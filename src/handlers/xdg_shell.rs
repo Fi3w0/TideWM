@@ -1,0 +1,1157 @@
+use smithay::{
+    backend::renderer::utils::with_renderer_surface_state,
+    delegate_xdg_shell,
+    desktop::{
+        find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output, PopupKind,
+        PopupKeyboardGrab, PopupManager, PopupPointerGrab, PopupUngrabStrategy, Window,
+        WindowSurfaceType,
+    },
+    input::{
+        pointer::{Focus, GrabStartData as PointerGrabStartData},
+        Seat,
+    },
+    output::Output,
+    reexports::{
+        wayland_protocols::xdg::shell::server::xdg_toplevel,
+        wayland_server::protocol::{wl_output, wl_seat, wl_surface::WlSurface},
+    },
+    utils::{Rectangle, Serial, SERIAL_COUNTER},
+    wayland::{
+        shell::xdg::{
+            PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+        },
+    },
+};
+
+use crate::{
+    grabs::{resize_grab, MoveSurfaceGrab, ResizeSurfaceGrab},
+    state::{FullscreenEntry, MaximizedEntry, PopupGrabState},
+    Smallvil,
+};
+
+impl XdgShellHandler for Smallvil {
+    fn xdg_shell_state(&mut self) -> &mut XdgShellState {
+        &mut self.xdg_shell_state
+    }
+
+    fn new_toplevel(&mut self, surface: ToplevelSurface) {
+        let window = Window::new_wayland_window(surface);
+        let wl_surface = window.toplevel().unwrap().wl_surface().clone();
+
+        // Creating an xdg_toplevel role does not map a window. The client
+        // first performs an empty commit, receives and acknowledges an
+        // initial configure, and only becomes mapped once it commits a
+        // non-null buffer. Niri follows the same explicit lifecycle; doing
+        // layout/focus work here made empty roles visible to WM policy and
+        // made a later null-buffer unmap indistinguishable from a hidden
+        // workspace.
+        self.unmapped_toplevels.insert(wl_surface, window);
+    }
+
+    fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        let preferred_output = self.preferred_output_for_toplevel(surface.wl_surface());
+
+        self.unmapped_toplevels.remove(surface.wl_surface());
+        self.detach_mapped_toplevel(surface.wl_surface());
+        self.forget_window_focus(surface.wl_surface());
+        self.retile();
+        self.repair_keyboard_focus(
+            preferred_output.as_deref(),
+            SERIAL_COUNTER.next_serial(),
+        );
+    }
+
+    fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
+        self.unconstrain_popup(&surface);
+        if let Err(err) = self.popups.track_popup(PopupKind::Xdg(surface)) {
+            tracing::warn!(?err, "Failed to track xdg popup");
+        }
+    }
+
+    fn popup_destroyed(&mut self, _surface: PopupSurface) {
+        // The popup pixels are part of its root Window/LayerSurface render
+        // element. Removing the role does not otherwise dirty that output.
+        self.request_redraw();
+    }
+
+    fn reposition_request(
+        &mut self,
+        surface: PopupSurface,
+        positioner: PositionerState,
+        token: u32,
+    ) {
+        surface.with_pending_state(|state| {
+            let geometry = positioner.get_geometry();
+            state.geometry = geometry;
+            state.positioner = positioner;
+        });
+        self.unconstrain_popup(&surface);
+        surface.send_repositioned(token);
+    }
+
+    fn move_request(&mut self, surface: ToplevelSurface, seat: wl_seat::WlSeat, serial: Serial) {
+        // Every window is tiled for now (no floating support yet), so a free
+        // drag would just be overwritten by the next retile. Revisit once
+        // floating windows exist: this check will then only block tiled ones.
+        if self.layout.contains(surface.wl_surface())
+            || self.fullscreen.contains_key(surface.wl_surface())
+            || self.maximized.contains_key(surface.wl_surface())
+        {
+            return;
+        }
+
+        let seat = Seat::from_resource(&seat).unwrap();
+
+        let wl_surface = surface.wl_surface();
+
+        if let Some(start_data) = check_grab(&seat, wl_surface, serial) {
+            let pointer = seat.get_pointer().unwrap();
+
+            // The grab is correctly scoped to this surface, but it may
+            // legitimately no longer be mapped (floated-and-hidden on
+            // another workspace, or destroyed, between the click and this
+            // request) -- bail instead of panicking.
+            let Some(window) = self
+                .space
+                .elements()
+                .find(|w| w.toplevel().unwrap().wl_surface() == wl_surface)
+                .cloned()
+            else {
+                return;
+            };
+            let Some(initial_window_location) = self.space.element_location(&window) else {
+                return;
+            };
+
+            let grab = MoveSurfaceGrab {
+                start_data,
+                window,
+                initial_window_location,
+            };
+
+            pointer.set_grab(self, grab, serial, Focus::Clear);
+        }
+    }
+
+    fn resize_request(
+        &mut self,
+        surface: ToplevelSurface,
+        seat: wl_seat::WlSeat,
+        serial: Serial,
+        edges: xdg_toplevel::ResizeEdge,
+    ) {
+        // See move_request: tiled windows don't free-resize yet.
+        if self.layout.contains(surface.wl_surface())
+            || self.fullscreen.contains_key(surface.wl_surface())
+            || self.maximized.contains_key(surface.wl_surface())
+        {
+            return;
+        }
+
+        let seat = Seat::from_resource(&seat).unwrap();
+
+        let wl_surface = surface.wl_surface();
+
+        if let Some(start_data) = check_grab(&seat, wl_surface, serial) {
+            let pointer = seat.get_pointer().unwrap();
+
+            // See move_request: the grab can outlive the surface being mapped.
+            let Some(window) = self
+                .space
+                .elements()
+                .find(|w| w.toplevel().unwrap().wl_surface() == wl_surface)
+                .cloned()
+            else {
+                return;
+            };
+            let Some(initial_window_location) = self.space.element_location(&window) else {
+                return;
+            };
+            let initial_window_size = window.geometry().size;
+
+            surface.with_pending_state(|state| {
+                state.states.set(xdg_toplevel::State::Resizing);
+            });
+
+            surface.send_pending_configure();
+
+            let grab = ResizeSurfaceGrab::start(
+                start_data,
+                window,
+                edges.into(),
+                Rectangle::new(initial_window_location, initial_window_size),
+            );
+
+            pointer.set_grab(self, grab, serial, Focus::Clear);
+        }
+    }
+
+    fn fullscreen_request(&mut self, surface: ToplevelSurface, wl_output: Option<wl_output::WlOutput>) {
+        let wl_surface = surface.wl_surface().clone();
+        self.do_fullscreen_request(surface, wl_output);
+        self.refresh_wlr_toplevel_state(&wl_surface);
+    }
+
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        self.do_unfullscreen(&surface);
+    }
+
+    fn maximize_request(&mut self, surface: ToplevelSurface) {
+        let wl_surface = surface.wl_surface().clone();
+        self.do_maximize_request(surface);
+        self.refresh_wlr_toplevel_state(&wl_surface);
+    }
+
+    fn unmaximize_request(&mut self, surface: ToplevelSurface) {
+        let wl_surface = surface.wl_surface().clone();
+        self.do_unmaximize_request(surface);
+        self.refresh_wlr_toplevel_state(&wl_surface);
+    }
+
+    fn grab(&mut self, surface: PopupSurface, _seat: wl_seat::WlSeat, serial: Serial) {
+        let popup = PopupKind::Xdg(surface);
+        let Ok(root) = find_popup_root_surface(&popup) else {
+            tracing::debug!("Ignoring popup grab without a live root surface");
+            return;
+        };
+
+        let Some(has_keyboard_grab) = self.popup_grab_policy(&root) else {
+            tracing::debug!("Dismissing popup grab whose root does not own focus");
+            let _ = PopupManager::dismiss_popup(&root, &popup);
+            return;
+        };
+
+        let mut grab = match self
+            .popups
+            .grab_popup(root.clone(), popup, &self.seat, serial)
+        {
+            Ok(grab) => grab,
+            Err(err) => {
+                tracing::debug!(?err, "Ignoring invalid popup grab");
+                return;
+            }
+        };
+
+        let keyboard = self.seat.get_keyboard().unwrap();
+        let pointer = self.seat.get_pointer().unwrap();
+        let keyboard_mismatch = has_keyboard_grab
+            && keyboard.is_grabbed()
+            && !(keyboard.has_grab(serial)
+                || grab.previous_serial().is_some_and(|previous| keyboard.has_grab(previous)));
+        let pointer_mismatch = pointer.is_grabbed()
+            && !(pointer.has_grab(serial)
+                || grab.previous_serial().is_some_and(|previous| pointer.has_grab(previous)));
+        if keyboard_mismatch || pointer_mismatch {
+            tracing::debug!("Dismissing popup grab that conflicts with an unrelated grab");
+            grab.ungrab(PopupUngrabStrategy::All);
+            return;
+        }
+
+        if has_keyboard_grab {
+            keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
+        }
+        pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
+        self.popup_grab = Some(PopupGrabState {
+            root,
+            grab,
+            has_keyboard_grab,
+        });
+        // Keep logical focus/activation on the root while immediately moving
+        // real wl_keyboard focus to the topmost popup, as Smithay's Anvil
+        // example does. Waiting for the first key event leaves menus briefly
+        // focused on their parent.
+        self.reconcile_keyboard_focus(serial);
+    }
+}
+
+impl Smallvil {
+    fn do_fullscreen_request(&mut self, surface: ToplevelSurface, wl_output: Option<wl_output::WlOutput>) {
+        let wl_surface = surface.wl_surface().clone();
+        let Some(window) = self.toplevel_window(&wl_surface) else {
+            Self::send_forced_configure(&surface);
+            return;
+        };
+        resize_grab::cancel(&wl_surface);
+        surface.with_pending_state(|state| {
+            state.states.unset(xdg_toplevel::State::Resizing);
+        });
+
+        let requested_output = wl_output
+            .as_ref()
+            .and_then(Output::from_resource);
+        // A mapped window's Layouts/FloatingTag ownership is authoritative.
+        // Merely changing FullscreenEntry to a different client-hinted output
+        // left the window owned by A but sized for B. Tide has no individual
+        // send-to-output primitive yet, and xdg-shell explicitly allows the
+        // compositor to ignore this hint, so honor it only before first map.
+        let owned_output = self
+            .preferred_output_for_toplevel(&wl_surface)
+            .and_then(|name| self.output_by_name(&name));
+        let output = if self.unmapped_toplevels.contains_key(&wl_surface) {
+            requested_output.or_else(|| self.primary_output())
+        } else {
+            if requested_output
+                .as_ref()
+                .is_some_and(|requested| owned_output.as_ref() != Some(requested))
+            {
+                tracing::debug!(
+                    "Ignoring fullscreen output hint until individual window output moves exist"
+                );
+            }
+            owned_output
+                .or(requested_output)
+                .or_else(|| self.primary_output())
+        };
+        let Some(output) = output else {
+            Self::send_forced_configure(&surface);
+            return;
+        };
+
+        // Toolkits may reassert fullscreen on focus changes. Re-sending the
+        // target state is required, but exiting and re-entering here would
+        // recapture the fullscreen viewport as the windowed restore geometry.
+        if self
+            .fullscreen
+            .get(&wl_surface)
+            .is_some_and(|entry| entry.output == output.name())
+        {
+            let Some(output_geo) = self.space.output_geometry(&output) else {
+                Self::send_forced_configure(&surface);
+                return;
+            };
+            surface.with_pending_state(|state| {
+                state.states.set(xdg_toplevel::State::Fullscreen);
+                state.states.unset(xdg_toplevel::State::Maximized);
+                state.states.unset(xdg_toplevel::State::Resizing);
+                state.size = Some(output_geo.size);
+            });
+            Self::send_forced_configure(&surface);
+            self.retile();
+            return;
+        }
+
+        // Validate that the output is still mapped before changing the
+        // existing fullscreen owner. A stale wl_output hint must not evict a
+        // valid fullscreen window and then abort for missing geometry.
+        let Some(output_geo) = self.space.output_geometry(&output) else {
+            Self::send_forced_configure(&surface);
+            return;
+        };
+
+        // At most one fullscreen window per output: pre-empt any existing
+        // one, telling it (not just our own bookkeeping) that it's no
+        // longer fullscreen.
+        let existing = self
+            .fullscreen
+            .iter()
+            .find(|(candidate, entry)| {
+                *candidate != &wl_surface && entry.output == output.name()
+            })
+            .map(|(surface, _)| surface.clone());
+        if let Some(existing_surface) = existing {
+            let existing_toplevel = self
+                .toplevel_window(&existing_surface)
+                .as_ref()
+                .and_then(|w| w.toplevel().cloned());
+            if let Some(existing_toplevel) = existing_toplevel {
+                self.do_unfullscreen(&existing_toplevel);
+            }
+        }
+
+        // Only a floating window needs its rect remembered -- a tiled one
+        // never leaves its `Layouts` slot (see `Smallvil::retile`), so it
+        // has somewhere to fall back to for free.
+        let (previous_restore_rect, previous_was_pinned) = self
+            .fullscreen
+            .remove(&wl_surface)
+            .map(|entry| (entry.restore_rect, entry.was_pinned))
+            .unwrap_or((None, false));
+        let restore_rect = previous_restore_rect
+            .or_else(|| self.maximized.get(&wl_surface).map(|entry| entry.restore_rect))
+            .or_else(|| {
+                if !self.unmapped_toplevels.contains_key(&wl_surface)
+                    && !self.layout.contains(&wl_surface)
+                {
+                    self.space.element_geometry(&window)
+                } else {
+                    None
+                }
+            });
+
+        let was_pinned = previous_was_pinned || self.pinned.remove(&wl_surface);
+        if was_pinned {
+            let active_workspace = self.layout.active_workspace(&output.name());
+            if let Some(tag) = self.floating_workspace.get_mut(&wl_surface) {
+                tag.output = output.name();
+                tag.workspace = active_workspace;
+            }
+        }
+        self.fullscreen.insert(
+            wl_surface,
+            FullscreenEntry {
+                output: output.name(),
+                restore_rect,
+                was_pinned,
+            },
+        );
+
+        surface.with_pending_state(|state| {
+            state.states.set(xdg_toplevel::State::Fullscreen);
+            state.states.unset(xdg_toplevel::State::Maximized);
+            state.states.unset(xdg_toplevel::State::Resizing);
+            state.size = Some(output_geo.size);
+        });
+        // Before the client's initial empty commit, keep this in pending
+        // state; `handle_commit` will include it in the initial configure.
+        Self::send_forced_configure(&surface);
+
+        self.retile();
+    }
+
+    fn do_maximize_request(&mut self, surface: ToplevelSurface) {
+        let wl_surface = surface.wl_surface();
+        // Only meaningful for a floating window -- a tiled one already
+        // fills its slot. The protocol still requires a reply either way.
+        if self.layout.contains(wl_surface) {
+            self.maximized.remove(wl_surface);
+            let size = self
+                .fullscreen
+                .get(wl_surface)
+                .and_then(|entry| self.output_by_name(&entry.output))
+                .and_then(|output| self.space.output_geometry(&output))
+                .map(|rect| rect.size)
+                .or_else(|| self.tiled_rect_for_surface(wl_surface).map(|rect| rect.size));
+            surface.with_pending_state(|state| {
+                state.states.unset(xdg_toplevel::State::Maximized);
+                state.states.unset(xdg_toplevel::State::Resizing);
+                if self.fullscreen.contains_key(wl_surface) {
+                    state.states.set(xdg_toplevel::State::Fullscreen);
+                }
+                if size.is_some() {
+                    state.size = size;
+                }
+            });
+            Self::send_forced_configure(&surface);
+            return;
+        }
+        if self.unmapped_toplevels.contains_key(wl_surface) {
+            self.maximized.remove(wl_surface);
+            surface.with_pending_state(|state| {
+                state.states.unset(xdg_toplevel::State::Maximized);
+            });
+            Self::send_forced_configure(&surface);
+            return;
+        }
+        let Some(window) = self.toplevel_window(wl_surface) else {
+            Self::send_forced_configure(&surface);
+            return;
+        };
+        resize_grab::cancel(wl_surface);
+        let output = self
+            .preferred_output_for_toplevel(wl_surface)
+            .and_then(|name| self.output_by_name(&name))
+            .or_else(|| self.primary_output());
+        let Some(output) = output else {
+            Self::send_forced_configure(&surface);
+            return;
+        };
+        let Some(area) = self.output_tiling_area(&output) else {
+            Self::send_forced_configure(&surface);
+            return;
+        };
+        // Same area (and gap) tiled windows use, so a maximized floating
+        // window looks visually consistent with the tiled layer around it.
+        let rect = crate::layout::inset(area, self.config.gaps);
+
+        if !self.maximized.contains_key(wl_surface) {
+            let restore_rect = self
+                .fullscreen
+                .get(wl_surface)
+                .and_then(|entry| entry.restore_rect)
+                .or_else(|| self.space.element_geometry(&window))
+                .or_else(|| self.floating_workspace.get(wl_surface).map(|tag| tag.rect));
+            let Some(restore_rect) = restore_rect else {
+                Self::send_forced_configure(&surface);
+                return;
+            };
+            self.maximized.insert(
+                wl_surface.clone(),
+                MaximizedEntry {
+                    output: output.name(),
+                    restore_rect,
+                },
+            );
+        }
+
+        // While fullscreen, maximize is return-mode intent only. The two
+        // protocol states and their competing geometries must never be active
+        // simultaneously.
+        if !self.fullscreen.contains_key(wl_surface) {
+            surface.with_pending_state(|state| {
+                state.states.set(xdg_toplevel::State::Maximized);
+                state.states.unset(xdg_toplevel::State::Fullscreen);
+                state.states.unset(xdg_toplevel::State::Resizing);
+                state.size = Some(rect.size);
+            });
+            if self.window_is_visible(wl_surface) {
+                self.space.map_element(window, rect.loc, false);
+            }
+        }
+        Self::send_forced_configure(&surface);
+        self.retile();
+    }
+
+    fn do_unmaximize_request(&mut self, surface: ToplevelSurface) {
+        let wl_surface = surface.wl_surface();
+        let entry = self.maximized.remove(wl_surface);
+        surface.with_pending_state(|state| {
+            state.states.unset(xdg_toplevel::State::Maximized);
+        });
+
+        // Fullscreen remains the current mode; this request only cancels the
+        // maximized mode that would otherwise be restored on fullscreen exit.
+        if self.fullscreen.contains_key(wl_surface) {
+            Self::send_forced_configure(&surface);
+            return;
+        }
+
+        if let Some(entry) = entry {
+            surface.with_pending_state(|state| {
+                state.size = Some(entry.restore_rect.size);
+            });
+            if let Some(tag) = self.floating_workspace.get_mut(wl_surface) {
+                tag.rect = entry.restore_rect;
+            }
+            let window = self
+                .space
+                .elements()
+                .find(|window| {
+                    window
+                        .toplevel()
+                        .is_some_and(|toplevel| toplevel.wl_surface() == wl_surface)
+                })
+                .cloned();
+            if let Some(window) = window {
+                self.space.map_element(window, entry.restore_rect.loc, false);
+            }
+        }
+        Self::send_forced_configure(&surface);
+        self.retile();
+    }
+}
+
+// Xdg Shell
+delegate_xdg_shell!(Smallvil);
+
+fn check_grab(
+    seat: &Seat<Smallvil>,
+    surface: &WlSurface,
+    serial: Serial,
+) -> Option<PointerGrabStartData<Smallvil>> {
+    let pointer = seat.get_pointer()?;
+
+    // Check that this surface has a click grab.
+    if !pointer.has_grab(serial) {
+        return None;
+    }
+
+    let start_data = pointer.grab_start_data()?;
+
+    let (focus, _) = start_data.focus.as_ref()?;
+    // If the focus was for a different surface, ignore the request. A
+    // client could otherwise get a valid grab serial from clicking one of
+    // its own surfaces, then request move/resize naming a *different*
+    // surface it also owns -- same-client alone doesn't catch that.
+    if focus != surface {
+        return None;
+    }
+
+    Some(start_data)
+}
+
+/// Should be called on `WlSurface::commit`
+pub fn handle_commit(state: &mut Smallvil, surface: &WlSurface) {
+    let tracking = if state.unmapped_toplevels.contains_key(surface) {
+        ToplevelTracking::Unmapped
+    } else if state.mapped_toplevel_window(surface).is_some() {
+        ToplevelTracking::Mapped
+    } else {
+        ToplevelTracking::Unknown
+    };
+
+    let has_buffer = with_renderer_surface_state(surface, |renderer_state| {
+        renderer_state.buffer().is_some()
+    })
+    .unwrap_or(false);
+
+    let transition = lifecycle_transition(tracking, has_buffer);
+    match transition {
+        ToplevelTransition::Map => state.map_toplevel(surface),
+        ToplevelTransition::Unmap => state.unmap_toplevel(surface),
+        ToplevelTransition::None => {}
+    }
+
+    // Push title/app_id changes to the foreign-toplevel handle. Compared
+    // before sending so an unrelated commit (every frame, potentially)
+    // doesn't emit a spurious `done` event to every bar watching.
+    if transition != ToplevelTransition::Unmap && state.foreign_toplevels.contains_key(surface) {
+        let (app_id, title) = state.toplevel_identity(surface);
+        let title = title.unwrap_or_default();
+        let app_id = app_id.unwrap_or_default();
+        let handle = &state.foreign_toplevels[surface];
+        if handle.title() != title || handle.app_id() != app_id {
+            handle.send_title(&title);
+            handle.send_app_id(&app_id);
+            handle.send_done();
+        }
+        // Mirror into the older wlr- protocol -- independent client set.
+        if let Some(wlr_handle) = state.wlr_foreign_toplevels.get(surface) {
+            if wlr_handle.title() != title || wlr_handle.app_id() != app_id {
+                wlr_handle.send_title(&title);
+                wlr_handle.send_app_id(&app_id);
+            }
+        }
+    }
+
+    // Only a commit that *started* in the unmapped state can be the empty
+    // initial commit. The null-buffer commit which just produced `Unmap`
+    // ends the old mapped lifetime; the client must make a subsequent empty
+    // commit for the fresh configure handshake, as Niri does. The pinned
+    // Smithay revision resets `initial_configure_sent` in its xdg role hook
+    // before this handler runs.
+    if tracking == ToplevelTracking::Unmapped && !has_buffer {
+        let Some(window) = state.unmapped_toplevels.get(surface) else {
+            return;
+        };
+        let toplevel = window.toplevel().unwrap();
+        if !toplevel.is_initial_configure_sent() {
+            toplevel.send_configure();
+        }
+    }
+
+    // Handle popup commits.
+    state.popups.commit(surface);
+    if let Some(popup) = state.popups.find_popup(surface) {
+        match popup {
+            PopupKind::Xdg(ref xdg) => {
+                if !xdg.is_initial_configure_sent() {
+                    // NOTE: This should never fail as the initial configure is always
+                    // allowed.
+                    xdg.send_configure().expect("initial configure failed");
+                }
+            }
+            PopupKind::InputMethod(ref _input_method) => {}
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToplevelTracking {
+    Unknown,
+    Unmapped,
+    Mapped,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToplevelTransition {
+    None,
+    Map,
+    Unmap,
+}
+
+fn lifecycle_transition(tracking: ToplevelTracking, has_buffer: bool) -> ToplevelTransition {
+    match (tracking, has_buffer) {
+        (ToplevelTracking::Unmapped, true) => ToplevelTransition::Map,
+        (ToplevelTracking::Mapped, false) => ToplevelTransition::Unmap,
+        _ => ToplevelTransition::None,
+    }
+}
+
+impl Smallvil {
+    /// Finds a protocol-mapped toplevel even when its workspace is hidden
+    /// and it is therefore absent from `Space`.
+    pub(crate) fn mapped_toplevel_window(&self, surface: &WlSurface) -> Option<Window> {
+        self.layout
+            .window_of(surface)
+            .or_else(|| self.floating_workspace.get(surface).map(|tag| tag.window.clone()))
+            // A parked (inactive) window-group member is mapped from the
+            // client's own point of view exactly like a hidden floating
+            // window above -- just not in `Layouts` or `space.elements()`
+            // either, since it isn't the tab currently occupying its
+            // group's leaf. Same reasoning, same fix.
+            .or_else(|| {
+                self.group_of(surface).and_then(|idx| {
+                    self.groups[idx]
+                        .members
+                        .iter()
+                        .find(|m| &m.surface == surface)
+                        .and_then(|m| m.parked_window.clone())
+                })
+            })
+            // Keep cleanup robust if older state or an interrupted
+            // transition left a visible floating window without its tag.
+            .or_else(|| {
+                self.space
+                    .elements()
+                    .find(|window| {
+                        window
+                            .toplevel()
+                            .is_some_and(|toplevel| toplevel.wl_surface() == surface)
+                    })
+                    .cloned()
+            })
+    }
+
+    fn toplevel_window(&self, surface: &WlSurface) -> Option<Window> {
+        self.unmapped_toplevels
+            .get(surface)
+            .cloned()
+            .or_else(|| self.mapped_toplevel_window(surface))
+    }
+
+    /// `(app_id, title)` for a toplevel, straight from the xdg-shell role
+    /// state a client sets via `set_app_id`/`set_title`. Shared by
+    /// `map_toplevel`'s window-rule matching and `ipc.rs`'s `windows`
+    /// query -- the one accessor pattern for both, rather than two
+    /// `with_states` call sites drifting apart.
+    pub(crate) fn toplevel_identity(&self, surface: &WlSurface) -> (Option<String>, Option<String>) {
+        smithay::wayland::compositor::with_states(surface, |states| {
+            let attrs = states
+                .data_map
+                .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()?
+                .lock()
+                .ok()?;
+            Some((attrs.app_id.clone(), attrs.title.clone()))
+        })
+        .unwrap_or((None, None))
+    }
+
+    fn map_toplevel(&mut self, surface: &WlSurface) {
+        let (app_id, title) = self.toplevel_identity(surface);
+        let rule = self.config.resolve_window_rules(app_id.as_deref(), title.as_deref());
+
+        let output = self
+            .fullscreen
+            .get(surface)
+            .and_then(|entry| self.output_by_name(&entry.output))
+            .or_else(|| rule.output.as_deref().and_then(|name| self.output_by_name(name)))
+            .or_else(|| self.primary_output());
+        let Some(output) = output else {
+            tracing::warn!("No output available for mapped toplevel, closing it");
+            if let Some(window) = self.unmapped_toplevels.get(surface) {
+                window.toplevel().unwrap().send_close();
+            }
+            return;
+        };
+        let Some(window) = self.unmapped_toplevels.remove(surface) else { return };
+        let focused = self.intended_window_surface();
+        let workspace = rule.workspace.unwrap_or_else(|| self.layout.active_workspace(&output.name()));
+        self.layout
+            .insert(&output.name(), workspace, window, focused.as_ref());
+        // `toggle_floating`/`toggle_pseudo_tile` below look the window up
+        // via `self.space.elements()`, which `layout.insert` alone does not
+        // populate -- only `retile()`'s own `space.map_element` call does.
+        // This `retile()` is pure bookkeeping (position tracking), not a
+        // render or a present, so applying the rule's placement after it
+        // is still invisible to the client: nothing is actually drawn
+        // until the backend's own render loop runs, strictly after this
+        // function returns.
+        self.retile();
+
+        // Tiling it first and immediately converting here (reusing the
+        // exact same logic the interactive toggles use, rather than
+        // re-deriving floating-rect placement from scratch) is, for the
+        // same reason, still applied before the window's first real frame.
+        if rule.float || rule.pin {
+            self.toggle_floating(surface);
+            if rule.pin {
+                self.pinned.insert(surface.clone());
+            }
+        } else if rule.pseudo_tile {
+            self.toggle_pseudo_tile(surface);
+        }
+
+        // Role creation alone must never steal focus. A real first buffer
+        // does. An Exclusive layer can temporarily own the actual keyboard,
+        // while centralized focus retains this window as the restore target.
+        self.focus_window(Some(surface.clone()), SERIAL_COUNTER.next_serial());
+
+        let handle = self
+            .foreign_toplevel_list_state
+            .new_toplevel::<Self>(title.clone().unwrap_or_default(), app_id.clone().unwrap_or_default());
+        self.foreign_toplevels.insert(surface.clone(), handle);
+
+        // Mirror the lifecycle into the older wlr-foreign-toplevel-management-v1
+        // protocol (waybar's `wlr/taskbar`, ags v1). Independent state machine
+        // from the newer ext- protocol above; both can be bound simultaneously.
+        if let Some(wlr_state) = self.wlr_foreign_toplevel_state.as_mut() {
+            let wlr_handle = wlr_state.track(
+                title.unwrap_or_default(),
+                app_id.unwrap_or_default(),
+            );
+            self.wlr_foreign_toplevels.insert(surface.clone(), wlr_handle);
+            // `focus_window` above already ran and, per this codebase's
+            // established "role creation alone must never steal focus, a
+            // real first buffer does" rule, a freshly-mapped window is
+            // typically activated by this point -- but that activation
+            // happened before this handle existed to receive it, so
+            // `init_instance`'s empty initial `state` array is stale from
+            // the moment it's sent. Push the real state now that the
+            // handle is actually registered in `wlr_foreign_toplevels`.
+            self.refresh_wlr_toplevel_state(surface);
+        }
+    }
+
+    fn unmap_toplevel(&mut self, surface: &WlSurface) {
+        resize_grab::cancel(surface);
+        let preferred_output = self.preferred_output_for_toplevel(surface);
+        let Some(window) = self.detach_mapped_toplevel(surface) else { return };
+        self.forget_window_focus(surface);
+
+        // An xdg unmap starts a fresh role lifecycle. Do not leak runtime
+        // state such as fullscreen/maximized into its next initial
+        // configure unless the client requests it again.
+        if let Some(toplevel) = window.toplevel() {
+            toplevel.with_pending_state(|state| {
+                state.states.unset(xdg_toplevel::State::Fullscreen);
+                state.states.unset(xdg_toplevel::State::Maximized);
+                state.states.unset(xdg_toplevel::State::Resizing);
+                state.states.unset(xdg_toplevel::State::Activated);
+                state.size = None;
+            });
+        }
+        self.unmapped_toplevels.insert(surface.clone(), window);
+        self.retile();
+        self.repair_keyboard_focus(
+            preferred_output.as_deref(),
+            SERIAL_COUNTER.next_serial(),
+        );
+    }
+
+    /// Removes every piece of runtime mapped-state and returns the window
+    /// handle so an xdg unmap can retain it for a later remap. This is also
+    /// used by permanent role destruction, which simply drops the result.
+    fn detach_mapped_toplevel(&mut self, surface: &WlSurface) -> Option<Window> {
+        let window = self.mapped_toplevel_window(surface);
+        if let Some(window) = &window {
+            self.space.unmap_elem(window);
+        }
+        // Before the unconditional tree removal below: if `surface` is a
+        // window-group's *active* member, this promotes the next tab into
+        // its leaf (or dissolves the group) so the leaf doesn't collapse
+        // the way an ordinary tile's close would. By the time
+        // `self.layout.remove(surface)` runs, `surface` no longer occupies
+        // any leaf either way, making that call a no-op for it specifically
+        // (find-nothing, same as any other surface that isn't tiled).
+        self.leave_group_on_close(surface);
+        self.layout.remove(surface);
+        self.fullscreen.remove(surface);
+        self.maximized.remove(surface);
+        self.floating_workspace.remove(surface);
+        self.pinned.remove(surface);
+        self.pseudo_tiled.remove(surface);
+        // Closing the foreign-toplevel handle here (rather than only on
+        // role destruction) means an xdg unmap also retires it; a later
+        // remap announces a fresh handle from `map_toplevel`, which is what
+        // bars expect -- an unmapped window is gone from the list.
+        if let Some(handle) = self.foreign_toplevels.remove(surface) {
+            self.foreign_toplevel_list_state.remove_toplevel(&handle);
+        }
+        // Mirror into the older wlr- protocol.
+        if let Some(handle) = self.wlr_foreign_toplevels.remove(surface) {
+            if let Some(wlr_state) = self.wlr_foreign_toplevel_state.as_mut() {
+                wlr_state.untrack(&handle);
+            }
+        }
+        window
+    }
+
+    pub(crate) fn preferred_output_for_toplevel(&self, surface: &WlSurface) -> Option<String> {
+        self.layout
+            .output_of(surface)
+            .map(str::to_string)
+            .or_else(|| {
+                self.floating_workspace
+                    .get(surface)
+                    .map(|tag| tag.output.clone())
+            })
+            .or_else(|| {
+                self.mapped_toplevel_window(surface)
+                    .and_then(|window| self.output_for_window(&window))
+                    .map(|output| output.name())
+            })
+    }
+
+    /// Root can be either a window's toplevel surface or a layer surface's
+    /// own surface (wlr-layer-shell popups, e.g. a bar's dropdown menu, are
+    /// still plain xdg_popups underneath, just parented to a layer instead
+    /// of a toplevel) -- try both.
+    pub(crate) fn unconstrain_popup(&self, popup: &PopupSurface) {
+        let Ok(root) = find_popup_root_surface(&PopupKind::Xdg(popup.clone())) else {
+            return;
+        };
+
+        // Resolve both the output the root actually lives on and its
+        // geometry in the same pass: a window's output comes from where
+        // it's mapped in `space`, a layer surface's from whichever
+        // output's `LayerMap` actually holds it (there's no space-element
+        // lookup for those).
+        let (output, root_geo) = if let Some(window) = self
+            .space
+            .elements()
+            .find(|w| w.toplevel().unwrap().wl_surface() == &root)
+        {
+            let Some(output) = self.output_for_window(window) else {
+                return;
+            };
+            let Some(root_geo) = self.space.element_geometry(window) else {
+                return;
+            };
+            (output, root_geo)
+        } else {
+            let found = self.space.outputs().find_map(|output| {
+                let map = layer_map_for_output(output);
+                let layer = map.layer_for_surface(&root, WindowSurfaceType::TOPLEVEL)?;
+                let mut geo = map.layer_geometry(layer)?;
+                // LayerMap geometry is output-local, while Space output and
+                // window geometry are global. Normalize before computing the
+                // positioner's parent-relative constraint box.
+                geo.loc += self.space.output_geometry(output)?.loc;
+                Some((output.clone(), geo))
+            });
+            let Some(found) = found else {
+                return;
+            };
+            found
+        };
+        let Some(output_geo) = self.space.output_geometry(&output) else {
+            return;
+        };
+
+        // The target geometry for the positioner should be relative to its parent's geometry, so
+        // we will compute that here.
+        let mut target = output_geo;
+        target.loc -= get_popup_toplevel_coords(&PopupKind::Xdg(popup.clone()));
+        target.loc -= root_geo.loc;
+
+        popup.with_pending_state(|state| {
+            state.geometry = state.positioner.get_unconstrained_geometry(target);
+        });
+    }
+
+    /// Repositions reactive popups after their toplevel parent's geometry
+    /// changes. This follows the xdg-positioner contract: a reactive popup
+    /// tracks parent movement/resize without waiting for the client to issue
+    /// an explicit reposition request.
+    pub(crate) fn update_reactive_popups(&self, window: &Window) {
+        let root = window.toplevel().unwrap().wl_surface();
+        for (popup, _) in PopupManager::popups_for_surface(root) {
+            let PopupKind::Xdg(popup) = popup else {
+                continue;
+            };
+            if !popup.with_pending_state(|state| state.positioner.reactive) {
+                continue;
+            }
+
+            self.unconstrain_popup(&popup);
+            if let Err(err) = popup.send_pending_configure() {
+                tracing::warn!(?err, "Failed to reconfigure reactive popup");
+            }
+        }
+    }
+
+    /// Clears `surface`'s fullscreen protocol state and bookkeeping. If it
+    /// is currently floating, restores its exact pre-fullscreen rect; a
+    /// still-tiled window needs no restore call here since it has an intact
+    /// `Layouts` slot. `restore_rect` can intentionally remain populated
+    /// while tiled so a floating -> tiled -> floating round trip during
+    /// fullscreen does not forget the original floating rect. Shared by
+    /// `unfullscreen_request` and `fullscreen_request`'s own pre-emption.
+    pub(crate) fn do_unfullscreen(&mut self, surface: &ToplevelSurface) {
+        let wl_surface = surface.wl_surface();
+        let entry = self.fullscreen.remove(wl_surface);
+
+        surface.with_pending_state(|state| {
+            state.states.unset(xdg_toplevel::State::Fullscreen);
+        });
+        let Some(entry) = entry else {
+            Self::send_forced_configure(surface);
+            return;
+        };
+
+        let restore_rect = entry
+            .restore_rect
+            .or_else(|| self.floating_workspace.get(wl_surface).map(|tag| tag.rect));
+        let maximized_rect = self.maximized.get(wl_surface).and_then(|maximized| {
+            let output = self.output_by_name(&maximized.output)?;
+            let area = self.output_tiling_area(&output)?;
+            Some(crate::layout::inset(area, self.config.gaps))
+        });
+        let is_floating = !self.layout.contains(wl_surface);
+        if !is_floating {
+            self.maximized.remove(wl_surface);
+            surface.with_pending_state(|state| {
+                state.states.unset(xdg_toplevel::State::Maximized);
+                state.size = self.tiled_rect_for_surface(wl_surface).map(|rect| rect.size);
+            });
+        }
+        if is_floating {
+            surface.with_pending_state(|state| {
+                if let Some(rect) = maximized_rect {
+                    state.states.set(xdg_toplevel::State::Maximized);
+                    state.size = Some(rect.size);
+                } else {
+                    state.states.unset(xdg_toplevel::State::Maximized);
+                    state.size = restore_rect.map(|rect| rect.size);
+                }
+            });
+            if let (Some(tag), Some(rect)) =
+                (self.floating_workspace.get_mut(wl_surface), restore_rect)
+            {
+                tag.rect = rect;
+            }
+        }
+
+        Self::send_forced_configure(surface);
+
+        if is_floating {
+            let target_rect = maximized_rect.or(restore_rect);
+            let visible_window = self
+                .space
+                .elements()
+                .find(|w| w.toplevel().unwrap().wl_surface() == wl_surface)
+                .cloned();
+            let window = visible_window.or_else(|| {
+                entry
+                    .was_pinned
+                    .then(|| self.floating_workspace.get(wl_surface).map(|tag| tag.window.clone()))
+                    .flatten()
+            });
+            if let (Some(window), Some(rect)) = (window, target_rect) {
+                self.space.map_element(window, rect.loc, false);
+            }
+            if entry.was_pinned {
+                self.pinned.insert(wl_surface.clone());
+            }
+        }
+
+        self.retile();
+        self.refresh_wlr_toplevel_state(wl_surface);
+    }
+
+    /// Broadcasts current activated/maximized/fullscreen state to every
+    /// wlr-foreign-toplevel-management-v1 client tracking `surface`, if any
+    /// is. `self.maximized`/`self.fullscreen` are read fresh here rather
+    /// than threaded through as arguments, so this stays correct regardless
+    /// of which internal branch of `do_maximize_request`/
+    /// `do_fullscreen_request`/`do_unfullscreen` actually changed them --
+    /// callers just call this once after the fact instead of reasoning
+    /// about which of several early-return paths needs it.
+    pub(crate) fn refresh_wlr_toplevel_state(&mut self, surface: &WlSurface) {
+        let Some(handle) = self.wlr_foreign_toplevels.get(surface) else {
+            return;
+        };
+        let activated = self.is_window_activated(surface);
+        let maximized = self.maximized.contains_key(surface);
+        let fullscreen = self.fullscreen.contains_key(surface);
+        handle.send_state(crate::handlers::wlr_foreign_toplevel::state_bytes(
+            activated, maximized, fullscreen,
+        ));
+    }
+
+    /// XDG state-change requests require a configure response even when the
+    /// request is duplicate or denied. `send_pending_configure` intentionally
+    /// emits nothing when state is unchanged, so force a plain configure in
+    /// that case. Before the initial handshake, the pending state is folded
+    /// into the one initial configure instead.
+    fn send_forced_configure(surface: &ToplevelSurface) {
+        if surface.is_initial_configure_sent() && surface.send_pending_configure().is_none() {
+            surface.send_configure();
+        }
+    }
+
+    /// `Super+F`: toggles fullscreen on the focused window, for apps that
+    /// never request it themselves and for manually fullscreening anything.
+    /// Drives the exact same path a client's own `xdg_toplevel` request
+    /// would (`fullscreen_request`/`do_unfullscreen`), just triggered from a
+    /// keybind instead of a protocol request.
+    pub(crate) fn toggle_fullscreen(&mut self) {
+        // Don't let a keybind escape an exclusive-interactivity layer (e.g.
+        // a lock screen) while it's still mapped, same guard `cycle_focus`
+        // already uses.
+        if self.exclusive_layer().is_some() {
+            return;
+        }
+        let Some(surface) = self.focused_window_surface() else {
+            return;
+        };
+        let window = self
+            .space
+            .elements()
+            .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == &surface))
+            .cloned();
+        let Some(window) = window else { return };
+        let Some(toplevel) = window.toplevel().cloned() else {
+            return;
+        };
+
+        if self.fullscreen.contains_key(&surface) {
+            self.do_unfullscreen(&toplevel);
+        } else {
+            self.fullscreen_request(toplevel, None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{lifecycle_transition, ToplevelTracking, ToplevelTransition};
+
+    #[test]
+    fn role_without_buffer_stays_unmapped() {
+        assert_eq!(
+            lifecycle_transition(ToplevelTracking::Unmapped, false),
+            ToplevelTransition::None
+        );
+    }
+
+    #[test]
+    fn first_buffer_maps_and_repeated_buffer_does_not_map_twice() {
+        assert_eq!(
+            lifecycle_transition(ToplevelTracking::Unmapped, true),
+            ToplevelTransition::Map
+        );
+        assert_eq!(
+            lifecycle_transition(ToplevelTracking::Mapped, true),
+            ToplevelTransition::None
+        );
+    }
+
+    #[test]
+    fn null_buffer_unmaps_and_a_later_buffer_remaps() {
+        assert_eq!(
+            lifecycle_transition(ToplevelTracking::Mapped, false),
+            ToplevelTransition::Unmap
+        );
+        assert_eq!(
+            lifecycle_transition(ToplevelTracking::Unmapped, false),
+            ToplevelTransition::None
+        );
+        assert_eq!(
+            lifecycle_transition(ToplevelTracking::Unmapped, true),
+            ToplevelTransition::Map
+        );
+    }
+
+    #[test]
+    fn unrelated_surface_never_enters_toplevel_lifecycle() {
+        assert_eq!(
+            lifecycle_transition(ToplevelTracking::Unknown, false),
+            ToplevelTransition::None
+        );
+        assert_eq!(
+            lifecycle_transition(ToplevelTracking::Unknown, true),
+            ToplevelTransition::None
+        );
+    }
+}

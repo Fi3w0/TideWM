@@ -1,0 +1,3687 @@
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    ffi::OsString,
+    rc::Rc,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use smithay::{
+    backend::{
+        renderer::{
+            element::{
+                memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
+                solid::{SolidColorBuffer, SolidColorRenderElement},
+                surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
+                Kind, RenderElementStates,
+            },
+            gles::GlesRenderer,
+            ImportAll, ImportMem,
+        },
+        session::libseat::LibSeatSession,
+    },
+    desktop::{
+        self, layer_map_for_output,
+        utils::{
+            send_frames_surface_tree, surface_presentation_feedback_flags_from_states,
+            surface_primary_scanout_output, under_from_surface_tree, OutputPresentationFeedback,
+        },
+        PopupGrab, PopupManager, PopupUngrabStrategy, Space, Window, WindowSurfaceType,
+    },
+    input::{
+        keyboard::XkbConfig,
+        pointer::{CursorImageStatus, MotionEvent, PointerHandle},
+        Seat, SeatState,
+    },
+    output::Output,
+    reexports::{
+        calloop::{
+            generic::Generic, EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction,
+        },
+        wayland_protocols::xdg::shell::server::xdg_toplevel,
+        wayland_server::{
+            backend::{ClientData, ClientId, DisconnectReason},
+            protocol::wl_surface::WlSurface,
+            Display, DisplayHandle,
+        },
+    },
+    utils::{Clock, Logical, Monotonic, Point, Rectangle, SERIAL_COUNTER},
+    wayland::{
+        compositor::{get_parent, CompositorClientState, CompositorState},
+        cursor_shape::CursorShapeManagerState,
+        dmabuf::{DmabufGlobal, DmabufState},
+        foreign_toplevel_list::{ForeignToplevelHandle, ForeignToplevelListState},
+        fractional_scale::{with_fractional_scale, FractionalScaleManagerState},
+        idle_inhibit::IdleInhibitManagerState,
+        idle_notify::IdleNotifierState,
+        image_capture_source::{ImageCaptureSourceState, OutputCaptureSourceState},
+        image_copy_capture::{ImageCopyCaptureState, Session as CaptureSession},
+        input_method::InputMethodManagerState,
+        keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitState,
+        output::OutputManagerState,
+        pointer_constraints::{with_pointer_constraint, PointerConstraintsState},
+        pointer_gestures::PointerGesturesState,
+        presentation::PresentationState,
+        relative_pointer::RelativePointerManagerState,
+        selection::{data_device::DataDeviceState, wlr_data_control::DataControlState},
+        session_lock::{LockSurface, SessionLockManagerState, SessionLocker},
+        shell::{
+            kde::decoration::KdeDecorationState,
+            wlr_layer::{KeyboardInteractivity, Layer as WlrLayer, WlrLayerShellState},
+            xdg::{decoration::XdgDecorationState, XdgShellState},
+        },
+        shm::ShmState,
+        single_pixel_buffer::SinglePixelBufferState,
+        socket::ListeningSocketSource,
+        text_input::TextInputManagerState,
+        viewporter::ViewporterState,
+        virtual_keyboard::VirtualKeyboardManagerState,
+        xdg_activation::XdgActivationState,
+    },
+};
+
+use wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
+
+use crate::{
+    capture::PendingCapture,
+    config::{Config, Direction},
+    layout::Layouts,
+    toast::{Toast, ToastKind},
+};
+
+// Render elements for whatever should be visible on an output while
+// `session_lock` isn't `Unlocked`: a full-output blank fill, always, plus
+// the registered `LockSurface`'s own content on top once it has one. Shared
+// by both backends (see `Smallvil::lock_render_elements`), same pattern as
+// `backend/udev.rs`'s own `OutputRenderElements` -- and nested inside that
+// enum as its own `Lock` variant there, rather than duplicating the
+// blank-vs-surface choice per backend.
+smithay::backend::renderer::element::render_elements! {
+    pub LockRenderElement<R> where R: ImportAll + ImportMem;
+    Blank = SolidColorRenderElement,
+    Surface = WaylandSurfaceRenderElement<R>,
+}
+
+pub struct Smallvil {
+    pub start_time: std::time::Instant,
+    pub socket_name: OsString,
+    pub display_handle: DisplayHandle,
+
+    pub config: Config,
+    pub toast: Option<Toast>,
+    /// `Some` while the workspace overview (see `overview.rs`) is showing
+    /// on the output it was built for (`Overview::output_name`); `None`
+    /// otherwise. Built once when toggled on, not rebuilt every frame --
+    /// see `toggle_overview`.
+    pub overview: Option<crate::overview::Overview>,
+    /// `Some` when `show_welcome_hint` was still on at startup (`main.rs`).
+    /// Built once, static content -- `should_show_welcome_hint` decides
+    /// per-frame whether the render call sites actually draw it, this
+    /// field just holds the texture so it isn't rebuilt every time.
+    pub welcome_hint: Option<crate::welcome::WelcomeHint>,
+    last_config_event: Instant,
+    needs_redraw: bool,
+    /// `Some(name)` while a `[submap.<name>]` keybind table is active
+    /// (`Action::EnterSubmap`/`ExitSubmap`, `input.rs`'s keybind-matching
+    /// closure). `None` means the base `[keybinds]` table is in effect.
+    /// Not tied to focus or any other implicit event -- only an explicit
+    /// `exit-submap` bind clears it, matching sway/Hyprland's own "mode"
+    /// behavior.
+    pub active_submap: Option<String>,
+
+    pub layout: Layouts,
+    pub space: Space<Window>,
+    pub loop_handle: LoopHandle<'static, Smallvil>,
+    pub loop_signal: LoopSignal,
+
+    // Smithay State
+    pub compositor_state: CompositorState,
+    pub xdg_shell_state: XdgShellState,
+    /// `zxdg_decoration_manager_v1`: lets GTK/Qt clients ask whether to draw
+    /// their own title bar (client-side decorations). TideWM enforces
+    /// server-side (which, since TideWM itself draws no decorations, means
+    /// no decorations at all) -- the tiling-WM convention (sway, Hyprland):
+    /// a tiling layout wastes space under a client-drawn header bar, and
+    /// floating windows focus/move/resize through Super-modifier actions
+    /// rather than a title bar. The handler is no-op-shaped beyond always
+    /// pinning `Mode::ServerSide`; see `handlers/mod.rs`.
+    pub xdg_decoration_state: XdgDecorationState,
+    /// `org_kde_kwin_server_decoration_manager`: KDE's older competing
+    /// decoration protocol, same purpose as `xdg_decoration_state` for
+    /// clients that speak this one instead (mostly Qt/KDE apps without
+    /// xdg-decoration support). Default mode `Server`, and `request_mode`
+    /// re-affirms it -- same enforcement shape as the xdg variant.
+    pub kde_decoration_state: KdeDecorationState,
+    pub layer_shell_state: WlrLayerShellState,
+    pub shm_state: ShmState,
+    pub output_manager_state: OutputManagerState,
+    /// `wp-pointer-constraints-v1`: lets a client ask the compositor to
+    /// lock the pointer in place (FPS look) or confine it to a region
+    /// (strategy games, modal menus). The actual enforcement happens in
+    /// `input.rs`'s `PointerMotion` arm -- this just hosts the global and
+    /// the constraint store, which lives per-surface in surface state
+    /// (Smithay's design, not on `Smallvil`).
+    pub pointer_constraints_state: PointerConstraintsState,
+    /// `wp-relative-pointer-manager-v1`: lets a client opt into receiving
+    /// relative motion events (deltas, not absolute coordinates), what
+    /// FPS games read to drive camera look. Purely additive on the input
+    /// path: `input.rs`'s `PointerMotion` arm calls `pointer.relative_
+    /// motion(...)` once per event, and any client that bound
+    /// `zwp_relative_pointer_v1` gets the deltas; nothing about the
+    /// regular motion path changes.
+    pub relative_pointer_state: RelativePointerManagerState,
+    pub seat_state: SeatState<Smallvil>,
+    pub data_device_state: DataDeviceState,
+    /// `wlr-data-control-unstable-v1`, the protocol clipboard managers
+    /// (cliphist, clipman, wl-clip-persist) actually use to read/write the
+    /// clipboard without being the focused client -- `wl_data_device` alone
+    /// only lets a focused client see the selection. Smithay's convenience
+    /// module handles the protocol directly; no per-request handler logic
+    /// needed here beyond the getter `DataControlHandler` requires (see
+    /// `handlers/mod.rs`). No primary-selection support yet -- TideWM
+    /// doesn't implement `zwp_primary_selection_v1` itself, so there's
+    /// nothing to pass as `DataControlState::new`'s `primary_selection`
+    /// argument.
+    pub data_control_state: DataControlState,
+    /// `ext-session-lock-v1`: lets a privileged client (swaylock, a
+    /// hyprlock-style daemon) take over every output and gate all
+    /// window/layer input until it decides to unlock. See
+    /// `handlers/mod.rs`'s `SessionLockHandler` impl (thin, adapts
+    /// Smithay's handler shape) and `lock_session`/`unlock_session`/
+    /// `register_lock_surface` below (the actual state machine).
+    pub session_lock_state: SessionLockManagerState,
+    pub(crate) session_lock: SessionLock,
+    /// One `LockSurface` per output, registered via `register_lock_surface`
+    /// as clients call `get_lock_surface`. Rendered full-screen in place of
+    /// every window/layer-shell surface while `session_lock` isn't
+    /// `Unlocked` -- see `lock_render_elements`.
+    pub(crate) lock_surfaces: HashMap<Output, LockSurface>,
+    /// Outputs that have rendered at least one locked (blanked, or real
+    /// lock-surface) frame since the current `Locking` attempt began.
+    /// `ext-session-lock-v1` requires *every* output to present a locked
+    /// frame -- not just one -- before the `locked` event may be sent, or a
+    /// second monitor could still be showing the unlocked desktop. Distinct
+    /// from Smithay's own internal (and unrelated)
+    /// `SessionLockManagerState::locked_outputs`, which only tracks
+    /// duplicate `get_lock_surface` calls per output.
+    pub(crate) locked_outputs: HashSet<Output>,
+    /// Cached full-output blank fill shown behind (or instead of) a lock
+    /// surface. `SolidColorBuffer` tracks its own commit counter and only
+    /// bumps it when size/color actually changes -- same "don't rebuild
+    /// every frame" shape as `Toast`/`WindowGroup::strip`.
+    lock_blank: SolidColorBuffer,
+    /// `xdg_activation_v1`: focus handoff on request (click a link, the
+    /// browser window gets focus). Handler and token policy live in
+    /// `handlers/mod.rs`; the grant path itself is
+    /// `Smallvil::activate_toplevel`.
+    pub xdg_activation_state: XdgActivationState,
+    /// `wp_single_pixel_buffer_manager_v1`: clients create 1x1 solid-color
+    /// buffers without a SHM round-trip. No handler logic; Smithay's
+    /// surface render element already knows how to draw these buffers, so
+    /// advertising the global is the whole job.
+    pub single_pixel_buffer_state: SinglePixelBufferState,
+    /// `wp_presentation`: frame-presentation feedback for clients that
+    /// want precise vsync timing (video players, benchmarks). Feedback is
+    /// collected per frame by `take_presentation_feedback` and presented
+    /// by each backend's render loop. `clock` is the MONOTONIC source the
+    /// feedback timestamps are taken from.
+    pub presentation_state: PresentationState,
+    pub clock: Clock<Monotonic>,
+    /// `zwp_keyboard_shortcuts_inhibit_v1`: lets a VM/remote-desktop
+    /// client capture combos the compositor would otherwise intercept
+    /// (Alt+Tab etc.) for its guest. The gate itself is in `input.rs`'s
+    /// keyboard filter -- an active inhibitor on the keyboard-focused
+    /// surface forwards everything instead of matching `[keybinds]`.
+    pub keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState,
+    /// `zwp_pointer_gestures_v1`: touchpad swipe/pinch/hold for clients
+    /// that bind it (browsers, map apps, image viewers). Pure global
+    /// advertisement -- no handler trait exists; `input.rs` forwards the
+    /// backend's libinput gesture events to the pointer handle, and
+    /// Smithay's own machinery delivers them to whichever client created
+    /// gesture objects. Kept so the `GlobalId` isn't dropped.
+    #[allow(dead_code)]
+    pub pointer_gestures_state: PointerGesturesState,
+    /// `wp_cursor_shape_manager_v1`: lets a client (Qt6/GTK4 toolkits,
+    /// which increasingly prefer this over drawing/positioning their own
+    /// cursor surface) ask the compositor to show a named system cursor
+    /// shape directly. No handler trait: Smithay's own `SetShape` dispatch
+    /// calls the existing `SeatHandler::cursor_image` (`handlers/mod.rs`)
+    /// the exact same way a client-set cursor surface already does, so
+    /// this needed zero new compositor-side plumbing beyond `cursor.rs`
+    /// actually rendering the requested shape instead of always the
+    /// theme's default glyph (see `Theme::render_element`).
+    #[allow(dead_code)]
+    pub cursor_shape_manager_state: CursorShapeManagerState,
+    /// `zwp_text_input_v3`: lets a text field (browser address bar,
+    /// terminal search, GTK/Qt entry widgets) tell the compositor it wants
+    /// an input method -- content type, surrounding text, cursor rect. No
+    /// handler trait: Smithay wires text-input focus automatically off
+    /// `WlSurface`'s own `KeyboardTarget` impl, which already fires from
+    /// `reconcile_keyboard_focus`'s existing `keyboard.set_focus` call, so
+    /// this needs nothing beyond the global itself.
+    #[allow(dead_code)]
+    pub text_input_manager_state: TextInputManagerState,
+    /// `zwp_input_method_v2`: the other side of text-input, for an actual
+    /// IME (fcitx5, ibus, an on-screen keyboard) to receive activation and
+    /// surrounding-text state and reply with `commit_string`/preedit.
+    /// `InputMethodHandler` below only has to place its popup surface
+    /// (candidate window) -- everything else, including composing with an
+    /// active keyboard grab so WM keybinds still take priority over IME
+    /// input, is Smithay's own machinery. No client allowlist (`|_client|
+    /// true`, matching anvil): any client that reaches this socket can
+    /// register as the system IME. There's no cheaper boundary than
+    /// `security-context-v1` (not implemented) to restrict this with, so
+    /// it's a deliberate, documented gap, not an oversight.
+    #[allow(dead_code)]
+    pub input_method_manager_state: InputMethodManagerState,
+    /// `zwp_virtual_keyboard_v1`: lets a privileged client (an on-screen
+    /// keyboard, ydotool/wtype-style tools, an IME's fallback path) inject
+    /// synthetic key events as if from real hardware. Requests deliver
+    /// straight to the wl_keyboard of whatever surface actually has
+    /// keyboard focus -- deliberately bypassing `input.rs`'s own filter
+    /// closure and any active grab, per protocol design, so an injected
+    /// `Super+<key>` is delivered as a literal keypress rather than
+    /// triggering a WM keybind. Same no-allowlist tradeoff as input-method
+    /// above, for the same reason (no `security-context-v1` yet).
+    #[allow(dead_code)]
+    pub virtual_keyboard_manager_state: VirtualKeyboardManagerState,
+    /// `ext-foreign-toplevel-list-v1`: exposes every mapped toplevel to
+    /// external tooling (bars, taskbars, window switchers) as a handle
+    /// carrying title/app_id. One handle per mapped toplevel, created in
+    /// `map_toplevel` and closed in `detach_mapped_toplevel` (so both an
+    /// xdg unmap and role destruction retire it); title/app_id changes are
+    /// pushed from `handle_commit`. Read-only by design: this protocol has
+    /// no activation/close requests, so a bar that wants those needs
+    /// xdg-activation on top.
+    pub foreign_toplevel_list_state: ForeignToplevelListState,
+    pub(crate) foreign_toplevels: HashMap<WlSurface, ForeignToplevelHandle>,
+    /// `wlr-foreign-toplevel-management-v1` (the older, bidirectional
+    /// protocol that waybar's `wlr/taskbar` module and ags v1 hardcode
+    /// against). Coexists with `foreign_toplevel_list_state` (the newer
+    /// read-only `ext-foreign-toplevel-list-v1`); clients pick whichever
+    /// they were written for. The two state machines are independent:
+    /// this one is hand-rolled on `wayland-protocols-wlr` because
+    /// Smithay 0.7 has no module for the older protocol, unlike the newer
+    /// one. See `handlers/wlr_foreign_toplevel.rs`.
+    pub wlr_foreign_toplevel_state: Option<crate::handlers::wlr_foreign_toplevel::WlrForeignToplevelState>,
+    pub(crate) wlr_foreign_toplevels: HashMap<WlSurface, crate::handlers::wlr_foreign_toplevel::WlrForeignToplevelHandle>,
+    /// `wlr-output-management-unstable-v1`: kanshi/`wlr-randr`/wdisplays read
+    /// output layout and can push position/transform/scale changes back.
+    /// Hand-rolled, same reason as the toplevel-management protocol above --
+    /// no Smithay module exists for it. See
+    /// `handlers/wlr_output_management.rs` for what this first pass does and
+    /// deliberately doesn't support yet.
+    pub wlr_output_management_state: crate::handlers::wlr_output_management::WlrOutputManagementState,
+    /// `wlr-output-power-management-unstable-v1`: on/off per output
+    /// (wlogout-style tools, a QuickShell power widget). See
+    /// `handlers/wlr_output_power_management.rs`.
+    pub wlr_output_power_management_state:
+        crate::handlers::wlr_output_power_management::WlrOutputPowerManagementState,
+    /// Backend hook for the above: `Some` only under the udev backend
+    /// (installed by `backend::udev::init_udev` once its device `Rc`
+    /// exists), where turning a CRTC off/on threads through the same DRM
+    /// surface the render loop drives. `None` under winit -- there's no
+    /// real display to power down for a nested window, so a power request
+    /// there is tracked as bookkeeping only (see the handler module).
+    /// Returns whether the change actually applied.
+    #[allow(clippy::type_complexity)]
+    pub set_output_power: Option<Box<dyn FnMut(&Output, bool) -> bool>>,
+    /// `zwlr_gamma_control_manager_v1`: night-light (wlsunset/gammastep).
+    /// See `handlers/wlr_gamma_control.rs`.
+    pub wlr_gamma_control_state: crate::handlers::wlr_gamma_control::WlrGammaControlState,
+    /// Backend hooks for the above, both `Some` only under udev (`None`
+    /// under winit -- a nested output has no real color pipeline to
+    /// adjust). `gamma_size` reads the CRTC's LUT size; `set_gamma` applies
+    /// a ramp (also used to reset to linear on control destroy).
+    #[allow(clippy::type_complexity)]
+    pub gamma_size: Option<Box<dyn FnMut(&Output) -> Option<u32>>>,
+    #[allow(clippy::type_complexity)]
+    pub set_gamma: Option<Box<dyn FnMut(&Output, &[u16], &[u16], &[u16]) -> bool>>,
+    /// `wp_fractional_scale_manager_v1`: lets clients render at
+    /// non-integer output scales (the `[[output]] scale` config knob
+    /// already accepts fractions; without this global clients only ever
+    /// saw the integer-rounded `wl_output` scale). Preferred scales are
+    /// pushed to surfaces from `new_fractional_scale` (handlers/mod.rs)
+    /// and refreshed by `set_window_fractional_scale` as windows are
+    /// (re)placed on outputs.
+    pub fractional_scale_manager_state: FractionalScaleManagerState,
+    pub popups: PopupManager,
+    /// Active xdg-popup pointer/keyboard grab and the root shell surface it
+    /// belongs to. The focus authority treats a live popup keyboard grab as
+    /// the root retaining logical focus even while wl_keyboard targets a
+    /// descendant popup surface.
+    pub(crate) popup_grab: Option<PopupGrabState>,
+    /// XDG toplevel roles that exist but do not currently have a committed
+    /// buffer. Protocol mapping is deliberately tracked separately from
+    /// `Space`: switching workspaces also removes windows from `Space`, but
+    /// those windows remain mapped from the client's point of view.
+    ///
+    /// A toplevel starts here, moves into `Layouts`/`floating_workspace` on
+    /// its first non-null buffer, and returns here when it commits a null
+    /// buffer. Keeping the `Window` handle lets a later remap repeat the
+    /// initial configure/map sequence without confusing it with destruction.
+    pub unmapped_toplevels: HashMap<WlSurface, Window>,
+    /// Layer-shell roles registered in an output's `LayerMap` which do not
+    /// currently have a committed buffer. `LayerMap` registration is kept
+    /// across unmap so the next initial configure can be arranged on the
+    /// same output; this set is the separate protocol-mapping signal used
+    /// for focus and commit transitions.
+    pub unmapped_layer_surfaces: HashSet<WlSurface>,
+    /// `wp_viewporter`: no handler logic of our own (`on_commit_buffer_handler`,
+    /// already wired into `handlers/compositor.rs`, validates viewport state on
+    /// every commit for us), but `xwayland-satellite` hard-requires the global
+    /// to exist -- it panics on startup without it.
+    pub viewporter_state: ViewporterState,
+    /// `ext-image-copy-capture-v1` (screenshot) protocol states, see
+    /// `handlers/capture.rs`. Only output sources are supported.
+    pub image_capture_source_state: ImageCaptureSourceState,
+    pub output_capture_source_state: OutputCaptureSourceState,
+    pub image_copy_capture_state: ImageCopyCaptureState,
+    /// `wlr-screencopy-unstable-v1` global (grim's native protocol, the one
+    /// with region capture), hand-rolled in `handlers/screencopy.rs`. Kept
+    /// because dropping the `GlobalId` would remove the global.
+    #[allow(dead_code)]
+    pub wlr_screencopy_global: smithay::reexports::wayland_server::backend::GlobalId,
+    /// Owned capture sessions. A `Session` stops itself on drop, so it must
+    /// be kept as long as the client wants it; dead ones are filtered out on
+    /// the backend cleanup ticks (`cleanup_capture`).
+    pub(crate) capture_sessions: Vec<CaptureSession>,
+    /// Validated capture requests waiting for a backend render loop (which
+    /// owns the GL renderer) to produce pixels. See `capture.rs`.
+    pub pending_captures: Vec<PendingCapture>,
+    /// `zwp_idle_inhibit_manager_v1`: only has an observable effect through
+    /// `idle_notifier_state.set_is_inhibited` below -- TideWM has no
+    /// idle/DPMS/lock behavior of its own to suppress.
+    pub idle_inhibit_manager_state: IdleInhibitManagerState,
+    /// `ext-idle-notifier-v1`, for an external tool (a swayidle-style daemon)
+    /// to watch idle/resume transitions and act on them (screen off, lock,
+    /// suspend). `notify_activity` is driven from every real input event in
+    /// `input.rs`; `set_is_inhibited` from `idle_inhibitors` below.
+    pub idle_notifier_state: IdleNotifierState<Smallvil>,
+    /// Live inhibitor count per surface. A client can create more than one
+    /// `zwp_idle_inhibitor_v1` on the same surface -- Smithay calls
+    /// `inhibit`/`uninhibit` per inhibitor *object*, not deduplicated by
+    /// surface -- so a plain `HashSet` would drop the whole surface the
+    /// moment any *one* of its inhibitors was destroyed, un-inhibiting while
+    /// another inhibitor on the same surface is still alive. Whether this
+    /// map is empty or not is the only thing that drives
+    /// `idle_notifier_state`'s inhibited flag -- individual surfaces are
+    /// never checked for visibility (matching most compositors' simplest-
+    /// correct behavior; see `IdleInhibitHandler`'s own doc comment).
+    pub idle_inhibitors: HashMap<WlSurface, usize>,
+
+    pub seat: Seat<Self>,
+    /// The window Tide intends to focus when no higher-priority layer owns
+    /// the keyboard. Kept separately from actual seat focus so an Exclusive
+    /// layer can preempt temporarily and then restore the exact window.
+    window_focus: Option<WlSurface>,
+    /// Explicit/first-map OnDemand layer focus. Unlike Exclusive layers it
+    /// is not globally preemptive; a later window/empty click clears it.
+    on_demand_layer_focus: Option<WlSurface>,
+    /// Last target applied to both wl_keyboard focus and XDG Activated.
+    /// Every mutation goes through `reconcile_keyboard_focus`.
+    keyboard_focus: KeyboardFocusTarget,
+
+    /// Only populated by the udev backend, which is also the only place
+    /// the `zwp_linux_dmabuf_v1` global actually gets created (see
+    /// `backend/udev.rs`). Under winit, `dmabuf_state` sits unused: no
+    /// global means no client ever binds it, so `DmabufHandler` methods
+    /// never fire.
+    pub dmabuf_state: DmabufState,
+    pub dmabuf_global: Option<DmabufGlobal>,
+    /// Shared with `backend::udev::DeviceData` so both the render loop and
+    /// `DmabufHandler::dmabuf_imported` (dispatched from client requests,
+    /// never re-entrantly with a render) can independently borrow it.
+    pub udev_renderer: Option<Rc<RefCell<GlesRenderer>>>,
+    /// Only populated by the udev backend (`backend/udev.rs`), which is the
+    /// only place VT switching means anything -- under winit a host
+    /// compositor already owns that. `input.rs`'s VT-switch keybind
+    /// detection calls `change_vt` on this when it's `Some`.
+    pub session: Option<LibSeatSession>,
+
+    /// Only read by the udev backend (see `cursor.rs`, `backend/udev.rs`).
+    /// Under winit the host compositor draws the real cursor, so this is
+    /// tracked but never rendered from.
+    pub cursor_status: CursorImageStatus,
+
+    /// Loaded xcursor theme for `CursorImageStatus::Named`, only populated
+    /// by the udev backend (`backend/udev.rs`, same pattern as `session`/
+    /// `udev_renderer` above). `None` under winit, and also under udev if no
+    /// theme could be loaded -- `cursor::fallback_glyph_element` covers that
+    /// case, see `cursor.rs`.
+    pub cursor_theme: Option<crate::cursor::Theme>,
+
+    /// Windows currently fullscreen, keyed by surface. This is the
+    /// authoritative "is this fullscreen right now" source `retile()` reads
+    /// -- `ToplevelSurface::current_state()` only reflects the last surface
+    /// the *client* acked, a round-trip behind `with_pending_state`, so it
+    /// can't drive rendering decisions directly (same reason anvil keeps its
+    /// own `FullscreenSurface` marker rather than relying on it).
+    pub fullscreen: HashMap<WlSurface, FullscreenEntry>,
+
+    /// Floating windows with a pending maximized placement. Kept separately
+    /// from FullscreenEntry so fullscreen can temporarily suppress the
+    /// protocol Maximized state and restore it on exit without losing the
+    /// original normal floating rectangle.
+    pub maximized: HashMap<WlSurface, MaximizedEntry>,
+
+    /// (output, workspace) tag for every *floating* window. Tiled windows
+    /// don't need one -- their workspace is implicit in which `Layouts` tree
+    /// holds them -- but a floating window isn't tracked in `Layouts` at
+    /// all, so `switch_workspace` needs this to know which floating windows
+    /// belong to the workspace it's hiding or showing.
+    pub floating_workspace: HashMap<WlSurface, FloatingTag>,
+
+    /// Windows exempt from `switch_workspace`'s hide/show cycle -- stay
+    /// mapped and visible no matter which workspace is active on their
+    /// output. Always floating (`toggle_pin` un-tiles first if needed; a
+    /// tiled pinned window has no coherent meaning when only one
+    /// workspace's tree is ever rendered per output at a time).
+    pub pinned: HashSet<WlSurface>,
+
+    /// Per-output "workspace to return to" for `toggle_scratchpad`, so
+    /// toggling the scratchpad off doesn't strand you on some fixed
+    /// fallback workspace regardless of where you actually were.
+    scratchpad_previous: HashMap<String, u32>,
+
+    /// Tiled windows that keep `config.pseudo_tile_scale` of their tile's
+    /// size instead of filling it -- a rect override `retile()` applies,
+    /// same shape as the fullscreen override. Stays in its `Layouts` slot
+    /// throughout, unlike floating: only the rendered rect changes.
+    pub pseudo_tiled: HashSet<WlSurface>,
+
+    /// Laptop lid closed right now, per libinput's `Switch::Lid`
+    /// (`SwitchState::On` = closed). Tracked separately from the
+    /// configured `lid_close`/`lid_open` actions so an event whose state
+    /// matches what we already have is a no-op -- libinput sometimes
+    /// re-emits the current state after a suspend/resume cycle, and
+    /// without this dedup that would re-fire the action every wake.
+    /// Defaults to `false` (open); libinput does not report initial switch
+    /// state at seat-assign time, so a lid already closed when TideWM
+    /// starts won't be reflected here until the first real toggle. Same
+    /// shape as `is_tablet_mode` below.
+    pub is_lid_closed: bool,
+
+    /// Device is in tablet mode right now, per libinput's
+    /// `Switch::TabletMode` (`SwitchState::On` = tablet mode). Same
+    /// dedup-vs-libinput-resume rationale as `is_lid_closed`.
+    pub is_tablet_mode: bool,
+
+    /// Windows sharing one `Layouts` leaf, tab-strip style: only the
+    /// `active` member actually occupies the leaf (and so is mapped/
+    /// visible) at any time, following this codebase's own established
+    /// pattern for "windows share a slot, only one shows" (see
+    /// `fullscreen`/`maximized`/`pseudo_tiled`/`floating_workspace` above)
+    /// rather than restructuring `layout::Node::Leaf` to hold more than one
+    /// `Window`. A flat `Vec` plus a linear scan (`group_of`) rather than a
+    /// second reverse-index map kept in sync with it -- groups are few and
+    /// small, and this codebase has hit the "two structures drift apart"
+    /// bug class more than once already (`FloatingTag` staleness, the
+    /// `workspace_of`/`window_of` fix). One source of truth.
+    pub groups: Vec<WindowGroup>,
+
+    /// `org.gnome.Mutter.ScreenCast` DBus service handle. `None` until
+    /// `main.rs` assigns it (after backend init, since the initial output
+    /// snapshot needs real outputs to exist) and always `None` when the
+    /// `screencast` feature is off. See `src/screencast/mod.rs`.
+    #[cfg(feature = "screencast")]
+    pub screencast: Option<crate::screencast::ScreencastState>,
+}
+
+/// One member of a `WindowGroup`.
+pub struct GroupMember {
+    pub surface: WlSurface,
+    /// Only meaningful while this member is *not* the group's active one --
+    /// the tree/`space` are authoritative for the active member instead.
+    /// Same convention as `FloatingTag::rect` being stale while its window
+    /// is visible: a parked member is unmapped (`space.unmap_elem`), so
+    /// (per the same gotcha `FloatingTag` exists for) it isn't in
+    /// `space.elements()` to re-find later -- this is the only place its
+    /// `Window` handle survives while parked.
+    pub parked_window: Option<Window>,
+}
+
+pub struct WindowGroup {
+    /// Which (output, workspace) tree's leaf this group occupies -- needed
+    /// to re-insert a parked member as its own tile again on `ungroup`
+    /// (`Layouts::insert` takes both explicitly).
+    pub output: String,
+    pub workspace: u32,
+    /// Tab order. Always at least 2 -- a "group" of one collapses back to a
+    /// plain tile (see `Smallvil::ungroup`).
+    pub members: Vec<GroupMember>,
+    /// Index into `members` of whichever one currently occupies the tree
+    /// leaf.
+    pub active: usize,
+    /// Cached tab-strip texture (see `tab_strip.rs`), same model as
+    /// `Toast`: built once, not every frame. `None` forces a rebuild on the
+    /// next `tab_strip_elements` pass -- set whenever membership/active
+    /// changes; a plain leaf-width change (an output resize, a sibling
+    /// split drag) is instead caught by comparing against `strip_width`
+    /// there, no separate invalidation needed for that case.
+    strip: Option<MemoryRenderBuffer>,
+    strip_width: i32,
+}
+
+pub struct FloatingTag {
+    /// A hidden window isn't mapped, so it isn't in `space.elements()`
+    /// either -- this is the only place its `Window` handle survives while
+    /// its workspace isn't the active one, needed to map it again later.
+    pub window: Window,
+    pub output: String,
+    pub workspace: u32,
+    /// Last known position+size, refreshed every time `switch_workspace`
+    /// hides this window, and read back to restore it exactly when its
+    /// workspace becomes active again. Stale while the window is actually
+    /// visible (`space`'s own position is authoritative then), but that's
+    /// fine since it's only ever read right after a hide.
+    pub rect: Rectangle<i32, Logical>,
+}
+
+pub struct FullscreenEntry {
+    /// Output name (matching `Layouts`' own convention of a stable `String`
+    /// rather than holding the `Output` type itself).
+    pub output: String,
+    /// The window's rect immediately before it went fullscreen, so it can be
+    /// restored exactly. Applied only when the window is floating at
+    /// unfullscreen time. It may remain populated while temporarily tiled
+    /// so a floating -> tiled -> floating round trip does not discard the
+    /// original rect; a window that stays tiled falls back through its
+    /// intact `Layouts` slot instead.
+    pub restore_rect: Option<Rectangle<i32, Logical>>,
+    /// Pinning is output-local and workspace-independent, while fullscreen is
+    /// owned by one workspace/output transaction. Suspend the pin during
+    /// fullscreen and restore it only if the window exits still floating.
+    pub was_pinned: bool,
+}
+
+pub struct MaximizedEntry {
+    pub output: String,
+    pub restore_rect: Rectangle<i32, Logical>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum KeyboardFocusTarget {
+    None,
+    Window(WlSurface),
+    Layer(WlSurface),
+    Lock(WlSurface),
+}
+
+/// Session lock state machine: `Unlocked` -> `Locking` -> `Locked` ->
+/// `Unlocked`. Entered via `SessionLockHandler::lock` (`handlers/mod.rs`),
+/// which calls `Smallvil::lock_session` below.
+pub(crate) enum SessionLock {
+    Unlocked,
+    /// Lock requested; waiting for every output to render at least one
+    /// locked frame (see `locked_outputs`) before confirming via
+    /// `SessionLocker::lock()`.
+    Locking(SessionLocker),
+    Locked,
+}
+
+pub(crate) struct PopupGrabState {
+    pub(crate) root: WlSurface,
+    pub(crate) grab: PopupGrab<Smallvil>,
+    pub(crate) has_keyboard_grab: bool,
+}
+
+impl KeyboardFocusTarget {
+    fn surface(&self) -> Option<&WlSurface> {
+        match self {
+            Self::None => None,
+            Self::Window(surface) | Self::Layer(surface) | Self::Lock(surface) => Some(surface),
+        }
+    }
+}
+
+impl FullscreenEntry {
+    /// Records the first useful windowed rect without overwriting an older
+    /// floating rect. The latter must survive a floating -> tiled -> floating
+    /// round trip performed while the fullscreen override is still active.
+    fn remember_restore_rect(&mut self, rect: Rectangle<i32, Logical>) {
+        self.restore_rect.get_or_insert(rect);
+    }
+
+    /// Moves the fullscreen override with the workspace content that owns it.
+    /// A saved floating rect uses global logical coordinates, so it needs the
+    /// same translation as the window itself when monitor origins differ.
+    fn move_to_output(&mut self, output: String, delta: Option<Point<i32, Logical>>) {
+        self.output = output;
+        if let (Some(rect), Some(delta)) = (&mut self.restore_rect, delta) {
+            rect.loc += delta;
+        }
+    }
+}
+
+impl MaximizedEntry {
+    fn move_to_output(&mut self, output: String, delta: Option<Point<i32, Logical>>) {
+        self.output = output;
+        if let Some(delta) = delta {
+            self.restore_rect.loc += delta;
+        }
+    }
+}
+
+/// Reserved workspace number for the scratchpad -- never reachable via the
+/// default `Super+1..9,0`/`Super+Shift+1..9,0` keybinds (which only ever
+/// address 1-10), so it stays inert on every output until something
+/// explicitly moves a window there via `Smallvil::move_to_scratchpad`.
+const SCRATCHPAD_WORKSPACE: u32 = 0;
+
+impl Smallvil {
+    pub fn new(event_loop: &mut EventLoop<'static, Smallvil>, display: Display<Self>) -> Self {
+        let start_time = std::time::Instant::now();
+        let config = Config::load();
+        // Copied out before `config` moves into the `Self { config, .. }`
+        // field below, so `layout: ...` further down can still read it.
+        let default_layout = config.default_layout;
+
+        let dh = display.handle();
+
+        let compositor_state = CompositorState::new::<Self>(&dh);
+        let xdg_shell_state = XdgShellState::new::<Self>(&dh);
+        let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
+        let kde_decoration_state = KdeDecorationState::new::<Self>(
+            &dh,
+            smithay::reexports::wayland_protocols_misc::server_decoration::server::org_kde_kwin_server_decoration_manager::Mode::Server,
+        );
+        let layer_shell_state = WlrLayerShellState::new::<Self>(&dh);
+        let shm_state = ShmState::new::<Self>(&dh, vec![]);
+        let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
+        let pointer_constraints_state = PointerConstraintsState::new::<Self>(&dh);
+        let relative_pointer_state = RelativePointerManagerState::new::<Self>(&dh);
+        let mut seat_state = SeatState::new();
+        let data_device_state = DataDeviceState::new::<Self>(&dh);
+        let data_control_state = DataControlState::new::<Self, _>(&dh, None, |_client| true);
+        let session_lock_state = SessionLockManagerState::new::<Self, _>(&dh, |_client| true);
+        let xdg_activation_state = XdgActivationState::new::<Self>(&dh);
+        let single_pixel_buffer_state = SinglePixelBufferState::new::<Self>(&dh);
+        let clock = Clock::<Monotonic>::new();
+        let presentation_state = PresentationState::new::<Self>(&dh, clock.id() as u32);
+        let fractional_scale_manager_state = FractionalScaleManagerState::new::<Self>(&dh);
+        let foreign_toplevel_list_state = ForeignToplevelListState::new::<Self>(&dh);
+        // The older wlr-foreign-toplevel-management-v1 protocol (hand-rolled,
+        // no Smithay module). See `handlers/wlr_foreign_toplevel.rs`.
+        let wlr_foreign_toplevel_state =
+            crate::handlers::wlr_foreign_toplevel::WlrForeignToplevelState::new(&dh);
+        let wlr_output_management_state =
+            crate::handlers::wlr_output_management::WlrOutputManagementState::new(&dh);
+        let wlr_output_power_management_state =
+            crate::handlers::wlr_output_power_management::WlrOutputPowerManagementState::new(&dh);
+        let wlr_gamma_control_state = crate::handlers::wlr_gamma_control::WlrGammaControlState::new(&dh);
+        let keyboard_shortcuts_inhibit_state = KeyboardShortcutsInhibitState::new::<Self>(&dh);
+        let pointer_gestures_state = PointerGesturesState::new::<Self>(&dh);
+        let cursor_shape_manager_state = CursorShapeManagerState::new::<Self>(&dh);
+        let text_input_manager_state = TextInputManagerState::new::<Self>(&dh);
+        let input_method_manager_state = InputMethodManagerState::new::<Self, _>(&dh, |_client| true);
+        let virtual_keyboard_manager_state =
+            VirtualKeyboardManagerState::new::<Self, _>(&dh, |_client| true);
+        let popups = PopupManager::default();
+        let viewporter_state = ViewporterState::new::<Self>(&dh);
+        let image_capture_source_state = ImageCaptureSourceState::new();
+        let output_capture_source_state = OutputCaptureSourceState::new::<Self>(&dh);
+        let image_copy_capture_state = ImageCopyCaptureState::new::<Self>(&dh);
+        let wlr_screencopy_global = dh.create_global::<Self, ZwlrScreencopyManagerV1, ()>(3, ());
+
+        // A seat is a group of keyboards, pointer and touch devices.
+        // A seat typically has a pointer and maintains a keyboard focus and a pointer focus.
+        let mut seat: Seat<Self> = seat_state.new_wl_seat(&dh, "winit");
+
+        // Notify clients that we have a keyboard, for the sake of the example we assume that keyboard is always present.
+        // You may want to track keyboard hot-plug in real compositor.
+        //
+        // A bad `xkb_layout`/`xkb_variant`/`xkb_options` in the user's
+        // config must not take the whole compositor down with it -- fall
+        // back to the default keymap (which always compiles) and log it,
+        // rather than unwrapping a config-controlled `Result`.
+        if seat
+            .add_keyboard(
+                config.input.xkb_config(),
+                config.input.repeat_delay,
+                config.input.repeat_rate,
+            )
+            .is_err()
+        {
+            tracing::error!(
+                layout = %config.input.xkb_layout,
+                variant = %config.input.xkb_variant,
+                options = ?config.input.xkb_options,
+                "Configured XKB keymap failed to compile, falling back to default layout"
+            );
+            seat.add_keyboard(
+                XkbConfig::default(),
+                config.input.repeat_delay,
+                config.input.repeat_rate,
+            )
+            .expect("default XKB keymap must always compile");
+        }
+
+        // Notify clients that we have a pointer (mouse)
+        // Here we assume that there is always pointer plugged in
+        seat.add_pointer();
+
+        // A space represents a two-dimensional plane. Windows and Outputs can be mapped onto it.
+        //
+        // Windows get a position and stacking order through mapping.
+        // Outputs become views of a part of the Space and can be rendered via Space::render_output.
+        let space = Space::default();
+
+        let socket_name = Self::init_wayland_listener(display, event_loop);
+
+        // Get the loop signal, used to stop the event loop
+        let loop_handle = event_loop.handle();
+        let loop_signal = event_loop.get_signal();
+
+        let idle_inhibit_manager_state = IdleInhibitManagerState::new::<Self>(&dh);
+        let idle_notifier_state = IdleNotifierState::<Self>::new(&dh, loop_handle.clone());
+
+        Self {
+            start_time,
+            display_handle: dh,
+
+            config,
+            toast: None,
+            overview: None,
+            welcome_hint: None,
+            last_config_event: Instant::now() - Duration::from_secs(1),
+            needs_redraw: true,
+            active_submap: None,
+
+            layout: {
+                let mut layout = Layouts::default();
+                layout.set_default_algorithm(default_layout);
+                layout
+            },
+            space,
+            loop_handle,
+            loop_signal,
+            socket_name,
+
+            compositor_state,
+            xdg_shell_state,
+            xdg_decoration_state,
+            kde_decoration_state,
+            layer_shell_state,
+            shm_state,
+            output_manager_state,
+            pointer_constraints_state,
+            relative_pointer_state,
+            seat_state,
+            data_device_state,
+            data_control_state,
+            session_lock_state,
+            session_lock: SessionLock::Unlocked,
+            lock_surfaces: HashMap::new(),
+            locked_outputs: HashSet::new(),
+            lock_blank: SolidColorBuffer::new((0, 0), [0.0, 0.0, 0.0, 1.0]),
+            xdg_activation_state,
+            single_pixel_buffer_state,
+            presentation_state,
+            clock,
+            fractional_scale_manager_state,
+            foreign_toplevel_list_state,
+            foreign_toplevels: HashMap::new(),
+            wlr_foreign_toplevel_state: Some(wlr_foreign_toplevel_state),
+            wlr_output_management_state,
+            wlr_output_power_management_state,
+            set_output_power: None,
+            wlr_gamma_control_state,
+            gamma_size: None,
+            set_gamma: None,
+            wlr_foreign_toplevels: HashMap::new(),
+            keyboard_shortcuts_inhibit_state,
+            pointer_gestures_state,
+            cursor_shape_manager_state,
+            text_input_manager_state,
+            input_method_manager_state,
+            virtual_keyboard_manager_state,
+            popups,
+            popup_grab: None,
+            unmapped_toplevels: HashMap::new(),
+            unmapped_layer_surfaces: HashSet::new(),
+            viewporter_state,
+            image_capture_source_state,
+            output_capture_source_state,
+            image_copy_capture_state,
+            wlr_screencopy_global,
+            capture_sessions: Vec::new(),
+            pending_captures: Vec::new(),
+            idle_inhibit_manager_state,
+            idle_notifier_state,
+            idle_inhibitors: HashMap::new(),
+            seat,
+            window_focus: None,
+            on_demand_layer_focus: None,
+            keyboard_focus: KeyboardFocusTarget::None,
+
+            dmabuf_state: DmabufState::new(),
+            dmabuf_global: None,
+            udev_renderer: None,
+            session: None,
+            cursor_status: CursorImageStatus::default_named(),
+            cursor_theme: None,
+            fullscreen: HashMap::new(),
+            maximized: HashMap::new(),
+            floating_workspace: HashMap::new(),
+            pinned: HashSet::new(),
+            scratchpad_previous: HashMap::new(),
+            pseudo_tiled: HashSet::new(),
+            is_lid_closed: false,
+            is_tablet_mode: false,
+            groups: Vec::new(),
+            #[cfg(feature = "screencast")]
+            screencast: None,
+        }
+    }
+
+    fn init_wayland_listener(
+        display: Display<Smallvil>,
+        event_loop: &mut EventLoop<Smallvil>,
+    ) -> OsString {
+        // Creates a new listening socket, automatically choosing the next available `wayland` socket name.
+        let listening_socket = ListeningSocketSource::new_auto().unwrap();
+
+        // Get the name of the listening socket.
+        // Clients will connect to this socket.
+        let socket_name = listening_socket.socket_name().to_os_string();
+
+        let loop_handle = event_loop.handle();
+
+        loop_handle
+            .insert_source(listening_socket, move |client_stream, _, state| {
+                // Inside the callback, you should insert the client into the display.
+                //
+                // You may also associate some data with the client when inserting the client.
+                state
+                    .display_handle
+                    .insert_client(client_stream, Arc::new(ClientState::default()))
+                    .unwrap();
+            })
+            .expect("Failed to init the wayland event source.");
+
+        // You also need to add the display itself to the event loop, so that client events will be processed by wayland-server.
+        loop_handle
+            .insert_source(
+                Generic::new(display, Interest::READ, Mode::Level),
+                |_, display, state| {
+                    // Safety: we don't drop the display
+                    unsafe {
+                        display.get_mut().dispatch_clients(state).unwrap();
+                    }
+                    Ok(PostAction::Continue)
+                },
+            )
+            .unwrap();
+
+        socket_name
+    }
+
+    /// Finds the topmost surface under `pos`, checking layer-shell surfaces
+    /// in the same front-to-back order they're rendered in
+    /// (`space_render_elements`, used by both backends): Overlay and Top
+    /// above every tiled/floating window, Bottom and Background below.
+    /// Walk up through `surface`'s parent chain and return the first
+    /// ancestor (including `surface` itself) that has a pointer constraint
+    /// registered for `pointer`. Constraints are typically created on the
+    /// xdg-toplevel's main surface, but `surface_under` may return a
+    /// subsurface of that toplevel (a popup, a sub-surface the client uses
+    /// for its own cursor, etc.) -- this resolves the disconnect.
+    ///
+    /// Returns `None` if no constraint is found anywhere in the chain.
+    pub(crate) fn root_with_constraint(
+        &self,
+        surface: &WlSurface,
+        pointer: &PointerHandle<Smallvil>,
+    ) -> Option<WlSurface> {
+        let mut current = Some(surface.clone());
+        while let Some(s) = current.clone() {
+            let mut found: Option<WlSurface> = None;
+            with_pointer_constraint(&s, pointer, |c| {
+                if c.is_some() {
+                    found = Some(s.clone());
+                }
+            });
+            if let Some(root) = found {
+                return Some(root);
+            }
+            current = get_parent(&s);
+        }
+        None
+    }
+
+    /// Walk up through `surface`'s parent chain and return its root
+    /// (the topmost ancestor with no parent). Used to compare two surfaces
+    /// for "same window" without caring whether either is a subsurface.
+    pub(crate) fn surface_root(&self, surface: &WlSurface) -> Option<WlSurface> {
+        let mut current = surface.clone();
+        loop {
+            match get_parent(&current) {
+                Some(p) => current = p,
+                None => return Some(current),
+            }
+        }
+    }
+
+    pub fn surface_under(
+        &self,
+        pos: Point<f64, Logical>,
+    ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        let output = self.space.output_under(pos).next()?;
+        let output_geo = self.space.output_geometry(output)?;
+
+        // While locked, only the lock surface is hit-testable -- never the
+        // windows/layers underneath, even if there is no lock surface yet
+        // for this output (in which case there's simply nothing here).
+        if !matches!(self.session_lock, SessionLock::Unlocked) {
+            let lock_surface = self.lock_surfaces.get(output)?;
+            let output_local = pos - output_geo.loc.to_f64();
+            return under_from_surface_tree(
+                lock_surface.wl_surface(),
+                output_local,
+                (0, 0),
+                WindowSurfaceType::ALL,
+            )
+            .map(|(s, p)| (s, p.to_f64() + output_geo.loc.to_f64()));
+        }
+
+        self.layer_surface_under(output, output_geo, pos, &[WlrLayer::Overlay, WlrLayer::Top])
+            .or_else(|| {
+                self.space.element_under(pos).and_then(|(window, location)| {
+                    window
+                        .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
+                        .map(|(s, p)| (s, (p + location).to_f64()))
+                })
+            })
+            .or_else(|| {
+                self.layer_surface_under(output, output_geo, pos, &[WlrLayer::Bottom, WlrLayer::Background])
+            })
+    }
+
+    fn layer_surface_under(
+        &self,
+        output: &Output,
+        output_geo: Rectangle<i32, Logical>,
+        pos: Point<f64, Logical>,
+        layers: &[WlrLayer],
+    ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        let output_local = pos - output_geo.loc.to_f64();
+        let map = layer_map_for_output(output);
+        for kind in layers {
+            for layer in map.layers_on(*kind).rev() {
+                if self.unmapped_layer_surfaces.contains(layer.wl_surface()) {
+                    continue;
+                }
+                let Some(layer_geo) = map.layer_geometry(layer) else {
+                    continue;
+                };
+                if let Some((s, p)) = layer.surface_under(
+                    output_local - layer_geo.loc.to_f64(),
+                    WindowSurfaceType::ALL,
+                ) {
+                    return Some((
+                        s,
+                        p.to_f64() + layer_geo.loc.to_f64() + output_geo.loc.to_f64(),
+                    ));
+                }
+            }
+        }
+        None
+    }
+
+    /// The layer surface (if any) whose bounds -- including its popups --
+    /// contain `pos` at the frontmost rendered position. Resolving through
+    /// `surface_under` is important: Bottom/Background layers must not steal
+    /// input from a window rendered above them.
+    pub(crate) fn layer_under_pointer(&self, pos: Point<f64, Logical>) -> Option<desktop::LayerSurface> {
+        let output = self.space.output_under(pos).next()?;
+        let (surface, _) = self.surface_under(pos)?;
+        let map = layer_map_for_output(output);
+        map.layer_for_surface(&surface, WindowSurfaceType::ALL)
+            .filter(|layer| !self.unmapped_layer_surfaces.contains(layer.wl_surface()))
+            .cloned()
+    }
+
+    /// The output containing `pos`, if any. Used to decide which output's
+    /// tiling tree a click/drag/new-window action should target.
+    pub(crate) fn output_for_point(&self, pos: Point<f64, Logical>) -> Option<Output> {
+        self.space.output_under(pos).next().cloned()
+    }
+
+    /// The output containing the largest share of a window's current geometry.
+    /// Output overlap storage inside Smithay is a HashMap, so taking its first
+    /// entry made straddling-window ownership nondeterministic across runs.
+    /// Ties use the stable output name. `None` if the window is not visible.
+    pub(crate) fn output_for_window(&self, window: &Window) -> Option<Output> {
+        let rect = self.space.element_geometry(window)?;
+        self.space
+            .outputs()
+            .filter_map(|output| {
+                let intersection = self.space.output_geometry(output)?.intersection(rect)?;
+                let area = i64::from(intersection.size.w) * i64::from(intersection.size.h);
+                Some((output.clone(), area))
+            })
+            .max_by(|(output_a, area_a), (output_b, area_b)| {
+                area_a
+                    .cmp(area_b)
+                    .then_with(|| output_b.name().cmp(&output_a.name()))
+            })
+            .map(|(output, _)| output)
+    }
+
+    /// The output a new action without any other spatial hint should
+    /// target. Used for "which monitor does this land on" decisions (new
+    /// windows, layer surfaces the client didn't pin to a specific output,
+    /// workspace keybinds).
+    ///
+    /// Resolution order depends on `focus_follows_mouse` because the two
+    /// settings describe the same underlying intent -- "where my attention
+    /// is" -- and ought to agree on which monitor that is:
+    ///
+    ///   * **`focus_follows_mouse = true` (default):** pointer output
+    ///     first. This is what makes a freshly-plugged second monitor get
+    ///     new windows on the first `Super+Enter` after moving the mouse
+    ///     over to it, even when that monitor has no windows yet for
+    ///     `focus_follows_mouse` itself to shift keyboard focus onto.
+    ///     Hyprland/i3/sway's "active monitor follows mouse" default is the
+    ///     same idea. Suspended while an Exclusive/OnDemand layer owns the
+    ///     keyboard (matching `focus_follows_mouse`'s own early-return in
+    ///     that case): a launcher or lock screen shouldn't redirect spawns
+    ///     to whatever output the pointer happens to have drifted onto
+    ///     during the layer interaction -- the remembered window's output
+    ///     is the better signal of pre-layer intent.
+    ///
+    ///   * **`focus_follows_mouse = false`:** focused window's output
+    ///     first. In a click-to-focus model an unrelated pointer position
+    ///     is a weaker signal of intent than whatever the user last
+    ///     clicked, so the focused window wins.
+    ///
+    /// Either way the focused window's output, then the first mapped
+    /// output, fill in the remaining fallbacks.
+    pub(crate) fn primary_output(&self) -> Option<Output> {
+        let intended_output = self.window_focus.as_ref().and_then(|surface| {
+            self.layout
+                .output_of(surface)
+                .and_then(|name| self.output_by_name(name))
+                .or_else(|| {
+                    self.mapped_toplevel_window(surface)
+                        .and_then(|window| self.output_for_window(&window))
+                })
+                .or_else(|| {
+                    self.floating_workspace
+                        .get(surface)
+                        .and_then(|tag| self.output_by_name(&tag.output))
+                })
+        });
+        let focused_output = self
+            .seat
+            .get_keyboard()
+            .and_then(|k| k.current_focus())
+            .and_then(|surface| {
+                self.space
+                    .elements()
+                    .find(|w| is_window(w, &surface))
+                    .and_then(|w| self.output_for_window(w))
+            });
+        let pointer_output = self
+            .seat
+            .get_pointer()
+            .and_then(|p| self.output_for_point(p.current_location()));
+        let first_output = || self.space.outputs().next().cloned();
+
+        // Mirror `focus_follows_mouse`'s own runtime gate: pointer-driven
+        // spawn is suspended while an Exclusive layer owns the keyboard, so
+        // a launcher or lock screen can't redirect new windows to whatever
+        // output the pointer drifted onto during the interaction.
+        let prefer_pointer =
+            self.config.input.focus_follows_mouse && self.exclusive_layer().is_none();
+
+        if prefer_pointer {
+            pointer_output
+                .or(intended_output)
+                .or(focused_output)
+                .or_else(first_output)
+        } else {
+            intended_output
+                .or(focused_output)
+                .or(pointer_output)
+                .or_else(first_output)
+        }
+    }
+
+    /// Requests ordinary window focus. The request becomes the retained
+    /// window intent, while `reconcile_keyboard_focus` may temporarily give
+    /// actual keyboard focus to a mapped Exclusive layer instead.
+    pub(crate) fn focus_window(&mut self, surface: Option<WlSurface>, serial: smithay::utils::Serial) {
+        self.on_demand_layer_focus = None;
+        self.window_focus = surface.filter(|surface| self.window_is_visible(surface));
+        self.reconcile_keyboard_focus(serial);
+    }
+
+    /// Requests focus for an OnDemand/Exclusive layer selected by first map
+    /// or click. Exclusive priority itself is derived globally; only an
+    /// OnDemand target must be remembered as explicit intent.
+    pub(crate) fn focus_layer(&mut self, surface: WlSurface, serial: smithay::utils::Serial) {
+        if self.layer_keyboard_interactivity(&surface) == Some(KeyboardInteractivity::OnDemand) {
+            self.on_demand_layer_focus = Some(surface);
+        }
+        self.reconcile_keyboard_focus(serial);
+    }
+
+    /// Recomputes actual seat focus from mapped state and applies XDG
+    /// Activated in the same transaction. Priority is mapped Exclusive
+    /// layer, valid OnDemand intent, valid visible window intent, then none.
+    pub(crate) fn reconcile_keyboard_focus(&mut self, serial: smithay::utils::Serial) {
+        if self
+            .window_focus
+            .as_ref()
+            .is_some_and(|surface| !self.window_is_visible(surface))
+        {
+            self.window_focus = None;
+        }
+        if self
+            .on_demand_layer_focus
+            .as_ref()
+            .is_some_and(|surface| {
+                self.layer_keyboard_interactivity(surface) != Some(KeyboardInteractivity::OnDemand)
+            })
+        {
+            self.on_demand_layer_focus = None;
+        }
+
+        // Locked takes absolute priority over everything else -- no window
+        // or layer may hold keyboard focus while the session is locked,
+        // even if none of them changed their own state. `None` here (no
+        // lock surface registered yet) intentionally clears keyboard focus
+        // entirely rather than falling through to the normal chain below.
+        let resolved = if !matches!(self.session_lock, SessionLock::Unlocked) {
+            self.lock_focus_target()
+                .map(KeyboardFocusTarget::Lock)
+                .unwrap_or(KeyboardFocusTarget::None)
+        } else {
+            self.exclusive_layer()
+                .map(|layer| KeyboardFocusTarget::Layer(layer.wl_surface().clone()))
+                .or_else(|| {
+                    self.on_demand_layer_focus
+                        .clone()
+                        .map(KeyboardFocusTarget::Layer)
+                })
+                .or_else(|| self.window_focus.clone().map(KeyboardFocusTarget::Window))
+                .unwrap_or(KeyboardFocusTarget::None)
+        };
+
+        self.release_popup_grab_if_focus_leaves(&resolved);
+
+        let popup_keyboard_focus = self.popup_grab.as_ref().and_then(|popup| {
+            let owns_keyboard = popup.has_keyboard_grab
+                && !popup.grab.has_ended()
+                && resolved.surface() == Some(&popup.root);
+            owns_keyboard
+                .then(|| popup.grab.current_grab())
+                .flatten()
+        });
+        let seat_target = popup_keyboard_focus
+            .or_else(|| resolved.surface().cloned());
+
+        let seat_surface = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus());
+        let focus_changed =
+            resolved != self.keyboard_focus || seat_surface.as_ref() != seat_target.as_ref();
+
+        let old_window = match &self.keyboard_focus {
+            KeyboardFocusTarget::Window(surface) => Some(surface.clone()),
+            _ => None,
+        };
+        let new_window = match &resolved {
+            KeyboardFocusTarget::Window(surface) => Some(surface.clone()),
+            _ => None,
+        };
+
+        // Assigned here, before the activation-change block below, so that
+        // `refresh_wlr_toplevel_state`'s `is_window_activated` check (which
+        // reads `self.keyboard_focus`) already sees the new focus target by
+        // the time it runs for either surface -- otherwise the surface
+        // losing focus would still read back as activated for one more
+        // statement, since `self.keyboard_focus` wouldn't have moved yet.
+        self.keyboard_focus = resolved;
+
+        let mut activation_changed = false;
+        if old_window != new_window {
+            if let Some(surface) = old_window {
+                activation_changed |= self.set_window_activated(&surface, false);
+                self.refresh_wlr_toplevel_state(&surface);
+            }
+            if let Some(surface) = new_window {
+                activation_changed |= self.set_window_activated(&surface, true);
+                self.refresh_wlr_toplevel_state(&surface);
+            }
+        }
+
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            if keyboard.current_focus() != seat_target {
+                keyboard.set_focus(self, seat_target, serial);
+            }
+        }
+        if focus_changed || activation_changed {
+            self.request_redraw();
+        }
+    }
+
+    /// Ends a popup grab when logical focus moves away from its root. The
+    /// pointer grab is released from a calloop idle so this remains safe if a
+    /// future focus path originates inside a pointer-grab callback.
+    fn release_popup_grab_if_focus_leaves(&mut self, target: &KeyboardFocusTarget) {
+        let leaving = self.popup_grab.as_ref().is_some_and(|popup| {
+            popup.has_keyboard_grab && target.surface() != Some(&popup.root)
+        });
+        if !leaving {
+            return;
+        }
+
+        self.release_popup_grab();
+    }
+
+    fn release_popup_grab(&mut self) {
+        let Some(mut popup) = self.popup_grab.take() else { return };
+        let grab_serial = popup.grab.serial();
+        let previous_serial = popup.grab.previous_serial();
+        popup.grab.ungrab(PopupUngrabStrategy::All);
+
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            let owns_grab = keyboard.has_grab(grab_serial)
+                || previous_serial.is_some_and(|serial| keyboard.has_grab(serial));
+            if owns_grab {
+                keyboard.unset_grab(self);
+            }
+        }
+
+        let serial = SERIAL_COUNTER.next_serial();
+        let time = self.start_time.elapsed().as_millis() as u32;
+        self.loop_handle.insert_idle(move |state| {
+            let Some(pointer) = state.seat.get_pointer() else { return };
+            let owns_grab = pointer.has_grab(grab_serial)
+                || previous_serial.is_some_and(|serial| pointer.has_grab(serial));
+            if owns_grab {
+                pointer.unset_grab(state, serial, time);
+            }
+        });
+    }
+
+    fn release_popup_grab_for_root(&mut self, root: &WlSurface) {
+        if self
+            .popup_grab
+            .as_ref()
+            .is_some_and(|popup| &popup.root == root)
+        {
+            self.release_popup_grab();
+        }
+    }
+
+    /// Drops completed popup-grab bookkeeping after `PopupManager::cleanup`
+    /// and restores both input devices to the centralized root focus.
+    pub(crate) fn refresh_popup_grab(&mut self) {
+        let ended = self
+            .popup_grab
+            .as_ref()
+            .is_some_and(|popup| popup.grab.has_ended());
+        if !ended {
+            return;
+        }
+
+        let popup = self.popup_grab.take().unwrap();
+        let grab_serial = popup.grab.serial();
+        let previous_serial = popup.grab.previous_serial();
+        let serial = SERIAL_COUNTER.next_serial();
+        let time = self.start_time.elapsed().as_millis() as u32;
+        if let Some(pointer) = self.seat.get_pointer() {
+            let owns_grab = pointer.has_grab(grab_serial)
+                || previous_serial.is_some_and(|candidate| pointer.has_grab(candidate));
+            if owns_grab {
+                pointer.unset_grab(self, serial, time);
+            }
+        }
+        self.reconcile_keyboard_focus(serial);
+    }
+
+    /// Returns whether a popup rooted at `root` may grab and, if so, whether
+    /// it should install a keyboard grab in addition to the pointer grab.
+    /// Ordinary windows and keyboard-interactive layers must already own
+    /// logical focus; a mapped `KeyboardInteractivity::None` layer is allowed
+    /// a pointer-only menu grab.
+    pub(crate) fn popup_grab_policy(&self, root: &WlSurface) -> Option<bool> {
+        if self.mapped_toplevel_window(root).is_some() {
+            return matches!(&self.keyboard_focus, KeyboardFocusTarget::Window(surface) if surface == root)
+                .then_some(true);
+        }
+
+        match self.layer_keyboard_interactivity(root)? {
+            KeyboardInteractivity::None => Some(false),
+            KeyboardInteractivity::OnDemand | KeyboardInteractivity::Exclusive => {
+                matches!(&self.keyboard_focus, KeyboardFocusTarget::Layer(surface) if surface == root)
+                    .then_some(true)
+            }
+        }
+    }
+
+    /// The ordinary window that owns logical WM focus. During an xdg-popup
+    /// keyboard grab the real seat focus is a descendant popup surface, but
+    /// compositor actions and IPC must continue to address its root window.
+    pub(crate) fn focused_window_surface(&self) -> Option<WlSurface> {
+        match &self.keyboard_focus {
+            KeyboardFocusTarget::Window(surface) => Some(surface.clone()),
+            KeyboardFocusTarget::None | KeyboardFocusTarget::Layer(_) | KeyboardFocusTarget::Lock(_) => None,
+        }
+    }
+
+    /// The surface actually holding keyboard focus right now, whatever its
+    /// role (window, layer, lock surface). `input.rs`'s shortcuts-inhibit
+    /// gate needs the real focused surface -- an inhibitor registered by a
+    /// VM client sits on its toplevel, and `focused_window_surface`'s
+    /// window-only view would miss the layer case -- but can't match on
+    /// the private `KeyboardFocusTarget` itself.
+    pub(crate) fn keyboard_focused_surface(&self) -> Option<&WlSurface> {
+        match &self.keyboard_focus {
+            KeyboardFocusTarget::Window(surface)
+            | KeyboardFocusTarget::Layer(surface)
+            | KeyboardFocusTarget::Lock(surface) => Some(surface),
+            KeyboardFocusTarget::None => None,
+        }
+    }
+
+    /// Which lock surface should own keyboard focus while locked: the
+    /// pointer's current output's, falling back to any registered one --
+    /// same focus-follows-mouse convention `focus_follows_mouse` already
+    /// uses elsewhere. `None` while no lock surface has been registered for
+    /// any output yet; `reconcile_keyboard_focus` then clears keyboard
+    /// focus entirely rather than leaking it to a window.
+    fn lock_focus_target(&self) -> Option<WlSurface> {
+        let pointer_output = self
+            .seat
+            .get_pointer()
+            .and_then(|pointer| self.space.output_under(pointer.current_location()).next().cloned());
+        pointer_output
+            .and_then(|output| self.lock_surfaces.get(&output))
+            .or_else(|| self.lock_surfaces.values().next())
+            .map(|lock_surface| lock_surface.wl_surface().clone())
+    }
+
+    /// Forces Smithay to re-resolve pointer enter/leave focus at the
+    /// pointer's current location without an actual device motion --
+    /// needed whenever `surface_under`'s answer changes out from under the
+    /// pointer (locking, unlocking, a lock surface registering), since
+    /// nothing else would otherwise trigger the re-resolution before the
+    /// next real mouse move. A click with no preceding motion (a trackpad
+    /// tap, most commonly) would otherwise still hit whatever was focused
+    /// before the change.
+    fn refresh_pointer_focus(&mut self) {
+        let Some(pointer) = self.seat.get_pointer() else { return };
+        let pos = pointer.current_location();
+        let under = self.surface_under(pos);
+        let serial = SERIAL_COUNTER.next_serial();
+        let time = self.start_time.elapsed().as_millis() as u32;
+        pointer.motion(self, under, &MotionEvent { location: pos, serial, time });
+        pointer.frame(self);
+    }
+
+    /// The retained visible window underneath any layer focus. Used only for
+    /// placement policy, not user actions against the currently focused
+    /// client.
+    pub(crate) fn intended_window_surface(&self) -> Option<WlSurface> {
+        self.window_focus.clone()
+    }
+
+    /// Applies XDG Activated to one tracked role. Looking through the
+    /// layout/floating registries (via `mapped_toplevel_window`) keeps this
+    /// correct for a protocol-mapped window on an inactive workspace without
+    /// turning every animated layer commit into an O(window-count) sweep.
+    fn set_window_activated(&mut self, surface: &WlSurface, activated: bool) -> bool {
+        let mapped = !self.unmapped_toplevels.contains_key(surface);
+        let window = self
+            .unmapped_toplevels
+            .get(surface)
+            .cloned()
+            .or_else(|| self.mapped_toplevel_window(surface));
+        let Some(window) = window else { return false };
+        let Some(toplevel) = window.toplevel() else { return false };
+        let changed = window.set_activated(activated && mapped);
+        if changed && mapped && toplevel.is_initial_configure_sent() {
+            toplevel.send_pending_configure();
+        }
+        changed
+    }
+
+    /// Whether `surface` currently holds keyboard focus. `KeyboardFocusTarget`
+    /// is private to this module, so this is the query surface for callers
+    /// elsewhere (`handlers/xdg_shell.rs`'s wlr-foreign-toplevel state
+    /// mirroring) that need it without exposing the enum itself.
+    pub(crate) fn is_window_activated(&self, surface: &WlSurface) -> bool {
+        matches!(&self.keyboard_focus, KeyboardFocusTarget::Window(s) if s == surface)
+    }
+
+    pub(crate) fn window_is_visible(&self, surface: &WlSurface) -> bool {
+        self.space.elements().any(|window| is_window(window, surface))
+    }
+
+    /// Commits a visible floating window's live Space placement back into
+    /// its durable ownership tag after an interactive move. In particular,
+    /// crossing an output transfers it to that output's active workspace;
+    /// otherwise later workspace actions would still treat it as belonging
+    /// to the output where the drag began.
+    pub(crate) fn sync_visible_floating_window(&mut self, window: &Window) {
+        let Some(surface) = window.toplevel().map(|toplevel| toplevel.wl_surface().clone()) else {
+            return;
+        };
+        if self.fullscreen.contains_key(&surface)
+            || self.maximized.contains_key(&surface)
+            || !self.floating_workspace.contains_key(&surface)
+            || !self.window_is_visible(&surface)
+        {
+            return;
+        }
+        let Some(rect) = self.space.element_geometry(window) else {
+            return;
+        };
+        let owner = self.output_for_window(window).map(|output| {
+            // The window may have just been dragged onto a different
+            // output; its surfaces need to hear about that output's scale.
+            self.set_window_fractional_scale(window, &output);
+            let name = output.name();
+            let workspace = self.layout.active_workspace(&name);
+            (name, workspace)
+        });
+
+        let tag = self.floating_workspace.get_mut(&surface).unwrap();
+        tag.rect = rect;
+        if let Some((output, workspace)) = owner {
+            tag.output = output;
+            tag.workspace = workspace;
+        }
+    }
+
+    fn layer_keyboard_interactivity(
+        &self,
+        surface: &WlSurface,
+    ) -> Option<KeyboardInteractivity> {
+        if self.unmapped_layer_surfaces.contains(surface) {
+            return None;
+        }
+        self.space.outputs().find_map(|output| {
+            let map = layer_map_for_output(output);
+            map.layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
+                .map(|layer| layer.cached_state().keyboard_interactivity)
+        })
+    }
+
+    /// Selects a deterministic ordinary-window fallback after the current
+    /// focus owner disappears. Pointer intent wins when focus-follows-mouse
+    /// is enabled; then the topmost visible window on the preferred output,
+    /// then the topmost visible window anywhere.
+    pub(crate) fn repair_keyboard_focus(
+        &mut self,
+        preferred_output: Option<&str>,
+        serial: smithay::utils::Serial,
+    ) {
+        if self
+            .window_focus
+            .as_ref()
+            .is_some_and(|surface| !self.window_is_visible(surface))
+        {
+            self.window_focus = None;
+        }
+        if self
+            .on_demand_layer_focus
+            .as_ref()
+            .is_some_and(|surface| {
+                self.layer_keyboard_interactivity(surface) != Some(KeyboardInteractivity::OnDemand)
+            })
+        {
+            self.on_demand_layer_focus = None;
+        }
+
+        if self.window_focus.is_none() && self.config.input.focus_follows_mouse {
+            if let Some(pos) = self.seat.get_pointer().map(|pointer| pointer.current_location()) {
+                if self.layer_under_pointer(pos).is_none() {
+                    if let Some(surface) = self.window_at_layout_position(pos) {
+                        self.window_focus = Some(surface);
+                    }
+                }
+            }
+        }
+
+        if self.window_focus.is_none() {
+            self.space.refresh();
+            self.window_focus = preferred_output
+                .and_then(|output_name| {
+                    self.space
+                        .elements()
+                        .rev()
+                        .find(|window| {
+                            self.output_for_window(window)
+                                .is_some_and(|output| output.name() == output_name)
+                        })
+                        .and_then(|window| {
+                            window.toplevel().map(|toplevel| toplevel.wl_surface().clone())
+                        })
+                })
+                .or_else(|| {
+                    self.space.elements().rev().find_map(|window| {
+                        window.toplevel().map(|toplevel| toplevel.wl_surface().clone())
+                    })
+                });
+        }
+        self.reconcile_keyboard_focus(serial);
+    }
+
+    /// Drops a destroyed/unmapped window from retained focus intent before
+    /// choosing a fallback. If an Exclusive layer currently owns the seat,
+    /// this still repairs the window that should be restored underneath it.
+    pub(crate) fn forget_window_focus(&mut self, surface: &WlSurface) {
+        self.release_popup_grab_for_root(surface);
+        if self.window_focus.as_ref() == Some(surface) {
+            self.window_focus = None;
+        }
+    }
+
+    /// Drops an unmapped/destroyed OnDemand layer from retained focus
+    /// intent. Exclusive focus is derived from mapped layer state and needs
+    /// no separate bookkeeping here.
+    pub(crate) fn forget_layer_focus(&mut self, surface: &WlSurface) {
+        self.release_popup_grab_for_root(surface);
+        if self.on_demand_layer_focus.as_ref() == Some(surface) {
+            self.on_demand_layer_focus = None;
+        }
+    }
+
+    fn window_at_layout_position(&self, pos: Point<f64, Logical>) -> Option<WlSurface> {
+        let live = self.space.element_under(pos).and_then(|(window, _)| {
+            window.toplevel().map(|toplevel| toplevel.wl_surface().clone())
+        });
+        if live.as_ref().is_some_and(|surface| {
+            !self.layout.contains(surface) || self.fullscreen.contains_key(surface)
+        }) {
+            return live;
+        }
+
+        let tiled = self.output_for_point(pos).and_then(|output| {
+            let workspace = self.layout.active_workspace(&output.name());
+            let area = self.output_tiling_area(&output)?;
+            self.layout
+                .layout(&output.name(), workspace, area, self.config.gaps)
+                .into_iter()
+                .find(|(_, rect)| rect.contains(pos.to_i32_round()))
+                .and_then(|(window, _)| {
+                    window.toplevel().map(|toplevel| toplevel.wl_surface().clone())
+                })
+        });
+        tiled.or(live)
+    }
+
+    /// Pushes `output`'s fractional scale to every surface in `window`'s
+    /// tree that bound wp_fractional_scale. Cheap to call from placement
+    /// paths: Smithay only emits the protocol event when the value
+    /// actually changes.
+    pub(crate) fn set_window_fractional_scale(&self, window: &Window, output: &Output) {
+        let scale = output.current_scale().fractional_scale();
+        window.with_surfaces(|_, states| {
+            with_fractional_scale(states, |fractional| {
+                fractional.set_preferred_scale(scale);
+            });
+        });
+    }
+
+    /// Same as `set_window_fractional_scale` for a layer-shell surface.
+    /// Called once at map time -- a layer surface's output never changes
+    /// afterwards, so there is nothing to refresh later.
+    pub(crate) fn set_layer_fractional_scale(
+        &self,
+        layer: &desktop::LayerSurface,
+        output: &Output,
+    ) {
+        let scale = output.current_scale().fractional_scale();
+        layer.with_surfaces(|_, states| {
+            with_fractional_scale(states, |fractional| {
+                fractional.set_preferred_scale(scale);
+            });
+        });
+    }
+
+    /// Sends the frame-done callback to every mapped layer surface on
+    /// `output`, the layer-shell equivalent of the per-window
+    /// `window.send_frame(...)` loop each backend already runs. Without
+    /// this, clients that throttle redraws on frame callbacks (most
+    /// wlr-layer-shell clients do) never get their next one.
+    pub fn send_layer_frames(&self, output: &Output, time: Duration) {
+        for layer in layer_map_for_output(output).layers() {
+            // A role remains registered in LayerMap across null-buffer
+            // unmap so it can be arranged for a later fresh configure, but
+            // it is not eligible for frame callbacks while protocol-
+            // unmapped. Filtering also prevents a bufferless client from
+            // driving a commit/callback redraw loop.
+            if self.unmapped_layer_surfaces.contains(layer.wl_surface()) {
+                continue;
+            }
+            layer.send_frame(output, time, Some(Duration::ZERO), |_, _| Some(output.clone()));
+        }
+    }
+
+    /// The lock-surface equivalent of `send_layer_frames`: a lock surface
+    /// is a bare `wl_surface`, not a `desktop::Window`/`LayerSurface`
+    /// wrapper, so it has no `.send_frame()` convenience of its own --
+    /// `send_frames_surface_tree` is the primitive both of those wrap.
+    /// Without this, a lock daemon that redraws on frame callbacks (an
+    /// animated clock, an unlock-failure shake) would freeze after its
+    /// first commit.
+    pub fn send_lock_frames(&self, output: &Output, time: Duration) {
+        if let Some(lock_surface) = self.lock_surfaces.get(output) {
+            send_frames_surface_tree(lock_surface.wl_surface(), output, time, Some(Duration::ZERO), |_, _| {
+                Some(output.clone())
+            });
+        }
+    }
+
+    /// Entry point for `SessionLockHandler::lock` (`handlers/mod.rs`):
+    /// cancels whatever interactive pointer/popup grab was live (grabs
+    /// bypass `surface_under`-based routing entirely, so locking alone
+    /// would not stop an in-progress window drag), resolves keyboard/
+    /// pointer focus onto the lock surface (or nothing yet, if none is
+    /// registered), and requests a redraw so every output blanks
+    /// immediately. The actual `SessionLocker::lock()` confirmation only
+    /// fires once every output has rendered a locked frame -- see
+    /// `mark_output_locked_frame`.
+    pub(crate) fn lock_session(&mut self, confirmation: SessionLocker) {
+        if !matches!(self.session_lock, SessionLock::Unlocked) {
+            // Another client is already locking/locked. Dropping
+            // `confirmation` here auto-sends `finished` to the new client,
+            // matching the protocol's own documented policy.
+            return;
+        }
+
+        self.locked_outputs.clear();
+
+        let serial = SERIAL_COUNTER.next_serial();
+        if let Some(pointer) = self.seat.get_pointer() {
+            pointer.unset_grab(self, serial, self.start_time.elapsed().as_millis() as u32);
+        }
+        self.release_popup_grab();
+
+        if self.space.outputs().next().is_none() {
+            // No displays attached -- nothing to render a locked frame on,
+            // so there is nothing to wait for either.
+            confirmation.lock();
+            self.session_lock = SessionLock::Locked;
+        } else {
+            self.session_lock = SessionLock::Locking(confirmation);
+        }
+
+        self.reconcile_keyboard_focus(serial);
+        self.refresh_pointer_focus();
+        self.request_redraw();
+    }
+
+    /// Entry point for `SessionLockHandler::unlock`.
+    pub(crate) fn unlock_session(&mut self) {
+        self.session_lock = SessionLock::Unlocked;
+        self.lock_surfaces.clear();
+        self.locked_outputs.clear();
+        let serial = SERIAL_COUNTER.next_serial();
+        self.reconcile_keyboard_focus(serial);
+        self.refresh_pointer_focus();
+        self.request_redraw();
+    }
+
+    /// Entry point for `SessionLockHandler::new_surface`: configures the
+    /// surface to fill `output` and registers it, then re-resolves focus --
+    /// without this a lock surface registered after `lock_session` already
+    /// ran (the common case: the client creates its lock surfaces only
+    /// after seeing the manager global) would never receive
+    /// `wl_keyboard.enter`, and password entry would be impossible.
+    pub(crate) fn register_lock_surface(&mut self, output: Output, surface: LockSurface) {
+        let Some(size) = self.space.output_geometry(&output).map(|geo| geo.size) else {
+            return;
+        };
+        surface.with_pending_state(|state| {
+            state.size = Some((size.w.max(0) as u32, size.h.max(0) as u32).into());
+        });
+        surface.send_configure();
+        self.lock_surfaces.insert(output, surface);
+
+        let serial = SERIAL_COUNTER.next_serial();
+        self.reconcile_keyboard_focus(serial);
+        self.refresh_pointer_focus();
+        self.request_redraw();
+    }
+
+    /// Called by both backends' render loops right after successfully
+    /// presenting a locked (blanked, or real lock-surface) frame on
+    /// `output`. No-op once already `Locked`, or while `Unlocked`.
+    pub(crate) fn mark_output_locked_frame(&mut self, output: &Output) {
+        if !matches!(self.session_lock, SessionLock::Locking(_)) {
+            return;
+        }
+        self.locked_outputs.insert(output.clone());
+        self.try_confirm_lock();
+    }
+
+    fn try_confirm_lock(&mut self) {
+        let SessionLock::Locking(_) = &self.session_lock else { return };
+        if !self.space.outputs().all(|o| self.locked_outputs.contains(o)) {
+            return;
+        }
+        let SessionLock::Locking(confirmation) = std::mem::replace(&mut self.session_lock, SessionLock::Locked)
+        else {
+            unreachable!()
+        };
+        confirmation.lock();
+    }
+
+    /// Render elements for whatever should be visible on `output` while
+    /// `session_lock` isn't `Unlocked`: the registered lock surface's own
+    /// content, if there is one, in front of a full-output blank fill that
+    /// guarantees nothing underneath is ever visible -- even before a lock
+    /// surface exists, or if it doesn't cover the whole output. Elements
+    /// are front-to-back (index 0 topmost, same convention `custom_elements`
+    /// uses elsewhere in both backends), so the surface must come *before*
+    /// the blank in the returned `Vec`, not after -- reversed once during
+    /// development, which put the opaque blank in front and silently
+    /// occluded every lock surface. Shared by both backends, same pattern
+    /// as `tab_strip_elements`.
+    pub(crate) fn lock_render_elements(
+        &mut self,
+        output: &Output,
+        renderer: &mut GlesRenderer,
+    ) -> Vec<LockRenderElement<GlesRenderer>> {
+        let Some(size) = self.space.output_geometry(output).map(|geo| geo.size) else {
+            return Vec::new();
+        };
+        let scale = output.current_scale().fractional_scale();
+
+        let mut elements = Vec::new();
+        if let Some(lock_surface) = self.lock_surfaces.get(output) {
+            let surface_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                render_elements_from_surface_tree(
+                    renderer,
+                    lock_surface.wl_surface(),
+                    (0, 0),
+                    scale,
+                    1.0,
+                    Kind::Unspecified,
+                );
+            elements.extend(surface_elements.into_iter().map(LockRenderElement::Surface));
+        }
+
+        self.lock_blank.update(size, [0.0, 0.0, 0.0, 1.0]);
+        let blank =
+            SolidColorRenderElement::from_buffer(&self.lock_blank, (0, 0), scale, 1.0, Kind::Unspecified);
+        elements.push(LockRenderElement::Blank(blank));
+
+        elements
+    }
+
+    /// Collects the wp_presentation feedback callbacks every visible
+    /// window and layer surface on `output` registered since its last
+    /// frame. The backend calls `presented` on the returned value once the
+    /// frame carrying that content is actually on screen; dropping it
+    /// without presenting discards every callback inside
+    /// (`SurfacePresentationFeedback`'s own Drop), which is the correct
+    /// answer for a frame that never reached the display. Modeled on
+    /// anvil's helper of the same name.
+    pub(crate) fn take_presentation_feedback(
+        &self,
+        output: &Output,
+        render_element_states: &RenderElementStates,
+    ) -> OutputPresentationFeedback {
+        let mut feedback = OutputPresentationFeedback::new(output);
+
+        self.space.elements().for_each(|window| {
+            if self.space.outputs_for_element(window).contains(output) {
+                window.take_presentation_feedback(
+                    &mut feedback,
+                    surface_primary_scanout_output,
+                    |surface, _| {
+                        surface_presentation_feedback_flags_from_states(
+                            surface,
+                            None,
+                            render_element_states,
+                        )
+                    },
+                );
+            }
+        });
+
+        let map = layer_map_for_output(output);
+        for layer in map.layers() {
+            if self.unmapped_layer_surfaces.contains(layer.wl_surface()) {
+                continue;
+            }
+            layer.take_presentation_feedback(
+                &mut feedback,
+                surface_primary_scanout_output,
+                |surface, _| {
+                    surface_presentation_feedback_flags_from_states(
+                        surface,
+                        None,
+                        render_element_states,
+                    )
+                },
+            );
+        }
+
+        feedback
+    }
+
+    /// Marks that something changed and a frame needs to be composited.
+    /// Backends should render only when this is true (or a toast is active)
+    /// rather than redrawing every frame regardless of damage.
+    pub fn request_redraw(&mut self) {
+        self.needs_redraw = true;
+    }
+
+    /// Whether a frame is due: either something was explicitly marked dirty
+    /// (via `request_redraw`) or a toast is still animating. Clears the
+    /// dirty flag as a side effect, since the caller is about to render.
+    pub fn take_needs_redraw(&mut self) -> bool {
+        let needs_redraw = self.needs_redraw || self.toast.is_some();
+        self.needs_redraw = false;
+        needs_redraw
+    }
+
+    /// Whether the welcome-hint card should actually be drawn this frame:
+    /// still enabled in config (`welcome_hint` built at all) and nothing
+    /// mapped anywhere yet -- it gives way to the first real window the
+    /// same way Hyprland's own hint does, rather than sitting on top of it.
+    pub fn should_show_welcome_hint(&self) -> bool {
+        self.welcome_hint.is_some() && self.space.elements().next().is_none()
+    }
+
+    /// The area tiled windows lay out into on `output`: the output's own
+    /// geometry with any layer-shell exclusive zone (a bar's height, say)
+    /// subtracted, translated from `non_exclusive_zone()`'s output-local
+    /// coordinates into `space`-global ones. Not yet gap-inset -- callers
+    /// that want a single rect filling this whole area (maximize) apply
+    /// `layout::inset` themselves; `Layouts::layout` does it per-leaf.
+    pub(crate) fn output_tiling_area(&self, output: &Output) -> Option<Rectangle<i32, Logical>> {
+        let output_geo = self.space.output_geometry(output)?;
+        let mut area = layer_map_for_output(output).non_exclusive_zone();
+        area.loc += output_geo.loc;
+        Some(area)
+    }
+
+    pub(crate) fn tiled_rect_for_surface(
+        &self,
+        surface: &WlSurface,
+    ) -> Option<Rectangle<i32, Logical>> {
+        let output_name = self.layout.output_of(surface)?;
+        let workspace = self.layout.workspace_of(surface)?;
+        let output = self.output_by_name(output_name)?;
+        let area = self.output_tiling_area(&output)?;
+        let rect = self
+            .layout
+            .layout(output_name, workspace, area, self.config.gaps)
+            .into_iter()
+            .find_map(|(window, rect)| is_window(&window, surface).then_some(rect))?;
+        Some(if self.pseudo_tiled.contains(surface) {
+            crate::layout::scale_centered(rect, self.config.pseudo_tile_scale)
+        } else {
+            rect
+        })
+    }
+
+    /// Clamps `pos` into the bounding box of every mapped output. Needed for
+    /// relative pointer motion (a real mouse's delta accumulates onto the
+    /// last known position with nothing else bounding it) -- absolute motion
+    /// doesn't need this, it's already transformed against one output's
+    /// geometry directly. Bounding-box, not per-output containment: an
+    /// L-shaped multi-monitor arrangement could still let the cursor drift
+    /// into a gap between two non-adjacent outputs. Not solved here; the
+    /// single/extended-desktop case this fixes is unaffected.
+    pub(crate) fn clamp_to_outputs(&self, pos: Point<f64, Logical>) -> Point<f64, Logical> {
+        let mut min = Point::<f64, Logical>::from((f64::MAX, f64::MAX));
+        let mut max = Point::<f64, Logical>::from((f64::MIN, f64::MIN));
+        for output in self.space.outputs() {
+            let Some(geo) = self.space.output_geometry(output) else {
+                continue;
+            };
+            min.x = min.x.min(geo.loc.x as f64);
+            min.y = min.y.min(geo.loc.y as f64);
+            max.x = max.x.max((geo.loc.x + geo.size.w) as f64);
+            max.y = max.y.max((geo.loc.y + geo.size.h) as f64);
+        }
+        if min.x > max.x || min.y > max.y {
+            return pos;
+        }
+        (pos.x.clamp(min.x, max.x), pos.y.clamp(min.y, max.y)).into()
+    }
+
+    /// Recomputes the tiling layout for every output and applies it: sends
+    /// each tiled window its new size (`send_pending_configure`) and
+    /// updates its position in `space`. Position takes effect immediately;
+    /// visible size catches up once the client commits a matching buffer,
+    /// same one-frame-lag tradeoff `resize_grab` already makes.
+    ///
+    /// Each output tiles independently -- see `layout::Layouts` -- so this
+    /// just loops every mapped output and applies that output's own tree
+    /// into that output's own (exclusive-zone-adjusted) area.
+    ///
+    /// A fullscreen window (`self.fullscreen`) keeps its `Layouts` slot the
+    /// whole time it's fullscreen -- see `handlers/xdg_shell.rs` -- so this
+    /// is also where that's reconciled: its slot's rect gets overridden to
+    /// the *full* output geometry (ignoring gaps and exclusive zones, unlike
+    /// every other rect here) rather than removed from the tree and
+    /// reinserted later. A pseudo-tiled window (`self.pseudo_tiled`, see
+    /// `toggle_pseudo_tile`) gets the same treatment on a smaller scale:
+    /// its slot's rect is shrunk to `config.pseudo_tile_scale` of itself,
+    /// centered, rather than filling the tile. Fullscreen always wins if a
+    /// window is somehow both.
+    pub fn retile(&mut self) {
+        let outputs: Vec<Output> = self.space.outputs().cloned().collect();
+        for output in &outputs {
+            let Some(area) = self.output_tiling_area(output) else {
+                continue;
+            };
+            let full_output_geo = self.space.output_geometry(output);
+            let workspace = self.layout.active_workspace(&output.name());
+
+            for (window, mut rect) in self.layout.layout(&output.name(), workspace, area, self.config.gaps) {
+                if let Some(surface) = window.toplevel().map(|t| t.wl_surface().clone()) {
+                    if let (Some(entry), Some(full)) = (self.fullscreen.get(&surface), full_output_geo)
+                    {
+                        if entry.output == output.name() {
+                            rect = full;
+                        }
+                    } else if self.pseudo_tiled.contains(&surface) {
+                        rect = crate::layout::scale_centered(rect, self.config.pseudo_tile_scale);
+                    }
+                }
+                tracing::trace!(?rect, output = output.name(), "Tiling window");
+                if let Some(toplevel) = window.toplevel() {
+                    toplevel.with_pending_state(|state| {
+                        state.size = Some(rect.size);
+                    });
+                    toplevel.send_pending_configure();
+                }
+                self.set_window_fractional_scale(&window, output);
+                self.space.map_element(window, rect.loc, false);
+            }
+
+            // A *floating* fullscreen window isn't in `self.layout` at all,
+            // so the loop above never sees it -- map it to the full output
+            // geometry directly.
+            if let Some(full) = full_output_geo {
+                let floating_fullscreen: Vec<Window> = self
+                    .space
+                    .elements()
+                    .filter(|w| {
+                        w.toplevel().is_some_and(|t| {
+                            let surface = t.wl_surface();
+                            !self.layout.contains(surface)
+                                && self
+                                    .fullscreen
+                                    .get(surface)
+                                    .is_some_and(|e| e.output == output.name())
+                        })
+                    })
+                    .cloned()
+                    .collect();
+                for window in floating_fullscreen {
+                    if let Some(toplevel) = window.toplevel() {
+                        toplevel.with_pending_state(|state| {
+                            state.states.set(xdg_toplevel::State::Fullscreen);
+                            state.states.unset(xdg_toplevel::State::Maximized);
+                            state.states.unset(xdg_toplevel::State::Resizing);
+                            state.size = Some(full.size);
+                        });
+                        toplevel.send_pending_configure();
+                    }
+                    self.space.map_element(window, full.loc, false);
+                }
+            }
+
+            // Floating maximized windows also live outside Layouts. Keep
+            // them reconciled to the current non-exclusive tiling area so a
+            // bar/output geometry change cannot leave stale size/location.
+            let maximized_rect = crate::layout::inset(area, self.config.gaps);
+            let floating_maximized: Vec<Window> = self
+                .space
+                .elements()
+                .filter(|window| {
+                    window.toplevel().is_some_and(|toplevel| {
+                        let surface = toplevel.wl_surface();
+                        !self.layout.contains(surface)
+                            && !self.fullscreen.contains_key(surface)
+                            && self
+                                .maximized
+                                .get(surface)
+                                .is_some_and(|entry| entry.output == output.name())
+                    })
+                })
+                .cloned()
+                .collect();
+            for window in floating_maximized {
+                if let Some(toplevel) = window.toplevel() {
+                    toplevel.with_pending_state(|state| {
+                        state.states.set(xdg_toplevel::State::Maximized);
+                        state.states.unset(xdg_toplevel::State::Fullscreen);
+                        state.states.unset(xdg_toplevel::State::Resizing);
+                        state.size = Some(maximized_rect.size);
+                    });
+                    toplevel.send_pending_configure();
+                }
+                self.space.map_element(window, maximized_rect.loc, false);
+            }
+        }
+
+        // Space::map_element always re-raises the element it touches (even
+        // with activate: false), so the loop above just knocked every
+        // floating window behind the tiled layer it re-stacked. Floating
+        // windows should stay on top, normal WM convention, so restore that
+        // (preserving floating windows' own relative order) every time.
+        let floating: Vec<Window> = self
+            .space
+            .elements()
+            .filter(|w| {
+                w.toplevel()
+                    .map(|t| !self.layout.contains(t.wl_surface()))
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        for window in floating {
+            self.space.raise_element(&window, false);
+        }
+
+        // Same invariant one level up: a fullscreen window (tiled or
+        // floating) should sit above every other window on its output,
+        // including floating ones, so it needs its own re-raise pass after
+        // the one above.
+        let fullscreen: Vec<Window> = self
+            .space
+            .elements()
+            .filter(|w| {
+                w.toplevel()
+                    .is_some_and(|t| self.fullscreen.contains_key(t.wl_surface()))
+            })
+            .cloned()
+            .collect();
+        for window in fullscreen {
+            self.space.raise_element(&window, false);
+        }
+
+        #[cfg(debug_assertions)]
+        self.assert_state_invariants();
+        self.request_redraw();
+    }
+
+    #[cfg(debug_assertions)]
+    fn assert_state_invariants(&self) {
+        for surface in &self.pinned {
+            debug_assert!(
+                self.floating_workspace.contains_key(surface),
+                "pinned window must remain floating"
+            );
+            debug_assert!(
+                !self.fullscreen.contains_key(surface),
+                "fullscreen must suspend actual pin membership"
+            );
+        }
+        for surface in &self.pseudo_tiled {
+            debug_assert!(
+                self.layout.contains(surface),
+                "pseudo-tiled window must remain in Layouts"
+            );
+        }
+        for (surface, maximized) in &self.maximized {
+            debug_assert!(
+                self.floating_workspace.contains_key(surface),
+                "maximized restore state only applies to floating windows"
+            );
+            debug_assert_eq!(
+                self.floating_workspace.get(surface).map(|tag| &tag.output),
+                Some(&maximized.output),
+                "maximized output must match floating ownership"
+            );
+        }
+
+        for surface in self.foreign_toplevels.keys() {
+            debug_assert!(
+                !self.unmapped_toplevels.contains_key(surface),
+                "foreign-toplevel handle must not outlive the mapped state"
+            );
+        }
+
+        let mut fullscreen_outputs = HashSet::new();
+        for (surface, entry) in &self.fullscreen {
+            debug_assert!(
+                fullscreen_outputs.insert(&entry.output),
+                "at most one fullscreen window may own an output"
+            );
+            if !self.unmapped_toplevels.contains_key(surface) {
+                if let Some(owner) = self.preferred_output_for_toplevel(surface) {
+                    debug_assert_eq!(
+                        owner, entry.output,
+                        "fullscreen output must match mapped ownership"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Toggles `surface` between tiled and floating. A window not tracked by
+    /// `self.layout` is, by definition, floating (this is also what gates
+    /// `move_request`/`resize_request` in `handlers/xdg_shell.rs`), so there's
+    /// no separate floating-window set to keep in sync.
+    ///
+    /// Untiling keeps the window's current geometry (no jump); retiling
+    /// snaps it into whatever slot the layout gives it, same as any other
+    /// tiled window.
+    pub fn toggle_floating(&mut self, surface: &WlSurface) {
+        let Some(window) = self
+            .space
+            .elements()
+            .find(|w| {
+                w.toplevel()
+                    .map(|t| t.wl_surface() == surface)
+                    .unwrap_or(false)
+            })
+            .cloned()
+        else {
+            return;
+        };
+
+        if self.layout.contains(surface) {
+            // `space` currently contains the fullscreen override geometry,
+            // not the underlying tile geometry. If this is the first time a
+            // tiled fullscreen window becomes floating, recover its normal
+            // tile rect before removing it from the tree. Niri likewise
+            // preserves separate windowed/floating geometry instead of
+            // treating the fullscreen viewport as a restoration size.
+            let normal_tile_rect = self.layout.output_of(surface).and_then(|output_name| {
+                let workspace = self.layout.workspace_of(surface)?;
+                let output = self.output_by_name(output_name)?;
+                let area = self.output_tiling_area(&output)?;
+                self.layout
+                    .layout(output_name, workspace, area, self.config.gaps)
+                    .into_iter()
+                    .find_map(|(candidate, rect)| is_window(&candidate, surface).then_some(rect))
+            });
+
+            // It's tiled, so by construction it's on its output's *active*
+            // workspace (a hidden workspace's windows are never mapped) --
+            // tag it with that before removing it from the tree, since
+            // `switch_workspace` needs this tag for a floating window (a
+            // tiled one's workspace is implicit in tree membership instead).
+            if let Some(output) = self.layout.output_of(surface).map(str::to_string) {
+                let workspace = self.layout.active_workspace(&output);
+                // Prefer an existing pre-fullscreen floating rect (it may be
+                // surviving a floating -> tiled -> floating round trip), then
+                // the underlying tile, and only finally the mapped geometry.
+                // The final fallback can be fullscreen-sized, but is better
+                // than losing the window entirely if output geometry vanished.
+                let rect = self
+                    .fullscreen
+                    .get(surface)
+                    .and_then(|entry| entry.restore_rect)
+                    .or_else(|| {
+                        (self.pseudo_tiled.contains(surface)
+                            && !self.fullscreen.contains_key(surface))
+                            .then(|| self.space.element_geometry(&window))
+                            .flatten()
+                    })
+                    .or(normal_tile_rect)
+                    .or_else(|| self.space.element_geometry(&window))
+                    .unwrap_or_else(|| Rectangle::new(Point::default(), window.geometry().size));
+                if let Some(entry) = self.fullscreen.get_mut(surface) {
+                    entry.remember_restore_rect(rect);
+                }
+                self.floating_workspace.insert(
+                    surface.clone(),
+                    FloatingTag {
+                        window: window.clone(),
+                        output,
+                        workspace,
+                        rect,
+                    },
+                );
+            }
+            // Pseudo-tiling is a tiled placement mode, not a dormant flag to
+            // report on a floating/pinned window or silently reactivate later.
+            self.pseudo_tiled.remove(surface);
+            self.layout.remove(surface);
+            self.space.raise_element(&window, false);
+        } else {
+            // Tile onto whichever output the window is actually sitting on
+            // right now (it was floating, so it has a real on-screen
+            // position already), not wherever the focused window happens
+            // to be. Falls back to `primary_output()` for the edge case of
+            // a floating window dragged fully outside every output's
+            // geometry -- previously (single-output, no such thing as
+            // "outside the output") floating-to-tiled always succeeded, and
+            // this keeps that true rather than silently no-oping.
+            let Some(output) = self.output_for_window(&window).or_else(|| self.primary_output()) else {
+                return;
+            };
+            let focused = self.focused_window_surface();
+            let workspace = self.layout.active_workspace(&output.name());
+            // Pinning requires floating state. Explicitly unpin before the
+            // inverse transition so `pinned => floating` remains true even
+            // when toggle_floating is invoked directly on a pinned window.
+            self.pinned.remove(surface);
+            if let Some(entry) = self.fullscreen.get_mut(surface) {
+                entry.was_pinned = false;
+            }
+            let was_maximized = self.maximized.remove(surface).is_some();
+            crate::grabs::resize_grab::cancel(surface);
+            if let Some(toplevel) = window.toplevel() {
+                toplevel.with_pending_state(|state| {
+                    if was_maximized {
+                        state.states.unset(xdg_toplevel::State::Maximized);
+                    }
+                    state.states.unset(xdg_toplevel::State::Resizing);
+                });
+            }
+            self.layout.insert(&output.name(), workspace, window, focused.as_ref());
+            // No longer floating, so no longer needs its own workspace tag.
+            self.floating_workspace.remove(surface);
+        }
+
+        self.retile();
+    }
+
+    /// Switches `output`'s visible workspace to `workspace`: hides
+    /// everything currently on the active one (unmapped, not destroyed or
+    /// untiled) and shows everything belonging to the new one. No-op if
+    /// `workspace` is already active, or if an exclusive-interactivity layer
+    /// (e.g. a lock screen) is mapped -- same guard `cycle_focus` uses, so a
+    /// lock screen can't be escaped by switching workspaces out from under
+    /// it. `self.pinned` windows are exempt from this whole cycle -- never
+    /// hidden, never re-shown, since they're already visible regardless.
+    /// This is also how the scratchpad works: it's just workspace
+    /// `SCRATCHPAD_WORKSPACE` under the hood, switched to like any other.
+    pub fn switch_workspace(&mut self, output: &Output, workspace: u32) {
+        if self.exclusive_layer().is_some() {
+            return;
+        }
+        let output_name = output.name();
+        let current = self.layout.active_workspace(&output_name);
+        if current == workspace {
+            return;
+        }
+
+        // Hide everything on the outgoing workspace. Tiled windows come
+        // from the tree; floating ones from the tag, snapshotting each
+        // one's latest position first so it comes back exactly where it was.
+        for window in self.layout.windows_in(&output_name, current) {
+            self.space.unmap_elem(&window);
+        }
+        // Pinned windows are exempt from this whole hide/show cycle -- they
+        // stay mapped and visible regardless of which workspace tag they
+        // happen to carry, so both loops below skip them entirely.
+        let outgoing_floating: Vec<WlSurface> = self
+            .floating_workspace
+            .iter()
+            .filter(|(surface, tag)| {
+                tag.output == output_name && tag.workspace == current && !self.pinned.contains(*surface)
+            })
+            .map(|(surface, _)| surface.clone())
+            .collect();
+        for surface in &outgoing_floating {
+            let window = self
+                .space
+                .elements()
+                .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface))
+                .cloned();
+            let Some(window) = window else { continue };
+            if !self.fullscreen.contains_key(surface) && !self.maximized.contains_key(surface) {
+                if let Some(rect) = self.space.element_geometry(&window) {
+                    if let Some(tag) = self.floating_workspace.get_mut(surface) {
+                        tag.rect = rect;
+                    }
+                }
+            }
+            self.space.unmap_elem(&window);
+        }
+
+        self.layout.set_active_workspace(&output_name, workspace);
+
+        // Show everything belonging to the new workspace. Tiled windows
+        // come back through retile() below (it only ever walks the
+        // *active* workspace's tree per output, so switching that above is
+        // enough); floating ones need an explicit map at their saved rect,
+        // using the `Window` handle the tag itself holds -- a hidden
+        // floating window was `unmap_elem`'d, so it isn't in
+        // `space.elements()` to look up anymore, unlike a tiled one (whose
+        // `Window` always lives on in its `Layouts` tree regardless).
+        let incoming_floating: Vec<(Window, Point<i32, Logical>)> = self
+            .floating_workspace
+            .iter()
+            .filter(|(surface, tag)| {
+                tag.output == output_name && tag.workspace == workspace && !self.pinned.contains(*surface)
+            })
+            .map(|(_, tag)| (tag.window.clone(), tag.rect.loc))
+            .collect();
+        for (window, loc) in incoming_floating {
+            self.space.map_element(window, loc, false);
+        }
+
+        self.retile();
+
+        self.refocus_after_hide(&output_name);
+
+        self.request_redraw();
+    }
+
+    /// Reassigns keyboard focus to the first mapped window on `output_name`,
+    /// or clears focus if there is none -- `unmap_elem` never touches
+    /// keyboard focus itself, so without this a window that was just hidden
+    /// (workspace switch, or moved to another workspace) would stay
+    /// "focused" while mapped nowhere. Shared by `switch_workspace` and
+    /// `move_to_workspace`, whose "leaving the visible workspace" cases are
+    /// otherwise identical.
+    fn refocus_after_hide(&mut self, output_name: &str) {
+        // `Space::outputs_for_element` (which `output_for_window` below
+        // uses) reads a per-element cache that's normally kept fresh by
+        // each backend's render loop calling `space.refresh()` once a
+        // frame -- but that hasn't run yet since whatever `map_element`/
+        // `unmap_elem` calls preceded this, so without an explicit refresh
+        // here it would see stale cache data. Cheap and idempotent to call
+        // an extra time (it no-ops unless something actually changed).
+        self.space.refresh();
+
+        let next_focus = self
+            .space
+            .elements()
+            .rev()
+            .find(|w| self.output_for_window(w).is_some_and(|o| o.name() == output_name))
+            .and_then(|w| w.toplevel())
+            .map(|t| t.wl_surface().clone());
+        self.focus_window(next_focus, SERIAL_COUNTER.next_serial());
+    }
+
+    /// Moves `surface` to `workspace` on whichever output it's currently on.
+    /// Stays on the current workspace rather than following (matching i3's
+    /// default `Mod+Shift+N` behavior) -- the simpler of the two common
+    /// conventions, easy to flip later if it feels wrong in practice.
+    pub fn move_to_workspace(&mut self, surface: &WlSurface, workspace: u32) {
+        let Some(output) = self.layout.output_of(surface).map(str::to_string) else {
+            // Not tiled -- must be floating, or not tracked at all.
+            let Some(tag) = self.floating_workspace.get(surface) else {
+                return;
+            };
+            let output = tag.output.clone();
+            // The window's *own* current workspace, not the output's active
+            // one -- it may already be sitting hidden on some other
+            // workspace (having been moved there previously), in which case
+            // the active workspace tells us nothing about its visibility.
+            let current = tag.workspace;
+            if workspace == current {
+                return;
+            }
+            let active = self.layout.active_workspace(&output);
+            if let Some(tag) = self.floating_workspace.get_mut(surface) {
+                tag.workspace = workspace;
+            }
+
+            // Pinned windows stay mapped and visible regardless of which
+            // workspace they're nominally tagged with -- same exemption
+            // `switch_workspace` applies, nothing to show or hide here.
+            if self.pinned.contains(surface) {
+                return;
+            }
+
+            if current == active && workspace != active {
+                // Leaving the visible workspace: hide it.
+                let window = self
+                    .space
+                    .elements()
+                    .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface))
+                    .cloned();
+                if let Some(window) = window {
+                    if !self.fullscreen.contains_key(surface)
+                        && !self.maximized.contains_key(surface)
+                    {
+                        if let Some(rect) = self.space.element_geometry(&window) {
+                            if let Some(tag) = self.floating_workspace.get_mut(surface) {
+                                tag.rect = rect;
+                            }
+                        }
+                    }
+                    self.space.unmap_elem(&window);
+                }
+                self.refocus_after_hide(&output);
+            } else if current != active && workspace == active {
+                // Entering the visible workspace: show it at its saved rect.
+                // (`current != active` is what tells this case apart from
+                // "already visible, just retagging its number" -- comparing
+                // only `workspace == active` would wrongly skip this too.)
+                if let Some(tag) = self.floating_workspace.get(surface) {
+                    self.space.map_element(tag.window.clone(), tag.rect.loc, false);
+                }
+                // Fullscreen/maximized tags intentionally retain their
+                // normal restore rectangle while hidden. Reconcile the
+                // output-owned placement immediately instead of exposing
+                // that normal location with a viewport-sized/stateful
+                // buffer until some unrelated future retile.
+                if self.fullscreen.contains_key(surface) || self.maximized.contains_key(surface) {
+                    self.retile();
+                }
+            }
+            self.request_redraw();
+            return;
+        };
+
+        // Same distinction as the floating branch above: the window's own
+        // current workspace, not the output's active one, since it may
+        // already be hidden on some other workspace than whichever is
+        // active right now.
+        let current = self
+            .layout
+            .workspace_of(surface)
+            .unwrap_or_else(|| self.layout.active_workspace(&output));
+        if workspace == current {
+            return;
+        }
+        let active = self.layout.active_workspace(&output);
+        // Look the `Window` up through the tree, not `space.elements()`:
+        // a tiled window already hidden on a non-active workspace isn't
+        // mapped, so it wouldn't be found there, but the tree always holds
+        // it regardless of visibility.
+        let Some(window) = self.layout.window_of(surface) else {
+            return;
+        };
+        self.layout.remove(surface);
+        self.layout.insert(&output, workspace, window.clone(), None);
+
+        if current == active {
+            // Leaving the visible workspace: hide it, then retile so its
+            // former neighbors on the active tree expand to fill the space
+            // it left behind (the same reconciliation any other tiled-
+            // window removal already triggers).
+            self.space.unmap_elem(&window);
+            self.retile();
+            self.refocus_after_hide(&output);
+        } else {
+            // Either staying hidden (moving between two non-active
+            // workspaces) or becoming visible (`workspace == active`) --
+            // retile() maps anything now in the active tree on its own,
+            // nothing else to do either way.
+            self.retile();
+        }
+    }
+
+    /// Shows/hides the scratchpad on `output`: if it's already showing,
+    /// returns to whatever workspace was active before (so toggling back
+    /// and forth doesn't strand you on some fixed fallback); otherwise
+    /// remembers the current workspace and shows the scratchpad. The
+    /// scratchpad has no structure of its own -- it's just workspace
+    /// `SCRATCHPAD_WORKSPACE`, reusing `switch_workspace`'s hide/show
+    /// mechanics as-is.
+    pub fn toggle_scratchpad(&mut self, output: &Output) {
+        let output_name = output.name();
+        let current = self.layout.active_workspace(&output_name);
+        if current == SCRATCHPAD_WORKSPACE {
+            let previous = self.scratchpad_previous.get(&output_name).copied().unwrap_or(1);
+            self.switch_workspace(output, previous);
+        } else {
+            self.scratchpad_previous.insert(output_name, current);
+            self.switch_workspace(output, SCRATCHPAD_WORKSPACE);
+        }
+    }
+
+    /// Moves `surface` to the scratchpad on whichever output it's
+    /// currently on -- just `move_to_workspace` with the reserved
+    /// scratchpad number, so it works for both tiled and floating windows
+    /// exactly like moving to any other workspace does.
+    pub fn move_to_scratchpad(&mut self, surface: &WlSurface) {
+        self.move_to_workspace(surface, SCRATCHPAD_WORKSPACE);
+    }
+
+    /// Toggles `surface` pinned: exempt from every workspace's hide/show
+    /// cycle on its output, staying mapped and visible no matter which
+    /// workspace is active. Un-tiles first if `surface` is currently
+    /// tiled (reusing `toggle_floating`'s own tiled-to-floating path) --
+    /// pinning only ever makes sense for a floating window, since only one
+    /// workspace's tiling tree is ever rendered per output at a time.
+    /// Unpinning doesn't re-tile it back; it just stays floating in place,
+    /// matching Hyprland's own pin behavior.
+    pub fn toggle_pin(&mut self, surface: &WlSurface) {
+        if let Some(was_pinned) = self.fullscreen.get(surface).map(|entry| entry.was_pinned) {
+            // Fullscreen temporarily suspends pinning. A toggle changes the
+            // mode to restore on exit without making two placement owners
+            // authoritative at once.
+            let wants_pinned = !was_pinned;
+            if wants_pinned && self.layout.contains(surface) {
+                self.toggle_floating(surface);
+            }
+            if let Some(entry) = self.fullscreen.get_mut(surface) {
+                entry.was_pinned = wants_pinned;
+            }
+            self.request_redraw();
+            return;
+        }
+        if self.pinned.remove(surface) {
+            // While pinned, this window stayed mapped regardless of which
+            // workspace was actually active -- so its FloatingTag may still
+            // say whatever workspace was active back when it got pinned,
+            // not wherever it visually is now. Without reconciling that
+            // here, switch_workspace's hide loop would look for it on the
+            // stale workspace and leave it stuck visible on every other
+            // one until the user happens to pass through that specific
+            // workspace number again.
+            let window = self
+                .space
+                .elements()
+                .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface))
+                .cloned();
+            if let Some(output) = window.as_ref().and_then(|w| self.output_for_window(w)) {
+                let active = self.layout.active_workspace(&output.name());
+                if let Some(tag) = self.floating_workspace.get_mut(surface) {
+                    tag.output = output.name();
+                    tag.workspace = active;
+                }
+            }
+            self.request_redraw();
+            return;
+        }
+        if self.layout.contains(surface) {
+            self.toggle_floating(surface);
+        }
+        self.pinned.insert(surface.clone());
+        self.request_redraw();
+    }
+
+    /// Toggles `surface` pseudo-tiled: stays in its `Layouts` slot (unlike
+    /// floating), but `retile()` shrinks the rect it actually renders at
+    /// to `config.pseudo_tile_scale` of the tile, centered within it,
+    /// instead of filling it. No-op for a window that isn't tiled --
+    /// pseudo-tiling only has meaning as a rect override on a real tile.
+    pub fn toggle_pseudo_tile(&mut self, surface: &WlSurface) {
+        if !self.layout.contains(surface) {
+            return;
+        }
+        if !self.pseudo_tiled.remove(surface) {
+            self.pseudo_tiled.insert(surface.clone());
+        }
+        self.retile();
+    }
+
+    /// Which group (if any) `surface` is a member of, active or parked.
+    pub fn group_of(&self, surface: &WlSurface) -> Option<usize> {
+        self.groups
+            .iter()
+            .position(|g| g.members.iter().any(|m| &m.surface == surface))
+    }
+
+    /// Groups the focused tiled window with its neighbor in `direction` --
+    /// i3/sway's "tabbed container" idea: both end up sharing one
+    /// `Layouts` leaf, cycled between via `cycle_tab`. Reuses the same
+    /// neighbor lookup `swap_direction` already does, and only ever finds a
+    /// *tiled* neighbor (a floating window nearest in that direction isn't
+    /// a valid group target, same restriction `swap_direction` applies).
+    /// Fullscreen and pseudo-tiled windows are excluded from grouping
+    /// entirely for now -- a deliberate v1 scope-out, not an oversight:
+    /// both are rect overrides on a tile's rendered size, and neither
+    /// interaction with a shared tab slot has been worked out yet.
+    pub fn group_direction(&mut self, direction: Direction) {
+        let Some(focused) = self.focused_window_surface() else {
+            return;
+        };
+        if !self.layout.contains(&focused)
+            || self.fullscreen.contains_key(&focused)
+            || self.pseudo_tiled.contains(&focused)
+        {
+            return;
+        }
+        let Some(current) = self
+            .space
+            .elements()
+            .find(|w| is_window(w, &focused))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(neighbor) = self.neighbor_in_direction(&current, direction) else {
+            return;
+        };
+        let Some(neighbor_surface) = neighbor.toplevel().map(|t| t.wl_surface().clone()) else {
+            return;
+        };
+        if !self.layout.contains(&neighbor_surface)
+            || self.fullscreen.contains_key(&neighbor_surface)
+            || self.pseudo_tiled.contains(&neighbor_surface)
+        {
+            return;
+        }
+        self.group_with(&focused, &neighbor_surface);
+    }
+
+    /// Merges `b` into `a`'s tiled slot as a new parked tab. Both must
+    /// already be tiled (checked by `group_direction`); `b`'s former leaf
+    /// collapses exactly like a normal close, since `Layouts::remove`
+    /// removes it from the tree the same way either way. Merging two
+    /// windows that are *both* already in (different) groups is out of
+    /// scope for now -- no-op rather than picking a side to discard.
+    pub fn group_with(&mut self, a: &WlSurface, b: &WlSurface) {
+        if self.group_of(b).is_some() {
+            tracing::debug!("group-with: target is itself already grouped, skipping");
+            return;
+        }
+        let Some(b_window) = self.layout.window_of(b) else {
+            return;
+        };
+        self.layout.remove(b);
+        self.space.unmap_elem(&b_window);
+
+        if let Some(idx) = self.group_of(a) {
+            self.groups[idx].members.push(GroupMember {
+                surface: b.clone(),
+                parked_window: Some(b_window),
+            });
+            self.groups[idx].strip = None;
+        } else {
+            let Some(output) = self.layout.output_of(a).map(str::to_string) else {
+                return;
+            };
+            let workspace = self
+                .layout
+                .workspace_of(a)
+                .unwrap_or_else(|| self.layout.active_workspace(&output));
+            self.groups.push(WindowGroup {
+                output,
+                workspace,
+                members: vec![
+                    GroupMember { surface: a.clone(), parked_window: None },
+                    GroupMember { surface: b.clone(), parked_window: Some(b_window) },
+                ],
+                active: 0,
+                strip: None,
+                strip_width: 0,
+            });
+        }
+        self.request_redraw();
+    }
+
+    /// Removes the member at `pos` in group `idx` (`surface` is that
+    /// member's own surface), promoting the next member -- wrapping,
+    /// following tab order -- into the leaf if the removed one was active,
+    /// or dissolving the group entirely if only one member remains
+    /// afterward. Returns the removed member's `Window` handle if one was
+    /// available: a parked member's is held directly, an active member's
+    /// is fetched from the tree before it's overwritten below. The caller
+    /// decides what to do with it -- `ungroup` gives it its own new tile,
+    /// close-cleanup (`leave_group_on_close`) does nothing further, since
+    /// the window is already being destroyed/unmapped by then.
+    fn leave_group(&mut self, idx: usize, surface: &WlSurface) -> Option<Window> {
+        let pos = self.groups[idx].members.iter().position(|m| &m.surface == surface)?;
+        let was_active = pos == self.groups[idx].active;
+        let active_window = was_active.then(|| self.layout.window_of(surface)).flatten();
+
+        let (new_active, dissolves) =
+            group_removal_outcome(self.groups[idx].members.len(), self.groups[idx].active, pos);
+        let removed = self.groups[idx].members.remove(pos);
+        let removed_window = active_window.or(removed.parked_window);
+
+        if dissolves {
+            let last_parked = self.groups[idx].members[0].parked_window.take();
+            self.groups.remove(idx);
+            if let Some(window) = last_parked {
+                self.layout.replace_leaf(surface, &window);
+            }
+            self.retile();
+            return removed_window;
+        }
+
+        self.groups[idx].active = new_active;
+        self.groups[idx].strip = None;
+        if was_active {
+            if let Some(window) = self.groups[idx].members[new_active].parked_window.take() {
+                self.layout.replace_leaf(surface, &window);
+            }
+        }
+        self.retile();
+        removed_window
+    }
+
+    /// Removes `surface` from its group, if grouped. The window keeps
+    /// existing (unlike `leave_group_on_close`), so it becomes its own
+    /// ordinary tile again -- splitting off from the last leaf in tree
+    /// order (`BspLayout::insert`'s own fallback), since "which leaf
+    /// currently has focus" isn't meaningfully derivable here: the group
+    /// this came from may have just dissolved or promoted a different
+    /// member into its old leaf.
+    pub fn ungroup(&mut self, surface: &WlSurface) {
+        let Some(idx) = self.group_of(surface) else {
+            return;
+        };
+        let output = self.groups[idx].output.clone();
+        let workspace = self.groups[idx].workspace;
+        let Some(window) = self.leave_group(idx, surface) else {
+            return;
+        };
+        self.layout.insert(&output, workspace, window, None);
+        self.retile();
+        self.request_redraw();
+    }
+
+    /// If `surface` belongs to a window group, leaves it (promoting the
+    /// next tab or dissolving the group, as `leave_group` describes)
+    /// instead of letting `detach_mapped_toplevel`'s ordinary
+    /// `self.layout.remove(surface)` collapse its leaf. No-op for an
+    /// ungrouped window. Treats a temporary (null-buffer) unmap the same as
+    /// permanent destruction for group membership -- a deliberate v1
+    /// scope-out: a parked member being independently hidden-then-remapped
+    /// while still "in" the group is its own can of worms this first pass
+    /// doesn't open.
+    pub(crate) fn leave_group_on_close(&mut self, surface: &WlSurface) {
+        if let Some(idx) = self.group_of(surface) {
+            self.leave_group(idx, surface);
+        }
+    }
+
+    /// Cycles the focused window's group to the next (`forward`) or
+    /// previous tab, wrapping. No-op if the focused window isn't grouped.
+    /// The demoted tab is unmapped and parked exactly like `group_with`
+    /// parks a freshly merged one; the promoted tab is mapped back at the
+    /// leaf's rect by the `retile()` below -- `retile()` only ever
+    /// positions whatever's currently in the tree, so without an explicit
+    /// unmap here the demoted window would otherwise stay stuck mapped at
+    /// its stale rect (same gotcha `switch_workspace` already has to work
+    /// around for hidden floating windows).
+    pub fn cycle_tab(&mut self, forward: bool) {
+        let Some(focused) = self.focused_window_surface() else {
+            return;
+        };
+        let Some(idx) = self.group_of(&focused) else {
+            return;
+        };
+        let old_active = self.groups[idx].active;
+        let len = self.groups[idx].members.len();
+        let new_active = if forward {
+            (old_active + 1) % len
+        } else {
+            (old_active + len - 1) % len
+        };
+        self.group_activate_tab(idx, new_active);
+    }
+
+    /// Makes `new_active` the tab occupying group `idx`'s shared leaf,
+    /// parking the previously active one. The demoted tab is unmapped and
+    /// parked exactly like `group_with` parks a freshly merged one; the
+    /// promoted tab is mapped back at the leaf's rect by the `retile()`
+    /// below -- `retile()` only ever positions whatever's currently in the
+    /// tree, so without an explicit unmap here the demoted window would
+    /// otherwise stay stuck mapped at its stale rect (same gotcha
+    /// `switch_workspace` already has to work around for hidden floating
+    /// windows).
+    fn group_activate_tab(&mut self, idx: usize, new_active: usize) {
+        let old_active = self.groups[idx].active;
+        if new_active == old_active {
+            return;
+        }
+
+        let old_surface = self.groups[idx].members[old_active].surface.clone();
+        let Some(old_window) = self.layout.window_of(&old_surface) else {
+            return;
+        };
+        let Some(new_window) = self.groups[idx].members[new_active].parked_window.take() else {
+            return;
+        };
+
+        self.layout.replace_leaf(&old_surface, &new_window);
+        self.space.unmap_elem(&old_window);
+        self.groups[idx].members[old_active].parked_window = Some(old_window);
+        self.groups[idx].active = new_active;
+        self.groups[idx].strip = None;
+        self.retile();
+
+        let new_surface = self.groups[idx].members[new_active].surface.clone();
+        self.focus_window(Some(new_surface), SERIAL_COUNTER.next_serial());
+        self.request_redraw();
+    }
+
+    /// Grants an xdg-activation request for `surface`: focus its window,
+    /// switching to its workspace first if that workspace is hidden,
+    /// promoting it to its group's active tab if it's a parked member, and
+    /// raising it if it's floating. No-op while an Exclusive layer surface
+    /// (e.g. a lock screen) is mapped -- the same guard every other
+    /// focus-moving action uses, so a background client can't activate its
+    /// way past one.
+    pub(crate) fn activate_toplevel(&mut self, surface: &WlSurface) {
+        if self.exclusive_layer().is_some() {
+            return;
+        }
+        if self.mapped_toplevel_window(surface).is_none() {
+            return;
+        }
+
+        // Where does the window live? A parked group member isn't in any
+        // tree under its own surface -- the group owns its slot.
+        let ownership = self
+            .group_of(surface)
+            .map(|idx| (self.groups[idx].output.clone(), self.groups[idx].workspace))
+            .or_else(|| {
+                let name = self.layout.output_of(surface)?;
+                let workspace = self.layout.workspace_of(surface)?;
+                Some((name.to_string(), workspace))
+            })
+            .or_else(|| {
+                self.floating_workspace
+                    .get(surface)
+                    .map(|tag| (tag.output.clone(), tag.workspace))
+            });
+
+        if let Some((output_name, workspace)) = ownership {
+            let hidden = self.layout.active_workspace(&output_name) != workspace
+                && !self.pinned.contains(surface);
+            if hidden {
+                if let Some(output) = self.output_by_name(&output_name) {
+                    self.switch_workspace(&output, workspace);
+                }
+            }
+        }
+
+        if let Some(idx) = self.group_of(surface) {
+            if let Some(tab) = self.groups[idx]
+                .members
+                .iter()
+                .position(|m| &m.surface == surface)
+            {
+                self.group_activate_tab(idx, tab);
+            }
+        }
+
+        // Raise only a floating window: raising a tiled one would lift the
+        // whole tiled layer above any overlapping floating window, breaking
+        // the z-order invariant -- tiled windows never overlap each other,
+        // so they never need raising at all.
+        if self.floating_workspace.contains_key(surface) {
+            if let Some(window) = self.mapped_toplevel_window(surface) {
+                self.space.raise_element(&window, false);
+            }
+        }
+
+        self.focus_window(Some(surface.clone()), SERIAL_COUNTER.next_serial());
+    }
+
+    /// Render elements for every group's tab strip, anchored to the top
+    /// edge of its active member's on-screen rect. Called by both
+    /// backends' `render_surface`, same as `toast`'s render element -- a
+    /// solo tile never has a group entry at all, so this is a genuine
+    /// no-op (empty `Vec`) in the common case. Each group's cached
+    /// `strip` buffer is only rebuilt here when missing (just
+    /// created, or invalidated by a membership/active change -- see
+    /// `WindowGroup::strip`'s own doc comment) or when the leaf's width no
+    /// longer matches the cached one (an output resize, a sibling split
+    /// drag) -- not every frame.
+    pub fn tab_strip_elements(
+        &mut self,
+        renderer: &mut GlesRenderer,
+    ) -> Vec<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        let mut elements = Vec::new();
+        for group in &mut self.groups {
+            let active_surface = &group.members[group.active].surface;
+            let Some(window) = self
+                .space
+                .elements()
+                .find(|w| is_window(w, active_surface))
+                .cloned()
+            else {
+                continue;
+            };
+            let Some(rect) = self.space.element_geometry(&window) else {
+                continue;
+            };
+
+            if group.strip.is_none() || group.strip_width != rect.size.w {
+                let titles: Vec<String> = group
+                    .members
+                    .iter()
+                    .map(|m| crate::tab_strip::window_title(&m.surface))
+                    .collect();
+                let (buffer, width) = crate::tab_strip::build_buffer(&titles, group.active, rect.size.w);
+                group.strip = Some(buffer);
+                group.strip_width = width;
+            }
+
+            if let Some(buffer) = &group.strip {
+                let location = (rect.loc.x as f64, rect.loc.y as f64);
+                if let Some(element) = crate::tab_strip::render_element(buffer, renderer, location) {
+                    elements.push(element);
+                }
+            }
+        }
+        elements
+    }
+
+    /// The mapped output named `name`, if any. Used to resolve
+    /// `Action::SwapWorkspacesWithOutput`'s config-supplied output name
+    /// into a real `Output`.
+    pub(crate) fn output_by_name(&self, name: &str) -> Option<Output> {
+        self.space.outputs().find(|o| o.name() == name).cloned()
+    }
+
+    /// Swaps `output_a`'s and `output_b`'s currently-active workspace
+    /// *content* -- the tiled tree and every tagged floating window trade
+    /// places, relocating onto the other monitor's screen area, while
+    /// each output keeps its own workspace-number bookkeeping untouched
+    /// (`layout::Layouts` is per-output-namespaced, see its own doc
+    /// comment -- there's no single global "workspace 3" to move between
+    /// monitors the way i3 or Hyprland's fully-global workspace model
+    /// has). Matches Hyprland's `swapactiveworkspaces` dispatcher. A
+    /// plain one-directional "move workspace to output" isn't
+    /// implemented separately -- switch the destination to an empty
+    /// workspace first, then swap, for the same effect. No-op if either
+    /// output is the same one, or an exclusive-interactivity layer is
+    /// mapped (same guard every other workspace-navigation path uses).
+    pub fn swap_workspaces(&mut self, output_a: &Output, output_b: &Output) {
+        if self.exclusive_layer().is_some() {
+            return;
+        }
+        let name_a = output_a.name();
+        let name_b = output_b.name();
+        if name_a == name_b {
+            return;
+        }
+        let ws_a = self.layout.active_workspace(&name_a);
+        let ws_b = self.layout.active_workspace(&name_b);
+
+        // Capture tiled membership before swapping the trees. Fullscreen is
+        // an override keyed outside `Layouts`, so moving a tree does not move
+        // its FullscreenEntry automatically.
+        let fullscreen_tiled_a: Vec<WlSurface> = self
+            .layout
+            .windows_in(&name_a, ws_a)
+            .into_iter()
+            .filter_map(|window| window.toplevel().map(|t| t.wl_surface().clone()))
+            .filter(|surface| self.fullscreen.contains_key(surface))
+            .collect();
+        let fullscreen_tiled_b: Vec<WlSurface> = self
+            .layout
+            .windows_in(&name_b, ws_b)
+            .into_iter()
+            .filter_map(|window| window.toplevel().map(|t| t.wl_surface().clone()))
+            .filter(|surface| self.fullscreen.contains_key(surface))
+            .collect();
+
+        let fullscreen_floating_a: Vec<WlSurface> = self
+            .floating_workspace
+            .iter()
+            .filter(|(surface, tag)| {
+                tag.output == name_a
+                    && tag.workspace == ws_a
+                    && !self.pinned.contains(*surface)
+                    && self.fullscreen.contains_key(*surface)
+            })
+            .map(|(surface, _)| surface.clone())
+            .collect();
+        let fullscreen_floating_b: Vec<WlSurface> = self
+            .floating_workspace
+            .iter()
+            .filter(|(surface, tag)| {
+                tag.output == name_b
+                    && tag.workspace == ws_b
+                    && !self.pinned.contains(*surface)
+                    && self.fullscreen.contains_key(*surface)
+            })
+            .map(|(surface, _)| surface.clone())
+            .collect();
+        let moving_fullscreen_a: Vec<WlSurface> = fullscreen_tiled_a
+            .iter()
+            .chain(&fullscreen_floating_a)
+            .cloned()
+            .collect();
+        let moving_fullscreen_b: Vec<WlSurface> = fullscreen_tiled_b
+            .iter()
+            .chain(&fullscreen_floating_b)
+            .cloned()
+            .collect();
+
+        // A destination may already own a fullscreen entry on a hidden
+        // workspace. If fullscreen content is arriving there, pre-empt that
+        // non-moving entry first so the swap cannot create two fullscreen
+        // owners for one output. The active fullscreen on the other side is
+        // excluded because it is vacating the destination in this same swap.
+        let mut preempt = Vec::new();
+        if !moving_fullscreen_a.is_empty() {
+            if let Some(surface) = self
+                .fullscreen
+                .iter()
+                .find(|(surface, entry)| {
+                    entry.output == name_b && !moving_fullscreen_b.contains(*surface)
+                })
+                .map(|(surface, _)| surface.clone())
+            {
+                preempt.push(surface);
+            }
+        }
+        if !moving_fullscreen_b.is_empty() {
+            if let Some(surface) = self
+                .fullscreen
+                .iter()
+                .find(|(surface, entry)| {
+                    entry.output == name_a && !moving_fullscreen_a.contains(*surface)
+                })
+                .map(|(surface, _)| surface.clone())
+            {
+                preempt.push(surface);
+            }
+        }
+        for surface in preempt {
+            let toplevel = self
+                .mapped_toplevel_window(&surface)
+                .and_then(|window| window.toplevel().cloned());
+            if let Some(toplevel) = toplevel {
+                self.do_unfullscreen(&toplevel);
+            } else {
+                self.fullscreen.remove(&surface);
+            }
+        }
+
+        self.layout.swap_active(&name_a, &name_b);
+
+        let delta = match (
+            self.space.output_geometry(output_a),
+            self.space.output_geometry(output_b),
+        ) {
+            (Some(geo_a), Some(geo_b)) => Some(geo_b.loc - geo_a.loc),
+            _ => None,
+        };
+        let bounds_a = self
+            .output_tiling_area(output_a)
+            .or_else(|| self.space.output_geometry(output_a));
+        let bounds_b = self
+            .output_tiling_area(output_b)
+            .or_else(|| self.space.output_geometry(output_b));
+
+        // FloatingTag.rect is a hide-time snapshot and deliberately stale
+        // while visible. Capture current non-fullscreen geometry before the
+        // ownership mutation so a workspace swap cannot snap a moved/resized
+        // floater back to its old position. A fullscreen tag retains its
+        // windowed restore rect instead of the viewport geometry.
+        let live_floating_rects: Vec<(WlSurface, Rectangle<i32, Logical>)> = self
+            .space
+            .elements()
+            .filter_map(|window| {
+                let surface = window.toplevel()?.wl_surface().clone();
+                if self.fullscreen.contains_key(&surface) || self.maximized.contains_key(&surface) {
+                    None
+                } else {
+                    self.space
+                        .element_geometry(window)
+                        .map(|rect| (surface, rect))
+                }
+            })
+            .collect();
+        for surface in fullscreen_tiled_a {
+            if let Some(entry) = self.fullscreen.get_mut(&surface) {
+                entry.move_to_output(name_b.clone(), delta);
+                if let (Some(rect), Some(bounds)) = (&mut entry.restore_rect, bounds_b) {
+                    *rect = clamp_rect_visible(*rect, bounds);
+                }
+            }
+        }
+        for surface in fullscreen_tiled_b {
+            if let Some(entry) = self.fullscreen.get_mut(&surface) {
+                entry.move_to_output(
+                    name_a.clone(),
+                    delta.map(|delta| (-delta.x, -delta.y).into()),
+                );
+                if let (Some(rect), Some(bounds)) = (&mut entry.restore_rect, bounds_a) {
+                    *rect = clamp_rect_visible(*rect, bounds);
+                }
+            }
+        }
+
+        // Floating windows aren't tracked by `Layouts` at all, so they need
+        // their own retag (their content-group's identity moved to the
+        // other output) and reposition (translate by the delta between the
+        // two outputs' origins, preserving relative on-screen placement --
+        // they were never unmapped, so nothing else will move them).
+        let mut moved: Vec<(Window, Point<i32, Logical>)> = Vec::new();
+        for (surface, tag) in &mut self.floating_workspace {
+            // Pinning exempts a window from workspace membership; including
+            // it only when its intentionally stale nominal workspace happened
+            // to be active made cross-output behavior nondeterministic.
+            if self.pinned.contains(surface) {
+                continue;
+            }
+            if tag.output == name_a && tag.workspace == ws_a {
+                if let Some((_, rect)) = live_floating_rects
+                    .iter()
+                    .find(|(candidate, _)| candidate == surface)
+                {
+                    tag.rect = *rect;
+                }
+                tag.output = name_b.clone();
+                tag.workspace = ws_b;
+                if let Some(delta) = delta {
+                    tag.rect.loc += delta;
+                    if let Some(bounds) = bounds_b {
+                        tag.rect = clamp_rect_visible(tag.rect, bounds);
+                    }
+                    moved.push((tag.window.clone(), tag.rect.loc));
+                }
+                if let Some(entry) = self.fullscreen.get_mut(surface) {
+                    entry.move_to_output(name_b.clone(), delta);
+                    if let (Some(rect), Some(bounds)) = (&mut entry.restore_rect, bounds_b) {
+                        *rect = clamp_rect_visible(*rect, bounds);
+                    }
+                }
+                if let Some(entry) = self.maximized.get_mut(surface) {
+                    entry.move_to_output(name_b.clone(), delta);
+                    if let Some(bounds) = bounds_b {
+                        entry.restore_rect = clamp_rect_visible(entry.restore_rect, bounds);
+                    }
+                }
+            } else if tag.output == name_b && tag.workspace == ws_b {
+                if let Some((_, rect)) = live_floating_rects
+                    .iter()
+                    .find(|(candidate, _)| candidate == surface)
+                {
+                    tag.rect = *rect;
+                }
+                tag.output = name_a.clone();
+                tag.workspace = ws_a;
+                if let Some(delta) = delta {
+                    tag.rect.loc -= delta;
+                    if let Some(bounds) = bounds_a {
+                        tag.rect = clamp_rect_visible(tag.rect, bounds);
+                    }
+                    moved.push((tag.window.clone(), tag.rect.loc));
+                }
+                if let Some(entry) = self.fullscreen.get_mut(surface) {
+                    entry.move_to_output(
+                        name_a.clone(),
+                        delta.map(|delta| (-delta.x, -delta.y).into()),
+                    );
+                    if let (Some(rect), Some(bounds)) = (&mut entry.restore_rect, bounds_a) {
+                        *rect = clamp_rect_visible(*rect, bounds);
+                    }
+                }
+                if let Some(entry) = self.maximized.get_mut(surface) {
+                    entry.move_to_output(
+                        name_a.clone(),
+                        delta.map(|delta| (-delta.x, -delta.y).into()),
+                    );
+                    if let Some(bounds) = bounds_a {
+                        entry.restore_rect = clamp_rect_visible(entry.restore_rect, bounds);
+                    }
+                }
+            }
+        }
+        for (window, loc) in moved {
+            self.space.map_element(window, loc, false);
+        }
+
+        self.retile();
+    }
+
+    /// If `config.input.focus_follows_mouse` is on, moves keyboard focus to
+    /// whatever window (not layer surface -- bars/launchers are deliberately
+    /// excluded, matching typical i3/sway/Hyprland scope) is under `pos`.
+    /// Called on every pointer motion. Deliberately doesn't raise -- Hyprland's
+    /// own default hover-focus doesn't either, only clicking raises. No-ops
+    /// if the window under `pos` is already focused (hovering the same
+    /// window repeatedly shouldn't spam redundant focus events), or if an
+    /// exclusive-interactivity layer (e.g. a lock screen) is mapped, same
+    /// guard every other focus-changing path already checks.
+    pub fn focus_follows_mouse(&mut self, pos: Point<f64, Logical>) {
+        if !self.config.input.focus_follows_mouse {
+            return;
+        }
+        if self
+            .seat
+            .get_pointer()
+            .is_some_and(|pointer| pointer.is_grabbed())
+        {
+            return;
+        }
+        if self.exclusive_layer().is_some() {
+            return;
+        }
+        if self.layer_under_pointer(pos).is_some() {
+            return;
+        }
+        let surface = self
+            .space
+            .element_under(pos)
+            .and_then(|(window, _)| window.toplevel().map(|t| t.wl_surface().clone()));
+        let Some(surface) = surface else {
+            return;
+        };
+        let current = self.focused_window_surface();
+        if current.as_ref() == Some(&surface) {
+            return;
+        }
+        self.focus_window(Some(surface), SERIAL_COUNTER.next_serial());
+    }
+
+    /// Cycles keyboard focus to the next mapped window (tiled or floating)
+    /// and raises it to the top of the stack. This is the only way to reach
+    /// a window that's fully covered by another one, since you can't click
+    /// something you can't see.
+    pub fn cycle_focus(&mut self) {
+        // Don't let a keybind tab focus away from an exclusive-interactivity
+        // layer (e.g. a lock screen) while it's still mapped.
+        if self.exclusive_layer().is_some() {
+            return;
+        }
+        let windows: Vec<Window> = self.space.elements().cloned().collect();
+        if windows.is_empty() {
+            return;
+        }
+
+        let current = self.focused_window_surface();
+        let current_index = current.as_ref().and_then(|surface| {
+            windows.iter().position(|w| {
+                w.toplevel()
+                    .map(|t| t.wl_surface() == surface)
+                    .unwrap_or(false)
+            })
+        });
+
+        let next_index = match current_index {
+            Some(i) => (i + 1) % windows.len(),
+            None => 0,
+        };
+        let next = windows[next_index].clone();
+
+        self.space.raise_element(&next, false);
+        self.focus_window(
+            Some(next.toplevel().unwrap().wl_surface().clone()),
+            SERIAL_COUNTER.next_serial(),
+        );
+    }
+
+    /// Moves keyboard focus to the nearest mapped window in `direction`
+    /// from the currently focused one (tiled or floating; works purely off
+    /// on-screen geometry, so it doesn't care which). No-op if nothing is
+    /// focused or nothing else lies in that direction.
+    pub fn focus_direction(&mut self, direction: Direction) {
+        let Some(focused) = self.focused_window_surface() else {
+            return;
+        };
+        let Some(current) = self
+            .space
+            .elements()
+            .find(|w| is_window(w, &focused))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(next) = self.neighbor_in_direction(&current, direction) else {
+            return;
+        };
+
+        self.space.raise_element(&next, false);
+        self.focus_window(
+            Some(next.toplevel().unwrap().wl_surface().clone()),
+            SERIAL_COUNTER.next_serial(),
+        );
+    }
+
+    /// Swaps the currently focused *tiled* window with its neighbor in
+    /// `direction`, keeping focus on the same window (which moves to the
+    /// neighbor's former slot). Floating windows aren't part of the tiling
+    /// tree, so this only applies to tiled ones -- swapping a floating
+    /// window's screen position doesn't mean anything the way it does for
+    /// two tiled slots.
+    pub fn swap_direction(&mut self, direction: Direction) {
+        let Some(focused) = self.focused_window_surface() else {
+            return;
+        };
+        if !self.layout.contains(&focused) {
+            return;
+        }
+        let Some(current) = self
+            .space
+            .elements()
+            .find(|w| is_window(w, &focused))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(neighbor) = self.neighbor_in_direction(&current, direction) else {
+            return;
+        };
+        let Some(neighbor_surface) = neighbor.toplevel().map(|t| t.wl_surface().clone()) else {
+            return;
+        };
+        if !self.layout.contains(&neighbor_surface) {
+            // Only swap within the tiling tree; a floating window nearest
+            // in that direction isn't a valid swap target.
+            return;
+        }
+
+        self.layout.swap(&focused, &neighbor_surface);
+        self.retile();
+    }
+
+    /// Switches the current output's active workspace to `algorithm` (see
+    /// `Action::SetLayout`). `Layouts` keeps the exact same tree either way
+    /// -- membership, insertion order, groups, swap/focus-direction are all
+    /// tree-shape-based rather than geometry-based, so none of that needs
+    /// to know which algorithm is active. Only the rects `retile()`
+    /// computes for this workspace change.
+    pub fn set_layout_algorithm(&mut self, algorithm: crate::config::LayoutAlgorithm) {
+        let Some(output) = self.primary_output() else {
+            return;
+        };
+        let workspace = self.layout.active_workspace(&output.name());
+        self.layout.set_algorithm(&output.name(), workspace, algorithm);
+        self.retile();
+    }
+
+    /// Nudges the current output's active workspace's master/stack ratio
+    /// (see `Action::GrowMaster`/`ShrinkMaster`). A visible no-op while BSP
+    /// is active -- `layout::Layouts::layout` doesn't consult the ratio in
+    /// that mode -- but still recorded against this (output, workspace), so
+    /// switching to master later immediately reflects whatever was last set.
+    pub fn adjust_master_ratio(&mut self, delta: f32) {
+        let Some(output) = self.primary_output() else {
+            return;
+        };
+        let workspace = self.layout.active_workspace(&output.name());
+        self.layout.adjust_master_ratio(&output.name(), workspace, delta);
+        self.retile();
+    }
+
+    /// Shows/hides the workspace overview on the current output (see
+    /// `overview.rs`, `Action::ToggleOverview`). Built fresh each time it's
+    /// toggled on -- it doesn't animate or otherwise need to stay in sync
+    /// with changes made while it's open, so there's nothing to cache
+    /// across frames the way `tab_strip_elements` caches per group.
+    pub fn toggle_overview(&mut self) {
+        if self.overview.take().is_some() {
+            self.request_redraw();
+            return;
+        }
+
+        let Some(output) = self.primary_output() else {
+            return;
+        };
+        let Some(mode) = output.current_mode() else {
+            return;
+        };
+        let output_name = output.name();
+        let active_workspace = self.layout.active_workspace(&output_name);
+
+        // Every workspace this output has ever populated, plus the active
+        // one even if it's currently empty, so there's always at least one
+        // cell to show.
+        let mut workspaces: Vec<u32> = self
+            .layout
+            .populated_workspaces()
+            .into_iter()
+            .filter(|(name, _)| name == &output_name)
+            .map(|(_, workspace)| workspace)
+            .collect();
+        if !workspaces.contains(&active_workspace) {
+            workspaces.push(active_workspace);
+        }
+        workspaces.sort_unstable();
+
+        const CELL_GAP: i32 = 12;
+        let cell_count = workspaces.len() as i32;
+        let cell_w = (mode.size.w - CELL_GAP * (cell_count + 1)) / cell_count.max(1);
+        let cell_h = mode.size.h - CELL_GAP * 2;
+
+        let cells: Vec<crate::overview::OverviewCell> = workspaces
+            .iter()
+            .enumerate()
+            .map(|(i, &workspace)| {
+                let x = CELL_GAP + i as i32 * (cell_w + CELL_GAP);
+                let area = Rectangle::new((x, CELL_GAP).into(), (cell_w.max(1), cell_h.max(1)).into());
+                // Reuses whichever algorithm (BSP or master) is actually
+                // active for this workspace, computed directly at the
+                // cell's own smaller size -- no separate scaling math
+                // needed, `Layouts::layout` already produces proportional
+                // rects for whatever area it's given.
+                let windows = self
+                    .layout
+                    .layout(&output_name, workspace, area, 4)
+                    .into_iter()
+                    .filter_map(|(window, rect)| {
+                        let surface = window.toplevel()?.wl_surface().clone();
+                        Some((rect, crate::tab_strip::window_title(&surface)))
+                    })
+                    .collect();
+                crate::overview::OverviewCell {
+                    area,
+                    active: workspace == active_workspace,
+                    windows,
+                }
+            })
+            .collect();
+
+        self.overview =
+            Some(crate::overview::Overview::build(output_name, &cells, (mode.size.w, mode.size.h)));
+        self.request_redraw();
+    }
+
+    /// Finds the mapped window whose center lies nearest `from`'s center in
+    /// `direction`. "Nearest" ranks candidates by distance along that
+    /// direction's axis, with a penalty for how far off-axis they sit, so a
+    /// neighbor roughly level with `from` wins over one that's technically
+    /// closer in raw distance but well off to the side.
+    fn neighbor_in_direction(&self, from: &Window, direction: Direction) -> Option<Window> {
+        let from_center = center(self.space.element_geometry(from)?);
+
+        self.space
+            .elements()
+            .filter(|w| *w != from)
+            .filter_map(|w| {
+                let c = center(self.space.element_geometry(w)?);
+                let (primary, off_axis) = match direction {
+                    Direction::Left => (from_center.x - c.x, from_center.y - c.y),
+                    Direction::Right => (c.x - from_center.x, from_center.y - c.y),
+                    Direction::Up => (from_center.y - c.y, from_center.x - c.x),
+                    Direction::Down => (c.y - from_center.y, from_center.x - c.x),
+                };
+                (primary > 0).then_some((w.clone(), primary as f64 + (off_axis as f64).abs() * 2.0))
+            })
+            .min_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(w, _)| w)
+    }
+
+    /// Re-reads the config file and applies what can be applied live
+    /// (keybinds, input repeat rate). Shows a toast either way so a reload
+    /// is never silent, success or failure. Debounced: editors commonly fire
+    /// more than one filesystem event per save.
+    pub fn reload_config(&mut self) {
+        let now = Instant::now();
+        if now.duration_since(self.last_config_event) < Duration::from_millis(150) {
+            self.last_config_event = now;
+            return;
+        }
+        self.last_config_event = now;
+
+        match Config::reload() {
+            Ok(new_config) => {
+                if let Some(keyboard) = self.seat.get_keyboard() {
+                    keyboard.change_repeat_info(
+                        new_config.input.repeat_rate,
+                        new_config.input.repeat_delay,
+                    );
+                    // Same bad-config-must-not-break-things guarantee as
+                    // the startup path in `Smallvil::new`: on failure this
+                    // just logs and leaves the previously-loaded keymap in
+                    // place, it doesn't touch `inner.keyboard` at all.
+                    if let Err(e) = keyboard.set_xkb_config(self, new_config.input.xkb_config()) {
+                        tracing::error!(
+                            error = ?e,
+                            layout = %new_config.input.xkb_layout,
+                            "Reloaded XKB keymap failed to compile, keeping the previous one"
+                        );
+                    }
+                }
+                if new_config.show_welcome_hint {
+                    if self.welcome_hint.is_none() {
+                        self.welcome_hint = Some(crate::welcome::WelcomeHint::build(&new_config.terminal));
+                    }
+                } else {
+                    self.welcome_hint = None;
+                }
+                self.config = new_config;
+                // A reload that dropped or renamed the currently-active
+                // submap would otherwise leave every key silently
+                // unmatched (falling through as plain input) with no
+                // indication why -- exit back to the base keybinds
+                // instead, the same table a name that never existed at
+                // all would resolve to.
+                if let Some(name) = &self.active_submap {
+                    if !self.config.submaps.contains_key(name) {
+                        self.active_submap = None;
+                    }
+                }
+                self.layout.set_default_algorithm(self.config.default_layout);
+                tracing::info!("Config reloaded");
+                self.toast = Some(Toast::new("Config reloaded", ToastKind::Info));
+                self.retile();
+            }
+            Err(err) => {
+                tracing::warn!(%err, "Failed to reload config, keeping the previous one");
+                self.toast = Some(Toast::new(
+                    &format!("Config error: {err}"),
+                    ToastKind::Error,
+                ));
+                self.request_redraw();
+            }
+        }
+    }
+}
+
+fn is_window(window: &Window, surface: &WlSurface) -> bool {
+    window
+        .toplevel()
+        .map(|t| t.wl_surface() == surface)
+        .unwrap_or(false)
+}
+
+/// Pure index bookkeeping for `leave_group`: given a group's member count
+/// and active index *before* removal, and the position being removed,
+/// returns the active index to use *after* removal, and whether the group
+/// should dissolve entirely (one member left doesn't meaningfully form a
+/// group anymore). Kept separate from `leave_group`'s `Window`/`Layouts`
+/// side effects so this indexing logic -- the part actually easy to get
+/// subtly wrong -- has a plain unit test.
+fn group_removal_outcome(len: usize, active: usize, removed_pos: usize) -> (usize, bool) {
+    let was_active = removed_pos == active;
+    let mut new_active = active;
+    if removed_pos < active {
+        new_active -= 1;
+    }
+    let new_len = len - 1;
+    if new_len <= 1 {
+        return (0, true);
+    }
+    if was_active {
+        new_active %= new_len;
+    }
+    (new_active, false)
+}
+
+fn center(rect: Rectangle<i32, Logical>) -> Point<i32, Logical> {
+    (rect.loc.x + rect.size.w / 2, rect.loc.y + rect.size.h / 2).into()
+}
+
+/// Keeps at least a small, grabbable part of a floating window inside the
+/// target working area after an output move. Raw origin translation can put
+/// almost the entire window off-screen when the destination is smaller.
+fn clamp_rect_visible(
+    mut rect: Rectangle<i32, Logical>,
+    bounds: Rectangle<i32, Logical>,
+) -> Rectangle<i32, Logical> {
+    const MIN_VISIBLE: i32 = 32;
+    let visible_w = MIN_VISIBLE.min(rect.size.w.max(1)).min(bounds.size.w.max(1));
+    let visible_h = MIN_VISIBLE.min(rect.size.h.max(1)).min(bounds.size.h.max(1));
+    let min_x = bounds.loc.x - rect.size.w + visible_w;
+    let max_x = bounds.loc.x + bounds.size.w - visible_w;
+    let min_y = bounds.loc.y - rect.size.h + visible_h;
+    let max_y = bounds.loc.y + bounds.size.h - visible_h;
+    rect.loc.x = rect.loc.x.clamp(min_x.min(max_x), min_x.max(max_x));
+    rect.loc.y = rect.loc.y.clamp(min_y.min(max_y), min_y.max(max_y));
+    rect
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fullscreen_restore_rect_keeps_the_original_windowed_geometry() {
+        let original = Rectangle::new((10, 20).into(), (640, 480).into());
+        let later_tile = Rectangle::new((100, 200).into(), (1280, 720).into());
+        let mut entry = FullscreenEntry {
+            output: "DP-1".to_owned(),
+            restore_rect: Some(original),
+            was_pinned: false,
+        };
+
+        entry.remember_restore_rect(later_tile);
+
+        assert_eq!(entry.restore_rect, Some(original));
+    }
+
+    #[test]
+    fn moving_fullscreen_translates_its_saved_floating_rect() {
+        let original = Rectangle::new((10, 20).into(), (640, 480).into());
+        let mut entry = FullscreenEntry {
+            output: "DP-1".to_owned(),
+            restore_rect: Some(original),
+            was_pinned: false,
+        };
+
+        entry.move_to_output("HDMI-A-1".to_owned(), Some((1920, -40).into()));
+
+        assert_eq!(entry.output, "HDMI-A-1");
+        assert_eq!(entry.restore_rect.unwrap().loc, (1930, -20).into());
+    }
+
+    #[test]
+    fn output_move_keeps_a_grabbable_part_of_large_floater_visible() {
+        let bounds = Rectangle::new((1920, 0).into(), (800, 600).into());
+        let far_offscreen = Rectangle::new((4000, 2000).into(), (1200, 900).into());
+
+        let clamped = clamp_rect_visible(far_offscreen, bounds);
+
+        assert_eq!(clamped.loc, (2688, 568).into());
+    }
+
+    #[test]
+    fn group_removal_promotes_next_member_wrapping() {
+        // [m0, m1, m2], active m1 (index 1) closes -> m2 (now index 1)
+        // becomes active.
+        assert_eq!(group_removal_outcome(3, 1, 1), (1, false));
+        // [m0, m1, m2], active m0 (index 0) closes -> m1 (now index 0).
+        assert_eq!(group_removal_outcome(3, 0, 0), (0, false));
+        // [m0, m1, m2], active m2 (last, index 2) closes -> wraps to m0.
+        assert_eq!(group_removal_outcome(3, 2, 2), (0, false));
+    }
+
+    #[test]
+    fn group_removal_of_non_active_member_keeps_active_pointed_at_same_window() {
+        // [m0, m1, m2, m3], active m3 (index 3); removing m0 (earlier,
+        // non-active) shifts active's index down to stay pointed at m3.
+        assert_eq!(group_removal_outcome(4, 3, 0), (2, false));
+        // Removing a later, non-active member leaves active's index alone.
+        assert_eq!(group_removal_outcome(4, 1, 3), (1, false));
+    }
+
+    #[test]
+    fn group_removal_dissolves_a_two_member_group_regardless_of_which_side_closes() {
+        assert_eq!(group_removal_outcome(2, 0, 0), (0, true));
+        assert_eq!(group_removal_outcome(2, 0, 1), (0, true));
+    }
+}
+
+#[derive(Default)]
+pub struct ClientState {
+    pub compositor_state: CompositorClientState,
+}
+
+impl ClientData for ClientState {
+    fn initialized(&self, _client_id: ClientId) {}
+    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
+}

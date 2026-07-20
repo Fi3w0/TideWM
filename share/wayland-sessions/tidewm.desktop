@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=TideWM
+Comment=A water-themed Wayland compositor
+Exec=TideWM
+Icon=tidewm
+Type=Application
+DesktopNames=TideWM

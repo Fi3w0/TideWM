@@ -1,0 +1,19 @@
+# Rust build artifacts
+/target
+
+# JetBrains IDE config (user/machine-specific)
+.idea/
+*.iml
+
+# Editor swap/backup files
+*.swp
+*.swo
+*~
+.*.un~
+
+# macOS / Windows junk
+.DS_Store
+Thumbs.db
+
+# Internal dev notes, not part of the public repo
+AGENT.md
