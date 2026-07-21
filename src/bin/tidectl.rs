@@ -243,6 +243,7 @@ fn print_window(w: &Value) {
         ("pseudo_tiled", "pseudo-tiled"),
         ("fullscreen", "fullscreen"),
         ("maximized", "maximized"),
+        ("urgent", "urgent"),
         ("focused", "focused"),
     ] {
         if w.get(key).and_then(Value::as_bool).unwrap_or(false) {
@@ -272,6 +273,7 @@ ACTIONS:
     Any action a `bind` accepts in config.wave works here too, e.g.:
         close-window, toggle-floating, toggle-fullscreen, toggle-pin,
         toggle-scratchpad, move-to-scratchpad, toggle-pseudo-tile,
+        raise-window, lower-window, focus-urgent,
         cycle-focus, focus-left/right/up/down, swap-left/right/up/down,
         group-left/right/up/down, ungroup, cycle-tab-next/prev, quit,
         submap:<name>, exit-submap, layout:bsp, layout:master,

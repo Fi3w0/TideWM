@@ -293,6 +293,7 @@ fn window_json(
         "pinned": state.pinned.contains(surface),
         "pseudo_tiled": state.pseudo_tiled.contains(surface),
         "fullscreen": state.fullscreen.contains_key(surface),
+        "urgent": state.urgent.contains(surface),
         // While fullscreen, `maximized` is retained internally only as the
         // mode to restore on exit; it is not the current protocol/placement
         // state and should not be exposed as simultaneously active.

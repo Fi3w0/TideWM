@@ -78,6 +78,17 @@ pub enum Action {
     ToggleScratchpad,
     MoveToScratchpad,
     TogglePseudoTile,
+    /// Raises/lowers the focused *floating* window within the floating
+    /// stack (a no-op on a tiled one -- tiled windows never overlap, so
+    /// z-order has no meaning there, same reasoning `TogglePseudoTile`'s
+    /// tiled-only restriction uses in reverse). See `Smallvil::raise_window`/
+    /// `lower_window`.
+    RaiseWindow,
+    LowerWindow,
+    /// Focuses whichever window is currently marked urgent, if any -- the
+    /// bindable counterpart to a bar reading the `urgent` IPC flag. See
+    /// `Smallvil::focus_urgent`.
+    FocusUrgent,
     CycleFocus,
     FocusDirection(Direction),
     SwapDirection(Direction),
@@ -1249,6 +1260,9 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "toggle-scratchpad" => Some(Action::ToggleScratchpad),
         "move-to-scratchpad" => Some(Action::MoveToScratchpad),
         "toggle-pseudo-tile" => Some(Action::TogglePseudoTile),
+        "raise-window" => Some(Action::RaiseWindow),
+        "lower-window" => Some(Action::LowerWindow),
+        "focus-urgent" => Some(Action::FocusUrgent),
         "cycle-focus" => Some(Action::CycleFocus),
         "focus-left" => Some(Action::FocusDirection(Direction::Left)),
         "focus-right" => Some(Action::FocusDirection(Direction::Right)),

@@ -1014,6 +1014,21 @@ impl Smallvil {
                     self.toggle_pseudo_tile(&surface);
                 }
             }
+            Action::RaiseWindow => {
+                let focused = self.focused_window_surface();
+                if let Some(surface) = focused {
+                    self.raise_window(&surface);
+                }
+            }
+            Action::LowerWindow => {
+                let focused = self.focused_window_surface();
+                if let Some(surface) = focused {
+                    self.lower_window(&surface);
+                }
+            }
+            Action::FocusUrgent => {
+                self.focus_urgent();
+            }
             Action::ToggleScratchpad => {
                 if let Some(output) = self.primary_output() {
                     self.toggle_scratchpad(&output);

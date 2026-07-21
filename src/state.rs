@@ -505,6 +505,22 @@ pub struct Smallvil {
     /// throughout, unlike floating: only the rendered rect changes.
     pub pseudo_tiled: HashSet<WlSurface>,
 
+    /// Windows asking for attention while they didn't have a fresh enough
+    /// claim to steal focus outright -- set from a stale-serial
+    /// xdg-activation request (see `Smallvil::mark_urgent`,
+    /// `handlers/mod.rs`'s `request_activation`), cleared by focusing the
+    /// window through any path (`reconcile_keyboard_focus`) or explicitly
+    /// via `focus-urgent` (`Smallvil::focus_urgent`).
+    pub urgent: HashSet<WlSurface>,
+
+    /// Most-recently-focused-first order of every window that has ever
+    /// held keyboard focus, updated from `reconcile_keyboard_focus`'s own
+    /// activation-change block and pruned in `detach_mapped_toplevel`.
+    /// Drives `cycle_focus`'s Alt-Tab ordering; a window not yet in this
+    /// list (freshly mapped but never focused) falls back to `Space`'s own
+    /// order, appended after every known entry.
+    pub(crate) focus_history: Vec<WlSurface>,
+
     /// Laptop lid closed right now, per libinput's `Switch::Lid`
     /// (`SwitchState::On` = closed). Tracked separately from the
     /// configured `lid_close`/`lid_open` actions so an event whose state
@@ -890,6 +906,8 @@ impl Smallvil {
             pinned: HashSet::new(),
             scratchpad_previous: HashMap::new(),
             pseudo_tiled: HashSet::new(),
+            urgent: HashSet::new(),
+            focus_history: Vec::new(),
             is_lid_closed: false,
             is_tablet_mode: false,
             groups: Vec::new(),
@@ -1279,6 +1297,9 @@ impl Smallvil {
             if let Some(surface) = new_window {
                 activation_changed |= self.set_window_activated(&surface, true);
                 self.refresh_wlr_toplevel_state(&surface);
+                self.urgent.remove(&surface);
+                self.focus_history.retain(|s| s != &surface);
+                self.focus_history.insert(0, surface);
             }
         }
 
@@ -2707,6 +2728,52 @@ impl Smallvil {
         self.retile();
     }
 
+    /// Raises `surface` to the top of the floating stack. No-op on a tiled
+    /// window -- tiled windows never overlap by construction, so raising
+    /// one has no meaning (same restriction `toggle_pseudo_tile` applies in
+    /// reverse). Floating windows are already always rendered above the
+    /// tiled layer (see the Z-order invariant `retile()` enforces); this
+    /// only changes relative order *within* the floating stack.
+    pub fn raise_window(&mut self, surface: &WlSurface) {
+        if !self.floating_workspace.contains_key(surface) {
+            return;
+        }
+        if let Some(window) = self.mapped_toplevel_window(surface) {
+            self.space.raise_element(&window, false);
+            self.request_redraw();
+        }
+    }
+
+    /// Sends `surface` to the bottom of the floating stack, still above
+    /// every tiled window. `Space` has no direct "lower" primitive, so this
+    /// raises every *other* floating window instead, preserving their
+    /// relative order -- the same trick `retile()` already uses to restore
+    /// the floating-above-tiled invariant after a tiling pass, just with
+    /// `surface` deliberately left out of the re-raise.
+    pub fn lower_window(&mut self, surface: &WlSurface) {
+        if !self.floating_workspace.contains_key(surface) {
+            return;
+        }
+        let others: Vec<Window> = self
+            .space
+            .elements()
+            .filter(|w| {
+                w.toplevel().is_some_and(|t| {
+                    let s = t.wl_surface();
+                    s != surface && self.floating_workspace.contains_key(s)
+                })
+            })
+            .cloned()
+            .collect();
+        if others.is_empty() {
+            return;
+        }
+        for window in others {
+            self.space.raise_element(&window, false);
+        }
+        self.request_redraw();
+    }
+
     /// Which group (if any) `surface` is a member of, active or parked.
     pub fn group_of(&self, surface: &WlSurface) -> Option<usize> {
         self.groups
@@ -2951,6 +3018,65 @@ impl Smallvil {
         // computed state bytes match what was last broadcast.
         self.refresh_wlr_toplevel_state(&old_surface);
         self.request_redraw();
+    }
+
+    /// Whether an xdg-activation token's originating serial (if any) is
+    /// still fresh enough to steal focus outright. `None` (no serial at
+    /// all) is always fresh -- see `handlers/mod.rs`'s `token_created` for
+    /// why xwayland-satellite/notification-daemon tokens have to stay
+    /// unconditionally trusted here. Shared by `token_created` (whether to
+    /// mint the token) and `request_activation` (whether to grant focus or
+    /// downgrade to `mark_urgent` once it's actually consumed).
+    pub(crate) fn activation_serial_is_fresh(
+        &self,
+        serial: &Option<(
+            smithay::utils::Serial,
+            smithay::reexports::wayland_server::protocol::wl_seat::WlSeat,
+        )>,
+    ) -> bool {
+        let Some((serial, seat)) = serial else {
+            return true;
+        };
+        if Seat::from_resource(seat).as_ref() != Some(&self.seat) {
+            return false;
+        }
+        let keyboard_fresh = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.last_enter())
+            .is_some_and(|last_enter| serial.is_no_older_than(&last_enter));
+        let pointer_fresh = self
+            .seat
+            .get_pointer()
+            .and_then(|pointer| pointer.last_enter())
+            .is_some_and(|last_enter| serial.is_no_older_than(&last_enter));
+        keyboard_fresh || pointer_fresh
+    }
+
+    /// Marks `surface` urgent instead of stealing focus for it -- the
+    /// downgrade path for a stale-serial xdg-activation request (see
+    /// `request_activation`). A no-op if the window isn't actually mapped;
+    /// urgency only means something for a window the user could plausibly
+    /// switch to.
+    pub(crate) fn mark_urgent(&mut self, surface: &WlSurface) {
+        if self.mapped_toplevel_window(surface).is_none() {
+            return;
+        }
+        self.urgent.insert(surface.clone());
+        self.request_redraw();
+    }
+
+    /// Focuses whichever window is currently marked urgent, if any --
+    /// reuses `activate_toplevel`'s own workspace-switch/group-promote/
+    /// floating-raise logic rather than duplicating it, since "focus this
+    /// window" means the same thing regardless of why. `activate_toplevel`
+    /// itself already clears `urgent` (via `reconcile_keyboard_focus`), so
+    /// there's nothing left to clear here.
+    pub fn focus_urgent(&mut self) {
+        let Some(surface) = self.urgent.iter().next().cloned() else {
+            return;
+        };
+        self.activate_toplevel(&surface);
     }
 
     /// Grants an xdg-activation request for `surface`: focus its window,
@@ -3384,27 +3510,43 @@ impl Smallvil {
         if windows.is_empty() {
             return;
         }
+        let surface_of = |w: &Window| w.toplevel().map(|t| t.wl_surface().clone());
+
+        // MRU order: every visible window that's been focused before, most
+        // recent first, then any visible window `focus_history` doesn't
+        // know about yet (freshly mapped, never focused) in `Space`'s own
+        // order -- matches niri/Hyprland's own Alt-Tab convention instead
+        // of the previous plain z-order walk.
+        let mut ordered: Vec<WlSurface> = self
+            .focus_history
+            .iter()
+            .filter(|s| windows.iter().any(|w| surface_of(w).as_ref() == Some(*s)))
+            .cloned()
+            .collect();
+        for window in &windows {
+            if let Some(surface) = surface_of(window) {
+                if !ordered.contains(&surface) {
+                    ordered.push(surface);
+                }
+            }
+        }
+        if ordered.is_empty() {
+            return;
+        }
 
         let current = self.focused_window_surface();
-        let current_index = current.as_ref().and_then(|surface| {
-            windows.iter().position(|w| {
-                w.toplevel()
-                    .map(|t| t.wl_surface() == surface)
-                    .unwrap_or(false)
-            })
-        });
-
+        let current_index = current.as_ref().and_then(|s| ordered.iter().position(|o| o == s));
         let next_index = match current_index {
-            Some(i) => (i + 1) % windows.len(),
+            Some(i) => (i + 1) % ordered.len(),
             None => 0,
         };
-        let next = windows[next_index].clone();
+        let next_surface = ordered[next_index].clone();
+        let Some(next) = windows.iter().find(|w| surface_of(w).as_ref() == Some(&next_surface)) else {
+            return;
+        };
 
-        self.space.raise_element(&next, false);
-        self.focus_window(
-            Some(next.toplevel().unwrap().wl_surface().clone()),
-            SERIAL_COUNTER.next_serial(),
-        );
+        self.space.raise_element(next, false);
+        self.focus_window(Some(next_surface), SERIAL_COUNTER.next_serial());
     }
 
     /// Moves keyboard focus to the nearest mapped window in `direction`

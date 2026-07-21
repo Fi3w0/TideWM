@@ -385,23 +385,19 @@ impl XdgActivationHandler for Smallvil {
     }
 
     fn token_created(&mut self, _token: XdgActivationToken, data: XdgActivationTokenData) -> bool {
-        let Some((serial, seat)) = data.serial else {
-            return true;
-        };
-        if Seat::from_resource(&seat).as_ref() != Some(&self.seat) {
-            return false;
+        // Only refuses to mint a token at all for a serial that names a
+        // foreign seat -- a present-but-*stale* serial still mints the
+        // token (unlike this used to work): `request_activation` re-checks
+        // freshness once the token is actually consumed and downgrades to
+        // `mark_urgent` instead of refusing outright, the one case where
+        // "urgent" genuinely applies. A missing serial altogether is always
+        // accepted outright, never downgraded -- see
+        // `Smallvil::activation_serial_is_fresh`'s own doc comment for why
+        // (xwayland-satellite/notification-daemon tokens depend on it).
+        match &data.serial {
+            None => true,
+            Some((_, seat)) => Seat::from_resource(seat).as_ref() == Some(&self.seat),
         }
-        let keyboard_fresh = self
-            .seat
-            .get_keyboard()
-            .and_then(|keyboard| keyboard.last_enter())
-            .is_some_and(|last_enter| serial.is_no_older_than(&last_enter));
-        let pointer_fresh = self
-            .seat
-            .get_pointer()
-            .and_then(|pointer| pointer.last_enter())
-            .is_some_and(|last_enter| serial.is_no_older_than(&last_enter));
-        keyboard_fresh || pointer_fresh
     }
 
     fn request_activation(
@@ -419,7 +415,11 @@ impl XdgActivationHandler for Smallvil {
         if token_data.timestamp.elapsed().as_secs() >= 10 {
             return;
         }
-        self.activate_toplevel(&surface);
+        if self.activation_serial_is_fresh(&token_data.serial) {
+            self.activate_toplevel(&surface);
+        } else {
+            self.mark_urgent(&surface);
+        }
     }
 }
 

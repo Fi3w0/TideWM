@@ -863,6 +863,8 @@ impl Smallvil {
         self.floating_workspace.remove(surface);
         self.pinned.remove(surface);
         self.pseudo_tiled.remove(surface);
+        self.urgent.remove(surface);
+        self.focus_history.retain(|s| s != surface);
         // Closing the foreign-toplevel handle here (rather than only on
         // role destruction) means an xdg unmap also retires it; a later
         // remap announces a fresh handle from `map_toplevel`, which is what
