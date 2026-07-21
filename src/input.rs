@@ -435,9 +435,17 @@ impl Smallvil {
                 }
             }
             InputEvent::PointerMotionAbsolute { event, .. } => {
-                let output = self.space.outputs().next().unwrap();
-
-                let output_geo = self.space.output_geometry(output).unwrap();
+                // No output to map an absolute position onto -- reachable
+                // during shutdown if a host compositor (winit backend)
+                // delivers a final motion event after outputs are already
+                // torn down. Nothing sensible to do with it; drop it rather
+                // than panic on the `Space` lookups below.
+                let Some(output) = self.space.outputs().next() else {
+                    return;
+                };
+                let Some(output_geo) = self.space.output_geometry(output) else {
+                    return;
+                };
 
                 let pos = event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
 
