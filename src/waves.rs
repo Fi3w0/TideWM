@@ -160,6 +160,17 @@ fn block_is_keyed(keyword: &str) -> bool {
     matches!(keyword, "input" | "touchpad" | "env" | "switch_events" | "submap")
 }
 
+/// The one plain `key = value` that's list-shaped instead of scalar --
+/// repeating it accumulates rather than overwriting, matching Hyprland's
+/// own `exec-once = foo` convention (list one thing to start per line,
+/// not one line holding an array). A single-entry allowlist rather than a
+/// general "list keys" mechanism, because this is the only config field
+/// with this shape today; add to this list if that ever changes rather
+/// than inventing array-literal syntax nothing else needs.
+fn assign_is_multi(key: &str) -> bool {
+    key == "spawn_at_startup"
+}
+
 /// Folds `incoming` onto `target` in place, applying the same policy in
 /// both directions this gets used for: parsing one file's own entries
 /// (fold its lines onto an initially-empty accumulator, so accidental
@@ -174,7 +185,9 @@ fn block_is_keyed(keyword: &str) -> bool {
 ///   merged across files (a *literal* duplicate key within one raw TOML
 ///   file is a hard parse error there; Waves is more forgiving on
 ///   purpose, since "last bind on this combo wins" is a perfectly
-///   sensible thing to want across a multi-file split).
+///   sensible thing to want across a multi-file split). The one
+///   exception is [`assign_is_multi`]'s single key (`spawn_at_startup`),
+///   which accumulates instead -- see its own doc comment.
 /// - A block whose keyword is in [`block_is_keyed`] (`input`, `touchpad`,
 ///   `env`, `switch_events`, `submap`) merges recursively with an
 ///   existing block of the same keyword *and* header (the header is the
@@ -189,7 +202,9 @@ fn merge_into(target: &mut Vec<Entry>, incoming: Vec<Entry>) {
     for entry in incoming {
         match &entry {
             Entry::Assign(key, _) => {
-                target.retain(|e| !matches!(e, Entry::Assign(k, _) if k == key));
+                if !assign_is_multi(key) {
+                    target.retain(|e| !matches!(e, Entry::Assign(k, _) if k == key));
+                }
                 target.push(entry);
             }
             Entry::VarDef(name, _) => {
@@ -404,6 +419,19 @@ mod tests {
         let mut acc = Vec::new();
         merge_into(&mut acc, parse_str("gaps = 8\ngaps = 12\n"));
         assert_eq!(acc, vec![Entry::Assign("gaps".into(), "12".into())]);
+    }
+
+    #[test]
+    fn spawn_at_startup_accumulates_instead_of_overwriting() {
+        let mut acc = Vec::new();
+        merge_into(&mut acc, parse_str("spawn_at_startup = waybar\nspawn_at_startup = swww init\n"));
+        assert_eq!(
+            acc,
+            vec![
+                Entry::Assign("spawn_at_startup".into(), "waybar".into()),
+                Entry::Assign("spawn_at_startup".into(), "swww init".into()),
+            ]
+        );
     }
 
     #[test]
