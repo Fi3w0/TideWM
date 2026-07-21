@@ -5,9 +5,10 @@ use std::{
 };
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use serde::Deserialize;
 use smithay::input::keyboard::{xkb, Keysym, ModifiersState, XkbConfig};
 use smithay::reexports::calloop::channel::{self, Channel};
+
+use crate::waves;
 
 /// A parsed, ready-to-match keybind: which modifiers must be held, which base
 /// (unshifted) key symbol triggers it, and what it does.
@@ -174,8 +175,8 @@ pub struct Config {
 }
 
 impl Config {
-    /// Load `$XDG_CONFIG_HOME/tidewm/config.toml` (falling back to
-    /// `~/.config/tidewm/config.toml`), writing out the default file on first
+    /// Load `$XDG_CONFIG_HOME/tidewm/config.wave` (falling back to
+    /// `~/.config/tidewm/config.wave`), writing out the default file on first
     /// run so there's something to edit. Falls back to in-memory defaults if
     /// the file can't be read or parsed.
     pub fn load() -> Self {
@@ -191,7 +192,7 @@ impl Config {
             if let Some(parent) = path.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            if let Err(err) = fs::write(&path, DEFAULT_CONFIG_TOML) {
+            if let Err(err) = fs::write(&path, DEFAULT_CONFIG_WAVE) {
                 tracing::warn!(%err, path = %path.display(), "Failed to write default config");
             }
             default
@@ -287,39 +288,27 @@ impl Config {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(default)]
+#[derive(Debug)]
 struct RawConfig {
-    /// Paths of other TOML files to fold in before this file's own keys
-    /// (see `load_raw_config`/`merge_toml`). Always empty by the time
-    /// `RawConfig` itself deserializes -- `load_raw_config` resolves and
-    /// strips this key from every file's `toml::Value` first -- kept as a
-    /// real field purely so the schema documents it, rather than `include`
-    /// being an unknown key serde would otherwise just silently accept
-    /// and drop with no explanation of where it went.
-    include: Vec<String>,
     terminal: String,
     show_welcome_hint: bool,
     water_effects: bool,
     cursor_always_visible: bool,
     gaps: i32,
     /// `"bsp"`/`"master"`, resolved via `parse_layout_algorithm` in
-    /// `Config::from_raw`. Raw string (not `LayoutAlgorithm` itself, which
-    /// isn't `Deserialize`) for the same reason `switch_events`/`keybinds`
-    /// store strings -- so a bad value warns and falls back rather than
-    /// failing the whole config parse.
+    /// `Config::from_raw`. Raw string (not `LayoutAlgorithm` itself) for
+    /// the same reason `switch_events`/`keybinds` store strings -- so a
+    /// bad value warns and falls back rather than failing the whole
+    /// config parse.
     default_layout: String,
     pseudo_tile_scale: f64,
     keybinds: HashMap<String, String>,
     input: InputConfig,
     xwayland: XwaylandConfig,
     spawn_at_startup: Vec<String>,
-    #[serde(rename = "output", default)]
     outputs: Vec<OutputConfig>,
     switch_events: SwitchEventsRaw,
-    #[serde(rename = "window_rule", default)]
     window_rules: Vec<WindowRule>,
-    #[serde(rename = "submap", default)]
     submaps: HashMap<String, HashMap<String, String>>,
     env: HashMap<String, String>,
     /// `$name` values substituted into `terminal`/`spawn_at_startup`/
@@ -402,11 +391,10 @@ impl Default for RawConfig {
         submaps.insert("nav".to_string(), nav_submap);
 
         Self {
-            include: Vec::new(),
             terminal: "kitty".to_string(),
             // Deliberately false, not true: a real config.toml always ships
             // with `show_welcome_hint = true` written explicitly (see
-            // DEFAULT_CONFIG_TOML), so this default is only ever consulted
+            // DEFAULT_CONFIG_WAVE), so this default is only ever consulted
             // when a user deletes the key from an existing file -- and per
             // the on-screen hint's own "delete this to dismiss" advice
             // (welcome.rs), that must resolve to off, not back to on.
@@ -430,8 +418,7 @@ impl Default for RawConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone)]
 pub struct InputConfig {
     pub repeat_delay: i32,
     pub repeat_rate: i32,
@@ -501,8 +488,7 @@ impl InputConfig {
 /// `Smallvil::reload_config`. A touchpad-settings edit needs a compositor
 /// restart to take effect; upgrade path is threading a device registry
 /// into `Smallvil` if that gap actually bites.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Default)]
 pub struct TouchpadConfig {
     pub tap_to_click: Option<bool>,
     pub tap_and_drag: Option<bool>,
@@ -522,8 +508,7 @@ pub struct TouchpadConfig {
     pub accel_profile: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone)]
 pub struct XwaylandConfig {
     pub enabled: bool,
     pub path: String,
@@ -547,10 +532,9 @@ impl Default for XwaylandConfig {
 /// real mode list to pick from and its transform is a rendering-pipeline
 /// requirement, not a monitor-orientation choice, so overriding it isn't
 /// meaningful the way it is for a real connector.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct OutputConfig {
     pub name: String,
-    #[serde(default = "default_true")]
     pub enabled: bool,
     /// `"1920x1080"` or `"1920x1080@60"`. Falls back to the connector's own
     /// preferred mode if unset or if nothing matches.
@@ -558,37 +542,33 @@ pub struct OutputConfig {
     /// Falls back to auto-layout (rightmost edge of already-mapped
     /// outputs) if unset.
     pub position: Option<(i32, i32)>,
-    #[serde(default = "default_scale")]
     pub scale: f64,
-    #[serde(default)]
     pub transform: OutputTransformConfig,
 }
 
-fn default_true() -> bool {
-    true
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            enabled: true,
+            mode: None,
+            position: None,
+            scale: 1.0,
+            transform: OutputTransformConfig::default(),
+        }
+    }
 }
 
-fn default_scale() -> f64 {
-    1.0
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum OutputTransformConfig {
     #[default]
     Normal,
-    #[serde(rename = "90")]
     Rotate90,
-    #[serde(rename = "180")]
     Rotate180,
-    #[serde(rename = "270")]
     Rotate270,
     Flipped,
-    #[serde(rename = "flipped-90")]
     Flipped90,
-    #[serde(rename = "flipped-180")]
     Flipped180,
-    #[serde(rename = "flipped-270")]
     Flipped270,
 }
 
@@ -612,8 +592,7 @@ pub struct SwitchEventsConfig {
 /// `[keybinds]` values use (see `parse_action`). Matches the keybinds
 /// pattern of storing raw strings in `RawConfig` and resolving them in
 /// `Config::from_raw`.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Default)]
 struct SwitchEventsRaw {
     lid_close: Option<String>,
     lid_open: Option<String>,
@@ -642,8 +621,7 @@ impl SwitchEventsConfig {
 /// would be nearly useless for them). See `Config::resolve_window_rules`
 /// for how multiple matching entries combine, and `handlers/xdg_shell.rs`'s
 /// `map_toplevel` for where this actually applies.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Default)]
 pub struct WindowRule {
     pub app_id: Option<String>,
     pub title: Option<String>,
@@ -701,9 +679,9 @@ pub fn parse_mode_str(s: &str) -> Option<(i32, i32, Option<f64>)> {
 }
 
 /// Watches the whole config directory tree (not just the main file, and
-/// recursively, so a `keybinds.toml` sitting next to `config.toml` -- or in
+/// recursively, so a `keybinds.wave` sitting next to `config.wave` -- or in
 /// a subdirectory -- is covered too) and forwards a `()` into the returned
-/// calloop `Channel` whenever a `.toml` file under it changes. Keep the
+/// calloop `Channel` whenever a `.wave` file under it changes. Keep the
 /// returned `RecommendedWatcher` alive for as long as watching should
 /// continue; dropping it stops the watch.
 ///
@@ -713,7 +691,7 @@ pub fn parse_mode_str(s: &str) -> Option<(i32, i32, Option<f64>)> {
 /// running), and in every real layout -- this project's own default,
 /// Hyprland's `~/.config/hypr/` -- every included file lives somewhere
 /// under the same config directory anyway, so this covers the actual case
-/// without re-deriving the watch list on every reload. The `.toml`
+/// without re-deriving the watch list on every reload. The `.wave`
 /// extension filter (plus skipping any path with a dotfile/dotdir
 /// component) also keeps a config directory that's its own git repo (as
 /// this user's real Hyprland config is) from spamming reloads on every
@@ -738,7 +716,7 @@ pub fn spawn_watcher() -> notify::Result<(RecommendedWatcher, Channel<()>)> {
         }
         let relevant = event.paths.iter().any(|p| {
             let rel = p.strip_prefix(&watch_root).unwrap_or(p);
-            p.extension().is_some_and(|ext| ext == "toml")
+            p.extension().is_some_and(|ext| ext == "wave")
                 && !rel
                     .components()
                     .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
@@ -756,15 +734,279 @@ pub fn spawn_watcher() -> notify::Result<(RecommendedWatcher, Channel<()>)> {
     Ok((watcher, rx))
 }
 
-/// Reads `path` as TOML and deserializes it into a `RawConfig`, resolving
-/// any `include = [...]` arrays first (see `load_toml_merged`). The single
-/// entry point both `Config::load` and `Config::reload` use so they stay
-/// consistent about how includes are resolved.
+/// Reads `path` as Waves, resolving `include` statements first (see
+/// `waves::resolve`), then lowers the merged entry list into a
+/// `RawConfig`. The single entry point both `Config::load` and
+/// `Config::reload` use so they stay consistent about how includes are
+/// resolved.
 fn load_raw_config(path: &Path) -> Result<RawConfig, String> {
-    let value = load_toml_merged(path)?;
-    let mut raw: RawConfig = value.try_into().map_err(|err: toml::de::Error| err.to_string())?;
+    let entries = waves::resolve(path)?;
+    let mut raw = lower_entries(&entries);
     substitute_variables_in_raw(&mut raw);
     Ok(raw)
+}
+
+/// Lowers a fully-merged Waves entry list into a `RawConfig`, starting
+/// from its defaults and overwriting whatever was actually present.
+/// Unknown keys/blocks warn and are ignored rather than failing the whole
+/// config -- same forgiving convention TOML loading always used (a typo
+/// shouldn't take down a working session).
+fn lower_entries(entries: &[waves::Entry]) -> RawConfig {
+    let mut raw = RawConfig::default();
+    for entry in entries {
+        match entry {
+            waves::Entry::VarDef(name, value) => {
+                raw.variables.insert(name.clone(), value.clone());
+            }
+            waves::Entry::Bind(combo, action) => {
+                raw.keybinds.insert(combo.clone(), action.clone());
+            }
+            // Already resolved away by `waves::resolve` before this ever runs.
+            waves::Entry::Include(_) => {}
+            waves::Entry::Assign(key, value) => apply_top_level_assign(&mut raw, key, value),
+            waves::Entry::Block(keyword, header, body) => apply_top_level_block(&mut raw, keyword, header, body),
+        }
+    }
+    raw
+}
+
+fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
+    match key {
+        "terminal" => raw.terminal = value.to_string(),
+        "show_welcome_hint" => set_bool(&mut raw.show_welcome_hint, key, value),
+        "water_effects" => set_bool(&mut raw.water_effects, key, value),
+        "cursor_always_visible" => set_bool(&mut raw.cursor_always_visible, key, value),
+        "gaps" => set_i32(&mut raw.gaps, key, value),
+        "default_layout" => raw.default_layout = value.to_string(),
+        "pseudo_tile_scale" => set_f64(&mut raw.pseudo_tile_scale, key, value),
+        // List-shaped, not scalar -- accumulates because `waves::merge_into`
+        // already let every occurrence of this one key through instead of
+        // deduping to the last (see `waves::assign_is_multi`).
+        "spawn_at_startup" => raw.spawn_at_startup.push(value.to_string()),
+        other => tracing::warn!(key = %other, value, "Unknown config key, ignoring"),
+    }
+}
+
+fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body: &[waves::Entry]) {
+    match keyword {
+        "input" => apply_input_block(&mut raw.input, body),
+        "xwayland" => apply_xwayland_block(&mut raw.xwayland, body),
+        "output" => raw.outputs.push(lower_output_block(header, body)),
+        "rule" => raw.window_rules.push(lower_window_rule_block(body)),
+        "submap" => {
+            let name = header.trim();
+            if name.is_empty() {
+                tracing::warn!("`submap` block needs a name, ignoring");
+                return;
+            }
+            let binds = raw.submaps.entry(name.to_string()).or_default();
+            for entry in body {
+                match entry {
+                    waves::Entry::Bind(combo, action) => {
+                        binds.insert(combo.clone(), action.clone());
+                    }
+                    _ => tracing::warn!(name, "A `submap` block may only contain `bind` statements, ignoring an entry"),
+                }
+            }
+        }
+        "env" => {
+            for entry in body {
+                match entry {
+                    waves::Entry::Assign(key, value) => {
+                        raw.env.insert(key.clone(), value.clone());
+                    }
+                    _ => tracing::warn!("An `env` block may only contain `key = value` assignments, ignoring an entry"),
+                }
+            }
+        }
+        "switch_events" => apply_switch_events_block(&mut raw.switch_events, body),
+        other => tracing::warn!(keyword = %other, "Unknown config block, ignoring"),
+    }
+}
+
+fn apply_input_block(input: &mut InputConfig, body: &[waves::Entry]) {
+    for entry in body {
+        match entry {
+            waves::Entry::Assign(key, value) => match key.as_str() {
+                "repeat_delay" => set_i32(&mut input.repeat_delay, key, value),
+                "repeat_rate" => set_i32(&mut input.repeat_rate, key, value),
+                "focus_follows_mouse" => set_bool(&mut input.focus_follows_mouse, key, value),
+                "xkb_rules" => input.xkb_rules = value.clone(),
+                "xkb_model" => input.xkb_model = value.clone(),
+                "xkb_layout" => input.xkb_layout = value.clone(),
+                "xkb_variant" => input.xkb_variant = value.clone(),
+                "xkb_options" => input.xkb_options = Some(value.clone()),
+                other => tracing::warn!(key = %other, "Unknown key in `input` block, ignoring"),
+            },
+            waves::Entry::Block(keyword, _, touchpad_body) if keyword == "touchpad" => {
+                apply_touchpad_block(&mut input.touchpad, touchpad_body);
+            }
+            _ => tracing::warn!("Unexpected entry in `input` block, ignoring"),
+        }
+    }
+}
+
+fn apply_touchpad_block(touchpad: &mut TouchpadConfig, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `touchpad` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "tap_to_click" => set_opt_bool(&mut touchpad.tap_to_click, key, value),
+            "tap_and_drag" => set_opt_bool(&mut touchpad.tap_and_drag, key, value),
+            "drag_lock" => set_opt_bool(&mut touchpad.drag_lock, key, value),
+            "disable_while_typing" => set_opt_bool(&mut touchpad.disable_while_typing, key, value),
+            "natural_scroll" => set_opt_bool(&mut touchpad.natural_scroll, key, value),
+            "left_handed" => set_opt_bool(&mut touchpad.left_handed, key, value),
+            "middle_emulation" => set_opt_bool(&mut touchpad.middle_emulation, key, value),
+            "click_method" => touchpad.click_method = Some(value.clone()),
+            "scroll_method" => touchpad.scroll_method = Some(value.clone()),
+            "accel_speed" => set_opt_f64(&mut touchpad.accel_speed, key, value),
+            "accel_profile" => touchpad.accel_profile = Some(value.clone()),
+            other => tracing::warn!(key = %other, "Unknown key in `touchpad` block, ignoring"),
+        }
+    }
+}
+
+fn apply_xwayland_block(xwayland: &mut XwaylandConfig, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `xwayland` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "enabled" => set_bool(&mut xwayland.enabled, key, value),
+            "path" => xwayland.path = value.clone(),
+            other => tracing::warn!(key = %other, "Unknown key in `xwayland` block, ignoring"),
+        }
+    }
+}
+
+fn apply_switch_events_block(switch_events: &mut SwitchEventsRaw, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `switch_events` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "lid_close" => switch_events.lid_close = Some(value.clone()),
+            "lid_open" => switch_events.lid_open = Some(value.clone()),
+            "tablet_mode_on" => switch_events.tablet_mode_on = Some(value.clone()),
+            "tablet_mode_off" => switch_events.tablet_mode_off = Some(value.clone()),
+            other => tracing::warn!(key = %other, "Unknown key in `switch_events` block, ignoring"),
+        }
+    }
+}
+
+fn lower_output_block(header: &str, body: &[waves::Entry]) -> OutputConfig {
+    let mut cfg = OutputConfig { name: header.trim().to_string(), ..Default::default() };
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!(name = %cfg.name, "Unexpected entry in `output` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "enabled" => set_bool(&mut cfg.enabled, key, value),
+            "mode" => cfg.mode = Some(value.clone()),
+            "position" => match parse_position(value) {
+                Some(pos) => cfg.position = Some(pos),
+                None => tracing::warn!(value, "Expected a position like `1920x0`, ignoring"),
+            },
+            "scale" => set_f64(&mut cfg.scale, key, value),
+            "transform" => match parse_transform(value) {
+                Some(t) => cfg.transform = t,
+                None => tracing::warn!(value, "Unknown transform, ignoring"),
+            },
+            other => tracing::warn!(key = %other, "Unknown key in `output` block, ignoring"),
+        }
+    }
+    cfg
+}
+
+fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
+    let mut rule = WindowRule::default();
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `rule` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "app_id" => rule.app_id = Some(value.clone()),
+            "title" => rule.title = Some(value.clone()),
+            "workspace" => match value.parse() {
+                Ok(n) => rule.workspace = Some(n),
+                Err(_) => tracing::warn!(value, "Expected a workspace number, ignoring"),
+            },
+            "output" => rule.output = Some(value.clone()),
+            "float" => set_bool(&mut rule.float, key, value),
+            "pseudo_tile" => set_bool(&mut rule.pseudo_tile, key, value),
+            "pin" => set_bool(&mut rule.pin, key, value),
+            other => tracing::warn!(key = %other, "Unknown key in `rule` block, ignoring"),
+        }
+    }
+    rule
+}
+
+/// `"1920x0"` -> `(1920, 0)`, the same `WxH` shorthand `parse_mode_str`
+/// already uses for resolution, reused here for position.
+fn parse_position(s: &str) -> Option<(i32, i32)> {
+    let (x, y) = s.split_once('x')?;
+    Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+}
+
+fn parse_transform(s: &str) -> Option<OutputTransformConfig> {
+    match s {
+        "normal" => Some(OutputTransformConfig::Normal),
+        "90" => Some(OutputTransformConfig::Rotate90),
+        "180" => Some(OutputTransformConfig::Rotate180),
+        "270" => Some(OutputTransformConfig::Rotate270),
+        "flipped" => Some(OutputTransformConfig::Flipped),
+        "flipped-90" => Some(OutputTransformConfig::Flipped90),
+        "flipped-180" => Some(OutputTransformConfig::Flipped180),
+        "flipped-270" => Some(OutputTransformConfig::Flipped270),
+        _ => None,
+    }
+}
+
+/// Mutates `field` only on a successful parse -- a bad value logs a
+/// warning and leaves whatever was already there (the default, or an
+/// earlier include's value) rather than silently resetting it.
+fn set_bool(field: &mut bool, key: &str, value: &str) {
+    match value {
+        "true" => *field = true,
+        "false" => *field = false,
+        _ => tracing::warn!(key, value, "Expected `true` or `false`, ignoring"),
+    }
+}
+
+fn set_opt_bool(field: &mut Option<bool>, key: &str, value: &str) {
+    match value {
+        "true" => *field = Some(true),
+        "false" => *field = Some(false),
+        _ => tracing::warn!(key, value, "Expected `true` or `false`, ignoring"),
+    }
+}
+
+fn set_i32(field: &mut i32, key: &str, value: &str) {
+    match value.parse() {
+        Ok(n) => *field = n,
+        Err(_) => tracing::warn!(key, value, "Expected an integer, ignoring"),
+    }
+}
+
+fn set_f64(field: &mut f64, key: &str, value: &str) {
+    match value.parse() {
+        Ok(n) => *field = n,
+        Err(_) => tracing::warn!(key, value, "Expected a number, ignoring"),
+    }
+}
+
+fn set_opt_f64(field: &mut Option<f64>, key: &str, value: &str) {
+    match value.parse() {
+        Ok(n) => *field = Some(n),
+        Err(_) => tracing::warn!(key, value, "Expected a number, ignoring"),
+    }
 }
 
 /// Replaces `$name` tokens with their `[variables]` value, but only for
@@ -775,8 +1017,12 @@ fn load_raw_config(path: &Path) -> Result<RawConfig, String> {
 /// written -- substituting *any* `$word` unconditionally would corrupt
 /// those instead of just leaving them for the shell/program that actually
 /// understands them.
+///
+/// `$wave(a, b, c)` is checked first, ahead of the plain-name lookup --
+/// it's a built-in, not something `[variables]` could ever define, so it
+/// works even with no variables set at all. See `resolve_wave_fallback`.
 fn substitute_variables(s: &str, variables: &HashMap<String, String>) -> String {
-    if variables.is_empty() || !s.contains('$') {
+    if !s.contains('$') {
         return s.to_string();
     }
     let mut result = String::with_capacity(s.len());
@@ -784,6 +1030,18 @@ fn substitute_variables(s: &str, variables: &HashMap<String, String>) -> String 
     while let Some(dollar) = rest.find('$') {
         result.push_str(&rest[..dollar]);
         let after = &rest[dollar + 1..];
+
+        if let Some(args) = after.strip_prefix("wave(") {
+            if let Some(end) = args.find(')') {
+                result.push_str(&resolve_wave_fallback(args[..end].split(',').map(str::trim)));
+                rest = &args[end + 1..];
+                continue;
+            }
+            // No closing `)` -- not actually a well-formed `$wave(...)`,
+            // fall through to plain-name handling below instead of
+            // silently eating the rest of the line.
+        }
+
         let name_len = after
             .find(|c: char| !(c.is_alphanumeric() || c == '_'))
             .unwrap_or(after.len());
@@ -800,6 +1058,42 @@ fn substitute_variables(s: &str, variables: &HashMap<String, String>) -> String 
     result
 }
 
+/// Resolves `$wave(a, b, c)` to the first candidate whose own first
+/// whitespace-separated word names a real, executable file -- on `$PATH`,
+/// or directly if it contains a `/`. Falls back to the last candidate,
+/// untried, if none resolve, so a spawn still gets attempted and fails
+/// with a normal, visible "command not found" rather than silently
+/// spawning nothing; an empty candidate list resolves to an empty string.
+fn resolve_wave_fallback<'a>(candidates: impl Iterator<Item = &'a str>) -> String {
+    let candidates: Vec<&str> = candidates.collect();
+    let found = candidates.iter().find(|c| command_exists(c));
+    if found.is_none() {
+        tracing::warn!(?candidates, "$wave(...): none of these were found, using the last one anyway");
+    }
+    found.or(candidates.last()).map(|s| s.to_string()).unwrap_or_default()
+}
+
+/// Whether `candidate`'s first whitespace-separated word is a real,
+/// executable file -- checked directly if it contains a `/`, otherwise
+/// searched on `$PATH`, the same resolution order a shell uses.
+fn command_exists(candidate: &str) -> bool {
+    let bin = candidate.split_whitespace().next().unwrap_or("");
+    if bin.is_empty() {
+        return false;
+    }
+    if bin.contains('/') {
+        return is_executable_file(Path::new(bin));
+    }
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|dir| is_executable_file(&dir.join(bin)))
+    })
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
 /// Applies `substitute_variables` to every field that plausibly reuses a
 /// variable -- keybind/submap combos and actions, `spawn_at_startup`,
 /// `terminal`, `switch_events` -- deliberately skipping match criteria like
@@ -807,10 +1101,9 @@ fn substitute_variables(s: &str, variables: &HashMap<String, String>) -> String 
 /// since those describe something to match against, not a command or bind
 /// where reusing a value makes sense.
 fn substitute_variables_in_raw(raw: &mut RawConfig) {
-    if raw.variables.is_empty() {
-        return;
-    }
-
+    // No early return on `raw.variables.is_empty()` -- `$wave(...)` is a
+    // built-in `substitute_variables` resolves on its own, not something
+    // `[variables]` defines, so it must still run with zero variables set.
     raw.terminal = substitute_variables(&raw.terminal, &raw.variables);
     raw.spawn_at_startup = raw
         .spawn_at_startup
@@ -851,123 +1144,6 @@ fn substitute_variables_in_raw(raw: &mut RawConfig) {
         raw.switch_events.tablet_mode_off.as_deref().map(|s| substitute_variables(s, &raw.variables));
 }
 
-/// Reads `path` as TOML, recursively resolving any top-level `include =
-/// [...]` array (paths relative to the including file's own directory, `~`
-/// expanded) into one merged `toml::Value` -- Hyprland's multi-file
-/// `source = path` idea, adapted to something valid TOML can express.
-///
-/// Merge order matches Hyprland's own `source` semantics: includes are
-/// folded in left-to-right (a later entry in the list overlays an earlier
-/// one), and the including file's own keys always win over anything it
-/// included -- the same relationship its own `moonlit.conf` comment relies
-/// on ("generated overrides, must stay last"), just expressed as "define it
-/// in the file doing the including" instead of "list it last".
-///
-/// Only the top-level file's own errors (missing, unreadable, unparseable,
-/// or a genuine `include` cycle) propagate to the caller. A problem in an
-/// *included* file is logged as a warning and that one include is skipped
-/// -- one bad split-out file shouldn't take down the whole config.
-fn load_toml_merged(path: &Path) -> Result<toml::Value, String> {
-    let mut ancestors = Vec::new();
-    load_toml_merged_inner(path, &mut ancestors)
-}
-
-fn load_toml_merged_inner(path: &Path, ancestors: &mut Vec<PathBuf>) -> Result<toml::Value, String> {
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if ancestors.contains(&canonical) {
-        return Err(format!("include cycle detected at {}", path.display()));
-    }
-    ancestors.push(canonical);
-    let result = load_toml_merged_uncycled(path, ancestors);
-    ancestors.pop();
-    result
-}
-
-fn load_toml_merged_uncycled(path: &Path, ancestors: &mut Vec<PathBuf>) -> Result<toml::Value, String> {
-    let contents = fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
-    let mut value: toml::Value = contents.parse().map_err(|err: toml::de::Error| format!("{}: {err}", path.display()))?;
-
-    let includes: Vec<String> = match value.get("include") {
-        None => Vec::new(),
-        Some(toml::Value::Array(items)) => items
-            .iter()
-            .filter_map(|item| match item.as_str() {
-                Some(s) => Some(s.to_string()),
-                None => {
-                    tracing::warn!(path = %path.display(), "Non-string entry in `include`, skipping");
-                    None
-                }
-            })
-            .collect(),
-        Some(_) => {
-            tracing::warn!(path = %path.display(), "`include` must be an array of paths, ignoring");
-            Vec::new()
-        }
-    };
-    if let Some(table) = value.as_table_mut() {
-        table.remove("include");
-    }
-
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut merged = toml::Value::Table(Default::default());
-    for include in includes {
-        let include_path = resolve_include_path(parent, &include);
-        match load_toml_merged_inner(&include_path, ancestors) {
-            Ok(included) => merged = merge_toml(merged, included),
-            Err(err) => tracing::warn!(path = %include_path.display(), %err, "Failed to load included config file, skipping"),
-        }
-    }
-
-    Ok(merge_toml(merged, value))
-}
-
-/// Expands a leading `~/` against `$HOME` and resolves the result against
-/// `base_dir` (the including file's own directory) if it's not already
-/// absolute -- so a split-out file can `include` a sibling by a plain
-/// relative name, the common case in every real multi-file layout (compare
-/// Hyprland's own `~/.config/hypr/`, where every sourced file just sits
-/// next to `hyprland.conf`).
-fn resolve_include_path(base_dir: &Path, include: &str) -> PathBuf {
-    let expanded = match include.strip_prefix("~/") {
-        Some(rest) => match std::env::var_os("HOME") {
-            Some(home) => PathBuf::from(home).join(rest),
-            None => PathBuf::from(include),
-        },
-        None => PathBuf::from(include),
-    };
-    if expanded.is_absolute() {
-        expanded
-    } else {
-        base_dir.join(expanded)
-    }
-}
-
-/// Combines two parsed TOML values the way folding multiple files together
-/// should behave: tables merge key-by-key, recursing so a nested table
-/// (`[keybinds]`, `[submap.nav]`) combines entry-by-entry instead of one
-/// file's whole table replacing another's; arrays concatenate, so
-/// `[[output]]`/`[[window_rule]]` entries from every file all end up
-/// present rather than only the last file's list surviving; anything else
-/// (a scalar, or two values of different shapes) has `overlay` win outright.
-fn merge_toml(base: toml::Value, overlay: toml::Value) -> toml::Value {
-    match (base, overlay) {
-        (toml::Value::Table(mut base), toml::Value::Table(overlay)) => {
-            for (key, value) in overlay {
-                let merged = match base.remove(&key) {
-                    Some(existing) => merge_toml(existing, value),
-                    None => value,
-                };
-                base.insert(key, merged);
-            }
-            toml::Value::Table(base)
-        }
-        (toml::Value::Array(mut base), toml::Value::Array(overlay)) => {
-            base.extend(overlay);
-            toml::Value::Array(base)
-        }
-        (_, overlay) => overlay,
-    }
-}
 
 static CONFIG_PATH_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
@@ -986,7 +1162,7 @@ fn config_path() -> PathBuf {
         return path.clone();
     }
     if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(dir).join("tidewm").join("config.toml");
+        return PathBuf::from(dir).join("tidewm").join("config.wave");
     }
     let Some(home) = std::env::var_os("HOME") else {
         // Same last-resort fallback `ipc.rs` uses for a missing
@@ -995,12 +1171,12 @@ fn config_path() -> PathBuf {
         // environment (minimal container, restricted PAM session) that
         // happens to clear both variables.
         tracing::warn!("Neither XDG_CONFIG_HOME nor HOME is set; falling back to /tmp for config storage");
-        return PathBuf::from("/tmp").join("tidewm-config").join("config.toml");
+        return PathBuf::from("/tmp").join("tidewm-config").join("config.wave");
     };
     PathBuf::from(home)
         .join(".config")
         .join("tidewm")
-        .join("config.toml")
+        .join("config.wave")
 }
 
 /// Parses a keybind key like `"Super+Shift+Q"` into modifiers plus a base
@@ -1128,20 +1304,35 @@ fn parse_workspace_number(n: &str, full_action: &str) -> Option<u32> {
     }
 }
 
-const DEFAULT_CONFIG_TOML: &str = r#"# TideWM configuration.
+const DEFAULT_CONFIG_WAVE: &str = r#"# TideWM configuration -- Waves format.
 # See DOCUMENTATION.md in the TideWM repo for the full reference.
+#
+# The shape: `key = value` is the rest of the line after the first `=`
+# (so a spawn command's own spaces/flags never need quoting); a line
+# ending in `{` opens a block, always multiline, no exceptions; `#`
+# starts a comment unless it's inside "quotes".
 
-# Split this file across others (Hyprland's "source" idea) by adding an
-# `include` array -- each path is resolved relative to *this* file's own
-# directory, and can itself include further files. A later entry overlays
-# an earlier one, but whatever this file sets below always wins over
-# anything it includes. [keybinds]/[submap.*] tables merge key-by-key
-# across files; [[output]]/[[window_rule]] arrays all accumulate.
-# include = ["monitors.toml", "keybinds.toml"]
+# Split this file across others (Hyprland's "source" idea) with `include`
+# -- resolved relative to *this* file's own directory, can itself include
+# further files, repeatable (one per line). A later include overlays an
+# earlier one, but whatever this file sets below always wins over
+# anything it includes. input/touchpad/env/switch_events/submap blocks
+# merge field-by-field across files; output/rule blocks accumulate.
+# include "monitors.wave"
+# include "keybinds.wave"
 
-# Change this (and the matching "spawn:" keybind below) to whatever
-# terminal you have, e.g. "kitty", "alacritty", "foot".
-terminal = "kitty"
+# `$name = value` defines a variable, substituted anywhere below
+# (Hyprland's own "$mainMod" idea) -- only names defined this way are
+# ever substituted, any other "$" (a spawn command's own $HOME, $PATH,
+# ...) is left exactly as written. Define $mod once, use it everywhere.
+$mod = SUPER
+
+# $wave(a, b, c) is a built-in, not a variable you define: it picks the
+# first candidate whose own first word is actually installed, so the
+# terminal/launcher this file names is the one that's real on whichever
+# machine it's running on, not a guess. Falls back to the last candidate
+# (untried) if none are found, so a spawn still gets attempted.
+terminal = $wave(kitty, alacritty, foot, xterm)
 # Shows a one-time startup message pointing you at Super+Enter (open a
 # terminal). Delete this line, or set it to false, to stop seeing it.
 show_welcome_hint = true
@@ -1154,22 +1345,23 @@ water_effects = true
 cursor_always_visible = false
 gaps = 8
 # Starting tiling algorithm for a workspace with no runtime override (see
-# the "layout:bsp"/"layout:master" keybinds below). "bsp" is this
-# project's existing adaptive engine -- already Hyprland's own "dwindle"
-# behavior (split orientation follows each window's own aspect ratio) --
-# "master" is one master pane plus an evenly-split stack (dwm/Hyprland's
-# "master" layout), always left/right regardless of output aspect ratio.
-default_layout = "bsp"
+# the "layout:bsp"/"layout:master" binds below). "bsp" is this project's
+# existing adaptive engine -- already Hyprland's own "dwindle" behavior
+# (split orientation follows each window's own aspect ratio) -- "master"
+# is one master pane plus an evenly-split stack (dwm/Hyprland's "master"
+# layout), always left/right regardless of output aspect ratio.
+default_layout = bsp
 # Fraction of its tile a pseudo-tiled window keeps, centered within it
-# (see the "toggle-pseudo-tile" keybind below). 0-1; clamped on load.
+# (see the "toggle-pseudo-tile" bind below). 0-1; clamped on load.
 pseudo_tile_scale = 0.7
 
 # Commands to launch once at startup, e.g. a bar or wallpaper daemon.
-# Args are split on whitespace (no shell involved), same as any other
-# spawn in this config -- quoting/globs/pipes aren't supported; wrap in
-# `sh -c "..."` yourself if you need those.
-spawn_at_startup = []
-# spawn_at_startup = ["waybar", "swaybg -i ~/wallpaper.png"]
+# Repeat the key once per command (Hyprland's "exec-once" convention) --
+# not one line holding a list. Args are split on whitespace (no shell
+# involved), same as any other spawn in this config; wrap in
+# `sh -c "..."` yourself if you need quoting/globs/pipes.
+# spawn_at_startup = waybar
+# spawn_at_startup = swaybg -i ~/wallpaper.png
 
 # Environment variables for TideWM's own process, applied before the
 # backend starts (so e.g. XCURSOR_THEME here affects the cursor theme
@@ -1177,212 +1369,212 @@ spawn_at_startup = []
 # systemd/D-Bus session-activation environment alongside WAYLAND_DISPLAY,
 # so anything session-activated (a portal backend, a polkit agent) sees
 # them too -- same idea as Hyprland's "env = KEY,VALUE" lines.
-# [env]
-# XCURSOR_THEME = "Adwaita"
-# XCURSOR_SIZE = "24"
-# QT_QPA_PLATFORMTHEME = "gtk3"
-# GDK_BACKEND = "wayland"
+# env {
+#     XCURSOR_THEME = Adwaita
+#     XCURSOR_SIZE = 24
+#     QT_QPA_PLATFORMTHEME = gtk3
+#     GDK_BACKEND = wayland
+# }
 
-# `$name` values, substituted into terminal/spawn_at_startup/keybinds/
-# submaps/switch_events (Hyprland's own "$mainMod"/"$terminal" idea) so a
-# key or command can be defined once and reused. Only names defined here
-# are ever substituted -- any other "$" (a spawn command's own $HOME,
-# $PATH, ...) is left exactly as written.
-# [variables]
-# mainMod = "Super"
-# terminal = "kitty"
-# then use them below, e.g. "$mainMod+Return" = "spawn:$terminal"
-
-[keybinds]
-"Super+Return" = "spawn:kitty"
-"Super+Q" = "close-window"
-"Super+V" = "toggle-floating"
-"Super+F" = "toggle-fullscreen"
-"Super+Tab" = "cycle-focus"
-"Super+H" = "focus-left"
-"Super+L" = "focus-right"
-"Super+K" = "focus-up"
-"Super+J" = "focus-down"
-"Super+Shift+H" = "swap-left"
-"Super+Shift+L" = "swap-right"
-"Super+Shift+K" = "swap-up"
-"Super+Shift+J" = "swap-down"
-"Super+Shift+Q" = "quit"
+bind $mod+Return = spawn:kitty
+bind $mod+Q = close-window
+bind $mod+V = toggle-floating
+bind $mod+F = toggle-fullscreen
+bind $mod+Tab = cycle-focus
+bind $mod+H = focus-left
+bind $mod+L = focus-right
+bind $mod+K = focus-up
+bind $mod+J = focus-down
+bind $mod+Shift+H = swap-left
+bind $mod+Shift+L = swap-right
+bind $mod+Shift+K = swap-up
+bind $mod+Shift+J = swap-down
+bind $mod+Shift+Q = quit
 # Un-tiles the focused window (floating it first, if it isn't already)
 # and keeps it visible across every workspace switch on its output --
 # handy for a music player or notes app you always want on top.
-"Super+P" = "toggle-pin"
+bind $mod+P = toggle-pin
 # Shrinks the focused tiled window to pseudo_tile_scale of its tile,
 # centered within it, instead of filling the tile -- handy for something
 # like a calculator or picture-in-picture video that doesn't want to
 # stretch. Stays tiled (unlike floating): its slot in the layout is
 # unchanged, just the rect it actually renders at.
-"Super+Shift+P" = "toggle-pseudo-tile"
+bind $mod+Shift+P = toggle-pseudo-tile
 # Switches the current workspace between the two tiling algorithms (see
 # default_layout above). "master-grow"/"master-shrink" nudge the master/
 # stack ratio in steps (dwm/Hyprland's convention) -- a no-op while bsp
 # is active, since there's no master ratio for it to affect.
-"Super+W" = "layout:bsp"
-"Super+Shift+W" = "layout:master"
-"Super+Ctrl+Minus" = "master-shrink"
-"Super+Ctrl+Equal" = "master-grow"
+bind $mod+W = layout:bsp
+bind $mod+Shift+W = layout:master
+bind $mod+Ctrl+Minus = master-shrink
+bind $mod+Ctrl+Equal = master-grow
 # Shows/hides a schematic grid of every workspace on the current output
 # (rects + titles, not live thumbnails of window content -- see AGENT.md's
 # Overview note for why). Press again to dismiss.
-"Super+O" = "toggle-overview"
+bind $mod+O = toggle-overview
 # Merges the focused tiled window with its neighbor into one shared tab
 # slot (i3/sway's "tabbed container" idea) -- cycle between them with
 # Super+]/Super+[, split the focused tab back out with Super+Shift+G.
-"Super+Ctrl+H" = "group-left"
-"Super+Ctrl+L" = "group-right"
-"Super+Ctrl+K" = "group-up"
-"Super+Ctrl+J" = "group-down"
-"Super+Shift+G" = "ungroup"
-"Super+BracketRight" = "cycle-tab-next"
-"Super+BracketLeft" = "cycle-tab-prev"
+bind $mod+Ctrl+H = group-left
+bind $mod+Ctrl+L = group-right
+bind $mod+Ctrl+K = group-up
+bind $mod+Ctrl+J = group-down
+bind $mod+Shift+G = ungroup
+bind $mod+BracketRight = cycle-tab-next
+bind $mod+BracketLeft = cycle-tab-prev
 # i3/sway's own default scratchpad binds: a hidden holding workspace,
 # shown/hidden with one key rather than switched to like a normal one.
-"Super+Minus" = "toggle-scratchpad"
-"Super+Shift+Minus" = "move-to-scratchpad"
+bind $mod+Minus = toggle-scratchpad
+bind $mod+Shift+Minus = move-to-scratchpad
 # Workspaces 1-9 on their own number key, 10 on the "0" key, matching
 # i3/sway's convention. Super+Shift+<N> moves the focused window there
 # without switching your own view to it.
-"Super+1" = "workspace:1"
-"Super+2" = "workspace:2"
-"Super+3" = "workspace:3"
-"Super+4" = "workspace:4"
-"Super+5" = "workspace:5"
-"Super+6" = "workspace:6"
-"Super+7" = "workspace:7"
-"Super+8" = "workspace:8"
-"Super+9" = "workspace:9"
-"Super+0" = "workspace:10"
-"Super+Shift+1" = "move-to-workspace:1"
-"Super+Shift+2" = "move-to-workspace:2"
-"Super+Shift+3" = "move-to-workspace:3"
-"Super+Shift+4" = "move-to-workspace:4"
-"Super+Shift+5" = "move-to-workspace:5"
-"Super+Shift+6" = "move-to-workspace:6"
-"Super+Shift+7" = "move-to-workspace:7"
-"Super+Shift+8" = "move-to-workspace:8"
-"Super+Shift+9" = "move-to-workspace:9"
-"Super+Shift+0" = "move-to-workspace:10"
+bind $mod+1 = workspace:1
+bind $mod+2 = workspace:2
+bind $mod+3 = workspace:3
+bind $mod+4 = workspace:4
+bind $mod+5 = workspace:5
+bind $mod+6 = workspace:6
+bind $mod+7 = workspace:7
+bind $mod+8 = workspace:8
+bind $mod+9 = workspace:9
+bind $mod+0 = workspace:10
+bind $mod+Shift+1 = move-to-workspace:1
+bind $mod+Shift+2 = move-to-workspace:2
+bind $mod+Shift+3 = move-to-workspace:3
+bind $mod+Shift+4 = move-to-workspace:4
+bind $mod+Shift+5 = move-to-workspace:5
+bind $mod+Shift+6 = move-to-workspace:6
+bind $mod+Shift+7 = move-to-workspace:7
+bind $mod+Shift+8 = move-to-workspace:8
+bind $mod+Shift+9 = move-to-workspace:9
+bind $mod+Shift+0 = move-to-workspace:10
 # Swaps what's on this output with what's on the named one -- no default
 # bind, output names are machine-specific (check your logs, or the
 # `outputs` IPC query, for what TideWM calls yours). Uncomment and fill
 # in your own second monitor's name to use it.
-# "Super+Shift+O" = "swap-workspaces:DP-2"
+# bind $mod+Shift+O = swap-workspaces:DP-2
 # Enters the "nav" submap below (sway/Hyprland's "mode" idea): a
 # temporary alternate keybind table, active until its own exit-submap
 # bind, not tied to focus. Query which submap (if any) is currently
 # active via the IPC socket's `active-submap` request, or `tidectl
 # active-submap`.
-"Super+N" = "submap:nav"
+bind $mod+N = submap:nav
 
 # A submap: vim-motion focus-move with no modifier held, since you're
 # already "in a mode." A resize mode is the more common example
 # elsewhere, but needs a keyboard resize action this project doesn't
-# have yet. Add more [submap.<name>] tables the same way for others.
-[submap.nav]
-h = "focus-left"
-l = "focus-right"
-k = "focus-up"
-j = "focus-down"
-Escape = "exit-submap"
+# have yet. Add more `submap <name> { }` blocks the same way for others.
+submap nav {
+    bind h = focus-left
+    bind l = focus-right
+    bind k = focus-up
+    bind j = focus-down
+    bind Escape = exit-submap
+}
 
-[input]
-repeat_delay = 200
-repeat_rate = 25
-focus_follows_mouse = true
-# Keyboard layout (xkbcommon rules/model/layout/variant/options). Leave
-# these unset and xkbcommon falls back to your XKB_DEFAULT_* env vars, same
-# as today. A comma-separated layout list plus xkb_options is how you get a
-# switchable multi-layout setup (setxkbmap/Hyprland/niri use the same
-# syntax), e.g. xkb_layout = "us,de" with a grp: toggle option below.
-# xkb_layout = "us"
-# xkb_variant = ""
-# xkb_options = "grp:alt_shift_toggle"
-# xkb_model = ""
-# xkb_rules = ""
+input {
+    repeat_delay = 200
+    repeat_rate = 25
+    focus_follows_mouse = true
+    # Keyboard layout (xkbcommon rules/model/layout/variant/options).
+    # Leave these unset and xkbcommon falls back to your XKB_DEFAULT_*
+    # env vars, same as today. A comma-separated layout list plus
+    # xkb_options is how you get a switchable multi-layout setup
+    # (setxkbmap/Hyprland/niri use the same syntax), e.g.
+    # xkb_layout = us,de with a grp: toggle option below.
+    # xkb_layout = us
+    # xkb_variant =
+    # xkb_options = grp:alt_shift_toggle
+    # xkb_model =
+    # xkb_rules =
 
-# Touchpad settings, udev backend only -- winit's nested host input can't
-# reach a real libinput device. Every key is opt-in: leave it commented out
-# and that setting is untouched, using whatever your driver already
-# defaults to. Takes effect for a touchpad connected at or after startup;
-# an edit here needs a restart to reach one already connected.
-[input.touchpad]
-# tap_to_click = true
-# tap_and_drag = true
-# drag_lock = false
-# disable_while_typing = true
-# natural_scroll = true
-# left_handed = false
-# middle_emulation = false
-# click_method = "clickfinger"   # or "button-areas"
-# scroll_method = "two-finger"   # or "edge", "on-button-down", "none"
-# accel_speed = 0.0              # -1.0 (slowest) .. 1.0 (fastest)
-# accel_profile = "adaptive"     # or "flat"
+    # Touchpad settings, udev backend only -- winit's nested host input
+    # can't reach a real libinput device. Every key is opt-in: leave it
+    # commented out and that setting is untouched, using whatever your
+    # driver already defaults to. Takes effect for a touchpad connected
+    # at or after startup; an edit here needs a restart to reach one
+    # already connected.
+    touchpad {
+        # tap_to_click = true
+        # tap_and_drag = true
+        # drag_lock = false
+        # disable_while_typing = true
+        # natural_scroll = true
+        # left_handed = false
+        # middle_emulation = false
+        # click_method = clickfinger   # or button-areas
+        # scroll_method = two-finger   # or edge, on-button-down, none
+        # accel_speed = 0.0            # -1.0 (slowest) .. 1.0 (fastest)
+        # accel_profile = adaptive     # or flat
+    }
+}
 
-[xwayland]
-enabled = true
-path = "xwayland-satellite"
+xwayland {
+    enabled = true
+    path = xwayland-satellite
+}
 
 # Per-output overrides, udev backend only. Purely opt-in -- omit entirely
 # and every connected output just auto-configures (preferred mode,
-# auto-positioned, scale 1, no rotation), same as today. `name` is the
-# connector name (check your logs for what TideWM detected, e.g.
-# "eDP-1", "DP-2"). Every other field is optional; specify only what
-# you want to override.
+# auto-positioned, scale 1, no rotation), same as today. The header is
+# the connector name (check your logs for what TideWM detected, e.g.
+# "eDP-1", "DP-2"). Every field is optional; specify only what you want
+# to override.
 #
-# [[output]]
-# name = "eDP-1"
-# enabled = true
-# mode = "1920x1080@60"
-# position = [0, 0]
-# scale = 1.0
-# transform = "normal"  # or "90", "180", "270", "flipped", "flipped-90", "flipped-180", "flipped-270"
+# output eDP-1 {
+#     enabled = true
+#     mode = 1920x1080@60
+#     position = 0x0
+#     scale = 1.0
+#     transform = normal  # or 90, 180, 270, flipped, flipped-90, flipped-180, flipped-270
+# }
 
 # Laptop lid / tablet-mode switch events, udev backend only (libinput's
 # switch capability isn't reachable through winit's nested-session
-# backend). Each entry takes the same action string [keybinds] does --
+# backend). Each entry takes the same action string binds do --
 # "spawn:...", "close-window", "workspace:N", anything -- but in practice
 # you almost always want "spawn:", since the things you'd want to react
 # with (suspend, screen lock, brightness, an onboard keyboard) live
-# outside the compositor. All four default to empty (no action); comment
-# in whichever you want. systemd-logind already triggers suspend on lid
-# close independently of this (its `HandleLidSwitch=` policy in
+# outside the compositor. All four unset by default; comment in whichever
+# you want. systemd-logind already triggers suspend on lid close
+# independently of this (its `HandleLidSwitch=` policy in
 # /etc/systemd/logind.conf), so a `lid_close` entry here is for whatever
 # extra you want on top of that, not a replacement for it. (No logind?
-# Nothing suspends on lid-close on its own -- put "spawn:systemctl suspend"
-# or your init's equivalent here.)
+# Nothing suspends on lid-close on its own -- put "spawn:systemctl
+# suspend" or your init's equivalent here.)
 #
-# [switch_events]
-# lid_close = "spawn:systemctl suspend"
-# lid_open = "spawn:brightnessctl s 50%"
-# tablet_mode_on = "spawn:onboard"
-# tablet_mode_off = "spawn:pkill onboard"
+# switch_events {
+#     lid_close = spawn:systemctl suspend
+#     lid_open = spawn:brightnessctl s 50%
+#     tablet_mode_on = spawn:onboard
+#     tablet_mode_off = spawn:pkill onboard
+# }
 
 # Per-app placement applied the moment a window first maps, before it's
 # ever tiled/rendered at its default spot (i3/sway's "for_window",
 # Hyprland's "windowrule" idea). Purely opt-in -- no rules, no behavior
 # change. `app_id` matches exactly; `title` matches case-insensitively
-# anywhere in the string. At least one of the two is required, or the rule
-# never matches anything. Multiple [[window_rule]] blocks can match the
-# same window; workspace/output take the last match, float/pseudo_tile/pin
-# accumulate (any match sets it).
+# anywhere in the string. At least one of the two is required, or the
+# rule never matches anything. Multiple `rule { }` blocks can match the
+# same window; workspace/output take the last match, float/pseudo_tile/
+# pin accumulate (any match sets it).
 #
-# [[window_rule]]
-# app_id = "pavucontrol"
-# float = true
+# rule {
+#     app_id = pavucontrol
+#     float = true
+# }
 #
-# [[window_rule]]
-# title = "Picture-in-Picture"
-# float = true
-# pin = true
+# rule {
+#     title = Picture-in-Picture
+#     float = true
+#     pin = true
+# }
 #
-# [[window_rule]]
-# app_id = "Slack"
-# workspace = 3
+# rule {
+#     app_id = Slack
+#     workspace = 3
+# }
 "#;
 
 #[cfg(test)]
@@ -1526,15 +1718,11 @@ mod tests {
     fn load_raw_config_substitutes_variables_into_keybinds_and_spawn_at_startup() {
         let dir = TestDir::new("variables");
         let main = dir.write(
-            "config.toml",
-            r#"
-            spawn_at_startup = ["$terminal --daemon"]
-            [variables]
-            mainMod = "SUPER"
-            terminal = "kitty"
-            [keybinds]
-            "$mainMod+Return" = "spawn:$terminal"
-            "#,
+            "config.wave",
+            "spawn_at_startup = $terminal --daemon\n\
+             $mainMod = SUPER\n\
+             $terminal = kitty\n\
+             bind $mainMod+Return = spawn:$terminal\n",
         );
 
         let raw = load_raw_config(&main).expect("should parse");
@@ -1544,51 +1732,21 @@ mod tests {
     }
 
     #[test]
-    fn merge_toml_merges_tables_recursively_concats_arrays_scalar_overlay_wins() {
-        let base: toml::Value = toml::from_str(
-            r#"
-            terminal = "kitty"
-            gaps = 8
-            [keybinds]
-            "Super+Q" = "close-window"
-            [[output]]
-            name = "eDP-1"
-            "#,
-        )
-        .unwrap();
-        let overlay: toml::Value = toml::from_str(
-            r#"
-            gaps = 10
-            [keybinds]
-            "Super+F" = "toggle-fullscreen"
-            [[output]]
-            name = "DP-2"
-            "#,
-        )
-        .unwrap();
+    fn load_raw_config_resolves_wave_fallback_to_the_first_real_command() {
+        // /bin/sh always exists on any system that can even run this test
+        // suite; "definitely-not-a-real-binary" never will. First match
+        // wins over an earlier miss, not just the first candidate overall.
+        let dir = TestDir::new("wave-fallback");
+        let main = dir.write("config.wave", "terminal = $wave(definitely-not-a-real-binary, /bin/sh, kitty)\n");
 
-        let merged = merge_toml(base, overlay);
-
-        // Scalar: overlay wins outright.
-        assert_eq!(merged.get("gaps").and_then(toml::Value::as_integer), Some(10));
-        // Untouched-by-overlay scalar survives from base.
-        assert_eq!(merged.get("terminal").and_then(toml::Value::as_str), Some("kitty"));
-        // Table: keys from both sides present, merged key-wise.
-        let keybinds = merged.get("keybinds").unwrap();
-        assert_eq!(keybinds.get("Super+Q").and_then(toml::Value::as_str), Some("close-window"));
-        assert_eq!(keybinds.get("Super+F").and_then(toml::Value::as_str), Some("toggle-fullscreen"));
-        // Array of tables: concatenated, not replaced.
-        let outputs = merged.get("output").and_then(toml::Value::as_array).unwrap();
-        assert_eq!(outputs.len(), 2);
-        assert_eq!(outputs[0].get("name").and_then(toml::Value::as_str), Some("eDP-1"));
-        assert_eq!(outputs[1].get("name").and_then(toml::Value::as_str), Some("DP-2"));
+        let raw = load_raw_config(&main).expect("should parse");
+        assert_eq!(raw.terminal, "/bin/sh");
     }
 
     /// Sets up an isolated directory under the system temp dir for a single
     /// test, cleaned up on drop -- these tests exercise real file I/O
-    /// (`load_toml_merged` resolving `include` paths relative to the file
-    /// doing the including), which in-memory `toml::Value` construction
-    /// can't cover.
+    /// (`load_raw_config` resolving `include` paths relative to the file
+    /// doing the including), which in-memory AST construction can't cover.
     struct TestDir(PathBuf);
     impl TestDir {
         fn new(name: &str) -> Self {
@@ -1610,55 +1768,47 @@ mod tests {
     }
 
     #[test]
-    fn load_toml_merged_resolves_relative_includes_with_including_files_own_keys_winning() {
+    fn load_raw_config_resolves_relative_includes_with_including_files_own_keys_winning() {
         let dir = TestDir::new("includes");
-        dir.write(
-            "keybinds.toml",
-            "[keybinds]\n\"Super+Q\" = \"close-window\"\n",
-        );
+        dir.write("keybinds.wave", "bind Super+Q = close-window\n");
         let main = dir.write(
-            "config.toml",
-            "include = [\"keybinds.toml\"]\nterminal = \"kitty\"\n[keybinds]\n\"Super+F\" = \"toggle-fullscreen\"\n",
+            "config.wave",
+            "include \"keybinds.wave\"\nterminal = kitty\nbind Super+F = toggle-fullscreen\n",
         );
 
-        let merged = load_toml_merged(&main).expect("include chain should resolve");
+        let raw = load_raw_config(&main).expect("include chain should resolve");
 
-        assert_eq!(merged.get("terminal").and_then(toml::Value::as_str), Some("kitty"));
-        // Included file's key survives (tables merge key-wise)...
-        let keybinds = merged.get("keybinds").unwrap();
-        assert_eq!(keybinds.get("Super+Q").and_then(toml::Value::as_str), Some("close-window"));
-        // ...and the including file's own key is present too, not clobbered
-        // by the include (merge order: include first, own keys folded on top).
-        assert_eq!(keybinds.get("Super+F").and_then(toml::Value::as_str), Some("toggle-fullscreen"));
-        // The `include` directive itself must not leak into the merged value.
-        assert!(merged.get("include").is_none());
+        assert_eq!(raw.terminal, "kitty");
+        // Included file's bind survives...
+        assert_eq!(raw.keybinds.get("Super+Q").map(String::as_str), Some("close-window"));
+        // ...and the including file's own bind is present too, not
+        // clobbered by the include (merge order: include first, own
+        // entries folded on top).
+        assert_eq!(raw.keybinds.get("Super+F").map(String::as_str), Some("toggle-fullscreen"));
     }
 
     #[test]
-    fn load_toml_merged_later_include_overlays_earlier_one() {
+    fn load_raw_config_later_include_overlays_earlier_one() {
         let dir = TestDir::new("include-order");
-        dir.write("a.toml", "gaps = 4\n");
-        dir.write("b.toml", "gaps = 12\n");
-        let main = dir.write("config.toml", "include = [\"a.toml\", \"b.toml\"]\n");
+        dir.write("a.wave", "gaps = 4\n");
+        dir.write("b.wave", "gaps = 12\n");
+        let main = dir.write("config.wave", "include \"a.wave\"\ninclude \"b.wave\"\n");
 
-        let merged = load_toml_merged(&main).unwrap();
-        assert_eq!(merged.get("gaps").and_then(toml::Value::as_integer), Some(12));
+        let raw = load_raw_config(&main).unwrap();
+        assert_eq!(raw.gaps, 12);
     }
 
     #[test]
-    fn load_toml_merged_skips_a_missing_include_instead_of_failing_the_whole_load() {
+    fn load_raw_config_skips_a_missing_include_instead_of_failing_the_whole_load() {
         let dir = TestDir::new("missing-include");
-        let main = dir.write(
-            "config.toml",
-            "include = [\"does-not-exist.toml\"]\nterminal = \"kitty\"\n",
-        );
+        let main = dir.write("config.wave", "include \"does-not-exist.wave\"\nterminal = kitty\n");
 
-        let merged = load_toml_merged(&main).expect("a bad include must not fail the top-level file");
-        assert_eq!(merged.get("terminal").and_then(toml::Value::as_str), Some("kitty"));
+        let raw = load_raw_config(&main).expect("a bad include must not fail the top-level file");
+        assert_eq!(raw.terminal, "kitty");
     }
 
     #[test]
-    fn load_toml_merged_detects_include_cycles_without_infinite_recursion() {
+    fn load_raw_config_detects_include_cycles_without_infinite_recursion() {
         // A cycle is caught deep in the include graph (b -> a, while a is
         // still an in-progress ancestor), the same place any other broken
         // include would be caught -- so it takes the same "log a warning,
@@ -1667,23 +1817,32 @@ mod tests {
         // matters here is that this terminates at all instead of
         // recursing forever; if it didn't, this test would hang, not fail.
         let dir = TestDir::new("cycle");
-        dir.write("b.toml", "include = [\"a.toml\"]\n");
-        let a = dir.write("a.toml", "include = [\"b.toml\"]\nterminal = \"kitty\"\n");
+        dir.write("b.wave", "include \"a.wave\"\n");
+        let a = dir.write("a.wave", "include \"b.wave\"\nterminal = kitty\n");
 
-        let merged = load_toml_merged(&a).expect("a cycle is skipped with a warning, not a hard failure");
-        assert_eq!(merged.get("terminal").and_then(toml::Value::as_str), Some("kitty"));
+        let raw = load_raw_config(&a).expect("a cycle is skipped with a warning, not a hard failure");
+        assert_eq!(raw.terminal, "kitty");
+    }
+
+    /// Parses and lowers `DEFAULT_CONFIG_WAVE` exactly the way `load_raw_config`
+    /// would for a real file (including `$mod` substitution), without
+    /// needing a real path on disk -- there's nothing to `include` in the
+    /// shipped default, so `waves::parse` alone (no `waves::resolve`) is
+    /// enough.
+    fn parse_default_config() -> Config {
+        let entries = waves::parse(DEFAULT_CONFIG_WAVE, Path::new("<default>")).expect("DEFAULT_CONFIG_WAVE must parse");
+        let mut raw = lower_entries(&entries);
+        substitute_variables_in_raw(&mut raw);
+        Config::from_raw(raw)
     }
 
     #[test]
     fn default_submap_parses_from_both_the_in_memory_and_written_defaults() {
         // Two independently hand-maintained representations of the same
-        // default (see `RawConfig::default()` and `DEFAULT_CONFIG_TOML`'s
+        // default (see `RawConfig::default()` and `DEFAULT_CONFIG_WAVE`'s
         // own doc note) -- assert both actually agree, not just that one
         // of them happens to parse.
-        for config in [Config::from_raw(RawConfig::default()), {
-            let raw: RawConfig = toml::from_str(DEFAULT_CONFIG_TOML).expect("DEFAULT_CONFIG_TOML must parse");
-            Config::from_raw(raw)
-        }] {
+        for config in [Config::from_raw(RawConfig::default()), parse_default_config()] {
             let nav = config.submaps.get("nav").expect("default config should ship a `nav` submap");
             let find = |key: &str| nav.iter().find(|b| b.keysym == xkb::keysym_from_name(key, xkb::KEYSYM_CASE_INSENSITIVE));
             assert!(matches!(find("h").map(|b| &b.action), Some(Action::FocusDirection(Direction::Left))));
@@ -1704,13 +1863,11 @@ mod tests {
     fn default_layout_keybinds_parse_from_both_the_in_memory_and_written_defaults() {
         // Same two-representations-must-agree check as the submap test
         // above, for the layout-algorithm keybinds: also catches, for free,
-        // a duplicate TOML key in DEFAULT_CONFIG_TOML (the parse itself
-        // would fail loudly rather than silently overwrite, unlike the
-        // in-memory HashMap side).
-        for config in [Config::from_raw(RawConfig::default()), {
-            let raw: RawConfig = toml::from_str(DEFAULT_CONFIG_TOML).expect("DEFAULT_CONFIG_TOML must parse");
-            Config::from_raw(raw)
-        }] {
+        // a duplicate `bind` for the same combo in DEFAULT_CONFIG_WAVE
+        // (last one silently wins there, unlike a literal duplicate TOML
+        // key, which used to fail the parse loudly -- worth a second look
+        // at the template by eye if this test ever breaks unexpectedly).
+        for config in [Config::from_raw(RawConfig::default()), parse_default_config()] {
             let find = |key: &str, mods: Mods| {
                 config
                     .keybinds
