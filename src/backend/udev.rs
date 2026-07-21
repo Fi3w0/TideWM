@@ -1275,8 +1275,19 @@ fn render_surface(
             // DrmOutputManager all follow this contract.
             if render_result.needs_sync() {
                 if let PrimaryPlaneElement::Swapchain(ref element) = render_result.primary_element {
-                    while let Err(e) = element.sync.wait() {
-                        tracing::warn!(%e, "GPU fence wait interrupted; retrying");
+                    // `Fence::wait` blocks on `eglClientWaitSyncKHR` with an
+                    // infinite timeout; per that call's own spec (see
+                    // Smithay's safety comment on `EGLFence::client_wait`),
+                    // the only error it can return is an invalid sync
+                    // object, not a transient interruption despite the
+                    // error type's name -- retrying forever, as this used
+                    // to, would hang the only event-loop thread on a single
+                    // bad fence permanently, the same class of freeze the
+                    // 0.15.1 `TileMoveGrab` deadlock caused. One attempt,
+                    // then present whatever the swapchain already has
+                    // rather than never presenting again.
+                    if let Err(e) = element.sync.wait() {
+                        tracing::error!(%e, "GPU fence wait failed (non-retryable); presenting without waiting");
                     }
                 }
             }
