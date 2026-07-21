@@ -1304,82 +1304,40 @@ fn parse_workspace_number(n: &str, full_action: &str) -> Option<u32> {
     }
 }
 
-const DEFAULT_CONFIG_WAVE: &str = r#"# TideWM configuration -- Waves format.
-# See DOCUMENTATION.md in the TideWM repo for the full reference.
-#
-# The shape: `key = value` is the rest of the line after the first `=`
-# (so a spawn command's own spaces/flags never need quoting); a line
-# ending in `{` opens a block, always multiline, no exceptions; `#`
-# starts a comment unless it's inside "quotes".
+const DEFAULT_CONFIG_WAVE: &str = r#"# TideWM configuration.
+# Full reference: DOCUMENTATION.md in the TideWM repo.
 
-# Split this file across others (Hyprland's "source" idea) with `include`
-# -- resolved relative to *this* file's own directory, can itself include
-# further files, repeatable (one per line). A later include overlays an
-# earlier one, but whatever this file sets below always wins over
-# anything it includes. input/touchpad/env/switch_events/submap blocks
-# merge field-by-field across files; output/rule blocks accumulate.
 # include "monitors.wave"
 # include "keybinds.wave"
 
-# `$name = value` defines a variable, substituted anywhere below
-# (Hyprland's own "$mainMod" idea) -- only names defined this way are
-# ever substituted, any other "$" (a spawn command's own $HOME, $PATH,
-# ...) is left exactly as written. Define $mod once, use it everywhere.
 $mod = SUPER
 
-# $wave(a, b, c) is a built-in, not a variable you define: it picks the
-# first candidate whose own first word is actually installed, so the
-# terminal/launcher this file names is the one that's real on whichever
-# machine it's running on, not a guess. Falls back to the last candidate
-# (untried) if none are found, so a spawn still gets attempted.
 terminal = $wave(kitty, alacritty, foot, xterm)
-# Shows a one-time startup message pointing you at Super+Enter (open a
-# terminal). Delete this line, or set it to false, to stop seeing it.
 show_welcome_hint = true
 water_effects = true
-# Forces the on-screen pointer to stay visible even when a client asks to
-# hide it (e.g. a terminal hiding its own cursor glyph after inactivity).
-# Off by default -- respecting a client's own hide request is correct
-# behavior; this is an opt-in override. udev backend only (winit never
-# draws its own cursor).
 cursor_always_visible = false
 gaps = 8
-# Starting tiling algorithm for a workspace with no runtime override (see
-# the "layout:bsp"/"layout:master" binds below). "bsp" is this project's
-# existing adaptive engine -- already Hyprland's own "dwindle" behavior
-# (split orientation follows each window's own aspect ratio) -- "master"
-# is one master pane plus an evenly-split stack (dwm/Hyprland's "master"
-# layout), always left/right regardless of output aspect ratio.
 default_layout = bsp
-# Fraction of its tile a pseudo-tiled window keeps, centered within it
-# (see the "toggle-pseudo-tile" bind below). 0-1; clamped on load.
 pseudo_tile_scale = 0.7
 
-# Commands to launch once at startup, e.g. a bar or wallpaper daemon.
-# Repeat the key once per command (Hyprland's "exec-once" convention) --
-# not one line holding a list. Args are split on whitespace (no shell
-# involved), same as any other spawn in this config; wrap in
-# `sh -c "..."` yourself if you need quoting/globs/pipes.
 # spawn_at_startup = waybar
 # spawn_at_startup = swaybg -i ~/wallpaper.png
 
-# Environment variables for TideWM's own process, applied before the
-# backend starts (so e.g. XCURSOR_THEME here affects the cursor theme
-# TideWM itself loads, not just child processes) and pushed into the
-# systemd/D-Bus session-activation environment alongside WAYLAND_DISPLAY,
-# so anything session-activated (a portal backend, a polkit agent) sees
-# them too -- same idea as Hyprland's "env = KEY,VALUE" lines.
 # env {
 #     XCURSOR_THEME = Adwaita
-#     XCURSOR_SIZE = 24
-#     QT_QPA_PLATFORMTHEME = gtk3
 #     GDK_BACKEND = wayland
 # }
 
+# Windows
 bind $mod+Return = spawn:kitty
 bind $mod+Q = close-window
 bind $mod+V = toggle-floating
 bind $mod+F = toggle-fullscreen
+bind $mod+P = toggle-pin
+bind $mod+Shift+P = toggle-pseudo-tile
+bind $mod+Shift+Q = quit
+
+# Focus and layout
 bind $mod+Tab = cycle-focus
 bind $mod+H = focus-left
 bind $mod+L = focus-right
@@ -1389,32 +1347,13 @@ bind $mod+Shift+H = swap-left
 bind $mod+Shift+L = swap-right
 bind $mod+Shift+K = swap-up
 bind $mod+Shift+J = swap-down
-bind $mod+Shift+Q = quit
-# Un-tiles the focused window (floating it first, if it isn't already)
-# and keeps it visible across every workspace switch on its output --
-# handy for a music player or notes app you always want on top.
-bind $mod+P = toggle-pin
-# Shrinks the focused tiled window to pseudo_tile_scale of its tile,
-# centered within it, instead of filling the tile -- handy for something
-# like a calculator or picture-in-picture video that doesn't want to
-# stretch. Stays tiled (unlike floating): its slot in the layout is
-# unchanged, just the rect it actually renders at.
-bind $mod+Shift+P = toggle-pseudo-tile
-# Switches the current workspace between the two tiling algorithms (see
-# default_layout above). "master-grow"/"master-shrink" nudge the master/
-# stack ratio in steps (dwm/Hyprland's convention) -- a no-op while bsp
-# is active, since there's no master ratio for it to affect.
 bind $mod+W = layout:bsp
 bind $mod+Shift+W = layout:master
 bind $mod+Ctrl+Minus = master-shrink
 bind $mod+Ctrl+Equal = master-grow
-# Shows/hides a schematic grid of every workspace on the current output
-# (rects + titles, not live thumbnails of window content -- see AGENT.md's
-# Overview note for why). Press again to dismiss.
 bind $mod+O = toggle-overview
-# Merges the focused tiled window with its neighbor into one shared tab
-# slot (i3/sway's "tabbed container" idea) -- cycle between them with
-# Super+]/Super+[, split the focused tab back out with Super+Shift+G.
+
+# Groups (tabbing)
 bind $mod+Ctrl+H = group-left
 bind $mod+Ctrl+L = group-right
 bind $mod+Ctrl+K = group-up
@@ -1422,13 +1361,12 @@ bind $mod+Ctrl+J = group-down
 bind $mod+Shift+G = ungroup
 bind $mod+BracketRight = cycle-tab-next
 bind $mod+BracketLeft = cycle-tab-prev
-# i3/sway's own default scratchpad binds: a hidden holding workspace,
-# shown/hidden with one key rather than switched to like a normal one.
+
+# Scratchpad
 bind $mod+Minus = toggle-scratchpad
 bind $mod+Shift+Minus = move-to-scratchpad
-# Workspaces 1-9 on their own number key, 10 on the "0" key, matching
-# i3/sway's convention. Super+Shift+<N> moves the focused window there
-# without switching your own view to it.
+
+# Workspaces
 bind $mod+1 = workspace:1
 bind $mod+2 = workspace:2
 bind $mod+3 = workspace:3
@@ -1449,22 +1387,10 @@ bind $mod+Shift+7 = move-to-workspace:7
 bind $mod+Shift+8 = move-to-workspace:8
 bind $mod+Shift+9 = move-to-workspace:9
 bind $mod+Shift+0 = move-to-workspace:10
-# Swaps what's on this output with what's on the named one -- no default
-# bind, output names are machine-specific (check your logs, or the
-# `outputs` IPC query, for what TideWM calls yours). Uncomment and fill
-# in your own second monitor's name to use it.
 # bind $mod+Shift+O = swap-workspaces:DP-2
-# Enters the "nav" submap below (sway/Hyprland's "mode" idea): a
-# temporary alternate keybind table, active until its own exit-submap
-# bind, not tied to focus. Query which submap (if any) is currently
-# active via the IPC socket's `active-submap` request, or `tidectl
-# active-submap`.
+
 bind $mod+N = submap:nav
 
-# A submap: vim-motion focus-move with no modifier held, since you're
-# already "in a mode." A resize mode is the more common example
-# elsewhere, but needs a keyboard resize action this project doesn't
-# have yet. Add more `submap <name> { }` blocks the same way for others.
 submap nav {
     bind h = focus-left
     bind l = focus-right
@@ -1477,36 +1403,14 @@ input {
     repeat_delay = 200
     repeat_rate = 25
     focus_follows_mouse = true
-    # Keyboard layout (xkbcommon rules/model/layout/variant/options).
-    # Leave these unset and xkbcommon falls back to your XKB_DEFAULT_*
-    # env vars, same as today. A comma-separated layout list plus
-    # xkb_options is how you get a switchable multi-layout setup
-    # (setxkbmap/Hyprland/niri use the same syntax), e.g.
-    # xkb_layout = us,de with a grp: toggle option below.
-    # xkb_layout = us
-    # xkb_variant =
-    # xkb_options = grp:alt_shift_toggle
-    # xkb_model =
-    # xkb_rules =
 
-    # Touchpad settings, udev backend only -- winit's nested host input
-    # can't reach a real libinput device. Every key is opt-in: leave it
-    # commented out and that setting is untouched, using whatever your
-    # driver already defaults to. Takes effect for a touchpad connected
-    # at or after startup; an edit here needs a restart to reach one
-    # already connected.
+    # xkb_layout = us
+    # xkb_options = grp:alt_shift_toggle
+
     touchpad {
         # tap_to_click = true
-        # tap_and_drag = true
-        # drag_lock = false
-        # disable_while_typing = true
         # natural_scroll = true
-        # left_handed = false
-        # middle_emulation = false
-        # click_method = clickfinger   # or button-areas
-        # scroll_method = two-finger   # or edge, on-button-down, none
-        # accel_speed = 0.0            # -1.0 (slowest) .. 1.0 (fastest)
-        # accel_profile = adaptive     # or flat
+        # accel_profile = adaptive
     }
 }
 
@@ -1515,65 +1419,20 @@ xwayland {
     path = xwayland-satellite
 }
 
-# Per-output overrides, udev backend only. Purely opt-in -- omit entirely
-# and every connected output just auto-configures (preferred mode,
-# auto-positioned, scale 1, no rotation), same as today. The header is
-# the connector name (check your logs for what TideWM detected, e.g.
-# "eDP-1", "DP-2"). Every field is optional; specify only what you want
-# to override.
-#
 # output eDP-1 {
-#     enabled = true
 #     mode = 1920x1080@60
 #     position = 0x0
 #     scale = 1.0
-#     transform = normal  # or 90, 180, 270, flipped, flipped-90, flipped-180, flipped-270
 # }
 
-# Laptop lid / tablet-mode switch events, udev backend only (libinput's
-# switch capability isn't reachable through winit's nested-session
-# backend). Each entry takes the same action string binds do --
-# "spawn:...", "close-window", "workspace:N", anything -- but in practice
-# you almost always want "spawn:", since the things you'd want to react
-# with (suspend, screen lock, brightness, an onboard keyboard) live
-# outside the compositor. All four unset by default; comment in whichever
-# you want. systemd-logind already triggers suspend on lid close
-# independently of this (its `HandleLidSwitch=` policy in
-# /etc/systemd/logind.conf), so a `lid_close` entry here is for whatever
-# extra you want on top of that, not a replacement for it. (No logind?
-# Nothing suspends on lid-close on its own -- put "spawn:systemctl
-# suspend" or your init's equivalent here.)
-#
 # switch_events {
 #     lid_close = spawn:systemctl suspend
 #     lid_open = spawn:brightnessctl s 50%
-#     tablet_mode_on = spawn:onboard
-#     tablet_mode_off = spawn:pkill onboard
 # }
 
-# Per-app placement applied the moment a window first maps, before it's
-# ever tiled/rendered at its default spot (i3/sway's "for_window",
-# Hyprland's "windowrule" idea). Purely opt-in -- no rules, no behavior
-# change. `app_id` matches exactly; `title` matches case-insensitively
-# anywhere in the string. At least one of the two is required, or the
-# rule never matches anything. Multiple `rule { }` blocks can match the
-# same window; workspace/output take the last match, float/pseudo_tile/
-# pin accumulate (any match sets it).
-#
 # rule {
 #     app_id = pavucontrol
 #     float = true
-# }
-#
-# rule {
-#     title = Picture-in-Picture
-#     float = true
-#     pin = true
-# }
-#
-# rule {
-#     app_id = Slack
-#     workspace = 3
 # }
 "#;
 
