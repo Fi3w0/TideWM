@@ -2,6 +2,13 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.51.2] - 2026-07-21
+
+### Tests
+- **Real multi-monitor hardware testing, first time ever:** plugging a real second monitor (HDMI) into a live session was correctly detected (`tidectl outputs` immediately showed the new output, correct mode/position). **Found a real bug, not yet fixed:** unplugging it does not retract the corresponding `wl_output` Wayland global, even though TideWM's own internal state is correctly cleaned up -- `backend/udev.rs:875` discards the `GlobalId` `create_global` returns, so the disconnect handler has nothing to call `remove_global` with. Confirmed two independent ways in the same session: `grim` failing to capture the disconnected output ("failed to copy output HDMI-A-1"), and `hyprlock`'s own debug log showing three bound outputs (`eDP-1` once, `HDMI-A-1` twice) after one unplug/replug cycle. A user-run `fastfetch` reporting "3 monitors" during the same session, initially assumed to be `fastfetch`'s own quirk, turned out to be entirely accurate. See `AGENT.md`'s Multi-monitor section for the fix.
+- **`ext-session-lock-v1` verified live end to end against a real lock client for the first time:** `hyprlock` locked correctly and the user unlocked with their real password back to a fully working desktop. Reading Smithay's own session-lock source directly surfaced a real, still-open gap while doing this: nothing unlocks the session automatically if the lock client dies without a clean `unlock_and_destroy`, and TideWM's own client-disconnect handler is a no-op -- the realistic recovery from a crashed lock client is killing the whole compositor session, not just the dead client. Flagged in `AGENT.md`, not fixed (`hyprlock` itself never actually crashed during testing).
+- **More real keybinds confirmed via actual keypresses:** `Super+N`/`Escape` (submap enter/exit), `Super+V` (toggle-floating, isolated test window), `Super+F` (toggle-fullscreen). `wp-cursor-shape-v1`'s actual on-screen glyph confirmed changing shape between contexts when the pointer is kept moving -- the one verification gap Phase L's original pass couldn't close nested.
+
 ## [0.51.1] - 2026-07-21
 
 ### Fixed
