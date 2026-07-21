@@ -1508,6 +1508,44 @@ impl Smallvil {
         }
     }
 
+    /// Translates every floating window tagged to `output_name` by `delta`
+    /// -- called when wlr-output-management (kanshi, wdisplays, ...) moves
+    /// an output's logical position. `retile()` already repositions tiled
+    /// windows for free (their tree is recomputed against the output's
+    /// fresh area on the very next call); floating windows have no such
+    /// automatic step, so without this they'd keep their old absolute
+    /// coordinates after the output moved out from under them -- possibly
+    /// landing on a different output, or off-screen entirely -- even
+    /// though the client requesting the move was told it succeeded.
+    ///
+    /// Mirrors `swap_workspaces`' own visible-vs-hidden handling: a visible
+    /// window's real position lives in `space` right now (`tag.rect` is
+    /// stale until the next hide, same as `sync_visible_floating_window`'s
+    /// doc comment explains), so that's what gets read and re-mapped; a
+    /// hidden window has no `space` presence to read, so `tag.rect` itself
+    /// -- the only place its position survives -- is what moves.
+    pub(crate) fn translate_floating_windows_on_output(&mut self, output_name: &str, delta: Point<i32, Logical>) {
+        let surfaces: Vec<WlSurface> = self
+            .floating_workspace
+            .iter()
+            .filter(|(_, tag)| tag.output == output_name)
+            .map(|(surface, _)| surface.clone())
+            .collect();
+        for surface in surfaces {
+            if self.window_is_visible(&surface) {
+                let window = self.floating_workspace.get(&surface).unwrap().window.clone();
+                let Some(mut rect) = self.space.element_geometry(&window) else {
+                    continue;
+                };
+                rect.loc += delta;
+                self.space.map_element(window, rect.loc, false);
+                self.floating_workspace.get_mut(&surface).unwrap().rect = rect;
+            } else if let Some(tag) = self.floating_workspace.get_mut(&surface) {
+                tag.rect.loc += delta;
+            }
+        }
+    }
+
     fn layer_keyboard_interactivity(
         &self,
         surface: &WlSurface,
