@@ -136,8 +136,8 @@ pub struct Config {
     /// config reload (`Smallvil::reload_config`), same as `gaps`.
     pub default_layout: LayoutAlgorithm,
     /// Fraction of its tile's size a pseudo-tiled window keeps, centered
-    /// within it (see `toggle-pseudo-tile`). Clamped to (0, 1] on load so
-    /// a bad value can't collapse or invert a window's size.
+    /// within it (see `toggle-pseudo-tile`). Clamped to [0.05, 1.0] on load
+    /// so a bad value can't collapse or invert a window's size.
     pub pseudo_tile_scale: f64,
     pub keybinds: Vec<Keybind>,
     pub input: InputConfig,
