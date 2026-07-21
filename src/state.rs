@@ -3542,8 +3542,19 @@ impl Smallvil {
             }
             Err(err) => {
                 tracing::warn!(%err, "Failed to reload config, keeping the previous one");
-                self.toast = Some(Toast::new(
-                    &format!("Config error: {err}"),
+                // Persistent, not the usual short-lived toast: this message
+                // can be a full file path plus a parser error, too long to
+                // read in ~2 seconds, and there's a natural "done" signal
+                // to wait for instead of a timer -- the next reload attempt
+                // (fixed or not) replaces this toast either way.
+                //
+                // "Config error {err}" (no colon) rather than "Config
+                // error: {err}" -- err already starts with "in file ... at
+                // line N: ...", matching Hyprland's own on-screen config
+                // error phrasing ("config error in file <path> at line
+                // <N>: <message>") rather than inventing our own shape.
+                self.toast = Some(Toast::persistent(
+                    &format!("Config error {err}"),
                     ToastKind::Error,
                 ));
                 self.request_redraw();
