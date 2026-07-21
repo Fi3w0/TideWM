@@ -40,7 +40,7 @@ use smithay::reexports::wayland_server::{
     protocol::wl_output::Transform as WlTransform,
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource, WEnum,
 };
-use smithay::utils::{Logical, Rectangle, Transform};
+use smithay::utils::{Logical, Point, Rectangle, Transform};
 use wayland_protocols_wlr::output_management::v1::server::{
     zwlr_output_configuration_head_v1::{self, ZwlrOutputConfigurationHeadV1},
     zwlr_output_configuration_v1::{self, ZwlrOutputConfigurationV1},
@@ -573,9 +573,22 @@ fn finish_configuration(
                 continue;
             }
             let scale = cfg.scale.map(Scale::Fractional);
+            let old_position = state.space.output_geometry(output).map(|geo| geo.loc);
             output.change_current_state(None, cfg.transform, scale, cfg.position.map(Into::into));
             if let Some(pos) = cfg.position {
                 state.space.map_output(output, pos);
+                // retile() below repositions tiled windows for free (their
+                // tree is recomputed against the output's fresh area);
+                // floating windows have no equivalent automatic step, so
+                // without this they'd keep their old absolute coordinates
+                // -- possibly landing on a different output or off-screen
+                // -- even though this apply is about to report success.
+                if let Some(old_position) = old_position {
+                    let delta: Point<i32, Logical> = Point::from(pos) - old_position;
+                    if delta != (0, 0).into() {
+                        state.translate_floating_windows_on_output(&output.name(), delta);
+                    }
+                }
             }
         }
         state.retile();

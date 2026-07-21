@@ -27,7 +27,6 @@ use smithay::reexports::wayland_server::{
     backend::ClientId, backend::GlobalId, Client, DataInit, Dispatch, GlobalDispatch, Resource,
 };
 use smithay::reexports::wayland_server::{DisplayHandle, New};
-use smithay::utils::SERIAL_COUNTER;
 use smithay::wayland::shell::xdg::XdgShellHandler;
 use wayland_protocols_wlr::foreign_toplevel::v1::server::{
     zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
@@ -52,6 +51,13 @@ struct WlrToplevelData {
     /// bound manager that received a `toplevel` event for this surface.
     instances: Vec<ZwlrForeignToplevelHandleV1>,
     closed: bool,
+    /// The `state` bytes most recently broadcast by `send_state`, so it can
+    /// skip re-sending (and the `done` that comes with it) when nothing
+    /// actually changed -- see `send_state`'s own doc comment. `None`
+    /// before the first real broadcast (the empty array `init_instance`
+    /// sends a fresh instance doesn't count, since it's a known-stale
+    /// placeholder, not a real state snapshot).
+    last_sent_state: Option<Vec<u8>>,
 }
 
 impl WlrForeignToplevelHandle {
@@ -62,6 +68,7 @@ impl WlrForeignToplevelHandle {
                 app_id,
                 instances: Vec::new(),
                 closed: false,
+                last_sent_state: None,
             })),
         }
     }
@@ -126,8 +133,20 @@ impl WlrForeignToplevelHandle {
     /// live handle resource, then a `done`. The `state_flags` argument is the
     /// raw protocol byte array (little-endian u32 state values packed
     /// together), composed by the caller from compositor state.
+    ///
+    /// Short-circuits if `state_flags` matches the last broadcast, unlike
+    /// `send_title`/`send_app_id` which already did this -- callers like
+    /// `refresh_wlr_toplevel_state` run unconditionally on every focus
+    /// change, maximize toggle, etc., most of which don't actually flip any
+    /// of *this* window's three bits, so without the check waybar would
+    /// redraw its taskbar on every such event even when nothing about this
+    /// entry changed.
     pub fn send_state(&self, state_flags: Vec<u8>) {
-        let inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
+        if inner.last_sent_state.as_ref() == Some(&state_flags) {
+            return;
+        }
+        inner.last_sent_state = Some(state_flags.clone());
         for instance in inner.instances.iter() {
             instance.state(state_flags.clone());
             instance.done();
@@ -342,12 +361,17 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, WlrForeignToplevelHandle> for Smallvi
         match request {
             zwlr_foreign_toplevel_handle_v1::Request::Activate { seat: _ } => {
                 // The seat arg is informational; per spec activation
-                // isn't guaranteed. Reuse the existing focus path; if
-                // the window is on a hidden workspace, focus switches
-                // there first (same as xdg-activation-v1).
-                if state.exclusive_layer().is_none() {
-                    state.focus_window(Some(surface), SERIAL_COUNTER.next_serial());
-                }
+                // isn't guaranteed. `activate_toplevel` is the real
+                // xdg-activation-v1 sequence (switch workspace if hidden,
+                // promote a parked group tab, raise if floating, then
+                // focus) -- reuse it rather than the plain `focus_window`
+                // this used to call, which silently no-ops on a hidden
+                // window (`focus_window`'s target is filtered to visible
+                // surfaces only), making a waybar taskbar click on a
+                // window from another workspace do nothing. Its own
+                // `exclusive_layer` check replaces the one this site used
+                // to do itself.
+                state.activate_toplevel(&surface);
             }
             zwlr_foreign_toplevel_handle_v1::Request::Close => {
                 if let Some(toplevel) = state
@@ -359,10 +383,15 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, WlrForeignToplevelHandle> for Smallvi
                 }
             }
             zwlr_foreign_toplevel_handle_v1::Request::SetMaximized => {
-                if !state.maximized.contains_key(&surface)
-                    && !state.layout.contains(&surface)
-                    && !state.fullscreen.contains_key(&surface)
-                {
+                // No `!state.fullscreen.contains_key(&surface)` guard here:
+                // `do_maximize_request` is explicitly designed to accept a
+                // fullscreen floating window, recording restore-intent (it
+                // reads the fullscreen entry's own restore rect as the
+                // basis for the maximized one) rather than trying to
+                // change anything visually while fullscreen still
+                // dominates the render -- excluding that case here would
+                // just silently drop a legitimate request.
+                if !state.maximized.contains_key(&surface) && !state.layout.contains(&surface) {
                     if let Some(toplevel) = state
                         .mapped_toplevel_window(&surface)
                         .as_ref()

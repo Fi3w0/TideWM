@@ -353,8 +353,21 @@ impl Smallvil {
                 .toplevel_window(&existing_surface)
                 .as_ref()
                 .and_then(|w| w.toplevel().cloned());
-            if let Some(existing_toplevel) = existing_toplevel {
-                self.do_unfullscreen(&existing_toplevel);
+            match existing_toplevel {
+                Some(existing_toplevel) => self.do_unfullscreen(&existing_toplevel),
+                // The window is between states (its toplevel couldn't be
+                // resolved right now) and do_unfullscreen never ran, so its
+                // FullscreenEntry would otherwise survive untouched --
+                // leaving two entries claiming the same output once the
+                // insert below adds this window's own, violating "at most
+                // one fullscreen per output" (checked by
+                // assert_state_invariants in debug builds, silently
+                // violated in release). Drop the stale bookkeeping
+                // directly since there's no live toplevel left to send an
+                // unfullscreen configure to anyway.
+                None => {
+                    self.fullscreen.remove(&existing_surface);
+                }
             }
         }
 
@@ -392,6 +405,7 @@ impl Smallvil {
                 output: output.name(),
                 restore_rect,
                 was_pinned,
+                pin_floated_it: false,
             },
         );
 
@@ -414,21 +428,20 @@ impl Smallvil {
         // fills its slot. The protocol still requires a reply either way.
         if self.layout.contains(wl_surface) {
             self.maximized.remove(wl_surface);
-            let size = self
-                .fullscreen
-                .get(wl_surface)
-                .and_then(|entry| self.output_by_name(&entry.output))
-                .and_then(|output| self.space.output_geometry(&output))
-                .map(|rect| rect.size)
-                .or_else(|| self.tiled_rect_for_surface(wl_surface).map(|rect| rect.size));
+            // No `state.size` write here: it's a documented no-op for a
+            // tiled window, which already has the correct size from
+            // whichever last set it -- retile()'s own configure for the
+            // ordinary case, or do_fullscreen_request's explicit
+            // `state.size = Some(output_geo.size)` if this window is also
+            // fullscreen (pending state carries forward, it isn't reset
+            // per call). Writing it again here just re-asserts a size the
+            // client already has, forcing a configure round-trip and
+            // redraw for a value that never actually changed.
             surface.with_pending_state(|state| {
                 state.states.unset(xdg_toplevel::State::Maximized);
                 state.states.unset(xdg_toplevel::State::Resizing);
                 if self.fullscreen.contains_key(wl_surface) {
                     state.states.set(xdg_toplevel::State::Fullscreen);
-                }
-                if size.is_some() {
-                    state.size = size;
                 }
             });
             Self::send_forced_configure(&surface);
@@ -1052,8 +1065,15 @@ impl Smallvil {
             return;
         };
         let activated = self.is_window_activated(surface);
-        let maximized = self.maximized.contains_key(surface);
         let fullscreen = self.fullscreen.contains_key(surface);
+        // `self.maximized` is retained as restore-intent while fullscreen
+        // is active (the documented invariant `assert_state_invariants`
+        // checks in state.rs -- fullscreen and maximized are never both
+        // reported, but a maximized entry can outlive its window going
+        // fullscreen), so a bare `contains_key` would report both bits set
+        // at once to every bound client -- mask it the same way ipc.rs's
+        // `window_json` already does (`maximized && !fullscreen`).
+        let maximized = self.maximized.contains_key(surface) && !fullscreen;
         handle.send_state(crate::handlers::wlr_foreign_toplevel::state_bytes(
             activated, maximized, fullscreen,
         ));
