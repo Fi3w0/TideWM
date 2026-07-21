@@ -109,6 +109,15 @@ pub struct Smallvil {
     pub display_handle: DisplayHandle,
 
     pub config: Config,
+    /// Every touchpad-class device `apply_touchpad_config` has been run
+    /// against (populated on `DeviceAdded`, pruned on `DeviceRemoved` --
+    /// see `backend/udev.rs`), so `reload_config` can re-apply a live
+    /// `[input.touchpad]` edit to hardware that's already connected.
+    /// libinput's `Device` is cheaply `Clone` (ref-counted), so this holds
+    /// owned handles rather than re-deriving them some other way. Always
+    /// empty under winit: the nested backend never reports a real libinput
+    /// device.
+    pub known_touchpads: Vec<smithay::reexports::input::Device>,
     pub toast: Option<Toast>,
     /// `Some` while the workspace overview (see `overview.rs`) is showing
     /// on the output it was built for (`Overview::output_name`); `None`
@@ -794,6 +803,7 @@ impl Smallvil {
             display_handle: dh,
 
             config,
+            known_touchpads: Vec::new(),
             toast: None,
             overview: None,
             welcome_hint: None,
@@ -3639,6 +3649,13 @@ impl Smallvil {
                     }
                 }
                 self.layout.set_default_algorithm(self.config.default_layout);
+                // The DeviceAdded path is the only other place this runs;
+                // an already-connected touchpad (a laptop's built-in one,
+                // which won't see another DeviceAdded short of a restart)
+                // otherwise never picks up an `[input.touchpad]` edit.
+                for device in self.known_touchpads.iter_mut() {
+                    crate::input::apply_touchpad_config(&self.config.input.touchpad, device);
+                }
                 tracing::info!("Config reloaded");
                 self.toast = Some(Toast::new("Config reloaded", ToastKind::Info));
                 self.retile();

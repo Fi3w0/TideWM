@@ -481,13 +481,10 @@ impl InputConfig {
 /// more than one touchpad needing different settings ever comes up, that's
 /// the upgrade path.
 ///
-/// ponytail: applied only when libinput reports the device (startup
-/// enumeration and hotplug), not re-applied to an already-connected
-/// touchpad on a config reload -- the `Libinput` handle lives inside the
-/// udev backend's own event-loop closures, not reachable from
-/// `Smallvil::reload_config`. A touchpad-settings edit needs a compositor
-/// restart to take effect; upgrade path is threading a device registry
-/// into `Smallvil` if that gap actually bites.
+/// Re-applied to every already-known touchpad on a config reload too
+/// (`Smallvil::known_touchpads`, populated/pruned from `DeviceAdded`/
+/// `DeviceRemoved` in `backend/udev.rs`), so editing this section reaches
+/// a laptop's built-in touchpad, not just one plugged in after the edit.
 #[derive(Debug, Clone, Default)]
 pub struct TouchpadConfig {
     pub tap_to_click: Option<bool>,

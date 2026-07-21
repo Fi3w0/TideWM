@@ -2,6 +2,11 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.52.1] - 2026-07-21
+
+### Fixed
+- **`[input.touchpad]` can now be hot-reloaded for an already-connected touchpad**, not just a newly-plugged one. `apply_touchpad_config` used to run only from the `DeviceAdded` path; a laptop's built-in touchpad never fires that again short of a restart, so an edited setting silently didn't take until the compositor relaunched. `Smallvil::known_touchpads` now holds a cloned handle (libinput's `Device` is cheaply ref-counted `Clone`) to every touchpad-class device seen, populated/pruned on `DeviceAdded`/`DeviceRemoved`, and `reload_config` re-applies the current `[input.touchpad]` settings to all of them.
+
 ## [0.52.0] - 2026-07-21
 
 ### Added

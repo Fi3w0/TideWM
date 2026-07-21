@@ -344,6 +344,12 @@ pub fn init_udev(
             }
             if let InputEvent::DeviceAdded { device } = &mut event {
                 crate::input::apply_touchpad_config(&state.config.input.touchpad, device);
+                if device.config_tap_finger_count() > 0 {
+                    state.known_touchpads.push(device.clone());
+                }
+            }
+            if let InputEvent::DeviceRemoved { device } = &event {
+                state.known_touchpads.retain(|d| d != device);
             }
             state.process_input_event(event);
         })?;
