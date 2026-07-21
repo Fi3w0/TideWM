@@ -2,6 +2,24 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.52.0] - 2026-07-21
+
+### Added
+- **Waves, TideWM's own config format, replaces TOML entirely.** `config.wave` (was `config.toml`) is now a hand-rolled, line-based syntax instead of TOML: `key = value` is the rest of the line after the first `=` (so `spawn:$wave(rofi -show drun, wofi --show drun)` needs no string-quoting for a command with its own flags/spaces), a line ending in `{` opens a real multi-line block (no inline `output eDP-1 { position = 0x0 scale = 1.0 }` on one line -- this is the one deliberate departure from looking exactly like Hyprland), `#` comments unless inside quotes. `bind <combo> = <action>` replaces `[keybinds]`/`"combo" = "action"` table entries; `submap <name> { }`, `output <name> { }`, `rule { }`, `input { touchpad { } }`, `xwayland { }`, `env { }`, `switch_events { }` replace their TOML table/array-of-table equivalents. `include "path.wave"` (repeatable, one per line) replaces the `include = [...]` array, with identical merge semantics carried over exactly: input/touchpad/env/switch_events/submap sections merge field-by-field across files (includer wins per key), output/rule blocks just accumulate -- ported at the `waves::Entry` level (`src/waves.rs`) instead of `toml::Value`, tested against its own grammar in isolation.
+- **`$wave(a, b, c, ...)`**, a built-in alongside `$name` variable substitution: resolves to the first candidate whose own first word is a real, executable file (checked directly or via `$PATH`), falling back to the last candidate untried if none resolve, so a spawn still gets attempted and fails visibly rather than silently doing nothing. Makes the *shipped default config* actually portable across machines -- `terminal = $wave(kitty, alacritty, foot, xterm)` in `DEFAULT_CONFIG_WAVE` picks whatever's actually installed instead of hardcoding one binary name the way the old TOML default (and Hyprland's/sway's own defaults) always have.
+- **`cursor_always_visible` config key** (udev backend, default `false`): forces the software cursor to stay visible even when a client asks to hide it (`CursorImageStatus::Hidden`) -- e.g. a terminal hiding its own pointer glyph after inactivity. Off by default since respecting a client's own hide request is the correct behavior; this is an opt-in override for anyone who wants the pointer to never disappear.
+
+### Fixed
+- **`wl_output` global leak on monitor disconnect** (found in 0.51.2's real-hardware testing): `create_surface` discarded the `GlobalId` from `create_global`, so unplugging a monitor left the global advertised forever and a replug stacked a second one on top. `SurfaceData` now keeps the id and retracts it in `handle_connector_change`'s `Disconnected` branch.
+- **Infinite retry loop on a GPU fence wait error** (`backend/udev.rs::render_surface`): the fence-wait loop treated every error as transient and retried forever; per `eglClientWaitSyncKHR`'s own spec the only error it can return is a non-retryable invalid sync object, so a persistent bad fence would have hung the only event-loop thread permanently -- the same class of freeze as the 0.15.1 `TileMoveGrab` deadlock. Now tries once and presents whatever the swapchain already has.
+- **`PointerMotionAbsolute` panic when no outputs are mapped**, reachable during shutdown if a host compositor delivers a final absolute-motion event after outputs are already torn down.
+- **`WlrForeignToplevelState::cleanup_closed` is now actually wired into both backends' per-frame cleanup tick**, matching what its own doc comment already claimed. Not an active leak today (`untrack` already removes its own entry synchronously on every close), but a documented safety net that wasn't hooked up.
+- **A defensive fix for 0.51.2's reproduced-once Overview stacked-text bug**: the shared glyph-advance loop in `overview.rs`/`tab_strip.rs`/`toast.rs` had no floor on a 0-advance-width glyph, which could draw the rest of a string in a near-vertical column instead of a line. Floored to `.max(1.0)` in all three. Not independently re-confirmed against the hardware that originally reproduced it.
+- **`pseudo_tile_scale`'s doc comment now matches its actual `[0.05, 1.0]` clamp range.**
+
+### Security
+- **Session-lock auto-unlock-on-crash was considered and rejected.** 0.51.2 flagged that a lock client dying without a clean `unlock_and_destroy` leaves no in-session recovery. Auto-unlocking on client death was evaluated and rejected: it reintroduces the exact vulnerability `ext-session-lock` exists to prevent (killing the locker to reach the desktop). The current fail-locked behavior stays as-is; a safer future fix would respawn a locker rather than drop to the unlocked desktop.
+
 ## [0.51.3] - 2026-07-21
 
 ### Fixed
