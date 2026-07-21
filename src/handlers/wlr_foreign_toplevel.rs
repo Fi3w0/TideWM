@@ -51,6 +51,13 @@ struct WlrToplevelData {
     /// bound manager that received a `toplevel` event for this surface.
     instances: Vec<ZwlrForeignToplevelHandleV1>,
     closed: bool,
+    /// The `state` bytes most recently broadcast by `send_state`, so it can
+    /// skip re-sending (and the `done` that comes with it) when nothing
+    /// actually changed -- see `send_state`'s own doc comment. `None`
+    /// before the first real broadcast (the empty array `init_instance`
+    /// sends a fresh instance doesn't count, since it's a known-stale
+    /// placeholder, not a real state snapshot).
+    last_sent_state: Option<Vec<u8>>,
 }
 
 impl WlrForeignToplevelHandle {
@@ -61,6 +68,7 @@ impl WlrForeignToplevelHandle {
                 app_id,
                 instances: Vec::new(),
                 closed: false,
+                last_sent_state: None,
             })),
         }
     }
@@ -125,8 +133,20 @@ impl WlrForeignToplevelHandle {
     /// live handle resource, then a `done`. The `state_flags` argument is the
     /// raw protocol byte array (little-endian u32 state values packed
     /// together), composed by the caller from compositor state.
+    ///
+    /// Short-circuits if `state_flags` matches the last broadcast, unlike
+    /// `send_title`/`send_app_id` which already did this -- callers like
+    /// `refresh_wlr_toplevel_state` run unconditionally on every focus
+    /// change, maximize toggle, etc., most of which don't actually flip any
+    /// of *this* window's three bits, so without the check waybar would
+    /// redraw its taskbar on every such event even when nothing about this
+    /// entry changed.
     pub fn send_state(&self, state_flags: Vec<u8>) {
-        let inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
+        if inner.last_sent_state.as_ref() == Some(&state_flags) {
+            return;
+        }
+        inner.last_sent_state = Some(state_flags.clone());
         for instance in inner.instances.iter() {
             instance.state(state_flags.clone());
             instance.done();
