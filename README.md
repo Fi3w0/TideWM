@@ -88,11 +88,12 @@ Mouse:
 | ---------------------------- | ------------------------------------- |
 | `Super` + left-drag          | Move floating window                  |
 | `Super` + right-drag         | Resize floating window                |
+| Left-drag a floating window's own edge | Resize it, no modifier needed |
 | `Super` + left-drag (tiled)  | Pick up and drop into a new tile slot |
 | `Super` + right-drag (tiled) | Resize the tile from an edge          |
 | Click on a split gap         | Drag to adjust the split ratio        |
 
-Full set, plus every action string and IPC/`tidectl` command, in [DOCUMENTATION.md](DOCUMENTATION.md). Rebind anything in `[keybinds]`.
+Full set, plus every action string and IPC/`tidectl` command, in [DOCUMENTATION.md](DOCUMENTATION.md). Rebind anything with `bind` in `config.wave`.
 
 ## Building
 

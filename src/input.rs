@@ -20,7 +20,7 @@ use smithay::{
         },
     },
     reexports::input::{AccelProfile, ClickMethod, Device as InputDevice, DeviceConfigResult, DragLockState, ScrollMethod},
-    utils::{Rectangle, SERIAL_COUNTER},
+    utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
     wayland::{
         compositor::RegionAttributes,
         keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitorSeat,
@@ -134,6 +134,39 @@ fn warn_on_config_err(result: DeviceConfigResult, setting: &str) {
     if let Err(e) = result {
         tracing::warn!(setting, error = ?e, "Failed to apply touchpad setting");
     }
+}
+
+/// Hit-tests `point` (already known to be inside `rect`, since callers only
+/// reach this after `Space::element_under` matched the window) against
+/// `rect`'s own edges for a no-modifier floating resize -- both niri and
+/// Hyprland let a plain border-drag resize a floating window without a
+/// modifier held, the tiled equivalent of which is `layout::hit_test_split`
+/// (whose "how close counts as a hit" threshold convention this mirrors).
+/// `None` means the point is in the interior, an ordinary focus click.
+fn floating_resize_edge(
+    rect: Rectangle<i32, Logical>,
+    point: Point<f64, Logical>,
+    threshold: f64,
+) -> Option<ResizeEdge> {
+    let left = point.x - rect.loc.x as f64;
+    let right = (rect.loc.x + rect.size.w) as f64 - point.x;
+    let top = point.y - rect.loc.y as f64;
+    let bottom = (rect.loc.y + rect.size.h) as f64 - point.y;
+
+    let mut edge = ResizeEdge::empty();
+    if left <= threshold {
+        edge |= ResizeEdge::LEFT;
+    }
+    if right <= threshold {
+        edge |= ResizeEdge::RIGHT;
+    }
+    if top <= threshold {
+        edge |= ResizeEdge::TOP;
+    }
+    if bottom <= threshold {
+        edge |= ResizeEdge::BOTTOM;
+    }
+    (!edge.is_empty()).then_some(edge)
 }
 
 impl Smallvil {
@@ -703,6 +736,40 @@ impl Smallvil {
                         }
                     }
 
+                    // A plain (no-modifier) left click landing on a
+                    // floating window's own edge resizes it directly, the
+                    // same convention niri and Hyprland both use -- the
+                    // floating counterpart to the tiled hit_test_split drag
+                    // just below. Skipped entirely once `super_drag` above
+                    // already claimed the click.
+                    if !super_drag && button == BTN_LEFT {
+                        if let Some((window, loc)) = under.clone() {
+                            let wl_surface = window.toplevel().unwrap().wl_surface().clone();
+                            if !self.layout.contains(&wl_surface)
+                                && !self.fullscreen.contains_key(&wl_surface)
+                                && !self.maximized.contains_key(&wl_surface)
+                            {
+                                let rect = Rectangle::new(loc, window.geometry().size);
+                                let threshold = (self.config.gaps as f64).max(4.0);
+                                if let Some(edge) =
+                                    floating_resize_edge(rect, pointer.current_location(), threshold)
+                                {
+                                    self.space.raise_element(&window, false);
+                                    self.focus_window(Some(wl_surface.clone()), serial);
+
+                                    let start_data = PointerGrabStartData {
+                                        focus: Some((wl_surface, loc.to_f64())),
+                                        button,
+                                        location: pointer.current_location(),
+                                    };
+                                    let grab = ResizeSurfaceGrab::start(start_data, window, edge, rect);
+                                    pointer.set_grab(self, grab, serial, Focus::Clear);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+
                     // A plain click that hit nothing might still have
                     // landed in the gap between two tiled windows -- drag
                     // that to adjust the split ratio, the tiled equivalent
@@ -1115,5 +1182,41 @@ impl Smallvil {
                 self.loop_signal.stop();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smithay::utils::{Point, Size};
+
+    fn rect() -> Rectangle<i32, Logical> {
+        Rectangle::new(Point::from((100, 100)), Size::from((200, 200)))
+    }
+
+    #[test]
+    fn interior_click_is_not_a_resize() {
+        assert_eq!(floating_resize_edge(rect(), Point::from((200.0, 200.0)), 4.0), None);
+    }
+
+    #[test]
+    fn near_each_single_edge_hits_only_that_edge() {
+        let r = rect();
+        assert_eq!(floating_resize_edge(r, Point::from((101.0, 200.0)), 4.0), Some(ResizeEdge::LEFT));
+        assert_eq!(floating_resize_edge(r, Point::from((299.0, 200.0)), 4.0), Some(ResizeEdge::RIGHT));
+        assert_eq!(floating_resize_edge(r, Point::from((200.0, 101.0)), 4.0), Some(ResizeEdge::TOP));
+        assert_eq!(floating_resize_edge(r, Point::from((200.0, 299.0)), 4.0), Some(ResizeEdge::BOTTOM));
+    }
+
+    #[test]
+    fn corner_hits_both_adjacent_edges() {
+        assert_eq!(
+            floating_resize_edge(rect(), Point::from((101.0, 101.0)), 4.0),
+            Some(ResizeEdge::TOP_LEFT)
+        );
+        assert_eq!(
+            floating_resize_edge(rect(), Point::from((299.0, 299.0)), 4.0),
+            Some(ResizeEdge::BOTTOM_RIGHT)
+        );
     }
 }
