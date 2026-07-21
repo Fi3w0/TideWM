@@ -515,11 +515,22 @@ pub struct Smallvil {
 
     /// Most-recently-focused-first order of every window that has ever
     /// held keyboard focus, updated from `reconcile_keyboard_focus`'s own
-    /// activation-change block and pruned in `detach_mapped_toplevel`.
-    /// Drives `cycle_focus`'s Alt-Tab ordering; a window not yet in this
-    /// list (freshly mapped but never focused) falls back to `Space`'s own
+    /// activation-change block (except while `cycling_focus` is set, see
+    /// that field) and pruned in `detach_mapped_toplevel`. Drives
+    /// `cycle_focus`'s Alt-Tab ordering; a window not yet in this list
+    /// (freshly mapped but never focused) falls back to `Space`'s own
     /// order, appended after every known entry.
     pub(crate) focus_history: Vec<WlSurface>,
+    /// Set for the duration of `cycle_focus`'s own `focus_window` call, so
+    /// `reconcile_keyboard_focus` skips its normal `focus_history` reorder.
+    /// Without this, cycling itself would move whatever it just focused to
+    /// the front of the MRU list, which the *next* press then reads back as
+    /// "current" -- degenerating into an A/B two-window oscillation instead
+    /// of a real cycle, since the third-oldest window's position keeps
+    /// getting pushed out from under the walk before it's ever reached.
+    /// Found by manual trace, not observed live -- `cargo test` cannot
+    /// catch this class of bug (needs a real multi-press keybind sequence).
+    cycling_focus: bool,
 
     /// Laptop lid closed right now, per libinput's `Switch::Lid`
     /// (`SwitchState::On` = closed). Tracked separately from the
@@ -915,6 +926,7 @@ impl Smallvil {
             pseudo_tiled: HashSet::new(),
             urgent: HashSet::new(),
             focus_history: Vec::new(),
+            cycling_focus: false,
             is_lid_closed: false,
             is_tablet_mode: false,
             groups: Vec::new(),
@@ -1305,8 +1317,10 @@ impl Smallvil {
                 activation_changed |= self.set_window_activated(&surface, true);
                 self.refresh_wlr_toplevel_state(&surface);
                 self.urgent.remove(&surface);
-                self.focus_history.retain(|s| s != &surface);
-                self.focus_history.insert(0, surface);
+                if !self.cycling_focus {
+                    self.focus_history.retain(|s| s != &surface);
+                    self.focus_history.insert(0, surface);
+                }
             }
         }
 
@@ -3582,7 +3596,9 @@ impl Smallvil {
         };
 
         self.space.raise_element(next, false);
+        self.cycling_focus = true;
         self.focus_window(Some(next_surface), SERIAL_COUNTER.next_serial());
+        self.cycling_focus = false;
     }
 
     /// Moves keyboard focus to the nearest mapped window in `direction`
