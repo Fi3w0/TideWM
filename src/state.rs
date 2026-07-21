@@ -499,6 +499,13 @@ pub struct Smallvil {
     /// fallback workspace regardless of where you actually were.
     scratchpad_previous: HashMap<String, u32>,
 
+    /// Per-output previously-active workspace, updated on every real
+    /// `switch_workspace` call -- drives `config.workspace_auto_back_and_forth`
+    /// (niri's own feature of the same name). Separate from
+    /// `scratchpad_previous` above: that one only tracks the scratchpad's
+    /// own toggle, this tracks every ordinary workspace switch.
+    workspace_previous: HashMap<String, u32>,
+
     /// Tiled windows that keep `config.pseudo_tile_scale` of their tile's
     /// size instead of filling it -- a rect override `retile()` applies,
     /// same shape as the fullscreen override. Stays in its `Layouts` slot
@@ -923,6 +930,7 @@ impl Smallvil {
             floating_workspace: HashMap::new(),
             pinned: HashSet::new(),
             scratchpad_previous: HashMap::new(),
+            workspace_previous: HashMap::new(),
             pseudo_tiled: HashSet::new(),
             urgent: HashSet::new(),
             focus_history: Vec::new(),
@@ -2423,9 +2431,20 @@ impl Smallvil {
         }
         let output_name = output.name();
         let current = self.layout.active_workspace(&output_name);
-        if current == workspace {
+        let workspace = if current != workspace {
+            workspace
+        } else if self.config.workspace_auto_back_and_forth {
+            // niri's `workspace-auto-back-and-forth`: re-selecting the
+            // already-active workspace jumps back to whichever one was
+            // active immediately before it, instead of no-opping.
+            match self.workspace_previous.get(&output_name) {
+                Some(&previous) if previous != current => previous,
+                _ => return,
+            }
+        } else {
             return;
-        }
+        };
+        self.workspace_previous.insert(output_name.clone(), current);
 
         // Hide everything on the outgoing workspace. Tiled windows come
         // from the tree; floating ones from the tag, snapshotting each

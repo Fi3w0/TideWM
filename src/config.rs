@@ -152,6 +152,11 @@ pub struct Config {
     /// the correct default behavior, this is an opt-in override for anyone
     /// who wants the pointer to never disappear.
     pub cursor_always_visible: bool,
+    /// niri's `workspace-auto-back-and-forth`: re-selecting the
+    /// already-active workspace jumps back to whichever one was active
+    /// immediately before it, instead of no-opping. Off by default --
+    /// matches the existing plain-no-op behavior unless opted into.
+    pub workspace_auto_back_and_forth: bool,
     pub gaps: i32,
     /// Starting tiling algorithm for a workspace with no runtime override
     /// (see `"layout:bsp"`/`"layout:master"` keybind actions,
@@ -259,6 +264,7 @@ impl Config {
             show_welcome_hint: raw.show_welcome_hint,
             water_effects: raw.water_effects,
             cursor_always_visible: raw.cursor_always_visible,
+            workspace_auto_back_and_forth: raw.workspace_auto_back_and_forth,
             gaps: raw.gaps,
             default_layout,
             pseudo_tile_scale: raw.pseudo_tile_scale.clamp(0.05, 1.0),
@@ -316,6 +322,7 @@ struct RawConfig {
     show_welcome_hint: bool,
     water_effects: bool,
     cursor_always_visible: bool,
+    workspace_auto_back_and_forth: bool,
     gaps: i32,
     /// `"bsp"`/`"master"`, resolved via `parse_layout_algorithm` in
     /// `Config::from_raw`. Raw string (not `LayoutAlgorithm` itself) for
@@ -423,6 +430,7 @@ impl Default for RawConfig {
             show_welcome_hint: false,
             water_effects: true,
             cursor_always_visible: false,
+            workspace_auto_back_and_forth: false,
             gaps: 8,
             default_layout: String::new(),
             pseudo_tile_scale: 0.7,
@@ -816,6 +824,7 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
         "show_welcome_hint" => set_bool(&mut raw.show_welcome_hint, key, value),
         "water_effects" => set_bool(&mut raw.water_effects, key, value),
         "cursor_always_visible" => set_bool(&mut raw.cursor_always_visible, key, value),
+        "workspace_auto_back_and_forth" => set_bool(&mut raw.workspace_auto_back_and_forth, key, value),
         "gaps" => set_i32(&mut raw.gaps, key, value),
         "default_layout" => raw.default_layout = value.to_string(),
         "pseudo_tile_scale" => set_f64(&mut raw.pseudo_tile_scale, key, value),
@@ -1370,6 +1379,7 @@ terminal = $wave(kitty, alacritty, foot, xterm)
 show_welcome_hint = true
 water_effects = true
 cursor_always_visible = false
+workspace_auto_back_and_forth = false
 gaps = 8
 default_layout = bsp
 pseudo_tile_scale = 0.7
@@ -1565,6 +1575,7 @@ mod tests {
             show_welcome_hint: false,
             water_effects: true,
             cursor_always_visible: false,
+            workspace_auto_back_and_forth: false,
             gaps: 0,
             default_layout: LayoutAlgorithm::Bsp,
             pseudo_tile_scale: 0.7,
