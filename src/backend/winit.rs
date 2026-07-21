@@ -78,6 +78,12 @@ pub fn init_winit(
                 serial_number: "Unknown".into(),
             },
         );
+        // Unlike udev.rs's per-connector globals (see `SurfaceData::global`
+        // there), discarding this `GlobalId` is fine: winit has exactly one
+        // simulated output that lives for the whole process and is never
+        // individually disconnected -- there is no runtime removal path to
+        // retract it from, only process exit tearing down the display
+        // (and every global on it) as a whole.
         let _global = output.create_global::<Smallvil>(&state.display_handle);
         output.change_current_state(
             Some(mode),
