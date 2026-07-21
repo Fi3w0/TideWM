@@ -50,7 +50,7 @@ use smithay::{
         udev::{self, UdevBackend, UdevEvent},
     },
     desktop::{space::SpaceRenderElements, utils::OutputPresentationFeedback, Window},
-    input::pointer::{CursorImageStatus, CursorImageSurfaceData},
+    input::pointer::{CursorIcon, CursorImageStatus, CursorImageSurfaceData},
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
         calloop::{
@@ -1148,7 +1148,22 @@ fn render_surface(
         state.toast = None;
     }
 
-    let (cursor_surface_element, cursor_glyph_element) = match &state.cursor_status {
+    // `cursor_always_visible` overrides a client's own hide request
+    // (`CursorImageStatus::Hidden`, e.g. a terminal hiding its pointer
+    // glyph after inactivity) rather than a TideWM-driven idle timer --
+    // there's no idle tracking here, this backend already recomputes the
+    // cursor element fresh from `state.cursor_status` on every render.
+    // Falls back to the plain default arrow, the same as an unrecognized
+    // named icon would.
+    let forced_visible_status = CursorImageStatus::Named(CursorIcon::Default);
+    let effective_cursor_status =
+        if matches!(state.cursor_status, CursorImageStatus::Hidden) && state.config.cursor_always_visible {
+            &forced_visible_status
+        } else {
+            &state.cursor_status
+        };
+
+    let (cursor_surface_element, cursor_glyph_element) = match effective_cursor_status {
         CursorImageStatus::Surface(cursor_surface) => {
             let hotspot = with_states(cursor_surface, |states| {
                 states

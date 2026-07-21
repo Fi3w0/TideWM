@@ -129,6 +129,14 @@ pub struct Config {
     /// checked once, at startup (see `main.rs`).
     pub show_welcome_hint: bool,
     pub water_effects: bool,
+    /// Forces the udev backend's software cursor to stay visible even when
+    /// a client asks to hide it (`wl_pointer.set_cursor` with a null
+    /// buffer, e.g. a terminal hiding its pointer glyph after inactivity --
+    /// see `backend/udev.rs::render_surface`'s `CursorImageStatus::Hidden`
+    /// handling). Off by default: respecting a client's own hide request is
+    /// the correct default behavior, this is an opt-in override for anyone
+    /// who wants the pointer to never disappear.
+    pub cursor_always_visible: bool,
     pub gaps: i32,
     /// Starting tiling algorithm for a workspace with no runtime override
     /// (see `"layout:bsp"`/`"layout:master"` keybind actions,
@@ -235,6 +243,7 @@ impl Config {
             terminal: raw.terminal,
             show_welcome_hint: raw.show_welcome_hint,
             water_effects: raw.water_effects,
+            cursor_always_visible: raw.cursor_always_visible,
             gaps: raw.gaps,
             default_layout,
             pseudo_tile_scale: raw.pseudo_tile_scale.clamp(0.05, 1.0),
@@ -292,6 +301,7 @@ struct RawConfig {
     terminal: String,
     show_welcome_hint: bool,
     water_effects: bool,
+    cursor_always_visible: bool,
     gaps: i32,
     /// `"bsp"`/`"master"`, resolved via `parse_layout_algorithm` in
     /// `Config::from_raw`. Raw string (not `LayoutAlgorithm` itself, which
@@ -402,6 +412,7 @@ impl Default for RawConfig {
             // (welcome.rs), that must resolve to off, not back to on.
             show_welcome_hint: false,
             water_effects: true,
+            cursor_always_visible: false,
             gaps: 8,
             default_layout: String::new(),
             pseudo_tile_scale: 0.7,
@@ -1135,6 +1146,12 @@ terminal = "kitty"
 # terminal). Delete this line, or set it to false, to stop seeing it.
 show_welcome_hint = true
 water_effects = true
+# Forces the on-screen pointer to stay visible even when a client asks to
+# hide it (e.g. a terminal hiding its own cursor glyph after inactivity).
+# Off by default -- respecting a client's own hide request is correct
+# behavior; this is an opt-in override. udev backend only (winit never
+# draws its own cursor).
+cursor_always_visible = false
 gaps = 8
 # Starting tiling algorithm for a workspace with no runtime override (see
 # the "layout:bsp"/"layout:master" keybinds below). "bsp" is this
@@ -1442,6 +1459,7 @@ mod tests {
             terminal: String::new(),
             show_welcome_hint: false,
             water_effects: true,
+            cursor_always_visible: false,
             gaps: 0,
             default_layout: LayoutAlgorithm::Bsp,
             pseudo_tile_scale: 0.7,
