@@ -6,11 +6,12 @@
 //!
 //! Read queries: `{"request": "outputs"}`, `{"request": "workspaces"}`,
 //! `{"request": "windows"}`, `{"request": "focused-window"}`,
-//! `{"request": "active-submap"}` (the currently active `[submap.<name>]`
-//! table, if any -- `null` when the base `[keybinds]` table is in effect).
+//! `{"request": "active-submap"}` (the currently active `submap <name> { }`
+//! block, if any -- `null` when the base binds are in effect).
 //! Actions: `{"request": "action", "action": "<string>"}`, where the string
-//! is the *exact* same syntax `[keybinds]` values use in config.toml (e.g.
-//! `"workspace:3"`, `"close-window"`, `"spawn:kitty"`) -- routed through
+//! is the *exact* same syntax a `bind` statement's action half uses in
+//! config.wave (e.g. `"workspace:3"`, `"close-window"`, `"spawn:kitty"`) --
+//! routed through
 //! `config::parse_action`/`Smallvil::run_action` directly, so every action
 //! a keybind can trigger is IPC-addressable for free, including ones added
 //! by later phases, with zero new dispatch code here.

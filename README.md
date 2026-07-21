@@ -34,7 +34,7 @@ Full modern tiling on the fundamentals -- BSP and master/stack, workspaces, grou
 - Layer-shell: bars, launchers, lock screens
 - XWayland, via [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite)
 - Screenshots, clipboard, session lock
-- Hot-reloadable TOML config, split across files, `[env]` + `[variables]`
+- Hot-reloadable config in Waves, TideWM's own format, split across files, `env`/`$variables`/`$wave(...)`
 - Per-app window rules
 - Submaps: temporary keybind layers (sway/Hyprland's "mode")
 - Workspace overview (`Super+O`)
@@ -135,22 +135,22 @@ To launch from a display manager (GDM, SDDM, greetd): put the `tidewm` binary on
 
 ## Configuration
 
-`~/.config/tidewm/config.toml`, generated with working defaults on first run. Hot-reload on save. Full key-by-key reference: [DOCUMENTATION.md](DOCUMENTATION.md).
+`~/.config/tidewm/config.wave`, generated with working defaults on first run. Hot-reload on save. Full key-by-key reference: [DOCUMENTATION.md](DOCUMENTATION.md).
 
-Splits across files (Hyprland's `source` idea, valid TOML):
+Config is [Waves](DOCUMENTATION.md#waves-format), TideWM's own format: `key = value` is the rest of the line after the first `=` (no quoting needed for a spawn command's own flags), a line ending in `{` opens a real multi-line block, `#` comments. Splits across files (Hyprland's `source` idea, adapted):
 
-```toml
-# config.toml
-include = ["monitors.toml", "keybinds.toml"]
+```
+# config.wave
+include "monitors.wave"
+include "keybinds.wave"
 
-[variables]
-mainMod = "Super"
+$mod = SUPER
+terminal = $wave(kitty, alacritty, foot)
 ```
 
-```toml
-# keybinds.toml
-[keybinds]
-"$mainMod+Return" = "spawn:kitty"
+```
+# keybinds.wave
+bind $mod+Return = spawn:$terminal
 ```
 
 ## Contributing

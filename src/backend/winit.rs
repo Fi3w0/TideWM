@@ -309,8 +309,11 @@ pub fn init_winit(
             // else marked itself dirty in the meantime. Goes through the
             // normal request_redraw() -> take_needs_redraw() path (checked
             // at the top of *next* tick), which re-dirties every output,
-            // not just whichever one(s) just rendered.
-            if state.toast.is_some() {
+            // not just whichever one(s) just rendered. Skipped for a
+            // persistent toast (see Toast::needs_continued_redraw) -- its
+            // pixels never change after the first render, so looping this
+            // forever would just burn cycles on identical frames.
+            if state.toast.as_ref().is_some_and(|toast| toast.needs_continued_redraw()) {
                 state.request_redraw();
             }
 

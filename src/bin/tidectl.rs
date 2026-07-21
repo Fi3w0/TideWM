@@ -3,9 +3,10 @@
 //! response line out, then the connection closes).
 //!
 //! Two kinds of commands: read queries (`outputs`/`workspaces`/`windows`/
-//! `focused-window`) and actions, which are exactly the same strings
-//! `[keybinds]` values use in config.toml (`close-window`, `workspace:3`,
-//! `spawn:kitty`, ...) -- this CLI does no validation of its own beyond a
+//! `focused-window`) and actions, which are exactly the same strings a
+//! `bind` statement's action half uses in config.wave (`close-window`,
+//! `workspace:3`, `spawn:kitty`, ...) -- this CLI does no validation of its
+//! own beyond a
 //! few space-separated shorthands (`workspace 3` instead of `workspace:3`);
 //! an unrecognized action string is rejected by the compositor itself,
 //! same as a bad keybind would be.
@@ -265,10 +266,10 @@ QUERIES:
     workspaces          list known workspaces (output, number, active, window count)
     windows             list currently mapped windows
     focused-window       (alias: focused) the currently focused window, if any
-    active-submap        the currently active [submap.<name>] table, if any
+    active-submap        the currently active `submap <name> {{ }}` block, if any
 
 ACTIONS:
-    Any string [keybinds] accepts in config.toml works here too, e.g.:
+    Any action a `bind` accepts in config.wave works here too, e.g.:
         close-window, toggle-floating, toggle-fullscreen, toggle-pin,
         toggle-scratchpad, move-to-scratchpad, toggle-pseudo-tile,
         cycle-focus, focus-left/right/up/down, swap-left/right/up/down,

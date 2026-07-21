@@ -16,6 +16,7 @@ mod screencast;
 mod state;
 mod tab_strip;
 mod toast;
+mod waves;
 mod welcome;
 mod xwayland;
 

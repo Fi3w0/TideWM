@@ -1353,7 +1353,10 @@ fn render_surface(
         state.send_layer_frames(output, state.start_time.elapsed());
     }
 
-    if state.toast.is_some() {
+    // Skipped for a persistent toast (see Toast::needs_continued_redraw) --
+    // its pixels never change after the first render, so looping this
+    // forever would just burn cycles on identical frames.
+    if state.toast.as_ref().is_some_and(|toast| toast.needs_continued_redraw()) {
         state.request_redraw();
         surface.dirty = true;
     }

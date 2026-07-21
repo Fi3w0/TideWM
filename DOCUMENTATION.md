@@ -13,25 +13,39 @@ Full reference for configuring and controlling TideWM: every config key, every a
 
 | Flag | Notes |
 | --- | --- |
-| `-c, --config <path>` | Load this file instead of `$XDG_CONFIG_HOME/tidewm/config.toml`. Applies to the hot-reload watcher too, not just the initial load. |
+| `-c, --config <path>` | Load this file instead of `$XDG_CONFIG_HOME/tidewm/config.wave`. Applies to the hot-reload watcher too, not just the initial load. |
 | `-s, --spawn <command>` | Spawn one specific command right after startup, instead of nothing. No shell parsing (same rule as `spawn_at_startup`). |
 | `-v, --version` | Print the version and exit. |
 | `-h, --help` | Print usage and exit. |
 
 ## Config file
 
-`$XDG_CONFIG_HOME/tidewm/config.toml`, or `~/.config/tidewm/config.toml` if `XDG_CONFIG_HOME` isn't set (or the path given to `--config`, see above). Written out with working defaults on first run. Almost every change hot-reloads on save — no restart needed — and a bad edit is reported and the previous config kept running, not silently discarded. The two documented exceptions: `[xwayland].enabled` (spawning/tearing down `xwayland-satellite` isn't done live) and `[input.touchpad]` (re-reads on save, but only reaches a touchpad connected *after* the edit — see that section below). Everything else, including keyboard layout, applies immediately.
+`$XDG_CONFIG_HOME/tidewm/config.wave`, or `~/.config/tidewm/config.wave` if `XDG_CONFIG_HOME` isn't set (or the path given to `--config`, see above). Written out with working defaults on first run. Almost every change hot-reloads on save — no restart needed — and a bad edit is reported (with a file/line pointing at the exact problem) and the previous config kept running, not silently discarded. The two documented exceptions: `xwayland { enabled }` (spawning/tearing down `xwayland-satellite` isn't done live) and `input { touchpad { ... } }` (re-reads on save, but only reaches a touchpad connected *after* the edit — see that section below). Everything else, including keyboard layout, applies immediately.
 
-**Multi-file:** add an `include = ["path.toml", ...]` array to any file (the main one, or one it includes). Each path resolves relative to the file that lists it; `~/` expands to your home directory. Rules:
+### Waves format
 
-- Tables merge key-by-key across files (`[keybinds]` in `config.toml` and in an included file combine, not replace).
-- Arrays concatenate (`[[output]]`/`[[window_rule]]` entries from every file all end up present).
-- A later `include` entry overlays an earlier one.
-- **The including file's own keys always win over anything it includes.** If `config.toml` includes `overrides.toml`, and both set `gaps`, `config.toml`'s own value wins — put an override directly in the file doing the including, not in a file you list last.
+TideWM's own config format, not TOML. Three rules cover the whole grammar:
+
+- **`key = value` is the rest of the line** after the first `=`, trimmed — so a spawn command's own flags and spaces never need quoting (`bind $mod+R = spawn:rofi -show drun` just works). Quote a value only if you need to keep meaningful leading/trailing whitespace, or a literal `#`.
+- **A line ending in `{` opens a block**, always real multi-line — `output eDP-1 { position = 0x0 scale = 1.0 }` all on one line is not valid. No exceptions; this is what keeps "rest of line" from being ambiguous.
+- **`#` starts a comment**, unless it's inside `"quotes"`.
+
+`$name = value` defines a variable, substituted anywhere below (only names actually defined this way are substituted — a `$HOME` or `$PATH` inside a spawn command is left untouched). `$wave(a, b, c, ...)` is a built-in, not something you define: it resolves to the first candidate whose own first word is a real, executable file (checked directly, or via `$PATH`), falling back to the last candidate untried if none resolve — so a spawn still gets attempted and fails visibly instead of silently doing nothing. This is what makes the shipped default config's `terminal = $wave(kitty, alacritty, foot, xterm)` line actually portable across machines instead of hardcoding one binary name.
+
+```
+$mod = SUPER
+terminal = $wave(kitty, alacritty, foot)
+bind $mod+Return = spawn:$terminal
+```
+
+**Multi-file:** `include "path.wave"` as its own statement, repeatable (one per line), in any file (the main one, or one it includes). Each path resolves relative to the file that lists it; `~/` expands to your home directory. Rules:
+
+- `input { }`, `input { touchpad { } }`, `env { }`, `switch_events { }`, and a given `submap <name> { }` merge field-by-field across files — the same key set from two files combines rather than one replacing the other.
+- `output <name> { }` and `rule { }` blocks accumulate — entries from every file all end up present.
+- A later `include` overlays an earlier one.
+- **The including file's own keys always win over anything it includes.** If `config.wave` includes `overrides.wave`, and both set `gaps`, `config.wave`'s own value wins — put an override directly in the file doing the including, not in a file you list last.
 - A broken include (missing, unreadable, unparseable, or a cycle) is skipped with a warning; it doesn't fail the whole config.
-- The config directory is watched recursively (`*.toml` files only, dotfiles/dotdirs skipped) — editing any included file hot-reloads exactly like editing the main file.
-
-**Variables:** an `[variables]` table (`name = "value"`) lets `$name` be reused in keybinds, submaps, `spawn_at_startup`, `terminal`, and `switch_events`. Only names actually defined in `[variables]` are substituted — a `$HOME` or `$PATH` inside a spawn command is left untouched.
+- The config directory is watched recursively (`*.wave` files only, dotfiles/dotdirs skipped) — editing any included file hot-reloads exactly like editing the main file.
 
 ## Config reference
 
@@ -39,51 +53,42 @@ Full reference for configuring and controlling TideWM: every config key, every a
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `terminal` | string | `"kitty"` | Spawned by the default `Super+Return` bind. |
+| `terminal` | string | `"kitty"` | Spawned by the default `Super+Return` bind. The shipped default is `$wave(kitty, alacritty, foot, xterm)` — see [`$wave(...)`](#waves-format) above. |
 | `show_welcome_hint` | bool | `true` | Shows a persistent "fake window" card pointing you at `Super+Return` whenever the desktop is otherwise empty. Disappears the instant a real window maps; delete this key (or set it `false`) to stop it coming back. Checked on every reload, not just at startup. |
 | `water_effects` | bool | `true` | Reserved for the water/aqua visual identity. The toggle exists now so config written today won't need migrating later; nothing reads it yet since `render/` isn't built. |
+| `cursor_always_visible` | bool | `false` | Forces the udev backend's software cursor to stay visible even when a client asks to hide it (e.g. a terminal hiding its own pointer glyph after inactivity). Off by default — respecting a client's own hide request is correct behavior; this is an opt-in override. |
 | `gaps` | integer | `8` | Pixel gap the tiling engine applies around and between tiles, both layout algorithms. |
-| `default_layout` | `"bsp"` \| `"master"` | `"bsp"` | Starting tiling algorithm for a workspace with no runtime override (see `layout:bsp`/`layout:master` actions below). `"bsp"` is dwindle-style: split orientation follows each window's own aspect ratio. `"master"` is one master pane plus an evenly-split stack, always left/right. |
+| `default_layout` | `bsp` \| `master` | `bsp` | Starting tiling algorithm for a workspace with no runtime override (see `layout:bsp`/`layout:master` actions below). `bsp` is dwindle-style: split orientation follows each window's own aspect ratio. `master` is one master pane plus an evenly-split stack, always left/right. |
 | `pseudo_tile_scale` | float, `0.05`–`1.0` | `0.7` | Fraction of its tile a pseudo-tiled window keeps, centered within it. Out-of-range values are clamped, not rejected. |
-| `spawn_at_startup` | array of strings | `[]` | Commands launched once at startup. Args split on whitespace — no shell involved, so quoting/globs/pipes aren't supported; wrap in `sh -c "..."` yourself if you need those. |
-| `include` | array of strings | `[]` | See [Config file](#config-file) above. Never actually present in a fully-loaded config — consumed and stripped before the rest of this file is parsed. |
+| `spawn_at_startup` | repeatable key | none | Commands launched once at startup — repeat the key once per command (`spawn_at_startup = waybar` on its own line, again for the next one), not one line holding a list. Args split on whitespace — no shell involved, so quoting/globs/pipes aren't supported; wrap in `sh -c "..."` yourself if you need those. |
 
-### `[env]`
+### `env { }`
 
-`KEY = "VALUE"` pairs, applied to TideWM's own process before the backend starts (so e.g. `XCURSOR_THEME` here actually changes the cursor theme TideWM itself loads, not just what child processes see) and folded into the systemd/D-Bus session-activation environment alongside `WAYLAND_DISPLAY`, so anything session-activated (a portal backend, a polkit agent) sees them too.
+`KEY = VALUE` pairs, applied to TideWM's own process before the backend starts (so e.g. `XCURSOR_THEME` here actually changes the cursor theme TideWM itself loads, not just what child processes see) and folded into the systemd/D-Bus session-activation environment alongside `WAYLAND_DISPLAY`, so anything session-activated (a portal backend, a polkit agent) sees them too.
 
-```toml
-[env]
-XCURSOR_THEME = "Adwaita"
-XCURSOR_SIZE = "24"
-QT_QPA_PLATFORMTHEME = "gtk3"
-GDK_BACKEND = "wayland"
+```
+env {
+    XCURSOR_THEME = Adwaita
+    XCURSOR_SIZE = 24
+    QT_QPA_PLATFORMTHEME = gtk3
+    GDK_BACKEND = wayland
+}
 ```
 
-### `[variables]`
-
-`name = "value"` pairs for `$name` substitution — see [Config file](#config-file) above.
-
-```toml
-[variables]
-mainMod = "Super"
-terminal = "kitty"
-```
-
-### `[input]`
+### `input { }`
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `repeat_delay` | integer (ms) | `200` | Delay before a held key starts repeating. |
 | `repeat_rate` | integer (Hz) | `25` | Repeat rate once it starts. |
 | `focus_follows_mouse` | bool | `true` | Moving the pointer over a window focuses it. |
-| `xkb_layout` | string | `""` | xkbcommon layout(s), comma-separated for a switchable multi-layout setup (e.g. `"us,de"`). Empty falls back to the `XKB_DEFAULT_*` env vars. Hot-reloaded; an invalid value is logged and ignored, keeping the previous keymap. |
-| `xkb_variant` | string | `""` | xkbcommon variant(s), one per layout. |
-| `xkb_options` | string | unset | xkbcommon options, e.g. `"grp:alt_shift_toggle"` to cycle multiple layouts. |
-| `xkb_model` | string | `""` | xkbcommon keyboard model. |
-| `xkb_rules` | string | `""` | xkbcommon rules file. |
+| `xkb_layout` | string | unset | xkbcommon layout(s), comma-separated for a switchable multi-layout setup (e.g. `us,de`). Unset falls back to the `XKB_DEFAULT_*` env vars. Hot-reloaded; an invalid value is logged and ignored, keeping the previous keymap. |
+| `xkb_variant` | string | unset | xkbcommon variant(s), one per layout. |
+| `xkb_options` | string | unset | xkbcommon options, e.g. `grp:alt_shift_toggle` to cycle multiple layouts. |
+| `xkb_model` | string | unset | xkbcommon keyboard model. |
+| `xkb_rules` | string | unset | xkbcommon rules file. |
 
-### `[input.touchpad]`
+### `input { touchpad { } }`
 
 udev backend only — winit's nested host input never reaches a real libinput device, so these sit unused there. Every key is opt-in: omit it and that setting is left at whatever your driver already defaults to. Applied once per touchpad-capable device (libinput's tap-finger-count check) when it's reported by libinput — startup enumeration and hotplug both fire this, but **a config edit here needs a restart to reach an already-connected touchpad** (unlike everything else in this table, this one isn't reloaded live).
 
@@ -96,42 +101,55 @@ udev backend only — winit's nested host input never reaches a real libinput de
 | `natural_scroll` | bool | Reverse scroll direction (touch-surface convention). |
 | `left_handed` | bool | Swap left/right buttons. |
 | `middle_emulation` | bool | Emulate a middle-click from simultaneous left+right press. |
-| `click_method` | string | `"clickfinger"` or `"button-areas"`. |
-| `scroll_method` | string | `"two-finger"`, `"edge"`, `"on-button-down"`, or `"none"`. |
+| `click_method` | string | `clickfinger` or `button-areas`. |
+| `scroll_method` | string | `two-finger`, `edge`, `on-button-down`, or `none`. |
 | `accel_speed` | float | `-1.0` (slowest) to `1.0` (fastest). |
-| `accel_profile` | string | `"adaptive"` or `"flat"`. |
+| `accel_profile` | string | `adaptive` or `flat`. |
 
-### `[xwayland]`
+```
+input {
+    repeat_delay = 200
+    repeat_rate = 25
+    xkb_layout = us
+
+    touchpad {
+        natural_scroll = true
+        tap_to_click = true
+    }
+}
+```
+
+### `xwayland { }`
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | Whether `xwayland-satellite` is spawned at startup. Takes effect on next launch — not hot-reloaded. |
-| `path` | string | `"xwayland-satellite"` | Path to the `xwayland-satellite` binary. |
+| `path` | string | `xwayland-satellite` | Path to the `xwayland-satellite` binary. |
 
-### `[[output]]`
+### `output <name> { }`
 
-Per-connector overrides, **udev backend only** — winit's single simulated output has no real mode list or transform-as-monitor-orientation meaning. Purely opt-in: an output with no matching entry auto-configures (preferred mode, auto-positioned to the right of whatever's already mapped, scale 1, no rotation).
+Per-connector overrides, **udev backend only** — winit's single simulated output has no real mode list or transform-as-monitor-orientation meaning. Purely opt-in: an output with no matching block auto-configures (preferred mode, auto-positioned to the right of whatever's already mapped, scale 1, no rotation). One block per connector; repeat the block (in the same or another included file) for a second monitor.
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `name` | string | — | Connector name, e.g. `"eDP-1"`, `"DP-2"`. Check your logs or the `outputs` IPC query for what TideWM detected. |
+| header | string | — | Connector name, e.g. `eDP-1`, `DP-2`. Check your logs or the `outputs` IPC query for what TideWM detected. |
 | `enabled` | bool | `true` | Set `false` to leave a connected output unused. |
-| `mode` | string, optional | connector's preferred mode | `"1920x1080"` or `"1920x1080@60"`. Falls back to the connector's own preferred mode if unset or unmatched. |
-| `position` | `[x, y]`, optional | auto-layout | Falls back to auto-layout (rightmost edge of already-mapped outputs) if unset. |
+| `mode` | string, optional | connector's preferred mode | `1920x1080` or `1920x1080@60`. Falls back to the connector's own preferred mode if unset or unmatched. |
+| `position` | `WxH`, optional | auto-layout | e.g. `1920x0`. Falls back to auto-layout (rightmost edge of already-mapped outputs) if unset. |
 | `scale` | float | `1.0` | |
-| `transform` | string | `"normal"` | One of `"normal"`, `"90"`, `"180"`, `"270"`, `"flipped"`, `"flipped-90"`, `"flipped-180"`, `"flipped-270"`. |
+| `transform` | string | `normal` | One of `normal`, `90`, `180`, `270`, `flipped`, `flipped-90`, `flipped-180`, `flipped-270`. |
 
-```toml
-[[output]]
-name = "eDP-1"
-enabled = true
-mode = "1920x1080@60"
-position = [0, 0]
-scale = 1.0
-transform = "normal"
+```
+output eDP-1 {
+    enabled = true
+    mode = 1920x1080@60
+    position = 0x0
+    scale = 1.0
+    transform = normal
+}
 ```
 
-### `[switch_events]`
+### `switch_events { }`
 
 Laptop lid / tablet-mode switch bindings, **udev backend only** (winit has no host-independent access to libinput's switch capability). Each entry takes any [action string](#action-strings) — in practice almost always `spawn:...`, since the things you'd react with (suspend, lock, brightness, an onboard keyboard) live outside the compositor.
 
@@ -142,17 +160,18 @@ Laptop lid / tablet-mode switch bindings, **udev backend only** (winit has no ho
 | `tablet_mode_on` | action string, optional | unset |
 | `tablet_mode_off` | action string, optional | unset |
 
-systemd-logind's own `HandleLidSwitch=` policy (`/etc/systemd/logind.conf`) already triggers suspend on lid close independently of this — `lid_close` here is for whatever *extra* you want on top of that, not a replacement. No logind? Nothing suspends on lid-close on its own; put `"spawn:systemctl suspend"` or your init's equivalent here.
+systemd-logind's own `HandleLidSwitch=` policy (`/etc/systemd/logind.conf`) already triggers suspend on lid close independently of this — `lid_close` here is for whatever *extra* you want on top of that, not a replacement. No logind? Nothing suspends on lid-close on its own; put `spawn:systemctl suspend` or your init's equivalent here.
 
-```toml
-[switch_events]
-lid_close = "spawn:systemctl suspend"
-lid_open = "spawn:brightnessctl s 50%"
+```
+switch_events {
+    lid_close = spawn:systemctl suspend
+    lid_open = spawn:brightnessctl s 50%
+}
 ```
 
-### `[[window_rule]]`
+### `rule { }`
 
-Per-app placement applied the moment a window first maps, before it's ever tiled/rendered at a default spot (i3/sway's `for_window`, Hyprland's `windowrule`).
+Per-app placement applied the moment a window first maps, before it's ever tiled/rendered at a default spot (i3/sway's `for_window`, Hyprland's `windowrule`). One block per rule; repeat for more.
 
 | Key | Type | Notes |
 | --- | --- | --- |
@@ -166,43 +185,47 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 
 Multiple rules can match the same window: `workspace`/`output` take the *last* match, `float`/`pseudo_tile`/`pin` accumulate (any match sets it, never unsets it).
 
-```toml
-[[window_rule]]
-app_id = "pavucontrol"
-float = true
+```
+rule {
+    app_id = pavucontrol
+    float = true
+}
 
-[[window_rule]]
-title = "Picture-in-Picture"
-float = true
-pin = true
+rule {
+    title = Picture-in-Picture
+    float = true
+    pin = true
+}
 
-[[window_rule]]
-app_id = "Slack"
-workspace = 3
+rule {
+    app_id = Slack
+    workspace = 3
+}
 ```
 
-### `[keybinds]`
+### `bind`
 
-`"Modifier+Key" = "action-string"`. Modifiers: `Super`/`Logo`/`Mod4`, `Ctrl`/`Control`, `Alt`, `Shift`, combined with `+`. Key names are matched against the *unshifted* keysym, so it doesn't matter whether you write the letter upper or lowercase. See [Action strings](#action-strings) for every value a bind can take, and the generated `config.toml` for the shipped defaults (also summarized in README's Quick Start table).
+`bind <Modifier+Key> = <action-string>`. Modifiers: `Super`/`Logo`/`Mod4`, `Ctrl`/`Control`, `Alt`, `Shift`, combined with `+`. Key names are matched against the *unshifted* keysym, so it doesn't matter whether you write the letter upper or lowercase. See [Action strings](#action-strings) for every value a bind can take, and the generated `config.wave` for the shipped defaults (also summarized in README's Quick Start table). A later `bind` on the same combo overrides an earlier one.
 
-### `[submap.<name>]`
+### `submap <name> { }`
 
-A temporary alternate keybind table (sway/Hyprland's "mode" idea), same `"Key" = "action"` syntax as `[keybinds]` (no modifier prefix needed if the submap's own binds are unmodified, like the shipped `nav` example). Entered via a `"submap:<name>"` keybind, which **fully replaces** the base `[keybinds]` table — not layered on top of it — until an explicit `"exit-submap"` bind. Not tied to focus; stays active until you explicitly leave it. A config reload that drops or renames the active submap auto-exits back to the base table.
+A temporary alternate keybind table (sway/Hyprland's "mode" idea), same `bind` statements as the top level (no modifier prefix needed if the submap's own binds are unmodified, like the shipped `nav` example). Entered via a `submap:<name>` action, which **fully replaces** the base binds — not layered on top of them — until an explicit `exit-submap` bind. Not tied to focus; stays active until you explicitly leave it. A config reload that drops or renames the active submap auto-exits back to the base binds.
 
-```toml
-[submap.nav]
-h = "focus-left"
-l = "focus-right"
-k = "focus-up"
-j = "focus-down"
-Escape = "exit-submap"
+```
+submap nav {
+    bind h = focus-left
+    bind l = focus-right
+    bind k = focus-up
+    bind j = focus-down
+    bind Escape = exit-submap
+}
 ```
 
 Query which submap (if any) is active via `tidectl active-submap` or the IPC `active-submap` request.
 
 ## Action strings
 
-The same set of strings works in `[keybinds]`, `[submap.*]`, `[switch_events]`, and as `tidectl`'s action argument / the IPC `action` request — one dispatch mechanism, not four.
+The same set of strings works after `bind ... =` at the top level or inside a `submap { }`, in `switch_events { }`, and as `tidectl`'s action argument / the IPC `action` request — one dispatch mechanism, not four.
 
 **Windows**
 - `close-window`
@@ -231,7 +254,7 @@ The same set of strings works in `[keybinds]`, `[submap.*]`, `[switch_events]`, 
 - `swap-workspaces:<output-name>` — swap this output's and the named output's active-workspace content
 
 **Modes**
-- `submap:<name>` — enter a `[submap.<name>]` table
+- `submap:<name>` — enter a `submap <name> { }` block
 - `exit-submap`
 - `toggle-overview` — schematic grid of every workspace on the current output (see README's Features list; not live thumbnails)
 

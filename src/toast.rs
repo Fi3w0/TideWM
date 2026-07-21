@@ -19,7 +19,11 @@ use smithay::{
 
 const FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/AdwaitaSans-Regular.ttf");
 const FONT_SIZE: f32 = 15.0;
-const LINE_HEIGHT: f32 = FONT_SIZE * 1.3;
+// Errors carry a lot more text (a file path plus a parser message) than the
+// one-line "Config reloaded" confirmation -- a smaller size keeps a long
+// error legible without the pill ballooning to an unreasonable width at the
+// same size ordinary short toasts use.
+const ERROR_FONT_SIZE: f32 = 12.0;
 const PADDING_X: i32 = 18;
 const PADDING_Y: i32 = 12;
 const MARGIN: i32 = 24;
@@ -43,6 +47,15 @@ pub enum ToastKind {
 }
 
 impl ToastKind {
+    /// Errors carry much longer messages than a routine confirmation --
+    /// see `ERROR_FONT_SIZE`'s own doc comment.
+    fn font_size(self) -> f32 {
+        match self {
+            ToastKind::Info => FONT_SIZE,
+            ToastKind::Error => ERROR_FONT_SIZE,
+        }
+    }
+
     /// Background tint, RGB. Kept in the water/aqua palette for info; a warm
     /// tone for errors so a broken config is obviously not the happy path.
     fn rgb(self) -> (u8, u8, u8) {
@@ -57,18 +70,26 @@ pub struct Toast {
     buffer: MemoryRenderBuffer,
     size: (i32, i32),
     shown_at: Instant,
-    visible_for: Duration,
+    /// `None` means this toast never fades on its own -- see `persistent`.
+    visible_for: Option<Duration>,
 }
 
 impl Toast {
     pub fn new(message: &str, kind: ToastKind) -> Self {
-        Self::with_duration(message, kind, VISIBLE_FOR)
+        Self::with_duration(message, kind, Some(VISIBLE_FOR))
     }
 
-    /// Same as `new`, but shown longer than the usual reload/error blip --
-    /// for the one-time first-run welcome hint, which needs enough time for
-    /// someone new to the compositor to actually read it.
-    pub fn with_duration(message: &str, kind: ToastKind, visible_for: Duration) -> Self {
+    /// Never fades or times out -- stays exactly as shown until its owner
+    /// replaces or drops it. Used for the config-reload error toast: the
+    /// message can be long (a file path plus a parser error) and the
+    /// natural "you're done with this" signal is the *next* reload attempt
+    /// replacing it, not a fixed timer someone may not finish reading
+    /// before it's gone.
+    pub fn persistent(message: &str, kind: ToastKind) -> Self {
+        Self::with_duration(message, kind, None)
+    }
+
+    fn with_duration(message: &str, kind: ToastKind, visible_for: Option<Duration>) -> Self {
         let (pixels, width, height) = rasterize_toast(message, kind);
         let buffer = MemoryRenderBuffer::from_slice(
             &pixels,
@@ -86,21 +107,41 @@ impl Toast {
         }
     }
 
+    /// Whether the caller should keep re-requesting a redraw purely to give
+    /// this toast another frame, even though nothing else went dirty in the
+    /// meantime -- true for an ordinary timed toast for its whole
+    /// visible-then-fading lifetime, always false for a `persistent` one.
+    /// A persistent toast's pixels never change after the first render (its
+    /// alpha is a flat 1.0 forever), so there is nothing later to redraw
+    /// *for* -- without this, the per-tick "a toast is showing" redraw loop
+    /// both backends run would spin forever instead of stopping once the
+    /// toast settles, burning CPU/GPU on frames that look identical to the
+    /// one already on screen.
+    pub fn needs_continued_redraw(&self) -> bool {
+        self.visible_for.is_some()
+    }
+
     /// The render element for this toast, anchored to the top-right of
     /// `output_size`, or `None` once it has fully faded out (the caller
-    /// should drop the `Toast` at that point).
+    /// should drop the `Toast` at that point) -- never for a `persistent`
+    /// one, which has no fade to reach.
     pub fn render_element(
         &self,
         renderer: &mut GlesRenderer,
         output_size: Size<i32, Physical>,
     ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
-        let elapsed = self.shown_at.elapsed();
-        let alpha = if elapsed < self.visible_for {
-            1.0
-        } else if elapsed < self.visible_for + FADE_FOR {
-            1.0 - (elapsed - self.visible_for).as_secs_f32() / FADE_FOR.as_secs_f32()
-        } else {
-            return None;
+        let alpha = match self.visible_for {
+            None => 1.0,
+            Some(visible_for) => {
+                let elapsed = self.shown_at.elapsed();
+                if elapsed < visible_for {
+                    1.0
+                } else if elapsed < visible_for + FADE_FOR {
+                    1.0 - (elapsed - visible_for).as_secs_f32() / FADE_FOR.as_secs_f32()
+                } else {
+                    return None;
+                }
+            }
         };
 
         let location = ((output_size.w - self.size.0 - MARGIN) as f64, MARGIN as f64);
@@ -122,17 +163,19 @@ impl Toast {
 /// background with a 1px antialiased edge, then the message text on top.
 fn rasterize_toast(message: &str, kind: ToastKind) -> (Vec<u8>, i32, i32) {
     let font = font();
+    let font_size = kind.font_size();
+    let line_height = font_size * 1.3;
 
     let mut glyphs = Vec::with_capacity(message.len());
     let mut text_width = 0.0f32;
     for ch in message.chars() {
-        let (metrics, bitmap) = font.rasterize(ch, FONT_SIZE);
+        let (metrics, bitmap) = font.rasterize(ch, font_size);
         text_width += metrics.advance_width;
         glyphs.push((metrics, bitmap));
     }
 
     let width = (text_width.ceil() as i32 + PADDING_X * 2).max(PADDING_X * 2 + 1);
-    let height = (LINE_HEIGHT.ceil() as i32) + PADDING_Y * 2;
+    let height = (line_height.ceil() as i32) + PADDING_Y * 2;
     let mut pixels = vec![0u8; (width * height * 4) as usize];
 
     let (bg_r, bg_g, bg_b) = kind.rgb();
@@ -151,7 +194,7 @@ fn rasterize_toast(message: &str, kind: ToastKind) -> (Vec<u8>, i32, i32) {
 
     // Baseline sits one line-height down from the top padding, leaving a small
     // ascent/descent margin either side rather than kissing the pill's edge.
-    let baseline = PADDING_Y + (LINE_HEIGHT * 0.8) as i32;
+    let baseline = PADDING_Y + (line_height * 0.8) as i32;
     let mut pen_x = PADDING_X;
 
     for (metrics, bitmap) in &glyphs {
