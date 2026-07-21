@@ -27,7 +27,6 @@ use smithay::reexports::wayland_server::{
     backend::ClientId, backend::GlobalId, Client, DataInit, Dispatch, GlobalDispatch, Resource,
 };
 use smithay::reexports::wayland_server::{DisplayHandle, New};
-use smithay::utils::SERIAL_COUNTER;
 use smithay::wayland::shell::xdg::XdgShellHandler;
 use wayland_protocols_wlr::foreign_toplevel::v1::server::{
     zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
@@ -342,12 +341,17 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, WlrForeignToplevelHandle> for Smallvi
         match request {
             zwlr_foreign_toplevel_handle_v1::Request::Activate { seat: _ } => {
                 // The seat arg is informational; per spec activation
-                // isn't guaranteed. Reuse the existing focus path; if
-                // the window is on a hidden workspace, focus switches
-                // there first (same as xdg-activation-v1).
-                if state.exclusive_layer().is_none() {
-                    state.focus_window(Some(surface), SERIAL_COUNTER.next_serial());
-                }
+                // isn't guaranteed. `activate_toplevel` is the real
+                // xdg-activation-v1 sequence (switch workspace if hidden,
+                // promote a parked group tab, raise if floating, then
+                // focus) -- reuse it rather than the plain `focus_window`
+                // this used to call, which silently no-ops on a hidden
+                // window (`focus_window`'s target is filtered to visible
+                // surfaces only), making a waybar taskbar click on a
+                // window from another workspace do nothing. Its own
+                // `exclusive_layer` check replaces the one this site used
+                // to do itself.
+                state.activate_toplevel(&surface);
             }
             zwlr_foreign_toplevel_handle_v1::Request::Close => {
                 if let Some(toplevel) = state
@@ -359,10 +363,15 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, WlrForeignToplevelHandle> for Smallvi
                 }
             }
             zwlr_foreign_toplevel_handle_v1::Request::SetMaximized => {
-                if !state.maximized.contains_key(&surface)
-                    && !state.layout.contains(&surface)
-                    && !state.fullscreen.contains_key(&surface)
-                {
+                // No `!state.fullscreen.contains_key(&surface)` guard here:
+                // `do_maximize_request` is explicitly designed to accept a
+                // fullscreen floating window, recording restore-intent (it
+                // reads the fullscreen entry's own restore rect as the
+                // basis for the maximized one) rather than trying to
+                // change anything visually while fullscreen still
+                // dominates the render -- excluding that case here would
+                // just silently drop a legitimate request.
+                if !state.maximized.contains_key(&surface) && !state.layout.contains(&surface) {
                     if let Some(toplevel) = state
                         .mapped_toplevel_window(&surface)
                         .as_ref()
