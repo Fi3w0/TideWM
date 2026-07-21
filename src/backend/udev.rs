@@ -726,6 +726,7 @@ pub fn init_udev(
             state.popups.cleanup();
             state.refresh_popup_grab();
             state.cleanup_capture();
+            state.cleanup_wlr_foreign_toplevels();
             let _ = state.display_handle.flush_clients();
 
             TimeoutAction::ToDuration(Duration::from_millis(16))

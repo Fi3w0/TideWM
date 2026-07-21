@@ -225,10 +225,23 @@ impl WlrForeignToplevelState {
     }
 
     /// GCs closed handles so a long-running session doesn't accumulate
-    /// dead entries. Called from the per-frame cleanup tick alongside
-    /// `popup`/`layer` cleanup.
+    /// dead entries. In the current code every removal path (`untrack`)
+    /// already drains its own entry synchronously, so this should normally
+    /// find nothing to do -- it exists as a safety net against a future
+    /// path that marks a handle closed without also untracking it, cheap
+    /// enough to run unconditionally every tick.
     pub fn cleanup_closed(&mut self) {
         self.toplevels.retain(|h| !h.is_closed());
+    }
+}
+
+impl Smallvil {
+    /// Wired into both backends' per-frame cleanup tick, next to
+    /// `cleanup_capture`/`refresh_popup_grab` -- see `WlrForeignToplevelState::cleanup_closed`.
+    pub fn cleanup_wlr_foreign_toplevels(&mut self) {
+        if let Some(wlr_state) = self.wlr_foreign_toplevel_state.as_mut() {
+            wlr_state.cleanup_closed();
+        }
     }
 }
 
