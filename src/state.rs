@@ -799,6 +799,13 @@ impl Smallvil {
         // Here we assume that there is always pointer plugged in
         seat.add_pointer();
 
+        // Advertise touch unconditionally too, matching pointer/keyboard
+        // above and the same "just advertise it" precedent `PointerGesturesState`
+        // already uses for a capability that may or may not have real
+        // hardware behind it -- a client simply never gets touch events if
+        // there's no touch panel, harmless either way.
+        seat.add_touch();
+
         // A space represents a two-dimensional plane. Windows and Outputs can be mapped onto it.
         //
         // Windows get a position and stacking order through mapping.

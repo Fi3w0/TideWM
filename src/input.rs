@@ -5,7 +5,7 @@ use smithay::{
             GestureEndEvent, GesturePinchUpdateEvent as BackendGesturePinchUpdateEvent,
             GestureSwipeUpdateEvent as BackendGestureSwipeUpdateEvent, InputBackend, InputEvent,
             KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
-            Switch, SwitchState, SwitchToggleEvent,
+            Switch, SwitchState, SwitchToggleEvent, TouchEvent,
         },
         session::Session,
     },
@@ -18,6 +18,7 @@ use smithay::{
             GesturePinchEndEvent, GesturePinchUpdateEvent, GestureSwipeBeginEvent,
             GestureSwipeEndEvent, GestureSwipeUpdateEvent, MotionEvent, RelativeMotionEvent,
         },
+        touch::{DownEvent as TouchDownData, MotionEvent as TouchMotionData, UpEvent as TouchUpData},
     },
     reexports::input::{AccelProfile, ClickMethod, Device as InputDevice, DeviceConfigResult, DragLockState, ScrollMethod},
     utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
@@ -170,6 +171,22 @@ fn floating_resize_edge(
 }
 
 impl Smallvil {
+    /// Maps a touch (or any other absolute-position) event's normalized
+    /// coordinates onto logical space, the same way `PointerMotionAbsolute`
+    /// already does just below -- first output, no per-device output
+    /// binding. A real touch panel is virtually always the built-in one, so
+    /// this deliberately matches the existing absolute-pointer convention
+    /// rather than anvil's own "prefer eDP, else first" heuristic; revisit
+    /// if a real multi-touch-panel setup ever needs per-device binding.
+    fn touch_location<I: InputBackend, E: AbsolutePositionEvent<I>>(
+        &self,
+        event: &E,
+    ) -> Option<Point<f64, Logical>> {
+        let output = self.space.outputs().next()?;
+        let output_geo = self.space.output_geometry(output)?;
+        Some(event.position_transformed(output_geo.size) + output_geo.loc.to_f64())
+    }
+
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) {
         // Device topology changes aren't user activity; every other variant
         // reaching this function is a real keyboard/pointer/touch event.
@@ -832,6 +849,61 @@ impl Smallvil {
                     },
                 );
                 pointer.frame(self);
+            }
+            InputEvent::TouchDown { event, .. } => {
+                let Some(touch) = self.seat.get_touch() else {
+                    return;
+                };
+                let Some(location) = self.touch_location(&event) else {
+                    return;
+                };
+                let serial = SERIAL_COUNTER.next_serial();
+                let under = self.surface_under(location);
+                touch.down(
+                    self,
+                    under,
+                    &TouchDownData {
+                        slot: event.slot(),
+                        location,
+                        serial,
+                        time: event.time_msec(),
+                    },
+                );
+            }
+            InputEvent::TouchMotion { event, .. } => {
+                let Some(touch) = self.seat.get_touch() else {
+                    return;
+                };
+                let Some(location) = self.touch_location(&event) else {
+                    return;
+                };
+                let under = self.surface_under(location);
+                touch.motion(
+                    self,
+                    under,
+                    &TouchMotionData {
+                        slot: event.slot(),
+                        location,
+                        time: event.time_msec(),
+                    },
+                );
+            }
+            InputEvent::TouchUp { event, .. } => {
+                let Some(touch) = self.seat.get_touch() else {
+                    return;
+                };
+                let serial = SERIAL_COUNTER.next_serial();
+                touch.up(self, &TouchUpData { slot: event.slot(), serial, time: event.time_msec() });
+            }
+            InputEvent::TouchFrame { .. } => {
+                if let Some(touch) = self.seat.get_touch() {
+                    touch.frame(self);
+                }
+            }
+            InputEvent::TouchCancel { .. } => {
+                if let Some(touch) = self.seat.get_touch() {
+                    touch.cancel(self);
+                }
             }
             InputEvent::PointerAxis { event, .. } => {
                 let source = event.source();
