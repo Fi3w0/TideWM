@@ -64,6 +64,7 @@ use smithay::{
         input::Libinput,
         rustix::fs::OFlags,
         wayland_protocols::wp::presentation_time::server::wp_presentation_feedback,
+        wayland_server::backend::GlobalId,
     },
     utils::{DeviceFd, Transform},
     wayland::{compositor::with_states, dmabuf::DmabufFeedbackBuilder, presentation::Refresh},
@@ -106,6 +107,12 @@ smithay::backend::renderer::element::render_elements! {
 struct SurfaceData {
     compositor: GbmDrmCompositor,
     output: Output,
+    /// The `wl_output` global's own id, kept so it can be retracted on
+    /// disconnect -- `create_surface` used to discard this (`let _global =
+    /// ...`), which left the global advertised to every client forever
+    /// after an unplug, with a replug adding a second one on top rather
+    /// than replacing it.
+    global: GlobalId,
     /// A frame is queued and we're waiting for its VBlank; the KMS API
     /// doesn't allow submitting another one to the same CRTC until then.
     pending: bool,
@@ -872,7 +879,7 @@ fn create_surface(
         Some(position.into()),
     );
     output.set_preferred(output_mode);
-    let _global = output.create_global::<Smallvil>(display_handle);
+    let global = output.create_global::<Smallvil>(display_handle);
     state.space.map_output(&output, position);
     #[cfg(feature = "screencast")]
     if let Some(screencast) = &state.screencast {
@@ -918,6 +925,7 @@ fn create_surface(
     Some(SurfaceData {
         compositor,
         output,
+        global,
         pending: false,
         dirty: true,
         empty_frame_retry_pending: None,
@@ -974,6 +982,13 @@ fn handle_connector_change(
             } => {
                 if let Some(surface) = dev.surfaces.remove(&crtc) {
                     tracing::info!(?crtc, "Output disconnected");
+                    // Retract the wl_output global explicitly -- letting
+                    // `surface` (and its `GlobalId`) just drop does not do
+                    // this; a client that already bound it would otherwise
+                    // keep seeing a global for an output that no longer
+                    // exists, and a later replug would advertise a second
+                    // global on top of the still-live stale one.
+                    display_handle.remove_global::<Smallvil>(surface.global);
                     // Windows tiled on this output are *not* migrated to
                     // another one -- they stay in that output's now-orphaned
                     // Layouts entry and stop being retiled. Real window
