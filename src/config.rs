@@ -394,7 +394,13 @@ impl Default for RawConfig {
         Self {
             include: Vec::new(),
             terminal: "kitty".to_string(),
-            show_welcome_hint: true,
+            // Deliberately false, not true: a real config.toml always ships
+            // with `show_welcome_hint = true` written explicitly (see
+            // DEFAULT_CONFIG_TOML), so this default is only ever consulted
+            // when a user deletes the key from an existing file -- and per
+            // the on-screen hint's own "delete this to dismiss" advice
+            // (welcome.rs), that must resolve to off, not back to on.
+            show_welcome_hint: false,
             water_effects: true,
             gaps: 8,
             default_layout: String::new(),

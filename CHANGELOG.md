@@ -2,6 +2,14 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.51.1] - 2026-07-21
+
+### Fixed
+- **`show_welcome_hint`'s "delete the key to dismiss" advice actually did nothing.** `RawConfig`'s struct-level `#[serde(default)]` falls back to `RawConfig::default()` for any omitted field, and that default was `true` -- so deleting the key from an existing config just silently reverted to showing the hint again, the opposite of what its own on-screen text told you to do. Default flipped to `false`; first-run behavior is unaffected since the auto-generated template always writes the key explicitly as `true`.
+
+### Tests
+- **Real-hardware verification pass** (t14arch, AMD Renoir/Vega, real udev/DRM backend, live session): confirmed working end to end for the first time -- `wlr-output-power-management-v1`'s real DRM CRTC power toggle (screen visibly blanked and recovered via `wlopm`, no freeze, matching risk class to the historical `TileMoveGrab` 0.15.1 incident but clean this time), `zwlr_gamma_control_manager_v1`'s real DRM gamma ioctls (`wlsunset` produced a user-confirmed visible warm color shift), the actual `Super+9`/`Super+1` workspace-switch keybind path via a real physical keypress (not just the underlying function), pseudo-tiling's visual result via `grim` (correct, matches design), and `toggle-pin` (confirmed to set both `floating` and `pinned` and to survive a workspace switch). Also reconfirmed, definitively this time: `wtype`/virtual-keyboard input structurally cannot trigger WM keybinds (delivers straight to the focused client, bypassing the keybind filter by protocol design) -- literal text/Return delivery works fine, modifier-combo keybinds never will via this path, on this or any future session. PSS held flat ~49-51MB over ~30 minutes of active mixed real use, no leak. Full write-up, including two real-but-not-yet-root-caused bugs found live (Overview's window-label text occasionally rendering as a stacked column of characters for a non-active workspace; the software cursor appearing to vanish from the real screen after ~2-3s of inactivity) and two non-TideWM findings (a QuickShell `-c`/`-p` config-selection gotcha; this machine's physical brightness keys producing zero Linux input events at the kernel level), is in `AGENT.md`'s "Real-hardware verification pass" section.
+
 ## [0.51.0] - 2026-07-21
 
 ### Added
