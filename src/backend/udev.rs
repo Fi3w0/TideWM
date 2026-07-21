@@ -996,12 +996,22 @@ fn handle_connector_change(
                     // exists, and a later replug would advertise a second
                     // global on top of the still-live stale one.
                     display_handle.remove_global::<Smallvil>(surface.global);
-                    // Windows tiled on this output are *not* migrated to
-                    // another one -- they stay in that output's now-orphaned
-                    // Layouts entry and stop being retiled. Real window
-                    // migration on hot-unplug is a bigger feature than
-                    // "multi-monitor tiling works"; tracked as a follow-up,
-                    // not silently missing.
+                    // Tiled windows migrate to a still-connected fallback
+                    // output (same workspace numbers) so they don't become
+                    // permanently unreachable -- see
+                    // `Smallvil::migrate_output_windows`'s own doc comment
+                    // for exactly what this does and doesn't cover (floating
+                    // windows on the disconnected output are a separate,
+                    // still-open gap). No-op if this was the only output.
+                    let disconnected_name = surface.output.name();
+                    let fallback: Option<String> = state
+                        .space
+                        .outputs()
+                        .find(|o| o.name() != disconnected_name)
+                        .map(|o| o.name());
+                    if let Some(fallback) = fallback {
+                        state.migrate_output_windows(&disconnected_name, &fallback);
+                    }
                     state.space.unmap_output(&surface.output);
                     state.lock_surfaces.remove(&surface.output);
                     state.lock_blank.remove(&surface.output);

@@ -2728,6 +2728,35 @@ impl Smallvil {
         self.retile();
     }
 
+    /// Moves every window tiled on `from_output` onto `to_output`,
+    /// preserving workspace numbers -- so a window tiled on a monitor that
+    /// just got unplugged doesn't stay permanently unreachable in its
+    /// now-orphaned `Layouts` entry (a real, previously-known gap; see the
+    /// Multi-monitor section of AGENT.md). A migrated workspace isn't
+    /// necessarily `to_output`'s *active* one, so the windows may land
+    /// hidden rather than immediately visible -- still reachable via
+    /// `workspace:<N>`, which is the point, not a bug. Floating windows on
+    /// the disconnected output are a separate, still-open gap this pass
+    /// doesn't cover -- see the same section.
+    pub(crate) fn migrate_output_windows(&mut self, from_output: &str, to_output: &str) {
+        let workspaces: Vec<u32> = self
+            .layout
+            .populated_workspaces()
+            .into_iter()
+            .filter(|(name, _)| name == from_output)
+            .map(|(_, workspace)| workspace)
+            .collect();
+        for workspace in workspaces {
+            for window in self.layout.windows_in(from_output, workspace) {
+                let Some(surface) = window.toplevel().map(|t| t.wl_surface().clone()) else {
+                    continue;
+                };
+                self.layout.remove(&surface);
+                self.layout.insert(to_output, workspace, window, None);
+            }
+        }
+    }
+
     /// Raises `surface` to the top of the floating stack. No-op on a tiled
     /// window -- tiled windows never overlap by construction, so raising
     /// one has no meaning (same restriction `toggle_pseudo_tile` applies in
