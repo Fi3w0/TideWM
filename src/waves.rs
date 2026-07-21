@@ -160,15 +160,14 @@ fn block_is_keyed(keyword: &str) -> bool {
     matches!(keyword, "input" | "touchpad" | "env" | "switch_events" | "submap")
 }
 
-/// The one plain `key = value` that's list-shaped instead of scalar --
-/// repeating it accumulates rather than overwriting, matching Hyprland's
-/// own `exec-once = foo` convention (list one thing to start per line,
-/// not one line holding an array). A single-entry allowlist rather than a
-/// general "list keys" mechanism, because this is the only config field
-/// with this shape today; add to this list if that ever changes rather
-/// than inventing array-literal syntax nothing else needs.
+/// Plain `key = value` keys that are list-shaped instead of scalar --
+/// repeating one accumulates rather than overwriting, matching Hyprland's
+/// own `exec-once = foo` convention (list one thing per line, not one line
+/// holding an array). A small allowlist rather than a general "list keys"
+/// mechanism, because this is a property of what each key *means*, not
+/// something a `.wave` file should ever need to say for itself.
 fn assign_is_multi(key: &str) -> bool {
-    key == "spawn_at_startup"
+    matches!(key, "spawn_at_startup" | "workspace_name")
 }
 
 /// Folds `incoming` onto `target` in place, applying the same policy in
@@ -186,8 +185,8 @@ fn assign_is_multi(key: &str) -> bool {
 ///   file is a hard parse error there; Waves is more forgiving on
 ///   purpose, since "last bind on this combo wins" is a perfectly
 ///   sensible thing to want across a multi-file split). The one
-///   exception is [`assign_is_multi`]'s single key (`spawn_at_startup`),
-///   which accumulates instead -- see its own doc comment.
+///   exception is [`assign_is_multi`]'s keys (`spawn_at_startup`,
+///   `workspace_name`), which accumulate instead -- see its own doc comment.
 /// - A block whose keyword is in [`block_is_keyed`] (`input`, `touchpad`,
 ///   `env`, `switch_events`, `submap`) merges recursively with an
 ///   existing block of the same keyword *and* header (the header is the

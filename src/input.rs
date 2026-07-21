@@ -1209,6 +1209,9 @@ impl Smallvil {
                 self.cycle_tab(false);
             }
             Action::SwitchWorkspace(workspace) => {
+                let Some(workspace) = self.resolve_workspace_ref(&workspace) else {
+                    return;
+                };
                 // Always the currently-focused/pointer output -- same
                 // resolution order `primary_output` uses everywhere else --
                 // so the keybind acts on whichever monitor you're actually
@@ -1218,6 +1221,9 @@ impl Smallvil {
                 }
             }
             Action::MoveToWorkspace(workspace) => {
+                let Some(workspace) = self.resolve_workspace_ref(&workspace) else {
+                    return;
+                };
                 let focused = self.focused_window_surface();
                 if let Some(surface) = focused {
                     self.move_to_workspace(&surface, workspace);

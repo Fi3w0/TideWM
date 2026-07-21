@@ -87,7 +87,7 @@ use wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_manager_v1::Z
 
 use crate::{
     capture::PendingCapture,
-    config::{Config, Direction},
+    config::{Config, Direction, WorkspaceRef},
     layout::Layouts,
     toast::{Toast, ToastKind},
 };
@@ -2436,6 +2436,24 @@ impl Smallvil {
         }
 
         self.retile();
+    }
+
+    /// Resolves a `"workspace:N"`/`"move-to-workspace:N"` target to a real
+    /// workspace number: a `Number` passes through, a `Name` looks itself
+    /// up in `config.workspace_names`. Warns and returns `None` for an
+    /// unknown name, the same "bad input, log and no-op" convention an
+    /// invalid numeric workspace used before names existed.
+    pub(crate) fn resolve_workspace_ref(&self, r: &WorkspaceRef) -> Option<u32> {
+        match r {
+            WorkspaceRef::Number(n) => Some(*n),
+            WorkspaceRef::Name(name) => {
+                let resolved = self.config.workspace_names.get(name).copied();
+                if resolved.is_none() {
+                    tracing::warn!(name, "Unknown workspace name, ignoring");
+                }
+                resolved
+            }
+        }
     }
 
     /// Switches `output`'s visible workspace to `workspace`: hides

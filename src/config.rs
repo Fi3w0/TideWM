@@ -101,6 +101,20 @@ pub enum Direction {
     Down,
 }
 
+/// A `"workspace:N"`/`"move-to-workspace:N"` target, addressed either by
+/// its raw number or by a `workspace_name` alias (niri's
+/// `set-workspace-name`, Hyprland's `workspace name:foo` -- purely an
+/// addressing convenience layered on the existing numbered model, not a
+/// second workspace identity: the workspace itself is still just its
+/// `u32`, same as an unnamed one). Kept unresolved at parse time --
+/// `parse_action` has no `Config` to look a name up against -- and resolved
+/// at the point of use by `Smallvil::resolve_workspace_ref`.
+#[derive(Debug, Clone)]
+pub enum WorkspaceRef {
+    Number(u32),
+    Name(String),
+}
+
 #[derive(Debug, Clone)]
 pub enum Action {
     Spawn(String),
@@ -138,8 +152,8 @@ pub enum Action {
     /// `Smallvil::cycle_tab`.
     CycleTabForward,
     CycleTabBackward,
-    SwitchWorkspace(u32),
-    MoveToWorkspace(u32),
+    SwitchWorkspace(WorkspaceRef),
+    MoveToWorkspace(WorkspaceRef),
     /// Swaps the current output's active workspace content with the named
     /// output's. No default keybind -- output names are machine-specific
     /// (see `[[output]]`), so there's nothing sensible to bind out of the box.
@@ -199,6 +213,12 @@ pub struct Config {
     /// immediately before it, instead of no-opping. Off by default --
     /// matches the existing plain-no-op behavior unless opted into.
     pub workspace_auto_back_and_forth: bool,
+    /// Persistent `name -> workspace number` aliases, from repeatable
+    /// `workspace_name = <N> <name>` config lines (see `WorkspaceRef`,
+    /// `Smallvil::resolve_workspace_ref`). A workspace's real identity
+    /// stays its number -- this is purely an addressing convenience, not a
+    /// second identity, so nothing but action-string resolution reads it.
+    pub workspace_names: HashMap<String, u32>,
     pub gaps: i32,
     /// Starting tiling algorithm for a workspace with no runtime override
     /// (see `"layout:bsp"`/`"layout:master"` keybind actions,
@@ -322,6 +342,7 @@ impl Config {
             }
             SplitBias::Auto
         });
+        let workspace_names = parse_workspace_names(&raw.workspace_names);
 
         Self {
             terminal: raw.terminal,
@@ -330,6 +351,7 @@ impl Config {
             cursor_always_visible: raw.cursor_always_visible,
             cursor_hide_after_ms: raw.cursor_hide_after_ms,
             workspace_auto_back_and_forth: raw.workspace_auto_back_and_forth,
+            workspace_names,
             gaps: raw.gaps,
             default_layout,
             master_orientation,
@@ -406,6 +428,11 @@ struct RawConfig {
     /// `parse_split_bias` -- same raw-string-then-resolve shape as
     /// `master_orientation` just above, for the same reason.
     bsp_split_bias: String,
+    /// Raw `"<N> <name>"` lines, one per `workspace_name` entry, resolved
+    /// via `parse_workspace_names`. Repeatable/accumulating like
+    /// `spawn_at_startup` (see `waves::assign_is_multi`), not a scalar --
+    /// a config defines many of these, one per named workspace.
+    workspace_names: Vec<String>,
     pseudo_tile_scale: f64,
     keybinds: HashMap<String, String>,
     input: InputConfig,
@@ -512,6 +539,7 @@ impl Default for RawConfig {
             default_layout: String::new(),
             master_orientation: String::new(),
             bsp_split_bias: String::new(),
+            workspace_names: Vec::new(),
             pseudo_tile_scale: 0.7,
             keybinds,
             input: InputConfig::default(),
@@ -909,6 +937,7 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
         "default_layout" => raw.default_layout = value.to_string(),
         "master_orientation" => raw.master_orientation = value.to_string(),
         "bsp_split_bias" => raw.bsp_split_bias = value.to_string(),
+        "workspace_name" => raw.workspace_names.push(value.to_string()),
         "pseudo_tile_scale" => set_f64(&mut raw.pseudo_tile_scale, key, value),
         // List-shaped, not scalar -- accumulates because `waves::merge_into`
         // already let every occurrence of this one key through instead of
@@ -1361,10 +1390,10 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         return Some(Action::Spawn(cmd.to_string()));
     }
     if let Some(n) = action.strip_prefix("workspace:") {
-        return parse_workspace_number(n, action).map(Action::SwitchWorkspace);
+        return Some(Action::SwitchWorkspace(parse_workspace_ref(n)));
     }
     if let Some(n) = action.strip_prefix("move-to-workspace:") {
-        return parse_workspace_number(n, action).map(Action::MoveToWorkspace);
+        return Some(Action::MoveToWorkspace(parse_workspace_ref(n)));
     }
     if let Some(name) = action.strip_prefix("swap-workspaces:") {
         return Some(Action::SwapWorkspacesWithOutput(name.to_string()));
@@ -1455,16 +1484,42 @@ fn parse_split_bias(s: &str) -> Option<SplitBias> {
     }
 }
 
-/// Parses the `N` in `"workspace:N"`/`"move-to-workspace:N"`. `full_action`
-/// is only for the warning message, so a bad config points at what was
-/// actually written.
-fn parse_workspace_number(n: &str, full_action: &str) -> Option<u32> {
-    match n.parse::<u32>() {
-        Ok(n) => Some(n),
-        Err(_) => {
-            tracing::warn!(action = %full_action, "Invalid workspace number, skipping");
-            None
+/// Parses every raw `"<N> <name>"` `workspace_name` line into a
+/// `name -> number` map. A malformed entry (no name, or a non-numeric `N`)
+/// warns and is skipped, same "bad config, log and move on" convention as
+/// an unrecognized keybind action. A repeated name keeps the last entry,
+/// same "last one wins" convention `resolve_window_rules` uses for a
+/// scalar field.
+fn parse_workspace_names(raw: &[String]) -> HashMap<String, u32> {
+    let mut names = HashMap::new();
+    for entry in raw {
+        let Some((number, name)) = entry.split_once(char::is_whitespace) else {
+            tracing::warn!(entry, "workspace_name needs a number and a name, ignoring");
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            tracing::warn!(entry, "workspace_name needs a number and a name, ignoring");
+            continue;
         }
+        match number.parse::<u32>() {
+            Ok(n) => {
+                names.insert(name.to_string(), n);
+            }
+            Err(_) => tracing::warn!(entry, "Invalid workspace number in workspace_name, ignoring"),
+        }
+    }
+    names
+}
+
+/// The `N` in `"workspace:N"`/`"move-to-workspace:N"` -- a plain number
+/// parses as-is, anything else is deferred as a `workspace_name` alias to
+/// resolve later (`Smallvil::resolve_workspace_ref`), since parsing here
+/// has no `Config` to check a name against yet.
+fn parse_workspace_ref(n: &str) -> WorkspaceRef {
+    match n.parse::<u32>() {
+        Ok(n) => WorkspaceRef::Number(n),
+        Err(_) => WorkspaceRef::Name(n.to_string()),
     }
 }
 
@@ -1624,8 +1679,24 @@ mod tests {
 
         assert!(matches!(parsed.lid_close, Some(Action::Spawn(_))));
         assert!(matches!(parsed.lid_open, Some(Action::CloseWindow)));
-        assert!(matches!(parsed.tablet_mode_on, Some(Action::SwitchWorkspace(2))));
+        assert!(matches!(parsed.tablet_mode_on, Some(Action::SwitchWorkspace(WorkspaceRef::Number(2)))));
         assert!(parsed.tablet_mode_off.is_none());
+    }
+
+    #[test]
+    fn parse_workspace_names_skips_malformed_entries_and_last_duplicate_wins() {
+        let names = parse_workspace_names(&[
+            "3 web".to_string(),
+            "4 chat".to_string(),
+            "nope".to_string(),           // no name, skipped
+            "  ".to_string(),             // no name, skipped
+            "notanumber web".to_string(), // bad number, skipped
+            "5 web".to_string(),          // duplicate name, last one wins
+        ]);
+
+        assert_eq!(names.len(), 2);
+        assert_eq!(names.get("web"), Some(&5));
+        assert_eq!(names.get("chat"), Some(&4));
     }
 
     #[test]
@@ -1681,6 +1752,7 @@ mod tests {
             cursor_always_visible: false,
             cursor_hide_after_ms: 0,
             workspace_auto_back_and_forth: false,
+            workspace_names: HashMap::new(),
             gaps: 0,
             default_layout: LayoutAlgorithm::Bsp,
             master_orientation: MasterOrientation::Left,
