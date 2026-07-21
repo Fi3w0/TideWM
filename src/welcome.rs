@@ -82,7 +82,7 @@ impl WelcomeHint {
             &mut pixels,
             canvas,
             font,
-            "Delete show_welcome_hint from config.toml to dismiss this",
+            "Delete show_welcome_hint from config.wave to dismiss this",
             PAD,
             y,
             BODY_SIZE,

@@ -92,7 +92,7 @@ fn parse_block(lines: &[&str], pos: &mut usize, path: &Path, nested: bool) -> Re
         }
         if line == "}" {
             if !nested {
-                return Err(format!("{}:{line_no}: unexpected `}}` with no open block", path.display()));
+                return Err(format!("in file {} at line {line_no}: unexpected `}}` with no open block", path.display()));
             }
             return Ok(entries);
         }
@@ -101,7 +101,7 @@ fn parse_block(lines: &[&str], pos: &mut usize, path: &Path, nested: bool) -> Re
             let header = header.trim();
             let (keyword, rest) = header.split_once(char::is_whitespace).unwrap_or((header, ""));
             if keyword.is_empty() {
-                return Err(format!("{}:{line_no}: expected a block name before `{{`", path.display()));
+                return Err(format!("in file {} at line {line_no}: expected a block name before `{{`", path.display()));
             }
             let body = parse_block(lines, pos, path, true)?;
             entries.push(Entry::Block(keyword.to_string(), rest.trim().to_string(), body));
@@ -113,7 +113,7 @@ fn parse_block(lines: &[&str], pos: &mut usize, path: &Path, nested: bool) -> Re
             .and_then(|r| (r.is_empty() || r.starts_with(char::is_whitespace)).then_some(r.trim()))
         {
             if rest.is_empty() {
-                return Err(format!("{}:{line_no}: `include` needs a path", path.display()));
+                return Err(format!("in file {} at line {line_no}: `include` needs a path", path.display()));
             }
             entries.push(Entry::Include(unquote(rest)));
             continue;
@@ -121,7 +121,7 @@ fn parse_block(lines: &[&str], pos: &mut usize, path: &Path, nested: bool) -> Re
 
         let Some((lhs, rhs)) = line.split_once('=') else {
             return Err(format!(
-                "{}:{line_no}: expected `key = value`, a block ending in `{{`, `include \"path\"`, or `}}` -- got `{line}`",
+                "in file {} at line {line_no}: expected `key = value`, a block ending in `{{`, `include \"path\"`, or `}}` -- got `{line}`",
                 path.display()
             ));
         };
@@ -130,23 +130,23 @@ fn parse_block(lines: &[&str], pos: &mut usize, path: &Path, nested: bool) -> Re
         if let Some(name) = lhs.strip_prefix('$') {
             let name = name.trim();
             if name.is_empty() {
-                return Err(format!("{}:{line_no}: `$` needs a variable name before `=`", path.display()));
+                return Err(format!("in file {} at line {line_no}: `$` needs a variable name before `=`", path.display()));
             }
             entries.push(Entry::VarDef(name.to_string(), value));
         } else if let Some(combo) = lhs.strip_prefix("bind ") {
             let combo = combo.trim();
             if combo.is_empty() {
-                return Err(format!("{}:{line_no}: `bind` needs a key combo before `=`", path.display()));
+                return Err(format!("in file {} at line {line_no}: `bind` needs a key combo before `=`", path.display()));
             }
             entries.push(Entry::Bind(combo.to_string(), value));
         } else if lhs.is_empty() {
-            return Err(format!("{}:{line_no}: missing key before `=`", path.display()));
+            return Err(format!("in file {} at line {line_no}: missing key before `=`", path.display()));
         } else {
             entries.push(Entry::Assign(lhs.to_string(), value));
         }
     }
     if nested {
-        return Err(format!("{}: unexpected end of file, missing a closing `}}`", path.display()));
+        return Err(format!("in file {}: unexpected end of file, missing a closing `}}`", path.display()));
     }
     Ok(entries)
 }
@@ -254,7 +254,7 @@ pub(crate) fn resolve(path: &Path) -> Result<Vec<Entry>, String> {
 fn resolve_inner(path: &Path, ancestors: &mut Vec<PathBuf>) -> Result<Vec<Entry>, String> {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if ancestors.contains(&canonical) {
-        return Err(format!("include cycle detected at {}", path.display()));
+        return Err(format!("include cycle detected in file {}", path.display()));
     }
     ancestors.push(canonical);
     let result = resolve_uncycled(path, ancestors);
@@ -263,7 +263,7 @@ fn resolve_inner(path: &Path, ancestors: &mut Vec<PathBuf>) -> Result<Vec<Entry>
 }
 
 fn resolve_uncycled(path: &Path, ancestors: &mut Vec<PathBuf>) -> Result<Vec<Entry>, String> {
-    let contents = fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
+    let contents = fs::read_to_string(path).map_err(|err| format!("in file {}: {err}", path.display()))?;
     let entries = parse(&contents, path)?;
 
     let parent = path.parent().unwrap_or_else(|| Path::new("."));

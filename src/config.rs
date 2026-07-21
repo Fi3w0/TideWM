@@ -392,7 +392,7 @@ impl Default for RawConfig {
 
         Self {
             terminal: "kitty".to_string(),
-            // Deliberately false, not true: a real config.toml always ships
+            // Deliberately false, not true: a real config.wave always ships
             // with `show_welcome_hint = true` written explicitly (see
             // DEFAULT_CONFIG_WAVE), so this default is only ever consulted
             // when a user deletes the key from an existing file -- and per
