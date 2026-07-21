@@ -22,10 +22,11 @@ use smithay::{
             gles::{GlesRenderer, GlesTexture},
         },
     },
+    desktop::layer_map_for_output,
     input::pointer::CursorImageStatus,
     output::Output,
     reexports::wayland_server::protocol::wl_buffer::WlBuffer,
-    utils::{Buffer as BufferCoords, IsAlive, Rectangle, Size, Transform},
+    utils::{Buffer as BufferCoords, IsAlive, Logical, Rectangle, Size, Transform},
     wayland::{
         image_copy_capture::{CaptureFailureReason, Frame},
         shm::with_buffer_contents_mut,
@@ -272,6 +273,34 @@ impl Smallvil {
             CaptureCompletion::Wlr { buffer, .. } => buffer.clone(),
         };
 
+        // Layer-shell surfaces matching a `[[layer_rule]] block_capture =
+        // true` (a sensitive panel opting out of screenshots/screencasts,
+        // niri's `block-out-from`) still render normally into `pixels`
+        // above -- excluding them from compositing would mean abandoning
+        // `render_output`'s convenience for a manually-interleaved element
+        // list (the same real render-path work this file's own module doc
+        // and AGENT.md's fullscreen-above-layer-shell gap both already
+        // flag as deliberately deferred). Instead, their on-screen rects
+        // are blacked out in the client-visible copy below, after the real
+        // pixels have already been read back into CPU memory but before
+        // they reach buffer the client can read -- the same practical
+        // result (the client never sees that content) without touching the
+        // render path. No-op while locked: no layer content is composited
+        // into the frame at all then (see the `locked` branch above), so
+        // there is nothing to exclude.
+        let excluded_rects: Vec<Rectangle<i32, BufferCoords>> = if locked {
+            Vec::new()
+        } else {
+            let scale = output.current_scale().fractional_scale();
+            let layer_map = layer_map_for_output(&output);
+            layer_map
+                .layers()
+                .filter(|layer| self.config.layer_blocks_capture(layer.namespace()))
+                .filter_map(|layer| layer_map.layer_geometry(layer))
+                .map(|geo| logical_rect_to_buffer(geo, scale))
+                .collect()
+        };
+
         // The client buffer was already validated against the advertised
         // constraints before the request was queued, but it is still
         // untrusted client input: clamp the copy to whatever the buffer
@@ -318,6 +347,36 @@ impl Smallvil {
                     );
                 }
             }
+
+            // Overwrite each excluded layer's rect with opaque black, same
+            // B,G,R,A byte order as the real copy above. Intersected
+            // against `rect` (the crop already applied to the real copy)
+            // and re-bounded against `rows`/`dst_stride`/`len` again here,
+            // since this is still writing into untrusted client memory.
+            for excluded in &excluded_rects {
+                let Some(overlap) = excluded.intersection(rect).filter(|r| !r.is_empty()) else {
+                    continue;
+                };
+                let col_start = (overlap.loc.x - rect.loc.x) as usize;
+                for local_row in 0..overlap.size.h as usize {
+                    let dst_row = (overlap.loc.y - rect.loc.y) as usize + local_row;
+                    if dst_row >= rows {
+                        continue;
+                    }
+                    let row_start = offset + dst_row * dst_stride + col_start * 4;
+                    let row_end = row_start + overlap.size.w as usize * 4;
+                    if row_end > len {
+                        continue;
+                    }
+                    for pixel_start in (row_start..row_end).step_by(4) {
+                        unsafe {
+                            std::ptr::write_bytes(ptr.add(pixel_start), 0, 3);
+                            *ptr.add(pixel_start + 3) = 255;
+                        }
+                    }
+                }
+            }
+
             true
         });
 
@@ -373,5 +432,48 @@ impl Smallvil {
             }
         }
         self.pending_captures = remaining;
+    }
+}
+
+/// Converts a layer surface's logical-space geometry (`LayerMap::layer_geometry`)
+/// into the buffer-pixel space `PendingCapture`'s `size`/`rect` already use
+/// (`output.current_mode().size`, i.e. already output-scaled) -- the same
+/// scale multiplication `space_render_elements` applies to a layer's
+/// location internally, just extended to the whole rect since this needs
+/// the size too, not only where it starts.
+fn logical_rect_to_buffer(geo: Rectangle<i32, Logical>, scale: f64) -> Rectangle<i32, BufferCoords> {
+    Rectangle::new(
+        (
+            (geo.loc.x as f64 * scale).round() as i32,
+            (geo.loc.y as f64 * scale).round() as i32,
+        )
+            .into(),
+        (
+            (geo.size.w as f64 * scale).round() as i32,
+            (geo.size.h as f64 * scale).round() as i32,
+        )
+            .into(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logical_rect_to_buffer_scales_location_and_size_together() {
+        let geo = Rectangle::new((10, 20).into(), (100, 50).into());
+
+        let unscaled = logical_rect_to_buffer(geo, 1.0);
+        assert_eq!(unscaled, Rectangle::new((10, 20).into(), (100, 50).into()));
+
+        let doubled = logical_rect_to_buffer(geo, 2.0);
+        assert_eq!(doubled, Rectangle::new((20, 40).into(), (200, 100).into()));
+
+        // A fractional scale (1.5x) must round, not truncate -- an
+        // excluded rect one pixel too small at an edge would leak a sliver
+        // of real content into the capture.
+        let fractional = logical_rect_to_buffer(geo, 1.5);
+        assert_eq!(fractional, Rectangle::new((15, 30).into(), (150, 75).into()));
     }
 }

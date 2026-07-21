@@ -251,6 +251,10 @@ pub struct Config {
     /// Per-app placement applied when a window first maps (`for_window`/
     /// `windowrule`'s own idea). See `WindowRule::matches`.
     pub window_rules: Vec<WindowRule>,
+    /// Layer-shell surfaces (bars, panels) excluded from screenshots and
+    /// screencasts by namespace (niri's `layer-rule { block-out-from ... }`).
+    /// See `LayerRule::matches`, `Config::layer_blocks_capture`.
+    pub layer_rules: Vec<LayerRule>,
     /// Named alternate keybind tables (`[submap.<name>]`), each parsed the
     /// same way `[keybinds]` is. See `Action::EnterSubmap`.
     pub submaps: HashMap<String, Vec<Keybind>>,
@@ -364,6 +368,7 @@ impl Config {
             outputs: raw.outputs,
             switch_events: SwitchEventsConfig::from_raw(raw.switch_events),
             window_rules: raw.window_rules,
+            layer_rules: raw.layer_rules,
             submaps,
             env: raw.env,
         }
@@ -403,6 +408,14 @@ impl Config {
         }
         effective
     }
+
+    /// Whether any `[[layer_rule]]` matching `namespace` sets
+    /// `block_capture` -- a single boolean effect, so unlike
+    /// `resolve_window_rules` there's nothing to fold across matches beyond
+    /// "did any of them say yes."
+    pub(crate) fn layer_blocks_capture(&self, namespace: &str) -> bool {
+        self.layer_rules.iter().any(|rule| rule.block_capture && rule.matches(namespace))
+    }
 }
 
 #[derive(Debug)]
@@ -441,6 +454,7 @@ struct RawConfig {
     outputs: Vec<OutputConfig>,
     switch_events: SwitchEventsRaw,
     window_rules: Vec<WindowRule>,
+    layer_rules: Vec<LayerRule>,
     submaps: HashMap<String, HashMap<String, String>>,
     env: HashMap<String, String>,
     /// `$name` values substituted into `terminal`/`spawn_at_startup`/
@@ -548,6 +562,7 @@ impl Default for RawConfig {
             outputs: Vec::new(),
             switch_events: SwitchEventsRaw::default(),
             window_rules: Vec::new(),
+            layer_rules: Vec::new(),
             submaps,
             env: HashMap::new(),
             variables: HashMap::new(),
@@ -822,6 +837,31 @@ impl WindowRule {
     }
 }
 
+/// Matches a layer-shell surface by its `namespace` (the string a client
+/// passes to `get_layer_surface`, e.g. a bar setting `"waybar"`) -- a layer
+/// surface has no app_id/title the way an xdg toplevel does, so namespace
+/// is the only thing to match on. One effect today: `block_capture`, letting
+/// a sensitive layer surface (a password-manager quick-access panel, say)
+/// opt out of screenshots/screencasts without hiding it from the user's own
+/// screen -- niri's `layer-rule { block-out-from ... }`. See
+/// `Smallvil::render_one_capture`'s excluded-rect pass.
+#[derive(Debug, Clone, Default)]
+pub struct LayerRule {
+    pub namespace: Option<String>,
+    pub block_capture: bool,
+}
+
+impl LayerRule {
+    /// A rule with no `namespace` never matches, same "blank rule matches
+    /// nothing" precedent `WindowRule::matches` sets.
+    pub(crate) fn matches(&self, namespace: &str) -> bool {
+        match &self.namespace {
+            Some(want) => namespace.contains(want.as_str()),
+            None => false,
+        }
+    }
+}
+
 /// Parses a `mode` string like `"1920x1080"` or `"1920x1080@60"` into
 /// `(width, height, refresh_hz)`.
 pub fn parse_mode_str(s: &str) -> Option<(i32, i32, Option<f64>)> {
@@ -953,6 +993,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "xwayland" => apply_xwayland_block(&mut raw.xwayland, body),
         "output" => raw.outputs.push(lower_output_block(header, body)),
         "rule" => raw.window_rules.push(lower_window_rule_block(body)),
+        "layer_rule" => raw.layer_rules.push(lower_layer_rule_block(body)),
         "submap" => {
             let name = header.trim();
             if name.is_empty() {
@@ -1113,6 +1154,22 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                 None => tracing::warn!(value, "Expected <width>x<height> for a rule's size, ignoring"),
             },
             other => tracing::warn!(key = %other, "Unknown key in `rule` block, ignoring"),
+        }
+    }
+    rule
+}
+
+fn lower_layer_rule_block(body: &[waves::Entry]) -> LayerRule {
+    let mut rule = LayerRule::default();
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `layer_rule` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "namespace" => rule.namespace = Some(value.clone()),
+            "block_capture" => set_bool(&mut rule.block_capture, key, value),
+            other => tracing::warn!(key = %other, "Unknown key in `layer_rule` block, ignoring"),
         }
     }
     rule
@@ -1744,6 +1801,31 @@ mod tests {
     }
 
     #[test]
+    fn layer_blocks_capture_matches_by_namespace_substring_only_when_flagged() {
+        let mut config = Config { layer_rules: Vec::new(), ..parse_default_config() };
+
+        // No rule at all: never blocked.
+        assert!(!config.layer_blocks_capture("waybar"));
+
+        config.layer_rules.push(LayerRule {
+            namespace: Some("bitwarden".to_string()),
+            block_capture: true,
+        });
+        assert!(config.layer_blocks_capture("bitwarden-quick-access"));
+        assert!(!config.layer_blocks_capture("waybar"));
+
+        // A rule with no namespace never matches, same "blank rule matches
+        // nothing" precedent WindowRule sets.
+        let blank = LayerRule { namespace: None, block_capture: true };
+        assert!(!blank.matches("anything"));
+
+        // A matching namespace but block_capture: false must not block --
+        // the rule matching and the effect firing are separate things.
+        config.layer_rules.push(LayerRule { namespace: Some("waybar".to_string()), block_capture: false });
+        assert!(!config.layer_blocks_capture("waybar"));
+    }
+
+    #[test]
     fn resolve_window_rules_folds_last_scalar_wins_bools_accumulate() {
         let mut config = Config {
             terminal: String::new(),
@@ -1785,6 +1867,7 @@ mod tests {
                     ..Default::default()
                 },
             ],
+            layer_rules: Vec::new(),
         };
         // Only the two "kitty" rules should ever combine; the "firefox"
         // one must not leak in just because it's in the same list.

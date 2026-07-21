@@ -41,7 +41,7 @@ bind $mod+Return = spawn:$terminal
 **Multi-file:** `include "path.wave"` as its own statement, repeatable (one per line), in any file (the main one, or one it includes). Each path resolves relative to the file that lists it; `~/` expands to your home directory. Rules:
 
 - `input { }`, `input { touchpad { } }`, `env { }`, `switch_events { }`, and a given `submap <name> { }` merge field-by-field across files — the same key set from two files combines rather than one replacing the other.
-- `output <name> { }` and `rule { }` blocks accumulate — entries from every file all end up present.
+- `output <name> { }`, `rule { }`, and `layer_rule { }` blocks accumulate — entries from every file all end up present.
 - A later `include` overlays an earlier one.
 - **The including file's own keys always win over anything it includes.** If `config.wave` includes `overrides.wave`, and both set `gaps`, `config.wave`'s own value wins — put an override directly in the file doing the including, not in a file you list last.
 - A broken include (missing, unreadable, unparseable, or a cycle) is skipped with a warning; it doesn't fail the whole config.
@@ -209,6 +209,22 @@ rule {
 rule {
     app_id = Slack
     workspace = 3
+}
+```
+
+### `layer_rule { }`
+
+Excludes a layer-shell surface (a bar, panel, or launcher, not an ordinary app window) from screenshots and screencasts by namespace, without hiding it from your own screen (niri's `layer-rule { block-out-from ... }`) — for something like a password-manager quick-access panel that shouldn't end up in a recording. One block per rule; repeat for more.
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `namespace` | string, optional | Matches case-sensitively, anywhere in the surface's namespace string (the name the client itself sets — rofi's is `rofi`). Required — a rule with no `namespace` never matches anything. |
+| `block_capture` | bool | Default `false`. When `true`, the matched surface's rect renders as solid black in `wlr-screencopy`/`ext-image-copy-capture` output instead of its real content. |
+
+```
+layer_rule {
+    namespace = rofi
+    block_capture = true
 }
 ```
 
