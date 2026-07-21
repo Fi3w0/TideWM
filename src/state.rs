@@ -594,6 +594,13 @@ pub struct FullscreenEntry {
     /// owned by one workspace/output transaction. Suspend the pin during
     /// fullscreen and restore it only if the window exits still floating.
     pub was_pinned: bool,
+    /// Whether the *most recent* `wants_pinned` toggle in `toggle_pin` was
+    /// the one that floated this window (it was tiled at the time). Turning
+    /// pin back off needs to know whether to undo that specific float --
+    /// re-tiling a window that was already floating on its own before it
+    /// got pinned would be wrong, so `was_pinned` alone (which only says
+    /// "is pin currently wanted") isn't enough information by itself.
+    pub pin_floated_it: bool,
 }
 
 pub struct MaximizedEntry {
@@ -2551,11 +2558,36 @@ impl Smallvil {
             // mode to restore on exit without making two placement owners
             // authoritative at once.
             let wants_pinned = !was_pinned;
-            if wants_pinned && self.layout.contains(surface) {
+            if wants_pinned {
+                if self.layout.contains(surface) {
+                    self.toggle_floating(surface);
+                    if let Some(entry) = self.fullscreen.get_mut(surface) {
+                        entry.pin_floated_it = true;
+                    }
+                }
+            } else if self.fullscreen.get(surface).is_some_and(|e| e.pin_floated_it) {
+                // Undo specifically the float *this* pin toggle caused,
+                // not a general "unpinning re-tiles" rule -- that's
+                // deliberately not how the non-fullscreen case above
+                // works (see this function's own doc comment: unpinning
+                // normally leaves a window floating in place, matching
+                // Hyprland). This differs because the whole pin-then-
+                // unpin round trip happened without the window ever being
+                // visibly floating (fullscreen was still covering it the
+                // entire time) -- there's no "user saw it floating and
+                // might want to keep it that way" moment to preserve, so
+                // reverting the mechanical side effect back to how it
+                // started is the least surprising outcome once fullscreen
+                // ends. Only fires when this toggle is the one that
+                // floated it; a window already floating before it got
+                // pinned is left alone, same as the normal case.
                 self.toggle_floating(surface);
             }
             if let Some(entry) = self.fullscreen.get_mut(surface) {
                 entry.was_pinned = wants_pinned;
+                if !wants_pinned {
+                    entry.pin_floated_it = false;
+                }
             }
             self.request_redraw();
             return;
@@ -3617,6 +3649,7 @@ mod tests {
             output: "DP-1".to_owned(),
             restore_rect: Some(original),
             was_pinned: false,
+            pin_floated_it: false,
         };
 
         entry.remember_restore_rect(later_tile);
@@ -3631,6 +3664,7 @@ mod tests {
             output: "DP-1".to_owned(),
             restore_rect: Some(original),
             was_pinned: false,
+            pin_floated_it: false,
         };
 
         entry.move_to_output("HDMI-A-1".to_owned(), Some((1920, -40).into()));

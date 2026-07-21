@@ -353,8 +353,21 @@ impl Smallvil {
                 .toplevel_window(&existing_surface)
                 .as_ref()
                 .and_then(|w| w.toplevel().cloned());
-            if let Some(existing_toplevel) = existing_toplevel {
-                self.do_unfullscreen(&existing_toplevel);
+            match existing_toplevel {
+                Some(existing_toplevel) => self.do_unfullscreen(&existing_toplevel),
+                // The window is between states (its toplevel couldn't be
+                // resolved right now) and do_unfullscreen never ran, so its
+                // FullscreenEntry would otherwise survive untouched --
+                // leaving two entries claiming the same output once the
+                // insert below adds this window's own, violating "at most
+                // one fullscreen per output" (checked by
+                // assert_state_invariants in debug builds, silently
+                // violated in release). Drop the stale bookkeeping
+                // directly since there's no live toplevel left to send an
+                // unfullscreen configure to anyway.
+                None => {
+                    self.fullscreen.remove(&existing_surface);
+                }
             }
         }
 
@@ -392,6 +405,7 @@ impl Smallvil {
                 output: output.name(),
                 restore_rect,
                 was_pinned,
+                pin_floated_it: false,
             },
         );
 
@@ -1052,8 +1066,15 @@ impl Smallvil {
             return;
         };
         let activated = self.is_window_activated(surface);
-        let maximized = self.maximized.contains_key(surface);
         let fullscreen = self.fullscreen.contains_key(surface);
+        // `self.maximized` is retained as restore-intent while fullscreen
+        // is active (the documented invariant `assert_state_invariants`
+        // checks in state.rs -- fullscreen and maximized are never both
+        // reported, but a maximized entry can outlive its window going
+        // fullscreen), so a bare `contains_key` would report both bits set
+        // at once to every bound client -- mask it the same way ipc.rs's
+        // `window_json` already does (`maximized && !fullscreen`).
+        let maximized = self.maximized.contains_key(surface) && !fullscreen;
         handle.send_state(crate::handlers::wlr_foreign_toplevel::state_bytes(
             activated, maximized, fullscreen,
         ));
