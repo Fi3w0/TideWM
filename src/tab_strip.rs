@@ -105,7 +105,12 @@ fn draw_label(pixels: &mut [u8], width: i32, font: &Font, title: &str, x0: i32, 
                 blend_text_pixel(pixels, width, x, y, coverage);
             }
         }
-        pen_x += metrics.advance_width.round() as i32;
+        // See overview.rs's identical guard for why: a 0-advance-width
+        // glyph (zero-width joiners, combining marks, .notdef fallback)
+        // would otherwise stall `pen_x` while `glyph_y0` still varies per
+        // character, stacking glyphs near the same column instead of a
+        // horizontal line.
+        pen_x += metrics.advance_width.round().max(1.0) as i32;
     }
 }
 

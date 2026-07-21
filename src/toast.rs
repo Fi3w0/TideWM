@@ -173,7 +173,10 @@ fn rasterize_toast(message: &str, kind: ToastKind) -> (Vec<u8>, i32, i32) {
             }
         }
 
-        pen_x += metrics.advance_width.round() as i32;
+        // See overview.rs's identical guard for why the `.max(1.0)` floor
+        // matters: a 0-advance-width glyph would otherwise stall `pen_x`
+        // while `glyph_y0` still varies per character.
+        pen_x += metrics.advance_width.round().max(1.0) as i32;
     }
 
     (pixels, width, height)

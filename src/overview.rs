@@ -213,7 +213,18 @@ fn draw_label(pixels: &mut [u8], canvas_w: i32, canvas_h: i32, font: &Font, titl
                 blend_text_pixel(pixels, canvas_w, x, y, coverage);
             }
         }
-        pen_x += metrics.advance_width.round() as i32;
+        // `.max(1.0)`: a font can legitimately return 0 advance width for a
+        // glyph it has no real width for (zero-width joiners, combining
+        // marks, or any codepoint the font falls back to .notdef for -- a
+        // window title is arbitrary client-supplied text, nothing stops one
+        // from containing these). Without the floor, `pen_x` stalls near
+        // the label's start x while `glyph_y0` keeps varying per character
+        // (it depends on that character's own metrics, not on `pen_x`),
+        // drawing every remaining character in a near-vertical column
+        // instead of a horizontal line -- the exact shape of a real,
+        // reproduced-once bug this guards against (see AGENT.md's
+        // "Real-hardware verification pass" section).
+        pen_x += metrics.advance_width.round().max(1.0) as i32;
     }
 }
 
