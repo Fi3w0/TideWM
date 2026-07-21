@@ -756,6 +756,27 @@ impl Smallvil {
             }
             return;
         };
+        // Auto-float heuristic (Phase N tier 1): a dialog with a parent, or
+        // a window whose min/max size are equal and nonzero (a splash
+        // screen, a fixed-size utility panel), tiling by default is a bad
+        // first-run experience -- both niri and Hyprland float these
+        // implicitly. `rule.tile` is the one escape hatch back to tiled per
+        // app, checked here rather than baked into the heuristic itself.
+        let implicit_float = !rule.tile
+            && self.unmapped_toplevels.get(surface).is_some_and(|window| {
+                let has_parent = window.toplevel().is_some_and(|t| t.parent().is_some());
+                let is_fixed_size = smithay::wayland::compositor::with_states(surface, |states| {
+                    let mut guard = states
+                        .cached_state
+                        .get::<smithay::wayland::shell::xdg::SurfaceCachedState>();
+                    let data = guard.current();
+                    data.min_size.w > 0
+                        && data.min_size.h > 0
+                        && data.min_size == data.max_size
+                });
+                has_parent || is_fixed_size
+            });
+
         let Some(window) = self.unmapped_toplevels.remove(surface) else { return };
         let focused = self.intended_window_surface();
         let workspace = rule.workspace.unwrap_or_else(|| self.layout.active_workspace(&output.name()));
@@ -775,7 +796,7 @@ impl Smallvil {
         // exact same logic the interactive toggles use, rather than
         // re-deriving floating-rect placement from scratch) is, for the
         // same reason, still applied before the window's first real frame.
-        if rule.float || rule.pin {
+        if rule.float || rule.pin || implicit_float {
             self.toggle_floating(surface);
             if rule.pin {
                 self.pinned.insert(surface.clone());

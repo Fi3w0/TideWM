@@ -294,6 +294,7 @@ impl Config {
             effective.float |= rule.float;
             effective.pseudo_tile |= rule.pseudo_tile;
             effective.pin |= rule.pin;
+            effective.tile |= rule.tile;
         }
         effective
     }
@@ -650,6 +651,13 @@ pub struct WindowRule {
     /// Implies `float` -- pinning only has meaning for a floating window,
     /// the same invariant `toggle-pin` enforces interactively.
     pub pin: bool,
+    /// Overrides the implicit auto-float heuristic (see `map_toplevel`'s
+    /// `has_parent`/`is_fixed_size` check) back to tiled for a window that
+    /// would otherwise auto-float -- the one flag in this struct that
+    /// means "force tiled" rather than "force floating," so it's the only
+    /// way to counteract the heuristic per-app. No effect if `float`/`pin`
+    /// also match, same as niri's own `open-floating false` precedence.
+    pub tile: bool,
 }
 
 impl WindowRule {
@@ -950,6 +958,7 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
             "float" => set_bool(&mut rule.float, key, value),
             "pseudo_tile" => set_bool(&mut rule.pseudo_tile, key, value),
             "pin" => set_bool(&mut rule.pin, key, value),
+            "tile" => set_bool(&mut rule.tile, key, value),
             other => tracing::warn!(key = %other, "Unknown key in `rule` block, ignoring"),
         }
     }

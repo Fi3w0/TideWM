@@ -182,8 +182,9 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 | `float` | bool | Default `false`. |
 | `pseudo_tile` | bool | Default `false`. No-op unless the window ends up tiled; ignored if `float`/`pin` also apply. |
 | `pin` | bool | Default `false`. Implies `float`. |
+| `tile` | bool | Default `false`. Forces tiled even if the auto-float heuristic (a window with a parent, e.g. a dialog, or one whose min/max size are equal, e.g. a splash screen) would otherwise float it. No effect if `float`/`pin` also match. |
 
-Multiple rules can match the same window: `workspace`/`output` take the *last* match, `float`/`pseudo_tile`/`pin` accumulate (any match sets it, never unsets it).
+Multiple rules can match the same window: `workspace`/`output` take the *last* match, `float`/`pseudo_tile`/`pin`/`tile` accumulate (any match sets it, never unsets it).
 
 ```
 rule {
@@ -235,9 +236,11 @@ The same set of strings works after `bind ... =` at the top level or inside a `s
 - `toggle-pseudo-tile`
 - `toggle-scratchpad`
 - `move-to-scratchpad`
+- `raise-window` / `lower-window` — floating windows only, no-op on a tiled one
 
 **Focus and layout**
-- `cycle-focus`
+- `cycle-focus` — most-recently-used order, not z-order
+- `focus-urgent` — jump to whichever window is currently marked urgent, if any
 - `focus-left` / `focus-right` / `focus-up` / `focus-down`
 - `swap-left` / `swap-right` / `swap-up` / `swap-down`
 - `layout:bsp` / `layout:master` — switch the current workspace's tiling algorithm
