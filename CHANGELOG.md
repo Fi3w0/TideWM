@@ -2,6 +2,19 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.51.3] - 2026-07-21
+
+### Fixed
+- **`wl_output` global leak on monitor disconnect**, found in 0.51.2's real-hardware testing pass: `create_surface` discarded the `GlobalId` from `create_global`, so unplugging a monitor cleaned up TideWM's own state but left the global advertised forever, with a replug stacking a second one on top. `SurfaceData` now keeps the `GlobalId` and `handle_connector_change`'s `Disconnected` branch calls `remove_global` with it. winit's own equivalent discard is left as-is (documented, not a bug there: its single simulated output never disconnects mid-process).
+- **Infinite retry loop on a GPU fence wait error** (`backend/udev.rs::render_surface`): `while let Err(e) = element.sync.wait() { retry }` treated every error as transient, but per `eglClientWaitSyncKHR`'s own spec the only error it can return is an invalid sync object -- not transient, despite Smithay naming the error type `Interrupted`. Looping on it forever would hang the only event-loop thread (including VT-switch handling) permanently, the same class of freeze the 0.15.1 `TileMoveGrab` deadlock caused. Now tries once and presents whatever the swapchain already has instead.
+- **`PointerMotionAbsolute` panic when no outputs are mapped** (`input.rs`): reachable during shutdown if a host compositor delivers a final absolute-motion event after outputs are already torn down. Now drops the event instead of unwrapping.
+- **`pseudo_tile_scale`'s doc comment matches its actual clamp range now** ("(0, 1]" was never what the code did; it's always been `[0.05, 1.0]`).
+- **Wired up `WlrForeignToplevelState::cleanup_closed`**, whose own doc comment already said it ran from the per-frame cleanup tick -- it didn't. `untrack()` already removes its own entry synchronously on every close today, so this is a safety net rather than an active leak, but it's cheap and now matches what the comment promised.
+- **A timeboxed, reasoned attempt at 0.51.2's reproduced-once Overview stacked-text bug**: `overview.rs`/`tab_strip.rs`/`toast.rs`'s shared glyph-advance loop (`pen_x += metrics.advance_width.round() as i32`) had no floor, so a 0-advance-width glyph (zero-width joiners, combining marks, `.notdef` fallback -- window titles are arbitrary text) would stall `pen_x` near the label's start while `glyph_y0` kept varying per character, drawing the rest of the string in a near-vertical column instead of a line. Floored to `.max(1.0)` in all three places. Not independently re-confirmed against the hardware that reproduced the original bug -- see `AGENT.md` for the caveat.
+
+### Security
+- **Session-lock crash recovery was considered and deliberately not implemented.** 0.51.2 flagged that a lock client dying without a clean `unlock_and_destroy` leaves the session locked with no in-session recovery. Auto-unlocking on client death was evaluated and rejected: it would reintroduce exactly the vulnerability `ext-session-lock` exists to prevent (an attacker killing the locker to reach the desktop). The current fail-locked behavior (blank fill stays up, VT-switch is the recovery path) is the secure one and is staying as-is.
+
 ## [0.51.2] - 2026-07-21
 
 ### Tests
