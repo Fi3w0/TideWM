@@ -183,8 +183,11 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 | `pseudo_tile` | bool | Default `false`. No-op unless the window ends up tiled; ignored if `float`/`pin` also apply. |
 | `pin` | bool | Default `false`. Implies `float`. |
 | `tile` | bool | Default `false`. Forces tiled even if the auto-float heuristic (a window with a parent, e.g. a dialog, or one whose min/max size are equal, e.g. a splash screen) would otherwise float it. No effect if `float`/`pin` also match. |
+| `no_focus` | bool | Default `false`. Maps without stealing focus — whatever was focused before stays focused. |
+| `position` | `<x>x<y>`, optional | Exact floating placement. No-op unless the window ends up floating. |
+| `size` | `<width>x<height>`, optional | Exact floating size. No-op unless the window ends up floating. |
 
-Multiple rules can match the same window: `workspace`/`output` take the *last* match, `float`/`pseudo_tile`/`pin`/`tile` accumulate (any match sets it, never unsets it).
+Multiple rules can match the same window: `workspace`/`output`/`position`/`size` take the *last* match, `float`/`pseudo_tile`/`pin`/`tile`/`no_focus` accumulate (any match sets it, never unsets it).
 
 ```
 rule {

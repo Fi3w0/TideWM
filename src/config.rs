@@ -295,6 +295,13 @@ impl Config {
             effective.pseudo_tile |= rule.pseudo_tile;
             effective.pin |= rule.pin;
             effective.tile |= rule.tile;
+            effective.no_focus |= rule.no_focus;
+            if rule.position.is_some() {
+                effective.position = rule.position;
+            }
+            if rule.size.is_some() {
+                effective.size = rule.size;
+            }
         }
         effective
     }
@@ -658,6 +665,20 @@ pub struct WindowRule {
     /// way to counteract the heuristic per-app. No effect if `float`/`pin`
     /// also match, same as niri's own `open-floating false` precedence.
     pub tile: bool,
+    /// Suppresses the automatic focus-on-map a newly-mapped window
+    /// normally gets (niri's `open-focused false`) -- useful for a
+    /// background/scanner-style app that shouldn't steal focus from
+    /// whatever's currently active. Leaves prior focus untouched entirely,
+    /// rather than picking some other window to focus instead.
+    pub no_focus: bool,
+    /// Exact floating placement (top-left corner), `<x>x<y>` -- the same
+    /// syntax `[[output]]`'s `position` already uses. No-op unless the
+    /// window ends up floating (from `float`/`pin`/the auto-float
+    /// heuristic), same "only means something once floating" restriction
+    /// `pseudo_tile` has in reverse for tiled.
+    pub position: Option<(i32, i32)>,
+    /// Exact floating size, `<width>x<height>` (same syntax as `position`).
+    pub size: Option<(i32, i32)>,
 }
 
 impl WindowRule {
@@ -959,6 +980,15 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
             "pseudo_tile" => set_bool(&mut rule.pseudo_tile, key, value),
             "pin" => set_bool(&mut rule.pin, key, value),
             "tile" => set_bool(&mut rule.tile, key, value),
+            "no_focus" => set_bool(&mut rule.no_focus, key, value),
+            "position" => match parse_position(value) {
+                Some(pos) => rule.position = Some(pos),
+                None => tracing::warn!(value, "Expected <x>x<y> for a rule's position, ignoring"),
+            },
+            "size" => match parse_position(value) {
+                Some(size) => rule.size = Some(size),
+                None => tracing::warn!(value, "Expected <width>x<height> for a rule's size, ignoring"),
+            },
             other => tracing::warn!(key = %other, "Unknown key in `rule` block, ignoring"),
         }
     }

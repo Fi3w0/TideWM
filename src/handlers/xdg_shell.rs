@@ -801,6 +801,9 @@ impl Smallvil {
             if rule.pin {
                 self.pinned.insert(surface.clone());
             }
+            if rule.position.is_some() || rule.size.is_some() {
+                self.apply_floating_placement(surface, rule.position, rule.size);
+            }
         } else if rule.pseudo_tile {
             self.toggle_pseudo_tile(surface);
         }
@@ -808,7 +811,12 @@ impl Smallvil {
         // Role creation alone must never steal focus. A real first buffer
         // does. An Exclusive layer can temporarily own the actual keyboard,
         // while centralized focus retains this window as the restore target.
-        self.focus_window(Some(surface.clone()), SERIAL_COUNTER.next_serial());
+        // `rule.no_focus` (Phase N tier 2) is the one exception: leaves
+        // whatever was focused before completely untouched, rather than
+        // picking some other window to focus instead.
+        if !rule.no_focus {
+            self.focus_window(Some(surface.clone()), SERIAL_COUNTER.next_serial());
+        }
 
         let handle = self
             .foreign_toplevel_list_state

@@ -46,7 +46,7 @@ use smithay::{
             Display, DisplayHandle,
         },
     },
-    utils::{Clock, Logical, Monotonic, Point, Rectangle, SERIAL_COUNTER},
+    utils::{Clock, Logical, Monotonic, Point, Rectangle, Size, SERIAL_COUNTER},
     wayland::{
         compositor::{get_parent, CompositorClientState, CompositorState},
         cursor_shape::CursorShapeManagerState,
@@ -2775,6 +2775,44 @@ impl Smallvil {
                 self.layout.remove(&surface);
                 self.layout.insert(to_output, workspace, window, None);
             }
+        }
+    }
+
+    /// Applies a `[[rule]]`-specified exact position/size to a floating
+    /// window, either of which may be unset (keep whatever `toggle_floating`
+    /// already placed it at for that axis). No-op if `surface` isn't
+    /// actually floating -- position/size only mean something once it is,
+    /// same restriction `pseudo_tile` has in reverse for tiled. Mirrors the
+    /// same configure+`map_element` shape `retile()`'s own tiled-window loop
+    /// and the interactive resize/move grabs already use, not a new pattern.
+    pub(crate) fn apply_floating_placement(
+        &mut self,
+        surface: &WlSurface,
+        position: Option<(i32, i32)>,
+        size: Option<(i32, i32)>,
+    ) {
+        let Some(window) = self.mapped_toplevel_window(surface) else {
+            return;
+        };
+        if !self.floating_workspace.contains_key(surface) {
+            return;
+        }
+        let Some(current) = self.space.element_geometry(&window) else {
+            return;
+        };
+        let loc = position.map(Point::from).unwrap_or(current.loc);
+        let size = size.map(Size::from).unwrap_or(current.size);
+        let rect = Rectangle::new(loc, size);
+
+        if let Some(toplevel) = window.toplevel() {
+            toplevel.with_pending_state(|state| {
+                state.size = Some(rect.size);
+            });
+            toplevel.send_pending_configure();
+        }
+        self.space.map_element(window, rect.loc, false);
+        if let Some(tag) = self.floating_workspace.get_mut(surface) {
+            tag.rect = rect;
         }
     }
 
