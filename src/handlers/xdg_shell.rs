@@ -428,21 +428,20 @@ impl Smallvil {
         // fills its slot. The protocol still requires a reply either way.
         if self.layout.contains(wl_surface) {
             self.maximized.remove(wl_surface);
-            let size = self
-                .fullscreen
-                .get(wl_surface)
-                .and_then(|entry| self.output_by_name(&entry.output))
-                .and_then(|output| self.space.output_geometry(&output))
-                .map(|rect| rect.size)
-                .or_else(|| self.tiled_rect_for_surface(wl_surface).map(|rect| rect.size));
+            // No `state.size` write here: it's a documented no-op for a
+            // tiled window, which already has the correct size from
+            // whichever last set it -- retile()'s own configure for the
+            // ordinary case, or do_fullscreen_request's explicit
+            // `state.size = Some(output_geo.size)` if this window is also
+            // fullscreen (pending state carries forward, it isn't reset
+            // per call). Writing it again here just re-asserts a size the
+            // client already has, forcing a configure round-trip and
+            // redraw for a value that never actually changed.
             surface.with_pending_state(|state| {
                 state.states.unset(xdg_toplevel::State::Maximized);
                 state.states.unset(xdg_toplevel::State::Resizing);
                 if self.fullscreen.contains_key(wl_surface) {
                     state.states.set(xdg_toplevel::State::Fullscreen);
-                }
-                if size.is_some() {
-                    state.size = size;
                 }
             });
             Self::send_forced_configure(&surface);
