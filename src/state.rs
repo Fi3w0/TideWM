@@ -2778,6 +2778,41 @@ impl Smallvil {
         }
     }
 
+    /// Runs the udev backend's real DRM power hook (if any -- `None` under
+    /// winit, logical-only there) for `output`, then updates
+    /// `wlr_output_power_management_state`'s own tracking/broadcast on
+    /// success. The one place that does both together, shared by the
+    /// protocol's own `SetMode` handler and `toggle_dpms` below.
+    fn set_output_power_state(&mut self, output: &Output, on: bool) -> bool {
+        let applied = match &mut self.set_output_power {
+            Some(hook) => hook(output, on),
+            None => true,
+        };
+        if applied {
+            self.wlr_output_power_management_state.set(output, on);
+        }
+        applied
+    }
+
+    /// `toggle-dpms` (Phase N tier 2): both niri (`power-off-monitors`) and
+    /// Hyprland (`dpms`) treat this as an ordinary bindable WM action, not
+    /// external-tool-only, even though `wlr-output-power-management-v1`
+    /// already exposes the same control to a client like `wlopm`. Toggles
+    /// every output together rather than just one -- if any output is
+    /// currently on, this turns all of them off, otherwise turns all back
+    /// on, so a multi-monitor setup doesn't end up in a mixed on/off state
+    /// from one bind press.
+    pub fn toggle_dpms(&mut self) {
+        let outputs: Vec<Output> = self.space.outputs().cloned().collect();
+        let any_on = outputs
+            .iter()
+            .any(|output| self.wlr_output_power_management_state.is_on(output));
+        let target_on = !any_on;
+        for output in &outputs {
+            self.set_output_power_state(output, target_on);
+        }
+    }
+
     /// Applies a `[[rule]]`-specified exact position/size to a floating
     /// window, either of which may be unset (keep whatever `toggle_floating`
     /// already placed it at for that axis). No-op if `surface` isn't

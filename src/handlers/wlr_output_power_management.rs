@@ -54,8 +54,18 @@ impl WlrOutputPowerManagementState {
         Self { global, power: HashMap::new(), controls: Vec::new() }
     }
 
-    fn is_on(&self, output: &Output) -> bool {
+    pub fn is_on(&self, output: &Output) -> bool {
         self.power.get(output).copied().unwrap_or(true)
+    }
+
+    /// Records `output`'s tracked power state and broadcasts it to every
+    /// client watching that output -- the two steps `SetMode` below and
+    /// `Smallvil::toggle_dpms` (the bindable `toggle-dpms` action, Phase N
+    /// tier 2) both need, factored out so there's one place that does them
+    /// together rather than two copies drifting apart.
+    pub fn set(&mut self, output: &Output, on: bool) {
+        self.power.insert(output.clone(), on);
+        self.broadcast(output, on);
     }
 
     fn broadcast(&self, output: &Output, on: bool) {
@@ -167,8 +177,7 @@ impl Dispatch<ZwlrOutputPowerV1, ControlData> for Smallvil {
                     None => true,
                 };
                 if applied {
-                    state.wlr_output_power_management_state.power.insert(output.clone(), want_on);
-                    state.wlr_output_power_management_state.broadcast(output, want_on);
+                    state.wlr_output_power_management_state.set(output, want_on);
                 } else {
                     resource.failed();
                 }

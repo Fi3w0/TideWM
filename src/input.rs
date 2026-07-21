@@ -1168,6 +1168,9 @@ impl Smallvil {
             Action::FocusUrgent => {
                 self.focus_urgent();
             }
+            Action::ToggleDpms => {
+                self.toggle_dpms();
+            }
             Action::ToggleScratchpad => {
                 if let Some(output) = self.primary_output() {
                     self.toggle_scratchpad(&output);

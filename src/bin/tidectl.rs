@@ -273,7 +273,7 @@ ACTIONS:
     Any action a `bind` accepts in config.wave works here too, e.g.:
         close-window, toggle-floating, toggle-fullscreen, toggle-pin,
         toggle-scratchpad, move-to-scratchpad, toggle-pseudo-tile,
-        raise-window, lower-window, focus-urgent,
+        raise-window, lower-window, focus-urgent, toggle-dpms,
         cycle-focus, focus-left/right/up/down, swap-left/right/up/down,
         group-left/right/up/down, ungroup, cycle-tab-next/prev, quit,
         submap:<name>, exit-submap, layout:bsp, layout:master,

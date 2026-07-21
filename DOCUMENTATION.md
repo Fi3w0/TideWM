@@ -264,6 +264,9 @@ The same set of strings works after `bind ... =` at the top level or inside a `s
 - `exit-submap`
 - `toggle-overview` — schematic grid of every workspace on the current output (see README's Features list; not live thumbnails)
 
+**Outputs**
+- `toggle-dpms` — toggle every output's power together (all on, or all off)
+
 **Process and session**
 - `spawn:<command>` — args split on whitespace, no shell
 - `quit`

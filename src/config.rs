@@ -89,6 +89,9 @@ pub enum Action {
     /// bindable counterpart to a bar reading the `urgent` IPC flag. See
     /// `Smallvil::focus_urgent`.
     FocusUrgent,
+    /// Toggles every output's power together (all on, or all off). See
+    /// `Smallvil::toggle_dpms`.
+    ToggleDpms,
     CycleFocus,
     FocusDirection(Direction),
     SwapDirection(Direction),
@@ -1302,6 +1305,7 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "raise-window" => Some(Action::RaiseWindow),
         "lower-window" => Some(Action::LowerWindow),
         "focus-urgent" => Some(Action::FocusUrgent),
+        "toggle-dpms" => Some(Action::ToggleDpms),
         "cycle-focus" => Some(Action::CycleFocus),
         "focus-left" => Some(Action::FocusDirection(Direction::Left)),
         "focus-right" => Some(Action::FocusDirection(Direction::Right)),
