@@ -732,6 +732,7 @@ impl Smallvil {
         // Copied out before `config` moves into the `Self { config, .. }`
         // field below, so `layout: ...` further down can still read it.
         let default_layout = config.default_layout;
+        let master_orientation = config.master_orientation;
 
         let dh = display.handle();
 
@@ -855,6 +856,7 @@ impl Smallvil {
             layout: {
                 let mut layout = Layouts::default();
                 layout.set_default_algorithm(default_layout);
+                layout.set_master_orientation(master_orientation);
                 layout
             },
             space,
@@ -3935,6 +3937,7 @@ impl Smallvil {
                     }
                 }
                 self.layout.set_default_algorithm(self.config.default_layout);
+                self.layout.set_master_orientation(self.config.master_orientation);
                 // The DeviceAdded path is the only other place this runs;
                 // an already-connected touchpad (a laptop's built-in one,
                 // which won't see another DeviceAdded short of a restart)

@@ -21,7 +21,7 @@ use smithay::{
     utils::{Logical, Point, Rectangle},
 };
 
-use crate::config::LayoutAlgorithm;
+use crate::config::{LayoutAlgorithm, MasterOrientation};
 
 enum Node {
     Leaf(Window),
@@ -240,6 +240,12 @@ pub struct Layouts {
     /// key not present. Pruned the same way and for the same reason as
     /// `algorithms`.
     master_ratio: HashMap<(String, u32), f32>,
+    /// Which side the master pane sits on under `LayoutAlgorithm::Master`,
+    /// global (not per-workspace, unlike `master_ratio` -- a taste setting,
+    /// not something interactively adjusted per split). Set from
+    /// `config.master_orientation` at startup and on every reload, same as
+    /// `default_algorithm`.
+    master_orientation: MasterOrientation,
     /// Monotonic identity for the current collection of BSP trees. Pointer
     /// grabs retain the value they started with so a window insertion,
     /// removal, leaf swap, or workspace-content swap cannot make an old
@@ -412,6 +418,13 @@ impl Layouts {
         self.default_algorithm = algorithm;
     }
 
+    /// Sets which side the master pane sits on for every workspace under
+    /// `LayoutAlgorithm::Master`. Called once at startup and again on every
+    /// config reload, same as `set_default_algorithm`.
+    pub fn set_master_orientation(&mut self, orientation: MasterOrientation) {
+        self.master_orientation = orientation;
+    }
+
     /// The master/stack split fraction for `output`'s `workspace` (master
     /// mode only). Defaults to an even 0.5 split.
     pub fn master_ratio(&self, output: &str, workspace: u32) -> f32 {
@@ -478,9 +491,13 @@ impl Layouts {
         };
         match self.algorithm(output, workspace) {
             LayoutAlgorithm::Bsp => tree.layout(area, gap),
-            LayoutAlgorithm::Master => {
-                layout_master(tree.windows(), area, gap, self.master_ratio(output, workspace))
-            }
+            LayoutAlgorithm::Master => layout_master(
+                tree.windows(),
+                area,
+                gap,
+                self.master_ratio(output, workspace),
+                self.master_orientation,
+            ),
         }
     }
 
@@ -932,18 +949,21 @@ pub(crate) fn scale_centered(rect: Rectangle<i32, Logical>, scale: f64) -> Recta
 /// maintains for membership/insertion/groups, so this is *not* necessarily
 /// literal chronological insertion order once swaps have happened; a
 /// deliberate, documented v1 simplification rather than tracking a
-/// separate ordered list) takes `master_ratio` of the area on the left;
-/// every other window stacks vertically in the remaining area, split
-/// evenly. Always left/right regardless of the output's aspect ratio,
-/// unlike BSP's per-split adaptive orientation -- that fixed split is the
-/// actual visual point of choosing this layout over the adaptive one.
+/// separate ordered list) takes `master_ratio` of the area on `orientation`'s
+/// side; every other window stacks evenly in the remaining area (vertically
+/// for `Left`/`Right`, horizontally for `Top`/`Bottom` -- matches Hyprland's
+/// own actual behavior for those two, not a naive 90-degree rotation).
+/// Always this fixed split regardless of the output's aspect ratio, unlike
+/// BSP's per-split adaptive orientation -- that fixed split is the actual
+/// visual point of choosing this layout over the adaptive one.
 fn layout_master(
     windows: Vec<Window>,
     area: Rectangle<i32, Logical>,
     gap: i32,
     master_ratio: f32,
+    orientation: MasterOrientation,
 ) -> Vec<(Window, Rectangle<i32, Logical>)> {
-    let rects = layout_master_rects(windows.len(), area, master_ratio);
+    let rects = layout_master_rects(windows.len(), area, master_ratio, orientation);
     let mut out: Vec<(Window, Rectangle<i32, Logical>)> = windows.into_iter().zip(rects).collect();
     for (_, rect) in &mut out {
         *rect = inset(*rect, gap);
@@ -954,15 +974,15 @@ fn layout_master(
 /// The pure geometry behind `layout_master`, split out so it's testable
 /// without needing real `Window`/Wayland fixtures (same reasoning as
 /// `state.rs`'s `group_removal_outcome`): `count` windows in, one rect per
-/// window out, in the same order. One master rect on the left at
-/// `master_ratio` of the width, the rest splitting the remaining height
-/// evenly -- each stack window gets its exact share of whatever height is
-/// still left, computed one at a time, rather than a single `height /
-/// count` division that would leave a rounding gap at the last window.
+/// window out, in the same order (master first, then the stack). Each stack
+/// window gets its exact share of whatever space is still left, computed
+/// one at a time, rather than a single division that would leave a
+/// rounding gap at the last window.
 fn layout_master_rects(
     count: usize,
     area: Rectangle<i32, Logical>,
     master_ratio: f32,
+    orientation: MasterOrientation,
 ) -> Vec<Rectangle<i32, Logical>> {
     if count == 0 {
         return Vec::new();
@@ -972,20 +992,49 @@ fn layout_master_rects(
     }
 
     let mut out = Vec::with_capacity(count);
-    let master_w = ((area.size.w as f32) * master_ratio).round() as i32;
-    out.push(Rectangle::new(area.loc, (master_w, area.size.h).into()));
+    match orientation {
+        MasterOrientation::Left | MasterOrientation::Right => {
+            let master_w = ((area.size.w as f32) * master_ratio).round() as i32;
+            let stack_w = area.size.w - master_w;
+            let (master_x, stack_x) = if orientation == MasterOrientation::Left {
+                (area.loc.x, area.loc.x + master_w)
+            } else {
+                (area.loc.x + stack_w, area.loc.x)
+            };
+            out.push(Rectangle::new((master_x, area.loc.y).into(), (master_w, area.size.h).into()));
 
-    let stack_x = area.loc.x + master_w;
-    let stack_w = area.size.w - master_w;
-    let mut y = area.loc.y;
-    let mut remaining_h = area.size.h;
-    let mut remaining_count = (count - 1) as i32;
-    for _ in 0..count - 1 {
-        let h = remaining_h / remaining_count;
-        out.push(Rectangle::new((stack_x, y).into(), (stack_w, h).into()));
-        y += h;
-        remaining_h -= h;
-        remaining_count -= 1;
+            let mut y = area.loc.y;
+            let mut remaining_h = area.size.h;
+            let mut remaining_count = (count - 1) as i32;
+            for _ in 0..count - 1 {
+                let h = remaining_h / remaining_count;
+                out.push(Rectangle::new((stack_x, y).into(), (stack_w, h).into()));
+                y += h;
+                remaining_h -= h;
+                remaining_count -= 1;
+            }
+        }
+        MasterOrientation::Top | MasterOrientation::Bottom => {
+            let master_h = ((area.size.h as f32) * master_ratio).round() as i32;
+            let stack_h = area.size.h - master_h;
+            let (master_y, stack_y) = if orientation == MasterOrientation::Top {
+                (area.loc.y, area.loc.y + master_h)
+            } else {
+                (area.loc.y + stack_h, area.loc.y)
+            };
+            out.push(Rectangle::new((area.loc.x, master_y).into(), (area.size.w, master_h).into()));
+
+            let mut x = area.loc.x;
+            let mut remaining_w = area.size.w;
+            let mut remaining_count = (count - 1) as i32;
+            for _ in 0..count - 1 {
+                let w = remaining_w / remaining_count;
+                out.push(Rectangle::new((x, stack_y).into(), (w, stack_h).into()));
+                x += w;
+                remaining_w -= w;
+                remaining_count -= 1;
+            }
+        }
     }
     out
 }
@@ -1012,12 +1061,15 @@ mod tests {
 
     #[test]
     fn layout_master_rects_handles_zero_one_and_many_windows() {
-        assert_eq!(layout_master_rects(0, area(1000, 1000), 0.5), Vec::new());
+        assert_eq!(layout_master_rects(0, area(1000, 1000), 0.5, MasterOrientation::Left), Vec::new());
 
         // A lone window fills the whole area, same as BSP's lone leaf.
-        assert_eq!(layout_master_rects(1, area(1000, 1000), 0.5), vec![area(1000, 1000)]);
+        assert_eq!(
+            layout_master_rects(1, area(1000, 1000), 0.5, MasterOrientation::Left),
+            vec![area(1000, 1000)]
+        );
 
-        let rects = layout_master_rects(3, area(1200, 900), 0.5);
+        let rects = layout_master_rects(3, area(1200, 900), 0.5, MasterOrientation::Left);
         assert_eq!(rects.len(), 3);
         // Master takes the configured fraction of the width, full height.
         assert_eq!(rects[0], Rectangle::new((0, 0).into(), (600, 900).into()));
@@ -1032,7 +1084,7 @@ mod tests {
         // 900 / 4 isn't exact -- the running-remainder approach must still
         // account for every pixel rather than leaving a gap after the last
         // stack window from a naively-rounded single division.
-        let rects = layout_master_rects(5, area(1000, 901), 0.6);
+        let rects = layout_master_rects(5, area(1000, 901), 0.6, MasterOrientation::Left);
         let stack: Vec<_> = rects[1..].to_vec();
         let total_h: i32 = stack.iter().map(|r| r.size.h).sum();
         assert_eq!(total_h, 901);
@@ -1042,6 +1094,35 @@ mod tests {
             assert_eq!(rect.loc.y, y);
             y += rect.size.h;
         }
+    }
+
+    #[test]
+    fn layout_master_rects_right_orientation_mirrors_left() {
+        let rects = layout_master_rects(3, area(1200, 900), 0.5, MasterOrientation::Right);
+        assert_eq!(rects.len(), 3);
+        // Master now on the right instead of the left.
+        assert_eq!(rects[0], Rectangle::new((600, 0).into(), (600, 900).into()));
+        // Stack now on the left, still split evenly top/bottom.
+        assert_eq!(rects[1], Rectangle::new((0, 0).into(), (600, 450).into()));
+        assert_eq!(rects[2], Rectangle::new((0, 450).into(), (600, 450).into()));
+    }
+
+    #[test]
+    fn layout_master_rects_top_bottom_stack_horizontally_not_vertically() {
+        let top = layout_master_rects(3, area(1200, 900), 0.5, MasterOrientation::Top);
+        assert_eq!(top.len(), 3);
+        // Master on top, full width.
+        assert_eq!(top[0], Rectangle::new((0, 0).into(), (1200, 450).into()));
+        // Stack below, split evenly left/right (not top/bottom).
+        assert_eq!(top[1], Rectangle::new((0, 450).into(), (600, 450).into()));
+        assert_eq!(top[2], Rectangle::new((600, 450).into(), (600, 450).into()));
+
+        let bottom = layout_master_rects(2, area(1000, 800), 0.25, MasterOrientation::Bottom);
+        assert_eq!(bottom.len(), 2);
+        // Master on the bottom this time, still full width.
+        assert_eq!(bottom[0], Rectangle::new((0, 600).into(), (1000, 200).into()));
+        // Lone stack window fills the remaining strip on top.
+        assert_eq!(bottom[1], Rectangle::new((0, 0).into(), (1000, 600).into()));
     }
 
     #[test]

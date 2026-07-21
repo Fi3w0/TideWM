@@ -60,6 +60,22 @@ pub enum LayoutAlgorithm {
     Master,
 }
 
+/// Which side the master pane sits on under `LayoutAlgorithm::Master`
+/// (Hyprland master's own `orientation` key, minus its niche `center`
+/// variant -- no analog need surfaced for it, skip outright rather than
+/// build unused complexity). `Left`/`Right` stack the other windows
+/// vertically in the remaining strip; `Top`/`Bottom` stack them
+/// horizontally instead -- matches Hyprland's own actual behavior for
+/// those two, not just a naive 90-degree rotation of left/right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MasterOrientation {
+    #[default]
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Left,
@@ -163,6 +179,11 @@ pub struct Config {
     /// `layout::Layouts::set_default_algorithm`). Read fresh on every
     /// config reload (`Smallvil::reload_config`), same as `gaps`.
     pub default_layout: LayoutAlgorithm,
+    /// Which side the master pane sits on under `LayoutAlgorithm::Master`
+    /// (see `layout::Layouts::set_master_orientation`). One global value,
+    /// not per-workspace like `master_ratio` -- this is a taste setting,
+    /// not something interactively adjusted per split.
+    pub master_orientation: MasterOrientation,
     /// Fraction of its tile's size a pseudo-tiled window keeps, centered
     /// within it (see `toggle-pseudo-tile`). Clamped to [0.05, 1.0] on load
     /// so a bad value can't collapse or invert a window's size.
@@ -258,6 +279,12 @@ impl Config {
             }
             LayoutAlgorithm::Bsp
         });
+        let master_orientation = parse_master_orientation(&raw.master_orientation).unwrap_or_else(|| {
+            if !raw.master_orientation.is_empty() {
+                tracing::warn!(value = %raw.master_orientation, "Unknown master_orientation, using left");
+            }
+            MasterOrientation::Left
+        });
 
         Self {
             terminal: raw.terminal,
@@ -267,6 +294,7 @@ impl Config {
             workspace_auto_back_and_forth: raw.workspace_auto_back_and_forth,
             gaps: raw.gaps,
             default_layout,
+            master_orientation,
             pseudo_tile_scale: raw.pseudo_tile_scale.clamp(0.05, 1.0),
             keybinds,
             input: raw.input,
@@ -330,6 +358,10 @@ struct RawConfig {
     /// bad value warns and falls back rather than failing the whole
     /// config parse.
     default_layout: String,
+    /// `"left"`/`"right"`/`"top"`/`"bottom"`, resolved via
+    /// `parse_master_orientation` -- same raw-string-then-resolve shape as
+    /// `default_layout` just above, for the same reason.
+    master_orientation: String,
     pseudo_tile_scale: f64,
     keybinds: HashMap<String, String>,
     input: InputConfig,
@@ -433,6 +465,7 @@ impl Default for RawConfig {
             workspace_auto_back_and_forth: false,
             gaps: 8,
             default_layout: String::new(),
+            master_orientation: String::new(),
             pseudo_tile_scale: 0.7,
             keybinds,
             input: InputConfig::default(),
@@ -827,6 +860,7 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
         "workspace_auto_back_and_forth" => set_bool(&mut raw.workspace_auto_back_and_forth, key, value),
         "gaps" => set_i32(&mut raw.gaps, key, value),
         "default_layout" => raw.default_layout = value.to_string(),
+        "master_orientation" => raw.master_orientation = value.to_string(),
         "pseudo_tile_scale" => set_f64(&mut raw.pseudo_tile_scale, key, value),
         // List-shaped, not scalar -- accumulates because `waves::merge_into`
         // already let every occurrence of this one key through instead of
@@ -1354,6 +1388,16 @@ fn parse_layout_algorithm(s: &str) -> Option<LayoutAlgorithm> {
     }
 }
 
+fn parse_master_orientation(s: &str) -> Option<MasterOrientation> {
+    match s {
+        "left" => Some(MasterOrientation::Left),
+        "right" => Some(MasterOrientation::Right),
+        "top" => Some(MasterOrientation::Top),
+        "bottom" => Some(MasterOrientation::Bottom),
+        _ => None,
+    }
+}
+
 /// Parses the `N` in `"workspace:N"`/`"move-to-workspace:N"`. `full_action`
 /// is only for the warning message, so a bad config points at what was
 /// actually written.
@@ -1382,6 +1426,7 @@ cursor_always_visible = false
 workspace_auto_back_and_forth = false
 gaps = 8
 default_layout = bsp
+master_orientation = left
 pseudo_tile_scale = 0.7
 
 # spawn_at_startup = waybar
@@ -1578,6 +1623,7 @@ mod tests {
             workspace_auto_back_and_forth: false,
             gaps: 0,
             default_layout: LayoutAlgorithm::Bsp,
+            master_orientation: MasterOrientation::Left,
             pseudo_tile_scale: 0.7,
             keybinds: Vec::new(),
             input: InputConfig::default(),
