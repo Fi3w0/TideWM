@@ -332,6 +332,7 @@ impl Smallvil {
                 );
             }
             InputEvent::PointerMotion { event, .. } => {
+                self.note_pointer_motion();
                 // Relative motion: what every real mouse/trackpad sends
                 // (absolute is tablets/touchscreens, or a nested backend's
                 // host compositor giving already-absolute coordinates).
@@ -485,6 +486,7 @@ impl Smallvil {
                 }
             }
             InputEvent::PointerMotionAbsolute { event, .. } => {
+                self.note_pointer_motion();
                 // No output to map an absolute position onto -- reachable
                 // during shutdown if a host compositor (winit backend)
                 // delivers a final motion event after outputs are already

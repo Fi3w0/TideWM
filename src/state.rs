@@ -37,7 +37,9 @@ use smithay::{
     output::Output,
     reexports::{
         calloop::{
-            generic::Generic, EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction,
+            generic::Generic,
+            timer::{TimeoutAction, Timer},
+            EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction,
         },
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{
@@ -131,6 +133,21 @@ pub struct Smallvil {
     pub welcome_hint: Option<crate::welcome::WelcomeHint>,
     last_config_event: Instant,
     needs_redraw: bool,
+    /// Timestamp of the last real pointer motion (absolute or relative),
+    /// updated from `Smallvil::note_pointer_motion`. Drives
+    /// `config.cursor_hide_after_ms`'s auto-hide check at render time
+    /// (`backend/udev.rs`) -- authoritative regardless of why a given
+    /// render happened to run.
+    pub(crate) last_pointer_motion: Instant,
+    /// Whether a `cursor_hide_after_ms` wake-up timer is currently pending.
+    /// `note_pointer_motion` only arms a new timer when this is `false`,
+    /// rather than spawning a fresh calloop source on every single motion
+    /// event (a real mouse can fire hundreds of those a second) -- the one
+    /// live timer re-reads `last_pointer_motion` when it fires and
+    /// reschedules itself further out if motion happened more recently
+    /// than expected, the same self-extending `TimeoutAction::ToDuration`
+    /// idiom `winit.rs`'s own redraw timer already uses.
+    cursor_idle_timer_armed: bool,
     /// `Some(name)` while a `[submap.<name>]` keybind table is active
     /// (`Action::EnterSubmap`/`ExitSubmap`, `input.rs`'s keybind-matching
     /// closure). `None` means the base `[keybinds]` table is in effect.
@@ -850,6 +867,8 @@ impl Smallvil {
             overview: None,
             welcome_hint: None,
             last_config_event: Instant::now() - Duration::from_secs(1),
+            last_pointer_motion: Instant::now(),
+            cursor_idle_timer_armed: false,
             needs_redraw: true,
             active_submap: None,
 
@@ -2870,6 +2889,47 @@ impl Smallvil {
         if let Some(tag) = self.floating_workspace.get_mut(surface) {
             tag.rect = rect;
         }
+    }
+
+    /// Records real pointer motion and, if `cursor_hide_after_ms` is
+    /// configured, makes sure a wake-up timer is running -- damage-gated
+    /// rendering means nothing else would naturally trigger a redraw at the
+    /// moment the idle threshold passes on an otherwise-static desktop, so
+    /// the auto-hide needs its own explicit prod. Only arms a new timer if
+    /// one isn't already pending (`cursor_idle_timer_armed`); a real mouse
+    /// fires this on every motion event, so spawning a fresh calloop timer
+    /// source each time would mean hundreds per second. The one live timer
+    /// re-reads `last_pointer_motion` when it fires and reschedules itself
+    /// further out (`TimeoutAction::ToDuration`, the same self-extending
+    /// idiom `winit.rs`'s own redraw timer uses) if motion happened more
+    /// recently than expected, rather than a fresh source per motion event.
+    /// The timer only requests a redraw; the actual hide/show decision is
+    /// re-derived fresh from `last_pointer_motion` at render time
+    /// (`backend/udev.rs`), so a slightly-early/late fire can't itself
+    /// cause an incorrect result. No-op under winit (`udev_renderer` is
+    /// `None` there) -- only the udev backend composites its own cursor at
+    /// all.
+    pub(crate) fn note_pointer_motion(&mut self) {
+        self.last_pointer_motion = Instant::now();
+        if self.config.cursor_hide_after_ms <= 0 || self.udev_renderer.is_none() {
+            return;
+        }
+        if self.cursor_idle_timer_armed {
+            return;
+        }
+        self.cursor_idle_timer_armed = true;
+        let delay = Duration::from_millis(self.config.cursor_hide_after_ms as u64);
+        let _ = self.loop_handle.insert_source(Timer::from_duration(delay), move |_, _, state: &mut Smallvil| {
+            let configured = Duration::from_millis(state.config.cursor_hide_after_ms.max(0) as u64);
+            let elapsed = state.last_pointer_motion.elapsed();
+            if elapsed >= configured {
+                state.cursor_idle_timer_armed = false;
+                state.request_redraw();
+                TimeoutAction::Drop
+            } else {
+                TimeoutAction::ToDuration(configured - elapsed)
+            }
+        });
     }
 
     /// Raises `surface` to the top of the floating stack. No-op on a tiled

@@ -1165,20 +1165,26 @@ fn render_surface(
         state.toast = None;
     }
 
-    // `cursor_always_visible` overrides a client's own hide request
-    // (`CursorImageStatus::Hidden`, e.g. a terminal hiding its pointer
-    // glyph after inactivity) rather than a TideWM-driven idle timer --
-    // there's no idle tracking here, this backend already recomputes the
-    // cursor element fresh from `state.cursor_status` on every render.
-    // Falls back to the plain default arrow, the same as an unrecognized
-    // named icon would.
+    // `cursor_hide_after_ms` (`Smallvil::note_pointer_motion` arms the
+    // wake-up timer that gets a render to actually run at this moment on an
+    // otherwise-static desktop) takes priority over everything else below --
+    // independent of `cursor_always_visible`, which only concerns a
+    // *client's* own hide request, not this compositor-driven timer.
+    let idle_hidden = state.config.cursor_hide_after_ms > 0
+        && state.last_pointer_motion.elapsed() >= Duration::from_millis(state.config.cursor_hide_after_ms as u64);
+    // Otherwise, `cursor_always_visible` overrides a client's own hide
+    // request (`CursorImageStatus::Hidden`, e.g. a terminal hiding its
+    // pointer glyph after inactivity) -- falls back to the plain default
+    // arrow, the same as an unrecognized named icon would.
     let forced_visible_status = CursorImageStatus::Named(CursorIcon::Default);
-    let effective_cursor_status =
-        if matches!(state.cursor_status, CursorImageStatus::Hidden) && state.config.cursor_always_visible {
-            &forced_visible_status
-        } else {
-            &state.cursor_status
-        };
+    let hidden_status = CursorImageStatus::Hidden;
+    let effective_cursor_status = if idle_hidden {
+        &hidden_status
+    } else if matches!(state.cursor_status, CursorImageStatus::Hidden) && state.config.cursor_always_visible {
+        &forced_visible_status
+    } else {
+        &state.cursor_status
+    };
 
     let (cursor_surface_element, cursor_glyph_element) = match effective_cursor_status {
         CursorImageStatus::Surface(cursor_surface) => {
