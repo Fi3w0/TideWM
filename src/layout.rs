@@ -21,7 +21,7 @@ use smithay::{
     utils::{Logical, Point, Rectangle},
 };
 
-use crate::config::{LayoutAlgorithm, MasterOrientation};
+use crate::config::{LayoutAlgorithm, MasterOrientation, SplitBias};
 
 enum Node {
     Leaf(Window),
@@ -143,10 +143,11 @@ impl BspLayout {
         &self,
         area: Rectangle<i32, Logical>,
         gap: i32,
+        bias: SplitBias,
     ) -> Vec<(Window, Rectangle<i32, Logical>)> {
         let mut out = Vec::new();
         if let Some(root) = &self.root {
-            collect(root, area, &mut out);
+            collect(root, area, bias, &mut out);
         }
         for (_, rect) in &mut out {
             *rect = inset(*rect, gap);
@@ -164,8 +165,9 @@ impl BspLayout {
         area: Rectangle<i32, Logical>,
         gap: i32,
         point: Point<f64, Logical>,
+        bias: SplitBias,
     ) -> Option<SplitHit> {
-        hit_test(self.root.as_ref()?, area, gap, point, Vec::new())
+        hit_test(self.root.as_ref()?, area, gap, point, bias, Vec::new())
     }
 
     /// The nearest enclosing split for each axis along the path from the
@@ -179,12 +181,17 @@ impl BspLayout {
     /// of each axis wins over any more distant ancestor, since that's the
     /// one whose ratio directly controls this window's size in that axis
     /// rather than resizing some larger subtree it happens to sit in.
-    pub fn resize_splits(&self, target: &WlSurface, area: Rectangle<i32, Logical>) -> Vec<SplitHit> {
+    pub fn resize_splits(
+        &self,
+        target: &WlSurface,
+        area: Rectangle<i32, Logical>,
+        bias: SplitBias,
+    ) -> Vec<SplitHit> {
         let mut horizontal = None;
         let mut vertical = None;
         if let Some(root) = &self.root {
             if node_contains(root, target) {
-                collect_resize_splits(root, target, area, Vec::new(), &mut horizontal, &mut vertical);
+                collect_resize_splits(root, target, area, bias, Vec::new(), &mut horizontal, &mut vertical);
             }
         }
         [horizontal, vertical].into_iter().flatten().collect()
@@ -246,6 +253,12 @@ pub struct Layouts {
     /// `config.master_orientation` at startup and on every reload, same as
     /// `default_algorithm`.
     master_orientation: MasterOrientation,
+    /// Manual override for every BSP tree's per-split axis choice (BSP
+    /// mode only; ignored under master, which never calls `split()` at
+    /// all). Global, same "taste setting, not per-workspace" reasoning as
+    /// `master_orientation`. Set from `config.bsp_split_bias` at startup
+    /// and on every reload.
+    split_bias: SplitBias,
     /// Monotonic identity for the current collection of BSP trees. Pointer
     /// grabs retain the value they started with so a window insertion,
     /// removal, leaf swap, or workspace-content swap cannot make an old
@@ -425,6 +438,13 @@ impl Layouts {
         self.master_orientation = orientation;
     }
 
+    /// Sets the manual per-split axis override for every BSP tree. Called
+    /// once at startup and again on every config reload, same as
+    /// `set_master_orientation`.
+    pub fn set_split_bias(&mut self, bias: SplitBias) {
+        self.split_bias = bias;
+    }
+
     /// The master/stack split fraction for `output`'s `workspace` (master
     /// mode only). Defaults to an even 0.5 split.
     pub fn master_ratio(&self, output: &str, workspace: u32) -> f32 {
@@ -490,7 +510,7 @@ impl Layouts {
             return Vec::new();
         };
         match self.algorithm(output, workspace) {
-            LayoutAlgorithm::Bsp => tree.layout(area, gap),
+            LayoutAlgorithm::Bsp => tree.layout(area, gap, self.split_bias),
             LayoutAlgorithm::Master => layout_master(
                 tree.windows(),
                 area,
@@ -520,7 +540,7 @@ impl Layouts {
         let mut hit = self
             .trees
             .get(&(output.to_string(), workspace))?
-            .hit_test_split(area, gap, point)?;
+            .hit_test_split(area, gap, point, self.split_bias)?;
         hit.output = output.to_string();
         hit.workspace = workspace;
         hit.topology_revision = self.topology_revision;
@@ -543,7 +563,7 @@ impl Layouts {
         let Some(tree) = self.trees.get(&(output.to_string(), workspace)) else {
             return Vec::new();
         };
-        tree.resize_splits(surface, area)
+        tree.resize_splits(surface, area, self.split_bias)
             .into_iter()
             .map(|mut hit| {
                 hit.output = output.to_string();
@@ -721,6 +741,7 @@ fn collect_resize_splits(
     node: &Node,
     target: &WlSurface,
     area: Rectangle<i32, Logical>,
+    bias: SplitBias,
     mut path: Vec<Side>,
     horizontal: &mut Option<SplitHit>,
     vertical: &mut Option<SplitHit>,
@@ -734,12 +755,8 @@ fn collect_resize_splits(
         return;
     };
 
-    let (first_area, second_area) = split(area, *ratio);
-    let axis = if area.size.w >= area.size.h {
-        Axis::Horizontal
-    } else {
-        Axis::Vertical
-    };
+    let (first_area, second_area) = split(area, *ratio, bias);
+    let axis = split_axis(area, bias);
 
     let hit = SplitHit {
         output: String::new(),
@@ -756,10 +773,10 @@ fn collect_resize_splits(
 
     if node_contains(first, target) {
         path.push(Side::First);
-        collect_resize_splits(first, target, first_area, path, horizontal, vertical);
+        collect_resize_splits(first, target, first_area, bias, path, horizontal, vertical);
     } else if node_contains(second, target) {
         path.push(Side::Second);
-        collect_resize_splits(second, target, second_area, path, horizontal, vertical);
+        collect_resize_splits(second, target, second_area, bias, path, horizontal, vertical);
     }
 }
 
@@ -768,6 +785,7 @@ fn hit_test(
     area: Rectangle<i32, Logical>,
     gap: i32,
     point: Point<f64, Logical>,
+    bias: SplitBias,
     mut path: Vec<Side>,
 ) -> Option<SplitHit> {
     let Node::Split {
@@ -779,12 +797,8 @@ fn hit_test(
         return None;
     };
 
-    let (first_area, second_area) = split(area, *ratio);
-    let axis = if area.size.w >= area.size.h {
-        Axis::Horizontal
-    } else {
-        Axis::Vertical
-    };
+    let (first_area, second_area) = split(area, *ratio, bias);
+    let axis = split_axis(area, bias);
     let threshold = (gap as f64).max(4.0);
 
     let on_border = match axis {
@@ -817,10 +831,10 @@ fn hit_test(
 
     if rect_contains(first_area, point) {
         path.push(Side::First);
-        hit_test(first, first_area, gap, point, path)
+        hit_test(first, first_area, gap, point, bias, path)
     } else {
         path.push(Side::Second);
-        hit_test(second, second_area, gap, point, path)
+        hit_test(second, second_area, gap, point, bias, path)
     }
 }
 
@@ -866,6 +880,7 @@ fn set_ratio_at(node: &mut Node, path: &[Side], ratio: f32) {
 fn collect(
     node: &Node,
     area: Rectangle<i32, Logical>,
+    bias: SplitBias,
     out: &mut Vec<(Window, Rectangle<i32, Logical>)>,
 ) {
     match node {
@@ -875,9 +890,9 @@ fn collect(
             first,
             second,
         } => {
-            let (first_area, second_area) = split(area, *ratio);
-            collect(first, first_area, out);
-            collect(second, second_area, out);
+            let (first_area, second_area) = split(area, *ratio, bias);
+            collect(first, first_area, bias, out);
+            collect(second, second_area, bias, out);
         }
     }
 }
@@ -892,13 +907,36 @@ fn collect_windows(node: &Node, out: &mut Vec<Window>) {
     }
 }
 
-/// Wide area -> side-by-side split; tall area -> stacked split. Decided
-/// fresh every layout pass from the area's own aspect ratio, not stored.
+/// Which way a split at `area` runs: `bias` overrides the adaptive choice
+/// when set to anything but `Auto`, otherwise wide area -> side-by-side,
+/// tall area -> stacked. The single source of truth `split()`'s own axis
+/// choice and every `Axis` metadata computation (`hit_test`,
+/// `collect_resize_splits`) route through, so the two can't drift apart --
+/// this project has been burned before by the same invariant enforced in
+/// more than one place independently (see the Z-order note in AGENT.md).
+fn split_axis(area: Rectangle<i32, Logical>, bias: SplitBias) -> Axis {
+    match bias {
+        SplitBias::Horizontal => Axis::Horizontal,
+        SplitBias::Vertical => Axis::Vertical,
+        SplitBias::Auto => {
+            if area.size.w >= area.size.h {
+                Axis::Horizontal
+            } else {
+                Axis::Vertical
+            }
+        }
+    }
+}
+
+/// Wide area -> side-by-side split; tall area -> stacked split, unless
+/// `bias` forces one way. Decided fresh every layout pass from the area's
+/// own aspect ratio (or the override), not stored.
 fn split(
     area: Rectangle<i32, Logical>,
     ratio: f32,
+    bias: SplitBias,
 ) -> (Rectangle<i32, Logical>, Rectangle<i32, Logical>) {
-    if area.size.w >= area.size.h {
+    if split_axis(area, bias) == Axis::Horizontal {
         let first_w = (area.size.w as f32 * ratio).round() as i32;
         let first = Rectangle::new(area.loc, (first_w, area.size.h).into());
         let second = Rectangle::new(
@@ -1053,6 +1091,19 @@ mod tests {
 
         assert!(layouts.trees.is_empty());
         assert_eq!(layouts.topology_revision, 0);
+    }
+
+    #[test]
+    fn split_axis_auto_follows_aspect_ratio_but_bias_overrides_it() {
+        let wide = area(1000, 500);
+        let tall = area(500, 1000);
+
+        assert_eq!(split_axis(wide, SplitBias::Auto), Axis::Horizontal);
+        assert_eq!(split_axis(tall, SplitBias::Auto), Axis::Vertical);
+
+        // A forced bias wins regardless of the area's own shape.
+        assert_eq!(split_axis(tall, SplitBias::Horizontal), Axis::Horizontal);
+        assert_eq!(split_axis(wide, SplitBias::Vertical), Axis::Vertical);
     }
 
     fn area(w: i32, h: i32) -> Rectangle<i32, Logical> {

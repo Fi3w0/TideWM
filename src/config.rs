@@ -76,6 +76,23 @@ pub enum MasterOrientation {
     Bottom,
 }
 
+/// Manual override for `BspLayout`'s per-split axis choice (Hyprland
+/// dwindle's `force_split` idea, scoped down to just the axis: this project
+/// has no analog for `split_width_multiplier`/`smart_split`'s mouse-position
+/// insertion logic or `permanent_direction_override`'s transient
+/// preselect-next-window state -- no request for either). `Auto` (default)
+/// is the existing, unchanged aspect-ratio-driven behavior (the module's
+/// own deliberate identity, see `layout.rs`'s doc comment) -- this is
+/// strictly an opt-in escape hatch for anyone who wants every split forced
+/// one way regardless of window/output shape, not a change to the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SplitBias {
+    #[default]
+    Auto,
+    Horizontal,
+    Vertical,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Left,
@@ -193,6 +210,11 @@ pub struct Config {
     /// not per-workspace like `master_ratio` -- this is a taste setting,
     /// not something interactively adjusted per split.
     pub master_orientation: MasterOrientation,
+    /// Manual override for BSP's per-split axis choice (see
+    /// `layout::Layouts::set_split_bias`). `Auto` (default) is the existing
+    /// aspect-ratio-driven behavior, unchanged. One global value, same
+    /// "taste setting, not per-workspace" reasoning as `master_orientation`.
+    pub bsp_split_bias: SplitBias,
     /// Fraction of its tile's size a pseudo-tiled window keeps, centered
     /// within it (see `toggle-pseudo-tile`). Clamped to [0.05, 1.0] on load
     /// so a bad value can't collapse or invert a window's size.
@@ -294,6 +316,12 @@ impl Config {
             }
             MasterOrientation::Left
         });
+        let bsp_split_bias = parse_split_bias(&raw.bsp_split_bias).unwrap_or_else(|| {
+            if !raw.bsp_split_bias.is_empty() {
+                tracing::warn!(value = %raw.bsp_split_bias, "Unknown bsp_split_bias, using auto");
+            }
+            SplitBias::Auto
+        });
 
         Self {
             terminal: raw.terminal,
@@ -305,6 +333,7 @@ impl Config {
             gaps: raw.gaps,
             default_layout,
             master_orientation,
+            bsp_split_bias,
             pseudo_tile_scale: raw.pseudo_tile_scale.clamp(0.05, 1.0),
             keybinds,
             input: raw.input,
@@ -373,6 +402,10 @@ struct RawConfig {
     /// `parse_master_orientation` -- same raw-string-then-resolve shape as
     /// `default_layout` just above, for the same reason.
     master_orientation: String,
+    /// `"auto"`/`"horizontal"`/`"vertical"`, resolved via
+    /// `parse_split_bias` -- same raw-string-then-resolve shape as
+    /// `master_orientation` just above, for the same reason.
+    bsp_split_bias: String,
     pseudo_tile_scale: f64,
     keybinds: HashMap<String, String>,
     input: InputConfig,
@@ -478,6 +511,7 @@ impl Default for RawConfig {
             gaps: 8,
             default_layout: String::new(),
             master_orientation: String::new(),
+            bsp_split_bias: String::new(),
             pseudo_tile_scale: 0.7,
             keybinds,
             input: InputConfig::default(),
@@ -874,6 +908,7 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
         "gaps" => set_i32(&mut raw.gaps, key, value),
         "default_layout" => raw.default_layout = value.to_string(),
         "master_orientation" => raw.master_orientation = value.to_string(),
+        "bsp_split_bias" => raw.bsp_split_bias = value.to_string(),
         "pseudo_tile_scale" => set_f64(&mut raw.pseudo_tile_scale, key, value),
         // List-shaped, not scalar -- accumulates because `waves::merge_into`
         // already let every occurrence of this one key through instead of
@@ -1411,6 +1446,15 @@ fn parse_master_orientation(s: &str) -> Option<MasterOrientation> {
     }
 }
 
+fn parse_split_bias(s: &str) -> Option<SplitBias> {
+    match s {
+        "auto" => Some(SplitBias::Auto),
+        "horizontal" => Some(SplitBias::Horizontal),
+        "vertical" => Some(SplitBias::Vertical),
+        _ => None,
+    }
+}
+
 /// Parses the `N` in `"workspace:N"`/`"move-to-workspace:N"`. `full_action`
 /// is only for the warning message, so a bad config points at what was
 /// actually written.
@@ -1441,6 +1485,7 @@ workspace_auto_back_and_forth = false
 gaps = 8
 default_layout = bsp
 master_orientation = left
+bsp_split_bias = auto
 pseudo_tile_scale = 0.7
 
 # spawn_at_startup = waybar
@@ -1639,6 +1684,7 @@ mod tests {
             gaps: 0,
             default_layout: LayoutAlgorithm::Bsp,
             master_orientation: MasterOrientation::Left,
+            bsp_split_bias: SplitBias::Auto,
             pseudo_tile_scale: 0.7,
             keybinds: Vec::new(),
             input: InputConfig::default(),
