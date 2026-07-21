@@ -998,6 +998,7 @@ fn handle_connector_change(
                     // not silently missing.
                     state.space.unmap_output(&surface.output);
                     state.lock_surfaces.remove(&surface.output);
+                    state.lock_blank.remove(&surface.output);
                     #[cfg(feature = "screencast")]
                     if let Some(screencast) = &state.screencast {
                         screencast.refresh_outputs(state.space.outputs());

@@ -207,10 +207,15 @@ pub struct Smallvil {
     /// duplicate `get_lock_surface` calls per output.
     pub(crate) locked_outputs: HashSet<Output>,
     /// Cached full-output blank fill shown behind (or instead of) a lock
-    /// surface. `SolidColorBuffer` tracks its own commit counter and only
-    /// bumps it when size/color actually changes -- same "don't rebuild
-    /// every frame" shape as `Toast`/`WindowGroup::strip`.
-    lock_blank: SolidColorBuffer,
+    /// surface, one per output. `SolidColorBuffer` tracks its own commit
+    /// counter and only bumps it when size/color actually changes -- same
+    /// "don't rebuild every frame" shape as `Toast`/`WindowGroup::strip` --
+    /// but that dedup only works per-buffer: a single shared buffer across
+    /// every output would flip size on every call in a multi-monitor lock
+    /// with differently-sized outputs, defeating the dedup and forcing a
+    /// texture re-upload per output per frame. Pruned on output disconnect
+    /// alongside `lock_surfaces`.
+    pub(crate) lock_blank: HashMap<Output, SolidColorBuffer>,
     /// `xdg_activation_v1`: focus handoff on request (click a link, the
     /// browser window gets focus). Handler and token policy live in
     /// `handlers/mod.rs`; the grant path itself is
@@ -822,7 +827,7 @@ impl Smallvil {
             session_lock: SessionLock::Unlocked,
             lock_surfaces: HashMap::new(),
             locked_outputs: HashSet::new(),
-            lock_blank: SolidColorBuffer::new((0, 0), [0.0, 0.0, 0.0, 1.0]),
+            lock_blank: HashMap::new(),
             xdg_activation_state,
             single_pixel_buffer_state,
             presentation_state,
@@ -1491,14 +1496,26 @@ impl Smallvil {
         let Some(rect) = self.space.element_geometry(window) else {
             return;
         };
-        let owner = self.output_for_window(window).map(|output| {
-            // The window may have just been dragged onto a different
-            // output; its surfaces need to hear about that output's scale.
-            self.set_window_fractional_scale(window, &output);
-            let name = output.name();
-            let workspace = self.layout.active_workspace(&name);
-            (name, workspace)
-        });
+        // Falls back to `primary_output()` for a window dragged fully
+        // outside every output's geometry, same fallback
+        // `toggle_floating`'s own floating-to-tiled path already uses for
+        // the identical ambiguity. Without it, `owner` stays `None` here
+        // and `tag.output`/`tag.workspace` below would keep whatever
+        // output the window *left* -- its `rect` still updates to the new
+        // (off-screen) position, but a later workspace switch on that
+        // stale output would still try to hide a window that isn't
+        // actually there anymore.
+        let owner = self
+            .output_for_window(window)
+            .or_else(|| self.primary_output())
+            .map(|output| {
+                // The window may have just been dragged onto a different
+                // output; its surfaces need to hear about that output's scale.
+                self.set_window_fractional_scale(window, &output);
+                let name = output.name();
+                let workspace = self.layout.active_workspace(&name);
+                (name, workspace)
+            });
 
         let tag = self.floating_workspace.get_mut(&surface).unwrap();
         tag.rect = rect;
@@ -1857,9 +1874,13 @@ impl Smallvil {
             elements.extend(surface_elements.into_iter().map(LockRenderElement::Surface));
         }
 
-        self.lock_blank.update(size, [0.0, 0.0, 0.0, 1.0]);
+        let blank_buffer = self
+            .lock_blank
+            .entry(output.clone())
+            .or_insert_with(|| SolidColorBuffer::new((0, 0), [0.0, 0.0, 0.0, 1.0]));
+        blank_buffer.update(size, [0.0, 0.0, 0.0, 1.0]);
         let blank =
-            SolidColorRenderElement::from_buffer(&self.lock_blank, (0, 0), scale, 1.0, Kind::Unspecified);
+            SolidColorRenderElement::from_buffer(blank_buffer, (0, 0), scale, 1.0, Kind::Unspecified);
         elements.push(LockRenderElement::Blank(blank));
 
         elements
@@ -2907,6 +2928,18 @@ impl Smallvil {
 
         let new_surface = self.groups[idx].members[new_active].surface.clone();
         self.focus_window(Some(new_surface), SERIAL_COUNTER.next_serial());
+        // `reconcile_keyboard_focus` (triggered by `focus_window` above)
+        // only refreshes wlr-foreign-toplevel state for the old/new
+        // *keyboard* focus targets. The demoted tab (`old_surface`) is
+        // only one of those if it also happened to hold actual keyboard
+        // focus before this call -- a group's visible tab and the seat's
+        // keyboard focus are independent (the user can click away to a
+        // different window entirely without switching tabs), so a demoted
+        // tab that wasn't focused would otherwise never get told anything
+        // changed. Explicit and safe to call unconditionally: `send_state`
+        // (see wlr_foreign_toplevel.rs) already short-circuits when its
+        // computed state bytes match what was last broadcast.
+        self.refresh_wlr_toplevel_state(&old_surface);
         self.request_redraw();
     }
 
