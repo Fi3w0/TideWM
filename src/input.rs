@@ -1435,6 +1435,9 @@ impl Smallvil {
             Action::SwapDirection(direction) => {
                 self.swap_direction(direction);
             }
+            Action::Resize(direction) => {
+                self.keyboard_resize(direction);
+            }
             Action::GroupDirection(direction) => {
                 self.group_direction(direction);
             }

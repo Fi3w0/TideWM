@@ -146,6 +146,10 @@ pub enum Action {
     CycleFocus,
     FocusDirection(Direction),
     SwapDirection(Direction),
+    /// Keyboard-driven resize. Right/down grow and left/up shrink the
+    /// focused window along that axis; floating windows change by pixels,
+    /// BSP windows move their nearest enclosing split.
+    Resize(Direction),
     /// Groups the focused tiled window with its neighbor in `Direction`
     /// into one shared tab slot. See `Smallvil::group_direction`.
     GroupDirection(Direction),
@@ -396,7 +400,11 @@ impl Config {
     /// booleans have no "leave alone" state to fall back to). Called once
     /// per newly-mapped window, not per frame, so folding rather than
     /// caching is fine.
-    pub(crate) fn resolve_window_rules(&self, app_id: Option<&str>, title: Option<&str>) -> WindowRule {
+    pub(crate) fn resolve_window_rules(
+        &self,
+        app_id: Option<&str>,
+        title: Option<&str>,
+    ) -> WindowRule {
         let mut effective = WindowRule::default();
         for rule in &self.window_rules {
             if !rule.matches(app_id, title) {
@@ -431,7 +439,13 @@ impl Config {
     /// `resolve_window_rules` there's nothing to fold across matches beyond
     /// "did any of them say yes."
     pub(crate) fn layer_blocks_capture(&self, namespace: &str) -> bool {
-        self.layer_rules.iter().any(|rule| rule.block_capture && rule.matches(namespace))
+        self.layer_rules
+            .iter()
+            .any(|rule| rule.block_capture && rule.matches(namespace))
+    }
+
+    pub(crate) fn has_layer_capture_exclusions(&self) -> bool {
+        self.layer_rules.iter().any(|rule| rule.block_capture)
     }
 }
 
@@ -804,6 +818,11 @@ impl SwitchEventsConfig {
 pub struct WindowRule {
     pub app_id: Option<String>,
     pub title: Option<String>,
+    /// Compiled once while loading the config. Keeping the compiled form is
+    /// important because capture rules may be checked for every recorded
+    /// frame, not only when the window first maps.
+    pub app_id_regex: Option<regex::Regex>,
+    pub title_regex: Option<regex::Regex>,
     /// Initial workspace number -- same numbering `workspace:N` keybinds
     /// use, including 0 (the reserved scratchpad) if you want a window to
     /// always start hidden.
@@ -834,6 +853,9 @@ pub struct WindowRule {
     /// whatever's currently active. Leaves prior focus untouched entirely,
     /// rather than picking some other window to focus instead.
     pub no_focus: bool,
+    pub maximize: bool,
+    pub fullscreen: bool,
+    pub block_capture: bool,
     /// Exact floating placement (top-left corner), `<x>x<y>` -- the same
     /// syntax `[[output]]`'s `position` already uses. No-op unless the
     /// window ends up floating (from `float`/`pin`/the auto-float
@@ -849,7 +871,11 @@ impl WindowRule {
     /// rather than silently matching every window -- a blank rule is far
     /// more likely to be a config mistake than an intentional "match all".
     pub(crate) fn matches(&self, app_id: Option<&str>, title: Option<&str>) -> bool {
-        if self.app_id.is_none() && self.title.is_none() {
+        if self.app_id.is_none()
+            && self.title.is_none()
+            && self.app_id_regex.is_none()
+            && self.title_regex.is_none()
+        {
             return false;
         }
         if let Some(want) = &self.app_id {
@@ -860,6 +886,18 @@ impl WindowRule {
         if let Some(want) = &self.title {
             let Some(title) = title else { return false };
             if !title.to_lowercase().contains(&want.to_lowercase()) {
+                return false;
+            }
+        }
+        if let Some(pattern) = &self.app_id_regex {
+            let Some(app_id) = app_id else { return false };
+            if !pattern.is_match(app_id) {
+                return false;
+            }
+        }
+        if let Some(pattern) = &self.title_regex {
+            let Some(title) = title else { return false };
+            if !pattern.is_match(title) {
                 return false;
             }
         }
@@ -1206,6 +1244,14 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
         match key.as_str() {
             "app_id" => rule.app_id = Some(value.clone()),
             "title" => rule.title = Some(value.clone()),
+            "app_id_regex" => match regex::Regex::new(value) {
+                Ok(pattern) => rule.app_id_regex = Some(pattern),
+                Err(err) => tracing::warn!(value, %err, "Invalid app_id_regex, ignoring"),
+            },
+            "title_regex" => match regex::Regex::new(value) {
+                Ok(pattern) => rule.title_regex = Some(pattern),
+                Err(err) => tracing::warn!(value, %err, "Invalid title_regex, ignoring"),
+            },
             "workspace" => match value.parse() {
                 Ok(n) => rule.workspace = Some(n),
                 Err(_) => tracing::warn!(value, "Expected a workspace number, ignoring"),
@@ -1594,6 +1640,10 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "swap-right" => Some(Action::SwapDirection(Direction::Right)),
         "swap-up" => Some(Action::SwapDirection(Direction::Up)),
         "swap-down" => Some(Action::SwapDirection(Direction::Down)),
+        "resize-left" => Some(Action::Resize(Direction::Left)),
+        "resize-right" => Some(Action::Resize(Direction::Right)),
+        "resize-up" => Some(Action::Resize(Direction::Up)),
+        "resize-down" => Some(Action::Resize(Direction::Down)),
         "group-left" => Some(Action::GroupDirection(Direction::Left)),
         "group-right" => Some(Action::GroupDirection(Direction::Right)),
         "group-up" => Some(Action::GroupDirection(Direction::Up)),
@@ -1911,14 +1961,36 @@ mod tests {
         // A blank [[window_rule]] block (or one that's only actions, no
         // app_id/title) is far more likely to be a config mistake than an
         // intentional "match every window" -- never silently apply it.
-        let blank = WindowRule { float: true, ..Default::default() };
+        let blank = WindowRule {
+            float: true,
+            ..Default::default()
+        };
         assert!(!blank.matches(Some("anything"), Some("anything")));
         assert!(!blank.matches(None, None));
     }
 
     #[test]
+    fn window_rule_regexes_compile_once_and_invalid_patterns_are_ignored() {
+        let rule = WindowRule {
+            app_id_regex: Some(regex::Regex::new(r"^(org\.)?mozilla\.firefox$").unwrap()),
+            title_regex: Some(regex::Regex::new("(?i)private browsing").unwrap()),
+            ..Default::default()
+        };
+        assert!(rule.matches(Some("org.mozilla.firefox"), Some("Private Browsing")));
+        assert!(!rule.matches(Some("kitty"), Some("Private Browsing")));
+
+        let invalid =
+            lower_window_rule_block(&[waves::Entry::Assign("app_id_regex".into(), "[".into())]);
+        assert!(invalid.app_id_regex.is_none());
+        assert!(!invalid.matches(Some("anything"), None));
+    }
+
+    #[test]
     fn layer_blocks_capture_matches_by_namespace_substring_only_when_flagged() {
-        let mut config = Config { layer_rules: Vec::new(), ..parse_default_config() };
+        let mut config = Config {
+            layer_rules: Vec::new(),
+            ..parse_default_config()
+        };
 
         // No rule at all: never blocked.
         assert!(!config.layer_blocks_capture("waybar"));

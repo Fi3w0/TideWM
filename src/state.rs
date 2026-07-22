@@ -4357,7 +4357,102 @@ impl Smallvil {
             return;
         };
         let workspace = self.layout.active_workspace(&output.name());
-        self.layout.adjust_master_ratio(&output.name(), workspace, delta);
+        self.layout
+            .adjust_master_ratio(&output.name(), workspace, delta);
+        self.retile();
+    }
+
+    /// Resizes the focused window without a pointer grab. Floating windows
+    /// change in 24-logical-pixel steps; BSP windows move the nearest split
+    /// on the requested axis while preserving the 5% safety clamp.
+    pub fn keyboard_resize(&mut self, direction: Direction) {
+        const STEP: i32 = 24;
+        let Some(surface) = self.focused_window_surface() else {
+            return;
+        };
+        let Some(window) = self.mapped_toplevel_window(&surface) else {
+            return;
+        };
+
+        if !self.layout.contains(&surface) {
+            // `Window::geometry().loc` is surface-local (usually 0,0), not
+            // the element's global position in `Space`. Reusing it here
+            // would teleport every keyboard-resized floater to the output's
+            // origin.
+            let location = self.space.element_location(&window).unwrap_or_default();
+            let mut geometry = window.geometry();
+            match direction {
+                Direction::Right => geometry.size.w = geometry.size.w.saturating_add(STEP),
+                Direction::Down => geometry.size.h = geometry.size.h.saturating_add(STEP),
+                Direction::Left => geometry.size.w = (geometry.size.w - STEP).max(64),
+                Direction::Up => geometry.size.h = (geometry.size.h - STEP).max(48),
+            }
+            if let Some(toplevel) = window.toplevel() {
+                toplevel.with_pending_state(|state| state.size = Some(geometry.size));
+                toplevel.send_pending_configure();
+            }
+            self.space.map_element(window, location, true);
+            self.request_redraw();
+            return;
+        }
+
+        let Some(output_name) = self.layout.output_of(&surface).map(str::to_owned) else {
+            return;
+        };
+        let Some(output) = self.output_by_name(&output_name) else {
+            return;
+        };
+        let workspace = self
+            .layout
+            .workspace_of(&surface)
+            .unwrap_or_else(|| self.layout.active_workspace(&output_name));
+        let Some(area) = self.output_tiling_area(&output) else {
+            return;
+        };
+        let wanted_axis = match direction {
+            Direction::Left | Direction::Right => crate::layout::Axis::Horizontal,
+            Direction::Up | Direction::Down => crate::layout::Axis::Vertical,
+        };
+        let Some(hit) = self
+            .layout
+            .resize_splits(&output_name, workspace, area, &surface)
+            .into_iter()
+            .find(|hit| hit.axis == wanted_axis)
+        else {
+            return;
+        };
+        let Some(ratio) = self.layout.ratio_at(&hit.output, hit.workspace, &hit.path) else {
+            return;
+        };
+        let span = match hit.axis {
+            crate::layout::Axis::Horizontal => hit.area.size.w,
+            crate::layout::Axis::Vertical => hit.area.size.h,
+        };
+        if span <= 0 {
+            return;
+        }
+        let geometry = window.geometry();
+        let target_center = match hit.axis {
+            crate::layout::Axis::Horizontal => geometry.loc.x + geometry.size.w / 2,
+            crate::layout::Axis::Vertical => geometry.loc.y + geometry.size.h / 2,
+        };
+        let boundary = match hit.axis {
+            crate::layout::Axis::Horizontal => {
+                hit.area.loc.x + (hit.area.size.w as f32 * ratio) as i32
+            }
+            crate::layout::Axis::Vertical => {
+                hit.area.loc.y + (hit.area.size.h as f32 * ratio) as i32
+            }
+        };
+        let target_is_first = target_center < boundary;
+        let grow = matches!(direction, Direction::Right | Direction::Down);
+        let sign = if grow == target_is_first { 1.0 } else { -1.0 };
+        self.layout.set_ratio(
+            &hit.output,
+            hit.workspace,
+            &hit.path,
+            ratio + sign * STEP as f32 / span as f32,
+        );
         self.retile();
     }
 

@@ -304,7 +304,7 @@ ACTIONS:
         cycle-focus, focus-left/right/up/down, swap-left/right/up/down,
         group-left/right/up/down, ungroup, cycle-tab-next/prev, quit,
         submap:<name>, exit-submap, layout:bsp, layout:master,
-        master-grow, master-shrink, toggle-overview
+        master-grow, master-shrink, resize-left/right/up/down, toggle-overview
 
     A few space-separated shorthands, equivalent to the colon syntax above:
         tidectl workspace <N>              same as "workspace:N"

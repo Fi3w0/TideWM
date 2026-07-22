@@ -624,6 +624,9 @@ pub fn handle_commit(state: &mut Smallvil, surface: &WlSurface) {
         ToplevelTransition::None => {}
     }
 
+    #[cfg(feature = "screencast")]
+    state.refresh_screencast_windows();
+
     // Push title/app_id changes to the foreign-toplevel handle. Compared
     // before sending so an unrelated commit (every frame, potentially)
     // doesn't emit a spurious `done` event to every bar watching.
@@ -843,7 +846,7 @@ impl Smallvil {
         // exact same logic the interactive toggles use, rather than
         // re-deriving floating-rect placement from scratch) is, for the
         // same reason, still applied before the window's first real frame.
-        if rule.float || rule.pin || implicit_float {
+        if rule.float || rule.pin || rule.maximize || implicit_float {
             self.toggle_floating(surface);
             if rule.pin {
                 self.pinned.insert(surface.clone());
@@ -853,6 +856,18 @@ impl Smallvil {
             }
         } else if rule.pseudo_tile {
             self.toggle_pseudo_tile(surface);
+        }
+
+        if let Some(toplevel) = self
+            .mapped_toplevel_window(surface)
+            .and_then(|window| window.toplevel().cloned())
+        {
+            if rule.maximize {
+                self.do_maximize_request(toplevel.clone());
+            }
+            if rule.fullscreen {
+                self.do_fullscreen_request(toplevel, None);
+            }
         }
 
         // Role creation alone must never steal focus. A real first buffer
