@@ -18,15 +18,49 @@ mod screencast;
 mod state;
 mod tab_strip;
 mod toast;
+mod wallpaper;
 mod waves;
 mod welcome;
 mod xwayland;
 
+use std::{process::Child, sync::Mutex};
+
 use smithay::reexports::{
-    calloop::{self, EventLoop},
+    calloop::{
+        self,
+        signals::{Signal, Signals},
+        EventLoop,
+    },
     wayland_server::Display,
 };
 pub use state::Smallvil;
+
+/// Children started by TideWM and not synchronously waited by their call
+/// site. Keeping the `Child` handles lets the SIGCHLD event source below reap
+/// them with `try_wait`; dropping a `Child` without waiting would leave a
+/// zombie until the compositor exits.
+static SPAWNED_CHILDREN: Mutex<Vec<Child>> = Mutex::new(Vec::new());
+
+pub(crate) fn track_child(child: Child) {
+    SPAWNED_CHILDREN.lock().unwrap().push(child);
+}
+
+fn reap_spawned_children() {
+    SPAWNED_CHILDREN
+        .lock()
+        .unwrap()
+        .retain_mut(|child| match child.try_wait() {
+            Ok(None) => true,
+            Ok(Some(status)) => {
+                tracing::debug!(pid = child.id(), ?status, "Spawned child exited");
+                false
+            }
+            Err(err) => {
+                tracing::warn!(pid = child.id(), %err, "Failed to reap spawned child");
+                false
+            }
+        });
+}
 
 /// Spawns `cmd`, splitting on whitespace so a simple invocation with
 /// arguments (`"kitty -e fish"`) works. Deliberately not shell-parsed --
@@ -35,12 +69,14 @@ pub use state::Smallvil;
 /// Shared by every spawn call site in the compositor (`-s`/`--spawn`
 /// below, `config.spawn_at_startup`, and `Action::Spawn` in `input.rs`)
 /// so they all get the same argument support for free.
-pub(crate) fn spawn(cmd: &str) -> std::io::Result<std::process::Child> {
+pub(crate) fn spawn(cmd: &str) -> std::io::Result<()> {
     let mut parts = cmd.split_whitespace();
     let program = parts
         .next()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "empty command"))?;
-    std::process::Command::new(program).args(parts).spawn()
+    let child = std::process::Command::new(program).args(parts).spawn()?;
+    track_child(child);
+    Ok(())
 }
 
 /// Applies `[env]` (`config.env`) to this process via `set_var`, before the
@@ -175,6 +211,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut event_loop: EventLoop<'static, Smallvil> = EventLoop::try_new()?;
+
+    // Create this before backend/optional-service initialization spawns any
+    // threads. Threads inherit the signal mask, ensuring SIGCHLD is delivered
+    // through this one event-loop source instead of to an arbitrary worker.
+    event_loop
+        .handle()
+        .insert_source(Signals::new(&[Signal::SIGCHLD])?, |_event, _, _state| {
+            reap_spawned_children()
+        })?;
 
     let display: Display<Smallvil> = Display::new()?;
     let mut state = Smallvil::new(&mut event_loop, display);

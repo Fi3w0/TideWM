@@ -98,7 +98,12 @@ impl XdgShellHandler for Smallvil {
             return;
         }
 
-        let seat = Seat::from_resource(&seat).unwrap();
+        let Some(seat) = Seat::from_resource(&seat) else {
+            return;
+        };
+        if seat != self.seat {
+            return;
+        }
 
         let wl_surface = surface.wl_surface();
 
@@ -146,7 +151,12 @@ impl XdgShellHandler for Smallvil {
             return;
         }
 
-        let seat = Seat::from_resource(&seat).unwrap();
+        let Some(seat) = Seat::from_resource(&seat) else {
+            return;
+        };
+        if seat != self.seat {
+            return;
+        }
 
         let wl_surface = surface.wl_surface();
 

@@ -18,17 +18,11 @@
 //! that race by construction, at the cost of a satellite process (~30MB)
 //! resident even if no X11 client ever runs.
 
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 
 const MAX_DISPLAY: u32 = 50;
 
-pub struct Satellite {
-    /// Held for the process's lifetime; satellite exits on its own once
-    /// TideWM's Wayland connection (its own, as a Wayland client) closes,
-    /// so nothing here needs to kill it explicitly.
-    #[allow(dead_code)]
-    child: Child,
-}
+pub struct Satellite;
 
 /// Spawn `xwayland-satellite :N` eagerly and export `DISPLAY=:N` for every
 /// process spawned afterward. Fails soft: any problem (binary missing, too
@@ -66,9 +60,10 @@ pub fn setup(path: &str) -> Option<Satellite> {
         display = %display_name,
         "Spawned xwayland-satellite"
     );
+    crate::track_child(child);
     std::env::set_var("DISPLAY", &display_name);
 
-    Some(Satellite { child })
+    Some(Satellite)
 }
 
 /// Cheap existence/version check: every `xwayland-satellite` since 0.7

@@ -1027,10 +1027,12 @@ impl Smallvil {
                 // Inside the callback, you should insert the client into the display.
                 //
                 // You may also associate some data with the client when inserting the client.
-                state
+                if let Err(err) = state
                     .display_handle
                     .insert_client(client_stream, Arc::new(ClientState::default()))
-                    .unwrap();
+                {
+                    tracing::warn!(%err, "Failed to register incoming Wayland client");
+                }
             })
             .expect("Failed to init the wayland event source.");
 
@@ -1040,8 +1042,10 @@ impl Smallvil {
                 Generic::new(display, Interest::READ, Mode::Level),
                 |_, display, state| {
                     // Safety: we don't drop the display
-                    unsafe {
-                        display.get_mut().dispatch_clients(state).unwrap();
+                    if let Err(err) = unsafe { display.get_mut().dispatch_clients(state) } {
+                        tracing::error!(%err, "Wayland display dispatch failed; stopping cleanly");
+                        state.loop_signal.stop();
+                        return Ok(PostAction::Remove);
                     }
                     Ok(PostAction::Continue)
                 },
@@ -3327,17 +3331,25 @@ impl Smallvil {
         }
         self.cursor_idle_timer_armed = true;
         let delay = Duration::from_millis(self.config.cursor_hide_after_ms as u64);
-        let _ = self.loop_handle.insert_source(Timer::from_duration(delay), move |_, _, state: &mut Smallvil| {
-            let configured = Duration::from_millis(state.config.cursor_hide_after_ms.max(0) as u64);
-            let elapsed = state.last_pointer_motion.elapsed();
-            if elapsed >= configured {
-                state.cursor_idle_timer_armed = false;
-                state.request_redraw();
-                TimeoutAction::Drop
-            } else {
-                TimeoutAction::ToDuration(configured - elapsed)
-            }
-        });
+        let result = self.loop_handle.insert_source(
+            Timer::from_duration(delay),
+            move |_, _, state: &mut Smallvil| {
+                let configured =
+                    Duration::from_millis(state.config.cursor_hide_after_ms.max(0) as u64);
+                let elapsed = state.last_pointer_motion.elapsed();
+                if elapsed >= configured {
+                    state.cursor_idle_timer_armed = false;
+                    state.request_redraw();
+                    TimeoutAction::Drop
+                } else {
+                    TimeoutAction::ToDuration(configured - elapsed)
+                }
+            },
+        );
+        if let Err(err) = result {
+            self.cursor_idle_timer_armed = false;
+            tracing::warn!(%err, "Failed to register cursor idle timer");
+        }
     }
 
     /// Raises `surface` to the top of the floating stack. No-op on a tiled

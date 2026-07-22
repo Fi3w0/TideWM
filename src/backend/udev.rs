@@ -898,16 +898,21 @@ fn create_surface(
     // edge instead always lands a new output past every existing one,
     // regardless of gaps left by earlier disconnects. Only used as the
     // fallback when config doesn't pin an explicit position.
-    let auto_x = state.space.outputs().fold(0, |max_edge, o| {
-        let geo = state.space.output_geometry(o).unwrap();
-        max_edge.max(geo.loc.x + geo.size.w)
-    });
+    let auto_x = state
+        .space
+        .outputs()
+        .filter_map(|output| state.space.output_geometry(output))
+        .fold(0, |max_edge, geo| max_edge.max(geo.loc.x + geo.size.w));
     let position = output_config
         .as_ref()
         .and_then(|c| c.position)
         .unwrap_or((auto_x, 0));
     let scale = Scale::Fractional(output_config.as_ref().map(|c| c.scale).unwrap_or(1.0));
-    let transform = match output_config.as_ref().map(|c| c.transform).unwrap_or_default() {
+    let transform = match output_config
+        .as_ref()
+        .map(|c| c.transform)
+        .unwrap_or_default()
+    {
         OutputTransformConfig::Normal => Transform::Normal,
         OutputTransformConfig::Rotate90 => Transform::_90,
         OutputTransformConfig::Rotate180 => Transform::_180,
