@@ -3046,17 +3046,34 @@ impl Smallvil {
         self.retile();
     }
 
-    /// Moves every window tiled on `from_output` onto `to_output`,
-    /// preserving workspace numbers -- so a window tiled on a monitor that
-    /// just got unplugged doesn't stay permanently unreachable in its
-    /// now-orphaned `Layouts` entry (a real, previously-known gap; see the
-    /// Multi-monitor section of AGENT.md). A migrated workspace isn't
-    /// necessarily `to_output`'s *active* one, so the windows may land
-    /// hidden rather than immediately visible -- still reachable via
-    /// `workspace:<N>`, which is the point, not a bug. Floating windows on
-    /// the disconnected output are a separate, still-open gap this pass
-    /// doesn't cover -- see the same section.
+    /// Moves every window owned by `from_output` onto `to_output`, preserving
+    /// workspace numbers. This runs while both outputs are still mapped, so
+    /// floating restore rectangles can be translated between their global
+    /// logical origins before the disconnected output disappears.
+    ///
+    /// A migrated workspace is not necessarily `to_output`'s active one. In
+    /// that case its windows are explicitly unmapped here and remain
+    /// reachable via `workspace:<N>`; leaving an element mapped at the dead
+    /// output's old coordinates would make it visible on the wrong workspace
+    /// and could leave keyboard focus pointing at unreachable content.
     pub(crate) fn migrate_output_windows(&mut self, from_output: &str, to_output: &str) {
+        let from_geometry = self
+            .output_by_name(from_output)
+            .and_then(|output| self.space.output_geometry(&output));
+        let to_output_handle = self.output_by_name(to_output);
+        let to_geometry = to_output_handle
+            .as_ref()
+            .and_then(|output| self.space.output_geometry(output));
+        let to_bounds = to_output_handle
+            .as_ref()
+            .and_then(|output| self.output_tiling_area(output))
+            .or(to_geometry);
+        let delta = match (from_geometry, to_geometry) {
+            (Some(from), Some(to)) => Some(to.loc - from.loc),
+            _ => None,
+        };
+        let active_workspace = self.layout.active_workspace(to_output);
+
         let workspaces: Vec<u32> = self
             .layout
             .populated_workspaces()
@@ -3070,9 +3087,99 @@ impl Smallvil {
                     continue;
                 };
                 self.layout.remove(&surface);
-                self.layout.insert(to_output, workspace, window, None);
+                self.layout
+                    .insert(to_output, workspace, window.clone(), None);
+
+                if let Some(entry) = self.fullscreen.get_mut(&surface) {
+                    entry.move_to_output(to_output.to_string(), delta);
+                    if let (Some(rect), Some(bounds)) = (&mut entry.restore_rect, to_bounds) {
+                        *rect = clamp_rect_visible(*rect, bounds);
+                    }
+                }
+                if let Some(entry) = self.maximized.get_mut(&surface) {
+                    entry.move_to_output(to_output.to_string(), delta);
+                    if let Some(bounds) = to_bounds {
+                        entry.restore_rect = clamp_rect_visible(entry.restore_rect, bounds);
+                    }
+                }
+
+                if workspace == active_workspace {
+                    if let Some(output) = &to_output_handle {
+                        self.set_window_fractional_scale(&window, output);
+                    }
+                } else {
+                    self.space.unmap_elem(&window);
+                }
             }
         }
+
+        // A group's parked members are deliberately absent from both Space
+        // and Layouts, so the group's durable ownership tag must move along
+        // with whichever active member was migrated above.
+        for group in &mut self.groups {
+            if group.output == from_output {
+                group.output = to_output.to_string();
+            }
+        }
+
+        let floating_surfaces: Vec<WlSurface> = self
+            .floating_workspace
+            .iter()
+            .filter(|(_, tag)| tag.output == from_output)
+            .map(|(surface, _)| surface.clone())
+            .collect();
+        for surface in floating_surfaces {
+            let was_visible = self.window_is_visible(&surface);
+            let live_rect = was_visible
+                .then(|| {
+                    let window = self.floating_workspace.get(&surface)?.window.clone();
+                    self.space.element_geometry(&window)
+                })
+                .flatten();
+
+            let (window, workspace, loc) = {
+                let tag = self.floating_workspace.get_mut(&surface).unwrap();
+                if !self.fullscreen.contains_key(&surface) && !self.maximized.contains_key(&surface)
+                {
+                    if let Some(rect) = live_rect {
+                        tag.rect = rect;
+                    }
+                }
+                tag.output = to_output.to_string();
+                if let Some(delta) = delta {
+                    tag.rect.loc += delta;
+                }
+                if let Some(bounds) = to_bounds {
+                    tag.rect = clamp_rect_visible(tag.rect, bounds);
+                }
+                (tag.window.clone(), tag.workspace, tag.rect.loc)
+            };
+
+            if let Some(entry) = self.fullscreen.get_mut(&surface) {
+                entry.move_to_output(to_output.to_string(), delta);
+                if let (Some(rect), Some(bounds)) = (&mut entry.restore_rect, to_bounds) {
+                    *rect = clamp_rect_visible(*rect, bounds);
+                }
+            }
+            if let Some(entry) = self.maximized.get_mut(&surface) {
+                entry.move_to_output(to_output.to_string(), delta);
+                if let Some(bounds) = to_bounds {
+                    entry.restore_rect = clamp_rect_visible(entry.restore_rect, bounds);
+                }
+            }
+
+            if self.pinned.contains(&surface) || workspace == active_workspace {
+                self.space.map_element(window.clone(), loc, false);
+                if let Some(output) = &to_output_handle {
+                    self.set_window_fractional_scale(&window, output);
+                }
+            } else {
+                self.space.unmap_elem(&window);
+            }
+        }
+
+        self.scratchpad_previous.remove(from_output);
+        self.workspace_previous.remove(from_output);
     }
 
     /// Runs the udev backend's real DRM power hook (if any -- `None` under

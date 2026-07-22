@@ -1047,21 +1047,18 @@ fn handle_connector_change(
                     // exists, and a later replug would advertise a second
                     // global on top of the still-live stale one.
                     display_handle.remove_global::<Smallvil>(surface.global);
-                    // Tiled windows migrate to a still-connected fallback
-                    // output (same workspace numbers) so they don't become
-                    // permanently unreachable -- see
-                    // `Smallvil::migrate_output_windows`'s own doc comment
-                    // for exactly what this does and doesn't cover (floating
-                    // windows on the disconnected output are a separate,
-                    // still-open gap). No-op if this was the only output.
+                    // Every window owned by this output migrates to a
+                    // still-connected fallback (same workspace numbers) so
+                    // neither tiled nor floating content becomes permanently
+                    // unreachable. No-op if this was the only output.
                     let disconnected_name = surface.output.name();
                     let fallback: Option<String> = state
                         .space
                         .outputs()
                         .find(|o| o.name() != disconnected_name)
                         .map(|o| o.name());
-                    if let Some(fallback) = fallback {
-                        state.migrate_output_windows(&disconnected_name, &fallback);
+                    if let Some(fallback) = fallback.as_deref() {
+                        state.migrate_output_windows(&disconnected_name, fallback);
                     }
                     state.space.unmap_output(&surface.output);
                     state.lock_surfaces.remove(&surface.output);
@@ -1071,8 +1068,14 @@ fn handle_connector_change(
                         screencast.refresh_outputs(state.space.outputs());
                     }
                     state.wlr_output_management_state.refresh(&state.space);
-                    state.wlr_output_power_management_state.output_removed(&surface.output);
+                    state
+                        .wlr_output_power_management_state
+                        .output_removed(&surface.output);
                     state.retile();
+                    state.repair_keyboard_focus(
+                        fallback.as_deref(),
+                        smithay::utils::SERIAL_COUNTER.next_serial(),
+                    );
                 }
             }
             _ => {}
