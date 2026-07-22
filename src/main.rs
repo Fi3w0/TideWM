@@ -92,8 +92,37 @@ fn apply_user_env(env: &std::collections::HashMap<String, String>) {
     }
 }
 
-/// Exports `WAYLAND_DISPLAY`/`XDG_CURRENT_DESKTOP`/`XDG_SESSION_TYPE` plus
-/// any `[env]` entries into the systemd user session and the D-Bus
+const FOREIGN_COMPOSITOR_ENV: &[&str] = &[
+    "HYPRLAND_INSTANCE_SIGNATURE",
+    "SWAYSOCK",
+    "I3SOCK",
+    "NIRI_SOCKET",
+    "WAYFIRE_SOCKET",
+];
+
+/// Makes TideWM's identity authoritative for this process and everything it
+/// spawns.  This matters especially for the nested backend: the process that
+/// launches us belongs to the host desktop, so blindly retaining its session
+/// variables makes tools such as fastfetch identify nested TideWM clients as
+/// Hyprland and lets children accidentally address the host compositor's IPC.
+fn configure_session_environment() {
+    std::env::set_var("XDG_CURRENT_DESKTOP", "tidewm");
+    std::env::set_var("XDG_SESSION_DESKTOP", "tidewm");
+    std::env::set_var("DESKTOP_SESSION", "tidewm");
+    std::env::set_var("XDG_SESSION_TYPE", "wayland");
+    std::env::set_var("TIDEWM_VERSION", env!("CARGO_PKG_VERSION"));
+
+    // Control sockets/signatures identify the *host* compositor. They are
+    // never valid for TideWM's children, and keeping them is worse than a
+    // cosmetic misidentification: a child could issue commands to the outer
+    // desktop rather than this session.
+    for key in FOREIGN_COMPOSITOR_ENV {
+        std::env::remove_var(key);
+    }
+}
+
+/// Exports TideWM's graphical-session variables plus any `[env]` entries
+/// into the systemd user session and the D-Bus
 /// session-activation environment, so anything activated by either (a
 /// portal backend, a polkit agent) sees a real graphical session instead of
 /// whatever it inherited from before TideWM started (nothing, on a bare
@@ -132,8 +161,51 @@ fn export_session_environment(env: &std::collections::HashMap<String, String>) {
         args.extend_from_slice(&vars);
         match std::process::Command::new(program).args(&args).status() {
             Ok(status) if status.success() => {}
-            Ok(status) => tracing::debug!(program, ?status, "Session environment export exited non-zero"),
-            Err(err) => tracing::debug!(%err, program, "Session environment export command not available"),
+            Ok(status) => tracing::debug!(
+                program,
+                ?status,
+                "Session environment export exited non-zero"
+            ),
+            Err(err) => {
+                tracing::debug!(%err, program, "Session environment export command not available")
+            }
+        }
+    }
+
+    // A persistent user manager may still carry control sockets from the
+    // previous graphical login. D-Bus has no remove operation for activation
+    // variables, so replace those with empty values there; then remove them
+    // completely from systemd's own manager environment. This only runs for
+    // standalone TideWM -- a nested session must never edit its host's state.
+    let empty_foreign_vars: Vec<String> = FOREIGN_COMPOSITOR_ENV
+        .iter()
+        .map(|key| format!("{key}="))
+        .collect();
+    match std::process::Command::new("dbus-update-activation-environment")
+        .args(&empty_foreign_vars)
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => tracing::debug!(
+            ?status,
+            "Foreign compositor DBus environment cleanup exited non-zero"
+        ),
+        Err(err) => {
+            tracing::debug!(%err, "Foreign compositor DBus environment cleanup unavailable")
+        }
+    }
+    match std::process::Command::new("systemctl")
+        .args(["--user", "unset-environment"])
+        .args(FOREIGN_COMPOSITOR_ENV)
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => tracing::debug!(
+            ?status,
+            "Foreign compositor systemd environment cleanup exited non-zero"
+        ),
+        Err(err) => {
+            tracing::debug!(%err, "Foreign compositor systemd environment cleanup unavailable")
         }
     }
 }
@@ -241,12 +313,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         crate::backend::udev::init_udev(&mut event_loop, &mut state)?;
     }
 
-    // After backend init: both branches above set the real WAYLAND_DISPLAY
-    // (see `state.socket_name`), which is exactly what needs to reach the
-    // systemd user session and D-Bus activation environment for anything
-    // session-activated (xdg-desktop-portal, a polkit agent) to find it,
-    // same startup step sway/Hyprland/niri all take.
-    export_session_environment(&state.config.env);
+    // After backend init: both branches above have set TideWM's real
+    // WAYLAND_DISPLAY (see `state.socket_name`), so it is now safe to make
+    // our process-local identity authoritative before anything is spawned.
+    configure_session_environment();
+
+    // A nested compositor shares the host's systemd user manager and D-Bus
+    // session. Importing wayland-N there would redirect subsequently
+    // activated host services into this disposable test window. Standalone
+    // TideWM owns the graphical session and should publish it normally.
+    if !nested {
+        export_session_environment(&state.config.env);
+    }
 
     // Bound so it stays alive for the process lifetime, same idiom as
     // `_config_watcher` below.
