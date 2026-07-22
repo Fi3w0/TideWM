@@ -105,14 +105,19 @@ fn build_request(args: &[String]) -> Result<Value, String> {
         "windows" => Ok(json!({ "request": "windows" })),
         "focused-window" | "focused" => Ok(json!({ "request": "focused-window" })),
         "active-submap" => Ok(json!({ "request": "active-submap" })),
+        "batch" if !rest.is_empty() => Ok(json!({ "request": "batch", "actions": rest })),
         "action" if !rest.is_empty() => Ok(action_request(&rest.join(" "))),
-        "workspace" if !rest.is_empty() => Ok(action_request(&format!("workspace:{}", rest.join(" ")))),
-        "move-to-workspace" if !rest.is_empty() => {
-            Ok(action_request(&format!("move-to-workspace:{}", rest.join(" "))))
+        "workspace" if !rest.is_empty() => {
+            Ok(action_request(&format!("workspace:{}", rest.join(" "))))
         }
-        "swap-workspaces" if !rest.is_empty() => {
-            Ok(action_request(&format!("swap-workspaces:{}", rest.join(" "))))
-        }
+        "move-to-workspace" if !rest.is_empty() => Ok(action_request(&format!(
+            "move-to-workspace:{}",
+            rest.join(" ")
+        ))),
+        "swap-workspaces" if !rest.is_empty() => Ok(action_request(&format!(
+            "swap-workspaces:{}",
+            rest.join(" ")
+        ))),
         "spawn" if !rest.is_empty() => Ok(action_request(&format!("spawn:{}", rest.join(" ")))),
         "submap" if !rest.is_empty() => Ok(action_request(&format!("submap:{}", rest.join(" ")))),
         _ => Ok(action_request(&args.join(" "))),
