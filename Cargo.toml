@@ -19,21 +19,29 @@ tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 notify = "8"
+calloop = { version = "0.14", features = ["signals"] }
 fontdue = "0.9.3"
+png = "0.18"
+regex = "1"
 xcursor = "0.3"
 wayland-protocols-wlr = "0.3.12"
 # Screencasting only (org.gnome.Mutter.ScreenCast over DBus + PipeWire
-# streaming, see AGENT.md's "Screencasting" section) -- optional, default
-# off, so the build stays binary-identical for everyone until Phase E's
-# screencast half actually lands. Versions match Niri's own pins, the
-# reference this design follows.
+# monitor/window streaming, see AGENT.md's "Screencasting" section) --
+# optional and default-off to keep these native/runtime dependencies out of
+# a minimal build. Versions match niri's known-good pins.
 zbus = { version = "5.13.2", optional = true }
 async-io = { version = "2.6.0", optional = true }
 pipewire = { version = "0.10.0", optional = true }
+blocking = { version = "1.6", optional = true }
 # Accessibility only (`org.freedesktop.a11y.KeyboardMonitor`): its
 # NameOwnerChanged disconnect-watch stream needs `StreamExt`, matching
 # niri's own dependency on this crate for the identical purpose.
 futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }
+# Accessible tree/announcements for TideWM's own compositor UI. The Unix
+# adapter exposes the tree through AT-SPI and keeps its async work off the
+# single-threaded compositor loop.
+accesskit = { version = "0.24.1", optional = true }
+accesskit_unix = { version = "0.22.0", optional = true }
 # Keep Smithay and smithay-drm-extras on Niri's exact known-good revision.
 # Crates.io 0.7.0 does not reset wlr-layer-shell state on null-buffer
 # unmap; this revision includes upstream commit 0565e70a, which performs
@@ -64,19 +72,28 @@ features = [
 
 [features]
 # Off by default: pulls in the project's first async runtime (zbus) and
-# first multi-threaded code (a PipeWire thread talking back to the
-# single-threaded compositor over calloop channels). See AGENT.md's
-# "Screencasting" section before extending src/screencast/ -- the module
-# is a structural skeleton only, no DBus interface or PipeWire stream is
-# actually wired up yet.
-screencast = ["dep:zbus", "dep:async-io", "dep:pipewire"]
+# PipeWire threads talking back to the single-threaded compositor over
+# calloop channels). See AGENT.md's "Screencasting" section.
+screencast = [
+    "dep:zbus",
+    "dep:async-io",
+    "dep:pipewire",
+    "dep:blocking",
+    "dep:futures-util",
+]
 # Off by default, same reasoning as `screencast` (pulls in zbus/async-io) --
 # deliberately its own flag, not bundled with `screencast`, so enabling
 # accessibility doesn't also drag in PipeWire/`libclang`. Implements
 # `org.freedesktop.a11y.KeyboardMonitor` (see AGENT.md's "Accessibility"
 # section) so a screen reader (Orca) can grab/watch keys system-wide --
 # Wayland's per-client input isolation otherwise makes that impossible.
-accessibility = ["dep:zbus", "dep:async-io", "dep:futures-util"]
+accessibility = [
+    "dep:zbus",
+    "dep:async-io",
+    "dep:futures-util",
+    "dep:accesskit",
+    "dep:accesskit_unix",
+]
 
 [profile.release]
 lto = true
