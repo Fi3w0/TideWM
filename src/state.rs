@@ -45,7 +45,7 @@ use smithay::{
         wayland_server::{
             backend::{ClientData, ClientId, DisconnectReason},
             protocol::wl_surface::WlSurface,
-            Display, DisplayHandle,
+            Client, Display, DisplayHandle,
         },
     },
     utils::{Clock, Logical, Monotonic, Point, Rectangle, Size, SERIAL_COUNTER},
