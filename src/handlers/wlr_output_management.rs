@@ -236,6 +236,10 @@ fn send_dynamic_head_properties(
 }
 
 impl GlobalDispatch<ZwlrOutputManagerV1, ()> for Smallvil {
+    fn can_view(client: Client, _data: &()) -> bool {
+        crate::state::trusted_client(&client)
+    }
+
     fn bind(
         state: &mut Self,
         dh: &DisplayHandle,

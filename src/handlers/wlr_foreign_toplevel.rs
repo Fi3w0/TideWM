@@ -268,6 +268,10 @@ impl Smallvil {
 //     handlers/screencopy.rs uses -- no separate dispatch target). ---
 
 impl GlobalDispatch<ZwlrForeignToplevelManagerV1, ()> for Smallvil {
+    fn can_view(client: Client, _data: &()) -> bool {
+        crate::state::trusted_client(&client)
+    }
+
     fn bind(
         state: &mut Self,
         _dh: &DisplayHandle,

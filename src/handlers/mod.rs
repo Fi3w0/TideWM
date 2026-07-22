@@ -568,6 +568,30 @@ impl KeyboardShortcutsInhibitHandler for Smallvil {
 delegate_keyboard_shortcuts_inhibit!(Smallvil);
 delegate_pointer_gestures!(Smallvil);
 
+impl SecurityContextHandler for Smallvil {
+    fn context_created(&mut self, source: SecurityContextListenerSource, context: SecurityContext) {
+        let result = self
+            .loop_handle
+            .insert_source(source, move |client_stream, _, state| {
+                let client_state = crate::state::ClientState {
+                    security_context: Some(context.clone()),
+                    ..Default::default()
+                };
+                if let Err(err) = state
+                    .display_handle
+                    .insert_client(client_stream, std::sync::Arc::new(client_state))
+                {
+                    tracing::warn!(%err, "Failed to register security-context Wayland client");
+                }
+            });
+        if let Err(err) = result {
+            tracing::warn!(%err, "Failed to register security-context listener");
+        }
+    }
+}
+
+delegate_security_context!(Smallvil);
+
 //
 // zwp_text_input_v3 + zwp_input_method_v2 + zwp_virtual_keyboard_v1
 //
@@ -606,13 +630,10 @@ delegate_pointer_gestures!(Smallvil);
 // its keys delivered as literal input, not reinterpreted as a WM
 // keybind.
 //
-// None of the three globals restrict which client can bind them
-// (`|_client| true`, matching anvil): any client on the socket can
-// register as the system IME or inject synthetic keystrokes into
-// whatever's focused. There's no cheaper boundary than
-// `security-context-v1` (not implemented) to narrow this with, so it's a
-// deliberate, documented gap rather than an oversight -- worth revisiting
-// if `security-context-v1` ever lands.
+// Text-input remains available to ordinary applications. Input-method and
+// virtual-keyboard are privileged globals: the security-context filter
+// hides both from sandboxed listeners while trusted desktop utilities on
+// TideWM's main socket retain the normal behavior.
 //
 
 impl InputMethodHandler for Smallvil {

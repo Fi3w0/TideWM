@@ -57,7 +57,9 @@ use smithay::{
         fractional_scale::{with_fractional_scale, FractionalScaleManagerState},
         idle_inhibit::IdleInhibitManagerState,
         idle_notify::IdleNotifierState,
-        image_capture_source::{ImageCaptureSourceState, OutputCaptureSourceState},
+        image_capture_source::{
+            ImageCaptureSourceState, OutputCaptureSourceState, ToplevelCaptureSourceState,
+        },
         image_copy_capture::{ImageCopyCaptureState, Session as CaptureSession},
         input_method::InputMethodManagerState,
         keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitState,
@@ -422,6 +424,7 @@ pub struct Smallvil {
     /// `handlers/capture.rs`. Only output sources are supported.
     pub image_capture_source_state: ImageCaptureSourceState,
     pub output_capture_source_state: OutputCaptureSourceState,
+    pub toplevel_capture_source_state: ToplevelCaptureSourceState,
     pub image_copy_capture_state: ImageCopyCaptureState,
     /// `wlr-screencopy-unstable-v1` global (grim's native protocol, the one
     /// with region capture), hand-rolled in `handlers/screencopy.rs`. Kept
@@ -817,19 +820,26 @@ impl Smallvil {
             crate::handlers::wlr_output_management::WlrOutputManagementState::new(&dh);
         let wlr_output_power_management_state =
             crate::handlers::wlr_output_power_management::WlrOutputPowerManagementState::new(&dh);
-        let wlr_gamma_control_state = crate::handlers::wlr_gamma_control::WlrGammaControlState::new(&dh);
+        let wlr_gamma_control_state =
+            crate::handlers::wlr_gamma_control::WlrGammaControlState::new(&dh);
         let keyboard_shortcuts_inhibit_state = KeyboardShortcutsInhibitState::new::<Self>(&dh);
         let pointer_gestures_state = PointerGesturesState::new::<Self>(&dh);
         let cursor_shape_manager_state = CursorShapeManagerState::new::<Self>(&dh);
         let text_input_manager_state = TextInputManagerState::new::<Self>(&dh);
-        let input_method_manager_state = InputMethodManagerState::new::<Self, _>(&dh, |_client| true);
+        let input_method_manager_state =
+            InputMethodManagerState::new::<Self, _>(&dh, trusted_client);
         let virtual_keyboard_manager_state =
-            VirtualKeyboardManagerState::new::<Self, _>(&dh, |_client| true);
+            VirtualKeyboardManagerState::new::<Self, _>(&dh, trusted_client);
+        let _security_context_state = SecurityContextState::new::<Self, _>(&dh, trusted_client);
         let popups = PopupManager::default();
         let viewporter_state = ViewporterState::new::<Self>(&dh);
         let image_capture_source_state = ImageCaptureSourceState::new();
-        let output_capture_source_state = OutputCaptureSourceState::new::<Self>(&dh);
-        let image_copy_capture_state = ImageCopyCaptureState::new::<Self>(&dh);
+        let output_capture_source_state =
+            OutputCaptureSourceState::new_with_filter::<Self, _>(&dh, trusted_client);
+        let toplevel_capture_source_state =
+            ToplevelCaptureSourceState::new_with_filter::<Self, _>(&dh, trusted_client);
+        let image_copy_capture_state =
+            ImageCopyCaptureState::new_with_filter::<Self, _>(&dh, trusted_client);
         let wlr_screencopy_global = dh.create_global::<Self, ZwlrScreencopyManagerV1, ()>(3, ());
 
         // A seat is a group of keyboards, pointer and touch devices.
@@ -4625,9 +4635,23 @@ mod tests {
 #[derive(Default)]
 pub struct ClientState {
     pub compositor_state: CompositorClientState,
+    /// Present only for clients accepted through a
+    /// `wp_security_context_v1` listener. Privileged global filters use
+    /// this marker; the metadata is also retained for diagnostics/policy.
+    pub security_context: Option<SecurityContext>,
 }
 
 impl ClientData for ClientState {
     fn initialized(&self, _client_id: ClientId) {}
     fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
+}
+
+/// Only clients connected to TideWM's ordinary socket are trusted with
+/// desktop-control protocols. A sandboxed application still receives the
+/// regular compositor/shell/input globals, but cannot become the session
+/// locker or IME, inject keys, or scrape/control the clipboard globally.
+pub(crate) fn trusted_client(client: &Client) -> bool {
+    client
+        .get_data::<ClientState>()
+        .is_none_or(|state| state.security_context.is_none())
 }

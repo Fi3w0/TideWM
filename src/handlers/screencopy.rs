@@ -69,12 +69,14 @@ fn output_capture_rect(
                 .to_i32_round()
         }
     };
-    full_rect
-        .intersection(rect)
-        .filter(|rect| !rect.is_empty())
+    full_rect.intersection(rect).filter(|rect| !rect.is_empty())
 }
 
 impl GlobalDispatch<ZwlrScreencopyManagerV1, ()> for Smallvil {
+    fn can_view(client: Client, _data: &()) -> bool {
+        crate::state::trusted_client(&client)
+    }
+
     fn bind(
         _state: &mut Self,
         _dh: &smithay::reexports::wayland_server::DisplayHandle,

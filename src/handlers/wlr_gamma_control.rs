@@ -68,6 +68,10 @@ fn identity_ramp(size: u32) -> Vec<u16> {
 }
 
 impl GlobalDispatch<ZwlrGammaControlManagerV1, ()> for Smallvil {
+    fn can_view(client: Client, _data: &()) -> bool {
+        crate::state::trusted_client(&client)
+    }
+
     fn bind(
         _state: &mut Self,
         _dh: &DisplayHandle,

@@ -108,6 +108,10 @@ impl WlrOutputPowerManagementState {
 }
 
 impl GlobalDispatch<ZwlrOutputPowerManagerV1, ()> for Smallvil {
+    fn can_view(client: Client, _data: &()) -> bool {
+        crate::state::trusted_client(&client)
+    }
+
     fn bind(
         _state: &mut Self,
         _dh: &DisplayHandle,
