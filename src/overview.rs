@@ -55,6 +55,7 @@ const TEXT_RGB: (u8, u8, u8) = (225, 225, 225);
 /// same idea as `tab_strip`'s active segment), and its windows' rects
 /// (already computed at cell scale) plus titles.
 pub struct OverviewCell {
+    pub workspace: u32,
     pub area: Rectangle<i32, Logical>,
     pub active: bool,
     pub windows: Vec<(Rectangle<i32, Logical>, String)>,
@@ -65,6 +66,8 @@ pub struct Overview {
     /// output must only draw this on the one it matches, not all of them
     /// (it's sized and laid out for exactly one output's mode).
     output_name: String,
+    #[cfg(feature = "accessibility")]
+    workspaces: Vec<u32>,
     buffer: MemoryRenderBuffer,
 }
 
@@ -92,11 +95,21 @@ impl Overview {
             Transform::Normal,
             None,
         );
-        Self { output_name, buffer }
+        Self {
+            output_name,
+            #[cfg(feature = "accessibility")]
+            workspaces: cells.iter().map(|cell| cell.workspace).collect(),
+            buffer,
+        }
     }
 
     pub fn output_name(&self) -> &str {
         &self.output_name
+    }
+
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn workspaces(&self) -> &[u32] {
+        &self.workspaces
     }
 
     pub fn render_element(
@@ -117,13 +130,31 @@ impl Overview {
 }
 
 fn draw_cell(pixels: &mut [u8], canvas_w: i32, canvas_h: i32, font: &Font, cell: &OverviewCell) {
-    let border = if cell.active { CELL_ACTIVE_BORDER } else { CELL_BORDER };
+    let border = if cell.active {
+        CELL_ACTIVE_BORDER
+    } else {
+        CELL_BORDER
+    };
     fill_rect(pixels, canvas_w, canvas_h, cell.area, rgba(CELL_BG));
-    stroke_rect(pixels, canvas_w, canvas_h, cell.area, border, CELL_BORDER_PX);
+    stroke_rect(
+        pixels,
+        canvas_w,
+        canvas_h,
+        cell.area,
+        border,
+        CELL_BORDER_PX,
+    );
 
     for (rect, title) in &cell.windows {
         fill_rect(pixels, canvas_w, canvas_h, *rect, rgba(WINDOW_BG));
-        stroke_rect(pixels, canvas_w, canvas_h, *rect, WINDOW_BORDER, WINDOW_BORDER_PX);
+        stroke_rect(
+            pixels,
+            canvas_w,
+            canvas_h,
+            *rect,
+            WINDOW_BORDER,
+            WINDOW_BORDER_PX,
+        );
         draw_label(pixels, canvas_w, canvas_h, font, title, *rect);
     }
 }
@@ -178,7 +209,14 @@ fn stroke_rect(
 /// Draws `title` clipped to `rect`'s bounds -- overflowing glyphs are
 /// simply cut off rather than measured and pre-truncated, same choice
 /// `tab_strip::draw_label` makes for its own segments.
-fn draw_label(pixels: &mut [u8], canvas_w: i32, canvas_h: i32, font: &Font, title: &str, rect: Rectangle<i32, Logical>) {
+fn draw_label(
+    pixels: &mut [u8],
+    canvas_w: i32,
+    canvas_h: i32,
+    font: &Font,
+    title: &str,
+    rect: Rectangle<i32, Logical>,
+) {
     let baseline = rect.loc.y + LABEL_PAD + FONT_SIZE as i32;
     let mut pen_x = rect.loc.x + LABEL_PAD;
     let clip_right = rect.loc.x + rect.size.w - LABEL_PAD;

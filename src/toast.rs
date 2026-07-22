@@ -67,6 +67,10 @@ impl ToastKind {
 }
 
 pub struct Toast {
+    #[cfg(feature = "accessibility")]
+    message: String,
+    #[cfg(feature = "accessibility")]
+    kind: ToastKind,
     buffer: MemoryRenderBuffer,
     size: (i32, i32),
     shown_at: Instant,
@@ -100,11 +104,27 @@ impl Toast {
             None,
         );
         Self {
+            #[cfg(feature = "accessibility")]
+            message: message.to_owned(),
+            #[cfg(feature = "accessibility")]
+            kind,
             buffer,
             size: (width, height),
             shown_at: Instant::now(),
             visible_for,
         }
+    }
+
+    /// Text and urgency retained alongside the render buffer so optional
+    /// accessibility support can expose the same notification to AT-SPI.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn kind(&self) -> ToastKind {
+        self.kind
     }
 
     /// Whether the caller should keep re-requesting a redraw purely to give
@@ -259,4 +279,15 @@ fn blend_text_pixel(pixels: &mut [u8], width: i32, x: i32, y: i32, coverage: u8)
         pixels[i + channel] = (bg + (255.0 - bg) * t) as u8;
     }
     pixels[i + 3] = pixels[i + 3].max(coverage);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_timed_toasts_request_animation_frames() {
+        assert!(Toast::new("ok", ToastKind::Info).needs_continued_redraw());
+        assert!(!Toast::persistent("error", ToastKind::Error).needs_continued_redraw());
+    }
 }

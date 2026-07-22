@@ -28,19 +28,28 @@
 //! copy that shape: `process_key` only ever touches the shared
 //! `Arc<Mutex<KeyboardGrabs>>` (a fast, in-memory, never-held-across-I/O
 //! critical section, the same safe shape `ScreencastState.outputs`
-//! already uses) and queues outbound `KeyEvent`s on a plain
+//! already uses) and queues outbound `KeyEvent`s on a bounded
 //! `std::sync::mpsc` channel; the actual (blocking) signal emission
 //! happens on the DBus thread itself, which has nothing else to do while
 //! idle anyway. See `dbus.rs` for that half.
 
 mod dbus;
+mod tree;
+
+pub(crate) use tree::{GroupSnapshot, UiSnapshot};
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc::TrySendError,
+    Arc, Mutex,
+};
 use std::time::Duration;
 
 use smithay::input::keyboard::Keysym;
 use zbus::names::OwnedUniqueName;
+
+const KEY_EVENT_QUEUE_CAPACITY: usize = 4096;
 
 /// Result of `AccessibilityState::process_key`, read by
 /// `Smallvil`'s own keyboard-input handling (`input.rs`) to decide whether
@@ -67,7 +76,12 @@ struct ClientGrab {
 }
 
 impl ClientGrab {
-    fn should_grab_keypress(&self, suppressed_keys: &HashSet<Keysym>, mods: u32, keysym: Keysym) -> bool {
+    fn should_grab_keypress(
+        &self,
+        suppressed_keys: &HashSet<Keysym>,
+        mods: u32,
+        keysym: Keysym,
+    ) -> bool {
         if self.grabbed {
             return true;
         }
@@ -78,10 +92,17 @@ impl ClientGrab {
                 return true;
             }
         }
-        self.keystrokes.iter().any(|(sym, grabbed_mods)| *sym == keysym && *grabbed_mods == mods)
+        self.keystrokes
+            .iter()
+            .any(|(sym, grabbed_mods)| *sym == keysym && *grabbed_mods == mods)
     }
 
-    fn should_watch_keypress(&self, suppressed_keys: &HashSet<Keysym>, mods: u32, keysym: Keysym) -> bool {
+    fn should_watch_keypress(
+        &self,
+        suppressed_keys: &HashSet<Keysym>,
+        mods: u32,
+        keysym: Keysym,
+    ) -> bool {
         self.watched || self.should_grab_keypress(suppressed_keys, mods, keysym)
     }
 }
@@ -108,6 +129,8 @@ impl KeyboardGrabs {
         for client in self.clients.values() {
             self.grabbed_mods.extend(&client.modifiers);
         }
+        self.grabbed_mod_last_press
+            .retain(|keysym, _| self.grabbed_mods.contains(keysym));
     }
 }
 
@@ -124,10 +147,18 @@ struct KeyEventMsg {
 
 pub struct AccessibilityState {
     grabs: Arc<Mutex<KeyboardGrabs>>,
-    to_dbus: std::sync::mpsc::Sender<KeyEventMsg>,
+    to_dbus: std::sync::mpsc::SyncSender<KeyEventMsg>,
+    dbus_backpressured: AtomicBool,
+    tree: Option<tree::AccessibilityTree>,
 }
 
 impl AccessibilityState {
+    pub(crate) fn update_ui(&mut self, snapshot: UiSnapshot) {
+        if let Some(tree) = self.tree.as_mut() {
+            tree.update(snapshot);
+        }
+    }
+
     /// Called once per real key press/release, before the compositor's own
     /// keybind/client dispatch -- see `Smallvil::a11y_process_key` in
     /// `input.rs` for the exact call site and why it has to run before
@@ -146,23 +177,47 @@ impl AccessibilityState {
         keycode: u32,
     ) -> KbMonBlock {
         let mut data = self.grabs.lock().unwrap();
+        let mut delivery_failed = false;
 
         for (name, client) in &data.clients {
             if client.should_watch_keypress(&data.suppressed_keys, mods, keysym) {
-                // Never blocks: an unbounded channel, drained by a thread
-                // whose only job is exactly this (see dbus.rs). A dead
-                // receiver (DBus thread panicked/never started) just drops
-                // the message, which is the correct degrade -- a11y
-                // announcements silently stop, not the compositor.
-                let _ = self.to_dbus.send(KeyEventMsg {
+                let message = KeyEventMsg {
                     destination: name.clone(),
                     released,
                     mods,
                     keysym: keysym.raw(),
                     unichar,
                     keycode,
-                });
+                };
+                match self.to_dbus.try_send(message) {
+                    Ok(()) => {
+                        if self.dbus_backpressured.swap(false, Ordering::AcqRel) {
+                            tracing::info!("Accessibility DBus key-event queue recovered");
+                        }
+                    }
+                    Err(TrySendError::Full(_)) => {
+                        delivery_failed = true;
+                        if !self.dbus_backpressured.swap(true, Ordering::AcqRel) {
+                            tracing::warn!(
+                                capacity = KEY_EVENT_QUEUE_CAPACITY,
+                                "Accessibility DBus key-event queue full; dropping events"
+                            );
+                        }
+                    }
+                    Err(TrySendError::Disconnected(_)) => delivery_failed = true,
+                }
             }
+        }
+
+        if delivery_failed {
+            // Grabbing a key is only safe while its event can actually be
+            // delivered. Fail open if the DBus consumer is gone or cannot
+            // keep up, otherwise a stalled accessibility client could make
+            // normal keyboard input disappear indefinitely.
+            data.clients.clear();
+            data.rebuild_grabbed_mods();
+            data.suppressed_keys.clear();
+            return KbMonBlock::Pass;
         }
 
         // A grabbed modifier pressed twice within the repeat-delay window
@@ -175,7 +230,11 @@ impl AccessibilityState {
                     return KbMonBlock::Pass;
                 }
             } else {
-                let last_press = data.grabbed_mod_last_press.get(&keysym).copied().unwrap_or(Duration::ZERO);
+                let last_press = data
+                    .grabbed_mod_last_press
+                    .get(&keysym)
+                    .copied()
+                    .unwrap_or(Duration::ZERO);
                 data.grabbed_mod_last_press.insert(keysym, time);
                 if time <= last_press.saturating_add(repeat_delay) {
                     return KbMonBlock::Pass;
@@ -191,7 +250,11 @@ impl AccessibilityState {
         } else if data.suppressed_keys.contains(&keysym) {
             // Second press for an already-down key (e.g. two keyboards).
             block = true;
-        } else if data.clients.values().any(|c| c.should_grab_keypress(&data.suppressed_keys, mods, keysym)) {
+        } else if data
+            .clients
+            .values()
+            .any(|c| c.should_grab_keypress(&data.suppressed_keys, mods, keysym))
+        {
             data.suppressed_keys.insert(keysym);
             block = true;
         }
@@ -215,9 +278,14 @@ impl AccessibilityState {
 /// this interface exposes only ever mutates the shared grab state.
 pub fn init() -> AccessibilityState {
     let grabs = Arc::new(Mutex::new(KeyboardGrabs::default()));
-    let (to_dbus, from_compositor) = std::sync::mpsc::channel();
+    let (to_dbus, from_compositor) = std::sync::mpsc::sync_channel(KEY_EVENT_QUEUE_CAPACITY);
     dbus::spawn(grabs.clone(), from_compositor);
-    AccessibilityState { grabs, to_dbus }
+    AccessibilityState {
+        grabs,
+        to_dbus,
+        dbus_backpressured: AtomicBool::new(false),
+        tree: Some(tree::AccessibilityTree::new(UiSnapshot::default())),
+    }
 }
 
 #[cfg(test)]
@@ -229,20 +297,26 @@ mod tests {
     /// way this project already tests other logic real hardware/injection
     /// tools in this sandbox can't reach (see AGENT.md's own "test the
     /// underlying state-mutating function directly" precedent). The
-    /// channel receiver is just dropped; `process_key`'s `let _ =
-    /// self.to_dbus.send(...)` already tolerates that.
-    fn state() -> AccessibilityState {
-        AccessibilityState {
-            grabs: Arc::new(Mutex::new(KeyboardGrabs::default())),
-            to_dbus: std::sync::mpsc::channel().0,
-        }
+    /// The receiver stays alive for the test: a disconnected DBus consumer
+    /// deliberately makes production fail open and discard active grabs.
+    fn state() -> (AccessibilityState, std::sync::mpsc::Receiver<KeyEventMsg>) {
+        let (to_dbus, from_compositor) = std::sync::mpsc::sync_channel(16);
+        (
+            AccessibilityState {
+                grabs: Arc::new(Mutex::new(KeyboardGrabs::default())),
+                to_dbus,
+                dbus_backpressured: AtomicBool::new(false),
+                tree: None,
+            },
+            from_compositor,
+        )
     }
 
     const DELAY: Duration = Duration::from_millis(200);
 
     #[test]
     fn ungrabbed_key_always_passes() {
-        let state = state();
+        let (state, _receiver) = state();
         let sym = Keysym::a;
         assert_eq!(
             state.process_key(DELAY, Duration::ZERO, false, 0, sym, 0, 30),
@@ -256,10 +330,13 @@ mod tests {
 
     #[test]
     fn full_grab_blocks_every_key_press_and_its_matching_release() {
-        let state = state();
+        let (state, _receiver) = state();
         state.grabs.lock().unwrap().clients.insert(
             OwnedUniqueName::try_from(":1.1").unwrap(),
-            ClientGrab { grabbed: true, ..Default::default() },
+            ClientGrab {
+                grabbed: true,
+                ..Default::default()
+            },
         );
         let sym = Keysym::a;
 
@@ -284,13 +361,16 @@ mod tests {
 
     #[test]
     fn grabbed_modifier_double_tap_within_repeat_delay_passes_through() {
-        let state = state();
+        let (state, _receiver) = state();
         let sym = Keysym::Super_L;
         {
             let mut data = state.grabs.lock().unwrap();
             data.clients.insert(
                 OwnedUniqueName::try_from(":1.1").unwrap(),
-                ClientGrab { modifiers: HashSet::from([sym]), ..Default::default() },
+                ClientGrab {
+                    modifiers: HashSet::from([sym]),
+                    ..Default::default()
+                },
             );
             // The real `SetKeyGrabs` DBus handler always calls this after
             // touching `modifiers` -- `grabbed_mods` is a derived index,
@@ -316,28 +396,61 @@ mod tests {
 
         // First press: grabbed, and specifically the "don't touch XKB
         // state" variant since this IS a grabbed modifier.
-        assert_eq!(state.process_key(DELAY, at(0), false, 0, sym, 0, 125), KbMonBlock::ModifierFirstPress);
-        assert_eq!(state.process_key(DELAY, at(10), true, 0, sym, 0, 125), KbMonBlock::ModifierFirstPress);
+        assert_eq!(
+            state.process_key(DELAY, at(0), false, 0, sym, 0, 125),
+            KbMonBlock::ModifierFirstPress
+        );
+        assert_eq!(
+            state.process_key(DELAY, at(10), true, 0, sym, 0, 125),
+            KbMonBlock::ModifierFirstPress
+        );
 
         // Second press within the repeat-delay window of the *first*
         // press: treated as an ordinary keypress (e.g. the a11y tool's
         // own "tap modifier alone" gesture), not grabbed -- and so is its
         // release.
-        assert_eq!(state.process_key(DELAY, at(50), false, 0, sym, 0, 125), KbMonBlock::Pass);
-        assert_eq!(state.process_key(DELAY, at(60), true, 0, sym, 0, 125), KbMonBlock::Pass);
+        assert_eq!(
+            state.process_key(DELAY, at(50), false, 0, sym, 0, 125),
+            KbMonBlock::Pass
+        );
+        assert_eq!(
+            state.process_key(DELAY, at(60), true, 0, sym, 0, 125),
+            KbMonBlock::Pass
+        );
 
         // A press well after the delay window (measured from the *second*
         // press) is grabbed again.
-        assert_eq!(state.process_key(DELAY, at(500), false, 0, sym, 0, 125), KbMonBlock::ModifierFirstPress);
+        assert_eq!(
+            state.process_key(DELAY, at(500), false, 0, sym, 0, 125),
+            KbMonBlock::ModifierFirstPress
+        );
+    }
+
+    #[test]
+    fn rebuilding_grabbed_modifiers_prunes_old_press_timestamps() {
+        let mut grabs = KeyboardGrabs::default();
+        grabs
+            .grabbed_mod_last_press
+            .insert(Keysym::Super_L, Duration::from_secs(1));
+        grabs.rebuild_grabbed_mods();
+        assert!(grabs.grabbed_mod_last_press.is_empty());
     }
 
     #[test]
     fn watch_only_client_never_blocks_but_still_gets_queued_a_key_event() {
-        let (to_dbus, from_compositor) = std::sync::mpsc::channel();
-        let state = AccessibilityState { grabs: Arc::new(Mutex::new(KeyboardGrabs::default())), to_dbus };
+        let (to_dbus, from_compositor) = std::sync::mpsc::sync_channel(1);
+        let state = AccessibilityState {
+            grabs: Arc::new(Mutex::new(KeyboardGrabs::default())),
+            to_dbus,
+            dbus_backpressured: AtomicBool::new(false),
+            tree: None,
+        };
         state.grabs.lock().unwrap().clients.insert(
             OwnedUniqueName::try_from(":1.1").unwrap(),
-            ClientGrab { watched: true, ..Default::default() },
+            ClientGrab {
+                watched: true,
+                ..Default::default()
+            },
         );
         let sym = Keysym::a;
 
@@ -345,9 +458,41 @@ mod tests {
             state.process_key(DELAY, Duration::ZERO, false, 0, sym, 97, 30),
             KbMonBlock::Pass
         );
-        let msg = from_compositor.try_recv().expect("watched client should have been queued a KeyEvent");
+        let msg = from_compositor
+            .try_recv()
+            .expect("watched client should have been queued a KeyEvent");
         assert_eq!(msg.keysym, sym.raw());
         assert_eq!(msg.unichar, 97);
         assert!(!msg.released);
+    }
+
+    #[test]
+    fn dbus_backpressure_discards_grabs_and_fails_open() {
+        let (to_dbus, _from_compositor) = std::sync::mpsc::sync_channel(1);
+        let state = AccessibilityState {
+            grabs: Arc::new(Mutex::new(KeyboardGrabs::default())),
+            to_dbus,
+            dbus_backpressured: AtomicBool::new(false),
+            tree: None,
+        };
+        state.grabs.lock().unwrap().clients.insert(
+            OwnedUniqueName::try_from(":1.1").unwrap(),
+            ClientGrab {
+                grabbed: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            state.process_key(DELAY, Duration::ZERO, false, 0, Keysym::a, 0, 30),
+            KbMonBlock::Block
+        );
+        assert_eq!(
+            state.process_key(DELAY, Duration::from_millis(1), false, 0, Keysym::b, 0, 48,),
+            KbMonBlock::Pass
+        );
+        let grabs = state.grabs.lock().unwrap();
+        assert!(grabs.clients.is_empty());
+        assert!(grabs.suppressed_keys.is_empty());
     }
 }

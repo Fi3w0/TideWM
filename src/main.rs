@@ -226,20 +226,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "accessibility")]
     {
         state.accessibility = Some(crate::accessibility::init());
+        state.sync_accessibility_tree();
     }
 
     // Kept alive for the process lifetime: dropping it stops the watch.
     let _config_watcher = match config::spawn_watcher() {
         Ok((watcher, changes)) => {
-            event_loop
+            match event_loop
                 .handle()
                 .insert_source(changes, |event, _, state| {
-                    if let calloop::channel::Event::Msg(()) = event {
-                        state.reload_config();
+                    if let calloop::channel::Event::Msg(pending) = event {
+                        pending.store(false, std::sync::atomic::Ordering::Release);
+                        state.note_config_event();
                     }
-                })
-                .expect("Failed to register config watcher in the event loop");
-            Some(watcher)
+                }) {
+                Ok(_) => Some(watcher),
+                Err(err) => {
+                    tracing::warn!(%err, "Failed to register config watcher; hot-reload disabled");
+                    None
+                }
+            }
         }
         Err(err) => {
             tracing::warn!(%err, "Failed to watch config file for changes; hot-reload disabled");

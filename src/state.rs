@@ -585,6 +585,10 @@ pub struct Smallvil {
     /// bug class more than once already (`FloatingTag` staleness, the
     /// `workspace_of`/`window_of` fix). One source of truth.
     pub groups: Vec<WindowGroup>,
+    /// Stable AccessKit node IDs for group/tab UI. Allocated monotonically
+    /// instead of deriving from vector indices or per-client Wayland object
+    /// numbers, both of which can collide or be reused.
+    next_ui_node_id: u64,
 
     /// `org.gnome.Mutter.ScreenCast` DBus service handle. `None` until
     /// `main.rs` assigns it (after backend init, since the initial output
@@ -598,10 +602,15 @@ pub struct Smallvil {
     /// `accessibility` feature is off. See `src/accessibility/mod.rs`.
     #[cfg(feature = "accessibility")]
     pub accessibility: Option<crate::accessibility::AccessibilityState>,
+    /// Coalesces high-frequency redraw causes (pointer motion, client
+    /// damage) into bounded accessibility snapshot work.
+    #[cfg(feature = "accessibility")]
+    accessibility_sync_timer_armed: bool,
 }
 
 /// One member of a `WindowGroup`.
 pub struct GroupMember {
+    pub ui_node_id: u64,
     pub surface: WlSurface,
     /// Only meaningful while this member is *not* the group's active one --
     /// the tree/`space` are authoritative for the active member instead.
@@ -614,6 +623,7 @@ pub struct GroupMember {
 }
 
 pub struct WindowGroup {
+    pub ui_node_id: u64,
     /// Which (output, workspace) tree's leaf this group occupies -- needed
     /// to re-insert a parked member as its own tile again on `ungroup`
     /// (`Layouts::insert` takes both explicitly).
@@ -967,10 +977,13 @@ impl Smallvil {
             is_lid_closed: false,
             is_tablet_mode: false,
             groups: Vec::new(),
+            next_ui_node_id: 1_000,
             #[cfg(feature = "screencast")]
             screencast: None,
             #[cfg(feature = "accessibility")]
             accessibility: None,
+            #[cfg(feature = "accessibility")]
+            accessibility_sync_timer_armed: false,
         }
     }
 
@@ -2099,13 +2112,132 @@ impl Smallvil {
     /// rather than redrawing every frame regardless of damage.
     pub fn request_redraw(&mut self) {
         self.needs_redraw = true;
+        #[cfg(feature = "accessibility")]
+        self.schedule_accessibility_sync();
     }
 
-    /// Whether a frame is due: either something was explicitly marked dirty
-    /// (via `request_redraw`) or a toast is still animating. Clears the
-    /// dirty flag as a side effect, since the caller is about to render.
+    #[cfg(feature = "accessibility")]
+    fn schedule_accessibility_sync(&mut self) {
+        const COALESCE: Duration = Duration::from_millis(50);
+        if self.accessibility.is_none() || self.accessibility_sync_timer_armed {
+            return;
+        }
+        self.accessibility_sync_timer_armed = true;
+        let result = self.loop_handle.insert_source(
+            Timer::from_duration(COALESCE),
+            move |_, _, state: &mut Smallvil| {
+                state.accessibility_sync_timer_armed = false;
+                state.sync_accessibility_tree();
+                TimeoutAction::Drop
+            },
+        );
+        if let Err(err) = result {
+            self.accessibility_sync_timer_armed = false;
+            tracing::warn!(%err, "Failed to schedule accessibility tree update");
+            self.sync_accessibility_tree();
+        }
+    }
+
+    /// Publishes compositor-owned UI to AccessKit. Building a small owned
+    /// snapshot here keeps the adapter's worker threads completely detached
+    /// from Smithay and Wayland object lifetimes.
+    #[cfg(feature = "accessibility")]
+    pub(crate) fn sync_accessibility_tree(&mut self) {
+        if self.accessibility.is_none() {
+            return;
+        }
+
+        let locked = !matches!(self.session_lock, SessionLock::Unlocked);
+        let primary = self.primary_output().map(|output| {
+            let output_name = output.name();
+            let workspace = self.layout.active_workspace(&output_name);
+            (output_name, workspace)
+        });
+        let workspace_label = primary
+            .as_ref()
+            .map(|(_, workspace)| {
+                self.config
+                    .workspace_names
+                    .iter()
+                    .find_map(|(name, number)| (*number == *workspace).then(|| name.clone()))
+                    .unwrap_or_else(|| workspace.to_string())
+            })
+            .unwrap_or_default();
+
+        let workspace_name = |workspace: u32| {
+            self.config
+                .workspace_names
+                .iter()
+                .find_map(|(name, number)| (*number == workspace).then(|| name.clone()))
+                .unwrap_or_else(|| workspace.to_string())
+        };
+        let overview_workspaces = self
+            .overview
+            .as_ref()
+            .map(|overview| {
+                overview
+                    .workspaces()
+                    .iter()
+                    .map(|&workspace| (workspace, workspace_name(workspace)))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let groups = primary
+            .as_ref()
+            .map(|(output_name, workspace)| {
+                self.groups
+                    .iter()
+                    .filter(|group| &group.output == output_name && group.workspace == *workspace)
+                    .map(|group| {
+                        let id = group.ui_node_id;
+                        crate::accessibility::GroupSnapshot {
+                            id,
+                            tabs: group
+                                .members
+                                .iter()
+                                .map(|member| {
+                                    (
+                                        member.ui_node_id,
+                                        crate::tab_strip::window_title(&member.surface),
+                                    )
+                                })
+                                .collect(),
+                            active: group.active,
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let snapshot = crate::accessibility::UiSnapshot {
+            workspace: workspace_label,
+            locked,
+            toast: self.toast.as_ref().map(|toast| {
+                (
+                    toast.message().to_owned(),
+                    matches!(toast.kind(), ToastKind::Error),
+                )
+            }),
+            config_error: self
+                .config_error_overlay
+                .as_ref()
+                .map(|error| error.message().to_owned()),
+            overview_workspaces,
+            groups,
+        };
+        if let Some(accessibility) = self.accessibility.as_mut() {
+            accessibility.update_ui(snapshot);
+        }
+    }
+
+    /// Whether a frame was explicitly marked dirty. Timed toasts request
+    /// their next frame from the backend after each successful render;
+    /// treating every live toast as implicitly dirty here would make a
+    /// persistent error toast redraw forever at the timer's full rate.
+    /// Clears the flag as a side effect, since the caller is about to render.
     pub fn take_needs_redraw(&mut self) -> bool {
-        let needs_redraw = self.needs_redraw || self.toast.is_some();
+        let needs_redraw = self.needs_redraw;
         self.needs_redraw = false;
         needs_redraw
     }
@@ -3102,6 +3234,12 @@ impl Smallvil {
             .position(|g| g.members.iter().any(|m| &m.surface == surface))
     }
 
+    fn allocate_ui_node_id(&mut self) -> u64 {
+        let id = self.next_ui_node_id;
+        self.next_ui_node_id = self.next_ui_node_id.wrapping_add(1).max(1_000);
+        id
+    }
+
     /// Groups the focused tiled window with its neighbor in `direction` --
     /// i3/sway's "tabbed container" idea: both end up sharing one
     /// `Layouts` leaf, cycled between via `cycle_tab`. Reuses the same
@@ -3163,12 +3301,17 @@ impl Smallvil {
         self.space.unmap_elem(&b_window);
 
         if let Some(idx) = self.group_of(a) {
+            let ui_node_id = self.allocate_ui_node_id();
             self.groups[idx].members.push(GroupMember {
+                ui_node_id,
                 surface: b.clone(),
                 parked_window: Some(b_window),
             });
             self.groups[idx].strip = None;
         } else {
+            let group_ui_node_id = self.allocate_ui_node_id();
+            let a_ui_node_id = self.allocate_ui_node_id();
+            let b_ui_node_id = self.allocate_ui_node_id();
             let Some(output) = self.layout.output_of(a).map(str::to_string) else {
                 return;
             };
@@ -3177,11 +3320,20 @@ impl Smallvil {
                 .workspace_of(a)
                 .unwrap_or_else(|| self.layout.active_workspace(&output));
             self.groups.push(WindowGroup {
+                ui_node_id: group_ui_node_id,
                 output,
                 workspace,
                 members: vec![
-                    GroupMember { surface: a.clone(), parked_window: None },
-                    GroupMember { surface: b.clone(), parked_window: Some(b_window) },
+                    GroupMember {
+                        ui_node_id: a_ui_node_id,
+                        surface: a.clone(),
+                        parked_window: None,
+                    },
+                    GroupMember {
+                        ui_node_id: b_ui_node_id,
+                        surface: b.clone(),
+                        parked_window: Some(b_window),
+                    },
                 ],
                 active: 0,
                 strip: None,

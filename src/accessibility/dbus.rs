@@ -28,20 +28,40 @@ use super::{KeyEventMsg, KeyboardGrabs};
 
 const PATH: &str = "/org/freedesktop/a11y/Manager";
 const NAME: &str = "org.freedesktop.a11y.Manager";
+const MAX_CLIENTS: usize = 32;
+const MAX_MODIFIERS_PER_CLIENT: usize = 64;
+const MAX_KEYSTROKES_PER_CLIENT: usize = 4096;
+
+fn ensure_client_slot(data: &KeyboardGrabs, sender: &OwnedUniqueName) -> fdo::Result<()> {
+    if data.clients.contains_key(sender) || data.clients.len() < MAX_CLIENTS {
+        Ok(())
+    } else {
+        Err(fdo::Error::LimitsExceeded(
+            "too many accessibility keyboard-monitor clients".into(),
+        ))
+    }
+}
 
 /// Spawns the DBus service thread. Fire-and-forget: a failure here (bus
 /// unreachable, name already taken) is logged and leaves accessibility
 /// unavailable, not a reason to fail compositor startup over an optional,
 /// default-off feature -- same policy `screencast::dbus::spawn` uses.
-pub(super) fn spawn(grabs: Arc<Mutex<KeyboardGrabs>>, from_compositor: mpsc::Receiver<KeyEventMsg>) {
-    std::thread::Builder::new()
+pub(super) fn spawn(
+    grabs: Arc<Mutex<KeyboardGrabs>>,
+    from_compositor: mpsc::Receiver<KeyEventMsg>,
+) {
+    if let Err(err) = std::thread::Builder::new()
         .name("a11y-dbus".into())
         .spawn(move || run(grabs, from_compositor))
-        .expect("failed to spawn accessibility DBus thread");
+    {
+        tracing::warn!(%err, "Failed to spawn accessibility DBus service thread");
+    }
 }
 
 fn run(grabs: Arc<Mutex<KeyboardGrabs>>, from_compositor: mpsc::Receiver<KeyEventMsg>) {
-    let iface = KeyboardMonitor { grabs: grabs.clone() };
+    let iface = KeyboardMonitor {
+        grabs: grabs.clone(),
+    };
 
     let connection = match zbus::blocking::connection::Builder::session()
         .and_then(|builder| builder.serve_at(PATH, iface))
@@ -54,7 +74,11 @@ fn run(grabs: Arc<Mutex<KeyboardGrabs>>, from_compositor: mpsc::Receiver<KeyEven
             return;
         }
     };
-    tracing::info!(bus_name = NAME, path = PATH, "Accessibility DBus service registered");
+    tracing::info!(
+        bus_name = NAME,
+        path = PATH,
+        "Accessibility DBus service registered"
+    );
 
     // A client that closes its DBus connection without an explicit
     // Ungrab/Unwatch (crashed, killed) must not leave a phantom grab
@@ -75,7 +99,10 @@ fn run(grabs: Arc<Mutex<KeyboardGrabs>>, from_compositor: mpsc::Receiver<KeyEven
     );
     task.detach();
 
-    let Ok(iface_ref) = connection.object_server().interface::<_, KeyboardMonitor>(PATH) else {
+    let Ok(iface_ref) = connection
+        .object_server()
+        .interface::<_, KeyboardMonitor>(PATH)
+    else {
         tracing::warn!("Accessibility DBus interface vanished immediately after registration");
         return;
     };
@@ -87,11 +114,19 @@ fn run(grabs: Arc<Mutex<KeyboardGrabs>>, from_compositor: mpsc::Receiver<KeyEven
     // else to do, so blocking it on DBus I/O (via `async_io::block_on`
     // below) can't stall anything else in the process.
     while let Ok(msg) = from_compositor.recv() {
-        let ctxt = emitter.clone().set_destination(BusName::Unique(msg.destination.into()));
+        let ctxt = emitter
+            .clone()
+            .set_destination(BusName::Unique(msg.destination.into()));
         async_io::block_on(async {
-            if let Err(err) =
-                KeyboardMonitor::key_event(&ctxt, msg.released, msg.mods, msg.keysym, msg.unichar, msg.keycode as u16)
-                    .await
+            if let Err(err) = KeyboardMonitor::key_event(
+                &ctxt,
+                msg.released,
+                msg.mods,
+                msg.keysym,
+                msg.unichar,
+                msg.keycode as u16,
+            )
+            .await
             {
                 tracing::warn!(%err, "Failed to emit accessibility KeyEvent signal");
             }
@@ -118,6 +153,7 @@ impl KeyboardMonitor {
         let sender = sender_of(&hdr)?;
         tracing::debug!(%sender, "a11y: GrabKeyboard");
         let mut data = self.grabs.lock().unwrap();
+        ensure_client_slot(&data, &sender)?;
         data.clients.entry(sender).or_default().grabbed = true;
         Ok(())
     }
@@ -141,6 +177,7 @@ impl KeyboardMonitor {
         let sender = sender_of(&hdr)?;
         tracing::debug!(%sender, "a11y: WatchKeyboard");
         let mut data = self.grabs.lock().unwrap();
+        ensure_client_slot(&data, &sender)?;
         data.clients.entry(sender).or_default().watched = true;
         Ok(())
     }
@@ -168,10 +205,21 @@ impl KeyboardMonitor {
         keystrokes: Vec<(u32, u32)>,
     ) -> fdo::Result<()> {
         let sender = sender_of(&hdr)?;
+        if modifiers.len() > MAX_MODIFIERS_PER_CLIENT
+            || keystrokes.len() > MAX_KEYSTROKES_PER_CLIENT
+        {
+            return Err(fdo::Error::LimitsExceeded(
+                "accessibility key-grab list is too large".into(),
+            ));
+        }
         tracing::debug!(%sender, ?modifiers, ?keystrokes, "a11y: SetKeyGrabs");
         let mut data = self.grabs.lock().unwrap();
+        ensure_client_slot(&data, &sender)?;
         let client = data.clients.entry(sender).or_default();
-        client.modifiers = modifiers.into_iter().map(smithay::input::keyboard::Keysym::new).collect();
+        client.modifiers = modifiers
+            .into_iter()
+            .map(smithay::input::keyboard::Keysym::new)
+            .collect();
         client.keystrokes = keystrokes
             .into_iter()
             .map(|(k, mods)| (smithay::input::keyboard::Keysym::new(k), mods))
@@ -200,13 +248,20 @@ fn sender_of(hdr: &Header<'_>) -> fdo::Result<OwnedUniqueName> {
         .ok_or_else(|| fdo::Error::Failed("no sender on accessibility DBus call".to_owned()))
 }
 
-async fn watch_disconnects(conn: &zbus::Connection, grabs: Arc<Mutex<KeyboardGrabs>>) -> zbus::Result<()> {
+async fn watch_disconnects(
+    conn: &zbus::Connection,
+    grabs: Arc<Mutex<KeyboardGrabs>>,
+) -> zbus::Result<()> {
     let proxy = fdo::DBusProxy::new(conn).await?;
-    let mut stream = proxy.receive_name_owner_changed_with_args(&[(2, UniqueName::null_value())]).await?;
+    let mut stream = proxy
+        .receive_name_owner_changed_with_args(&[(2, UniqueName::null_value())])
+        .await?;
 
     while let Some(signal) = stream.next().await {
         let args = signal.args()?;
-        let Some(name) = &**args.old_owner() else { continue };
+        let Some(name) = &**args.old_owner() else {
+            continue;
+        };
         // `new_owner` being empty is exactly what the args filter above
         // already selects for -- a client that dropped off the bus, not
         // one that merely changed which name it owns.
