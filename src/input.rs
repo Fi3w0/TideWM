@@ -813,8 +813,21 @@ impl Smallvil {
                     // Re-enabled here for the real-hardware retest this
                     // project's own standing rule required before trusting
                     // it again -- see AGENT.md/CHANGELOG.md.
-                    let super_drag = keyboard.modifier_state().logo
-                        && (button == BTN_LEFT || button == BTN_RIGHT);
+                    // `modifier_state().logo` is the XKB *effective* state:
+                    // it also includes latched/locked modifiers. In a nested
+                    // compositor the host can additionally leave that state
+                    // stale across keyboard-focus changes. Neither case means
+                    // the user is physically holding the main modifier now.
+                    // Require an actually pressed Super key so an ordinary
+                    // drag can never turn into a compositor move/resize.
+                    let super_held = keyboard.with_pressed_keysyms(|keys| {
+                        keys.into_iter().any(|key| {
+                            key.raw_syms()
+                                .into_iter()
+                                .any(|sym| matches!(sym, Keysym::Super_L | Keysym::Super_R))
+                        })
+                    });
+                    let super_drag = super_held && (button == BTN_LEFT || button == BTN_RIGHT);
                     if super_drag {
                         if let Some((window, loc)) = under.clone() {
                             let wl_surface = window.toplevel().unwrap().wl_surface().clone();
