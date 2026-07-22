@@ -2502,14 +2502,20 @@ dependencies = [
 
 [[package]]
 name = "tidewm"
-version = "0.53.0"
+version = "0.57.0"
 dependencies = [
+ "accesskit",
+ "accesskit_unix",
  "async-io",
  "bitflags 2.13.1",
+ "blocking",
+ "calloop 0.14.4",
  "fontdue",
  "futures-util",
  "notify",
  "pipewire",
+ "png",
+ "regex",
  "serde",
  "serde_json",
  "smithay",
