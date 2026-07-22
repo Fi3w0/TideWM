@@ -126,7 +126,18 @@ pub struct Smallvil {
     /// empty under winit: the nested backend never reports a real libinput
     /// device.
     pub known_touchpads: Vec<smithay::reexports::input::Device>,
+    /// Active compositor-consumed horizontal touchpad swipe: configured
+    /// finger count plus accumulated libinput X delta. `None` means gesture
+    /// events continue through the ordinary client protocol path.
+    pub(crate) workspace_swipe: Option<(u32, f64, f64)>,
     pub toast: Option<Toast>,
+    /// Persistent config diagnostic rendered as a reserved top panel.  It
+    /// is independent of `toast`: reload confirmations and short debug
+    /// notices keep using the existing popup path.
+    pub config_error_overlay: Option<crate::error_overlay::ConfigErrorOverlay>,
+    /// Lightweight compositor fallback behind the desktop. External
+    /// layer-shell wallpaper clients naturally cover it.
+    pub builtin_wallpaper: crate::wallpaper::BuiltinWallpaper,
     /// `Some` while the workspace overview (see `overview.rs`) is showing
     /// on the output it was built for (`Overview::output_name`); `None`
     /// otherwise. Built once when toggled on, not rebuilt every frame --
@@ -138,6 +149,7 @@ pub struct Smallvil {
     /// field just holds the texture so it isn't rebuilt every time.
     pub welcome_hint: Option<crate::welcome::WelcomeHint>,
     last_config_event: Instant,
+    config_reload_timer_armed: bool,
     needs_redraw: bool,
     /// Timestamp of the last real pointer motion (absolute or relative),
     /// updated from `Smallvil::note_pointer_motion`. Drives
@@ -778,7 +790,7 @@ const SCRATCHPAD_WORKSPACE: u32 = 0;
 impl Smallvil {
     pub fn new(event_loop: &mut EventLoop<'static, Smallvil>, display: Display<Self>) -> Self {
         let start_time = std::time::Instant::now();
-        let config = Config::load();
+        let (config, startup_config_error) = Config::load_with_error();
         // Copied out before `config` moves into the `Self { config, .. }`
         // field below, so `layout: ...` further down can still read it.
         let default_layout = config.default_layout;
@@ -907,10 +919,15 @@ impl Smallvil {
 
             config,
             known_touchpads: Vec::new(),
+            workspace_swipe: None,
             toast: None,
+            config_error_overlay: startup_config_error
+                .map(crate::error_overlay::ConfigErrorOverlay::new),
+            builtin_wallpaper: crate::wallpaper::BuiltinWallpaper::build(),
             overview: None,
             welcome_hint: None,
             last_config_event: Instant::now() - Duration::from_secs(1),
+            config_reload_timer_armed: false,
             last_pointer_motion: Instant::now(),
             cursor_idle_timer_armed: false,
             needs_redraw: true,
@@ -2325,8 +2342,43 @@ impl Smallvil {
     pub(crate) fn output_tiling_area(&self, output: &Output) -> Option<Rectangle<i32, Logical>> {
         let output_geo = self.space.output_geometry(output)?;
         let mut area = layer_map_for_output(output).non_exclusive_zone();
+        if let Some(error) = &self.config_error_overlay {
+            let reserved = error.reserved_height().min(area.size.h.max(0));
+            area.loc.y += reserved;
+            area.size.h -= reserved;
+        }
         area.loc += output_geo.loc;
         Some(area)
+    }
+
+    /// Builds the persistent config-error render element at the top of the
+    /// layer-shell non-exclusive zone. The matching space reservation lives
+    /// in `output_tiling_area` above.
+    pub(crate) fn config_error_element(
+        &mut self,
+        output: &Output,
+        renderer: &mut GlesRenderer,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        let mode = output.current_mode()?;
+        let scale = output.current_scale().fractional_scale();
+        let local_y = layer_map_for_output(output).non_exclusive_zone().loc.y;
+        let logical_width = (mode.size.w as f64 / scale).round() as i32;
+        self.config_error_overlay
+            .as_mut()?
+            .render_element(renderer, logical_width, local_y, scale)
+    }
+
+    pub(crate) fn wallpaper_element(
+        &self,
+        output: &Output,
+        renderer: &mut GlesRenderer,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        let mode = output.current_mode()?;
+        self.builtin_wallpaper.render_element(
+            renderer,
+            mode.size,
+            output.current_scale().fractional_scale(),
+        )
     }
 
     pub(crate) fn tiled_rect_for_surface(
@@ -4412,20 +4464,45 @@ impl Smallvil {
             .map(|(w, _)| w)
     }
 
-    /// Re-reads the config file and applies what can be applied live
-    /// (keybinds, input repeat rate). Shows a toast either way so a reload
-    /// is never silent, success or failure. Debounced: editors commonly fire
-    /// more than one filesystem event per save.
-    pub fn reload_config(&mut self) {
-        let now = Instant::now();
-        if now.duration_since(self.last_config_event) < Duration::from_millis(150) {
-            self.last_config_event = now;
+    /// Records one relevant filesystem event and ensures a single trailing
+    /// reload runs after the event stream has been quiet for 150ms. Editors
+    /// that truncate then rewrite a file can otherwise make the first event
+    /// load a partial file and have the completed write discarded by a
+    /// leading-edge debounce.
+    pub fn note_config_event(&mut self) {
+        const QUIET: Duration = Duration::from_millis(150);
+        self.last_config_event = Instant::now();
+        if self.config_reload_timer_armed {
             return;
         }
-        self.last_config_event = now;
+        self.config_reload_timer_armed = true;
+        let result = self.loop_handle.insert_source(
+            Timer::from_duration(QUIET),
+            move |_, _, state: &mut Smallvil| {
+                let elapsed = state.last_config_event.elapsed();
+                if elapsed >= QUIET {
+                    state.config_reload_timer_armed = false;
+                    state.reload_config();
+                    TimeoutAction::Drop
+                } else {
+                    TimeoutAction::ToDuration(QUIET - elapsed)
+                }
+            },
+        );
+        if let Err(err) = result {
+            self.config_reload_timer_armed = false;
+            tracing::warn!(%err, "Failed to register config debounce timer; reloading immediately");
+            self.reload_config();
+        }
+    }
 
+    /// Re-reads the config file and applies what can be applied live
+    /// (keybinds, input repeat rate). Shows a toast either way so a reload
+    /// is never silent, success or failure.
+    pub fn reload_config(&mut self) {
         match Config::reload() {
             Ok(new_config) => {
+                let had_error_overlay = self.config_error_overlay.take().is_some();
                 if let Some(keyboard) = self.seat.get_keyboard() {
                     keyboard.change_repeat_info(
                         new_config.input.repeat_rate,
@@ -4478,24 +4555,25 @@ impl Smallvil {
                 tracing::info!("Config reloaded");
                 self.toast = Some(Toast::new("Config reloaded", ToastKind::Info));
                 self.retile();
+                if had_error_overlay {
+                    self.request_redraw();
+                }
             }
             Err(err) => {
                 tracing::warn!(%err, "Failed to reload config, keeping the previous one");
-                // Persistent, not the usual short-lived toast: this message
-                // can be a full file path plus a parser error, too long to
-                // read in ~2 seconds, and there's a natural "done" signal
-                // to wait for instead of a timer -- the next reload attempt
-                // (fixed or not) replaces this toast either way.
-                //
                 // "Config error {err}" (no colon) rather than "Config
                 // error: {err}" -- err already starts with "in file ... at
                 // line N: ...", matching Hyprland's own on-screen config
                 // error phrasing ("config error in file <path> at line
                 // <N>: <message>") rather than inventing our own shape.
-                self.toast = Some(Toast::persistent(
-                    &format!("Config error {err}"),
-                    ToastKind::Error,
-                ));
+                let message = format!("Config error {err}");
+                self.config_error_overlay =
+                    Some(crate::error_overlay::ConfigErrorOverlay::new(&message));
+                // Keep the established notification path for immediate
+                // visual feedback/debugging; the reserved panel is the
+                // persistent, readable diagnostic.
+                self.toast = Some(Toast::new("Config reload failed", ToastKind::Error));
+                self.retile();
                 self.request_redraw();
             }
         }

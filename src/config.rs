@@ -279,13 +279,23 @@ impl Config {
     /// run so there's something to edit. Falls back to in-memory defaults if
     /// the file can't be read or parsed.
     pub fn load() -> Self {
+        Self::load_with_error().0
+    }
+
+    /// Startup variant of [`Config::load`] that also retains a parse error
+    /// for the compositor-owned error panel.  Callers that only need the
+    /// old fallback behavior can continue using `load()`.
+    pub fn load_with_error() -> (Self, Option<String>) {
         let path = config_path();
 
-        let raw = if path.exists() {
-            load_raw_config(&path).unwrap_or_else(|err| {
-                tracing::warn!(%err, path = %path.display(), "Failed to parse config, using defaults");
-                RawConfig::default()
-            })
+        let (raw, error) = if path.exists() {
+            match load_raw_config(&path) {
+                Ok(raw) => (raw, None),
+                Err(err) => {
+                    tracing::warn!(%err, path = %path.display(), "Failed to parse config, using defaults");
+                    (RawConfig::default(), Some(err))
+                }
+            }
         } else {
             let default = RawConfig::default();
             if let Some(parent) = path.parent() {
@@ -911,8 +921,9 @@ pub fn parse_mode_str(s: &str) -> Option<(i32, i32, Option<f64>)> {
 /// component) also keeps a config directory that's its own git repo (as
 /// this user's real Hyprland config is) from spamming reloads on every
 /// `.git/index` write a `git status`/`checkout` causes.
-pub fn spawn_watcher() -> notify::Result<(RecommendedWatcher, Channel<()>)> {
+pub fn spawn_watcher() -> notify::Result<(RecommendedWatcher, Channel<Arc<AtomicBool>>)> {
     let (tx, rx) = channel::channel();
+    let event_pending = Arc::new(AtomicBool::new(false));
     let watch_dir = config_path()
         .parent()
         .expect("config path always has a parent")
@@ -936,15 +947,32 @@ pub fn spawn_watcher() -> notify::Result<(RecommendedWatcher, Channel<()>)> {
                     .components()
                     .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
         });
-        if relevant {
-            let _ = tx.send(());
+        if relevant
+            && !event_pending.swap(true, Ordering::AcqRel)
+            && tx.send(event_pending.clone()).is_err()
+        {
+            event_pending.store(false, Ordering::Release);
         }
     })?;
 
     // `Config::load()` normally creates this directory already, but the
     // watcher needs it to exist regardless of load order.
     let _ = fs::create_dir_all(&watch_dir);
-    watcher.watch(&watch_dir, RecursiveMode::Recursive)?;
+    if let Err(recursive_err) = watcher.watch(&watch_dir, RecursiveMode::Recursive) {
+        // A custom `--config /tmp/foo.wave` is legitimate, but recursively
+        // traversing a broad parent such as /tmp can encounter unrelated
+        // systemd-private directories that are intentionally unreadable.
+        // Keep the main config (and sibling includes) hot-reloadable instead
+        // of disabling the watcher completely. Nested include directories
+        // still get the full recursive behavior whenever the parent allows
+        // it, which is the normal ~/.config/tidewm case.
+        tracing::warn!(
+            %recursive_err,
+            path = %watch_dir.display(),
+            "Recursive config watch failed; falling back to the config directory only"
+        );
+        watcher.watch(&watch_dir, RecursiveMode::NonRecursive)?;
+    }
 
     Ok((watcher, rx))
 }
