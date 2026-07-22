@@ -66,7 +66,11 @@ use smithay::{
         pointer_gestures::PointerGesturesState,
         presentation::PresentationState,
         relative_pointer::RelativePointerManagerState,
-        selection::{data_device::DataDeviceState, wlr_data_control::DataControlState},
+        security_context::{SecurityContext, SecurityContextState},
+        selection::{
+            data_device::DataDeviceState, primary_selection::PrimarySelectionState,
+            wlr_data_control::DataControlState,
+        },
         session_lock::{LockSurface, SessionLockManagerState, SessionLocker},
         shell::{
             kde::decoration::KdeDecorationState,
@@ -199,16 +203,16 @@ pub struct Smallvil {
     pub relative_pointer_state: RelativePointerManagerState,
     pub seat_state: SeatState<Smallvil>,
     pub data_device_state: DataDeviceState,
+    /// `wp-primary-selection-unstable-v1`: select-to-copy and middle-click
+    /// paste, also exposed to wlr-data-control clipboard managers.
+    pub primary_selection_state: PrimarySelectionState,
     /// `wlr-data-control-unstable-v1`, the protocol clipboard managers
     /// (cliphist, clipman, wl-clip-persist) actually use to read/write the
     /// clipboard without being the focused client -- `wl_data_device` alone
     /// only lets a focused client see the selection. Smithay's convenience
     /// module handles the protocol directly; no per-request handler logic
     /// needed here beyond the getter `DataControlHandler` requires (see
-    /// `handlers/mod.rs`). No primary-selection support yet -- TideWM
-    /// doesn't implement `zwp_primary_selection_v1` itself, so there's
-    /// nothing to pass as `DataControlState::new`'s `primary_selection`
-    /// argument.
+    /// `handlers/mod.rs`).
     pub data_control_state: DataControlState,
     /// `ext-session-lock-v1`: lets a privileged client (swaylock, a
     /// hyprlock-style daemon) take over every output and gate all
@@ -784,14 +788,17 @@ impl Smallvil {
         let relative_pointer_state = RelativePointerManagerState::new::<Self>(&dh);
         let mut seat_state = SeatState::new();
         let data_device_state = DataDeviceState::new::<Self>(&dh);
-        let data_control_state = DataControlState::new::<Self, _>(&dh, None, |_client| true);
-        let session_lock_state = SessionLockManagerState::new::<Self, _>(&dh, |_client| true);
+        let primary_selection_state = PrimarySelectionState::new::<Self>(&dh);
+        let data_control_state =
+            DataControlState::new::<Self, _>(&dh, Some(&primary_selection_state), trusted_client);
+        let session_lock_state = SessionLockManagerState::new::<Self, _>(&dh, trusted_client);
         let xdg_activation_state = XdgActivationState::new::<Self>(&dh);
         let single_pixel_buffer_state = SinglePixelBufferState::new::<Self>(&dh);
         let clock = Clock::<Monotonic>::new();
         let presentation_state = PresentationState::new::<Self>(&dh, clock.id() as u32);
         let fractional_scale_manager_state = FractionalScaleManagerState::new::<Self>(&dh);
-        let foreign_toplevel_list_state = ForeignToplevelListState::new::<Self>(&dh);
+        let foreign_toplevel_list_state =
+            ForeignToplevelListState::new_with_filter::<Self>(&dh, trusted_client);
         // The older wlr-foreign-toplevel-management-v1 protocol (hand-rolled,
         // no Smithay module). See `handlers/wlr_foreign_toplevel.rs`.
         let wlr_foreign_toplevel_state =
@@ -912,6 +919,7 @@ impl Smallvil {
             relative_pointer_state,
             seat_state,
             data_device_state,
+            primary_selection_state,
             data_control_state,
             session_lock_state,
             session_lock: SessionLock::Unlocked,

@@ -189,6 +189,23 @@ fn floating_resize_edge(
     (!edge.is_empty()).then_some(edge)
 }
 
+/// Resolves a completed horizontal workspace swipe. Vertical/diagonal
+/// gestures are ignored even if their X component happens to cross the
+/// threshold, and workspace numbering never wraps through the reserved
+/// scratchpad workspace 0.
+fn workspace_swipe_target(current: u32, delta_x: f64, delta_y: f64, threshold: f64) -> Option<u32> {
+    if delta_x.abs() < threshold || delta_x.abs() <= delta_y.abs() {
+        return None;
+    }
+    if delta_x < 0.0 {
+        current.checked_add(1)
+    } else if current > 1 {
+        Some(current - 1)
+    } else {
+        None
+    }
+}
+
 impl Smallvil {
     /// Maps a touch (or any other absolute-position) event's normalized
     /// coordinates onto logical space, the same way `PointerMotionAbsolute`
@@ -1174,17 +1191,36 @@ impl Smallvil {
             // for the focused surface. No client bound the protocol, the
             // events simply go nowhere.
             InputEvent::GestureSwipeBegin { event, .. } => {
+                let fingers = GestureBeginEvent::fingers(&event);
+                let compositor_swipe = self
+                    .config
+                    .input
+                    .touchpad
+                    .workspace_swipe_fingers
+                    .is_some_and(|configured| configured == fingers)
+                    && matches!(self.session_lock, SessionLock::Unlocked)
+                    && self.exclusive_layer().is_none();
+                if compositor_swipe {
+                    self.workspace_swipe = Some((fingers, 0.0, 0.0));
+                    return;
+                }
                 let pointer = self.seat.get_pointer().unwrap();
                 pointer.gesture_swipe_begin(
                     self,
                     &GestureSwipeBeginEvent {
                         serial: SERIAL_COUNTER.next_serial(),
                         time: Event::time_msec(&event),
-                        fingers: GestureBeginEvent::fingers(&event),
+                        fingers,
                     },
                 );
             }
             InputEvent::GestureSwipeUpdate { event, .. } => {
+                if let Some((_, delta_x, delta_y)) = &mut self.workspace_swipe {
+                    let delta = BackendGestureSwipeUpdateEvent::delta(&event);
+                    *delta_x += delta.x;
+                    *delta_y += delta.y;
+                    return;
+                }
                 let pointer = self.seat.get_pointer().unwrap();
                 pointer.gesture_swipe_update(
                     self,
@@ -1195,6 +1231,26 @@ impl Smallvil {
                 );
             }
             InputEvent::GestureSwipeEnd { event, .. } => {
+                if let Some((_fingers, delta_x, delta_y)) = self.workspace_swipe.take() {
+                    if !GestureEndEvent::cancelled(&event) {
+                        let threshold = self
+                            .config
+                            .input
+                            .touchpad
+                            .workspace_swipe_distance
+                            .unwrap_or(200.0)
+                            .max(1.0);
+                        if let Some(output) = self.primary_output() {
+                            let current = self.layout.active_workspace(&output.name());
+                            if let Some(target) =
+                                workspace_swipe_target(current, delta_x, delta_y, threshold)
+                            {
+                                self.switch_workspace(&output, target);
+                            }
+                        }
+                    }
+                    return;
+                }
                 let pointer = self.seat.get_pointer().unwrap();
                 pointer.gesture_swipe_end(
                     self,
@@ -1476,5 +1532,18 @@ mod tests {
             floating_resize_edge(rect(), Point::from((299.0, 299.0)), 4.0),
             Some(ResizeEdge::BOTTOM_RIGHT)
         );
+    }
+
+    #[test]
+    fn horizontal_workspace_swipe_moves_one_workspace_without_wrapping_zero() {
+        assert_eq!(workspace_swipe_target(3, -220.0, 12.0, 200.0), Some(4));
+        assert_eq!(workspace_swipe_target(3, 220.0, 12.0, 200.0), Some(2));
+        assert_eq!(workspace_swipe_target(1, 220.0, 12.0, 200.0), None);
+    }
+
+    #[test]
+    fn short_or_vertical_workspace_swipe_is_ignored() {
+        assert_eq!(workspace_swipe_target(3, 199.0, 0.0, 200.0), None);
+        assert_eq!(workspace_swipe_target(3, 220.0, 300.0, 200.0), None);
     }
 }

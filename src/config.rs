@@ -668,6 +668,13 @@ pub struct TouchpadConfig {
     pub accel_speed: Option<f64>,
     /// `"adaptive"` or `"flat"`.
     pub accel_profile: Option<String>,
+    /// When set to 3 or more, horizontal swipes with this finger count are
+    /// consumed by TideWM to change workspace instead of being forwarded to
+    /// the focused client. Unset keeps client-only gesture forwarding.
+    pub workspace_swipe_fingers: Option<u32>,
+    /// Horizontal libinput delta required before the configured workspace
+    /// swipe commits. Defaults to 200.0 when omitted.
+    pub workspace_swipe_distance: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -1085,6 +1092,19 @@ fn apply_touchpad_block(touchpad: &mut TouchpadConfig, body: &[waves::Entry]) {
             "scroll_method" => touchpad.scroll_method = Some(value.clone()),
             "accel_speed" => set_opt_f64(&mut touchpad.accel_speed, key, value),
             "accel_profile" => touchpad.accel_profile = Some(value.clone()),
+            "workspace_swipe_fingers" => match value.parse::<u32>() {
+                Ok(0) => touchpad.workspace_swipe_fingers = None,
+                Ok(fingers @ 3..) => touchpad.workspace_swipe_fingers = Some(fingers),
+                Ok(_) => tracing::warn!(
+                    key,
+                    value,
+                    "workspace_swipe_fingers must be 0 or at least 3, ignoring"
+                ),
+                Err(err) => tracing::warn!(key, value, %err, "Expected an integer, ignoring"),
+            },
+            "workspace_swipe_distance" => {
+                set_opt_f64(&mut touchpad.workspace_swipe_distance, key, value)
+            }
             other => tracing::warn!(key = %other, "Unknown key in `touchpad` block, ignoring"),
         }
     }
@@ -1748,6 +1768,8 @@ input {
         # tap_to_click = true
         # natural_scroll = true
         # accel_profile = adaptive
+        # workspace_swipe_fingers = 3
+        # workspace_swipe_distance = 200
     }
 }
 

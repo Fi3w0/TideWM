@@ -37,8 +37,14 @@ use smithay::wayland::keyboard_shortcuts_inhibit::{
 };
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraintsHandler};
+use smithay::wayland::security_context::{
+    SecurityContext, SecurityContextHandler, SecurityContextListenerSource,
+};
 use smithay::wayland::selection::data_device::{
     set_data_device_focus, DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler,
+};
+use smithay::wayland::selection::primary_selection::{
+    set_primary_focus, PrimarySelectionHandler, PrimarySelectionState,
 };
 use smithay::wayland::selection::wlr_data_control::{DataControlHandler, DataControlState};
 use smithay::wayland::selection::SelectionHandler;
@@ -52,14 +58,13 @@ use smithay::wayland::xdg_activation::{
     XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
 };
 use smithay::{
-    delegate_cursor_shape,
-    delegate_data_control, delegate_data_device, delegate_dmabuf, delegate_foreign_toplevel_list,
-    delegate_fractional_scale,
-    delegate_idle_inhibit, delegate_idle_notify, delegate_input_method_manager,
-    delegate_kde_decoration,
-    delegate_keyboard_shortcuts_inhibit, delegate_output,
-    delegate_pointer_constraints, delegate_pointer_gestures, delegate_presentation, delegate_relative_pointer, delegate_seat,
-    delegate_session_lock, delegate_single_pixel_buffer, delegate_text_input_manager, delegate_viewporter,
+    delegate_cursor_shape, delegate_data_control, delegate_data_device, delegate_dmabuf,
+    delegate_foreign_toplevel_list, delegate_fractional_scale, delegate_idle_inhibit,
+    delegate_idle_notify, delegate_input_method_manager, delegate_kde_decoration,
+    delegate_keyboard_shortcuts_inhibit, delegate_output, delegate_pointer_constraints,
+    delegate_pointer_gestures, delegate_presentation, delegate_primary_selection,
+    delegate_relative_pointer, delegate_seat, delegate_security_context, delegate_session_lock,
+    delegate_single_pixel_buffer, delegate_text_input_manager, delegate_viewporter,
     delegate_virtual_keyboard_manager, delegate_xdg_activation, delegate_xdg_decoration,
 };
 
@@ -90,7 +95,8 @@ impl SeatHandler for Smallvil {
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
         let dh = &self.display_handle;
         let client = focused.and_then(|s| dh.get_client(s.id()).ok());
-        set_data_device_focus(dh, seat, client);
+        set_data_device_focus(dh, seat, client.clone());
+        set_primary_focus(dh, seat, client);
     }
 }
 
@@ -121,6 +127,18 @@ impl DataDeviceHandler for Smallvil {
 impl WaylandDndGrabHandler for Smallvil {}
 
 delegate_data_device!(Smallvil);
+
+//
+// wp-primary-selection-unstable-v1 (select-to-copy / middle-click paste)
+//
+
+impl PrimarySelectionHandler for Smallvil {
+    fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {
+        &mut self.primary_selection_state
+    }
+}
+
+delegate_primary_selection!(Smallvil);
 
 //
 // wlr-data-control-unstable-v1 (clipboard-manager hooks)
