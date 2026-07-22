@@ -2,6 +2,51 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.57.0] - 2026-07-22
+
+### Added
+- **Hyprland-style persistent configuration diagnostics.** Parse failures now create a compositor-owned top panel on every output, reserve 96 logical pixels from tiled/maximized work areas, remain until a successful reload, scale per output, wrap long file/line errors, and publish an assertive accessibility alert. The existing timed toast path remains for reload confirmation and immediate failure feedback.
+- **A built-in Tide wallpaper fallback.** Fi3w0's canonical `assets/tide-aqua-4k.png` artwork is embedded and decoded once into a native 3840×2160 ARGB texture, retaining full 4K detail instead of enlarging a soft 640×360 copy. It scales behind the desktop with centered `cover` cropping instead of aspect-ratio distortion. Standard layer-shell background clients render above it, so richer external wallpaper tools replace it without TideWM-specific hooks. The new faithful transparent logo is now the canonical README/session-picker artwork.
+- **`wp-security-context-v1` with real policy filtering.** Security-context listeners tag clients with sandbox/app/instance metadata; sandboxed clients cannot see session-lock, input-method, virtual-keyboard, global clipboard-control, capture, foreign-toplevel, gamma/DPMS, or output-management globals. Security-context clients also cannot create nested security contexts.
+- **Per-window capture and screencasting.** `ext-foreign-toplevel-image-capture-source-v1` renders a selected toplevel (including its surface tree/popups) without neighboring windows or desktop chrome. Mutter `RecordWindow` accepts TideWM's numeric `window_id` (also exposed by `windows`/`focused-window` IPC) and feeds the same bounded PipeWire SHM stream machinery as monitor capture.
+- **Full-output wlr-screencopy DMA-BUF fast path.** DRM sessions advertise ARGB8888 DMA-BUF capture and render directly into a validated client buffer, with no CPU readback/copy and an explicit GPU-fence wait before `ready`. It fails closed when privacy exclusions are active; SHM remains the portable fallback and region-capture path. PipeWire itself remains SHM-backed for now.
+- **Comparison-tier daily-use controls:** `resize-left/right/up/down` keyboard actions for floating/BSP windows; IPC batch requests (1–128 actions, complete pre-validation before execution); regex `app_id_regex`/`title_regex` window matching; `maximize`/`fullscreen` initial rule state; and per-window `block_capture`.
+
+### Fixed
+- Nested sessions now replace inherited host-desktop identity (`DESKTOP_SESSION`, both XDG desktop variables, and compositor control sockets) for their own children, while deliberately not importing their disposable `WAYLAND_DISPLAY` into the shared systemd/D-Bus activation environment. This fixes Fastfetch identifying a nested client as Hyprland and prevents nested children or newly activated host services from addressing the wrong compositor. `TIDEWM_VERSION` is exported to children for integrations; Fastfetch itself still needs an upstream TideWM version probe to append it to the WM module.
+- Interactive compositor move/resize now requires a physically pressed Super key, not XKB's broader effective `logo` modifier state. A latched modifier or a stale nested focus transition can therefore no longer turn a plain pointer drag into a window grab.
+- Visible frames and screenshots now share the same wallpaper/error-panel stacking on both winit and udev backends; lock frames continue to skip all desktop UI/content rather than merely covering it.
+- Startup config errors are retained for the persistent panel instead of being logged and lost when defaults are used.
+- Keyboard-resizing a floating window preserves its global desktop position instead of confusing surface-local geometry with its `Space` location and teleporting it to the output origin.
+- IPC `quit` schedules shutdown after a short response grace period, so `tidectl quit` receives success instead of reporting a misleading EOF while TideWM exits correctly.
+- A custom config placed in a broad directory such as `/tmp` no longer loses hot reload when an unrelated protected subdirectory makes recursive watching fail; TideWM falls back to watching the config directory non-recursively.
+
+### Verification
+- Default tests: 66 passed. All-feature tests: 77 passed. All-feature/all-target Clippy passes with warnings denied, and the locked all-feature release build succeeds. Nested live checks cover the wallpaper, startup and hot-reload error panels, successful error recovery, the broad-directory watcher fallback, screenshot stacking, graceful IPC shutdown, isolated TideWM child identity, and a real Kitty/Fastfetch `kitty-direct` image. The pointer drag correction is code-reviewed but needs the user's physical mouse check; live DRM/DMA-BUF and portal/OBS verification remains for the hardware pass.
+
+## [0.56.0] - 2026-07-22
+
+### Added
+- **Completed output screencasting over PipeWire.** `Session::Start` now creates a fixed-size BGRA `Video/Source`, emits `PipeWireStreamAdded`, and streams mapped-SHM frames requested from the compositor over calloop. Frames reuse `capture.rs` end to end, so session-lock protection, compositor UI stacking, cursor compositing, and `layer_rule { block_capture = true }` exclusions apply equally to screenshots and screencasts. Cursor mode 0 is hidden; modes 1/2 use embedded cursor as the safe v1 fallback. `Stop` drops the PipeWire thread, emits stream closure, and unregisters stream objects.
+- **AccessKit/AT-SPI tree for TideWM-owned UI.** Workspace state, named workspaces, overview entries, tab groups, and toast alerts now publish through `accesskit_unix`; error toasts are assertive live regions. Adapter callbacks consume an owned snapshot and never touch Smithay state from their worker thread. Locked sessions expose only a locked status and suppress window titles/notifications.
+- **Compositor workspace swipes.** Optional `workspace_swipe_fingers` and `workspace_swipe_distance` touchpad settings consume horizontal libinput swipes and switch one adjacent workspace. The gesture decision is unit-tested independently of unavailable nested touchpad hardware.
+- **Primary-selection protocol support**, including seat-focus synchronization and data-control integration for middle-click selection workflows.
+
+### Fixed
+- **Output disconnect migration now covers floating windows and associated state**, not only tiles: geometry is translated/clamped to the fallback output, fullscreen/maximize restore records and group ownership move, hidden workspaces remain hidden, and stale per-output workspace history is removed.
+- **XDG popup null-buffer lifecycle is explicit.** Popups map on their first buffer, unmap on null-buffer commits, dismiss the correct active grab, and can receive a fresh initial configure before remapping.
+- **Touch taps now focus their target** through TideWM's central focus authority (and raise floating windows); keyboard-interactive layers are handled without bypassing session-lock policy.
+- **Capture cursor parity:** client-provided cursor surfaces, hotspots, idle hiding, and `cursor_always_visible` now match the visible udev frame instead of only supporting named cursor glyphs.
+- **Daily-driver lifecycle and overload hardening.** Spawned processes are retained and reaped through `SIGCHLD`; PipeWire workers stop and join with their stream handles; screencast sessions/objects are removed on `Stop` or DBus-owner loss; IPC connections, capture sessions, pending readbacks, DBus sessions/streams, and accessibility clients/grabs now have explicit bounds and idle timeouts.
+- **Capture correctness and privacy fixes.** Capture exclusions now transform correctly on rotated/flipped/scaled outputs, padded SHM buffers use the real last-row bound, stale screencast frames are cleared on failure/hot-unplug, same-output stream requests share readbacks, and burst screenshots are spread across frames instead of freezing one compositor turn.
+- **Failure paths no longer take down or wedge the WM.** Nested renderer bind/render/submit errors retry instead of panicking; vanished popup clients cannot panic initial configure; Wayland dispatch failures stop cleanly; accessibility DBus backpressure fails open instead of swallowing keys; config reload uses trailing-edge debounce and coalesces watcher events.
+- **Stable accessibility node IDs and output focus repair.** Large tab groups cannot collide in the AccessKit tree, stale modifier timestamps are pruned, and removing an output repairs keyboard focus away from hidden/migrated surfaces.
+- **IPC responses are fully nonblocking and complete.** Partial writes continue on writable readiness, stalled request/response peers time out, and the control socket is forced to owner-only mode (`0600`).
+
+### Tests
+- Default and all-feature builds pass; all 72 tests pass with every feature enabled. All-feature Clippy passes with warnings denied.
+- Live nested/session-bus check: `CreateSession -> RecordMonitor(winit-0) -> Start` published `tidewm-screencast-winit-0` as a PipeWire `Video/Source`; `Stop` removed it. Moving-frame/OBS correctness remains explicitly unverified because this machine lacks a usable portal/video-source consumer and that validation needs the real udev/DRM backend.
+
 ## [0.55.0] - 2026-07-22
 
 ### Added

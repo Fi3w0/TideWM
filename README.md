@@ -34,14 +34,17 @@ Full modern tiling on the fundamentals -- BSP and master/stack, workspaces, grou
 - Layer-shell: bars, launchers, lock screens
 - XWayland, via [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite)
 - Screenshots, clipboard, session lock
+- Optional PipeWire monitor and per-window screencasting
+- A low-memory built-in Tide wallpaper; layer-shell wallpaper tools replace it normally
 - Hot-reloadable config in Waves, TideWM's own format, split across files, `env`/`$variables`/`$wave(...)`
-- Per-app window rules
+- Per-app window rules, including regex matching, initial fullscreen/maximize, and capture privacy
 - Submaps: temporary keybind layers (sway/Hyprland's "mode")
 - Workspace overview (`Super+O`)
 - Keyboard layout and touchpad (libinput) config
 - JSON IPC socket, plus a `tidectl` CLI over it
 - Server-side decorations enforced
 - First-boot hint on an empty desktop, gone once you open a window or edit config
+- Persistent, workspace-reserving config-error panel plus the existing reload/debug toasts
 
 Full config reference, every action string, and the protocol matrix: [DOCUMENTATION.md](DOCUMENTATION.md).
 
@@ -52,10 +55,10 @@ Full config reference, every action string, and the protocol matrix: [DOCUMENTAT
 - **Nested (dev/testing)**: yes, `cargo run` opens TideWM as a window inside any existing session.
 - **Real hardware**: verified on AMD -- backend, tiling, pointer-constraints (tested against real Minecraft), interactive drag/resize.
 - **Nvidia**: overlay-plane workaround is built in, not yet run on real Nvidia hardware.
-- **DPMS / gamma / lid-switch**: protocol-complete, real hardware behavior not yet verified.
+- **DPMS / gamma**: protocol-complete and verified on AMD hardware; lid/tablet switches still need broader hardware coverage.
 - **Touchpad config**: built (tap, natural-scroll, accel, click-method, ...), not yet verified on real hardware.
-- **Touchpad/mouse gestures**: not built.
-- **Screencasting**: screenshots work; OBS/browser screen-*recording* doesn't yet.
+- **Touchpad gestures**: compositor workspace swipes are built; broader real-device coverage is pending.
+- **Screencasting**: monitor and per-window PipeWire streams are built behind `--features screencast`; end-to-end portal/OBS and DMA-BUF PipeWire validation still needs the hardware test pass.
 - **AUR package**: not yet -- build from source below.
 
 ## Quick Start

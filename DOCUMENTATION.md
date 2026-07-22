@@ -4,6 +4,7 @@ Full reference for configuring and controlling TideWM: every config key, every a
 
 - [Command-line flags](#command-line-flags)
 - [Config file](#config-file)
+- [Wallpaper behavior](#wallpaper-behavior)
 - [Config reference](#config-reference)
 - [Action strings](#action-strings)
 - [IPC and `tidectl`](#ipc-and-tidectl)
@@ -20,7 +21,7 @@ Full reference for configuring and controlling TideWM: every config key, every a
 
 ## Config file
 
-`$XDG_CONFIG_HOME/tidewm/config.wave`, or `~/.config/tidewm/config.wave` if `XDG_CONFIG_HOME` isn't set (or the path given to `--config`, see above). Written out with working defaults on first run. Almost every change hot-reloads on save — no restart needed — and a bad edit is reported (with a file/line pointing at the exact problem) and the previous config kept running, not silently discarded. The two documented exceptions: `xwayland { enabled }` (spawning/tearing down `xwayland-satellite` isn't done live) and `input { touchpad { ... } }` (re-reads on save, but only reaches a touchpad connected *after* the edit — see that section below). Everything else, including keyboard layout, applies immediately.
+`$XDG_CONFIG_HOME/tidewm/config.wave`, or `~/.config/tidewm/config.wave` if `XDG_CONFIG_HOME` isn't set (or the path given to `--config`, see above). Written out with working defaults on first run. Almost every change hot-reloads on save — no restart needed — and a bad edit is shown in a persistent compositor-owned panel that reserves space above tiled windows (with file/line detail) while the previous config keeps running. Fixing the file clears the panel; the existing short reload/debug toast remains separate. The main exception is `xwayland { enabled }` (spawning/tearing down `xwayland-satellite` isn't done live). Everything else, including keyboard layout and already-connected touchpads, applies immediately.
 
 ### Waves format
 
@@ -46,6 +47,10 @@ bind $mod+Return = spawn:$terminal
 - **The including file's own keys always win over anything it includes.** If `config.wave` includes `overrides.wave`, and both set `gaps`, `config.wave`'s own value wins — put an override directly in the file doing the including, not in a file you list last.
 - A broken include (missing, unreadable, unparseable, or a cycle) is skipped with a warning; it doesn't fail the whole config.
 - The config directory is watched recursively (`*.wave` files only, dotfiles/dotdirs skipped) — editing any included file hot-reloads exactly like editing the main file.
+
+## Wallpaper behavior
+
+TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh session never needs a separate daemon. The source is decoded once at its native 3840×2160 resolution and scales to each output with centered `cover` cropping rather than distortion; it is never pre-downsampled, and it is hidden while the session is locked. This costs about 31.6 MiB of steady-state pixel backing in exchange for retaining full 4K detail. It is intentionally only a fallback: standard Wayland layer-shell background clients render above it, so tools such as `swaybg`, `swww`/`awww`, or another compatible wallpaper daemon can provide images, animations, transitions, and per-output management without a TideWM-specific API. Start one with `spawn_at_startup` if desired.
 
 ## Config reference
 
@@ -95,7 +100,7 @@ env {
 
 ### `input { touchpad { } }`
 
-udev backend only — winit's nested host input never reaches a real libinput device, so these sit unused there. Every key is opt-in: omit it and that setting is left at whatever your driver already defaults to. Applied once per touchpad-capable device (libinput's tap-finger-count check) when it's reported by libinput — startup enumeration and hotplug both fire this, but **a config edit here needs a restart to reach an already-connected touchpad** (unlike everything else in this table, this one isn't reloaded live).
+udev backend only — winit's nested host input never reaches a real libinput device, so these sit unused there. Every key is opt-in: omit it and that setting is left at whatever your driver already defaults to. Applied per touchpad-capable device (libinput's tap-finger-count check) at startup/hotplug and re-applied to already-connected touchpads on config reload.
 
 | Key | Type | Notes |
 | --- | --- | --- |
@@ -182,6 +187,8 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 | --- | --- | --- |
 | `app_id` | string, optional | Matches exactly. At least one of `app_id`/`title` is required — a rule with neither never matches anything. |
 | `title` | string, optional | Matches case-insensitively, anywhere in the string. |
+| `app_id_regex` | regular expression, optional | Rust regex matched against the full app ID string. Combines with other criteria in the same rule. |
+| `title_regex` | regular expression, optional | Rust regex matched against the title. Use `(?i)` for case-insensitive matching. |
 | `workspace` | integer, optional | Initial workspace, same numbering as `workspace:N` keybinds (including `0`, the scratchpad). |
 | `output` | string, optional | Initial output by connector name. Falls back to normal placement if unset or unconnected. |
 | `float` | bool | Default `false`. |
@@ -189,10 +196,13 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 | `pin` | bool | Default `false`. Implies `float`. |
 | `tile` | bool | Default `false`. Forces tiled even if the auto-float heuristic (a window with a parent, e.g. a dialog, or one whose min/max size are equal, e.g. a splash screen) would otherwise float it. No effect if `float`/`pin` also match. |
 | `no_focus` | bool | Default `false`. Maps without stealing focus — whatever was focused before stays focused. |
+| `maximize` | bool | Default `false`. Opens maximized and implies floating placement. |
+| `fullscreen` | bool | Default `false`. Opens fullscreen on its selected output. |
+| `block_capture` | bool | Default `false`. A per-window capture/screencast source renders black instead of exposing the window. |
 | `position` | `<x>x<y>`, optional | Exact floating placement. No-op unless the window ends up floating. |
 | `size` | `<width>x<height>`, optional | Exact floating size. No-op unless the window ends up floating. |
 
-Multiple rules can match the same window: `workspace`/`output`/`position`/`size` take the *last* match, `float`/`pseudo_tile`/`pin`/`tile`/`no_focus` accumulate (any match sets it, never unsets it).
+Multiple rules can match the same window: `workspace`/`output`/`position`/`size` take the *last* match; boolean effects accumulate (any match sets one, never unsets it).
 
 ```
 rule {
@@ -267,6 +277,7 @@ The same set of strings works after `bind ... =` at the top level or inside a `s
 - `focus-urgent` — jump to whichever window is currently marked urgent, if any
 - `focus-left` / `focus-right` / `focus-up` / `focus-down`
 - `swap-left` / `swap-right` / `swap-up` / `swap-down`
+- `resize-left` / `resize-right` / `resize-up` / `resize-down` — shrink/grow the focused floating window by 24 logical pixels, or move its nearest BSP split
 - `layout:bsp` / `layout:master` — switch the current workspace's tiling algorithm
 - `master-grow` / `master-shrink` — nudge the master/stack ratio (master layout only, no-op under BSP)
 
@@ -295,7 +306,7 @@ The same set of strings works after `bind ... =` at the top level or inside a `s
 
 ## IPC and `tidectl`
 
-`$XDG_RUNTIME_DIR/tidewm-<pid>.sock`: one JSON request line in, one JSON response line out, per connection. Read queries return structured data; `{"request": "action", "action": "<any string above>"}` runs any action string. This is genuinely the same path a keybind press uses (`config::parse_action` → `Smallvil::run_action`), so anything a keybind can do is scriptable from a shell, and anything a later version adds to the action catalog is IPC-addressable for free.
+`$XDG_RUNTIME_DIR/tidewm-<pid>.sock`: one JSON request line in, one JSON response line out, per connection. Read queries return structured data; `{"request": "action", "action": "<any string above>"}` runs any action string. `{"request":"batch","actions":["workspace:2","spawn:kitty"]}` validates the complete list first, then executes up to 128 actions in order, so an invalid later item cannot leave a half-run batch. This is genuinely the same path a keybind press uses (`config::parse_action` → `Smallvil::run_action`).
 
 Queries: `outputs`, `workspaces`, `windows`, `focused-window`, `active-submap`.
 
@@ -311,6 +322,7 @@ tidectl move-to-workspace 2
 tidectl spawn kitty
 tidectl submap nav              # shorthand for action submap:nav
 tidectl action toggle-floating  # explicit passthrough, works for any action string
+tidectl batch workspace:2 spawn:kitty
 tidectl active-submap
 --json                          # on any query, for scripting
 ```
@@ -332,8 +344,9 @@ Full flag/command list: `tidectl --help`.
 | `ext-session-lock-v1` | Screen lock (`swaylock`, `hyprlock`) | Done |
 | `ext-foreign-toplevel-list-v1` | Read-only toplevel list | Done |
 | `wlr-foreign-toplevel-management-v1` | Bidirectional toplevel control (waybar's `wlr/taskbar`, ags v1) | Done |
-| `wlr-screencopy-unstable-v1` + `ext-image-copy-capture-v1` | Screenshots (`grim`) | Done — output-level only, no per-window capture |
-| `wlr-data-control-unstable-v1` | Clipboard managers (`cliphist`, `wl-clip-persist`) | Done — regular selection only, no primary selection |
+| `wlr-screencopy-unstable-v1` + `ext-image-copy-capture-v1` | Screenshots (`grim`) | Done — output and per-window ext capture; SHM everywhere plus direct DMA-BUF rendering for full-output wlr capture on DRM sessions |
+| `wlr-data-control-unstable-v1` | Clipboard managers (`cliphist`, `wl-clip-persist`) | Done, including primary selection |
+| `wp-security-context-v1` | Sandboxed Wayland listener and policy identity | Done — sandboxed clients are denied session-lock, IME/virtual-keyboard, global clipboard control, capture, output-control, and foreign-toplevel globals |
 | `xdg-output-manager-v1` | Output geometry disclosure | Done |
 | `idle-inhibit-unstable-v1` / `ext-idle-notify-v1` | Idle inhibition and notification | Done |
 | `wp-pointer-constraints-v1` + `wp-relative-pointer-v1` | Pointer lock/confine, relative motion | Done — verified live (Minecraft camera-look) |
@@ -345,5 +358,6 @@ Full flag/command list: `tidectl --help`.
 | `wlr-output-power-management-unstable-v1` | Display on/off (DPMS) | Protocol + render-loop logic done; real CRTC power toggle unverified on hardware |
 | `zwlr-gamma-control-manager-v1` | Night-light tools (`wlsunset`, `gammastep`) | Protocol + DRM gamma ioctls done; real color-change unverified on hardware |
 | `org.freedesktop.a11y.KeyboardMonitor` (DBus, not a Wayland protocol) | Screen reader (Orca) grabbing/watching keys system-wide | Done, behind the `accessibility` Cargo feature (off by default, `cargo build --features accessibility`) — see CHANGELOG for the verification bar |
+| `org.gnome.Mutter.ScreenCast` + PipeWire | Portal-facing monitor/window video streams | Done behind the `screencast` Cargo feature; shallow PipeWire node lifecycle verified, real portal/OBS hardware validation pending |
 
-Everything on this project's original "rice ecosystem compatibility" list is implemented. Still open beyond this matrix: compositor-bound touchpad gestures, an AccessKit-exposed accessible tree for TideWM's own UI (toast/overview/tab-strip announcements to a screen reader), and screencasting's PipeWire half (the D-Bus interface exists; `Session.Start` errors until it's built).
+Everything on the original protocol/rice compatibility list is implemented. Remaining work is chiefly real-hardware validation, PipeWire DMA-BUF transport (the working stream currently uses mapped SHM), and visual/render identity work.
