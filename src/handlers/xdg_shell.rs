@@ -53,20 +53,20 @@ impl XdgShellHandler for Smallvil {
         self.detach_mapped_toplevel(surface.wl_surface());
         self.forget_window_focus(surface.wl_surface());
         self.retile();
-        self.repair_keyboard_focus(
-            preferred_output.as_deref(),
-            SERIAL_COUNTER.next_serial(),
-        );
+        self.repair_keyboard_focus(preferred_output.as_deref(), SERIAL_COUNTER.next_serial());
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
         self.unconstrain_popup(&surface);
+        self.unmapped_popup_surfaces
+            .insert(surface.wl_surface().clone());
         if let Err(err) = self.popups.track_popup(PopupKind::Xdg(surface)) {
             tracing::warn!(?err, "Failed to track xdg popup");
         }
     }
 
-    fn popup_destroyed(&mut self, _surface: PopupSurface) {
+    fn popup_destroyed(&mut self, surface: PopupSurface) {
+        self.unmapped_popup_surfaces.remove(surface.wl_surface());
         // The popup pixels are part of its root Window/LayerSurface render
         // element. Removing the role does not otherwise dirty that output.
         self.request_redraw();
@@ -652,15 +652,27 @@ pub fn handle_commit(state: &mut Smallvil, surface: &WlSurface) {
         }
     }
 
-    // Handle popup commits.
+    // Handle popup commits. PopupManager tracks role/tree lifetime but does
+    // not distinguish a mapped popup from a role kept alive after committing
+    // a null buffer, so mirror the explicit toplevel/layer lifecycle here.
+    let popup_was_unmapped = state.unmapped_popup_surfaces.contains(surface);
     state.popups.commit(surface);
     if let Some(popup) = state.popups.find_popup(surface) {
         match popup {
             PopupKind::Xdg(ref xdg) => {
-                if !xdg.is_initial_configure_sent() {
-                    // NOTE: This should never fail as the initial configure is always
-                    // allowed.
-                    xdg.send_configure().expect("initial configure failed");
+                if popup_was_unmapped && has_buffer {
+                    state.unmapped_popup_surfaces.remove(surface);
+                } else if !popup_was_unmapped && !has_buffer {
+                    state.unmapped_popup_surfaces.insert(surface.clone());
+                    let root = find_popup_root_surface(&popup).ok();
+                    state.unmap_popup_grab(surface, root.as_ref());
+                } else if popup_was_unmapped && !has_buffer && !xdg.is_initial_configure_sent() {
+                    if let Err(err) = xdg.send_configure() {
+                        // A client can disappear between commit dispatch and
+                        // configure emission. That ends this popup lifetime;
+                        // it must never take the compositor down with it.
+                        tracing::debug!(%err, "Popup vanished before initial configure");
+                    }
                 }
             }
             PopupKind::InputMethod(ref _input_method) => {}

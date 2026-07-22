@@ -382,6 +382,11 @@ pub struct Smallvil {
     /// (re)placed on outputs.
     pub fractional_scale_manager_state: FractionalScaleManagerState,
     pub popups: PopupManager,
+    /// XDG popup roles which currently have no committed buffer. Smithay's
+    /// `PopupManager` tracks role/tree lifetime, not protocol mapping, so a
+    /// persistent popup role needs this separate signal across null-buffer
+    /// unmap and later remap just like `unmapped_toplevels` below.
+    pub(crate) unmapped_popup_surfaces: HashSet<WlSurface>,
     /// Active xdg-popup pointer/keyboard grab and the root shell surface it
     /// belongs to. The focus authority treats a live popup keyboard grab as
     /// the root retaining logical focus even while wl_keyboard targets a
@@ -948,12 +953,14 @@ impl Smallvil {
             input_method_manager_state,
             virtual_keyboard_manager_state,
             popups,
+            unmapped_popup_surfaces: HashSet::new(),
             popup_grab: None,
             unmapped_toplevels: HashMap::new(),
             unmapped_layer_surfaces: HashSet::new(),
             viewporter_state,
             image_capture_source_state,
             output_capture_source_state,
+            toplevel_capture_source_state,
             image_copy_capture_state,
             wlr_screencopy_global,
             capture_sessions: Vec::new(),
@@ -1454,6 +1461,36 @@ impl Smallvil {
         {
             self.release_popup_grab();
         }
+    }
+
+    /// Removes a bufferless popup from the active grab without discarding a
+    /// still-mapped parent menu. A null-buffer commit keeps the xdg_popup
+    /// role alive, so Smithay's resource-lifetime cleanup cannot perform this
+    /// transition for us. Only the topmost popup can be removed from a valid
+    /// nested grab; if a client unmaps a non-topmost ancestor, dismiss the
+    /// whole chain rather than retain focus on an invisible hierarchy.
+    pub(crate) fn unmap_popup_grab(&mut self, surface: &WlSurface, root: Option<&WlSurface>) {
+        if root.is_none()
+            || self
+                .popup_grab
+                .as_ref()
+                .is_none_or(|popup| Some(&popup.root) != root)
+        {
+            return;
+        }
+        let Some(mut popup) = self.popup_grab.take() else {
+            return;
+        };
+        let topmost = popup.grab.current_grab();
+        let strategy = if topmost.as_ref() == Some(surface) {
+            PopupUngrabStrategy::Topmost
+        } else {
+            PopupUngrabStrategy::All
+        };
+        popup.grab.ungrab(strategy);
+        self.popup_grab = Some(popup);
+        self.refresh_popup_grab();
+        self.reconcile_keyboard_focus(SERIAL_COUNTER.next_serial());
     }
 
     /// Drops completed popup-grab bookkeeping after `PopupManager::cleanup`
