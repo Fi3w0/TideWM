@@ -143,6 +143,10 @@ pub fn init_winit(
                             None,
                             None,
                         );
+                        #[cfg(feature = "screencast")]
+                        if let Some(screencast) = &state.screencast {
+                            screencast.refresh_outputs(state.space.outputs());
+                        }
                         state.wlr_output_management_state.refresh(&state.space);
                         state.retile();
                     }
@@ -180,8 +184,18 @@ pub fn init_winit(
                 let locked = !matches!(state.session_lock, SessionLock::Unlocked);
 
                 let render_result = {
-                    let (renderer, mut framebuffer) = entry.backend.bind().unwrap();
-
+                    let (renderer, mut framebuffer) = match entry.backend.bind() {
+                        Ok(bound) => bound,
+                        Err(err) => {
+                            tracing::warn!(
+                                output = entry.output.name(),
+                                ?err,
+                                "Failed to bind nested output; retrying next frame"
+                            );
+                            entry.dirty = true;
+                            continue;
+                        }
+                    };
                     if locked {
                         // Bypass the `render_output` convenience below: it
                         // pulls layer-shell content from
@@ -192,11 +206,15 @@ pub fn init_winit(
                         // windows and layers entirely.
                         let lock_elements = state.lock_render_elements(&entry.output, renderer);
                         let clear_color = [0.0, 0.0, 0.0, 1.0];
-                        entry
-                            .damage_tracker
-                            .render_output(renderer, &mut framebuffer, 0, &lock_elements, clear_color)
-                            .unwrap()
+                        entry.damage_tracker.render_output(
+                            renderer,
+                            &mut framebuffer,
+                            0,
+                            &lock_elements,
+                            clear_color,
+                        )
                     } else {
+                        let error_element = state.config_error_element(&entry.output, renderer);
                         let toast_element = state
                             .toast
                             .as_ref()
@@ -204,6 +222,8 @@ pub fn init_winit(
                         if state.toast.is_some() && toast_element.is_none() {
                             // Fully faded out.
                             state.toast = None;
+                            #[cfg(feature = "accessibility")]
+                            state.sync_accessibility_tree();
                         }
                         // Drawn first so it ends up topmost (index 0 in a
                         // render element list is the front, this codebase's
@@ -222,34 +242,74 @@ pub fn init_winit(
                             .then_some(state.welcome_hint.as_ref())
                             .flatten()
                             .and_then(|hint| hint.render_element(renderer, size));
-                        let custom_elements: Vec<MemoryRenderBufferRenderElement<GlesRenderer>> =
-                            overview_element
-                                .into_iter()
-                                .chain(toast_element)
-                                .chain(state.tab_strip_elements(renderer))
-                                .chain(welcome_element)
-                                .collect();
-
-                        smithay::desktop::space::render_output::<
+                        let wallpaper_element = state.wallpaper_element(&entry.output, renderer);
+                        let space_elements = match smithay::desktop::space::space_render_elements::<
                             _,
-                            MemoryRenderBufferRenderElement<GlesRenderer>,
-                            _,
+                            Window,
                             _,
                         >(
-                            &entry.output,
+                            renderer, [&state.space], &entry.output, 1.0
+                        ) {
+                            Ok(elements) => elements,
+                            Err(err) => {
+                                tracing::warn!(%err, "Failed to gather nested output elements");
+                                entry.dirty = true;
+                                continue;
+                            }
+                        };
+                        let elements: Vec<
+                            crate::backend::udev::OutputRenderElements<
+                                GlesRenderer,
+                                WaylandSurfaceRenderElement<GlesRenderer>,
+                            >,
+                        > = overview_element
+                            .into_iter()
+                            .chain(toast_element)
+                            .chain(error_element)
+                            .chain(state.tab_strip_elements(renderer))
+                            .chain(welcome_element)
+                            .map(crate::backend::udev::OutputRenderElements::Composited)
+                            .chain(
+                                space_elements
+                                    .into_iter()
+                                    .map(crate::backend::udev::OutputRenderElements::Space),
+                            )
+                            .chain(
+                                wallpaper_element
+                                    .map(crate::backend::udev::OutputRenderElements::Composited),
+                            )
+                            .collect();
+
+                        entry.damage_tracker.render_output(
                             renderer,
                             &mut framebuffer,
-                            1.0,
                             0,
-                            [&state.space],
-                            &custom_elements,
-                            &mut entry.damage_tracker,
-                            [0.1, 0.1, 0.1, 1.0],
+                            &elements,
+                            [0.05, 0.05, 0.05, 1.0],
                         )
-                        .unwrap()
                     }
                 };
-                entry.backend.submit(Some(&[damage])).unwrap();
+                let render_result = match render_result {
+                    Ok(result) => result,
+                    Err(err) => {
+                        tracing::warn!(
+                            output = entry.output.name(),
+                            ?err,
+                            "Failed to render nested output; retrying next frame"
+                        );
+                        entry.dirty = true;
+                        continue;
+                    }
+                };
+                if let Err(err) = entry.backend.submit(Some(&[damage])) {
+                    tracing::warn!(
+                        output = entry.output.name(),
+                        ?err,
+                        "Failed to submit nested output; retrying next frame"
+                    );
+                    entry.dirty = true;
+                    continue;
+                }
                 state.mark_output_locked_frame(&entry.output);
 
                 // wp_presentation feedback: collected from the same render

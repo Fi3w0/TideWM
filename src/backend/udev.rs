@@ -1220,9 +1220,14 @@ fn render_surface(
         .map(|geo| geo.loc)
         .unwrap_or_default();
 
-    let toast_element = state.toast.as_ref().and_then(|toast| toast.render_element(renderer, size));
+    let toast_element = state
+        .toast
+        .as_ref()
+        .and_then(|toast| toast.render_element(renderer, size));
     if state.toast.is_some() && toast_element.is_none() {
         state.toast = None;
+        #[cfg(feature = "accessibility")]
+        state.sync_accessibility_tree();
     }
 
     // `cursor_hide_after_ms` (`Smallvil::note_pointer_motion` arms the
@@ -1322,6 +1327,12 @@ fn render_surface(
             .and_then(|overview| overview.render_element(renderer))
     };
 
+    let error_element = if locked {
+        None
+    } else {
+        state.config_error_element(output, renderer)
+    };
+
     let space_elements = if locked {
         Vec::new()
     } else {
@@ -1351,7 +1362,16 @@ fn render_surface(
     let welcome_element = if locked || !state.should_show_welcome_hint() {
         None
     } else {
-        state.welcome_hint.as_ref().and_then(|hint| hint.render_element(renderer, size))
+        state
+            .welcome_hint
+            .as_ref()
+            .and_then(|hint| hint.render_element(renderer, size))
+    };
+
+    let wallpaper_element = if locked {
+        None
+    } else {
+        state.wallpaper_element(output, renderer)
     };
 
     let elements: Vec<OutputRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>> =
@@ -1360,19 +1380,23 @@ fn render_surface(
         overview_element
             .into_iter()
             .chain(toast_element)
+            .chain(error_element)
             .chain(cursor_glyph_element)
             .chain(tab_strip_elements)
             .chain(welcome_element)
             .map(OutputRenderElements::Composited)
             .chain(cursor_surface_element.into_iter().map(OutputRenderElements::Cursor))
             .chain(space_elements.into_iter().map(OutputRenderElements::Space))
+            // Last is backmost: the built-in image never covers a client
+            // or a layer-shell wallpaper placed above it.
+            .chain(wallpaper_element.map(OutputRenderElements::Composited))
             .chain(lock_elements.into_iter().map(OutputRenderElements::Lock))
             .collect();
 
-    let render_result = surface.compositor.render_frame::<
-        _,
-        OutputRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>,
-    >(
+    let render_result = surface.compositor.render_frame::<_, OutputRenderElements<
+        GlesRenderer,
+        WaylandSurfaceRenderElement<GlesRenderer>,
+    >>(
         renderer,
         &elements,
         [0.05, 0.05, 0.05, 1.0],
