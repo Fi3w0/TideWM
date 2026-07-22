@@ -3,9 +3,9 @@ name = "tidewm"
 version = "0.53.0"
 edition = "2021"
 # Verified floor: wayland-protocols 0.32.13 requires 1.86 (1.85 fails to
-# compile it). The optional `screencast` feature needs newer still (zbus
-# 5.18 requires 1.87) -- documented in README, not reflected here since
-# the feature is off by default and not yet functional (see AGENT.md).
+# compile it). The optional `screencast`/`accessibility` features need
+# newer still (zbus 5.18 requires 1.87) -- documented in README, not
+# reflected here since both are off by default (see AGENT.md).
 rust-version = "1.86"
 
 [[bin]]
@@ -30,6 +30,10 @@ wayland-protocols-wlr = "0.3.12"
 zbus = { version = "5.13.2", optional = true }
 async-io = { version = "2.6.0", optional = true }
 pipewire = { version = "0.10.0", optional = true }
+# Accessibility only (`org.freedesktop.a11y.KeyboardMonitor`): its
+# NameOwnerChanged disconnect-watch stream needs `StreamExt`, matching
+# niri's own dependency on this crate for the identical purpose.
+futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }
 # Keep Smithay and smithay-drm-extras on Niri's exact known-good revision.
 # Crates.io 0.7.0 does not reset wlr-layer-shell state on null-buffer
 # unmap; this revision includes upstream commit 0565e70a, which performs
@@ -66,6 +70,13 @@ features = [
 # is a structural skeleton only, no DBus interface or PipeWire stream is
 # actually wired up yet.
 screencast = ["dep:zbus", "dep:async-io", "dep:pipewire"]
+# Off by default, same reasoning as `screencast` (pulls in zbus/async-io) --
+# deliberately its own flag, not bundled with `screencast`, so enabling
+# accessibility doesn't also drag in PipeWire/`libclang`. Implements
+# `org.freedesktop.a11y.KeyboardMonitor` (see AGENT.md's "Accessibility"
+# section) so a screen reader (Orca) can grab/watch keys system-wide --
+# Wayland's per-client input isolation otherwise makes that impossible.
+accessibility = ["dep:zbus", "dep:async-io", "dep:futures-util"]
 
 [profile.release]
 lto = true

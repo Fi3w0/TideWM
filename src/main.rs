@@ -2,6 +2,8 @@
 
 mod handlers;
 
+#[cfg(feature = "accessibility")]
+mod accessibility;
 mod backend;
 mod capture;
 mod config;
@@ -210,6 +212,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "screencast")]
     {
         state.screencast = crate::screencast::init(&event_loop.handle(), state.space.outputs());
+    }
+
+    // No output/backend dependency (unlike screencast above), but grouped
+    // here with the other optional-subsystem init rather than inside
+    // `Smallvil::new` for the same reason: keep `new` itself free of
+    // feature-gated DBus-thread spawning.
+    #[cfg(feature = "accessibility")]
+    {
+        state.accessibility = Some(crate::accessibility::init());
     }
 
     // Kept alive for the process lifetime: dropping it stops the watch.

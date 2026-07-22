@@ -11,7 +11,7 @@ use smithay::{
     },
     desktop::layer_map_for_output,
     input::{
-        keyboard::{keysyms, FilterResult},
+        keyboard::{keysyms, FilterResult, Keysym},
         pointer::{
             AxisFrame, ButtonEvent, Focus, GrabStartData as PointerGrabStartData,
             GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
@@ -29,6 +29,9 @@ use smithay::{
         shell::wlr_layer::KeyboardInteractivity,
     },
 };
+
+#[cfg(feature = "accessibility")]
+use std::time::Duration;
 
 use crate::{
     config::{Action, Keybind, TouchpadConfig},
@@ -187,6 +190,52 @@ impl Smallvil {
         Some(event.position_transformed(output_geo.size) + output_geo.loc.to_f64())
     }
 
+    /// Feeds this keystroke to the accessibility keyboard monitor (a
+    /// screen reader's grab/watch registrations), if anything is
+    /// listening. Must run *before* `keyboard.input()` is called for this
+    /// event, not from inside its filter closure -- see the call site's
+    /// own comment in `process_input_event` for why. Reads the seat's
+    /// XKB state as it stands *before* this keystroke updates it (matches
+    /// niri's own `a11y_process_key`), since a grab decision has to be
+    /// made before Smithay's own `keyboard.input()` gets a chance to
+    /// mutate that state at all.
+    #[cfg(feature = "accessibility")]
+    fn a11y_process_key(
+        &mut self,
+        time: Duration,
+        keycode: smithay::backend::input::Keycode,
+        key_state: KeyState,
+    ) -> crate::accessibility::KbMonBlock {
+        if self.accessibility.is_none() {
+            return crate::accessibility::KbMonBlock::Pass;
+        }
+
+        let keyboard = self.seat.get_keyboard().unwrap();
+        let (mods, keysym, unichar) = keyboard.with_xkb_state(self, |context| {
+            let xkb = context.xkb().lock().unwrap();
+            // SAFETY: not changing the ref count, only reading the
+            // current state through it -- same justification niri's own
+            // reference implementation gives for this identical call.
+            let state = unsafe { xkb.state() };
+            (
+                state.serialize_mods(smithay::input::keyboard::xkb::STATE_MODS_EFFECTIVE),
+                state.key_get_one_sym(keycode),
+                state.key_get_utf32(keycode),
+            )
+        });
+
+        let repeat_delay = Duration::from_millis(self.config.input.repeat_delay.max(0) as u64);
+        self.accessibility.as_ref().unwrap().process_key(
+            repeat_delay,
+            time,
+            key_state == KeyState::Released,
+            mods,
+            keysym,
+            unichar,
+            keycode.raw(),
+        )
+    }
+
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) {
         // Device topology changes aren't user activity; every other variant
         // reaching this function is a real keyboard/pointer/touch event.
@@ -201,6 +250,34 @@ impl Smallvil {
                 let key_state = event.state();
                 tracing::trace!(keycode = ?event.key_code(), ?key_state, "Raw key event");
 
+                // Accessibility keyboard grabs (a screen reader watching or
+                // grabbing keys system-wide, `org.freedesktop.a11y.KeyboardMonitor`)
+                // have to be decided *before* `keyboard.input()` runs at
+                // all, not from inside its filter closure below: a grabbed
+                // modifier's first press must not touch XKB state (e.g. a
+                // Caps-Lock-shaped toggle), and `keyboard.input()` itself
+                // is what updates that state, before the closure ever
+                // runs. See `Smallvil::a11y_process_key`'s own doc for why
+                // this mirrors niri's own `KeyboardMonitor` positioning
+                // exactly. `a11y_block` (a plain `bool`, not the 3-way
+                // enum) is what the closure below actually branches on, so
+                // its body compiles identically regardless of whether the
+                // `accessibility` feature is on.
+                #[cfg(feature = "accessibility")]
+                let a11y_block = {
+                    let block = self.a11y_process_key(
+                        Duration::from_millis(u64::from(time)),
+                        event.key_code(),
+                        key_state,
+                    );
+                    if block == crate::accessibility::KbMonBlock::ModifierFirstPress {
+                        return;
+                    }
+                    block != crate::accessibility::KbMonBlock::Pass
+                };
+                #[cfg(not(feature = "accessibility"))]
+                let a11y_block = false;
+
                 let keyboard = self.seat.get_keyboard().unwrap();
                 keyboard.input::<(), _>(
                     self,
@@ -209,10 +286,18 @@ impl Smallvil {
                     serial,
                     time,
                     |data, modifiers, handle| {
-                        if key_state != KeyState::Pressed {
-                            return FilterResult::Forward;
-                        }
-
+                        // VT-switch is the hardware/session-level escape
+                        // hatch and must stay reachable even if
+                        // accessibility (buggy or otherwise) is currently
+                        // grabbing everything -- checked first, before
+                        // `a11y_block` gets a say, same reasoning the
+                        // lock/inhibit gates below already use for their
+                        // own escape-hatch ordering. Wrapped in its own
+                        // press check (rather than relying on the shared
+                        // guard further down, which now comes after this)
+                        // to keep this block's own behavior byte-for-byte
+                        // unchanged from before.
+                        if key_state == KeyState::Pressed {
                         // Ctrl+Alt+F<N>: usually resolves to a distinct
                         // XF86Switch_VT_N keysym once libinput/DRM (not a host
                         // compositor) owns the keyboard -- xkbcommon's default
@@ -260,6 +345,35 @@ impl Smallvil {
                                 ),
                             }
                             return FilterResult::Intercept(());
+                        }
+                        }
+
+                        if a11y_block {
+                            // Mirrors niri's own workaround: forward a
+                            // grabbed *modifier's* release to the client
+                            // anyway, since Wayland's own
+                            // wl_keyboard.enter/modifiers events can leak
+                            // it to a freshly-focused client regardless
+                            // (e.g. opening an a11y tool's own menu with a
+                            // modifier still logically held) -- better to
+                            // let that one case through than have the
+                            // client's own key presses silently do
+                            // nothing until the modifier is re-tapped.
+                            let is_modifier = matches!(
+                                handle.modified_sym(),
+                                Keysym::Shift_L | Keysym::Shift_R
+                                    | Keysym::Control_L | Keysym::Control_R
+                                    | Keysym::Super_L | Keysym::Super_R
+                                    | Keysym::Alt_L | Keysym::Alt_R
+                            );
+                            if key_state != KeyState::Pressed && is_modifier {
+                                return FilterResult::Forward;
+                            }
+                            return FilterResult::Intercept(());
+                        }
+
+                        if key_state != KeyState::Pressed {
+                            return FilterResult::Forward;
                         }
 
                         // Locked: no WM keybind fires (Super+anything must

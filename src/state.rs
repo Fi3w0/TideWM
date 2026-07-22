@@ -592,6 +592,12 @@ pub struct Smallvil {
     /// `screencast` feature is off. See `src/screencast/mod.rs`.
     #[cfg(feature = "screencast")]
     pub screencast: Option<crate::screencast::ScreencastState>,
+
+    /// `org.freedesktop.a11y.KeyboardMonitor` DBus service handle. `None`
+    /// until `main.rs` assigns it and always `None` when the
+    /// `accessibility` feature is off. See `src/accessibility/mod.rs`.
+    #[cfg(feature = "accessibility")]
+    pub accessibility: Option<crate::accessibility::AccessibilityState>,
 }
 
 /// One member of a `WindowGroup`.
@@ -963,6 +969,8 @@ impl Smallvil {
             groups: Vec::new(),
             #[cfg(feature = "screencast")]
             screencast: None,
+            #[cfg(feature = "accessibility")]
+            accessibility: None,
         }
     }
 

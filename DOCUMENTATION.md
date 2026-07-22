@@ -344,5 +344,6 @@ Full flag/command list: `tidectl --help`.
 | `wlr-output-management-unstable-v1` | Runtime output reconfiguration (`wlr-randr`, `kanshi`, `wdisplays`) | Done — position/transform/scale apply live; disabling an output or changing resolution needs real hardware to verify a live modeset |
 | `wlr-output-power-management-unstable-v1` | Display on/off (DPMS) | Protocol + render-loop logic done; real CRTC power toggle unverified on hardware |
 | `zwlr-gamma-control-manager-v1` | Night-light tools (`wlsunset`, `gammastep`) | Protocol + DRM gamma ioctls done; real color-change unverified on hardware |
+| `org.freedesktop.a11y.KeyboardMonitor` (DBus, not a Wayland protocol) | Screen reader (Orca) grabbing/watching keys system-wide | Done, behind the `accessibility` Cargo feature (off by default, `cargo build --features accessibility`) — see CHANGELOG for the verification bar |
 
-Everything on this project's original "rice ecosystem compatibility" list is implemented. Still open beyond this matrix: compositor-bound touchpad gestures, workspace-overview accessibility, and screencasting's PipeWire half (the D-Bus interface exists; `Session.Start` errors until it's built).
+Everything on this project's original "rice ecosystem compatibility" list is implemented. Still open beyond this matrix: compositor-bound touchpad gestures, an AccessKit-exposed accessible tree for TideWM's own UI (toast/overview/tab-strip announcements to a screen reader), and screencasting's PipeWire half (the D-Bus interface exists; `Session.Start` errors until it's built).
