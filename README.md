@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="share/icons/tidewm.png" width="180" alt="TideWM logo">
+<img src="share/icons/TideWM-logo-faithful-4k.png" width="180" alt="TideWM logo">
 
 # TideWM
 
@@ -132,7 +132,7 @@ cargo run --locked
 
 Backend auto-selects: nested (winit) when `WAYLAND_DISPLAY`/`DISPLAY` is set, standalone TTY/DRM (udev) otherwise -- switch to a free VT with neither set to try it standalone.
 
-To launch from a display manager (GDM, SDDM, greetd): put the `TideWM` binary (note the case -- `[[bin]] name` in `Cargo.toml` builds it capitalized, and `tidewm.desktop`'s own `Exec=` line expects exactly that) on `PATH`, copy `share/wayland-sessions/tidewm.desktop` into `/usr/share/wayland-sessions/`, and `share/icons/tidewm.png` into `/usr/share/pixmaps/tidewm.png` for the session picker's icon.
+To launch from a display manager (GDM, SDDM, greetd): put the `TideWM` binary (note the case -- `[[bin]] name` in `Cargo.toml` builds it capitalized, and `tidewm.desktop`'s own `Exec=` line expects exactly that) on `PATH`, copy `share/wayland-sessions/tidewm.desktop` into `/usr/share/wayland-sessions/`, and copy `share/icons/TideWM-logo-faithful-4k.png` to `/usr/share/pixmaps/tidewm.png` for the session picker's icon.
 
 ## Configuration
 
