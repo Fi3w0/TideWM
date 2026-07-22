@@ -61,16 +61,15 @@ impl CompositorHandler for Smallvil {
                 return;
             };
 
-            match state.loop_handle.insert_source(
-                source,
-                move |_, _, state: &mut Smallvil| {
+            match state
+                .loop_handle
+                .insert_source(source, move |_, _, state: &mut Smallvil| {
                     if let Some(client_state) = client.get_data::<ClientState>() {
                         let dh = state.display_handle.clone();
                         client_state.compositor_state.blocker_cleared(state, &dh);
                     }
                     Ok(())
-                },
-            ) {
+                }) {
                 Ok(_) => add_blocker(surface, blocker),
                 Err(err) => {
                     tracing::warn!(

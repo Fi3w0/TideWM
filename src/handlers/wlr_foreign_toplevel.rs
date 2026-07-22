@@ -286,13 +286,11 @@ impl GlobalDispatch<ZwlrForeignToplevelManagerV1, ()> for Smallvil {
             let Ok(client) = wlr_state.dh.get_client(instance.id()) else {
                 continue;
             };
-            let Ok(toplevel) = client
-                .create_resource::<ZwlrForeignToplevelHandleV1, _, Smallvil>(
-                    &wlr_state.dh,
-                    instance.version(),
-                    handle.clone(),
-                )
-            else {
+            let Ok(toplevel) = client.create_resource::<ZwlrForeignToplevelHandleV1, _, Smallvil>(
+                &wlr_state.dh,
+                instance.version(),
+                handle.clone(),
+            ) else {
                 continue;
             };
             instance.toplevel(&toplevel);

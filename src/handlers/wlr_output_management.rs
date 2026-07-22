@@ -170,11 +170,19 @@ fn create_head_resources(
 ) -> Option<HeadResources> {
     let client = dh.get_client(manager.id()).ok()?;
     let head = client
-        .create_resource::<ZwlrOutputHeadV1, Output, Smallvil>(dh, manager.version(), output.clone())
+        .create_resource::<ZwlrOutputHeadV1, Output, Smallvil>(
+            dh,
+            manager.version(),
+            output.clone(),
+        )
         .ok()?;
     manager.head(&head);
     let mode = client
-        .create_resource::<ZwlrOutputModeV1, Output, Smallvil>(dh, manager.version(), output.clone())
+        .create_resource::<ZwlrOutputModeV1, Output, Smallvil>(
+            dh,
+            manager.version(),
+            output.clone(),
+        )
         .ok()?;
     head.mode(&mode);
     Some(HeadResources {
@@ -209,7 +217,11 @@ fn send_static_head_properties(r: &HeadResources, output: &Output) {
 /// enabled/current_mode/position/transform/scale -- resent on every
 /// `refresh()`, since these are exactly the properties output-management
 /// apply can change live.
-fn send_dynamic_head_properties(r: &HeadResources, output: &Output, geo: Option<Rectangle<i32, Logical>>) {
+fn send_dynamic_head_properties(
+    r: &HeadResources,
+    output: &Output,
+    geo: Option<Rectangle<i32, Logical>>,
+) {
     // TideWM never tracks a head that isn't currently mapped (see the
     // module doc comment), so this is always enabled.
     r.head.enabled(1);
@@ -279,14 +291,20 @@ impl Dispatch<ZwlrOutputManagerV1, ()> for Smallvil {
             }
             zwlr_output_manager_v1::Request::Stop => {
                 manager.finished();
-                state.wlr_output_management_state.instances.retain(|m| m != manager);
+                state
+                    .wlr_output_management_state
+                    .instances
+                    .retain(|m| m != manager);
             }
             _ => {}
         }
     }
 
     fn destroyed(state: &mut Self, _client: ClientId, resource: &ZwlrOutputManagerV1, _data: &()) {
-        state.wlr_output_management_state.instances.retain(|m| m != resource);
+        state
+            .wlr_output_management_state
+            .instances
+            .retain(|m| m != resource);
     }
 }
 
@@ -407,7 +425,9 @@ impl Dispatch<ZwlrOutputConfigurationV1, ConfigurationData> for Smallvil {
                     resource.post_error(Error::AlreadyConfiguredHead, "head already configured");
                     return;
                 }
-                inner.ops.insert(output, HeadOp::Enabled(EnabledHeadConfig::default()));
+                inner
+                    .ops
+                    .insert(output, HeadOp::Enabled(EnabledHeadConfig::default()));
             }
             Request::DisableHead { head } => {
                 let Some(output) = head.data::<Output>().cloned() else {
@@ -464,7 +484,11 @@ impl Dispatch<ZwlrOutputConfigurationHeadV1, ConfigHeadData> for Smallvil {
                 }
                 cfg.mode_assigned = true;
             }
-            Request::SetCustomMode { width, height, refresh } => {
+            Request::SetCustomMode {
+                width,
+                height,
+                refresh,
+            } => {
                 if cfg.mode_assigned {
                     resource.post_error(Error::AlreadySet, "mode already set");
                     return;

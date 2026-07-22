@@ -257,14 +257,19 @@ pub fn init_udev(
                     continue;
                 }
             };
-            let egl_context = match EGLContext::new_with_priority(&egl_display, ContextPriority::High) {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), %e, "Failed to create EGL context");
-                    continue;
-                }
-            };
-            let render_formats: Vec<Format> = egl_context.dmabuf_render_formats().iter().copied().collect();
+            let egl_context =
+                match EGLContext::new_with_priority(&egl_display, ContextPriority::High) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(path = %path.display(), %e, "Failed to create EGL context");
+                        continue;
+                    }
+                };
+            let render_formats: Vec<Format> = egl_context
+                .dmabuf_render_formats()
+                .iter()
+                .copied()
+                .collect();
 
             // On split KMS/render-node systems (the common case on AMD and
             // Intel: card0 + renderD128) `node` above is the *display* node
@@ -297,7 +302,14 @@ pub fn init_udev(
             };
 
             tracing::info!(path = %path.display(), "Using GPU");
-            break 'found (drm, drm_notifier, gbm, renderer, render_formats, render_node);
+            break 'found (
+                drm,
+                drm_notifier,
+                gbm,
+                renderer,
+                render_formats,
+                render_node,
+            );
         }
         return Err("No GPU with a connected display found (are you running from a TTY?)".into());
     };
@@ -313,7 +325,10 @@ pub fn init_udev(
             Ok(default_feedback) => {
                 let global = state
                     .dmabuf_state
-                    .create_global_with_default_feedback::<Smallvil>(&display_handle, &default_feedback);
+                    .create_global_with_default_feedback::<Smallvil>(
+                        &display_handle,
+                        &default_feedback,
+                    );
                 state.dmabuf_global = Some(global);
             }
             Err(e) => {
@@ -445,24 +460,37 @@ pub fn init_udev(
     let device_for_gamma_size = Rc::clone(&device);
     state.gamma_size = Some(Box::new(move |target: &Output| {
         let dev = device_for_gamma_size.borrow();
-        let crtc = dev.surfaces.iter().find(|(_, s)| &s.output == target).map(|(&c, _)| c)?;
-        ControlDevice::get_crtc(&dev.drm, crtc).ok().map(|info| info.gamma_length())
+        let crtc = dev
+            .surfaces
+            .iter()
+            .find(|(_, s)| &s.output == target)
+            .map(|(&c, _)| c)?;
+        ControlDevice::get_crtc(&dev.drm, crtc)
+            .ok()
+            .map(|info| info.gamma_length())
     }));
 
     let device_for_set_gamma = Rc::clone(&device);
-    state.set_gamma = Some(Box::new(move |target: &Output, red: &[u16], green: &[u16], blue: &[u16]| {
-        let dev = device_for_set_gamma.borrow();
-        let Some(crtc) = dev.surfaces.iter().find(|(_, s)| &s.output == target).map(|(&c, _)| c) else {
-            return false;
-        };
-        match ControlDevice::set_gamma(&dev.drm, crtc, red, green, blue) {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::warn!(%e, "Failed to set gamma ramp via DRM");
-                false
+    state.set_gamma = Some(Box::new(
+        move |target: &Output, red: &[u16], green: &[u16], blue: &[u16]| {
+            let dev = device_for_set_gamma.borrow();
+            let Some(crtc) = dev
+                .surfaces
+                .iter()
+                .find(|(_, s)| &s.output == target)
+                .map(|(&c, _)| c)
+            else {
+                return false;
+            };
+            match ControlDevice::set_gamma(&dev.drm, crtc, red, green, blue) {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!(%e, "Failed to set gamma ramp via DRM");
+                    false
+                }
             }
-        }
-    }));
+        },
+    ));
 
     // Do the initial render after `device` exists so an unexpectedly empty
     // first frame can use the same estimated-VBlank path as every later
@@ -604,7 +632,9 @@ pub fn init_udev(
                         // inconsistent with what `reset_state()` already
                         // did.
                         surface.powered_off = false;
-                        state.wlr_output_power_management_state.force_on(&surface.output);
+                        state
+                            .wlr_output_power_management_state
+                            .force_on(&surface.output);
                         if let Some(delay) =
                             render_surface(state, surface, &mut renderer.borrow_mut())
                         {
@@ -674,9 +704,9 @@ pub fn init_udev(
     // pending/dirty pair on `SurfaceData`.
     let device_for_timer = Rc::clone(&device);
     let loop_handle_for_timer = event_loop.handle();
-    event_loop.handle().insert_source(
-        Timer::immediate(),
-        move |_, _, state: &mut Smallvil| {
+    event_loop
+        .handle()
+        .insert_source(Timer::immediate(), move |_, _, state: &mut Smallvil| {
             if state.take_needs_redraw() {
                 let mut dev = device_for_timer.borrow_mut();
                 for surface in dev.surfaces.values_mut() {
@@ -693,9 +723,7 @@ pub fn init_udev(
             // again on resume, so nothing gets lost by skipping here.
             if dev.drm.is_active() {
                 let DeviceData {
-                    surfaces,
-                    renderer,
-                    ..
+                    surfaces, renderer, ..
                 } = &mut *dev;
                 let mut renderer = renderer.borrow_mut();
                 for (&crtc, surface) in surfaces.iter_mut() {
@@ -736,8 +764,7 @@ pub fn init_udev(
             let _ = state.display_handle.flush_clients();
 
             TimeoutAction::ToDuration(Duration::from_millis(16))
-        },
-    )?;
+        })?;
 
     Ok(())
 }
@@ -753,7 +780,11 @@ fn gpu_has_connected_display(drm: &DrmDevice) -> bool {
 }
 
 fn connector_type_name(connector: &connector::Info) -> String {
-    format!("{}-{}", connector.interface().as_str(), connector.interface_id())
+    format!(
+        "{}-{}",
+        connector.interface().as_str(),
+        connector.interface_id()
+    )
 }
 
 fn pick_preferred_mode(modes: &[DrmMode]) -> Option<DrmMode> {
@@ -786,9 +817,15 @@ fn pick_mode(modes: &[DrmMode], requested: Option<&str>) -> Option<DrmMode> {
             if let Some(m) = found {
                 return Some(*m);
             }
-            tracing::warn!(requested, "Configured output mode not found; using preferred mode");
+            tracing::warn!(
+                requested,
+                "Configured output mode not found; using preferred mode"
+            );
         } else {
-            tracing::warn!(requested, "Failed to parse configured output mode; using preferred mode");
+            tracing::warn!(
+                requested,
+                "Failed to parse configured output mode; using preferred mode"
+            );
         }
     }
     pick_preferred_mode(modes)
@@ -903,14 +940,25 @@ fn create_surface(
     };
     // Using an overlay plane on an Nvidia card breaks scanout.
     if let Ok(driver) = drm.get_driver() {
-        let is_nvidia = driver.name().to_string_lossy().to_lowercase().contains("nvidia")
-            || driver.description().to_string_lossy().to_lowercase().contains("nvidia");
+        let is_nvidia = driver
+            .name()
+            .to_string_lossy()
+            .to_lowercase()
+            .contains("nvidia")
+            || driver
+                .description()
+                .to_string_lossy()
+                .to_lowercase()
+                .contains("nvidia");
         if is_nvidia {
             planes.overlay = vec![];
         }
     }
 
-    let allocator = GbmAllocator::new(gbm.clone(), GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT);
+    let allocator = GbmAllocator::new(
+        gbm.clone(),
+        GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
+    );
     let compositor = match DrmCompositor::new(
         &output,
         drm_surface,
@@ -981,7 +1029,10 @@ fn handle_connector_change(
                         state.retile();
                         dev.surfaces.insert(crtc, surface);
                     }
-                    None => tracing::warn!(?crtc, "Failed to create DRM surface for newly connected output"),
+                    None => tracing::warn!(
+                        ?crtc,
+                        "Failed to create DRM surface for newly connected output"
+                    ),
                 }
             }
             DrmScanEvent::Disconnected {
@@ -1171,7 +1222,8 @@ fn render_surface(
     // independent of `cursor_always_visible`, which only concerns a
     // *client's* own hide request, not this compositor-driven timer.
     let idle_hidden = state.config.cursor_hide_after_ms > 0
-        && state.last_pointer_motion.elapsed() >= Duration::from_millis(state.config.cursor_hide_after_ms as u64);
+        && state.last_pointer_motion.elapsed()
+            >= Duration::from_millis(state.config.cursor_hide_after_ms as u64);
     // Otherwise, `cursor_always_visible` overrides a client's own hide
     // request (`CursorImageStatus::Hidden`, e.g. a terminal hiding its
     // pointer glyph after inactivity) -- falls back to the plain default
@@ -1180,7 +1232,9 @@ fn render_surface(
     let hidden_status = CursorImageStatus::Hidden;
     let effective_cursor_status = if idle_hidden {
         &hidden_status
-    } else if matches!(state.cursor_status, CursorImageStatus::Hidden) && state.config.cursor_always_visible {
+    } else if matches!(state.cursor_status, CursorImageStatus::Hidden)
+        && state.config.cursor_always_visible
+    {
         &forced_visible_status
     } else {
         &state.cursor_status
@@ -1226,7 +1280,9 @@ fn render_surface(
             let glyph = state
                 .cursor_theme
                 .as_mut()
-                .and_then(|theme| theme.render_element(renderer, local, scale as u32, elapsed, icon))
+                .and_then(|theme| {
+                    theme.render_element(renderer, local, scale as u32, elapsed, icon)
+                })
                 .or_else(|| cursor::fallback_glyph_element(renderer, local.into()));
             (Vec::new(), glyph)
         }
@@ -1239,7 +1295,11 @@ fn render_surface(
     // pulls layer-shell content from `layer_map_for_output(output)`
     // unconditionally, independent of whatever `spaces` it's given, so an
     // empty space alone would not have hidden a panel/bar.
-    let tab_strip_elements = if locked { Vec::new() } else { state.tab_strip_elements(renderer) };
+    let tab_strip_elements = if locked {
+        Vec::new()
+    } else {
+        state.tab_strip_elements(renderer)
+    };
 
     // The overview shows window titles too -- same lock-gating as the tab
     // strip above, same reasoning.
@@ -1270,7 +1330,11 @@ fn render_surface(
         }
     };
 
-    let lock_elements = if locked { state.lock_render_elements(output, renderer) } else { Vec::new() };
+    let lock_elements = if locked {
+        state.lock_render_elements(output, renderer)
+    } else {
+        Vec::new()
+    };
 
     // Background-level placeholder, not transient UI -- behind
     // toast/overview/tab-strip/cursor in the chain below. Never shown
@@ -1369,9 +1433,12 @@ fn render_surface(
         state.send_lock_frames(output, state.start_time.elapsed());
     } else {
         state.space.elements().for_each(|window| {
-            window.send_frame(output, state.start_time.elapsed(), Some(Duration::ZERO), |_, _| {
-                Some(output.clone())
-            })
+            window.send_frame(
+                output,
+                state.start_time.elapsed(),
+                Some(Duration::ZERO),
+                |_, _| Some(output.clone()),
+            )
         });
         state.send_layer_frames(output, state.start_time.elapsed());
     }
@@ -1379,7 +1446,11 @@ fn render_surface(
     // Skipped for a persistent toast (see Toast::needs_continued_redraw) --
     // its pixels never change after the first render, so looping this
     // forever would just burn cycles on identical frames.
-    if state.toast.as_ref().is_some_and(|toast| toast.needs_continued_redraw()) {
+    if state
+        .toast
+        .as_ref()
+        .is_some_and(|toast| toast.needs_continued_redraw())
+    {
         state.request_redraw();
         surface.dirty = true;
     }

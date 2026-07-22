@@ -22,8 +22,8 @@ use wayland_protocols_wlr::screencopy::v1::server::{
 };
 
 use crate::{
-    Smallvil,
     capture::{CaptureCompletion, PendingCapture},
+    Smallvil,
 };
 
 /// Per-frame state carried from the capture request to the `copy` request.
@@ -86,7 +86,7 @@ impl GlobalDispatch<ZwlrScreencopyManagerV1, ()> for Smallvil {
 
 impl Dispatch<ZwlrScreencopyManagerV1, ()> for Smallvil {
     fn request(
-        _state: &mut Self,
+        state: &mut Self,
         _client: &Client,
         _resource: &ZwlrScreencopyManagerV1,
         request: zwlr_screencopy_manager_v1::Request,
@@ -205,6 +205,5 @@ impl Dispatch<ZwlrScreencopyFrameV1, WlrFrameData> for Smallvil {
                 report_damage,
             },
         });
-        state.request_redraw();
     }
 }

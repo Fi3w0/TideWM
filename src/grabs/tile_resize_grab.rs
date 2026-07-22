@@ -9,9 +9,9 @@ use crate::{layout::Axis, layout::SplitHit, Smallvil};
 use smithay::{
     input::pointer::{
         AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
-        GesturePinchEndEvent, GesturePinchUpdateEvent, GestureSwipeBeginEvent, GestureSwipeEndEvent,
-        GestureSwipeUpdateEvent, GrabStartData as PointerGrabStartData, MotionEvent, PointerGrab,
-        PointerInnerHandle, RelativeMotionEvent,
+        GesturePinchEndEvent, GesturePinchUpdateEvent, GestureSwipeBeginEvent,
+        GestureSwipeEndEvent, GestureSwipeUpdateEvent, GrabStartData as PointerGrabStartData,
+        MotionEvent, PointerGrab, PointerInnerHandle, RelativeMotionEvent,
     },
     reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::{Logical, Point},
@@ -27,7 +27,11 @@ pub struct TileResizeGrab {
 }
 
 impl TileResizeGrab {
-    pub fn start(start_data: PointerGrabStartData<Smallvil>, hit: SplitHit, start_ratio: f32) -> Self {
+    pub fn start(
+        start_data: PointerGrabStartData<Smallvil>,
+        hit: SplitHit,
+        start_ratio: f32,
+    ) -> Self {
         Self {
             start_data,
             start_ratio,
@@ -65,8 +69,12 @@ impl PointerGrab<Smallvil> for TileResizeGrab {
         };
         let new_ratio = self.start_ratio as f64 + delta_ratio;
 
-        data.layout
-            .set_ratio(&self.hit.output, self.hit.workspace, &self.hit.path, new_ratio as f32);
+        data.layout.set_ratio(
+            &self.hit.output,
+            self.hit.workspace,
+            &self.hit.path,
+            new_ratio as f32,
+        );
         data.retile();
     }
 

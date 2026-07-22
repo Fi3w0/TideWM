@@ -51,7 +51,11 @@ pub struct WlrOutputPowerManagementState {
 impl WlrOutputPowerManagementState {
     pub fn new(dh: &DisplayHandle) -> Self {
         let global = dh.create_global::<Smallvil, ZwlrOutputPowerManagerV1, ()>(1, ());
-        Self { global, power: HashMap::new(), controls: Vec::new() }
+        Self {
+            global,
+            power: HashMap::new(),
+            controls: Vec::new(),
+        }
     }
 
     pub fn is_on(&self, output: &Output) -> bool {
@@ -134,7 +138,10 @@ impl Dispatch<ZwlrOutputPowerManagerV1, ()> for Smallvil {
                     Some(output) => {
                         let on = state.wlr_output_power_management_state.is_on(&output);
                         control.mode(if on { Mode::On } else { Mode::Off });
-                        state.wlr_output_power_management_state.controls.push((output, control));
+                        state
+                            .wlr_output_power_management_state
+                            .controls
+                            .push((output, control));
                     }
                     // Per spec, `failed` covers "the output disappeared";
                     // a `wl_output` that never resolved to a live `Output`
@@ -187,7 +194,15 @@ impl Dispatch<ZwlrOutputPowerV1, ControlData> for Smallvil {
         }
     }
 
-    fn destroyed(state: &mut Self, _client: ClientId, resource: &ZwlrOutputPowerV1, _data: &ControlData) {
-        state.wlr_output_power_management_state.controls.retain(|(_, r)| r != resource);
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &ZwlrOutputPowerV1,
+        _data: &ControlData,
+    ) {
+        state
+            .wlr_output_power_management_state
+            .controls
+            .retain(|(_, r)| r != resource);
     }
 }

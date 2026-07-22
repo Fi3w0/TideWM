@@ -65,10 +65,9 @@ pub fn handle_commit(state: &mut Smallvil, surface: &WlSurface) -> bool {
     } else {
         LayerTracking::Mapped
     };
-    let has_buffer = with_renderer_surface_state(surface, |renderer_state| {
-        renderer_state.buffer().is_some()
-    })
-    .unwrap_or(false);
+    let has_buffer =
+        with_renderer_surface_state(surface, |renderer_state| renderer_state.buffer().is_some())
+            .unwrap_or(false);
     let transition = layer_lifecycle_transition(tracking, has_buffer);
 
     match transition {
@@ -185,7 +184,10 @@ impl WlrLayerShellHandler for Smallvil {
         // non-exclusive zone) sort out the fallout on that output.
         for out in self.space.outputs() {
             let mut map = layer_map_for_output(out);
-            let found = map.layers().find(|l| l.layer_surface() == &surface).cloned();
+            let found = map
+                .layers()
+                .find(|l| l.layer_surface() == &surface)
+                .cloned();
             if let Some(layer) = found {
                 map.unmap_layer(&layer);
                 break;

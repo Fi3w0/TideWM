@@ -57,7 +57,11 @@ pub fn build_buffer(titles: &[String], active: usize, width: i32) -> (MemoryRend
         let segment_w = width / titles.len() as i32;
         for (i, title) in titles.iter().enumerate() {
             let x0 = i as i32 * segment_w;
-            let seg_w = if i == titles.len() - 1 { width - x0 } else { segment_w };
+            let seg_w = if i == titles.len() - 1 {
+                width - x0
+            } else {
+                segment_w
+            };
             let bg = if i == active { ACTIVE_BG } else { INACTIVE_BG };
             for y in 0..HEIGHT {
                 for x in x0..x0 + seg_w {

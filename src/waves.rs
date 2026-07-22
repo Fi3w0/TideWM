@@ -80,7 +80,12 @@ pub(crate) fn parse(contents: &str, path: &Path) -> Result<Vec<Entry>, String> {
     parse_block(&lines, &mut pos, path, false)
 }
 
-fn parse_block(lines: &[&str], pos: &mut usize, path: &Path, nested: bool) -> Result<Vec<Entry>, String> {
+fn parse_block(
+    lines: &[&str],
+    pos: &mut usize,
+    path: &Path,
+    nested: bool,
+) -> Result<Vec<Entry>, String> {
     let mut entries = Vec::new();
     while *pos < lines.len() {
         let line_no = *pos + 1;
@@ -92,19 +97,31 @@ fn parse_block(lines: &[&str], pos: &mut usize, path: &Path, nested: bool) -> Re
         }
         if line == "}" {
             if !nested {
-                return Err(format!("in file {} at line {line_no}: unexpected `}}` with no open block", path.display()));
+                return Err(format!(
+                    "in file {} at line {line_no}: unexpected `}}` with no open block",
+                    path.display()
+                ));
             }
             return Ok(entries);
         }
 
         if let Some(header) = line.strip_suffix('{') {
             let header = header.trim();
-            let (keyword, rest) = header.split_once(char::is_whitespace).unwrap_or((header, ""));
+            let (keyword, rest) = header
+                .split_once(char::is_whitespace)
+                .unwrap_or((header, ""));
             if keyword.is_empty() {
-                return Err(format!("in file {} at line {line_no}: expected a block name before `{{`", path.display()));
+                return Err(format!(
+                    "in file {} at line {line_no}: expected a block name before `{{`",
+                    path.display()
+                ));
             }
             let body = parse_block(lines, pos, path, true)?;
-            entries.push(Entry::Block(keyword.to_string(), rest.trim().to_string(), body));
+            entries.push(Entry::Block(
+                keyword.to_string(),
+                rest.trim().to_string(),
+                body,
+            ));
             continue;
         }
 
@@ -113,7 +130,10 @@ fn parse_block(lines: &[&str], pos: &mut usize, path: &Path, nested: bool) -> Re
             .and_then(|r| (r.is_empty() || r.starts_with(char::is_whitespace)).then_some(r.trim()))
         {
             if rest.is_empty() {
-                return Err(format!("in file {} at line {line_no}: `include` needs a path", path.display()));
+                return Err(format!(
+                    "in file {} at line {line_no}: `include` needs a path",
+                    path.display()
+                ));
             }
             entries.push(Entry::Include(unquote(rest)));
             continue;
@@ -130,23 +150,35 @@ fn parse_block(lines: &[&str], pos: &mut usize, path: &Path, nested: bool) -> Re
         if let Some(name) = lhs.strip_prefix('$') {
             let name = name.trim();
             if name.is_empty() {
-                return Err(format!("in file {} at line {line_no}: `$` needs a variable name before `=`", path.display()));
+                return Err(format!(
+                    "in file {} at line {line_no}: `$` needs a variable name before `=`",
+                    path.display()
+                ));
             }
             entries.push(Entry::VarDef(name.to_string(), value));
         } else if let Some(combo) = lhs.strip_prefix("bind ") {
             let combo = combo.trim();
             if combo.is_empty() {
-                return Err(format!("in file {} at line {line_no}: `bind` needs a key combo before `=`", path.display()));
+                return Err(format!(
+                    "in file {} at line {line_no}: `bind` needs a key combo before `=`",
+                    path.display()
+                ));
             }
             entries.push(Entry::Bind(combo.to_string(), value));
         } else if lhs.is_empty() {
-            return Err(format!("in file {} at line {line_no}: missing key before `=`", path.display()));
+            return Err(format!(
+                "in file {} at line {line_no}: missing key before `=`",
+                path.display()
+            ));
         } else {
             entries.push(Entry::Assign(lhs.to_string(), value));
         }
     }
     if nested {
-        return Err(format!("in file {}: unexpected end of file, missing a closing `}}`", path.display()));
+        return Err(format!(
+            "in file {}: unexpected end of file, missing a closing `}}`",
+            path.display()
+        ));
     }
     Ok(entries)
 }
@@ -157,7 +189,10 @@ fn parse_block(lines: &[&str], pos: &mut usize, path: &Path, nested: bool) -> Re
 /// a property of what each keyword *means*, not something a `.wave` file
 /// should ever need to say for itself.
 fn block_is_keyed(keyword: &str) -> bool {
-    matches!(keyword, "input" | "touchpad" | "env" | "switch_events" | "submap")
+    matches!(
+        keyword,
+        "input" | "touchpad" | "env" | "switch_events" | "submap"
+    )
 }
 
 /// Plain `key = value` keys that are list-shaped instead of scalar --
@@ -218,9 +253,10 @@ fn merge_into(target: &mut Vec<Entry>, incoming: Vec<Entry>) {
                 // Resolved away before merging ever sees it -- see `resolve`.
             }
             Entry::Block(keyword, header, body) if block_is_keyed(keyword) => {
-                if let Some(Entry::Block(_, _, existing_body)) = target.iter_mut().find(
-                    |e| matches!(e, Entry::Block(k, h, _) if k == keyword && h == header),
-                ) {
+                if let Some(Entry::Block(_, _, existing_body)) = target
+                    .iter_mut()
+                    .find(|e| matches!(e, Entry::Block(k, h, _) if k == keyword && h == header))
+                {
                     merge_into(existing_body, body.clone());
                 } else {
                     target.push(entry);
@@ -262,7 +298,8 @@ fn resolve_inner(path: &Path, ancestors: &mut Vec<PathBuf>) -> Result<Vec<Entry>
 }
 
 fn resolve_uncycled(path: &Path, ancestors: &mut Vec<PathBuf>) -> Result<Vec<Entry>, String> {
-    let contents = fs::read_to_string(path).map_err(|err| format!("in file {}: {err}", path.display()))?;
+    let contents =
+        fs::read_to_string(path).map_err(|err| format!("in file {}: {err}", path.display()))?;
     let entries = parse(&contents, path)?;
 
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -314,9 +351,7 @@ mod tests {
 
     #[test]
     fn parses_flat_assignments_and_strips_comments() {
-        let entries = parse_str(
-            "# a comment\nterminal = kitty # trailing comment\ngaps = 8\n",
-        );
+        let entries = parse_str("# a comment\nterminal = kitty # trailing comment\ngaps = 8\n");
         assert_eq!(
             entries,
             vec![
@@ -329,14 +364,16 @@ mod tests {
     #[test]
     fn hash_inside_quotes_is_not_a_comment() {
         let entries = parse_str(r#"title = "Firefox # 1""#);
-        assert_eq!(entries, vec![Entry::Assign("title".into(), "Firefox # 1".into())]);
+        assert_eq!(
+            entries,
+            vec![Entry::Assign("title".into(), "Firefox # 1".into())]
+        );
     }
 
     #[test]
     fn parses_var_def_bind_and_include() {
-        let entries = parse_str(
-            "$mod = SUPER\nbind $mod+Return = spawn:kitty\ninclude \"monitors.wave\"\n",
-        );
+        let entries =
+            parse_str("$mod = SUPER\nbind $mod+Return = spawn:kitty\ninclude \"monitors.wave\"\n");
         assert_eq!(
             entries,
             vec![
@@ -423,7 +460,10 @@ mod tests {
     #[test]
     fn spawn_at_startup_accumulates_instead_of_overwriting() {
         let mut acc = Vec::new();
-        merge_into(&mut acc, parse_str("spawn_at_startup = waybar\nspawn_at_startup = swww init\n"));
+        merge_into(
+            &mut acc,
+            parse_str("spawn_at_startup = waybar\nspawn_at_startup = swww init\n"),
+        );
         assert_eq!(
             acc,
             vec![
@@ -452,8 +492,16 @@ mod tests {
                         Entry::Assign("repeat_rate".into(), "30".into()),
                     ]
                 ),
-                Entry::Block("output".into(), "eDP-1".into(), vec![Entry::Assign("scale".into(), "1.0".into())]),
-                Entry::Block("output".into(), "eDP-1".into(), vec![Entry::Assign("scale".into(), "2.0".into())]),
+                Entry::Block(
+                    "output".into(),
+                    "eDP-1".into(),
+                    vec![Entry::Assign("scale".into(), "1.0".into())]
+                ),
+                Entry::Block(
+                    "output".into(),
+                    "eDP-1".into(),
+                    vec![Entry::Assign("scale".into(), "2.0".into())]
+                ),
             ]
         );
     }

@@ -2,8 +2,8 @@ use smithay::{
     backend::renderer::utils::with_renderer_surface_state,
     delegate_xdg_shell,
     desktop::{
-        find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output, PopupKind,
-        PopupKeyboardGrab, PopupManager, PopupPointerGrab, PopupUngrabStrategy, Window,
+        find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output,
+        PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab, PopupUngrabStrategy, Window,
         WindowSurfaceType,
     },
     input::{
@@ -16,10 +16,8 @@ use smithay::{
         wayland_server::protocol::{wl_output, wl_seat, wl_surface::WlSurface},
     },
     utils::{Rectangle, Serial, SERIAL_COUNTER},
-    wayland::{
-        shell::xdg::{
-            PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
-        },
+    wayland::shell::xdg::{
+        PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
     },
 };
 
@@ -186,7 +184,11 @@ impl XdgShellHandler for Smallvil {
         }
     }
 
-    fn fullscreen_request(&mut self, surface: ToplevelSurface, wl_output: Option<wl_output::WlOutput>) {
+    fn fullscreen_request(
+        &mut self,
+        surface: ToplevelSurface,
+        wl_output: Option<wl_output::WlOutput>,
+    ) {
         let wl_surface = surface.wl_surface().clone();
         self.do_fullscreen_request(surface, wl_output);
         self.refresh_wlr_toplevel_state(&wl_surface);
@@ -237,10 +239,14 @@ impl XdgShellHandler for Smallvil {
         let keyboard_mismatch = has_keyboard_grab
             && keyboard.is_grabbed()
             && !(keyboard.has_grab(serial)
-                || grab.previous_serial().is_some_and(|previous| keyboard.has_grab(previous)));
+                || grab
+                    .previous_serial()
+                    .is_some_and(|previous| keyboard.has_grab(previous)));
         let pointer_mismatch = pointer.is_grabbed()
             && !(pointer.has_grab(serial)
-                || grab.previous_serial().is_some_and(|previous| pointer.has_grab(previous)));
+                || grab
+                    .previous_serial()
+                    .is_some_and(|previous| pointer.has_grab(previous)));
         if keyboard_mismatch || pointer_mismatch {
             tracing::debug!("Dismissing popup grab that conflicts with an unrelated grab");
             grab.ungrab(PopupUngrabStrategy::All);
@@ -265,7 +271,11 @@ impl XdgShellHandler for Smallvil {
 }
 
 impl Smallvil {
-    fn do_fullscreen_request(&mut self, surface: ToplevelSurface, wl_output: Option<wl_output::WlOutput>) {
+    fn do_fullscreen_request(
+        &mut self,
+        surface: ToplevelSurface,
+        wl_output: Option<wl_output::WlOutput>,
+    ) {
         let wl_surface = surface.wl_surface().clone();
         let Some(window) = self.toplevel_window(&wl_surface) else {
             Self::send_forced_configure(&surface);
@@ -276,9 +286,7 @@ impl Smallvil {
             state.states.unset(xdg_toplevel::State::Resizing);
         });
 
-        let requested_output = wl_output
-            .as_ref()
-            .and_then(Output::from_resource);
+        let requested_output = wl_output.as_ref().and_then(Output::from_resource);
         // A mapped window's Layouts/FloatingTag ownership is authoritative.
         // Merely changing FullscreenEntry to a different client-hinted output
         // left the window owned by A but sized for B. Tide has no individual
@@ -344,9 +352,7 @@ impl Smallvil {
         let existing = self
             .fullscreen
             .iter()
-            .find(|(candidate, entry)| {
-                *candidate != &wl_surface && entry.output == output.name()
-            })
+            .find(|(candidate, entry)| *candidate != &wl_surface && entry.output == output.name())
             .map(|(surface, _)| surface.clone());
         if let Some(existing_surface) = existing {
             let existing_toplevel = self
@@ -380,7 +386,11 @@ impl Smallvil {
             .map(|entry| (entry.restore_rect, entry.was_pinned))
             .unwrap_or((None, false));
         let restore_rect = previous_restore_rect
-            .or_else(|| self.maximized.get(&wl_surface).map(|entry| entry.restore_rect))
+            .or_else(|| {
+                self.maximized
+                    .get(&wl_surface)
+                    .map(|entry| entry.restore_rect)
+            })
             .or_else(|| {
                 if !self.unmapped_toplevels.contains_key(&wl_surface)
                     && !self.layout.contains(&wl_surface)
@@ -545,7 +555,8 @@ impl Smallvil {
                 })
                 .cloned();
             if let Some(window) = window {
-                self.space.map_element(window, entry.restore_rect.loc, false);
+                self.space
+                    .map_element(window, entry.restore_rect.loc, false);
             }
         }
         Self::send_forced_configure(&surface);
@@ -592,10 +603,9 @@ pub fn handle_commit(state: &mut Smallvil, surface: &WlSurface) {
         ToplevelTracking::Unknown
     };
 
-    let has_buffer = with_renderer_surface_state(surface, |renderer_state| {
-        renderer_state.buffer().is_some()
-    })
-    .unwrap_or(false);
+    let has_buffer =
+        with_renderer_surface_state(surface, |renderer_state| renderer_state.buffer().is_some())
+            .unwrap_or(false);
 
     let transition = lifecycle_transition(tracking, has_buffer);
     match transition {
@@ -686,7 +696,11 @@ impl Smallvil {
     pub(crate) fn mapped_toplevel_window(&self, surface: &WlSurface) -> Option<Window> {
         self.layout
             .window_of(surface)
-            .or_else(|| self.floating_workspace.get(surface).map(|tag| tag.window.clone()))
+            .or_else(|| {
+                self.floating_workspace
+                    .get(surface)
+                    .map(|tag| tag.window.clone())
+            })
             // A parked (inactive) window-group member is mapped from the
             // client's own point of view exactly like a hidden floating
             // window above -- just not in `Layouts` or `space.elements()`
@@ -727,7 +741,10 @@ impl Smallvil {
     /// `map_toplevel`'s window-rule matching and `ipc.rs`'s `windows`
     /// query -- the one accessor pattern for both, rather than two
     /// `with_states` call sites drifting apart.
-    pub(crate) fn toplevel_identity(&self, surface: &WlSurface) -> (Option<String>, Option<String>) {
+    pub(crate) fn toplevel_identity(
+        &self,
+        surface: &WlSurface,
+    ) -> (Option<String>, Option<String>) {
         smithay::wayland::compositor::with_states(surface, |states| {
             let attrs = states
                 .data_map
@@ -741,13 +758,19 @@ impl Smallvil {
 
     fn map_toplevel(&mut self, surface: &WlSurface) {
         let (app_id, title) = self.toplevel_identity(surface);
-        let rule = self.config.resolve_window_rules(app_id.as_deref(), title.as_deref());
+        let rule = self
+            .config
+            .resolve_window_rules(app_id.as_deref(), title.as_deref());
 
         let output = self
             .fullscreen
             .get(surface)
             .and_then(|entry| self.output_by_name(&entry.output))
-            .or_else(|| rule.output.as_deref().and_then(|name| self.output_by_name(name)))
+            .or_else(|| {
+                rule.output
+                    .as_deref()
+                    .and_then(|name| self.output_by_name(name))
+            })
             .or_else(|| self.primary_output());
         let Some(output) = output else {
             tracing::warn!("No output available for mapped toplevel, closing it");
@@ -770,16 +793,18 @@ impl Smallvil {
                         .cached_state
                         .get::<smithay::wayland::shell::xdg::SurfaceCachedState>();
                     let data = guard.current();
-                    data.min_size.w > 0
-                        && data.min_size.h > 0
-                        && data.min_size == data.max_size
+                    data.min_size.w > 0 && data.min_size.h > 0 && data.min_size == data.max_size
                 });
                 has_parent || is_fixed_size
             });
 
-        let Some(window) = self.unmapped_toplevels.remove(surface) else { return };
+        let Some(window) = self.unmapped_toplevels.remove(surface) else {
+            return;
+        };
         let focused = self.intended_window_surface();
-        let workspace = rule.workspace.unwrap_or_else(|| self.layout.active_workspace(&output.name()));
+        let workspace = rule
+            .workspace
+            .unwrap_or_else(|| self.layout.active_workspace(&output.name()));
         self.layout
             .insert(&output.name(), workspace, window, focused.as_ref());
         // `toggle_floating`/`toggle_pseudo_tile` below look the window up
@@ -847,7 +872,9 @@ impl Smallvil {
     fn unmap_toplevel(&mut self, surface: &WlSurface) {
         resize_grab::cancel(surface);
         let preferred_output = self.preferred_output_for_toplevel(surface);
-        let Some(window) = self.detach_mapped_toplevel(surface) else { return };
+        let Some(window) = self.detach_mapped_toplevel(surface) else {
+            return;
+        };
         self.forget_window_focus(surface);
 
         // An xdg unmap starts a fresh role lifecycle. Do not leak runtime
@@ -864,10 +891,7 @@ impl Smallvil {
         }
         self.unmapped_toplevels.insert(surface.clone(), window);
         self.retile();
-        self.repair_keyboard_focus(
-            preferred_output.as_deref(),
-            SERIAL_COUNTER.next_serial(),
-        );
+        self.repair_keyboard_focus(preferred_output.as_deref(), SERIAL_COUNTER.next_serial());
     }
 
     /// Removes every piece of runtime mapped-state and returns the window
@@ -1036,7 +1060,9 @@ impl Smallvil {
             self.maximized.remove(wl_surface);
             surface.with_pending_state(|state| {
                 state.states.unset(xdg_toplevel::State::Maximized);
-                state.size = self.tiled_rect_for_surface(wl_surface).map(|rect| rect.size);
+                state.size = self
+                    .tiled_rect_for_surface(wl_surface)
+                    .map(|rect| rect.size);
             });
         }
         if is_floating {
@@ -1068,7 +1094,11 @@ impl Smallvil {
             let window = visible_window.or_else(|| {
                 entry
                     .was_pinned
-                    .then(|| self.floating_workspace.get(wl_surface).map(|tag| tag.window.clone()))
+                    .then(|| {
+                        self.floating_workspace
+                            .get(wl_surface)
+                            .map(|tag| tag.window.clone())
+                    })
                     .flatten()
             });
             if let (Some(window), Some(rect)) = (window, target_rect) {

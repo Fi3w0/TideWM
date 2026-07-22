@@ -191,7 +191,15 @@ impl BspLayout {
         let mut vertical = None;
         if let Some(root) = &self.root {
             if node_contains(root, target) {
-                collect_resize_splits(root, target, area, bias, Vec::new(), &mut horizontal, &mut vertical);
+                collect_resize_splits(
+                    root,
+                    target,
+                    area,
+                    bias,
+                    Vec::new(),
+                    &mut horizontal,
+                    &mut vertical,
+                );
             }
         }
         [horizontal, vertical].into_iter().flatten().collect()
@@ -322,7 +330,13 @@ impl Layouts {
 
     /// Inserts `window` into `output`'s tree for `workspace` (created empty
     /// if this is the first window ever tiled there).
-    pub fn insert(&mut self, output: &str, workspace: u32, window: Window, target: Option<&WlSurface>) {
+    pub fn insert(
+        &mut self,
+        output: &str,
+        workspace: u32,
+        window: Window,
+        target: Option<&WlSurface>,
+    ) {
         self.trees
             .entry((output.to_string(), workspace))
             .or_default()
@@ -366,8 +380,14 @@ impl Layouts {
     pub fn swap_active(&mut self, output_a: &str, output_b: &str) {
         let ws_a = self.active_workspace(output_a);
         let ws_b = self.active_workspace(output_b);
-        let tree_a = self.trees.remove(&(output_a.to_string(), ws_a)).unwrap_or_default();
-        let tree_b = self.trees.remove(&(output_b.to_string(), ws_b)).unwrap_or_default();
+        let tree_a = self
+            .trees
+            .remove(&(output_a.to_string(), ws_a))
+            .unwrap_or_default();
+        let tree_b = self
+            .trees
+            .remove(&(output_b.to_string(), ws_b))
+            .unwrap_or_default();
         // Do not materialize empty trees. Workspace IDs are accepted over
         // IPC, so repeatedly swapping arbitrary empty active workspaces must
         // not grow this registry forever.
@@ -419,7 +439,8 @@ impl Layouts {
     /// configured default (see `algorithm`'s own doc, and this struct's
     /// `algorithms` field doc for the pruning this participates in).
     pub fn set_algorithm(&mut self, output: &str, workspace: u32, algorithm: LayoutAlgorithm) {
-        self.algorithms.insert((output.to_string(), workspace), algorithm);
+        self.algorithms
+            .insert((output.to_string(), workspace), algorithm);
     }
 
     /// Sets the fallback `algorithm` uses for any (output, workspace)
@@ -463,7 +484,8 @@ impl Layouts {
     /// if the workspace is later switched to master.
     pub fn adjust_master_ratio(&mut self, output: &str, workspace: u32, delta: f32) {
         let new_ratio = (self.master_ratio(output, workspace) + delta).clamp(0.05, 0.95);
-        self.master_ratio.insert((output.to_string(), workspace), new_ratio);
+        self.master_ratio
+            .insert((output.to_string(), workspace), new_ratio);
     }
 
     /// Swaps `a` and `b` if -- and only if -- they're tiled in the *same*
@@ -575,7 +597,9 @@ impl Layouts {
     }
 
     pub fn ratio_at(&self, output: &str, workspace: u32, path: &[Side]) -> Option<f32> {
-        self.trees.get(&(output.to_string(), workspace))?.ratio_at(path)
+        self.trees
+            .get(&(output.to_string(), workspace))?
+            .ratio_at(path)
     }
 
     pub fn set_ratio(&mut self, output: &str, workspace: u32, path: &[Side], ratio: f32) {
@@ -605,7 +629,10 @@ impl Layouts {
 /// shared by `Layouts::remove` for both `algorithms` and `master_ratio`,
 /// and independently testable without needing a real tree/`Window` to
 /// actually empty (see this module's tests).
-fn prune_orphaned<T>(overrides: &mut HashMap<(String, u32), T>, live_keys: &HashSet<(String, u32)>) {
+fn prune_orphaned<T>(
+    overrides: &mut HashMap<(String, u32), T>,
+    live_keys: &HashSet<(String, u32)>,
+) {
     overrides.retain(|key, _| live_keys.contains(key));
 }
 
@@ -701,7 +728,13 @@ fn find_window(node: &Node, target: &WlSurface) -> Option<Window> {
 /// write's result collide with the second match -- e.g. writing `window_b`
 /// into `a`'s leaf and then matching leaves against surface `b` would also
 /// match that leaf a second time, duplicating `window_b` into both slots.
-fn swap_leaves(node: &mut Node, a: &WlSurface, window_a: &Window, b: &WlSurface, window_b: &Window) {
+fn swap_leaves(
+    node: &mut Node,
+    a: &WlSurface,
+    window_a: &Window,
+    b: &WlSurface,
+    window_b: &Window,
+) {
     match node {
         Node::Leaf(window) => {
             if is_window(window, a) {
@@ -776,7 +809,15 @@ fn collect_resize_splits(
         collect_resize_splits(first, target, first_area, bias, path, horizontal, vertical);
     } else if node_contains(second, target) {
         path.push(Side::Second);
-        collect_resize_splits(second, target, second_area, bias, path, horizontal, vertical);
+        collect_resize_splits(
+            second,
+            target,
+            second_area,
+            bias,
+            path,
+            horizontal,
+            vertical,
+        );
     }
 }
 
@@ -978,7 +1019,10 @@ pub(crate) fn scale_centered(rect: Rectangle<i32, Logical>, scale: f64) -> Recta
     let new_h = ((rect.size.h as f64 * scale).round() as i32).max(1);
     let dx = (rect.size.w - new_w) / 2;
     let dy = (rect.size.h - new_h) / 2;
-    Rectangle::new((rect.loc.x + dx, rect.loc.y + dy).into(), (new_w, new_h).into())
+    Rectangle::new(
+        (rect.loc.x + dx, rect.loc.y + dy).into(),
+        (new_w, new_h).into(),
+    )
 }
 
 /// Master-stack geometry (dwm/Hyprland's "master" layout): the first
@@ -1039,7 +1083,10 @@ fn layout_master_rects(
             } else {
                 (area.loc.x + stack_w, area.loc.x)
             };
-            out.push(Rectangle::new((master_x, area.loc.y).into(), (master_w, area.size.h).into()));
+            out.push(Rectangle::new(
+                (master_x, area.loc.y).into(),
+                (master_w, area.size.h).into(),
+            ));
 
             let mut y = area.loc.y;
             let mut remaining_h = area.size.h;
@@ -1060,7 +1107,10 @@ fn layout_master_rects(
             } else {
                 (area.loc.y + stack_h, area.loc.y)
             };
-            out.push(Rectangle::new((area.loc.x, master_y).into(), (area.size.w, master_h).into()));
+            out.push(Rectangle::new(
+                (area.loc.x, master_y).into(),
+                (area.size.w, master_h).into(),
+            ));
 
             let mut x = area.loc.x;
             let mut remaining_w = area.size.w;
@@ -1112,7 +1162,10 @@ mod tests {
 
     #[test]
     fn layout_master_rects_handles_zero_one_and_many_windows() {
-        assert_eq!(layout_master_rects(0, area(1000, 1000), 0.5, MasterOrientation::Left), Vec::new());
+        assert_eq!(
+            layout_master_rects(0, area(1000, 1000), 0.5, MasterOrientation::Left),
+            Vec::new()
+        );
 
         // A lone window fills the whole area, same as BSP's lone leaf.
         assert_eq!(
@@ -1127,7 +1180,10 @@ mod tests {
         // The other two evenly split the remaining width's height, exactly
         // tiling it with no gap or overlap.
         assert_eq!(rects[1], Rectangle::new((600, 0).into(), (600, 450).into()));
-        assert_eq!(rects[2], Rectangle::new((600, 450).into(), (600, 450).into()));
+        assert_eq!(
+            rects[2],
+            Rectangle::new((600, 450).into(), (600, 450).into())
+        );
     }
 
     #[test]
@@ -1171,7 +1227,10 @@ mod tests {
         let bottom = layout_master_rects(2, area(1000, 800), 0.25, MasterOrientation::Bottom);
         assert_eq!(bottom.len(), 2);
         // Master on the bottom this time, still full width.
-        assert_eq!(bottom[0], Rectangle::new((0, 600).into(), (1000, 200).into()));
+        assert_eq!(
+            bottom[0],
+            Rectangle::new((0, 600).into(), (1000, 200).into())
+        );
         // Lone stack window fills the remaining strip on top.
         assert_eq!(bottom[1], Rectangle::new((0, 0).into(), (1000, 600).into()));
     }

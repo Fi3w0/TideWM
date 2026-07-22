@@ -299,11 +299,8 @@ pub struct Smallvil {
     /// `InputMethodHandler` below only has to place its popup surface
     /// (candidate window) -- everything else, including composing with an
     /// active keyboard grab so WM keybinds still take priority over IME
-    /// input, is Smithay's own machinery. No client allowlist (`|_client|
-    /// true`, matching anvil): any client that reaches this socket can
-    /// register as the system IME. There's no cheaper boundary than
-    /// `security-context-v1` (not implemented) to restrict this with, so
-    /// it's a deliberate, documented gap, not an oversight.
+    /// input, is Smithay's own machinery. Sandboxed security-context
+    /// clients cannot see this privileged global.
     #[allow(dead_code)]
     pub input_method_manager_state: InputMethodManagerState,
     /// `zwp_virtual_keyboard_v1`: lets a privileged client (an on-screen
@@ -313,8 +310,8 @@ pub struct Smallvil {
     /// keyboard focus -- deliberately bypassing `input.rs`'s own filter
     /// closure and any active grab, per protocol design, so an injected
     /// `Super+<key>` is delivered as a literal keypress rather than
-    /// triggering a WM keybind. Same no-allowlist tradeoff as input-method
-    /// above, for the same reason (no `security-context-v1` yet).
+    /// triggering a WM keybind. Like input-method, the global is hidden
+    /// from sandboxed security-context clients.
     #[allow(dead_code)]
     pub virtual_keyboard_manager_state: VirtualKeyboardManagerState,
     /// `ext-foreign-toplevel-list-v1`: exposes every mapped toplevel to
@@ -335,15 +332,18 @@ pub struct Smallvil {
     /// this one is hand-rolled on `wayland-protocols-wlr` because
     /// Smithay 0.7 has no module for the older protocol, unlike the newer
     /// one. See `handlers/wlr_foreign_toplevel.rs`.
-    pub wlr_foreign_toplevel_state: Option<crate::handlers::wlr_foreign_toplevel::WlrForeignToplevelState>,
-    pub(crate) wlr_foreign_toplevels: HashMap<WlSurface, crate::handlers::wlr_foreign_toplevel::WlrForeignToplevelHandle>,
+    pub wlr_foreign_toplevel_state:
+        Option<crate::handlers::wlr_foreign_toplevel::WlrForeignToplevelState>,
+    pub(crate) wlr_foreign_toplevels:
+        HashMap<WlSurface, crate::handlers::wlr_foreign_toplevel::WlrForeignToplevelHandle>,
     /// `wlr-output-management-unstable-v1`: kanshi/`wlr-randr`/wdisplays read
     /// output layout and can push position/transform/scale changes back.
     /// Hand-rolled, same reason as the toplevel-management protocol above --
     /// no Smithay module exists for it. See
     /// `handlers/wlr_output_management.rs` for what this first pass does and
     /// deliberately doesn't support yet.
-    pub wlr_output_management_state: crate::handlers::wlr_output_management::WlrOutputManagementState,
+    pub wlr_output_management_state:
+        crate::handlers::wlr_output_management::WlrOutputManagementState,
     /// `wlr-output-power-management-unstable-v1`: on/off per output
     /// (wlogout-style tools, a QuickShell power widget). See
     /// `handlers/wlr_output_power_management.rs`.
@@ -1086,14 +1086,21 @@ impl Smallvil {
 
         self.layer_surface_under(output, output_geo, pos, &[WlrLayer::Overlay, WlrLayer::Top])
             .or_else(|| {
-                self.space.element_under(pos).and_then(|(window, location)| {
-                    window
-                        .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
-                        .map(|(s, p)| (s, (p + location).to_f64()))
-                })
+                self.space
+                    .element_under(pos)
+                    .and_then(|(window, location)| {
+                        window
+                            .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
+                            .map(|(s, p)| (s, (p + location).to_f64()))
+                    })
             })
             .or_else(|| {
-                self.layer_surface_under(output, output_geo, pos, &[WlrLayer::Bottom, WlrLayer::Background])
+                self.layer_surface_under(
+                    output,
+                    output_geo,
+                    pos,
+                    &[WlrLayer::Bottom, WlrLayer::Background],
+                )
             })
     }
 
@@ -1132,7 +1139,10 @@ impl Smallvil {
     /// contain `pos` at the frontmost rendered position. Resolving through
     /// `surface_under` is important: Bottom/Background layers must not steal
     /// input from a window rendered above them.
-    pub(crate) fn layer_under_pointer(&self, pos: Point<f64, Logical>) -> Option<desktop::LayerSurface> {
+    pub(crate) fn layer_under_pointer(
+        &self,
+        pos: Point<f64, Logical>,
+    ) -> Option<desktop::LayerSurface> {
         let output = self.space.output_under(pos).next()?;
         let (surface, _) = self.surface_under(pos)?;
         let map = layer_map_for_output(output);
@@ -1251,7 +1261,11 @@ impl Smallvil {
     /// Requests ordinary window focus. The request becomes the retained
     /// window intent, while `reconcile_keyboard_focus` may temporarily give
     /// actual keyboard focus to a mapped Exclusive layer instead.
-    pub(crate) fn focus_window(&mut self, surface: Option<WlSurface>, serial: smithay::utils::Serial) {
+    pub(crate) fn focus_window(
+        &mut self,
+        surface: Option<WlSurface>,
+        serial: smithay::utils::Serial,
+    ) {
         self.on_demand_layer_focus = None;
         self.window_focus = surface.filter(|surface| self.window_is_visible(surface));
         self.reconcile_keyboard_focus(serial);
@@ -1278,13 +1292,9 @@ impl Smallvil {
         {
             self.window_focus = None;
         }
-        if self
-            .on_demand_layer_focus
-            .as_ref()
-            .is_some_and(|surface| {
-                self.layer_keyboard_interactivity(surface) != Some(KeyboardInteractivity::OnDemand)
-            })
-        {
+        if self.on_demand_layer_focus.as_ref().is_some_and(|surface| {
+            self.layer_keyboard_interactivity(surface) != Some(KeyboardInteractivity::OnDemand)
+        }) {
             self.on_demand_layer_focus = None;
         }
 
@@ -1315,12 +1325,9 @@ impl Smallvil {
             let owns_keyboard = popup.has_keyboard_grab
                 && !popup.grab.has_ended()
                 && resolved.surface() == Some(&popup.root);
-            owns_keyboard
-                .then(|| popup.grab.current_grab())
-                .flatten()
+            owns_keyboard.then(|| popup.grab.current_grab()).flatten()
         });
-        let seat_target = popup_keyboard_focus
-            .or_else(|| resolved.surface().cloned());
+        let seat_target = popup_keyboard_focus.or_else(|| resolved.surface().cloned());
 
         let seat_surface = self
             .seat
@@ -1377,9 +1384,10 @@ impl Smallvil {
     /// pointer grab is released from a calloop idle so this remains safe if a
     /// future focus path originates inside a pointer-grab callback.
     fn release_popup_grab_if_focus_leaves(&mut self, target: &KeyboardFocusTarget) {
-        let leaving = self.popup_grab.as_ref().is_some_and(|popup| {
-            popup.has_keyboard_grab && target.surface() != Some(&popup.root)
-        });
+        let leaving = self
+            .popup_grab
+            .as_ref()
+            .is_some_and(|popup| popup.has_keyboard_grab && target.surface() != Some(&popup.root));
         if !leaving {
             return;
         }
@@ -1388,7 +1396,9 @@ impl Smallvil {
     }
 
     fn release_popup_grab(&mut self) {
-        let Some(mut popup) = self.popup_grab.take() else { return };
+        let Some(mut popup) = self.popup_grab.take() else {
+            return;
+        };
         let grab_serial = popup.grab.serial();
         let previous_serial = popup.grab.previous_serial();
         popup.grab.ungrab(PopupUngrabStrategy::All);
@@ -1404,7 +1414,9 @@ impl Smallvil {
         let serial = SERIAL_COUNTER.next_serial();
         let time = self.start_time.elapsed().as_millis() as u32;
         self.loop_handle.insert_idle(move |state| {
-            let Some(pointer) = state.seat.get_pointer() else { return };
+            let Some(pointer) = state.seat.get_pointer() else {
+                return;
+            };
             let owns_grab = pointer.has_grab(grab_serial)
                 || previous_serial.is_some_and(|serial| pointer.has_grab(serial));
             if owns_grab {
@@ -1475,7 +1487,9 @@ impl Smallvil {
     pub(crate) fn focused_window_surface(&self) -> Option<WlSurface> {
         match &self.keyboard_focus {
             KeyboardFocusTarget::Window(surface) => Some(surface.clone()),
-            KeyboardFocusTarget::None | KeyboardFocusTarget::Layer(_) | KeyboardFocusTarget::Lock(_) => None,
+            KeyboardFocusTarget::None
+            | KeyboardFocusTarget::Layer(_)
+            | KeyboardFocusTarget::Lock(_) => None,
         }
     }
 
@@ -1501,10 +1515,12 @@ impl Smallvil {
     /// any output yet; `reconcile_keyboard_focus` then clears keyboard
     /// focus entirely rather than leaking it to a window.
     fn lock_focus_target(&self) -> Option<WlSurface> {
-        let pointer_output = self
-            .seat
-            .get_pointer()
-            .and_then(|pointer| self.space.output_under(pointer.current_location()).next().cloned());
+        let pointer_output = self.seat.get_pointer().and_then(|pointer| {
+            self.space
+                .output_under(pointer.current_location())
+                .next()
+                .cloned()
+        });
         pointer_output
             .and_then(|output| self.lock_surfaces.get(&output))
             .or_else(|| self.lock_surfaces.values().next())
@@ -1520,12 +1536,22 @@ impl Smallvil {
     /// tap, most commonly) would otherwise still hit whatever was focused
     /// before the change.
     fn refresh_pointer_focus(&mut self) {
-        let Some(pointer) = self.seat.get_pointer() else { return };
+        let Some(pointer) = self.seat.get_pointer() else {
+            return;
+        };
         let pos = pointer.current_location();
         let under = self.surface_under(pos);
         let serial = SERIAL_COUNTER.next_serial();
         let time = self.start_time.elapsed().as_millis() as u32;
-        pointer.motion(self, under, &MotionEvent { location: pos, serial, time });
+        pointer.motion(
+            self,
+            under,
+            &MotionEvent {
+                location: pos,
+                serial,
+                time,
+            },
+        );
         pointer.frame(self);
     }
 
@@ -1548,7 +1574,9 @@ impl Smallvil {
             .cloned()
             .or_else(|| self.mapped_toplevel_window(surface));
         let Some(window) = window else { return false };
-        let Some(toplevel) = window.toplevel() else { return false };
+        let Some(toplevel) = window.toplevel() else {
+            return false;
+        };
         let changed = window.set_activated(activated && mapped);
         if changed && mapped && toplevel.is_initial_configure_sent() {
             toplevel.send_pending_configure();
@@ -1565,7 +1593,9 @@ impl Smallvil {
     }
 
     pub(crate) fn window_is_visible(&self, surface: &WlSurface) -> bool {
-        self.space.elements().any(|window| is_window(window, surface))
+        self.space
+            .elements()
+            .any(|window| is_window(window, surface))
     }
 
     /// Commits a visible floating window's live Space placement back into
@@ -1574,7 +1604,10 @@ impl Smallvil {
     /// otherwise later workspace actions would still treat it as belonging
     /// to the output where the drag began.
     pub(crate) fn sync_visible_floating_window(&mut self, window: &Window) {
-        let Some(surface) = window.toplevel().map(|toplevel| toplevel.wl_surface().clone()) else {
+        let Some(surface) = window
+            .toplevel()
+            .map(|toplevel| toplevel.wl_surface().clone())
+        else {
             return;
         };
         if self.fullscreen.contains_key(&surface)
@@ -1632,7 +1665,11 @@ impl Smallvil {
     /// doc comment explains), so that's what gets read and re-mapped; a
     /// hidden window has no `space` presence to read, so `tag.rect` itself
     /// -- the only place its position survives -- is what moves.
-    pub(crate) fn translate_floating_windows_on_output(&mut self, output_name: &str, delta: Point<i32, Logical>) {
+    pub(crate) fn translate_floating_windows_on_output(
+        &mut self,
+        output_name: &str,
+        delta: Point<i32, Logical>,
+    ) {
         let surfaces: Vec<WlSurface> = self
             .floating_workspace
             .iter()
@@ -1641,7 +1678,12 @@ impl Smallvil {
             .collect();
         for surface in surfaces {
             if self.window_is_visible(&surface) {
-                let window = self.floating_workspace.get(&surface).unwrap().window.clone();
+                let window = self
+                    .floating_workspace
+                    .get(&surface)
+                    .unwrap()
+                    .window
+                    .clone();
                 let Some(mut rect) = self.space.element_geometry(&window) else {
                     continue;
                 };
@@ -1654,10 +1696,7 @@ impl Smallvil {
         }
     }
 
-    fn layer_keyboard_interactivity(
-        &self,
-        surface: &WlSurface,
-    ) -> Option<KeyboardInteractivity> {
+    fn layer_keyboard_interactivity(&self, surface: &WlSurface) -> Option<KeyboardInteractivity> {
         if self.unmapped_layer_surfaces.contains(surface) {
             return None;
         }
@@ -1684,18 +1723,18 @@ impl Smallvil {
         {
             self.window_focus = None;
         }
-        if self
-            .on_demand_layer_focus
-            .as_ref()
-            .is_some_and(|surface| {
-                self.layer_keyboard_interactivity(surface) != Some(KeyboardInteractivity::OnDemand)
-            })
-        {
+        if self.on_demand_layer_focus.as_ref().is_some_and(|surface| {
+            self.layer_keyboard_interactivity(surface) != Some(KeyboardInteractivity::OnDemand)
+        }) {
             self.on_demand_layer_focus = None;
         }
 
         if self.window_focus.is_none() && self.config.input.focus_follows_mouse {
-            if let Some(pos) = self.seat.get_pointer().map(|pointer| pointer.current_location()) {
+            if let Some(pos) = self
+                .seat
+                .get_pointer()
+                .map(|pointer| pointer.current_location())
+            {
                 if self.layer_under_pointer(pos).is_none() {
                     if let Some(surface) = self.window_at_layout_position(pos) {
                         self.window_focus = Some(surface);
@@ -1716,12 +1755,16 @@ impl Smallvil {
                                 .is_some_and(|output| output.name() == output_name)
                         })
                         .and_then(|window| {
-                            window.toplevel().map(|toplevel| toplevel.wl_surface().clone())
+                            window
+                                .toplevel()
+                                .map(|toplevel| toplevel.wl_surface().clone())
                         })
                 })
                 .or_else(|| {
                     self.space.elements().rev().find_map(|window| {
-                        window.toplevel().map(|toplevel| toplevel.wl_surface().clone())
+                        window
+                            .toplevel()
+                            .map(|toplevel| toplevel.wl_surface().clone())
                     })
                 });
         }
@@ -1750,7 +1793,9 @@ impl Smallvil {
 
     fn window_at_layout_position(&self, pos: Point<f64, Logical>) -> Option<WlSurface> {
         let live = self.space.element_under(pos).and_then(|(window, _)| {
-            window.toplevel().map(|toplevel| toplevel.wl_surface().clone())
+            window
+                .toplevel()
+                .map(|toplevel| toplevel.wl_surface().clone())
         });
         if live.as_ref().is_some_and(|surface| {
             !self.layout.contains(surface) || self.fullscreen.contains_key(surface)
@@ -1766,7 +1811,9 @@ impl Smallvil {
                 .into_iter()
                 .find(|(_, rect)| rect.contains(pos.to_i32_round()))
                 .and_then(|(window, _)| {
-                    window.toplevel().map(|toplevel| toplevel.wl_surface().clone())
+                    window
+                        .toplevel()
+                        .map(|toplevel| toplevel.wl_surface().clone())
                 })
         });
         tiled.or(live)
@@ -1816,7 +1863,9 @@ impl Smallvil {
             if self.unmapped_layer_surfaces.contains(layer.wl_surface()) {
                 continue;
             }
-            layer.send_frame(output, time, Some(Duration::ZERO), |_, _| Some(output.clone()));
+            layer.send_frame(output, time, Some(Duration::ZERO), |_, _| {
+                Some(output.clone())
+            });
         }
     }
 
@@ -1829,9 +1878,13 @@ impl Smallvil {
     /// first commit.
     pub fn send_lock_frames(&self, output: &Output, time: Duration) {
         if let Some(lock_surface) = self.lock_surfaces.get(output) {
-            send_frames_surface_tree(lock_surface.wl_surface(), output, time, Some(Duration::ZERO), |_, _| {
-                Some(output.clone())
-            });
+            send_frames_surface_tree(
+                lock_surface.wl_surface(),
+                output,
+                time,
+                Some(Duration::ZERO),
+                |_, _| Some(output.clone()),
+            );
         }
     }
 
@@ -1919,11 +1972,18 @@ impl Smallvil {
     }
 
     fn try_confirm_lock(&mut self) {
-        let SessionLock::Locking(_) = &self.session_lock else { return };
-        if !self.space.outputs().all(|o| self.locked_outputs.contains(o)) {
+        let SessionLock::Locking(_) = &self.session_lock else {
+            return;
+        };
+        if !self
+            .space
+            .outputs()
+            .all(|o| self.locked_outputs.contains(o))
+        {
             return;
         }
-        let SessionLock::Locking(confirmation) = std::mem::replace(&mut self.session_lock, SessionLock::Locked)
+        let SessionLock::Locking(confirmation) =
+            std::mem::replace(&mut self.session_lock, SessionLock::Locked)
         else {
             unreachable!()
         };
@@ -1970,8 +2030,13 @@ impl Smallvil {
             .entry(output.clone())
             .or_insert_with(|| SolidColorBuffer::new((0, 0), [0.0, 0.0, 0.0, 1.0]));
         blank_buffer.update(size, [0.0, 0.0, 0.0, 1.0]);
-        let blank =
-            SolidColorRenderElement::from_buffer(blank_buffer, (0, 0), scale, 1.0, Kind::Unspecified);
+        let blank = SolidColorRenderElement::from_buffer(
+            blank_buffer,
+            (0, 0),
+            scale,
+            1.0,
+            Kind::Unspecified,
+        );
         elements.push(LockRenderElement::Blank(blank));
 
         elements
@@ -2141,9 +2206,13 @@ impl Smallvil {
             let full_output_geo = self.space.output_geometry(output);
             let workspace = self.layout.active_workspace(&output.name());
 
-            for (window, mut rect) in self.layout.layout(&output.name(), workspace, area, self.config.gaps) {
+            for (window, mut rect) in
+                self.layout
+                    .layout(&output.name(), workspace, area, self.config.gaps)
+            {
                 if let Some(surface) = window.toplevel().map(|t| t.wl_surface().clone()) {
-                    if let (Some(entry), Some(full)) = (self.fullscreen.get(&surface), full_output_geo)
+                    if let (Some(entry), Some(full)) =
+                        (self.fullscreen.get(&surface), full_output_geo)
                     {
                         if entry.output == output.name() {
                             rect = full;
@@ -2383,8 +2452,8 @@ impl Smallvil {
                     .or_else(|| {
                         (self.pseudo_tiled.contains(surface)
                             && !self.fullscreen.contains_key(surface))
-                            .then(|| self.space.element_geometry(&window))
-                            .flatten()
+                        .then(|| self.space.element_geometry(&window))
+                        .flatten()
                     })
                     .or(normal_tile_rect)
                     .or_else(|| self.space.element_geometry(&window))
@@ -2416,7 +2485,10 @@ impl Smallvil {
             // geometry -- previously (single-output, no such thing as
             // "outside the output") floating-to-tiled always succeeded, and
             // this keeps that true rather than silently no-oping.
-            let Some(output) = self.output_for_window(&window).or_else(|| self.primary_output()) else {
+            let Some(output) = self
+                .output_for_window(&window)
+                .or_else(|| self.primary_output())
+            else {
                 return;
             };
             let focused = self.focused_window_surface();
@@ -2438,7 +2510,8 @@ impl Smallvil {
                     state.states.unset(xdg_toplevel::State::Resizing);
                 });
             }
-            self.layout.insert(&output.name(), workspace, window, focused.as_ref());
+            self.layout
+                .insert(&output.name(), workspace, window, focused.as_ref());
             // No longer floating, so no longer needs its own workspace tag.
             self.floating_workspace.remove(surface);
         }
@@ -2508,7 +2581,9 @@ impl Smallvil {
             .floating_workspace
             .iter()
             .filter(|(surface, tag)| {
-                tag.output == output_name && tag.workspace == current && !self.pinned.contains(*surface)
+                tag.output == output_name
+                    && tag.workspace == current
+                    && !self.pinned.contains(*surface)
             })
             .map(|(surface, _)| surface.clone())
             .collect();
@@ -2543,7 +2618,9 @@ impl Smallvil {
             .floating_workspace
             .iter()
             .filter(|(surface, tag)| {
-                tag.output == output_name && tag.workspace == workspace && !self.pinned.contains(*surface)
+                tag.output == output_name
+                    && tag.workspace == workspace
+                    && !self.pinned.contains(*surface)
             })
             .map(|(_, tag)| (tag.window.clone(), tag.rect.loc))
             .collect();
@@ -2579,7 +2656,10 @@ impl Smallvil {
             .space
             .elements()
             .rev()
-            .find(|w| self.output_for_window(w).is_some_and(|o| o.name() == output_name))
+            .find(|w| {
+                self.output_for_window(w)
+                    .is_some_and(|o| o.name() == output_name)
+            })
             .and_then(|w| w.toplevel())
             .map(|t| t.wl_surface().clone());
         self.focus_window(next_focus, SERIAL_COUNTER.next_serial());
@@ -2642,7 +2722,8 @@ impl Smallvil {
                 // "already visible, just retagging its number" -- comparing
                 // only `workspace == active` would wrongly skip this too.)
                 if let Some(tag) = self.floating_workspace.get(surface) {
-                    self.space.map_element(tag.window.clone(), tag.rect.loc, false);
+                    self.space
+                        .map_element(tag.window.clone(), tag.rect.loc, false);
                 }
                 // Fullscreen/maximized tags intentionally retain their
                 // normal restore rectangle while hidden. Reconcile the
@@ -2707,7 +2788,11 @@ impl Smallvil {
         let output_name = output.name();
         let current = self.layout.active_workspace(&output_name);
         if current == SCRATCHPAD_WORKSPACE {
-            let previous = self.scratchpad_previous.get(&output_name).copied().unwrap_or(1);
+            let previous = self
+                .scratchpad_previous
+                .get(&output_name)
+                .copied()
+                .unwrap_or(1);
             self.switch_workspace(output, previous);
         } else {
             self.scratchpad_previous.insert(output_name, current);
@@ -2744,7 +2829,11 @@ impl Smallvil {
                         entry.pin_floated_it = true;
                     }
                 }
-            } else if self.fullscreen.get(surface).is_some_and(|e| e.pin_floated_it) {
+            } else if self
+                .fullscreen
+                .get(surface)
+                .is_some_and(|e| e.pin_floated_it)
+            {
                 // Undo specifically the float *this* pin toggle caused,
                 // not a general "unpinning re-tiles" rule -- that's
                 // deliberately not how the non-fullscreen case above
@@ -3113,7 +3202,10 @@ impl Smallvil {
     /// close-cleanup (`leave_group_on_close`) does nothing further, since
     /// the window is already being destroyed/unmapped by then.
     fn leave_group(&mut self, idx: usize, surface: &WlSurface) -> Option<Window> {
-        let pos = self.groups[idx].members.iter().position(|m| &m.surface == surface)?;
+        let pos = self.groups[idx]
+            .members
+            .iter()
+            .position(|m| &m.surface == surface)?;
         let was_active = pos == self.groups[idx].active;
         let active_window = was_active.then(|| self.layout.window_of(surface)).flatten();
 
@@ -3410,14 +3502,16 @@ impl Smallvil {
                     .iter()
                     .map(|m| crate::tab_strip::window_title(&m.surface))
                     .collect();
-                let (buffer, width) = crate::tab_strip::build_buffer(&titles, group.active, rect.size.w);
+                let (buffer, width) =
+                    crate::tab_strip::build_buffer(&titles, group.active, rect.size.w);
                 group.strip = Some(buffer);
                 group.strip_width = width;
             }
 
             if let Some(buffer) = &group.strip {
                 let location = (rect.loc.x as f64, rect.loc.y as f64);
-                if let Some(element) = crate::tab_strip::render_element(buffer, renderer, location) {
+                if let Some(element) = crate::tab_strip::render_element(buffer, renderer, location)
+                {
                     elements.push(element);
                 }
             }
@@ -3767,13 +3861,18 @@ impl Smallvil {
         }
 
         let current = self.focused_window_surface();
-        let current_index = current.as_ref().and_then(|s| ordered.iter().position(|o| o == s));
+        let current_index = current
+            .as_ref()
+            .and_then(|s| ordered.iter().position(|o| o == s));
         let next_index = match current_index {
             Some(i) => (i + 1) % ordered.len(),
             None => 0,
         };
         let next_surface = ordered[next_index].clone();
-        let Some(next) = windows.iter().find(|w| surface_of(w).as_ref() == Some(&next_surface)) else {
+        let Some(next) = windows
+            .iter()
+            .find(|w| surface_of(w).as_ref() == Some(&next_surface))
+        else {
             return;
         };
 
@@ -3858,7 +3957,8 @@ impl Smallvil {
             return;
         };
         let workspace = self.layout.active_workspace(&output.name());
-        self.layout.set_algorithm(&output.name(), workspace, algorithm);
+        self.layout
+            .set_algorithm(&output.name(), workspace, algorithm);
         self.retile();
     }
 
@@ -3921,7 +4021,8 @@ impl Smallvil {
             .enumerate()
             .map(|(i, &workspace)| {
                 let x = CELL_GAP + i as i32 * (cell_w + CELL_GAP);
-                let area = Rectangle::new((x, CELL_GAP).into(), (cell_w.max(1), cell_h.max(1)).into());
+                let area =
+                    Rectangle::new((x, CELL_GAP).into(), (cell_w.max(1), cell_h.max(1)).into());
                 // Reuses whichever algorithm (BSP or master) is actually
                 // active for this workspace, computed directly at the
                 // cell's own smaller size -- no separate scaling math
@@ -3937,6 +4038,7 @@ impl Smallvil {
                     })
                     .collect();
                 crate::overview::OverviewCell {
+                    workspace,
                     area,
                     active: workspace == active_workspace,
                     windows,
@@ -3944,8 +4046,11 @@ impl Smallvil {
             })
             .collect();
 
-        self.overview =
-            Some(crate::overview::Overview::build(output_name, &cells, (mode.size.w, mode.size.h)));
+        self.overview = Some(crate::overview::Overview::build(
+            output_name,
+            &cells,
+            (mode.size.w, mode.size.h),
+        ));
         self.request_redraw();
     }
 
@@ -4007,7 +4112,8 @@ impl Smallvil {
                 }
                 if new_config.show_welcome_hint {
                     if self.welcome_hint.is_none() {
-                        self.welcome_hint = Some(crate::welcome::WelcomeHint::build(&new_config.terminal));
+                        self.welcome_hint =
+                            Some(crate::welcome::WelcomeHint::build(&new_config.terminal));
                     }
                 } else {
                     self.welcome_hint = None;
@@ -4024,8 +4130,10 @@ impl Smallvil {
                         self.active_submap = None;
                     }
                 }
-                self.layout.set_default_algorithm(self.config.default_layout);
-                self.layout.set_master_orientation(self.config.master_orientation);
+                self.layout
+                    .set_default_algorithm(self.config.default_layout);
+                self.layout
+                    .set_master_orientation(self.config.master_orientation);
                 self.layout.set_split_bias(self.config.bsp_split_bias);
                 // The DeviceAdded path is the only other place this runs;
                 // an already-connected touchpad (a laptop's built-in one,
@@ -4103,8 +4211,12 @@ fn clamp_rect_visible(
     bounds: Rectangle<i32, Logical>,
 ) -> Rectangle<i32, Logical> {
     const MIN_VISIBLE: i32 = 32;
-    let visible_w = MIN_VISIBLE.min(rect.size.w.max(1)).min(bounds.size.w.max(1));
-    let visible_h = MIN_VISIBLE.min(rect.size.h.max(1)).min(bounds.size.h.max(1));
+    let visible_w = MIN_VISIBLE
+        .min(rect.size.w.max(1))
+        .min(bounds.size.w.max(1));
+    let visible_h = MIN_VISIBLE
+        .min(rect.size.h.max(1))
+        .min(bounds.size.h.max(1));
     let min_x = bounds.loc.x - rect.size.w + visible_w;
     let max_x = bounds.loc.x + bounds.size.w - visible_w;
     let min_y = bounds.loc.y - rect.size.h + visible_h;

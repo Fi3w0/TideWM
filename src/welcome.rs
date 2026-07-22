@@ -58,7 +58,13 @@ impl WelcomeHint {
                     continue;
                 }
                 let (r, g, b, a) = CARD_BG;
-                put_pixel(&mut pixels, width, x, y, (r, g, b, (a as f32 * edge_alpha) as u8));
+                put_pixel(
+                    &mut pixels,
+                    width,
+                    x,
+                    y,
+                    (r, g, b, (a as f32 * edge_alpha) as u8),
+                );
             }
         }
         stroke_rect(&mut pixels, width, height, BORDER_PX, CARD_BORDER);
@@ -66,7 +72,15 @@ impl WelcomeHint {
         let font = crate::toast::font();
         let canvas = (width, height);
         let mut y = PAD + TITLE_SIZE as i32;
-        draw_line(&mut pixels, canvas, font, "Welcome to TideWM", PAD, y, TITLE_SIZE);
+        draw_line(
+            &mut pixels,
+            canvas,
+            font,
+            "Welcome to TideWM",
+            PAD,
+            y,
+            TITLE_SIZE,
+        );
         y += TITLE_SIZE as i32 + LINE_GAP;
         draw_line(
             &mut pixels,
@@ -96,7 +110,10 @@ impl WelcomeHint {
             Transform::Normal,
             None,
         );
-        Self { buffer, size: (width, height) }
+        Self {
+            buffer,
+            size: (width, height),
+        }
     }
 
     /// Centered on whatever output/render area it's drawn into.
@@ -150,7 +167,15 @@ fn stroke_rect(pixels: &mut [u8], width: i32, height: i32, thickness: i32, rgb: 
 /// Left-aligned text at baseline `(x0, baseline_y)`, clipped to the card's
 /// own bounds -- same overflow-is-just-cut-off choice `overview.rs`'s
 /// `draw_label` makes.
-fn draw_line(pixels: &mut [u8], canvas: (i32, i32), font: &Font, text: &str, x0: i32, baseline_y: i32, font_size: f32) {
+fn draw_line(
+    pixels: &mut [u8],
+    canvas: (i32, i32),
+    font: &Font,
+    text: &str,
+    x0: i32,
+    baseline_y: i32,
+    font_size: f32,
+) {
     let (canvas_w, canvas_h) = canvas;
     let mut pen_x = x0;
     for ch in text.chars() {

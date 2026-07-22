@@ -154,7 +154,11 @@ impl Theme {
         // `self.frames(...)` calls) since the second call would otherwise
         // need to borrow `self` again while the first call's result is
         // still held.
-        let icon = if self.frames(icon).is_some() { icon } else { CursorIcon::Default };
+        let icon = if self.frames(icon).is_some() {
+            icon
+        } else {
+            CursorIcon::Default
+        };
         let frames = self.frames(icon)?;
         let frame = pick_frame(frames, size, scale, time);
 
@@ -244,12 +248,27 @@ mod tests {
             icon(24, 24, 200), // frame 1: [100, 300)
         ];
 
-        assert_eq!(pick_frame(&frames, 24, 1, Duration::from_millis(0)).delay, 100);
-        assert_eq!(pick_frame(&frames, 24, 1, Duration::from_millis(50)).delay, 100);
-        assert_eq!(pick_frame(&frames, 24, 1, Duration::from_millis(150)).delay, 200);
+        assert_eq!(
+            pick_frame(&frames, 24, 1, Duration::from_millis(0)).delay,
+            100
+        );
+        assert_eq!(
+            pick_frame(&frames, 24, 1, Duration::from_millis(50)).delay,
+            100
+        );
+        assert_eq!(
+            pick_frame(&frames, 24, 1, Duration::from_millis(150)).delay,
+            200
+        );
         // Wraps past the 300ms total back to frame 0.
-        assert_eq!(pick_frame(&frames, 24, 1, Duration::from_millis(350)).delay, 100);
+        assert_eq!(
+            pick_frame(&frames, 24, 1, Duration::from_millis(350)).delay,
+            100
+        );
         // Nearest to size*scale = 48 picks the other size group entirely.
-        assert_eq!(pick_frame(&frames, 24, 2, Duration::from_millis(0)).width, 48);
+        assert_eq!(
+            pick_frame(&frames, 24, 2, Duration::from_millis(0)).width,
+            48
+        );
     }
 }

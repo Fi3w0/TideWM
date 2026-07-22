@@ -13,14 +13,19 @@ use smithay::{
     input::{
         keyboard::{keysyms, FilterResult, Keysym},
         pointer::{
-            AxisFrame, ButtonEvent, Focus, GrabStartData as PointerGrabStartData,
-            GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
-            GesturePinchEndEvent, GesturePinchUpdateEvent, GestureSwipeBeginEvent,
-            GestureSwipeEndEvent, GestureSwipeUpdateEvent, MotionEvent, RelativeMotionEvent,
+            AxisFrame, ButtonEvent, Focus, GestureHoldBeginEvent, GestureHoldEndEvent,
+            GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
+            GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent,
+            GrabStartData as PointerGrabStartData, MotionEvent, RelativeMotionEvent,
         },
-        touch::{DownEvent as TouchDownData, MotionEvent as TouchMotionData, UpEvent as TouchUpData},
+        touch::{
+            DownEvent as TouchDownData, MotionEvent as TouchMotionData, UpEvent as TouchUpData,
+        },
     },
-    reexports::input::{AccelProfile, ClickMethod, Device as InputDevice, DeviceConfigResult, DragLockState, ScrollMethod},
+    reexports::input::{
+        AccelProfile, ClickMethod, Device as InputDevice, DeviceConfigResult, DragLockState,
+        ScrollMethod,
+    },
     utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
     wayland::{
         compositor::RegionAttributes,
@@ -65,11 +70,18 @@ pub fn apply_touchpad_config(cfg: &TouchpadConfig, device: &mut InputDevice) {
         warn_on_config_err(device.config_tap_set_drag_enabled(enabled), "tap_and_drag");
     }
     if let Some(enabled) = cfg.drag_lock {
-        let state = if enabled { DragLockState::EnabledTimeout } else { DragLockState::Disabled };
+        let state = if enabled {
+            DragLockState::EnabledTimeout
+        } else {
+            DragLockState::Disabled
+        };
         warn_on_config_err(device.config_tap_set_drag_lock_enabled(state), "drag_lock");
     }
     if let Some(enabled) = cfg.disable_while_typing {
-        warn_on_config_err(device.config_dwt_set_enabled(enabled), "disable_while_typing");
+        warn_on_config_err(
+            device.config_dwt_set_enabled(enabled),
+            "disable_while_typing",
+        );
     }
     if let Some(enabled) = cfg.natural_scroll {
         warn_on_config_err(
@@ -81,16 +93,20 @@ pub fn apply_touchpad_config(cfg: &TouchpadConfig, device: &mut InputDevice) {
         warn_on_config_err(device.config_left_handed_set(enabled), "left_handed");
     }
     if let Some(enabled) = cfg.middle_emulation {
-        warn_on_config_err(device.config_middle_emulation_set_enabled(enabled), "middle_emulation");
+        warn_on_config_err(
+            device.config_middle_emulation_set_enabled(enabled),
+            "middle_emulation",
+        );
     }
     if let Some(speed) = cfg.accel_speed {
         warn_on_config_err(device.config_accel_set_speed(speed), "accel_speed");
     }
     if let Some(profile) = &cfg.accel_profile {
         match profile.as_str() {
-            "flat" => {
-                warn_on_config_err(device.config_accel_set_profile(AccelProfile::Flat), "accel_profile")
-            }
+            "flat" => warn_on_config_err(
+                device.config_accel_set_profile(AccelProfile::Flat),
+                "accel_profile",
+            ),
             "adaptive" => warn_on_config_err(
                 device.config_accel_set_profile(AccelProfile::Adaptive),
                 "accel_profile",
@@ -239,7 +255,10 @@ impl Smallvil {
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) {
         // Device topology changes aren't user activity; every other variant
         // reaching this function is a real keyboard/pointer/touch event.
-        if !matches!(event, InputEvent::DeviceAdded { .. } | InputEvent::DeviceRemoved { .. }) {
+        if !matches!(
+            event,
+            InputEvent::DeviceAdded { .. } | InputEvent::DeviceRemoved { .. }
+        ) {
             self.idle_notifier_state.notify_activity(&self.seat);
         }
 
@@ -298,54 +317,58 @@ impl Smallvil {
                         // to keep this block's own behavior byte-for-byte
                         // unchanged from before.
                         if key_state == KeyState::Pressed {
-                        // Ctrl+Alt+F<N>: usually resolves to a distinct
-                        // XF86Switch_VT_N keysym once libinput/DRM (not a host
-                        // compositor) owns the keyboard -- xkbcommon's default
-                        // keymap maps that combo to this range at the
-                        // *modified* level, not literally "F<N> plus two held
-                        // modifiers", which is why this checks
-                        // `modified_sym()` rather than the `raw_syms()`
-                        // keybind matching below uses. Not every keymap
-                        // resolves it that way, though, so this also falls
-                        // back to modifiers+base-keysym: raw_syms() for an
-                        // F-key is always the plain F<N> symbol regardless of
-                        // modifiers (F-keys have no shift level), so that
-                        // check doesn't depend on the keymap doing anything
-                        // special at all. No-op under winit, where
-                        // `data.session` stays `None` -- there's a host
-                        // compositor already handling VT switches there.
-                        let modified = handle.modified_sym().raw();
-                        let raw = handle.raw_syms().first().map(|s| s.raw());
-                        tracing::debug!(
-                            ?modified, ?raw, ?modifiers,
-                            "Key pressed (checked against VT-switch)"
-                        );
-                        let vt_switch = (keysyms::KEY_XF86Switch_VT_1..=keysyms::KEY_XF86Switch_VT_12)
-                            .contains(&modified)
-                            .then(|| (modified - keysyms::KEY_XF86Switch_VT_1 + 1) as i32)
-                            .or_else(|| {
-                                if !(modifiers.ctrl && modifiers.alt) {
-                                    return None;
-                                }
-                                let raw = raw?;
-                                (keysyms::KEY_F1..=keysyms::KEY_F12)
-                                    .contains(&raw)
-                                    .then(|| (raw - keysyms::KEY_F1 + 1) as i32)
-                            });
-                        if let Some(vt) = vt_switch {
-                            match data.session.as_mut() {
-                                Some(session) => {
-                                    tracing::info!(vt, "Switching VT");
-                                    if let Err(err) = session.change_vt(vt) {
-                                        tracing::warn!(vt, %err, "Failed to switch VT");
+                            // Ctrl+Alt+F<N>: usually resolves to a distinct
+                            // XF86Switch_VT_N keysym once libinput/DRM (not a host
+                            // compositor) owns the keyboard -- xkbcommon's default
+                            // keymap maps that combo to this range at the
+                            // *modified* level, not literally "F<N> plus two held
+                            // modifiers", which is why this checks
+                            // `modified_sym()` rather than the `raw_syms()`
+                            // keybind matching below uses. Not every keymap
+                            // resolves it that way, though, so this also falls
+                            // back to modifiers+base-keysym: raw_syms() for an
+                            // F-key is always the plain F<N> symbol regardless of
+                            // modifiers (F-keys have no shift level), so that
+                            // check doesn't depend on the keymap doing anything
+                            // special at all. No-op under winit, where
+                            // `data.session` stays `None` -- there's a host
+                            // compositor already handling VT switches there.
+                            let modified = handle.modified_sym().raw();
+                            let raw = handle.raw_syms().first().map(|s| s.raw());
+                            tracing::debug!(
+                                ?modified,
+                                ?raw,
+                                ?modifiers,
+                                "Key pressed (checked against VT-switch)"
+                            );
+                            let vt_switch = (keysyms::KEY_XF86Switch_VT_1
+                                ..=keysyms::KEY_XF86Switch_VT_12)
+                                .contains(&modified)
+                                .then(|| (modified - keysyms::KEY_XF86Switch_VT_1 + 1) as i32)
+                                .or_else(|| {
+                                    if !(modifiers.ctrl && modifiers.alt) {
+                                        return None;
                                     }
+                                    let raw = raw?;
+                                    (keysyms::KEY_F1..=keysyms::KEY_F12)
+                                        .contains(&raw)
+                                        .then(|| (raw - keysyms::KEY_F1 + 1) as i32)
+                                });
+                            if let Some(vt) = vt_switch {
+                                match data.session.as_mut() {
+                                    Some(session) => {
+                                        tracing::info!(vt, "Switching VT");
+                                        if let Err(err) = session.change_vt(vt) {
+                                            tracing::warn!(vt, %err, "Failed to switch VT");
+                                        }
+                                    }
+                                    None => tracing::debug!(
+                                        vt,
+                                        "VT-switch key seen but no session (winit backend)"
+                                    ),
                                 }
-                                None => tracing::debug!(
-                                    vt, "VT-switch key seen but no session (winit backend)"
-                                ),
+                                return FilterResult::Intercept(());
                             }
-                            return FilterResult::Intercept(());
-                        }
                         }
 
                         if a11y_block {
@@ -361,10 +384,14 @@ impl Smallvil {
                             // nothing until the modifier is re-tapped.
                             let is_modifier = matches!(
                                 handle.modified_sym(),
-                                Keysym::Shift_L | Keysym::Shift_R
-                                    | Keysym::Control_L | Keysym::Control_R
-                                    | Keysym::Super_L | Keysym::Super_R
-                                    | Keysym::Alt_L | Keysym::Alt_R
+                                Keysym::Shift_L
+                                    | Keysym::Shift_R
+                                    | Keysym::Control_L
+                                    | Keysym::Control_R
+                                    | Keysym::Super_L
+                                    | Keysym::Super_R
+                                    | Keysym::Alt_L
+                                    | Keysym::Alt_R
                             );
                             if key_state != KeyState::Pressed && is_modifier {
                                 return FilterResult::Forward;
@@ -424,9 +451,12 @@ impl Smallvil {
                         // but degrades safely to "nothing matches,
                         // everything forwards" rather than panicking.
                         let table: &[Keybind] = match &data.active_submap {
-                            Some(name) => {
-                                data.config.submaps.get(name).map(Vec::as_slice).unwrap_or(&[])
-                            }
+                            Some(name) => data
+                                .config
+                                .submaps
+                                .get(name)
+                                .map(Vec::as_slice)
+                                .unwrap_or(&[]),
                             None => &data.config.keybinds,
                         };
                         let action = table
@@ -466,9 +496,7 @@ impl Smallvil {
                 // only gates the regular `motion` call below.
                 pointer.relative_motion(
                     self,
-                    under
-                        .as_ref()
-                        .map(|(s, l)| (s.clone(), *l)),
+                    under.as_ref().map(|(s, l)| (s.clone(), *l)),
                     &RelativeMotionEvent {
                         delta: event.delta(),
                         delta_unaccel: event.delta_unaccel(),
@@ -538,9 +566,7 @@ impl Smallvil {
                         // surface-under at the new location has a different
                         // root, drop the motion.
                         let new_under = self.surface_under(new_loc);
-                        let new_root = new_under
-                            .as_ref()
-                            .and_then(|(s, _)| self.surface_root(s));
+                        let new_root = new_under.as_ref().and_then(|(s, _)| self.surface_root(s));
                         if new_root.as_ref() != Some(root_surf) {
                             drop_motion = true;
                         }
@@ -574,19 +600,16 @@ impl Smallvil {
                 // call `activate()` to send `locked`/`confined` to the
                 // client, and clients wait on that signal before assuming
                 // the constraint is in effect.
-                if let Some((root_surf, surface_loc)) =
-                    new_under.as_ref().and_then(|(s, l)| {
-                        Some((self.root_with_constraint(s, &pointer)?, *l))
-                    })
+                if let Some((root_surf, surface_loc)) = new_under
+                    .as_ref()
+                    .and_then(|(s, l)| Some((self.root_with_constraint(s, &pointer)?, *l)))
                 {
                     with_pointer_constraint(&root_surf, &pointer, |c| {
                         if let Some(c) = c {
                             if !c.is_active() {
                                 let local = (new_loc - surface_loc).to_i32_round();
-                                let in_region = c
-                                    .region()
-                                    .map(|r| r.contains(local))
-                                    .unwrap_or(true);
+                                let in_region =
+                                    c.region().map(|r| r.contains(local)).unwrap_or(true);
                                 if in_region {
                                     c.activate();
                                 }
@@ -660,7 +683,12 @@ impl Smallvil {
                 if !matches!(self.session_lock, SessionLock::Unlocked) {
                     pointer.button(
                         self,
-                        &ButtonEvent { button, state: button_state, serial, time: event.time_msec() },
+                        &ButtonEvent {
+                            button,
+                            state: button_state,
+                            serial,
+                            time: event.time_msec(),
+                        },
                     );
                     pointer.frame(self);
                     return;
@@ -706,7 +734,9 @@ impl Smallvil {
                     // reserve an exclusive zone) doesn't fall through into
                     // window-click or split-drag handling underneath it.
                     if let Some(layer) = self.layer_under_pointer(pointer.current_location()) {
-                        if layer.cached_state().keyboard_interactivity != KeyboardInteractivity::None {
+                        if layer.cached_state().keyboard_interactivity
+                            != KeyboardInteractivity::None
+                        {
                             self.focus_layer(layer.wl_surface().clone(), serial);
                         }
                         pointer.button(
@@ -817,12 +847,7 @@ impl Smallvil {
                                         location: pointer.current_location(),
                                     };
                                     let grab = TileMoveGrab::start(
-                                        start_data,
-                                        window,
-                                        wl_surface,
-                                        output,
-                                        workspace,
-                                        loc,
+                                        start_data, window, wl_surface, output, workspace, loc,
                                     );
                                     pointer.set_grab(self, grab, serial, Focus::Clear);
                                     return;
@@ -884,9 +909,11 @@ impl Smallvil {
                             {
                                 let rect = Rectangle::new(loc, window.geometry().size);
                                 let threshold = (self.config.gaps as f64).max(4.0);
-                                if let Some(edge) =
-                                    floating_resize_edge(rect, pointer.current_location(), threshold)
-                                {
+                                if let Some(edge) = floating_resize_edge(
+                                    rect,
+                                    pointer.current_location(),
+                                    threshold,
+                                ) {
                                     self.space.raise_element(&window, false);
                                     self.focus_window(Some(wl_surface.clone()), serial);
 
@@ -895,7 +922,8 @@ impl Smallvil {
                                         button,
                                         location: pointer.current_location(),
                                     };
-                                    let grab = ResizeSurfaceGrab::start(start_data, window, edge, rect);
+                                    let grab =
+                                        ResizeSurfaceGrab::start(start_data, window, edge, rect);
                                     pointer.set_grab(self, grab, serial, Focus::Clear);
                                     return;
                                 }
@@ -912,21 +940,22 @@ impl Smallvil {
                     // won't be within hit_test_split's threshold of any
                     // split boundary.
                     if under.is_none() && button == BTN_LEFT {
-                        let hit = self
-                            .output_for_point(pointer.current_location())
-                            .and_then(|output| {
-                                let output_geo = self.space.output_geometry(&output)?;
-                                let mut area = layer_map_for_output(&output).non_exclusive_zone();
-                                area.loc += output_geo.loc;
-                                let workspace = self.layout.active_workspace(&output.name());
-                                self.layout.hit_test_split(
-                                    &output.name(),
-                                    workspace,
-                                    area,
-                                    self.config.gaps,
-                                    pointer.current_location(),
-                                )
-                            });
+                        let hit =
+                            self.output_for_point(pointer.current_location())
+                                .and_then(|output| {
+                                    let output_geo = self.space.output_geometry(&output)?;
+                                    let mut area =
+                                        layer_map_for_output(&output).non_exclusive_zone();
+                                    area.loc += output_geo.loc;
+                                    let workspace = self.layout.active_workspace(&output.name());
+                                    self.layout.hit_test_split(
+                                        &output.name(),
+                                        workspace,
+                                        area,
+                                        self.config.gaps,
+                                        pointer.current_location(),
+                                    )
+                                });
                         if let Some(hit) = hit {
                             if let Some(start_ratio) =
                                 self.layout.ratio_at(&hit.output, hit.workspace, &hit.path)
@@ -977,7 +1006,7 @@ impl Smallvil {
                 let under = self.surface_under(location);
                 touch.down(
                     self,
-                    under,
+                    under.clone(),
                     &TouchDownData {
                         slot: event.slot(),
                         location,
@@ -1009,7 +1038,14 @@ impl Smallvil {
                     return;
                 };
                 let serial = SERIAL_COUNTER.next_serial();
-                touch.up(self, &TouchUpData { slot: event.slot(), serial, time: event.time_msec() });
+                touch.up(
+                    self,
+                    &TouchUpData {
+                        slot: event.slot(),
+                        serial,
+                        time: event.time_msec(),
+                    },
+                );
             }
             InputEvent::TouchFrame { .. } => {
                 if let Some(touch) = self.seat.get_touch() {
@@ -1082,7 +1118,10 @@ impl Smallvil {
                     Switch::Lid => {
                         let closed = state == SwitchState::On;
                         if std::mem::replace(&mut self.is_lid_closed, closed) == closed {
-                            tracing::trace!(closed, "Lid switch event with no state change, ignoring");
+                            tracing::trace!(
+                                closed,
+                                "Lid switch event with no state change, ignoring"
+                            );
                             return;
                         }
                         tracing::info!(closed, "Lid {}", if closed { "closed" } else { "opened" });
@@ -1098,10 +1137,17 @@ impl Smallvil {
                     Switch::TabletMode => {
                         let tablet = state == SwitchState::On;
                         if std::mem::replace(&mut self.is_tablet_mode, tablet) == tablet {
-                            tracing::trace!(tablet, "Tablet-mode switch event with no state change, ignoring");
+                            tracing::trace!(
+                                tablet,
+                                "Tablet-mode switch event with no state change, ignoring"
+                            );
                             return;
                         }
-                        tracing::info!(tablet, "Tablet mode {}", if tablet { "entered" } else { "left" });
+                        tracing::info!(
+                            tablet,
+                            "Tablet mode {}",
+                            if tablet { "entered" } else { "left" }
+                        );
                         let action = if tablet {
                             self.config.switch_events.tablet_mode_on.clone()
                         } else {
@@ -1393,16 +1439,31 @@ mod tests {
 
     #[test]
     fn interior_click_is_not_a_resize() {
-        assert_eq!(floating_resize_edge(rect(), Point::from((200.0, 200.0)), 4.0), None);
+        assert_eq!(
+            floating_resize_edge(rect(), Point::from((200.0, 200.0)), 4.0),
+            None
+        );
     }
 
     #[test]
     fn near_each_single_edge_hits_only_that_edge() {
         let r = rect();
-        assert_eq!(floating_resize_edge(r, Point::from((101.0, 200.0)), 4.0), Some(ResizeEdge::LEFT));
-        assert_eq!(floating_resize_edge(r, Point::from((299.0, 200.0)), 4.0), Some(ResizeEdge::RIGHT));
-        assert_eq!(floating_resize_edge(r, Point::from((200.0, 101.0)), 4.0), Some(ResizeEdge::TOP));
-        assert_eq!(floating_resize_edge(r, Point::from((200.0, 299.0)), 4.0), Some(ResizeEdge::BOTTOM));
+        assert_eq!(
+            floating_resize_edge(r, Point::from((101.0, 200.0)), 4.0),
+            Some(ResizeEdge::LEFT)
+        );
+        assert_eq!(
+            floating_resize_edge(r, Point::from((299.0, 200.0)), 4.0),
+            Some(ResizeEdge::RIGHT)
+        );
+        assert_eq!(
+            floating_resize_edge(r, Point::from((200.0, 101.0)), 4.0),
+            Some(ResizeEdge::TOP)
+        );
+        assert_eq!(
+            floating_resize_edge(r, Point::from((200.0, 299.0)), 4.0),
+            Some(ResizeEdge::BOTTOM)
+        );
     }
 
     #[test]

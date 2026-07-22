@@ -78,10 +78,14 @@ fn apply_user_env(env: &std::collections::HashMap<String, String>) {
 /// and otherwise ignored, never fatal, per this project's any-distro
 /// requirement.
 fn export_session_environment(env: &std::collections::HashMap<String, String>) {
-    std::env::set_var("XDG_CURRENT_DESKTOP", "tidewm");
-    std::env::set_var("XDG_SESSION_TYPE", "wayland");
-
-    let mut vars: Vec<&str> = vec!["WAYLAND_DISPLAY", "XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE"];
+    let mut vars: Vec<&str> = vec![
+        "WAYLAND_DISPLAY",
+        "XDG_CURRENT_DESKTOP",
+        "XDG_SESSION_DESKTOP",
+        "DESKTOP_SESSION",
+        "XDG_SESSION_TYPE",
+        "TIDEWM_VERSION",
+    ];
     vars.extend(env.keys().map(String::as_str));
 
     for (program, mut args) in [
@@ -180,7 +184,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // convention anvil and niri use for their own backend auto-selection.
     // Checked before `apply_user_env` so a stray WAYLAND_DISPLAY/DISPLAY in
     // `[env]` can't retroactively change which backend gets picked.
-    let nested = std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
+    let nested =
+        std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
 
     apply_user_env(&state.config.env);
 

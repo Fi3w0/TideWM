@@ -2,6 +2,10 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -290,10 +294,10 @@ impl Config {
             if let Err(err) = fs::write(&path, DEFAULT_CONFIG_WAVE) {
                 tracing::warn!(%err, path = %path.display(), "Failed to write default config");
             }
-            default
+            (default, None)
         };
 
-        Self::from_raw(raw)
+        (Self::from_raw(raw), error)
     }
 
     /// Re-read the config file for a hot-reload. Unlike `load`, this never
@@ -399,6 +403,9 @@ impl Config {
             effective.pin |= rule.pin;
             effective.tile |= rule.tile;
             effective.no_focus |= rule.no_focus;
+            effective.maximize |= rule.maximize;
+            effective.fullscreen |= rule.fullscreen;
+            effective.block_capture |= rule.block_capture;
             if rule.position.is_some() {
                 effective.position = rule.position;
             }
@@ -500,8 +507,14 @@ impl Default for RawConfig {
         keybinds.insert("Super+Ctrl+K".to_string(), "group-up".to_string());
         keybinds.insert("Super+Ctrl+J".to_string(), "group-down".to_string());
         keybinds.insert("Super+Shift+G".to_string(), "ungroup".to_string());
-        keybinds.insert("Super+BracketRight".to_string(), "cycle-tab-next".to_string());
-        keybinds.insert("Super+BracketLeft".to_string(), "cycle-tab-prev".to_string());
+        keybinds.insert(
+            "Super+BracketRight".to_string(),
+            "cycle-tab-next".to_string(),
+        );
+        keybinds.insert(
+            "Super+BracketLeft".to_string(),
+            "cycle-tab-prev".to_string(),
+        );
         // i3/sway's own default scratchpad binds.
         keybinds.insert("Super+Minus".to_string(), "toggle-scratchpad".to_string());
         keybinds.insert(
@@ -959,7 +972,9 @@ fn lower_entries(entries: &[waves::Entry]) -> RawConfig {
             // Already resolved away by `waves::resolve` before this ever runs.
             waves::Entry::Include(_) => {}
             waves::Entry::Assign(key, value) => apply_top_level_assign(&mut raw, key, value),
-            waves::Entry::Block(keyword, header, body) => apply_top_level_block(&mut raw, keyword, header, body),
+            waves::Entry::Block(keyword, header, body) => {
+                apply_top_level_block(&mut raw, keyword, header, body)
+            }
         }
     }
     raw
@@ -972,7 +987,9 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
         "water_effects" => set_bool(&mut raw.water_effects, key, value),
         "cursor_always_visible" => set_bool(&mut raw.cursor_always_visible, key, value),
         "cursor_hide_after_ms" => set_i32(&mut raw.cursor_hide_after_ms, key, value),
-        "workspace_auto_back_and_forth" => set_bool(&mut raw.workspace_auto_back_and_forth, key, value),
+        "workspace_auto_back_and_forth" => {
+            set_bool(&mut raw.workspace_auto_back_and_forth, key, value)
+        }
         "gaps" => set_i32(&mut raw.gaps, key, value),
         "default_layout" => raw.default_layout = value.to_string(),
         "master_orientation" => raw.master_orientation = value.to_string(),
@@ -1006,7 +1023,10 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
                     waves::Entry::Bind(combo, action) => {
                         binds.insert(combo.clone(), action.clone());
                     }
-                    _ => tracing::warn!(name, "A `submap` block may only contain `bind` statements, ignoring an entry"),
+                    _ => tracing::warn!(
+                        name,
+                        "A `submap` block may only contain `bind` statements, ignoring an entry"
+                    ),
                 }
             }
         }
@@ -1101,7 +1121,10 @@ fn apply_switch_events_block(switch_events: &mut SwitchEventsRaw, body: &[waves:
 }
 
 fn lower_output_block(header: &str, body: &[waves::Entry]) -> OutputConfig {
-    let mut cfg = OutputConfig { name: header.trim().to_string(), ..Default::default() };
+    let mut cfg = OutputConfig {
+        name: header.trim().to_string(),
+        ..Default::default()
+    };
     for entry in body {
         let waves::Entry::Assign(key, value) = entry else {
             tracing::warn!(name = %cfg.name, "Unexpected entry in `output` block, ignoring");
@@ -1145,13 +1168,19 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
             "pin" => set_bool(&mut rule.pin, key, value),
             "tile" => set_bool(&mut rule.tile, key, value),
             "no_focus" => set_bool(&mut rule.no_focus, key, value),
+            "maximize" => set_bool(&mut rule.maximize, key, value),
+            "fullscreen" => set_bool(&mut rule.fullscreen, key, value),
+            "block_capture" => set_bool(&mut rule.block_capture, key, value),
             "position" => match parse_position(value) {
                 Some(pos) => rule.position = Some(pos),
                 None => tracing::warn!(value, "Expected <x>x<y> for a rule's position, ignoring"),
             },
             "size" => match parse_position(value) {
                 Some(size) => rule.size = Some(size),
-                None => tracing::warn!(value, "Expected <width>x<height> for a rule's size, ignoring"),
+                None => tracing::warn!(
+                    value,
+                    "Expected <width>x<height> for a rule's size, ignoring"
+                ),
             },
             other => tracing::warn!(key = %other, "Unknown key in `rule` block, ignoring"),
         }
@@ -1260,7 +1289,9 @@ fn substitute_variables(s: &str, variables: &HashMap<String, String>) -> String 
 
         if let Some(args) = after.strip_prefix("wave(") {
             if let Some(end) = args.find(')') {
-                result.push_str(&resolve_wave_fallback(args[..end].split(',').map(str::trim)));
+                result.push_str(&resolve_wave_fallback(
+                    args[..end].split(',').map(str::trim),
+                ));
                 rest = &args[end + 1..];
                 continue;
             }
@@ -1295,9 +1326,15 @@ fn resolve_wave_fallback<'a>(candidates: impl Iterator<Item = &'a str>) -> Strin
     let candidates: Vec<&str> = candidates.collect();
     let found = candidates.iter().find(|c| command_exists(c));
     if found.is_none() {
-        tracing::warn!(?candidates, "$wave(...): none of these were found, using the last one anyway");
+        tracing::warn!(
+            ?candidates,
+            "$wave(...): none of these were found, using the last one anyway"
+        );
     }
-    found.or(candidates.last()).map(|s| s.to_string()).unwrap_or_default()
+    found
+        .or(candidates.last())
+        .map(|s| s.to_string())
+        .unwrap_or_default()
 }
 
 /// Whether `candidate`'s first whitespace-separated word is a real,
@@ -1363,14 +1400,27 @@ fn substitute_variables_in_raw(raw: &mut RawConfig) {
             (name.clone(), binds)
         })
         .collect();
-    raw.switch_events.lid_close = raw.switch_events.lid_close.as_deref().map(|s| substitute_variables(s, &raw.variables));
-    raw.switch_events.lid_open = raw.switch_events.lid_open.as_deref().map(|s| substitute_variables(s, &raw.variables));
-    raw.switch_events.tablet_mode_on =
-        raw.switch_events.tablet_mode_on.as_deref().map(|s| substitute_variables(s, &raw.variables));
-    raw.switch_events.tablet_mode_off =
-        raw.switch_events.tablet_mode_off.as_deref().map(|s| substitute_variables(s, &raw.variables));
+    raw.switch_events.lid_close = raw
+        .switch_events
+        .lid_close
+        .as_deref()
+        .map(|s| substitute_variables(s, &raw.variables));
+    raw.switch_events.lid_open = raw
+        .switch_events
+        .lid_open
+        .as_deref()
+        .map(|s| substitute_variables(s, &raw.variables));
+    raw.switch_events.tablet_mode_on = raw
+        .switch_events
+        .tablet_mode_on
+        .as_deref()
+        .map(|s| substitute_variables(s, &raw.variables));
+    raw.switch_events.tablet_mode_off = raw
+        .switch_events
+        .tablet_mode_off
+        .as_deref()
+        .map(|s| substitute_variables(s, &raw.variables));
 }
-
 
 static CONFIG_PATH_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
@@ -1397,8 +1447,12 @@ fn config_path() -> PathBuf {
         // beats a compositor that won't start at all in a stripped
         // environment (minimal container, restricted PAM session) that
         // happens to clear both variables.
-        tracing::warn!("Neither XDG_CONFIG_HOME nor HOME is set; falling back to /tmp for config storage");
-        return PathBuf::from("/tmp").join("tidewm-config").join("config.wave");
+        tracing::warn!(
+            "Neither XDG_CONFIG_HOME nor HOME is set; falling back to /tmp for config storage"
+        );
+        return PathBuf::from("/tmp")
+            .join("tidewm-config")
+            .join("config.wave");
     };
     PathBuf::from(home)
         .join(".config")
@@ -1563,7 +1617,10 @@ fn parse_workspace_names(raw: &[String]) -> HashMap<String, u32> {
             Ok(n) => {
                 names.insert(name.to_string(), n);
             }
-            Err(_) => tracing::warn!(entry, "Invalid workspace number in workspace_name, ignoring"),
+            Err(_) => tracing::warn!(
+                entry,
+                "Invalid workspace number in workspace_name, ignoring"
+            ),
         }
     }
     names
@@ -1736,7 +1793,10 @@ mod tests {
 
         assert!(matches!(parsed.lid_close, Some(Action::Spawn(_))));
         assert!(matches!(parsed.lid_open, Some(Action::CloseWindow)));
-        assert!(matches!(parsed.tablet_mode_on, Some(Action::SwitchWorkspace(WorkspaceRef::Number(2)))));
+        assert!(matches!(
+            parsed.tablet_mode_on,
+            Some(Action::SwitchWorkspace(WorkspaceRef::Number(2)))
+        ));
         assert!(parsed.tablet_mode_off.is_none());
     }
 
@@ -1771,12 +1831,18 @@ mod tests {
 
     #[test]
     fn window_rule_matches_app_id_exactly_and_title_by_substring() {
-        let by_app_id = WindowRule { app_id: Some("firefox".to_string()), ..Default::default() };
+        let by_app_id = WindowRule {
+            app_id: Some("firefox".to_string()),
+            ..Default::default()
+        };
         assert!(by_app_id.matches(Some("firefox"), None));
         assert!(!by_app_id.matches(Some("firefox-nightly"), None));
         assert!(!by_app_id.matches(None, Some("Firefox")));
 
-        let by_title = WindowRule { title: Some("Picture-in-Picture".to_string()), ..Default::default() };
+        let by_title = WindowRule {
+            title: Some("Picture-in-Picture".to_string()),
+            ..Default::default()
+        };
         assert!(by_title.matches(None, Some("Video - picture-in-picture")));
         assert!(!by_title.matches(None, Some("Video")));
         assert!(!by_title.matches(None, None));
@@ -1816,12 +1882,18 @@ mod tests {
 
         // A rule with no namespace never matches, same "blank rule matches
         // nothing" precedent WindowRule sets.
-        let blank = LayerRule { namespace: None, block_capture: true };
+        let blank = LayerRule {
+            namespace: None,
+            block_capture: true,
+        };
         assert!(!blank.matches("anything"));
 
         // A matching namespace but block_capture: false must not block --
         // the rule matching and the effect firing are separate things.
-        config.layer_rules.push(LayerRule { namespace: Some("waybar".to_string()), block_capture: false });
+        config.layer_rules.push(LayerRule {
+            namespace: Some("waybar".to_string()),
+            block_capture: false,
+        });
         assert!(!config.layer_blocks_capture("waybar"));
     }
 
@@ -1888,16 +1960,28 @@ mod tests {
         variables.insert("mainMod".to_string(), "SUPER".to_string());
         variables.insert("terminal".to_string(), "kitty".to_string());
 
-        assert_eq!(substitute_variables("$mainMod+Return", &variables), "SUPER+Return");
-        assert_eq!(substitute_variables("spawn:$terminal", &variables), "spawn:kitty");
+        assert_eq!(
+            substitute_variables("$mainMod+Return", &variables),
+            "SUPER+Return"
+        );
+        assert_eq!(
+            substitute_variables("spawn:$terminal", &variables),
+            "spawn:kitty"
+        );
         // $HOME/$PATH aren't defined variables -- must survive untouched,
         // since these commonly appear in real spawn commands and corrupting
         // them would be far worse than leaving an unknown $name alone.
-        assert_eq!(substitute_variables("spawn:sh -c \"echo $HOME\"", &variables), "spawn:sh -c \"echo $HOME\"");
+        assert_eq!(
+            substitute_variables("spawn:sh -c \"echo $HOME\"", &variables),
+            "spawn:sh -c \"echo $HOME\""
+        );
         // A bare trailing `$` (no identifier following) must not panic or loop.
         assert_eq!(substitute_variables("cost is $5", &variables), "cost is $5");
         // No variables defined at all -- short-circuits, returns unchanged.
-        assert_eq!(substitute_variables("$mainMod+Q", &HashMap::new()), "$mainMod+Q");
+        assert_eq!(
+            substitute_variables("$mainMod+Q", &HashMap::new()),
+            "$mainMod+Q"
+        );
     }
 
     #[test]
@@ -1913,8 +1997,11 @@ mod tests {
 
         let raw = load_raw_config(&main).expect("should parse");
         assert_eq!(raw.spawn_at_startup, vec!["kitty --daemon".to_string()]);
-        assert_eq!(raw.keybinds.get("SUPER+Return").map(String::as_str), Some("spawn:kitty"));
-        assert!(raw.keybinds.get("$mainMod+Return").is_none());
+        assert_eq!(
+            raw.keybinds.get("SUPER+Return").map(String::as_str),
+            Some("spawn:kitty")
+        );
+        assert!(!raw.keybinds.contains_key("$mainMod+Return"));
     }
 
     #[test]
@@ -1923,7 +2010,10 @@ mod tests {
         // suite; "definitely-not-a-real-binary" never will. First match
         // wins over an earlier miss, not just the first candidate overall.
         let dir = TestDir::new("wave-fallback");
-        let main = dir.write("config.wave", "terminal = $wave(definitely-not-a-real-binary, /bin/sh, kitty)\n");
+        let main = dir.write(
+            "config.wave",
+            "terminal = $wave(definitely-not-a-real-binary, /bin/sh, kitty)\n",
+        );
 
         let raw = load_raw_config(&main).expect("should parse");
         assert_eq!(raw.terminal, "/bin/sh");
@@ -1936,7 +2026,8 @@ mod tests {
     struct TestDir(PathBuf);
     impl TestDir {
         fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!("tidewm-config-test-{name}-{}", std::process::id()));
+            let dir = std::env::temp_dir()
+                .join(format!("tidewm-config-test-{name}-{}", std::process::id()));
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir).unwrap();
             Self(dir)
@@ -1966,11 +2057,17 @@ mod tests {
 
         assert_eq!(raw.terminal, "kitty");
         // Included file's bind survives...
-        assert_eq!(raw.keybinds.get("Super+Q").map(String::as_str), Some("close-window"));
+        assert_eq!(
+            raw.keybinds.get("Super+Q").map(String::as_str),
+            Some("close-window")
+        );
         // ...and the including file's own bind is present too, not
         // clobbered by the include (merge order: include first, own
         // entries folded on top).
-        assert_eq!(raw.keybinds.get("Super+F").map(String::as_str), Some("toggle-fullscreen"));
+        assert_eq!(
+            raw.keybinds.get("Super+F").map(String::as_str),
+            Some("toggle-fullscreen")
+        );
     }
 
     #[test]
@@ -1987,7 +2084,10 @@ mod tests {
     #[test]
     fn load_raw_config_skips_a_missing_include_instead_of_failing_the_whole_load() {
         let dir = TestDir::new("missing-include");
-        let main = dir.write("config.wave", "include \"does-not-exist.wave\"\nterminal = kitty\n");
+        let main = dir.write(
+            "config.wave",
+            "include \"does-not-exist.wave\"\nterminal = kitty\n",
+        );
 
         let raw = load_raw_config(&main).expect("a bad include must not fail the top-level file");
         assert_eq!(raw.terminal, "kitty");
@@ -2006,7 +2106,8 @@ mod tests {
         dir.write("b.wave", "include \"a.wave\"\n");
         let a = dir.write("a.wave", "include \"b.wave\"\nterminal = kitty\n");
 
-        let raw = load_raw_config(&a).expect("a cycle is skipped with a warning, not a hard failure");
+        let raw =
+            load_raw_config(&a).expect("a cycle is skipped with a warning, not a hard failure");
         assert_eq!(raw.terminal, "kitty");
     }
 
@@ -2016,7 +2117,8 @@ mod tests {
     /// shipped default, so `waves::parse` alone (no `waves::resolve`) is
     /// enough.
     fn parse_default_config() -> Config {
-        let entries = waves::parse(DEFAULT_CONFIG_WAVE, Path::new("<default>")).expect("DEFAULT_CONFIG_WAVE must parse");
+        let entries = waves::parse(DEFAULT_CONFIG_WAVE, Path::new("<default>"))
+            .expect("DEFAULT_CONFIG_WAVE must parse");
         let mut raw = lower_entries(&entries);
         substitute_variables_in_raw(&mut raw);
         Config::from_raw(raw)
@@ -2028,20 +2130,47 @@ mod tests {
         // default (see `RawConfig::default()` and `DEFAULT_CONFIG_WAVE`'s
         // own doc note) -- assert both actually agree, not just that one
         // of them happens to parse.
-        for config in [Config::from_raw(RawConfig::default()), parse_default_config()] {
-            let nav = config.submaps.get("nav").expect("default config should ship a `nav` submap");
-            let find = |key: &str| nav.iter().find(|b| b.keysym == xkb::keysym_from_name(key, xkb::KEYSYM_CASE_INSENSITIVE));
-            assert!(matches!(find("h").map(|b| &b.action), Some(Action::FocusDirection(Direction::Left))));
-            assert!(matches!(find("l").map(|b| &b.action), Some(Action::FocusDirection(Direction::Right))));
-            assert!(matches!(find("k").map(|b| &b.action), Some(Action::FocusDirection(Direction::Up))));
-            assert!(matches!(find("j").map(|b| &b.action), Some(Action::FocusDirection(Direction::Down))));
-            assert!(matches!(find("Escape").map(|b| &b.action), Some(Action::ExitSubmap)));
+        for config in [
+            Config::from_raw(RawConfig::default()),
+            parse_default_config(),
+        ] {
+            let nav = config
+                .submaps
+                .get("nav")
+                .expect("default config should ship a `nav` submap");
+            let find = |key: &str| {
+                nav.iter()
+                    .find(|b| b.keysym == xkb::keysym_from_name(key, xkb::KEYSYM_CASE_INSENSITIVE))
+            };
+            assert!(matches!(
+                find("h").map(|b| &b.action),
+                Some(Action::FocusDirection(Direction::Left))
+            ));
+            assert!(matches!(
+                find("l").map(|b| &b.action),
+                Some(Action::FocusDirection(Direction::Right))
+            ));
+            assert!(matches!(
+                find("k").map(|b| &b.action),
+                Some(Action::FocusDirection(Direction::Up))
+            ));
+            assert!(matches!(
+                find("j").map(|b| &b.action),
+                Some(Action::FocusDirection(Direction::Down))
+            ));
+            assert!(matches!(
+                find("Escape").map(|b| &b.action),
+                Some(Action::ExitSubmap)
+            ));
 
             let enters_nav = config
                 .keybinds
                 .iter()
                 .any(|b| matches!(&b.action, Action::EnterSubmap(name) if name == "nav"));
-            assert!(enters_nav, "default keybinds should have a bind entering the `nav` submap");
+            assert!(
+                enters_nav,
+                "default keybinds should have a bind entering the `nav` submap"
+            );
         }
     }
 
@@ -2053,21 +2182,47 @@ mod tests {
         // (last one silently wins there, unlike a literal duplicate TOML
         // key, which used to fail the parse loudly -- worth a second look
         // at the template by eye if this test ever breaks unexpectedly).
-        for config in [Config::from_raw(RawConfig::default()), parse_default_config()] {
+        for config in [
+            Config::from_raw(RawConfig::default()),
+            parse_default_config(),
+        ] {
             let find = |key: &str, mods: Mods| {
-                config
-                    .keybinds
-                    .iter()
-                    .find(|b| b.keysym == xkb::keysym_from_name(key, xkb::KEYSYM_CASE_INSENSITIVE) && b.mods == mods)
+                config.keybinds.iter().find(|b| {
+                    b.keysym == xkb::keysym_from_name(key, xkb::KEYSYM_CASE_INSENSITIVE)
+                        && b.mods == mods
+                })
             };
-            let logo = Mods { logo: true, ..Default::default() };
-            let logo_shift = Mods { logo: true, shift: true, ..Default::default() };
-            let logo_ctrl = Mods { logo: true, ctrl: true, ..Default::default() };
+            let logo = Mods {
+                logo: true,
+                ..Default::default()
+            };
+            let logo_shift = Mods {
+                logo: true,
+                shift: true,
+                ..Default::default()
+            };
+            let logo_ctrl = Mods {
+                logo: true,
+                ctrl: true,
+                ..Default::default()
+            };
 
-            assert!(matches!(find("w", logo).map(|b| &b.action), Some(Action::SetLayout(LayoutAlgorithm::Bsp))));
-            assert!(matches!(find("w", logo_shift).map(|b| &b.action), Some(Action::SetLayout(LayoutAlgorithm::Master))));
-            assert!(matches!(find("minus", logo_ctrl).map(|b| &b.action), Some(Action::ShrinkMaster)));
-            assert!(matches!(find("equal", logo_ctrl).map(|b| &b.action), Some(Action::GrowMaster)));
+            assert!(matches!(
+                find("w", logo).map(|b| &b.action),
+                Some(Action::SetLayout(LayoutAlgorithm::Bsp))
+            ));
+            assert!(matches!(
+                find("w", logo_shift).map(|b| &b.action),
+                Some(Action::SetLayout(LayoutAlgorithm::Master))
+            ));
+            assert!(matches!(
+                find("minus", logo_ctrl).map(|b| &b.action),
+                Some(Action::ShrinkMaster)
+            ));
+            assert!(matches!(
+                find("equal", logo_ctrl).map(|b| &b.action),
+                Some(Action::GrowMaster)
+            ));
         }
     }
 }

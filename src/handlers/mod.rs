@@ -23,9 +23,11 @@ use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Rectangle};
-use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier};
 use smithay::wayland::compositor::{get_parent, with_states};
-use smithay::wayland::foreign_toplevel_list::{ForeignToplevelListHandler, ForeignToplevelListState};
+use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier};
+use smithay::wayland::foreign_toplevel_list::{
+    ForeignToplevelListHandler, ForeignToplevelListState,
+};
 use smithay::wayland::fractional_scale::{with_fractional_scale, FractionalScaleHandler};
 use smithay::wayland::idle_inhibit::IdleInhibitHandler;
 use smithay::wayland::idle_notify::{IdleNotifierHandler, IdleNotifierState};
@@ -468,7 +470,9 @@ impl FractionalScaleHandler for Smallvil {
         }
 
         let scanout = |surface: &WlSurface| {
-            with_states(surface, |states| surface_primary_scanout_output(surface, states))
+            with_states(surface, |states| {
+                surface_primary_scanout_output(surface, states)
+            })
         };
         let output = scanout(&surface)
             .or_else(|| (root != surface).then(|| scanout(&root)).flatten())

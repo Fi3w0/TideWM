@@ -11,9 +11,9 @@ use crate::{layout::Axis, layout::SplitHit, Smallvil};
 use smithay::{
     input::pointer::{
         AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
-        GesturePinchEndEvent, GesturePinchUpdateEvent, GestureSwipeBeginEvent, GestureSwipeEndEvent,
-        GestureSwipeUpdateEvent, GrabStartData as PointerGrabStartData, MotionEvent, PointerGrab,
-        PointerInnerHandle, RelativeMotionEvent,
+        GesturePinchEndEvent, GesturePinchUpdateEvent, GestureSwipeBeginEvent,
+        GestureSwipeEndEvent, GestureSwipeUpdateEvent, GrabStartData as PointerGrabStartData,
+        MotionEvent, PointerGrab, PointerInnerHandle, RelativeMotionEvent,
     },
     reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::{Logical, Point},
@@ -29,8 +29,14 @@ pub struct TileWindowResizeGrab {
 }
 
 impl TileWindowResizeGrab {
-    pub fn start(start_data: PointerGrabStartData<Smallvil>, handles: Vec<(SplitHit, f32)>) -> Self {
-        Self { start_data, handles }
+    pub fn start(
+        start_data: PointerGrabStartData<Smallvil>,
+        handles: Vec<(SplitHit, f32)>,
+    ) -> Self {
+        Self {
+            start_data,
+            handles,
+        }
     }
 }
 

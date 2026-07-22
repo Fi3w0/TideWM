@@ -53,7 +53,9 @@ fn main() {
         .unwrap_or_else(|msg| fail(&msg));
     let response = match send_request(&socket, &request) {
         Ok(r) => r,
-        Err(e) if socket_override.is_none() && e.kind() == std::io::ErrorKind::ConnectionRefused => {
+        Err(e)
+            if socket_override.is_none() && e.kind() == std::io::ErrorKind::ConnectionRefused =>
+        {
             // A stale socket file: TideWM's cleanup only runs on a clean
             // `Drop` (see ipc.rs's `SocketGuard`), which a SIGKILL or a
             // crash skips entirely, leaving the file behind after the
@@ -61,8 +63,12 @@ fn main() {
             // whatever socket (if any) is left.
             let _ = std::fs::remove_file(&socket);
             let retry_socket = find_socket().unwrap_or_else(|msg| fail(&msg));
-            send_request(&retry_socket, &request)
-                .unwrap_or_else(|e| fail(&format!("failed to connect to {}: {e}", retry_socket.display())))
+            send_request(&retry_socket, &request).unwrap_or_else(|e| {
+                fail(&format!(
+                    "failed to connect to {}: {e}",
+                    retry_socket.display()
+                ))
+            })
         }
         Err(e) => fail(&format!("failed to connect to {}: {e}", socket.display())),
     };
@@ -71,7 +77,10 @@ fn main() {
     if json_output {
         println!("{response}");
     } else if !ok {
-        let err = response.get("error").and_then(Value::as_str).unwrap_or("unknown error");
+        let err = response
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown error");
         eprintln!("tidectl: {err}");
     } else {
         print_response(&args[0], response.get("data").unwrap_or(&Value::Null));
@@ -178,7 +187,9 @@ fn print_response(command: &str, data: &Value) {
 }
 
 fn print_outputs(data: &Value) {
-    let Some(outputs) = data.as_array() else { return };
+    let Some(outputs) = data.as_array() else {
+        return;
+    };
     for o in outputs {
         let name = o.get("name").and_then(Value::as_str).unwrap_or("?");
         let size = o.get("size").and_then(Value::as_array);
@@ -188,7 +199,10 @@ fn print_outputs(data: &Value) {
         let refresh_mhz = o.get("refresh_mhz").and_then(Value::as_i64).unwrap_or(0);
         let scale = o.get("scale").and_then(Value::as_f64).unwrap_or(1.0);
         let transform = o.get("transform").and_then(Value::as_str).unwrap_or("?");
-        let workspace = o.get("active_workspace").and_then(Value::as_u64).unwrap_or(0);
+        let workspace = o
+            .get("active_workspace")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         let pos = o.get("position").and_then(Value::as_array);
         let (x, y) = pos
             .and_then(|p| Some((p.first()?.as_i64()?, p.get(1)?.as_i64()?)))
@@ -201,7 +215,9 @@ fn print_outputs(data: &Value) {
 }
 
 fn print_workspaces(data: &Value) {
-    let Some(workspaces) = data.as_array() else { return };
+    let Some(workspaces) = data.as_array() else {
+        return;
+    };
     for w in workspaces {
         let output = w.get("output").and_then(Value::as_str).unwrap_or("?");
         let workspace = w.get("workspace").and_then(Value::as_u64).unwrap_or(0);
@@ -213,7 +229,9 @@ fn print_workspaces(data: &Value) {
 }
 
 fn print_windows(data: &Value) {
-    let Some(windows) = data.as_array() else { return };
+    let Some(windows) = data.as_array() else {
+        return;
+    };
     if windows.is_empty() {
         println!("(no mapped windows)");
         return;
@@ -250,7 +268,11 @@ fn print_window(w: &Value) {
             flags.push(label);
         }
     }
-    let flags = if flags.is_empty() { String::new() } else { format!("  [{}]", flags.join(", ")) };
+    let flags = if flags.is_empty() {
+        String::new()
+    } else {
+        format!("  [{}]", flags.join(", "))
+    };
     println!("{app_id}  \"{title}\"  output={output}  workspace={workspace}{flags}");
 }
 
@@ -286,6 +308,7 @@ ACTIONS:
         tidectl spawn <cmd...>             same as "spawn:<cmd...>"
         tidectl submap <name>              same as "submap:<name>"
         tidectl action <string>            explicit passthrough
+        tidectl batch <action>...          validate then execute up to 128 actions
 
 FLAGS:
     --json, -j        print the raw JSON response instead of a formatted view

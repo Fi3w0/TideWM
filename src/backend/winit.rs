@@ -3,11 +3,12 @@ use std::time::Duration;
 use smithay::{
     backend::{
         renderer::{
-            damage::OutputDamageTracker, element::memory::MemoryRenderBufferRenderElement,
+            damage::OutputDamageTracker, element::surface::WaylandSurfaceRenderElement,
             gles::GlesRenderer,
         },
         winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend},
     },
+    desktop::Window,
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{
         calloop::{
@@ -268,7 +269,9 @@ pub fn init_winit(
                             .output
                             .current_mode()
                             .map(|mode| {
-                                Refresh::fixed(Duration::from_secs_f64(1_000f64 / mode.refresh as f64))
+                                Refresh::fixed(Duration::from_secs_f64(
+                                    1_000f64 / mode.refresh as f64,
+                                ))
                             })
                             .unwrap_or(Refresh::Unknown),
                         0,
@@ -313,7 +316,11 @@ pub fn init_winit(
             // persistent toast (see Toast::needs_continued_redraw) -- its
             // pixels never change after the first render, so looping this
             // forever would just burn cycles on identical frames.
-            if state.toast.as_ref().is_some_and(|toast| toast.needs_continued_redraw()) {
+            if state
+                .toast
+                .as_ref()
+                .is_some_and(|toast| toast.needs_continued_redraw())
+            {
                 state.request_redraw();
             }
 

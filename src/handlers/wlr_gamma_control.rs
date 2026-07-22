@@ -47,7 +47,10 @@ pub struct WlrGammaControlState {
 impl WlrGammaControlState {
     pub fn new(dh: &DisplayHandle) -> Self {
         let global = dh.create_global::<Smallvil, ZwlrGammaControlManagerV1, ()>(1, ());
-        Self { global, controls: HashMap::new() }
+        Self {
+            global,
+            controls: HashMap::new(),
+        }
     }
 }
 
@@ -100,7 +103,10 @@ impl Dispatch<ZwlrGammaControlManagerV1, ()> for Smallvil {
 
         match (target, size) {
             (Some(output), Some(size)) => {
-                if let Some(old) = state.wlr_gamma_control_state.controls.insert(output, control.clone())
+                if let Some(old) = state
+                    .wlr_gamma_control_state
+                    .controls
+                    .insert(output, control.clone())
                 {
                     old.failed();
                 }
@@ -121,7 +127,9 @@ impl Dispatch<ZwlrGammaControlV1, ControlData> for Smallvil {
         _dh: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
-        let Some((output, size)) = &data.0 else { return };
+        let Some((output, size)) = &data.0 else {
+            return;
+        };
         let zwlr_gamma_control_v1::Request::SetGamma { fd } = request else {
             return;
         };
@@ -148,7 +156,10 @@ impl Dispatch<ZwlrGammaControlV1, ControlData> for Smallvil {
         }
 
         let channel = |bytes: &[u8]| -> Vec<u16> {
-            bytes.chunks_exact(2).map(|c| u16::from_ne_bytes([c[0], c[1]])).collect()
+            bytes
+                .chunks_exact(2)
+                .map(|c| u16::from_ne_bytes([c[0], c[1]]))
+                .collect()
         };
         let red = channel(&buf[..size * 2]);
         let green = channel(&buf[size * 2..size * 4]);
@@ -164,8 +175,15 @@ impl Dispatch<ZwlrGammaControlV1, ControlData> for Smallvil {
         }
     }
 
-    fn destroyed(state: &mut Self, _client: ClientId, resource: &ZwlrGammaControlV1, data: &ControlData) {
-        let Some((output, size)) = &data.0 else { return };
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &ZwlrGammaControlV1,
+        data: &ControlData,
+    ) {
+        let Some((output, size)) = &data.0 else {
+            return;
+        };
         // Only reset gamma if this resource is still the tracked owner --
         // if a newer client already transferred control away (see
         // `GetGammaControl` above), the map entry no longer points at
