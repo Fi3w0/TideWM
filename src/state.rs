@@ -328,6 +328,11 @@ pub struct Smallvil {
     /// xdg-activation on top.
     pub foreign_toplevel_list_state: ForeignToplevelListState,
     pub(crate) foreign_toplevels: HashMap<WlSurface, ForeignToplevelHandle>,
+    /// Compositor-global numeric IDs for mapped toplevels. Wayland object
+    /// IDs are only unique within one client, so they cannot safely identify
+    /// a window across DBus/IPC when two applications both own `wl_surface@7`.
+    pub(crate) foreign_toplevel_numeric_ids: HashMap<WlSurface, u64>,
+    pub(crate) next_foreign_toplevel_numeric_id: u64,
     /// `wlr-foreign-toplevel-management-v1` (the older, bidirectional
     /// protocol that waybar's `wlr/taskbar` module and ags v1 hardcode
     /// against). Coexists with `foreign_toplevel_list_state` (the newer
@@ -938,6 +943,8 @@ impl Smallvil {
             fractional_scale_manager_state,
             foreign_toplevel_list_state,
             foreign_toplevels: HashMap::new(),
+            foreign_toplevel_numeric_ids: HashMap::new(),
+            next_foreign_toplevel_numeric_id: 1,
             wlr_foreign_toplevel_state: Some(wlr_foreign_toplevel_state),
             wlr_output_management_state,
             wlr_output_power_management_state,

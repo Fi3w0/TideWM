@@ -855,20 +855,24 @@ impl Smallvil {
             self.focus_window(Some(surface.clone()), SERIAL_COUNTER.next_serial());
         }
 
-        let handle = self
-            .foreign_toplevel_list_state
-            .new_toplevel::<Self>(title.clone().unwrap_or_default(), app_id.clone().unwrap_or_default());
+        let handle = self.foreign_toplevel_list_state.new_toplevel::<Self>(
+            title.clone().unwrap_or_default(),
+            app_id.clone().unwrap_or_default(),
+        );
         self.foreign_toplevels.insert(surface.clone(), handle);
+        let numeric_id = self.next_foreign_toplevel_numeric_id;
+        self.next_foreign_toplevel_numeric_id =
+            self.next_foreign_toplevel_numeric_id.saturating_add(1);
+        self.foreign_toplevel_numeric_ids
+            .insert(surface.clone(), numeric_id);
 
         // Mirror the lifecycle into the older wlr-foreign-toplevel-management-v1
         // protocol (waybar's `wlr/taskbar`, ags v1). Independent state machine
         // from the newer ext- protocol above; both can be bound simultaneously.
         if let Some(wlr_state) = self.wlr_foreign_toplevel_state.as_mut() {
-            let wlr_handle = wlr_state.track(
-                title.unwrap_or_default(),
-                app_id.unwrap_or_default(),
-            );
-            self.wlr_foreign_toplevels.insert(surface.clone(), wlr_handle);
+            let wlr_handle = wlr_state.track(title.unwrap_or_default(), app_id.unwrap_or_default());
+            self.wlr_foreign_toplevels
+                .insert(surface.clone(), wlr_handle);
             // `focus_window` above already ran and, per this codebase's
             // established "role creation alone must never steal focus, a
             // real first buffer does" rule, a freshly-mapped window is
@@ -937,6 +941,7 @@ impl Smallvil {
         if let Some(handle) = self.foreign_toplevels.remove(surface) {
             self.foreign_toplevel_list_state.remove_toplevel(&handle);
         }
+        self.foreign_toplevel_numeric_ids.remove(surface);
         // Mirror into the older wlr- protocol.
         if let Some(handle) = self.wlr_foreign_toplevels.remove(surface) {
             if let Some(wlr_state) = self.wlr_foreign_toplevel_state.as_mut() {

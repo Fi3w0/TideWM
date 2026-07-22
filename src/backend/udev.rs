@@ -731,6 +731,7 @@ pub fn init_udev(
                     // scanout to render into or capture from until turned
                     // back on (see `Smallvil::set_output_power`).
                     if surface.powered_off {
+                        state.fail_captures_for_output(&surface.output);
                         continue;
                     }
                     if surface.dirty && !surface.pending {

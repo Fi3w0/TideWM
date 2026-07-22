@@ -17,24 +17,38 @@ use smithay::{
     backend::{
         allocator::Fourcc,
         renderer::{
-            Bind, ExportMem, Offscreen, TextureMapping, damage::OutputDamageTracker,
-            element::memory::MemoryRenderBufferRenderElement,
-            gles::{GlesRenderer, GlesTexture},
+            damage::OutputDamageTracker,
+            element::{
+                surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
+                AsRenderElements, Kind,
+            },
+            gles::{GlesRenderer, GlesTarget, GlesTexture},
+            Bind, ExportMem, Offscreen,
         },
     },
-    desktop::layer_map_for_output,
-    input::pointer::CursorImageStatus,
+    desktop::{layer_map_for_output, space::SpaceElement},
+    input::pointer::{CursorIcon, CursorImageStatus, CursorImageSurfaceData},
     output::Output,
-    reexports::wayland_server::protocol::wl_buffer::WlBuffer,
-    utils::{Buffer as BufferCoords, IsAlive, Logical, Rectangle, Size, Transform},
+    reexports::wayland_server::protocol::{wl_buffer::WlBuffer, wl_surface::WlSurface},
+    utils::{Buffer as BufferCoords, IsAlive, Logical, Rectangle, Scale, Size, Transform},
     wayland::{
+        compositor::with_states,
         image_copy_capture::{CaptureFailureReason, Frame},
         shm::with_buffer_contents_mut,
     },
 };
 use wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1;
 
-use crate::{state::SessionLock, Smallvil};
+use crate::{backend::udev::OutputRenderElements, state::SessionLock, Smallvil};
+
+/// A malicious or broken client must not be able to queue an unlimited
+/// number of full-output GL readbacks before the backend renders a frame.
+const MAX_PENDING_CAPTURES: usize = 64;
+/// Even a bounded queue can freeze the compositor if all of its full-size
+/// GL readbacks run in one event-loop turn. Spread bursts over frames while
+/// still allowing both screencast cursor variants and ordinary screenshots
+/// to make progress together.
+const MAX_CAPTURE_RENDERS_PER_OUTPUT_FRAME: usize = 4;
 
 /// How a drained capture reports completion to its client. Everything up to
 /// this point (render, readback, SHM write) is protocol-independent.
@@ -48,12 +62,59 @@ pub enum CaptureCompletion {
         buffer: WlBuffer,
         report_damage: bool,
     },
+    /// wlr-screencopy targeting a client-owned DMA-BUF. The compositor
+    /// renders straight into this buffer and never maps/copies it through
+    /// CPU memory.
+    WlrDmabuf {
+        frame: ZwlrScreencopyFrameV1,
+        dmabuf: smithay::backend::allocator::dmabuf::Dmabuf,
+        report_damage: bool,
+    },
+    /// PipeWire monitor stream: the target is compositor-owned memory, not
+    /// an untrusted Wayland buffer, but it intentionally shares the entire
+    /// render/readback/privacy-exclusion path above the final copy.
+    #[cfg(feature = "screencast")]
+    Screencast(Vec<crate::screencast::FrameTarget>),
+}
+
+impl CaptureCompletion {
+    fn fail(self, reason: CaptureFailureReason) {
+        match self {
+            Self::Ext(frame) => frame.fail(reason),
+            Self::Wlr { frame, .. } => frame.failed(),
+            Self::WlrDmabuf { frame, .. } => frame.failed(),
+            #[cfg(feature = "screencast")]
+            Self::Screencast(targets) => {
+                for target in targets {
+                    target.complete(None);
+                }
+            }
+        }
+    }
+
+    fn output_unavailable(self) {
+        match self {
+            Self::Ext(frame) => frame.fail(CaptureFailureReason::Unknown),
+            Self::Wlr { frame, .. } => frame.failed(),
+            Self::WlrDmabuf { frame, .. } => frame.failed(),
+            #[cfg(feature = "screencast")]
+            Self::Screencast(targets) => {
+                for target in targets {
+                    target.close();
+                }
+            }
+        }
+    }
 }
 
 /// A validated capture request waiting for a backend render loop (which owns
 /// the GL renderer) to produce the pixels.
 pub struct PendingCapture {
     pub output: Output,
+    /// A mapped toplevel surface for per-window capture. `None` means the
+    /// full output. The output remains explicit because it selects the GL
+    /// renderer/scale even when the window is hidden on another workspace.
+    pub window: Option<WlSurface>,
     /// The client asked for the cursor to be composited into the capture.
     pub draw_cursor: bool,
     /// Buffer-space region of the output to copy out (full output when
@@ -64,8 +125,52 @@ pub struct PendingCapture {
 }
 
 impl Smallvil {
-    /// Drains every `PendingCapture` targeting `output`, rendering each into
-    /// its client-provided SHM buffer. Called from a backend's render loop
+    pub(crate) fn queue_capture(&mut self, capture: PendingCapture) {
+        if self.pending_captures.len() >= MAX_PENDING_CAPTURES {
+            tracing::warn!(
+                limit = MAX_PENDING_CAPTURES,
+                "Capture queue full; rejecting request"
+            );
+            capture.completion.fail(CaptureFailureReason::Unknown);
+            return;
+        }
+        self.pending_captures.push(capture);
+        self.request_redraw();
+    }
+
+    #[cfg(feature = "screencast")]
+    pub(crate) fn queue_screencast_frame(
+        &mut self,
+        output: Output,
+        target: crate::screencast::FrameTarget,
+    ) {
+        self.queue_capture(PendingCapture {
+            output,
+            window: None,
+            draw_cursor: target.draw_cursor,
+            region: None,
+            completion: CaptureCompletion::Screencast(vec![target]),
+        });
+    }
+
+    #[cfg(feature = "screencast")]
+    pub(crate) fn queue_window_screencast_frame(
+        &mut self,
+        output: Output,
+        surface: WlSurface,
+        target: crate::screencast::FrameTarget,
+    ) {
+        self.queue_capture(PendingCapture {
+            output,
+            window: Some(surface),
+            draw_cursor: false,
+            region: None,
+            completion: CaptureCompletion::Screencast(vec![target]),
+        });
+    }
+
+    /// Drains a bounded batch of `PendingCapture`s targeting `output`,
+    /// rendering each into its client-provided SHM buffer. Called from a backend's render loop
     /// with the backend's renderer. `composite_cursor` is set by the udev
     /// backend, the only place TideWM itself draws a cursor (under winit the
     /// host compositor's cursor is never part of the frame anyway).
@@ -90,6 +195,67 @@ impl Smallvil {
         }
         self.pending_captures = remaining;
 
+        // PipeWire consumers asking for the same output/cursor variant can
+        // share one render and one owned frame. Without this fan-out, N
+        // streams caused N full-size textures, readbacks, and CPU copies per
+        // compositor frame.
+        #[cfg(feature = "screencast")]
+        {
+            let mut regular = Vec::new();
+            let mut with_cursor = Vec::new();
+            let mut without_cursor = Vec::new();
+            for capture in mine.drain(..) {
+                let PendingCapture {
+                    output,
+                    window,
+                    draw_cursor,
+                    region,
+                    completion,
+                } = capture;
+                match (window, region, completion) {
+                    (None, None, CaptureCompletion::Screencast(mut targets)) => {
+                        if draw_cursor {
+                            with_cursor.append(&mut targets);
+                        } else {
+                            without_cursor.append(&mut targets);
+                        }
+                    }
+                    (window, region, completion) => regular.push(PendingCapture {
+                        output,
+                        window,
+                        draw_cursor,
+                        region,
+                        completion,
+                    }),
+                }
+            }
+            if !without_cursor.is_empty() {
+                regular.push(PendingCapture {
+                    output: output.clone(),
+                    window: None,
+                    draw_cursor: false,
+                    region: None,
+                    completion: CaptureCompletion::Screencast(without_cursor),
+                });
+            }
+            if !with_cursor.is_empty() {
+                regular.push(PendingCapture {
+                    output: output.clone(),
+                    window: None,
+                    draw_cursor: true,
+                    region: None,
+                    completion: CaptureCompletion::Screencast(with_cursor),
+                });
+            }
+            mine = regular;
+        }
+
+        if mine.len() > MAX_CAPTURE_RENDERS_PER_OUTPUT_FRAME {
+            let deferred = mine.split_off(MAX_CAPTURE_RENDERS_PER_OUTPUT_FRAME);
+            self.pending_captures.extend(deferred);
+            self.request_redraw();
+        }
+
         for capture in mine {
             self.render_one_capture(renderer, capture, composite_cursor);
         }
@@ -103,17 +269,15 @@ impl Smallvil {
     ) {
         let PendingCapture {
             output,
+            window,
             draw_cursor,
             region,
-            completion,
+            mut completion,
         } = capture;
 
         macro_rules! fail {
             ($completion:expr, $reason:expr) => {
-                match $completion {
-                    CaptureCompletion::Ext(frame) => frame.fail($reason),
-                    CaptureCompletion::Wlr { frame, .. } => frame.failed(),
-                }
+                $completion.fail($reason)
             };
         }
 
@@ -121,7 +285,23 @@ impl Smallvil {
             fail!(completion, CaptureFailureReason::Unknown);
             return;
         };
-        let size: Size<i32, BufferCoords> = Size::from((mode.size.w, mode.size.h));
+        let window_target = window
+            .as_ref()
+            .and_then(|surface| self.mapped_toplevel_window(surface));
+        if window.is_some() && window_target.is_none() {
+            fail!(completion, CaptureFailureReason::Unknown);
+            return;
+        }
+        let scale = output.current_scale().fractional_scale();
+        let size: Size<i32, BufferCoords> = if let Some(target) = &window_target {
+            let logical = SpaceElement::geometry(target).size;
+            Size::from((
+                (logical.w as f64 * scale).round().max(1.0) as i32,
+                (logical.h as f64 * scale).round().max(1.0) as i32,
+            ))
+        } else {
+            Size::from((mode.size.w, mode.size.h))
+        };
         let full_rect = Rectangle::from_size(size);
         // Region was already clamped to the output at queue time; re-check
         // against the *current* mode in case it changed since.
@@ -134,38 +314,89 @@ impl Smallvil {
             return;
         };
 
-        let mut texture: GlesTexture = match renderer.create_buffer(Fourcc::Argb8888, size) {
-            Ok(texture) => texture,
-            Err(err) => {
-                tracing::warn!(%err, "Failed to allocate capture texture");
-                fail!(completion, CaptureFailureReason::Unknown);
-                return;
-            }
+        let mut direct_dmabuf = match &mut completion {
+            CaptureCompletion::WlrDmabuf { dmabuf, .. } => Some(dmabuf.clone()),
+            _ => None,
         };
-        let mut target = match renderer.bind(&mut texture) {
+        let mut texture: Option<GlesTexture> = if direct_dmabuf.is_none() {
+            match renderer.create_buffer(Fourcc::Argb8888, size) {
+                Ok(texture) => Some(texture),
+                Err(err) => {
+                    tracing::warn!(%err, "Failed to allocate capture texture");
+                    fail!(completion, CaptureFailureReason::Unknown);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let bind_result = match direct_dmabuf.as_mut() {
+            Some(dmabuf) => renderer.bind(dmabuf),
+            None => renderer.bind(texture.as_mut().expect("capture texture exists")),
+        };
+        let mut target = match bind_result {
             Ok(target) => target,
             Err(err) => {
-                tracing::warn!(%err, "Failed to bind capture texture");
+                tracing::warn!(%err, "Failed to bind capture target");
                 fail!(completion, CaptureFailureReason::Unknown);
                 return;
             }
         };
+
+        // A toplevel source is rendered on its own transparent/black canvas
+        // at the scale of its owning output. It includes subsurfaces and
+        // popups belonging to that toplevel, but no neighboring windows,
+        // compositor chrome, wallpaper, or pointer.
+        if let Some(window_target) = window_target {
+            let blocked = window_target.toplevel().is_some_and(|toplevel| {
+                let (app_id, title) = self.toplevel_identity(toplevel.wl_surface());
+                self.config
+                    .resolve_window_rules(app_id.as_deref(), title.as_deref())
+                    .block_capture
+            });
+            let window_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = if blocked {
+                Vec::new()
+            } else {
+                AsRenderElements::render_elements(
+                    &window_target,
+                    renderer,
+                    (0, 0).into(),
+                    Scale::from(scale),
+                    1.0,
+                )
+            };
+            let mut damage_tracker =
+                OutputDamageTracker::new((size.w, size.h), 1.0, Transform::Normal);
+            if let Err(err) = damage_tracker.render_output(
+                renderer,
+                &mut target,
+                0,
+                &window_elements,
+                [0.0, 0.0, 0.0, 0.0],
+            ) {
+                tracing::warn!(%err, "Failed to render toplevel capture frame");
+                fail!(completion, CaptureFailureReason::Unknown);
+                return;
+            }
+            self.finish_capture_readback(renderer, target, size, rect, Vec::new(), completion);
+            return;
+        }
 
         let locked = !matches!(self.session_lock, SessionLock::Unlocked);
 
         // What the user sees: space + layer-shell surfaces (both come from
         // `render_output`) plus the toast OSD and any window-group tab
         // strips, plus the composited cursor when the client asked for it.
-        // A client-set cursor surface (`CursorImageStatus::Surface`) is not
-        // composited yet -- only the xcursor/fallback glyph path is. None of
-        // that applies while locked: a capture must show exactly what the
+        // None of that applies while locked: a capture must show exactly what the
         // visible frame shows -- the lock content, never the desktop
         // underneath -- or a screenshot tool could read straight through
         // the lock. Skipped, not just covered, for the same reason the
         // visible-frame render loops skip it: `render_output` below pulls
         // layer-shell content from `layer_map_for_output` unconditionally,
         // independent of whatever `spaces` it's given.
-        let mut custom: Vec<MemoryRenderBufferRenderElement<GlesRenderer>> = Vec::new();
+        let mut elements: Vec<
+            OutputRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>,
+        > = Vec::new();
         if !locked {
             // Pushed first so it ends up topmost (index 0 is the front,
             // this codebase's established render-element-list convention)
@@ -178,116 +409,176 @@ impl Smallvil {
                 .filter(|overview| overview.output_name() == output.name())
                 .and_then(|overview| overview.render_element(renderer))
             {
-                custom.push(overview_element);
+                elements.push(OutputRenderElements::Composited(overview_element));
             }
-            if let Some(toast_element) =
-                self.toast.as_ref().and_then(|toast| toast.render_element(renderer, mode.size))
+            if let Some(toast_element) = self
+                .toast
+                .as_ref()
+                .and_then(|toast| toast.render_element(renderer, mode.size))
             {
-                custom.push(toast_element);
+                elements.push(OutputRenderElements::Composited(toast_element));
             }
-            custom.extend(self.tab_strip_elements(renderer));
+            if let Some(error_element) = self.config_error_element(&output, renderer) {
+                elements.push(OutputRenderElements::Composited(error_element));
+            }
+            elements.extend(
+                self.tab_strip_elements(renderer)
+                    .into_iter()
+                    .map(OutputRenderElements::Composited),
+            );
             if self.should_show_welcome_hint() {
-                if let Some(welcome_element) =
-                    self.welcome_hint.as_ref().and_then(|hint| hint.render_element(renderer, mode.size))
+                if let Some(welcome_element) = self
+                    .welcome_hint
+                    .as_ref()
+                    .and_then(|hint| hint.render_element(renderer, mode.size))
                 {
-                    custom.push(welcome_element);
+                    elements.push(OutputRenderElements::Composited(welcome_element));
                 }
             }
         }
         if !locked && composite_cursor && draw_cursor {
-            if let CursorImageStatus::Named(icon) = &self.cursor_status {
-                let icon = *icon;
-                let scale = output.current_scale().fractional_scale();
-                let output_loc = self
-                    .space
-                    .output_geometry(&output)
-                    .map(|geo| geo.loc)
-                    .unwrap_or_default();
-                let pointer_loc = self
-                    .seat
-                    .get_pointer()
-                    .map(|pointer| pointer.current_location())
-                    .unwrap_or_default();
-                let local = (pointer_loc - output_loc.to_f64()).to_physical(scale);
-                let elapsed = self.start_time.elapsed();
-                let glyph = self
-                    .cursor_theme
-                    .as_mut()
-                    .and_then(|theme| theme.render_element(renderer, local, scale as u32, elapsed, icon))
-                    .or_else(|| crate::cursor::fallback_glyph_element(renderer, local.into()));
-                if let Some(glyph) = glyph {
-                    custom.push(glyph);
+            let idle_hidden = self.config.cursor_hide_after_ms > 0
+                && self.last_pointer_motion.elapsed()
+                    >= std::time::Duration::from_millis(self.config.cursor_hide_after_ms as u64);
+            let forced_visible = CursorImageStatus::Named(CursorIcon::Default);
+            let hidden = CursorImageStatus::Hidden;
+            let cursor_status = if idle_hidden {
+                &hidden
+            } else if matches!(self.cursor_status, CursorImageStatus::Hidden)
+                && self.config.cursor_always_visible
+            {
+                &forced_visible
+            } else {
+                &self.cursor_status
+            };
+            let scale = output.current_scale().fractional_scale();
+            let output_loc = self
+                .space
+                .output_geometry(&output)
+                .map(|geo| geo.loc)
+                .unwrap_or_default();
+            let pointer_loc = self
+                .seat
+                .get_pointer()
+                .map(|pointer| pointer.current_location())
+                .unwrap_or_default();
+            match cursor_status {
+                CursorImageStatus::Surface(cursor_surface) => {
+                    let hotspot = with_states(cursor_surface, |states| {
+                        states
+                            .data_map
+                            .get::<CursorImageSurfaceData>()
+                            .map(|data| data.lock().unwrap().hotspot)
+                            .unwrap_or_default()
+                    });
+                    let local = (pointer_loc - output_loc.to_f64()).to_physical(scale)
+                        - hotspot.to_f64().to_physical(scale);
+                    elements.extend(
+                        render_elements_from_surface_tree(
+                            renderer,
+                            cursor_surface,
+                            local.to_i32_round(),
+                            scale,
+                            1.0,
+                            Kind::Unspecified,
+                        )
+                        .into_iter()
+                        .map(OutputRenderElements::Cursor),
+                    );
                 }
+                CursorImageStatus::Named(icon) => {
+                    let local = (pointer_loc - output_loc.to_f64()).to_physical(scale);
+                    let elapsed = self.start_time.elapsed();
+                    let glyph = self
+                        .cursor_theme
+                        .as_mut()
+                        .and_then(|theme| {
+                            theme.render_element(renderer, local, scale as u32, elapsed, *icon)
+                        })
+                        .or_else(|| crate::cursor::fallback_glyph_element(renderer, local.into()));
+                    if let Some(glyph) = glyph {
+                        elements.push(OutputRenderElements::Composited(glyph));
+                    }
+                }
+                CursorImageStatus::Hidden => {}
             }
         }
 
         let mut damage_tracker = OutputDamageTracker::from_output(&output);
         let render_result = if locked {
             let lock_elements = self.lock_render_elements(&output, renderer);
-            damage_tracker.render_output(renderer, &mut target, 0, &lock_elements, [0.0, 0.0, 0.0, 1.0])
-        } else {
-            smithay::desktop::space::render_output::<
-                _,
-                MemoryRenderBufferRenderElement<GlesRenderer>,
-                _,
-                _,
-            >(
-                &output,
+            damage_tracker.render_output(
                 renderer,
                 &mut target,
-                1.0,
                 0,
-                [&self.space],
-                &custom,
-                &mut damage_tracker,
-                [0.05, 0.05, 0.05, 1.0],
+                &lock_elements,
+                [0.0, 0.0, 0.0, 1.0],
             )
+        } else {
+            match smithay::desktop::space::space_render_elements::<_, smithay::desktop::Window, _>(
+                renderer,
+                [&self.space],
+                &output,
+                1.0,
+            ) {
+                Ok(space_elements) => {
+                    elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
+                    if let Some(wallpaper) = self.wallpaper_element(&output, renderer) {
+                        elements.push(OutputRenderElements::Composited(wallpaper));
+                    }
+                    damage_tracker.render_output(
+                        renderer,
+                        &mut target,
+                        0,
+                        &elements,
+                        [0.05, 0.05, 0.05, 1.0],
+                    )
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "Failed to gather capture render elements");
+                    fail!(completion, CaptureFailureReason::Unknown);
+                    return;
+                }
+            }
         };
-        if let Err(err) = render_result {
-            tracing::warn!(%err, "Failed to render capture frame");
-            fail!(completion, CaptureFailureReason::Unknown);
+        let render_result = match render_result {
+            Ok(result) => result,
+            Err(err) => {
+                tracing::warn!(%err, "Failed to render capture frame");
+                fail!(completion, CaptureFailureReason::Unknown);
+                return;
+            }
+        };
+
+        if let CaptureCompletion::WlrDmabuf {
+            frame,
+            report_damage,
+            ..
+        } = completion
+        {
+            drop(target);
+            // `ready` transfers the buffer back to the client. Unlike the
+            // SHM readback path below, no map/copy operation implicitly
+            // waits for GL, so explicitly wait for the render fence before
+            // telling a consumer it may read/reuse the DMA-BUF.
+            if let Err(err) = render_result.sync.wait() {
+                tracing::warn!(%err, "DMA-BUF capture fence wait failed");
+                frame.failed();
+                return;
+            }
+            if report_damage {
+                frame.damage(0, 0, rect.size.w as u32, rect.size.h as u32);
+            }
+            let elapsed = self.start_time.elapsed();
+            let secs = elapsed.as_secs();
+            frame.ready(
+                (secs >> 32) as u32,
+                (secs & 0xFFFF_FFFF) as u32,
+                elapsed.subsec_nanos(),
+            );
             return;
         }
 
-        let mapping = match renderer.copy_framebuffer(&target, full_rect, Fourcc::Argb8888) {
-            Ok(mapping) => mapping,
-            Err(err) => {
-                tracing::warn!(%err, "Failed to read back capture frame");
-                fail!(completion, CaptureFailureReason::Unknown);
-                return;
-            }
-        };
-        drop(target);
-        let flipped = mapping.flipped();
-        let pixels = match renderer.map_texture(&mapping) {
-            Ok(pixels) => pixels,
-            Err(err) => {
-                tracing::warn!(%err, "Failed to map capture readback");
-                fail!(completion, CaptureFailureReason::Unknown);
-                return;
-            }
-        };
-
-        let buffer = match &completion {
-            CaptureCompletion::Ext(frame) => frame.buffer(),
-            CaptureCompletion::Wlr { buffer, .. } => buffer.clone(),
-        };
-
-        // Layer-shell surfaces matching a `[[layer_rule]] block_capture =
-        // true` (a sensitive panel opting out of screenshots/screencasts,
-        // niri's `block-out-from`) still render normally into `pixels`
-        // above -- excluding them from compositing would mean abandoning
-        // `render_output`'s convenience for a manually-interleaved element
-        // list (the same real render-path work this file's own module doc
-        // and AGENT.md's fullscreen-above-layer-shell gap both already
-        // flag as deliberately deferred). Instead, their on-screen rects
-        // are blacked out in the client-visible copy below, after the real
-        // pixels have already been read back into CPU memory but before
-        // they reach buffer the client can read -- the same practical
-        // result (the client never sees that content) without touching the
-        // render path. No-op while locked: no layer content is composited
-        // into the frame at all then (see the `locked` branch above), so
-        // there is nothing to exclude.
         let excluded_rects: Vec<Rectangle<i32, BufferCoords>> = if locked {
             Vec::new()
         } else {
@@ -297,8 +588,77 @@ impl Smallvil {
                 .layers()
                 .filter(|layer| self.config.layer_blocks_capture(layer.namespace()))
                 .filter_map(|layer| layer_map.layer_geometry(layer))
-                .map(|geo| logical_rect_to_buffer(geo, scale))
+                .map(|geo| logical_rect_to_buffer(geo, size, scale, output.current_transform()))
                 .collect()
+        };
+        self.finish_capture_readback(renderer, target, size, rect, excluded_rects, completion);
+    }
+
+    fn finish_capture_readback(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        target: GlesTarget<'_>,
+        size: Size<i32, BufferCoords>,
+        rect: Rectangle<i32, BufferCoords>,
+        excluded_rects: Vec<Rectangle<i32, BufferCoords>>,
+        completion: CaptureCompletion,
+    ) {
+        let full_rect = Rectangle::from_size(size);
+        let mapping = match renderer.copy_framebuffer(&target, full_rect, Fourcc::Argb8888) {
+            Ok(mapping) => mapping,
+            Err(err) => {
+                tracing::warn!(%err, "Failed to read back capture frame");
+                completion.fail(CaptureFailureReason::Unknown);
+                return;
+            }
+        };
+        drop(target);
+        // Not `mapping.flipped()`: that describes raw glReadPixels output in
+        // isolation (always bottom-up for GLES), but everything read back
+        // here went through `render_output`/`GlesRenderer::render`, whose
+        // projection multiplies in a constant `flip180` regardless of
+        // target -- that already cancels the GL-readback orientation, so
+        // the mapped pixels are already top-down. Reversing rows again here
+        // double-flips the image (confirmed upside-down on real hardware
+        // via grim before this fix).
+        let pixels = match renderer.map_texture(&mapping) {
+            Ok(pixels) => pixels,
+            Err(err) => {
+                tracing::warn!(%err, "Failed to map capture readback");
+                completion.fail(CaptureFailureReason::Unknown);
+                return;
+            }
+        };
+
+        #[cfg(feature = "screencast")]
+        if let CaptureCompletion::Screencast(targets) = &completion {
+            let stride = size.w as usize * 4;
+            let mut owned = vec![0u8; stride * size.h as usize];
+            for row in 0..size.h as usize {
+                let source_start = row * stride;
+                let destination_start = row * stride;
+                owned[destination_start..destination_start + stride]
+                    .copy_from_slice(&pixels[source_start..source_start + stride]);
+            }
+            black_out_rects(&mut owned, size, full_rect, &excluded_rects);
+            let frame = std::sync::Arc::new(crate::screencast::ScreencastFrame {
+                pixels: owned,
+                width: size.w as u32,
+                height: size.h as u32,
+                stride: stride as u32,
+            });
+            for target in targets {
+                target.complete(Some(frame.clone()));
+            }
+            return;
+        }
+
+        let buffer = match &completion {
+            CaptureCompletion::Ext(frame) => frame.buffer(),
+            CaptureCompletion::Wlr { buffer, .. } => buffer.clone(),
+            CaptureCompletion::WlrDmabuf { .. } => unreachable!(),
+            #[cfg(feature = "screencast")]
+            CaptureCompletion::Screencast(_) => unreachable!(),
         };
 
         // The client buffer was already validated against the advertised
@@ -319,25 +679,18 @@ impl Smallvil {
             let dst_stride = meta.stride as usize;
             let rows = (rect.size.h as usize).min(meta.height as usize);
             let offset = meta.offset as usize;
-            let dst_end = match offset.checked_add(dst_stride.saturating_mul(rows)) {
-                Some(end) => end,
-                None => return false,
-            };
-            if dst_end > len
+            let row_bytes = rect.size.w as usize * 4;
+            let dst_end = shm_copy_end(offset, dst_stride, rows, row_bytes);
+            if dst_end.is_none_or(|end| end > len)
+                || row_bytes > dst_stride
                 || pixels.len() < src_stride * size.h as usize
                 || (rect.loc.x as usize) * 4 + (rect.size.w as usize) * 4 > src_stride
             {
                 return false;
             }
-            let row_bytes = rect.size.w as usize * 4;
             for row in 0..rows {
                 let image_row = rect.loc.y as usize + row;
-                let src_row = if flipped {
-                    size.h as usize - 1 - image_row
-                } else {
-                    image_row
-                };
-                let src_start = src_row * src_stride + rect.loc.x as usize * 4;
+                let src_start = image_row * src_stride + rect.loc.x as usize * 4;
                 let src = &pixels[src_start..src_start + row_bytes];
                 unsafe {
                     std::ptr::copy_nonoverlapping(
@@ -403,10 +756,13 @@ impl Smallvil {
                     elapsed.subsec_nanos(),
                 );
             }
-            (Ok(false), completion) => fail!(completion, CaptureFailureReason::BufferConstraints),
+            #[cfg(feature = "screencast")]
+            (_, CaptureCompletion::Screencast(_)) => unreachable!(),
+            (_, CaptureCompletion::WlrDmabuf { .. }) => unreachable!(),
+            (Ok(false), completion) => completion.fail(CaptureFailureReason::BufferConstraints),
             (Err(err), completion) => {
                 tracing::warn!(%err, "Failed to access capture target buffer");
-                fail!(completion, CaptureFailureReason::BufferConstraints);
+                completion.fail(CaptureFailureReason::BufferConstraints);
             }
         }
     }
@@ -425,35 +781,88 @@ impl Smallvil {
             if self.space.outputs().any(|output| output == &capture.output) {
                 remaining.push(capture);
             } else {
-                match capture.completion {
-                    CaptureCompletion::Ext(frame) => frame.fail(CaptureFailureReason::Unknown),
-                    CaptureCompletion::Wlr { frame, .. } => frame.failed(),
-                }
+                capture.completion.output_unavailable();
+            }
+        }
+        self.pending_captures = remaining;
+    }
+
+    /// A mapped output can temporarily remain in `Space` while DPMS has
+    /// disabled its CRTC. There is no renderer target to service captures
+    /// in that state, so fail them instead of leaving clients and stream
+    /// workers waiting forever behind an output that cleanup still sees as
+    /// logically present.
+    pub(crate) fn fail_captures_for_output(&mut self, output: &Output) {
+        if self.pending_captures.is_empty() {
+            return;
+        }
+        let mut remaining = Vec::with_capacity(self.pending_captures.len());
+        for capture in self.pending_captures.drain(..) {
+            if &capture.output == output {
+                capture.completion.output_unavailable();
+            } else {
+                remaining.push(capture);
             }
         }
         self.pending_captures = remaining;
     }
 }
 
+fn shm_copy_end(offset: usize, stride: usize, rows: usize, row_bytes: usize) -> Option<usize> {
+    if rows == 0 {
+        Some(offset)
+    } else {
+        stride
+            .checked_mul(rows - 1)
+            .and_then(|last_row| offset.checked_add(last_row))
+            .and_then(|last_row| last_row.checked_add(row_bytes))
+    }
+}
+
+/// Applies capture-exclusion rectangles to an owned BGRA frame. This is the
+/// safe-memory equivalent of the raw-pointer overwrite used for Wayland SHM
+/// below and is used by PipeWire's compositor-owned frame slot.
+#[cfg(feature = "screencast")]
+fn black_out_rects(
+    pixels: &mut [u8],
+    size: Size<i32, BufferCoords>,
+    rect: Rectangle<i32, BufferCoords>,
+    excluded_rects: &[Rectangle<i32, BufferCoords>],
+) {
+    let stride = size.w as usize * 4;
+    for excluded in excluded_rects {
+        let Some(overlap) = excluded.intersection(rect).filter(|area| !area.is_empty()) else {
+            continue;
+        };
+        for row in overlap.loc.y..overlap.loc.y + overlap.size.h {
+            let start = row as usize * stride + overlap.loc.x as usize * 4;
+            let end = start + overlap.size.w as usize * 4;
+            if end > pixels.len() {
+                continue;
+            }
+            for pixel in pixels[start..end].chunks_exact_mut(4) {
+                pixel.copy_from_slice(&[0, 0, 0, 255]);
+            }
+        }
+    }
+}
+
 /// Converts a layer surface's logical-space geometry (`LayerMap::layer_geometry`)
 /// into the buffer-pixel space `PendingCapture`'s `size`/`rect` already use
-/// (`output.current_mode().size`, i.e. already output-scaled) -- the same
-/// scale multiplication `space_render_elements` applies to a layer's
-/// location internally, just extended to the whole rect since this needs
-/// the size too, not only where it starts.
-fn logical_rect_to_buffer(geo: Rectangle<i32, Logical>, scale: f64) -> Rectangle<i32, BufferCoords> {
-    Rectangle::new(
-        (
-            (geo.loc.x as f64 * scale).round() as i32,
-            (geo.loc.y as f64 * scale).round() as i32,
-        )
-            .into(),
-        (
-            (geo.size.w as f64 * scale).round() as i32,
-            (geo.size.h as f64 * scale).round() as i32,
-        )
-            .into(),
-    )
+/// (`output.current_mode().size`, i.e. already output-scaled and transformed).
+/// This must apply rotation/flip as well as scale: the layer map reports
+/// output-local logical coordinates while the captured pixels are in buffer
+/// coordinates.
+fn logical_rect_to_buffer(
+    geo: Rectangle<i32, Logical>,
+    buffer_size: Size<i32, BufferCoords>,
+    scale: f64,
+    transform: Transform,
+) -> Rectangle<i32, BufferCoords> {
+    let logical_size = buffer_size.to_f64().to_logical(scale, transform);
+    geo.to_f64()
+        .to_buffer(scale, transform, &logical_size)
+        .to_i32_round()
 }
 
 #[cfg(test)]
@@ -463,17 +872,56 @@ mod tests {
     #[test]
     fn logical_rect_to_buffer_scales_location_and_size_together() {
         let geo = Rectangle::new((10, 20).into(), (100, 50).into());
+        let size = Size::from((1920, 1080));
 
-        let unscaled = logical_rect_to_buffer(geo, 1.0);
+        let unscaled = logical_rect_to_buffer(geo, size, 1.0, Transform::Normal);
         assert_eq!(unscaled, Rectangle::new((10, 20).into(), (100, 50).into()));
 
-        let doubled = logical_rect_to_buffer(geo, 2.0);
+        let doubled = logical_rect_to_buffer(geo, size, 2.0, Transform::Normal);
         assert_eq!(doubled, Rectangle::new((20, 40).into(), (200, 100).into()));
 
         // A fractional scale (1.5x) must round, not truncate -- an
         // excluded rect one pixel too small at an edge would leak a sliver
         // of real content into the capture.
-        let fractional = logical_rect_to_buffer(geo, 1.5);
-        assert_eq!(fractional, Rectangle::new((15, 30).into(), (150, 75).into()));
+        let fractional = logical_rect_to_buffer(geo, size, 1.5, Transform::Normal);
+        assert_eq!(
+            fractional,
+            Rectangle::new((15, 30).into(), (150, 75).into())
+        );
+    }
+
+    #[test]
+    fn logical_rect_to_buffer_applies_output_rotation() {
+        let geo = Rectangle::new((10, 20).into(), (30, 40).into());
+        // A 90x70 buffer rotated 90 degrees exposes a 70x90 logical area.
+        let rotated = logical_rect_to_buffer(geo, Size::from((90, 70)), 1.0, Transform::_90);
+        assert_eq!(rotated, Rectangle::new((30, 10).into(), (40, 30).into()));
+    }
+
+    #[test]
+    fn shm_copy_bound_ends_at_last_rows_pixels_not_next_stride() {
+        // Two four-byte rows with four bytes of padding between them need
+        // 12 bytes, not two complete eight-byte strides.
+        assert_eq!(shm_copy_end(0, 8, 2, 4), Some(12));
+        assert_eq!(shm_copy_end(5, 8, 2, 4), Some(17));
+        assert_eq!(shm_copy_end(5, 8, 0, 4), Some(5));
+    }
+
+    #[cfg(feature = "screencast")]
+    #[test]
+    fn screencast_privacy_rect_is_opaque_black_and_bounded() {
+        let size: Size<i32, BufferCoords> = (4, 3).into();
+        let mut pixels = vec![7; 4 * 3 * 4];
+        black_out_rects(
+            &mut pixels,
+            size,
+            Rectangle::from_size(size),
+            &[Rectangle::new((1, 1).into(), (2, 1).into())],
+        );
+
+        assert_eq!(&pixels[20..24], &[0, 0, 0, 255]);
+        assert_eq!(&pixels[24..28], &[0, 0, 0, 255]);
+        assert_eq!(&pixels[16..20], &[7, 7, 7, 7]);
+        assert_eq!(&pixels[28..32], &[7, 7, 7, 7]);
     }
 }

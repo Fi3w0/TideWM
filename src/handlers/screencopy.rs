@@ -3,18 +3,21 @@
 //!
 //! Hand-rolled on `wayland-protocols-wlr` -- there is no Smithay convenience
 //! module for it (unlike ext-image-copy-capture, see `handlers/capture.rs`).
-//! SHM-only: the `linux_dmabuf` offer is never sent. Everything after the
-//! request is queued shares the machinery in `src/capture.rs`.
+//! SHM is the portable and region-capture path. On a DRM session, an
+//! eligible full-output request is also offered ARGB8888 DMA-BUF and is
+//! rendered directly into the client's imported target. Everything after
+//! the request is queued through `src/capture.rs`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use smithay::{
+    backend::allocator::{Buffer, Fourcc},
     output::Output,
     reexports::wayland_server::{
-        Client, DataInit, Dispatch, GlobalDispatch, New, protocol::wl_shm,
+        protocol::wl_shm, Client, DataInit, Dispatch, GlobalDispatch, New,
     },
     utils::{Buffer as BufferCoords, Logical, Rectangle, Size},
-    wayland::shm::with_buffer_contents,
+    wayland::{dmabuf::get_dmabuf, shm::with_buffer_contents},
 };
 use wayland_protocols_wlr::screencopy::v1::server::{
     zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
@@ -135,6 +138,11 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Smallvil {
             return;
         };
 
+        let full_output = capture
+            .as_ref()
+            .and_then(|capture| capture.output.current_mode())
+            .map(|mode| mode.size.w == rect.size.w && mode.size.h == rect.size.h)
+            .unwrap_or(false);
         let frame = data_init.init(
             frame,
             WlrFrameData {
@@ -149,6 +157,16 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Smallvil {
             rect.size.h as u32,
             (rect.size.w * 4) as u32,
         );
+        if full_output
+            && state.dmabuf_global.is_some()
+            && !state.config.has_layer_capture_exclusions()
+        {
+            frame.linux_dmabuf(
+                Fourcc::Argb8888 as u32,
+                rect.size.w as u32,
+                rect.size.h as u32,
+            );
+        }
         frame.buffer_done();
     }
 }
@@ -181,6 +199,37 @@ impl Dispatch<ZwlrScreencopyFrameV1, WlrFrameData> for Smallvil {
         // Untrusted client input: the buffer must be an SHM buffer in one of
         // the advertised formats and at least the offered size. Anything
         // else fails the frame rather than risking a bad write later.
+        let dmabuf = get_dmabuf(&buffer).cloned().ok();
+        if let Some(dmabuf) = dmabuf {
+            let full_size: Option<Size<i32, BufferCoords>> = capture
+                .output
+                .current_mode()
+                .map(|mode| (mode.size.w, mode.size.h).into());
+            let direct_valid = full_size.is_some_and(|size| {
+                capture.rect.loc == (0, 0).into()
+                    && capture.rect.size == size
+                    && dmabuf.size() == size
+                    && matches!(dmabuf.format().code, Fourcc::Argb8888 | Fourcc::Xrgb8888)
+            }) && state.dmabuf_global.is_some()
+                && !state.config.has_layer_capture_exclusions();
+            if !direct_valid {
+                resource.failed();
+                return;
+            }
+            state.queue_capture(PendingCapture {
+                output: capture.output.clone(),
+                window: None,
+                draw_cursor: data.overlay_cursor,
+                region: None,
+                completion: CaptureCompletion::WlrDmabuf {
+                    frame: resource.clone(),
+                    dmabuf,
+                    report_damage,
+                },
+            });
+            return;
+        }
+
         let valid = with_buffer_contents(&buffer, |_, _, meta| {
             meta.width >= capture.rect.size.w
                 && meta.height >= capture.rect.size.h
@@ -195,8 +244,9 @@ impl Dispatch<ZwlrScreencopyFrameV1, WlrFrameData> for Smallvil {
             return;
         }
 
-        state.pending_captures.push(PendingCapture {
+        state.queue_capture(PendingCapture {
             output: capture.output.clone(),
+            window: None,
             draw_cursor: data.overlay_cursor,
             region: Some(capture.rect),
             completion: CaptureCompletion::Wlr {
