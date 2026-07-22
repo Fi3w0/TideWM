@@ -97,17 +97,20 @@ fn run(
     compositor: smithay::reexports::calloop::channel::Sender<ScreencastEvent>,
 ) {
     let sessions = Arc::new(Mutex::new(SessionRegistry::default()));
+    let next_id = Arc::new(AtomicU64::new(1));
     let root = Mutter {
-        outputs,
+        outputs: outputs.clone(),
         windows,
-        compositor,
-        next_id: Arc::new(AtomicU64::new(1)),
+        compositor: compositor.clone(),
+        next_id: next_id.clone(),
         sessions: sessions.clone(),
     };
+    let (portal_root, portal_sessions) = super::portal::Portal::new(outputs, compositor, next_id);
 
     let connection = match zbus::blocking::connection::Builder::session()
         .and_then(|builder| builder.serve_at("/org/gnome/Mutter/ScreenCast", root))
         .and_then(|builder| builder.name("org.gnome.Mutter.ScreenCast"))
+        .and_then(|builder| builder.serve_at("/org/freedesktop/portal/desktop", portal_root))
         .and_then(|builder| builder.build())
     {
         Ok(connection) => connection,
@@ -129,6 +132,38 @@ fn run(
         "screencast disconnect watcher",
     );
     task.detach();
+
+    // The portal backend name is requested separately (rather than via
+    // `.name()` above) so a name collision here -- unlikely, but possible if
+    // another compositor's backend is somehow already claiming it -- doesn't
+    // take down the already-working Mutter interface too.
+    let portal_connection = async_connection.clone();
+    let portal_task = async_connection.executor().spawn(
+        async move {
+            match portal_connection
+                .request_name("org.freedesktop.impl.portal.desktop.tidewm")
+                .await
+            {
+                Ok(()) => tracing::info!(
+                    "Screencast portal backend registered as org.freedesktop.impl.portal.desktop.tidewm"
+                ),
+                Err(err) => {
+                    tracing::warn!(
+                        %err,
+                        "Failed to claim the screencast portal backend name; Discord/OBS-style \
+                         portal screen sharing will not reach TideWM (org.gnome.Mutter.ScreenCast \
+                         is still available for xdg-desktop-portal-gnome setups)"
+                    );
+                    return;
+                }
+            }
+            if let Err(err) = super::portal::watch_disconnects(&portal_connection, portal_sessions).await {
+                tracing::warn!(%err, "Screencast portal disconnect watcher failed");
+            }
+        },
+        "screencast portal backend",
+    );
+    portal_task.detach();
 
     // Keeps `_connection` (and with it, the registered interfaces) alive
     // for the process lifetime. zbus dispatches incoming calls on its

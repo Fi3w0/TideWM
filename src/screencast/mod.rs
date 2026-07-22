@@ -19,6 +19,7 @@
 
 mod dbus;
 mod pipewire_thread;
+mod portal;
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
