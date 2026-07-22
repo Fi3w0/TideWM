@@ -58,7 +58,7 @@ Full config reference, every action string, and the protocol matrix: [DOCUMENTAT
 - **DPMS / gamma**: protocol-complete and verified on AMD hardware; lid/tablet switches still need broader hardware coverage.
 - **Touchpad config**: built (tap, natural-scroll, accel, click-method, ...), not yet verified on real hardware.
 - **Touchpad gestures**: compositor workspace swipes are built; broader real-device coverage is pending.
-- **Screencasting**: monitor and per-window PipeWire streams are built behind `--features screencast`; end-to-end portal/OBS and DMA-BUF PipeWire validation still needs the hardware test pass.
+- **Screencasting**: monitor and per-window PipeWire streams are built behind `--features screencast`, with a real `xdg-desktop-portal` backend (not just the Mutter-compatible interface) so Discord/OBS-style screen sharing can reach TideWM directly -- see [Screen sharing](#screen-sharing) below. DMA-BUF PipeWire and real Discord/OBS validation still need the hardware test pass.
 - **AUR package**: not yet -- build from source below.
 
 ## Quick Start
@@ -136,6 +136,19 @@ cargo run --locked
 Backend auto-selects: nested (winit) when `WAYLAND_DISPLAY`/`DISPLAY` is set, standalone TTY/DRM (udev) otherwise -- switch to a free VT with neither set to try it standalone.
 
 To launch from a display manager (GDM, SDDM, greetd): put the `TideWM` binary (note the case -- `[[bin]] name` in `Cargo.toml` builds it capitalized, and `tidewm.desktop`'s own `Exec=` line expects exactly that) on `PATH`, copy `share/wayland-sessions/tidewm.desktop` into `/usr/share/wayland-sessions/`, and copy `share/icons/TideWM-logo-faithful-4k.png` to `/usr/share/pixmaps/tidewm.png` for the session picker's icon.
+
+### Screen sharing
+
+Discord, OBS, and anything else that shares your screen go through `xdg-desktop-portal`, not TideWM directly. Build with `cargo build --release --locked --features screencast`, then install TideWM's own portal backend files so `xdg-desktop-portal` knows to route screen-share requests to it:
+
+```bash
+sudo cp share/xdg-desktop-portal/tidewm.portal /usr/share/xdg-desktop-portal/portals/
+sudo cp share/xdg-desktop-portal/tidewm-portals.conf /usr/share/xdg-desktop-portal/
+```
+
+`xdg-desktop-portal` itself must already be installed (most distros ship it by default). No other portal backend is required -- TideWM implements `org.freedesktop.impl.portal.ScreenCast` itself rather than borrowing `xdg-desktop-portal-gnome`'s, so there's no GTK4/libadwaita/nautilus dependency chain to pull in just for screen sharing. Log in through TideWM's own session entry (so `xdg-desktop-portal` picks up `XDG_CURRENT_DESKTOP=tidewm` and reads the config above) and a fresh `xdg-desktop-portal` process for that session will route `ScreenCast` requests to TideWM.
+
+v1 shares whichever output TideWM considers first -- there's no picker dialog yet for choosing a monitor or an app window, and window sharing isn't implemented. See [DOCUMENTATION.md](DOCUMENTATION.md)'s protocol matrix for the current verification status.
 
 ## Configuration
 

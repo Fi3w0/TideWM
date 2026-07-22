@@ -1,0 +1,4 @@
+[portal]
+DBusName=org.freedesktop.impl.portal.desktop.tidewm
+Interfaces=org.freedesktop.impl.portal.ScreenCast;
+UseIn=tidewm

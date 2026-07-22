@@ -2,6 +2,14 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.58.0] - 2026-07-22
+
+### Added
+- **A real `xdg-desktop-portal` screencast backend.** `org.freedesktop.impl.portal.ScreenCast` is now implemented directly (`src/screencast/portal.rs`), registered as `org.freedesktop.impl.portal.desktop.tidewm` alongside the existing `org.gnome.Mutter.ScreenCast` interface, self-contained rather than requiring `xdg-desktop-portal-gnome`. This is the interface Discord/OBS-style screen sharing actually reaches through `xdg-desktop-portal`; the Mutter interface alone only helped users willing to install `xdg-desktop-portal-gnome` and its GTK4/libadwaita/nautilus dependency chain. Ships with `share/xdg-desktop-portal/tidewm.portal` and `tidewm-portals.conf`; see README's new "Screen sharing" section for the install step, both files are required. v1 is MONITOR-only, one stream per session, and auto-selects the first available output instead of showing a source picker.
+
+### Verification
+- Default tests: 66 passed. All-feature tests: 77 passed. All-feature/all-target Clippy passes with warnings denied. A throwaway single-connection DBus test client (`zbus::blocking::Connection`, deleted after use) drove `CreateSession` -> `SelectSources` -> `Start` -> confirmed via `pw-dump` that a real PipeWire `Video/Source` node appeared with the exact node id `Start` returned -> `Close` -> confirmed the node was torn down. Ran clean across six repeated sessions. Not verified: routing through a real `xdg-desktop-portal` process (the already-running system portal daemon picked its backend before this session's `XDG_CURRENT_DESKTOP=tidewm` existed, so a nested session cannot reroute it) and the abrupt-disconnect cleanup path (verified by construction against the already-tested Mutter-interface disconnect watcher instead). Both need a fresh login on real hardware, then real Discord/OBS.
+
 ## [0.57.0] - 2026-07-22
 
 ### Added
