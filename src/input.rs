@@ -1031,6 +1031,32 @@ impl Smallvil {
                         time: event.time_msec(),
                     },
                 );
+
+                // Touch is an activation gesture just like a primary-button
+                // press. Keep the actual wl_touch target above unchanged,
+                // but route WM focus through the same centralized window/
+                // layer authority pointer clicks use. Locked sessions only
+                // forward to the lock surface and never alter WM focus.
+                if matches!(self.session_lock, SessionLock::Unlocked) {
+                    if let Some(layer) = self.layer_under_pointer(location) {
+                        if layer.cached_state().keyboard_interactivity
+                            != KeyboardInteractivity::None
+                        {
+                            self.focus_layer(layer.wl_surface().clone(), serial);
+                        }
+                    } else if self.exclusive_layer().is_none() {
+                        if let Some((window, _)) = self.space.element_under(location) {
+                            let window = window.clone();
+                            let surface = window.toplevel().unwrap().wl_surface().clone();
+                            if !self.layout.contains(&surface) {
+                                self.space.raise_element(&window, false);
+                            }
+                            self.focus_window(Some(surface), serial);
+                        } else if under.is_none() {
+                            self.focus_window(None, serial);
+                        }
+                    }
+                }
             }
             InputEvent::TouchMotion { event, .. } => {
                 let Some(touch) = self.seat.get_touch() else {
