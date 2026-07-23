@@ -353,7 +353,9 @@ impl Config {
             .map(|(name, binds)| {
                 let parsed = binds
                     .iter()
-                    .filter_map(|(combo, action)| parse_keybind(combo, action, false, &mut warnings))
+                    .filter_map(|(combo, action)| {
+                        parse_keybind(combo, action, false, &mut warnings)
+                    })
                     .collect();
                 (name.clone(), parsed)
             })
@@ -1655,7 +1657,9 @@ fn parse_keybind(
     let keysym = xkb::keysym_from_name(&key_name, xkb::KEYSYM_CASE_INSENSITIVE);
     if keysym.raw() == 0 {
         tracing::warn!(key = %key_name, combo, "Unknown key name in keybind, skipping");
-        warnings.push(format!("Unknown key \"{key_name}\" in keybind \"{combo}\", skipped"));
+        warnings.push(format!(
+            "Unknown key \"{key_name}\" in keybind \"{combo}\", skipped"
+        ));
         return None;
     }
 
@@ -1666,7 +1670,13 @@ fn parse_keybind(
         return None;
     };
 
-    if lint_footguns && !mods.ctrl && !mods.alt && !mods.shift && !mods.logo && is_typing_key(&key_name) {
+    if lint_footguns
+        && !mods.ctrl
+        && !mods.alt
+        && !mods.shift
+        && !mods.logo
+        && is_typing_key(&key_name)
+    {
         warnings.push(format!(
             "\"{combo}\" has no modifier -- it will capture that key everywhere, including text fields"
         ));
@@ -2537,10 +2547,8 @@ mod tests {
     #[test]
     fn unknown_keybind_action_is_dropped_and_reported() {
         let mut raw = RawConfig::default();
-        raw.keybinds.insert(
-            "Super+Z".to_string(),
-            "not-a-real-action".to_string(),
-        );
+        raw.keybinds
+            .insert("Super+Z".to_string(), "not-a-real-action".to_string());
         let (config, warnings) = Config::from_raw(raw);
         assert!(!config
             .keybinds

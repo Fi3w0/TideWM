@@ -4923,10 +4923,11 @@ impl Smallvil {
                 // the kind of thing you want to notice before it bites,
                 // not after.
                 if !warnings.is_empty() {
-                    self.config_error_overlay = Some(crate::error_overlay::ConfigErrorOverlay::new(
-                        warnings.join("; "),
-                        crate::error_overlay::OverlaySeverity::Warning,
-                    ));
+                    self.config_error_overlay =
+                        Some(crate::error_overlay::ConfigErrorOverlay::new(
+                            warnings.join("; "),
+                            crate::error_overlay::OverlaySeverity::Warning,
+                        ));
                 }
                 self.retile();
                 if had_error_overlay || !warnings.is_empty() {
