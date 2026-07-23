@@ -115,6 +115,11 @@ udev backend only — winit's nested host input never reaches a real libinput de
 | `scroll_method` | string | `two-finger`, `edge`, `on-button-down`, or `none`. |
 | `accel_speed` | float | `-1.0` (slowest) to `1.0` (fastest). |
 | `accel_profile` | string | `adaptive` or `flat`. |
+| `workspace_swipe_fingers` / `workspace_swipe_distance` | integer / float | Compatibility shortcut for adjacent-workspace horizontal swipes. |
+| `gesture_swipe_fingers` | integer | Finger count for the four `swipe_*` action bindings below. |
+| `swipe_left`, `swipe_right`, `swipe_up`, `swipe_down` | action | Runs any ordinary TideWM action after a dominant-axis swipe crosses `workspace_swipe_distance` (default 200). |
+| `gesture_pinch_fingers` | integer | Finger count for `pinch_in` / `pinch_out`. |
+| `pinch_in`, `pinch_out` | action | Runs after the completed pinch reaches scale 0.8 / 1.2 respectively. |
 
 ```
 input {
@@ -125,6 +130,9 @@ input {
     touchpad {
         natural_scroll = true
         tap_to_click = true
+        gesture_swipe_fingers = 3
+        swipe_left = workspace:2
+        pinch_in = toggle-overview
     }
 }
 ```
@@ -199,6 +207,7 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 | `maximize` | bool | Default `false`. Opens maximized and implies floating placement. |
 | `fullscreen` | bool | Default `false`. Opens fullscreen on its selected output. |
 | `block_capture` | bool | Default `false`. A per-window capture/screencast source renders black instead of exposing the window. |
+| `opacity` | float | Per-window alpha, clamped to `0.0`–`1.0`. Applies to the whole window surface tree. |
 | `position` | `<x>x<y>`, optional | Exact floating placement. No-op unless the window ends up floating. |
 | `size` | `<width>x<height>`, optional | Exact floating size. No-op unless the window ends up floating. |
 
@@ -341,7 +350,8 @@ Full flag/command list: `tidectl --help`.
 | `wp-viewporter` | Surface scaling/cropping (needed by `xwayland-satellite`) | Done |
 | `wp-presentation-time` | Frame timing feedback to clients | Done |
 | `wp-single-pixel-buffer-v1` | Solid-color buffers without a real allocation | Done |
-| `ext-session-lock-v1` | Screen lock (`swaylock`, `hyprlock`) | Done |
+| `xdg-toplevel-icon-v1` | Client-provided application/window icons | Done — names and buffers are retained in committed surface state for launchers and future TideWM UI consumers |
+| `ext-session-lock-v1` | Screen lock (`swaylock`, `hyprlock`) | Done — a crashed lock client terminates the compositor session fail-closed so the login manager can recover; it never auto-unlocks |
 | `ext-foreign-toplevel-list-v1` | Read-only toplevel list | Done |
 | `wlr-foreign-toplevel-management-v1` | Bidirectional toplevel control (waybar's `wlr/taskbar`, ags v1) | Done |
 | `wlr-screencopy-unstable-v1` + `ext-image-copy-capture-v1` | Screenshots (`grim`) | Done — output and per-window ext capture; SHM everywhere plus direct DMA-BUF rendering for full-output wlr capture on DRM sessions |
@@ -350,7 +360,7 @@ Full flag/command list: `tidectl --help`.
 | `xdg-output-manager-v1` | Output geometry disclosure | Done |
 | `idle-inhibit-unstable-v1` / `ext-idle-notify-v1` | Idle inhibition and notification | Done |
 | `wp-pointer-constraints-v1` + `wp-relative-pointer-v1` | Pointer lock/confine, relative motion | Done — verified live (Minecraft camera-look) |
-| `wp-pointer-gestures-v1` | Touchpad gesture events to clients | Done (protocol only — no built-in compositor gesture binds yet) |
+| `wp-pointer-gestures-v1` | Touchpad gesture events to clients | Done — unbound streams reach clients; configured swipe/pinch streams are consumed atomically by compositor actions |
 | `zwp-keyboard-shortcuts-inhibit-v1` | Let a client (VM, remote desktop) capture all shortcuts | Done |
 | `zwp-text-input-v3` + `zwp-input-method-v2` + `zwp-virtual-keyboard-v1` | IME support | Done — app-side activation verified live; see CHANGELOG for the exact verification bar per sub-protocol |
 | `wp-cursor-shape-v1` | Named-cursor requests (Qt6/GTK4, QuickShell) | Done |
@@ -358,7 +368,7 @@ Full flag/command list: `tidectl --help`.
 | `wlr-output-power-management-unstable-v1` | Display on/off (DPMS) | Protocol + render-loop logic done; real CRTC power toggle unverified on hardware |
 | `zwlr-gamma-control-manager-v1` | Night-light tools (`wlsunset`, `gammastep`) | Protocol + DRM gamma ioctls done; real color-change unverified on hardware |
 | `org.freedesktop.a11y.KeyboardMonitor` (DBus, not a Wayland protocol) | Screen reader (Orca) grabbing/watching keys system-wide | Done, behind the `accessibility` Cargo feature (off by default, `cargo build --features accessibility`) — see CHANGELOG for the verification bar |
-| `org.gnome.Mutter.ScreenCast` + PipeWire | Monitor/window video streams for `xdg-desktop-portal-gnome`-based setups | Done behind the `screencast` Cargo feature; shallow PipeWire node lifecycle verified, real portal/OBS hardware validation pending |
-| `org.freedesktop.impl.portal.ScreenCast` (DBus, the real `xdg-desktop-portal` backend interface) | Discord/OBS-style screen sharing | Done behind the `screencast` Cargo feature, self-contained (no `xdg-desktop-portal-gnome` needed) — see `share/xdg-desktop-portal/`. v1 is MONITOR-only, single stream, no source picker (auto-selects the first output). Verified with a real DBus round trip producing and tearing down a live PipeWire node; routing through a real `xdg-desktop-portal` process needs a fresh login on real hardware, since a nested session can't reroute the host's already-running portal daemon |
+| `org.gnome.Mutter.ScreenCast` + PipeWire | Monitor/window video streams for `xdg-desktop-portal-gnome`-based setups | Behind the `screencast` Cargo feature — DBus session lifecycle works, but PipeWire streaming is broken (DMA-BUF allocation fails on real hardware, MemFd fallback is unreliable). Not usable for real screen sharing yet |
+| `org.freedesktop.impl.portal.ScreenCast` (DBus, the real `xdg-desktop-portal` backend interface) | Discord/OBS-style screen sharing | Behind the `screencast` Cargo feature, self-contained (no `xdg-desktop-portal-gnome` needed), with compositor-owned monitor/window/virtual-source selection — but see the PipeWire row above, the actual stream doesn't work reliably yet. Virtual sources also mirror the selected desktop dimensions rather than creating a headless DRM connector |
 
-Everything on the original protocol/rice compatibility list is implemented. Remaining work is chiefly real-hardware validation, PipeWire DMA-BUF transport (the working stream currently uses mapped SHM), and visual/render identity work.
+Everything else on the original protocol/rice compatibility list is implemented. Screencasting is the one exception: the DBus/portal plumbing is there, but PipeWire buffer delivery is broken and needs real GBM-backed DMA-BUF allocation before it's usable.
