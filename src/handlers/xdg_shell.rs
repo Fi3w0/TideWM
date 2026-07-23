@@ -632,6 +632,15 @@ pub fn handle_commit(state: &mut Smallvil, surface: &WlSurface) {
     // doesn't emit a spurious `done` event to every bar watching.
     if transition != ToplevelTransition::Unmap && state.foreign_toplevels.contains_key(surface) {
         let (app_id, title) = state.toplevel_identity(surface);
+        if let Some(opacity) = state
+            .config
+            .resolve_window_rules(app_id.as_deref(), title.as_deref())
+            .opacity
+        {
+            state.window_opacity.insert(surface.clone(), opacity);
+        } else {
+            state.window_opacity.remove(surface);
+        }
         let title = title.unwrap_or_default();
         let app_id = app_id.unwrap_or_default();
         let handle = &state.foreign_toplevels[surface];
@@ -786,6 +795,11 @@ impl Smallvil {
         let rule = self
             .config
             .resolve_window_rules(app_id.as_deref(), title.as_deref());
+        if let Some(opacity) = rule.opacity {
+            self.window_opacity.insert(surface.clone(), opacity);
+        } else {
+            self.window_opacity.remove(surface);
+        }
 
         let output = self
             .fullscreen
@@ -958,6 +972,7 @@ impl Smallvil {
         self.pinned.remove(surface);
         self.pseudo_tiled.remove(surface);
         self.urgent.remove(surface);
+        self.window_opacity.remove(surface);
         self.focus_history.retain(|s| s != surface);
         // Closing the foreign-toplevel handle here (rather than only on
         // role destruction) means an xdg unmap also retires it; a later

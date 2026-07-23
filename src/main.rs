@@ -16,6 +16,8 @@ mod layout;
 mod overview;
 #[cfg(feature = "screencast")]
 mod screencast;
+#[cfg(feature = "screencast")]
+mod source_picker;
 mod state;
 mod tab_strip;
 mod toast;

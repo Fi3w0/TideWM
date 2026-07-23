@@ -70,6 +70,13 @@ pub enum CaptureCompletion {
         dmabuf: smithay::backend::allocator::dmabuf::Dmabuf,
         report_damage: bool,
     },
+    /// PipeWire-owned DMA-BUF rendered in place. Completion is signalled
+    /// only after the GL fence, before PipeWire requeues the buffer.
+    #[cfg(feature = "screencast")]
+    PipewireDmabuf {
+        dmabuf: smithay::backend::allocator::dmabuf::Dmabuf,
+        done: std::sync::mpsc::SyncSender<bool>,
+    },
     /// PipeWire monitor stream: the target is compositor-owned memory, not
     /// an untrusted Wayland buffer, but it intentionally shares the entire
     /// render/readback/privacy-exclusion path above the final copy.
@@ -84,6 +91,10 @@ impl CaptureCompletion {
             Self::Wlr { frame, .. } => frame.failed(),
             Self::WlrDmabuf { frame, .. } => frame.failed(),
             #[cfg(feature = "screencast")]
+            Self::PipewireDmabuf { done, .. } => {
+                let _ = done.send(false);
+            }
+            #[cfg(feature = "screencast")]
             Self::Screencast(targets) => {
                 for target in targets {
                     target.complete(None);
@@ -97,6 +108,10 @@ impl CaptureCompletion {
             Self::Ext(frame) => frame.fail(CaptureFailureReason::Unknown),
             Self::Wlr { frame, .. } => frame.failed(),
             Self::WlrDmabuf { frame, .. } => frame.failed(),
+            #[cfg(feature = "screencast")]
+            Self::PipewireDmabuf { done, .. } => {
+                let _ = done.send(false);
+            }
             #[cfg(feature = "screencast")]
             Self::Screencast(targets) => {
                 for target in targets {
@@ -316,6 +331,8 @@ impl Smallvil {
 
         let mut direct_dmabuf = match &mut completion {
             CaptureCompletion::WlrDmabuf { dmabuf, .. } => Some(dmabuf.clone()),
+            #[cfg(feature = "screencast")]
+            CaptureCompletion::PipewireDmabuf { dmabuf, .. } => Some(dmabuf.clone()),
             _ => None,
         };
         let mut texture: Option<GlesTexture> = if direct_dmabuf.is_none() {
@@ -354,6 +371,11 @@ impl Smallvil {
                     .resolve_window_rules(app_id.as_deref(), title.as_deref())
                     .block_capture
             });
+            let opacity = window_target
+                .toplevel()
+                .and_then(|toplevel| self.window_opacity.get(toplevel.wl_surface()))
+                .copied()
+                .unwrap_or(1.0);
             let window_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = if blocked {
                 Vec::new()
             } else {
@@ -362,7 +384,7 @@ impl Smallvil {
                     renderer,
                     (0, 0).into(),
                     Scale::from(scale),
-                    1.0,
+                    opacity,
                 )
             };
             let mut damage_tracker =
@@ -515,13 +537,8 @@ impl Smallvil {
                 [0.0, 0.0, 0.0, 1.0],
             )
         } else {
-            match smithay::desktop::space::space_render_elements::<_, smithay::desktop::Window, _>(
-                renderer,
-                [&self.space],
-                &output,
-                1.0,
-            ) {
-                Ok(space_elements) => {
+            match self.desktop_render_elements(renderer, &output) {
+                Some(space_elements) => {
                     elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
                     if let Some(wallpaper) = self.wallpaper_element(&output, renderer) {
                         elements.push(OutputRenderElements::Composited(wallpaper));
@@ -534,8 +551,8 @@ impl Smallvil {
                         [0.05, 0.05, 0.05, 1.0],
                     )
                 }
-                Err(err) => {
-                    tracing::warn!(%err, "Failed to gather capture render elements");
+                None => {
+                    tracing::warn!("Failed to gather capture render elements");
                     fail!(completion, CaptureFailureReason::Unknown);
                     return;
                 }
@@ -550,12 +567,11 @@ impl Smallvil {
             }
         };
 
-        if let CaptureCompletion::WlrDmabuf {
-            frame,
-            report_damage,
-            ..
-        } = completion
-        {
+        let direct_completion = matches!(completion, CaptureCompletion::WlrDmabuf { .. });
+        #[cfg(feature = "screencast")]
+        let direct_completion =
+            direct_completion || matches!(completion, CaptureCompletion::PipewireDmabuf { .. });
+        if direct_completion {
             drop(target);
             // `ready` transfers the buffer back to the client. Unlike the
             // SHM readback path below, no map/copy operation implicitly
@@ -563,19 +579,32 @@ impl Smallvil {
             // telling a consumer it may read/reuse the DMA-BUF.
             if let Err(err) = render_result.sync.wait() {
                 tracing::warn!(%err, "DMA-BUF capture fence wait failed");
-                frame.failed();
+                completion.fail(CaptureFailureReason::Unknown);
                 return;
             }
-            if report_damage {
-                frame.damage(0, 0, rect.size.w as u32, rect.size.h as u32);
+            match completion {
+                CaptureCompletion::WlrDmabuf {
+                    frame,
+                    report_damage,
+                    ..
+                } => {
+                    if report_damage {
+                        frame.damage(0, 0, rect.size.w as u32, rect.size.h as u32);
+                    }
+                    let elapsed = self.start_time.elapsed();
+                    let secs = elapsed.as_secs();
+                    frame.ready(
+                        (secs >> 32) as u32,
+                        (secs & 0xFFFF_FFFF) as u32,
+                        elapsed.subsec_nanos(),
+                    );
+                }
+                #[cfg(feature = "screencast")]
+                CaptureCompletion::PipewireDmabuf { done, .. } => {
+                    let _ = done.send(true);
+                }
+                _ => unreachable!(),
             }
-            let elapsed = self.start_time.elapsed();
-            let secs = elapsed.as_secs();
-            frame.ready(
-                (secs >> 32) as u32,
-                (secs & 0xFFFF_FFFF) as u32,
-                elapsed.subsec_nanos(),
-            );
             return;
         }
 
@@ -641,6 +670,17 @@ impl Smallvil {
                     .copy_from_slice(&pixels[source_start..source_start + stride]);
             }
             black_out_rects(&mut owned, size, full_rect, &excluded_rects);
+            // TEMP DIAGNOSTIC: sample the center pixel to prove/disprove
+            // real content is reaching this point before it's handed off.
+            let sample_offset = (size.h as usize / 2) * stride + (size.w as usize / 2) * 4;
+            let sample = owned.get(sample_offset..sample_offset + 4);
+            tracing::warn!(
+                width = size.w,
+                height = size.h,
+                targets = targets.len(),
+                ?sample,
+                "DIAG screencast frame ready to complete"
+            );
             let frame = std::sync::Arc::new(crate::screencast::ScreencastFrame {
                 pixels: owned,
                 width: size.w as u32,
@@ -657,6 +697,8 @@ impl Smallvil {
             CaptureCompletion::Ext(frame) => frame.buffer(),
             CaptureCompletion::Wlr { buffer, .. } => buffer.clone(),
             CaptureCompletion::WlrDmabuf { .. } => unreachable!(),
+            #[cfg(feature = "screencast")]
+            CaptureCompletion::PipewireDmabuf { .. } => unreachable!(),
             #[cfg(feature = "screencast")]
             CaptureCompletion::Screencast(_) => unreachable!(),
         };
@@ -759,6 +801,8 @@ impl Smallvil {
             #[cfg(feature = "screencast")]
             (_, CaptureCompletion::Screencast(_)) => unreachable!(),
             (_, CaptureCompletion::WlrDmabuf { .. }) => unreachable!(),
+            #[cfg(feature = "screencast")]
+            (_, CaptureCompletion::PipewireDmabuf { .. }) => unreachable!(),
             (Ok(false), completion) => completion.fail(CaptureFailureReason::BufferConstraints),
             (Err(err), completion) => {
                 tracing::warn!(%err, "Failed to access capture target buffer");

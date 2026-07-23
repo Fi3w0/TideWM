@@ -14,7 +14,7 @@ use smithay::{
                 memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
                 solid::{SolidColorBuffer, SolidColorRenderElement},
                 surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
-                Kind, RenderElementStates,
+                AsRenderElements, Kind, RenderElementStates,
             },
             gles::GlesRenderer,
             ImportAll, ImportMem,
@@ -23,6 +23,7 @@ use smithay::{
     },
     desktop::{
         self, layer_map_for_output,
+        space::SpaceRenderElements,
         utils::{
             send_frames_surface_tree, surface_presentation_feedback_flags_from_states,
             surface_primary_scanout_output, under_from_surface_tree, OutputPresentationFeedback,
@@ -45,10 +46,10 @@ use smithay::{
         wayland_server::{
             backend::{ClientData, ClientId, DisconnectReason},
             protocol::wl_surface::WlSurface,
-            Client, Display, DisplayHandle,
+            Client, Display, DisplayHandle, Resource,
         },
     },
-    utils::{Clock, Logical, Monotonic, Point, Rectangle, Size, SERIAL_COUNTER},
+    utils::{Clock, Logical, Monotonic, Point, Rectangle, Scale, Size, SERIAL_COUNTER},
     wayland::{
         compositor::{get_parent, CompositorClientState, CompositorState},
         cursor_shape::CursorShapeManagerState,
@@ -86,6 +87,7 @@ use smithay::{
         viewporter::ViewporterState,
         virtual_keyboard::VirtualKeyboardManagerState,
         xdg_activation::XdgActivationState,
+        xdg_toplevel_icon::XdgToplevelIconManager,
     },
 };
 
@@ -126,10 +128,9 @@ pub struct Smallvil {
     /// empty under winit: the nested backend never reports a real libinput
     /// device.
     pub known_touchpads: Vec<smithay::reexports::input::Device>,
-    /// Active compositor-consumed horizontal touchpad swipe: configured
-    /// finger count plus accumulated libinput X delta. `None` means gesture
+    /// Active compositor-consumed touchpad gesture. `None` means gesture
     /// events continue through the ordinary client protocol path.
-    pub(crate) workspace_swipe: Option<(u32, f64, f64)>,
+    pub(crate) compositor_gesture: Option<CompositorGesture>,
     pub toast: Option<Toast>,
     /// Persistent config diagnostic rendered as a reserved top panel.  It
     /// is independent of `toast`: reload confirmations and short debug
@@ -143,6 +144,8 @@ pub struct Smallvil {
     /// otherwise. Built once when toggled on, not rebuilt every frame --
     /// see `toggle_overview`.
     pub overview: Option<crate::overview::Overview>,
+    #[cfg(feature = "screencast")]
+    pub(crate) screencast_picker: Option<crate::source_picker::SourcePicker>,
     /// `Some` when `show_welcome_hint` was still on at startup (`main.rs`).
     /// Built once, static content -- `should_show_welcome_hint` decides
     /// per-frame whether the render call sites actually draw it, this
@@ -176,6 +179,9 @@ pub struct Smallvil {
 
     pub layout: Layouts,
     pub space: Space<Window>,
+    /// Per-mapped-window alpha resolved from window rules. Missing entries
+    /// are fully opaque.
+    pub(crate) window_opacity: HashMap<WlSurface, f32>,
     pub loop_handle: LoopHandle<'static, Smallvil>,
     pub loop_signal: LoopSignal,
 
@@ -236,6 +242,10 @@ pub struct Smallvil {
     /// `register_lock_surface` below (the actual state machine).
     pub session_lock_state: SessionLockManagerState,
     pub(crate) session_lock: SessionLock,
+    /// Client currently responsible for the fail-closed lock. If it dies
+    /// without unlocking, TideWM terminates the compositor session so the
+    /// login manager can recover; it never reveals the existing desktop.
+    session_lock_client: Option<ClientId>,
     /// One `LockSurface` per output, registered via `register_lock_surface`
     /// as clients call `get_lock_surface`. Rendered full-screen in place of
     /// every window/layer-shell surface while `session_lock` isn't
@@ -265,6 +275,7 @@ pub struct Smallvil {
     /// `handlers/mod.rs`; the grant path itself is
     /// `Smallvil::activate_toplevel`.
     pub xdg_activation_state: XdgActivationState,
+    pub xdg_toplevel_icon_manager: XdgToplevelIconManager,
     /// `wp_single_pixel_buffer_manager_v1`: clients create 1x1 solid-color
     /// buffers without a SHM round-trip. No handler logic; Smithay's
     /// surface render element already knows how to draw these buffers, so
@@ -738,6 +749,20 @@ pub(crate) enum SessionLock {
     Locked,
 }
 
+/// Gesture streams captured by compositor bindings instead of forwarded via
+/// wp-pointer-gestures. A stream is claimed at Begin and remains owned until
+/// End so clients never receive a partial gesture.
+pub(crate) enum CompositorGesture {
+    Swipe {
+        workspace_fallback: bool,
+        delta_x: f64,
+        delta_y: f64,
+    },
+    Pinch {
+        scale: f64,
+    },
+}
+
 pub(crate) struct PopupGrabState {
     pub(crate) root: WlSurface,
     pub(crate) grab: PopupGrab<Smallvil>,
@@ -788,9 +813,139 @@ impl MaximizedEntry {
 const SCRATCHPAD_WORKSPACE: u32 = 0;
 
 impl Smallvil {
+    pub(crate) fn screencast_picker_element(
+        &self,
+        output: &Output,
+        renderer: &mut GlesRenderer,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        #[cfg(feature = "screencast")]
+        {
+            self.screencast_picker
+                .as_ref()
+                .filter(|picker| picker.output_name() == output.name())
+                .and_then(|picker| picker.render_element(renderer))
+        }
+        #[cfg(not(feature = "screencast"))]
+        {
+            let _ = (output, renderer);
+            None
+        }
+    }
+
+    /// Builds the desktop stack explicitly, allowing both per-window alpha
+    /// and fullscreen placement to differ from Smithay's all-or-nothing
+    /// `space_render_elements` helper. The returned vector is front-to-back.
+    /// Fullscreen windows cover layer-shell Top/Overlay surfaces as requested;
+    /// regular windows retain the protocol order above Bottom/Background.
+    pub(crate) fn desktop_render_elements(
+        &self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+    ) -> Option<Vec<SpaceRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>>>
+    {
+        self.space.output_geometry(output)?;
+        let mut result = Vec::new();
+
+        fn append_windows(
+            state: &Smallvil,
+            renderer: &mut GlesRenderer,
+            output: &Output,
+            fullscreen: bool,
+            result: &mut Vec<
+                SpaceRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>,
+            >,
+        ) {
+            let Some(output_geo) = state.space.output_geometry(output) else {
+                return;
+            };
+            let output_scale = output.current_scale().fractional_scale();
+            let scale = Scale::from(output_scale);
+            for window in state.space.elements_for_output(output).rev() {
+                let surface = window.toplevel().map(|toplevel| toplevel.wl_surface());
+                if surface.is_some_and(|surface| state.fullscreen.contains_key(surface))
+                    != fullscreen
+                {
+                    continue;
+                }
+                let Some(location) = state.space.element_location(window) else {
+                    continue;
+                };
+                let alpha = surface
+                    .and_then(|surface| state.window_opacity.get(surface))
+                    .copied()
+                    .unwrap_or(1.0);
+                let render_location = location - output_geo.loc - window.geometry().loc;
+                result.extend(
+                    window
+                        .render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
+                            renderer,
+                            render_location.to_physical_precise_round(output_scale),
+                            scale,
+                            alpha,
+                        )
+                        .into_iter()
+                        .map(SpaceRenderElements::Surface),
+                );
+            }
+        }
+
+        fn append_layers(
+            state: &Smallvil,
+            renderer: &mut GlesRenderer,
+            output: &Output,
+            kinds: &[WlrLayer],
+            result: &mut Vec<
+                SpaceRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>,
+            >,
+        ) {
+            let output_scale = output.current_scale().fractional_scale();
+            let scale = Scale::from(output_scale);
+            let layer_map = layer_map_for_output(output);
+            for kind in kinds {
+                for layer in layer_map.layers_on(*kind).rev() {
+                    if state.unmapped_layer_surfaces.contains(layer.wl_surface()) {
+                        continue;
+                    }
+                    let Some(geometry) = layer_map.layer_geometry(layer) else {
+                        continue;
+                    };
+                    result.extend(
+                        layer
+                            .render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
+                                renderer,
+                                geometry.loc.to_physical_precise_round(output_scale),
+                                scale,
+                                1.0,
+                            )
+                            .into_iter()
+                            .map(SpaceRenderElements::Surface),
+                    );
+                }
+            }
+        }
+
+        append_windows(self, renderer, output, true, &mut result);
+        append_layers(
+            self,
+            renderer,
+            output,
+            &[WlrLayer::Overlay, WlrLayer::Top],
+            &mut result,
+        );
+        append_windows(self, renderer, output, false, &mut result);
+        append_layers(
+            self,
+            renderer,
+            output,
+            &[WlrLayer::Bottom, WlrLayer::Background],
+            &mut result,
+        );
+        Some(result)
+    }
+
     pub fn new(event_loop: &mut EventLoop<'static, Smallvil>, display: Display<Self>) -> Self {
         let start_time = std::time::Instant::now();
-        let (config, startup_config_error) = Config::load_with_error();
+        let (config, startup_config_error, startup_config_warnings) = Config::load_with_error();
         // Copied out before `config` moves into the `Self { config, .. }`
         // field below, so `layout: ...` further down can still read it.
         let default_layout = config.default_layout;
@@ -818,6 +973,11 @@ impl Smallvil {
             DataControlState::new::<Self, _>(&dh, Some(&primary_selection_state), trusted_client);
         let session_lock_state = SessionLockManagerState::new::<Self, _>(&dh, trusted_client);
         let xdg_activation_state = XdgActivationState::new::<Self>(&dh);
+        let mut xdg_toplevel_icon_manager = XdgToplevelIconManager::new::<Self>(&dh);
+        // Advertise the sizes TideWM-owned consumers are most likely to use.
+        // Clients remain free to submit other sizes as required by the
+        // protocol; these are preferences, not limits.
+        xdg_toplevel_icon_manager.replace_icon_sizes([32, 48, 64, 128]);
         let single_pixel_buffer_state = SinglePixelBufferState::new::<Self>(&dh);
         let clock = Clock::<Monotonic>::new();
         let presentation_state = PresentationState::new::<Self>(&dh, clock.id() as u32);
@@ -919,12 +1079,27 @@ impl Smallvil {
 
             config,
             known_touchpads: Vec::new(),
-            workspace_swipe: None,
+            compositor_gesture: None,
             toast: None,
             config_error_overlay: startup_config_error
-                .map(crate::error_overlay::ConfigErrorOverlay::new),
+                .map(|message| {
+                    crate::error_overlay::ConfigErrorOverlay::new(
+                        message,
+                        crate::error_overlay::OverlaySeverity::Error,
+                    )
+                })
+                .or_else(|| {
+                    (!startup_config_warnings.is_empty()).then(|| {
+                        crate::error_overlay::ConfigErrorOverlay::new(
+                            startup_config_warnings.join("; "),
+                            crate::error_overlay::OverlaySeverity::Warning,
+                        )
+                    })
+                }),
             builtin_wallpaper: crate::wallpaper::BuiltinWallpaper::build(),
             overview: None,
+            #[cfg(feature = "screencast")]
+            screencast_picker: None,
             welcome_hint: None,
             last_config_event: Instant::now() - Duration::from_secs(1),
             config_reload_timer_armed: false,
@@ -941,6 +1116,7 @@ impl Smallvil {
                 layout
             },
             space,
+            window_opacity: HashMap::new(),
             loop_handle,
             loop_signal,
             socket_name,
@@ -960,10 +1136,12 @@ impl Smallvil {
             data_control_state,
             session_lock_state,
             session_lock: SessionLock::Unlocked,
+            session_lock_client: None,
             lock_surfaces: HashMap::new(),
             locked_outputs: HashSet::new(),
             lock_blank: HashMap::new(),
             xdg_activation_state,
+            xdg_toplevel_icon_manager,
             single_pixel_buffer_state,
             presentation_state,
             clock,
@@ -1049,15 +1227,30 @@ impl Smallvil {
 
         let loop_handle = event_loop.handle();
 
+        let (disconnect_sender, disconnect_source) =
+            smithay::reexports::calloop::channel::channel();
+        loop_handle
+            .insert_source(disconnect_source, |event, _, state: &mut Smallvil| {
+                if let smithay::reexports::calloop::channel::Event::Msg(client_id) = event {
+                    state.handle_client_disconnect(client_id);
+                }
+            })
+            .expect("Failed to init the client-disconnect event source.");
+
+        let sender_for_clients = disconnect_sender.clone();
         loop_handle
             .insert_source(listening_socket, move |client_stream, _, state| {
                 // Inside the callback, you should insert the client into the display.
                 //
                 // You may also associate some data with the client when inserting the client.
-                if let Err(err) = state
-                    .display_handle
-                    .insert_client(client_stream, Arc::new(ClientState::default()))
-                {
+                if let Err(err) = state.display_handle.insert_client(
+                    client_stream,
+                    Arc::new(ClientState {
+                        compositor_state: CompositorClientState::default(),
+                        security_context: None,
+                        disconnect_sender: Some(sender_for_clients.clone()),
+                    }),
+                ) {
                     tracing::warn!(%err, "Failed to register incoming Wayland client");
                 }
             })
@@ -1082,10 +1275,9 @@ impl Smallvil {
         socket_name
     }
 
-    /// Finds the topmost surface under `pos`, checking layer-shell surfaces
-    /// in the same front-to-back order they're rendered in
-    /// (`space_render_elements`, used by both backends): Overlay and Top
-    /// above every tiled/floating window, Bottom and Background below.
+    /// Finds the topmost surface under `pos`, checking the same manually
+    /// interleaved order used by `desktop_render_elements`: fullscreen,
+    /// Overlay/Top, regular windows, then Bottom/Background.
     /// Walk up through `surface`'s parent chain and return the first
     /// ancestor (including `surface` itself) that has a pointer constraint
     /// registered for `pointer`. Constraints are typically created on the
@@ -1150,7 +1342,15 @@ impl Smallvil {
             .map(|(s, p)| (s, p.to_f64() + output_geo.loc.to_f64()));
         }
 
-        self.layer_surface_under(output, output_geo, pos, &[WlrLayer::Overlay, WlrLayer::Top])
+        self.fullscreen_surface_under(output, pos)
+            .or_else(|| {
+                self.layer_surface_under(
+                    output,
+                    output_geo,
+                    pos,
+                    &[WlrLayer::Overlay, WlrLayer::Top],
+                )
+            })
             .or_else(|| {
                 self.space
                     .element_under(pos)
@@ -1167,6 +1367,27 @@ impl Smallvil {
                     pos,
                     &[WlrLayer::Bottom, WlrLayer::Background],
                 )
+            })
+    }
+
+    fn fullscreen_surface_under(
+        &self,
+        output: &Output,
+        pos: Point<f64, Logical>,
+    ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        self.space
+            .elements_for_output(output)
+            .rev()
+            .filter(|window| {
+                window
+                    .toplevel()
+                    .is_some_and(|toplevel| self.fullscreen.contains_key(toplevel.wl_surface()))
+            })
+            .find_map(|window| {
+                let location = self.space.element_location(window)?;
+                window
+                    .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
+                    .map(|(surface, point)| (surface, (point + location).to_f64()))
             })
     }
 
@@ -2001,6 +2222,15 @@ impl Smallvil {
             return;
         }
 
+        self.session_lock_client = self
+            .display_handle
+            .get_client(confirmation.ext_session_lock().id())
+            .ok()
+            .map(|client| client.id());
+
+        #[cfg(feature = "screencast")]
+        self.screencast_picker.take();
+
         self.locked_outputs.clear();
 
         let serial = SERIAL_COUNTER.next_serial();
@@ -2026,12 +2256,28 @@ impl Smallvil {
     /// Entry point for `SessionLockHandler::unlock`.
     pub(crate) fn unlock_session(&mut self) {
         self.session_lock = SessionLock::Unlocked;
+        self.session_lock_client = None;
         self.lock_surfaces.clear();
         self.locked_outputs.clear();
         let serial = SERIAL_COUNTER.next_serial();
         self.reconcile_keyboard_focus(serial);
         self.refresh_pointer_focus();
         self.request_redraw();
+    }
+
+    fn handle_client_disconnect(&mut self, client_id: ClientId) {
+        if self.session_lock_client.as_ref() == Some(&client_id)
+            && !matches!(self.session_lock, SessionLock::Unlocked)
+        {
+            // Fail closed: ending the compositor returns control to the
+            // display/login manager. Continuing with an unlocked desktop
+            // would make killing the locker a lock bypass.
+            tracing::error!(
+                "Session-lock client crashed; terminating the compositor session securely"
+            );
+            self.session_lock_client = None;
+            self.loop_signal.stop();
+        }
     }
 
     /// Entry point for `SessionLockHandler::new_surface`: configures the
@@ -3167,6 +3413,16 @@ impl Smallvil {
     /// output's old coordinates would make it visible on the wrong workspace
     /// and could leave keyboard focus pointing at unreachable content.
     pub(crate) fn migrate_output_windows(&mut self, from_output: &str, to_output: &str) {
+        #[cfg(feature = "screencast")]
+        if self
+            .screencast_picker
+            .as_ref()
+            .is_some_and(|picker| picker.output_name() == from_output)
+        {
+            // The modal UI cannot remain usable after its output vanishes.
+            // Dropping it sends a portal cancellation response.
+            self.screencast_picker.take();
+        }
         let from_geometry = self
             .output_by_name(from_output)
             .and_then(|output| self.space.output_geometry(&output));
@@ -4596,7 +4852,7 @@ impl Smallvil {
     /// is never silent, success or failure.
     pub fn reload_config(&mut self) {
         match Config::reload() {
-            Ok(new_config) => {
+            Ok((new_config, warnings)) => {
                 let had_error_overlay = self.config_error_overlay.take().is_some();
                 if let Some(keyboard) = self.seat.get_keyboard() {
                     keyboard.change_repeat_info(
@@ -4624,6 +4880,17 @@ impl Smallvil {
                     self.welcome_hint = None;
                 }
                 self.config = new_config;
+                self.window_opacity = self
+                    .foreign_toplevels
+                    .keys()
+                    .filter_map(|surface| {
+                        let (app_id, title) = self.toplevel_identity(surface);
+                        self.config
+                            .resolve_window_rules(app_id.as_deref(), title.as_deref())
+                            .opacity
+                            .map(|opacity| (surface.clone(), opacity))
+                    })
+                    .collect();
                 // A reload that dropped or renamed the currently-active
                 // submap would otherwise leave every key silently
                 // unmatched (falling through as plain input) with no
@@ -4649,8 +4916,20 @@ impl Smallvil {
                 }
                 tracing::info!("Config reloaded");
                 self.toast = Some(Toast::new("Config reloaded", ToastKind::Info));
+                // Unlike a hard parse failure, these diagnostics don't mean
+                // the reload was rejected -- `new_config` above is already
+                // in effect. Still worth a persistent nudge instead of a
+                // toast that scrolls away, since a footgun lint is exactly
+                // the kind of thing you want to notice before it bites,
+                // not after.
+                if !warnings.is_empty() {
+                    self.config_error_overlay = Some(crate::error_overlay::ConfigErrorOverlay::new(
+                        warnings.join("; "),
+                        crate::error_overlay::OverlaySeverity::Warning,
+                    ));
+                }
                 self.retile();
-                if had_error_overlay {
+                if had_error_overlay || !warnings.is_empty() {
                     self.request_redraw();
                 }
             }
@@ -4662,8 +4941,10 @@ impl Smallvil {
                 // error phrasing ("config error in file <path> at line
                 // <N>: <message>") rather than inventing our own shape.
                 let message = format!("Config error {err}");
-                self.config_error_overlay =
-                    Some(crate::error_overlay::ConfigErrorOverlay::new(&message));
+                self.config_error_overlay = Some(crate::error_overlay::ConfigErrorOverlay::new(
+                    &message,
+                    crate::error_overlay::OverlaySeverity::Error,
+                ));
                 // Keep the established notification path for immediate
                 // visual feedback/debugging; the reserved panel is the
                 // persistent, readable diagnostic.
@@ -4812,11 +5093,16 @@ pub struct ClientState {
     /// `wp_security_context_v1` listener. Privileged global filters use
     /// this marker; the metadata is also retained for diagnostics/policy.
     pub security_context: Option<SecurityContext>,
+    pub(crate) disconnect_sender: Option<smithay::reexports::calloop::channel::Sender<ClientId>>,
 }
 
 impl ClientData for ClientState {
     fn initialized(&self, _client_id: ClientId) {}
-    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
+    fn disconnected(&self, client_id: ClientId, _reason: DisconnectReason) {
+        if let Some(sender) = &self.disconnect_sender {
+            let _ = sender.send(client_id);
+        }
+    }
 }
 
 /// Only clients connected to TideWM's ordinary socket are trusted with

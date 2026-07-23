@@ -21,6 +21,7 @@ mod dbus;
 mod pipewire_thread;
 mod portal;
 
+use std::sync::mpsc;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -54,6 +55,15 @@ pub(crate) struct WindowSnapshot {
 pub(crate) enum ScreencastSource {
     Output(String),
     Window(u64),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SourceChoice {
+    pub(crate) source: ScreencastSource,
+    pub(crate) source_type: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) label: String,
 }
 
 #[derive(Clone)]
@@ -121,6 +131,16 @@ pub enum ScreencastEvent {
     FrameRequested {
         source: ScreencastSource,
         target: FrameTarget,
+    },
+    PickSource {
+        source_types: u32,
+        response: mpsc::SyncSender<Option<SourceChoice>>,
+    },
+    DmabufFrameRequested {
+        source: ScreencastSource,
+        dmabuf: smithay::backend::allocator::dmabuf::Dmabuf,
+        draw_cursor: bool,
+        done: mpsc::SyncSender<bool>,
     },
 }
 
@@ -229,6 +249,52 @@ pub fn init<'a>(
                     }
                 }
             },
+            ScreencastEvent::PickSource {
+                source_types,
+                response,
+            } => state.open_screencast_picker(source_types, response),
+            ScreencastEvent::DmabufFrameRequested {
+                source,
+                dmabuf,
+                draw_cursor,
+                done,
+            } => {
+                use crate::capture::{CaptureCompletion, PendingCapture};
+                let target = match source {
+                    ScreencastSource::Output(name) => state
+                        .space
+                        .outputs()
+                        .find(|output| output.name() == name)
+                        .cloned()
+                        .map(|output| (output, None)),
+                    ScreencastSource::Window(id) => state
+                        .foreign_toplevel_numeric_ids
+                        .iter()
+                        .find_map(|(surface, candidate)| {
+                            (*candidate == id).then(|| surface.clone())
+                        })
+                        .and_then(|surface| {
+                            state
+                                .capture_output_for_screencast(&surface)
+                                .map(|output| (output, Some(surface)))
+                        }),
+                };
+                let Some((output, window)) = target else {
+                    let _ = done.send(false);
+                    return;
+                };
+                if window.is_none() && state.config.has_layer_capture_exclusions() {
+                    let _ = done.send(false);
+                    return;
+                }
+                state.queue_capture(PendingCapture {
+                    output,
+                    window,
+                    draw_cursor,
+                    region: None,
+                    completion: CaptureCompletion::PipewireDmabuf { dmabuf, done },
+                });
+            }
         }
     }) {
         tracing::warn!(%err, "Failed to register screencast compositor channel");

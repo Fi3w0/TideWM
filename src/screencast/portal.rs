@@ -14,10 +14,9 @@
 //! and `tidewm-portals.conf`, both of which are load-bearing -- nothing
 //! routes to this code without them. See AGENT.md's "Screencasting" section.
 //!
-//! **v1 scope, deliberately thin:** MONITOR source type only, one stream per
-//! session, no source picker -- `Start` auto-selects the first available
-//! output instead of asking the user which one (see the `ponytail:` marker
-//! on `Portal::start` for the upgrade path). This proves the whole
+//! One stream is supported per session. `Start` asks the compositor thread
+//! to show its source picker; monitor, window, and virtual choices never
+//! require the D-Bus worker to inspect live compositor state. This proves the whole
 //! `xdg-desktop-portal` -> PipeWire pipe end-to-end as the smallest
 //! reviewable slice, the same "land the safe testable core first" sequencing
 //! the original Mutter/PipeWire split used.
@@ -34,6 +33,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use futures_util::StreamExt;
@@ -43,13 +43,14 @@ use zbus::names::{OwnedUniqueName, UniqueName};
 use zbus::object_server::SignalEmitter;
 use zbus::zvariant::{NoneValue, OwnedObjectPath, OwnedValue, Value};
 
-use super::{pipewire_thread, OutputSnapshot, ScreencastEvent, ScreencastSource};
+use super::{pipewire_thread, OutputSnapshot, ScreencastEvent};
 
 const MAX_PORTAL_SESSIONS: usize = 8;
 
-/// `AvailableSourceTypes` bit for monitors. `WINDOW` (2) and `VIRTUAL` (4)
-/// are not implemented in v1.
 const SOURCE_TYPE_MONITOR: u32 = 1;
+const SOURCE_TYPE_WINDOW: u32 = 2;
+const SOURCE_TYPE_VIRTUAL: u32 = 4;
+const SOURCE_TYPES: u32 = SOURCE_TYPE_MONITOR | SOURCE_TYPE_WINDOW | SOURCE_TYPE_VIRTUAL;
 /// `AvailableCursorModes` bits this backend can actually satisfy: `Hidden`
 /// (1) and `Embedded` (2). `Metadata` (4) is not implemented.
 const CURSOR_MODES: u32 = 1 | 2;
@@ -58,6 +59,7 @@ pub(super) struct SessionEntry {
     owner: OwnedUniqueName,
     /// `None` until `SelectSources` runs; `Start` requires it.
     draw_cursor: Mutex<Option<bool>>,
+    source_types: Mutex<Option<u32>>,
     stream: Mutex<Option<PortalStream>>,
 }
 
@@ -68,7 +70,6 @@ struct PortalStream {
 pub(super) type SessionMap = HashMap<OwnedObjectPath, Arc<SessionEntry>>;
 
 pub(super) struct Portal {
-    outputs: Arc<Mutex<Vec<OutputSnapshot>>>,
     compositor: smithay::reexports::calloop::channel::Sender<ScreencastEvent>,
     next_id: Arc<AtomicU64>,
     sessions: Arc<Mutex<SessionMap>>,
@@ -76,14 +77,13 @@ pub(super) struct Portal {
 
 impl Portal {
     pub(super) fn new(
-        outputs: Arc<Mutex<Vec<OutputSnapshot>>>,
+        _outputs: Arc<Mutex<Vec<OutputSnapshot>>>,
         compositor: smithay::reexports::calloop::channel::Sender<ScreencastEvent>,
         next_id: Arc<AtomicU64>,
     ) -> (Self, Arc<Mutex<SessionMap>>) {
         let sessions = Arc::new(Mutex::new(HashMap::new()));
         (
             Self {
-                outputs,
                 compositor,
                 next_id,
                 sessions: sessions.clone(),
@@ -107,7 +107,7 @@ const RESPONSE_OTHER_ERROR: u32 = 2;
 impl Portal {
     #[zbus(property)]
     fn available_source_types(&self) -> u32 {
-        SOURCE_TYPE_MONITOR
+        SOURCE_TYPES
     }
 
     #[zbus(property)]
@@ -121,7 +121,17 @@ impl Portal {
     /// (versions 4-6) aren't implemented. Claiming a version this backend
     /// doesn't back would invite a frontend to rely on fields that never
     /// arrive.
-    #[zbus(property)]
+    ///
+    /// `name = "version"` matters: `org.freedesktop.impl.portal.ScreenCast.xml`
+    /// declares this one property lowercase (unlike `AvailableCursorModes`/
+    /// `AvailableSourceTypes`, which are PascalCase), and zbus's default
+    /// PascalCase-ing would otherwise export it as `Version`. xdg-desktop-portal's
+    /// frontend does a case-sensitive lookup for `version` to decide whether the
+    /// backend is new enough to bother mirroring `AvailableCursorModes` at all --
+    /// get the case wrong and that lookup silently reads 0, so it never binds
+    /// `AvailableCursorModes` and every client's requested cursor mode reads back
+    /// as unavailable, forever, with no error anywhere on TideWM's side to see.
+    #[zbus(property, name = "version")]
     fn version(&self) -> u32 {
         3
     }
@@ -154,6 +164,7 @@ impl Portal {
                 Arc::new(SessionEntry {
                     owner,
                     draw_cursor: Mutex::new(None),
+                    source_types: Mutex::new(None),
                     stream: Mutex::new(None),
                 }),
             );
@@ -185,7 +196,7 @@ impl Portal {
         Ok((RESPONSE_SUCCESS, results))
     }
 
-    /// v1 only honors `types` (must include `MONITOR`) and `cursor_mode`.
+    /// Honors the portal source-type bitmask and `cursor_mode`.
     /// `multiple`, `restore_data`, and `persist_mode` are read by no one --
     /// this backend never offers more than one stream and never persists,
     /// so there is nothing to do with them.
@@ -204,11 +215,12 @@ impl Portal {
         let types = options
             .get("types")
             .and_then(|value| u32::try_from(value).ok())
-            .unwrap_or(SOURCE_TYPE_MONITOR);
-        if types & SOURCE_TYPE_MONITOR == 0 {
+            .unwrap_or(SOURCE_TYPE_MONITOR)
+            & SOURCE_TYPES;
+        if types == 0 {
             tracing::warn!(
                 types,
-                "Portal screencast requested a source type this v1 backend doesn't support (only MONITOR)"
+                "Portal screencast requested no supported source type"
             );
             return Ok((RESPONSE_OTHER_ERROR, HashMap::new()));
         }
@@ -218,19 +230,13 @@ impl Portal {
             .and_then(|value| u32::try_from(value).ok())
             .unwrap_or(1);
         *entry.draw_cursor.lock().unwrap() = Some(cursor_mode & 2 != 0);
+        *entry.source_types.lock().unwrap() = Some(types);
 
         Ok((RESPONSE_SUCCESS, HashMap::new()))
     }
 
-    /// `parent_window` is intentionally unused (only meaningful for parenting
-    /// a real picker dialog, which v1 doesn't show).
-    ///
-    /// ponytail: no source picker. Auto-selects the first output in the
-    /// live snapshot instead of asking the user which one to share -- the
-    /// same shortcut a single-monitor setup would never notice. Upgrade path:
-    /// a first-party picker overlay (matching the `overview.rs` pattern) that
-    /// lets `Start` pick a specific connector, the way `hyprland-share-picker`
-    /// / a `wlr` chooser-script do for their respective backends.
+    /// `parent_window` is unused because the picker is compositor-owned rather
+    /// than a separate desktop window that needs transient parenting.
     async fn start(
         &self,
         _handle: OwnedObjectPath,
@@ -248,18 +254,36 @@ impl Portal {
             tracing::warn!(%session_handle, "Portal screencast Start called before SelectSources");
             return Ok((RESPONSE_OTHER_ERROR, HashMap::new()));
         };
+        let Some(source_types) = *entry.source_types.lock().unwrap() else {
+            return Ok((RESPONSE_OTHER_ERROR, HashMap::new()));
+        };
         if entry.stream.lock().unwrap().is_some() {
             return Ok((RESPONSE_OTHER_ERROR, HashMap::new()));
         }
 
-        let Some(output) = self.outputs.lock().unwrap().first().cloned() else {
-            tracing::warn!("Portal screencast Start with no outputs available");
+        let (choice_tx, choice_rx) = mpsc::sync_channel(1);
+        if self
+            .compositor
+            .send(ScreencastEvent::PickSource {
+                source_types,
+                response: choice_tx,
+            })
+            .is_err()
+        {
             return Ok((RESPONSE_OTHER_ERROR, HashMap::new()));
+        }
+        let choice = blocking::unblock(move || choice_rx.recv())
+            .await
+            .ok()
+            .flatten();
+        let Some(choice) = choice else {
+            // Portal response 1 is user cancellation.
+            return Ok((1, HashMap::new()));
         };
 
-        let source = ScreencastSource::Output(output.name.clone());
+        let source = choice.source;
         let compositor = self.compositor.clone();
-        let (width, height) = (output.width, output.height);
+        let (width, height) = (choice.width, choice.height);
         let started = blocking::unblock(move || {
             pipewire_thread::start(source, width, height, draw_cursor, compositor)
         })
@@ -288,7 +312,7 @@ impl Portal {
         );
         stream_props.insert(
             "source_type".to_string(),
-            OwnedValue::from(SOURCE_TYPE_MONITOR),
+            OwnedValue::from(choice.source_type),
         );
         let streams: Vec<(u32, HashMap<String, OwnedValue>)> = vec![(node_id, stream_props)];
 
@@ -311,9 +335,9 @@ impl Portal {
     ) -> zbus::fdo::Result<Option<Arc<SessionEntry>>> {
         let owner = sender_of(header)?;
         let sessions = self.sessions.lock().unwrap();
-        Ok(sessions.get(session_handle).and_then(|entry| {
-            (entry.owner == owner).then(|| entry.clone())
-        }))
+        Ok(sessions
+            .get(session_handle)
+            .and_then(|entry| (entry.owner == owner).then(|| entry.clone())))
     }
 }
 
@@ -329,12 +353,17 @@ struct SessionObject {
 
 #[interface(name = "org.freedesktop.impl.portal.Session")]
 impl SessionObject {
-    #[zbus(property)]
+    /// Lowercase per `org.freedesktop.impl.portal.Session.xml` -- see the
+    /// `Portal::version` doc comment above for why the case matters here.
+    #[zbus(property, name = "version")]
     fn version(&self) -> u32 {
         1
     }
 
-    async fn close(&self, #[zbus(signal_emitter)] emitter: SignalEmitter<'_>) -> zbus::fdo::Result<()> {
+    async fn close(
+        &self,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<()> {
         // Dropping the removed entry drops its `PortalStream`, whose
         // `StreamHandle` stops and joins the PipeWire worker thread.
         self.sessions.lock().unwrap().remove(&self.path);

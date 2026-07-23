@@ -49,7 +49,7 @@ use smithay::{
         session::{libseat::LibSeatSession, Event as SessionEvent, Session},
         udev::{self, UdevBackend, UdevEvent},
     },
-    desktop::{space::SpaceRenderElements, utils::OutputPresentationFeedback, Window},
+    desktop::{space::SpaceRenderElements, utils::OutputPresentationFeedback},
     input::pointer::{CursorIcon, CursorImageStatus, CursorImageSurfaceData},
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
@@ -1326,6 +1326,11 @@ fn render_surface(
             .filter(|overview| overview.output_name() == output.name())
             .and_then(|overview| overview.render_element(renderer))
     };
+    let picker_element = if locked {
+        None
+    } else {
+        state.screencast_picker_element(output, renderer)
+    };
 
     let error_element = if locked {
         None
@@ -1336,18 +1341,7 @@ fn render_surface(
     let space_elements = if locked {
         Vec::new()
     } else {
-        match smithay::desktop::space::space_render_elements::<_, Window, _>(
-            renderer,
-            [&state.space],
-            output,
-            1.0,
-        ) {
-            Ok(elements) => elements,
-            Err(e) => {
-                tracing::warn!(%e, "Failed to gather space render elements");
-                return None;
-            }
-        }
+        state.desktop_render_elements(renderer, output)?
     };
 
     let lock_elements = if locked {
@@ -1377,8 +1371,9 @@ fn render_surface(
     let elements: Vec<OutputRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>> =
         // Drawn first so it ends up topmost (index 0 is the front, this
         // codebase's established render-element-list convention).
-        overview_element
+        picker_element
             .into_iter()
+            .chain(overview_element)
             .chain(toast_element)
             .chain(error_element)
             .chain(cursor_glyph_element)

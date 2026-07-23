@@ -8,7 +8,6 @@ use smithay::{
         },
         winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend},
     },
-    desktop::Window,
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{
         calloop::{
@@ -234,6 +233,8 @@ pub fn init_winit(
                             .as_ref()
                             .filter(|overview| overview.output_name() == entry.output.name())
                             .and_then(|overview| overview.render_element(renderer));
+                        let picker_element =
+                            state.screencast_picker_element(&entry.output, renderer);
                         // Behind toast/overview/tab-strip in the chain (see
                         // above for why index 0 is frontmost) -- it's a
                         // background-level placeholder, not transient UI.
@@ -243,27 +244,23 @@ pub fn init_winit(
                             .flatten()
                             .and_then(|hint| hint.render_element(renderer, size));
                         let wallpaper_element = state.wallpaper_element(&entry.output, renderer);
-                        let space_elements = match smithay::desktop::space::space_render_elements::<
-                            _,
-                            Window,
-                            _,
-                        >(
-                            renderer, [&state.space], &entry.output, 1.0
-                        ) {
-                            Ok(elements) => elements,
-                            Err(err) => {
-                                tracing::warn!(%err, "Failed to gather nested output elements");
-                                entry.dirty = true;
-                                continue;
-                            }
-                        };
+                        let space_elements =
+                            match state.desktop_render_elements(renderer, &entry.output) {
+                                Some(elements) => elements,
+                                None => {
+                                    tracing::warn!("Failed to gather nested output elements");
+                                    entry.dirty = true;
+                                    continue;
+                                }
+                            };
                         let elements: Vec<
                             crate::backend::udev::OutputRenderElements<
                                 GlesRenderer,
                                 WaylandSurfaceRenderElement<GlesRenderer>,
                             >,
-                        > = overview_element
+                        > = picker_element
                             .into_iter()
+                            .chain(overview_element)
                             .chain(toast_element)
                             .chain(error_element)
                             .chain(state.tab_strip_elements(renderer))

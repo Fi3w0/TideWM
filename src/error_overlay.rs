@@ -25,15 +25,27 @@ const BODY_SIZE: f32 = 13.0;
 const PAD_X: i32 = 22;
 const MAX_CACHED_WIDTHS: usize = 4;
 
+/// `Error` means the file failed to parse and the previous config is still
+/// the one actually in effect; `Warning` means the new config applied fine
+/// but something in it is worth a second look (a dropped keybind entry, or
+/// a footgun lint -- see `Config::from_raw`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum OverlaySeverity {
+    Error,
+    Warning,
+}
+
 pub struct ConfigErrorOverlay {
     message: String,
+    severity: OverlaySeverity,
     buffers: HashMap<i32, MemoryRenderBuffer>,
 }
 
 impl ConfigErrorOverlay {
-    pub fn new(message: impl Into<String>) -> Self {
+    pub fn new(message: impl Into<String>, severity: OverlaySeverity) -> Self {
         Self {
             message: message.into(),
+            severity,
             buffers: HashMap::new(),
         }
     }
@@ -59,7 +71,7 @@ impl ConfigErrorOverlay {
                 self.buffers.clear();
             }
             self.buffers
-                .insert(width, build_buffer(&self.message, width));
+                .insert(width, build_buffer(&self.message, self.severity, width));
         }
         let buffer = self.buffers.get(&width)?;
         let location: Point<f64, Physical> = (0.0, logical_y as f64 * scale).into();
@@ -76,7 +88,7 @@ impl ConfigErrorOverlay {
     }
 }
 
-fn build_buffer(message: &str, width: i32) -> MemoryRenderBuffer {
+fn build_buffer(message: &str, severity: OverlaySeverity, width: i32) -> MemoryRenderBuffer {
     let mut pixels = vec![0u8; (width * PANEL_HEIGHT * 4) as usize];
     for y in 0..PANEL_HEIGHT {
         for x in 0..width {
@@ -99,11 +111,15 @@ fn build_buffer(message: &str, width: i32) -> MemoryRenderBuffer {
     }
 
     let font = crate::toast::font();
+    let title = match severity {
+        OverlaySeverity::Error => "TideWM configuration error",
+        OverlaySeverity::Warning => "TideWM configuration warning",
+    };
     draw_line(
         &mut pixels,
         (width, PANEL_HEIGHT),
         font,
-        "TideWM configuration error",
+        title,
         PAD_X,
         25,
         (TITLE_SIZE, (255, 244, 244)),

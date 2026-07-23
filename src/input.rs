@@ -39,12 +39,12 @@ use smithay::{
 use std::time::Duration;
 
 use crate::{
-    config::{Action, Keybind, TouchpadConfig},
+    config::{Action, Direction, Keybind, TouchpadConfig},
     grabs::{
         resize_grab::ResizeEdge, MoveSurfaceGrab, ResizeSurfaceGrab, TileMoveGrab, TileResizeGrab,
         TileWindowResizeGrab,
     },
-    state::{SessionLock, Smallvil},
+    state::{CompositorGesture, SessionLock, Smallvil},
     toast::{Toast, ToastKind},
 };
 
@@ -206,7 +206,35 @@ fn workspace_swipe_target(current: u32, delta_x: f64, delta_y: f64, threshold: f
     }
 }
 
+fn completed_swipe_direction(delta_x: f64, delta_y: f64, threshold: f64) -> Option<Direction> {
+    if delta_x.abs().max(delta_y.abs()) < threshold {
+        return None;
+    }
+    if delta_x.abs() > delta_y.abs() {
+        Some(if delta_x < 0.0 {
+            Direction::Left
+        } else {
+            Direction::Right
+        })
+    } else {
+        Some(if delta_y < 0.0 {
+            Direction::Up
+        } else {
+            Direction::Down
+        })
+    }
+}
+
 impl Smallvil {
+    fn run_workspace_swipe(&mut self, delta_x: f64, delta_y: f64, threshold: f64) {
+        if let Some(output) = self.primary_output() {
+            let current = self.layout.active_workspace(&output.name());
+            if let Some(target) = workspace_swipe_target(current, delta_x, delta_y, threshold) {
+                self.switch_workspace(&output, target);
+            }
+        }
+    }
+
     /// Maps a touch (or any other absolute-position) event's normalized
     /// coordinates onto logical space, the same way `PointerMotionAbsolute`
     /// already does just below -- first output, no per-device output
@@ -457,6 +485,17 @@ impl Smallvil {
                             None => return FilterResult::Forward,
                         };
                         tracing::trace!(?keysym, ?modifiers, "Key pressed");
+
+                        // The portal picker is compositor-owned modal UI.
+                        // While visible, no key press leaks into the client
+                        // underneath it; arrows/Tab move and Enter/Escape
+                        // accept/cancel.
+                        #[cfg(feature = "screencast")]
+                        if data.screencast_picker.is_some()
+                            && data.handle_screencast_picker_key(keysym)
+                        {
+                            return FilterResult::Intercept(());
+                        }
 
                         // A submap fully replaces the base table rather
                         // than layering on top of it (matches sway/
@@ -1231,16 +1270,27 @@ impl Smallvil {
             // events simply go nowhere.
             InputEvent::GestureSwipeBegin { event, .. } => {
                 let fingers = GestureBeginEvent::fingers(&event);
-                let compositor_swipe = self
-                    .config
-                    .input
-                    .touchpad
+                let touchpad = &self.config.input.touchpad;
+                let has_action = touchpad.swipe_left.is_some()
+                    || touchpad.swipe_right.is_some()
+                    || touchpad.swipe_up.is_some()
+                    || touchpad.swipe_down.is_some();
+                let action_match = has_action
+                    && touchpad
+                        .gesture_swipe_fingers
+                        .is_some_and(|configured| configured == fingers);
+                let workspace_fallback = touchpad
                     .workspace_swipe_fingers
-                    .is_some_and(|configured| configured == fingers)
+                    .is_some_and(|configured| configured == fingers);
+                let compositor_swipe = (action_match || workspace_fallback)
                     && matches!(self.session_lock, SessionLock::Unlocked)
                     && self.exclusive_layer().is_none();
                 if compositor_swipe {
-                    self.workspace_swipe = Some((fingers, 0.0, 0.0));
+                    self.compositor_gesture = Some(CompositorGesture::Swipe {
+                        workspace_fallback,
+                        delta_x: 0.0,
+                        delta_y: 0.0,
+                    });
                     return;
                 }
                 let pointer = self.seat.get_pointer().unwrap();
@@ -1254,7 +1304,10 @@ impl Smallvil {
                 );
             }
             InputEvent::GestureSwipeUpdate { event, .. } => {
-                if let Some((_, delta_x, delta_y)) = &mut self.workspace_swipe {
+                if let Some(CompositorGesture::Swipe {
+                    delta_x, delta_y, ..
+                }) = &mut self.compositor_gesture
+                {
                     let delta = BackendGestureSwipeUpdateEvent::delta(&event);
                     *delta_x += delta.x;
                     *delta_y += delta.y;
@@ -1270,8 +1323,15 @@ impl Smallvil {
                 );
             }
             InputEvent::GestureSwipeEnd { event, .. } => {
-                if let Some((_fingers, delta_x, delta_y)) = self.workspace_swipe.take() {
-                    if !GestureEndEvent::cancelled(&event) {
+                if let Some(CompositorGesture::Swipe {
+                    workspace_fallback,
+                    delta_x,
+                    delta_y,
+                }) = self.compositor_gesture.take()
+                {
+                    if !GestureEndEvent::cancelled(&event)
+                        && matches!(self.session_lock, SessionLock::Unlocked)
+                    {
                         let threshold = self
                             .config
                             .input
@@ -1279,13 +1339,20 @@ impl Smallvil {
                             .workspace_swipe_distance
                             .unwrap_or(200.0)
                             .max(1.0);
-                        if let Some(output) = self.primary_output() {
-                            let current = self.layout.active_workspace(&output.name());
-                            if let Some(target) =
-                                workspace_swipe_target(current, delta_x, delta_y, threshold)
-                            {
-                                self.switch_workspace(&output, target);
+                        let direction = completed_swipe_direction(delta_x, delta_y, threshold);
+                        let action = direction.and_then(|direction| {
+                            let touchpad = &self.config.input.touchpad;
+                            match direction {
+                                Direction::Left => touchpad.swipe_left.clone(),
+                                Direction::Right => touchpad.swipe_right.clone(),
+                                Direction::Up => touchpad.swipe_up.clone(),
+                                Direction::Down => touchpad.swipe_down.clone(),
                             }
+                        });
+                        if let Some(action) = action {
+                            self.run_action(action);
+                        } else if workspace_fallback {
+                            self.run_workspace_swipe(delta_x, delta_y, threshold);
                         }
                     }
                     return;
@@ -1301,6 +1368,19 @@ impl Smallvil {
                 );
             }
             InputEvent::GesturePinchBegin { event, .. } => {
+                let fingers = GestureBeginEvent::fingers(&event);
+                let touchpad = &self.config.input.touchpad;
+                let compositor_pinch = (touchpad.pinch_in.is_some()
+                    || touchpad.pinch_out.is_some())
+                    && touchpad
+                        .gesture_pinch_fingers
+                        .is_some_and(|configured| configured == fingers)
+                    && matches!(self.session_lock, SessionLock::Unlocked)
+                    && self.exclusive_layer().is_none();
+                if compositor_pinch {
+                    self.compositor_gesture = Some(CompositorGesture::Pinch { scale: 1.0 });
+                    return;
+                }
                 let pointer = self.seat.get_pointer().unwrap();
                 pointer.gesture_pinch_begin(
                     self,
@@ -1312,6 +1392,10 @@ impl Smallvil {
                 );
             }
             InputEvent::GesturePinchUpdate { event, .. } => {
+                if let Some(CompositorGesture::Pinch { scale }) = &mut self.compositor_gesture {
+                    *scale = BackendGesturePinchUpdateEvent::scale(&event);
+                    return;
+                }
                 let pointer = self.seat.get_pointer().unwrap();
                 pointer.gesture_pinch_update(
                     self,
@@ -1324,6 +1408,23 @@ impl Smallvil {
                 );
             }
             InputEvent::GesturePinchEnd { event, .. } => {
+                if let Some(CompositorGesture::Pinch { scale }) = self.compositor_gesture.take() {
+                    if !GestureEndEvent::cancelled(&event)
+                        && matches!(self.session_lock, SessionLock::Unlocked)
+                    {
+                        let action = if scale <= 0.8 {
+                            self.config.input.touchpad.pinch_in.clone()
+                        } else if scale >= 1.2 {
+                            self.config.input.touchpad.pinch_out.clone()
+                        } else {
+                            None
+                        };
+                        if let Some(action) = action {
+                            self.run_action(action);
+                        }
+                    }
+                    return;
+                }
                 let pointer = self.seat.get_pointer().unwrap();
                 pointer.gesture_pinch_end(
                     self,
@@ -1587,5 +1688,18 @@ mod tests {
     fn short_or_vertical_workspace_swipe_is_ignored() {
         assert_eq!(workspace_swipe_target(3, 199.0, 0.0, 200.0), None);
         assert_eq!(workspace_swipe_target(3, 220.0, 300.0, 200.0), None);
+    }
+
+    #[test]
+    fn compositor_swipe_uses_the_dominant_axis() {
+        assert_eq!(
+            completed_swipe_direction(-240.0, 20.0, 200.0),
+            Some(Direction::Left)
+        );
+        assert_eq!(
+            completed_swipe_direction(20.0, 240.0, 200.0),
+            Some(Direction::Down)
+        );
+        assert_eq!(completed_swipe_direction(199.0, 0.0, 200.0), None);
     }
 }

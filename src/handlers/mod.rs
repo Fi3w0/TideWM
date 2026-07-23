@@ -57,6 +57,7 @@ use smithay::wayland::shell::xdg::ToplevelSurface;
 use smithay::wayland::xdg_activation::{
     XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
 };
+use smithay::wayland::xdg_toplevel_icon::XdgToplevelIconHandler;
 use smithay::{
     delegate_cursor_shape, delegate_data_control, delegate_data_device, delegate_dmabuf,
     delegate_foreign_toplevel_list, delegate_fractional_scale, delegate_idle_inhibit,
@@ -66,6 +67,7 @@ use smithay::{
     delegate_relative_pointer, delegate_seat, delegate_security_context, delegate_session_lock,
     delegate_single_pixel_buffer, delegate_text_input_manager, delegate_viewporter,
     delegate_virtual_keyboard_manager, delegate_xdg_activation, delegate_xdg_decoration,
+    delegate_xdg_toplevel_icon,
 };
 
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1;
@@ -266,19 +268,10 @@ delegate_idle_notify!(Smallvil);
 // `mark_output_locked_frame`) -- this impl just adapts Smithay's handler
 // shape to it.
 //
-// If a lock client dies without unlocking, the session stays locked and a
-// second `lock()` request is refused (see `lock_session`) -- the protocol
-// explicitly allows this as compositor policy ("It is acceptable for the
-// session to be permanently locked if this happens"). A dead-client
-// takeover was considered and dropped: Smithay 0.7's own
-// `SessionLockManagerState::locked_outputs` (its per-output
-// `get_lock_surface` duplicate check, unrelated to `Smallvil`'s own
-// `locked_outputs`) is only ever cleared on a graceful
-// `unlock_and_destroy`, never on ungraceful client death -- so a new
-// client's `get_lock_surface` would still hit a `duplicate_output`
-// protocol error (which disconnects it) even if this handler accepted its
-// `lock()` call. Not fixable from the compositor side at this pinned
-// Smithay version.
+// A dead lock client is detected through ClientData's disconnect callback.
+// Recovery is fail-closed: TideWM terminates the compositor session and lets
+// the login manager create a fresh one. It never clears the lock in place,
+// and therefore killing the locker cannot reveal the protected desktop.
 //
 
 impl SessionLockHandler for Smallvil {
@@ -303,6 +296,22 @@ impl SessionLockHandler for Smallvil {
 }
 
 delegate_session_lock!(Smallvil);
+
+// xdg-toplevel-icon-v1 stores the committed icon name/buffers in Smithay's
+// ToplevelIconCachedState. TideWM does not draw a dock, but publishing the
+// protocol lets launchers, overview/task-switcher work, and future internal
+// consumers obtain the client-provided icon without another protocol change.
+impl XdgToplevelIconHandler for Smallvil {
+    fn set_icon(
+        &mut self,
+        _toplevel: smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::XdgToplevel,
+        _wl_surface: WlSurface,
+    ) {
+        self.request_redraw();
+    }
+}
+
+delegate_xdg_toplevel_icon!(Smallvil);
 
 //
 // xdg-decoration + KDE server-decoration

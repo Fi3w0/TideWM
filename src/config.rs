@@ -286,10 +286,16 @@ impl Config {
         Self::load_with_error().0
     }
 
-    /// Startup variant of [`Config::load`] that also retains a parse error
-    /// for the compositor-owned error panel.  Callers that only need the
-    /// old fallback behavior can continue using `load()`.
-    pub fn load_with_error() -> (Self, Option<String>) {
+    /// Startup variant of [`Config::load`] that also retains a hard parse
+    /// error, plus any dropped-keybind/footgun-lint diagnostics from
+    /// `from_raw`, for the compositor-owned error panel -- kept as two
+    /// separate outputs (rather than one merged message) because they're
+    /// different severities: a hard error means the previous/default
+    /// config is what's actually in effect, while these diagnostics mean
+    /// the parsed config applied but something in it deserves a look.
+    /// Callers that only need the old fallback behavior can continue using
+    /// `load()`.
+    pub fn load_with_error() -> (Self, Option<String>, Vec<String>) {
         let path = config_path();
 
         let (raw, error) = if path.exists() {
@@ -311,14 +317,17 @@ impl Config {
             (default, None)
         };
 
-        (Self::from_raw(raw), error)
+        let (config, warnings) = Self::from_raw(raw);
+        (config, error, warnings)
     }
 
     /// Re-read the config file for a hot-reload. Unlike `load`, this never
-    /// writes a default file and reports errors instead of silently falling
-    /// back, so a reload with a typo in it doesn't quietly wipe out whatever
-    /// the user had.
-    pub fn reload() -> Result<Self, String> {
+    /// writes a default file and reports a hard parse failure instead of
+    /// silently falling back, so a reload with a typo in it doesn't quietly
+    /// wipe out whatever the user had. The `Vec<String>` alongside a
+    /// successful reload is the same dropped-keybind/footgun-lint
+    /// diagnostics `from_raw` produces -- empty in the common case.
+    pub fn reload() -> Result<(Self, Vec<String>), String> {
         let raw = load_raw_config(&config_path())?;
         Ok(Self::from_raw(raw))
     }
@@ -328,11 +337,15 @@ impl Config {
         config_path()
     }
 
-    fn from_raw(raw: RawConfig) -> Self {
+    /// Returns the parsed config plus any diagnostics worth showing on the
+    /// compositor-owned panel (dropped keybind entries, footgun lints) --
+    /// see `parse_keybind`. Empty when nothing needs a second look.
+    fn from_raw(raw: RawConfig) -> (Self, Vec<String>) {
+        let mut warnings = Vec::new();
         let keybinds = raw
             .keybinds
             .iter()
-            .filter_map(|(combo, action)| parse_keybind(combo, action))
+            .filter_map(|(combo, action)| parse_keybind(combo, action, true, &mut warnings))
             .collect();
         let submaps = raw
             .submaps
@@ -340,7 +353,7 @@ impl Config {
             .map(|(name, binds)| {
                 let parsed = binds
                     .iter()
-                    .filter_map(|(combo, action)| parse_keybind(combo, action))
+                    .filter_map(|(combo, action)| parse_keybind(combo, action, false, &mut warnings))
                     .collect();
                 (name.clone(), parsed)
             })
@@ -366,7 +379,7 @@ impl Config {
         });
         let workspace_names = parse_workspace_names(&raw.workspace_names);
 
-        Self {
+        let config = Self {
             terminal: raw.terminal,
             show_welcome_hint: raw.show_welcome_hint,
             water_effects: raw.water_effects,
@@ -389,7 +402,8 @@ impl Config {
             layer_rules: raw.layer_rules,
             submaps,
             env: raw.env,
-        }
+        };
+        (config, warnings)
     }
 
     /// Folds every `[[window_rule]]` entry matching `app_id`/`title` into
@@ -429,6 +443,9 @@ impl Config {
             }
             if rule.size.is_some() {
                 effective.size = rule.size;
+            }
+            if rule.opacity.is_some() {
+                effective.opacity = rule.opacity;
             }
         }
         effective
@@ -699,6 +716,19 @@ pub struct TouchpadConfig {
     /// Horizontal libinput delta required before the configured workspace
     /// swipe commits. Defaults to 200.0 when omitted.
     pub workspace_swipe_distance: Option<f64>,
+    /// Optional compositor actions for each completed swipe direction. When
+    /// any is set, a swipe with `gesture_swipe_fingers` is consumed by
+    /// TideWM; an unbound direction is simply ignored.
+    pub gesture_swipe_fingers: Option<u32>,
+    pub swipe_left: Option<Action>,
+    pub swipe_right: Option<Action>,
+    pub swipe_up: Option<Action>,
+    pub swipe_down: Option<Action>,
+    /// Pinch bindings use the final scale reported by libinput: below 0.8
+    /// is `pinch_in`, above 1.2 is `pinch_out`.
+    pub gesture_pinch_fingers: Option<u32>,
+    pub pinch_in: Option<Action>,
+    pub pinch_out: Option<Action>,
 }
 
 #[derive(Debug, Clone)]
@@ -856,6 +886,9 @@ pub struct WindowRule {
     pub maximize: bool,
     pub fullscreen: bool,
     pub block_capture: bool,
+    /// Per-window render alpha in the inclusive range 0.0..=1.0. Applied
+    /// to the complete surface tree (including subsurfaces and popups).
+    pub opacity: Option<f32>,
     /// Exact floating placement (top-left corner), `<x>x<y>` -- the same
     /// syntax `[[output]]`'s `position` already uses. No-op unless the
     /// window ends up floating (from `float`/`pin`/the auto-float
@@ -1171,8 +1204,33 @@ fn apply_touchpad_block(touchpad: &mut TouchpadConfig, body: &[waves::Entry]) {
             "workspace_swipe_distance" => {
                 set_opt_f64(&mut touchpad.workspace_swipe_distance, key, value)
             }
+            "gesture_swipe_fingers" => {
+                set_gesture_fingers(&mut touchpad.gesture_swipe_fingers, key, value)
+            }
+            "swipe_left" => touchpad.swipe_left = parse_action(value),
+            "swipe_right" => touchpad.swipe_right = parse_action(value),
+            "swipe_up" => touchpad.swipe_up = parse_action(value),
+            "swipe_down" => touchpad.swipe_down = parse_action(value),
+            "gesture_pinch_fingers" => {
+                set_gesture_fingers(&mut touchpad.gesture_pinch_fingers, key, value)
+            }
+            "pinch_in" => touchpad.pinch_in = parse_action(value),
+            "pinch_out" => touchpad.pinch_out = parse_action(value),
             other => tracing::warn!(key = %other, "Unknown key in `touchpad` block, ignoring"),
         }
+    }
+}
+
+fn set_gesture_fingers(field: &mut Option<u32>, key: &str, value: &str) {
+    match value.parse::<u32>() {
+        Ok(0) => *field = None,
+        Ok(fingers @ 2..) => *field = Some(fingers),
+        Ok(_) => tracing::warn!(
+            key,
+            value,
+            "gesture finger count must be 0 or at least 2, ignoring"
+        ),
+        Err(err) => tracing::warn!(key, value, %err, "Expected an integer, ignoring"),
     }
 }
 
@@ -1265,6 +1323,10 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
             "maximize" => set_bool(&mut rule.maximize, key, value),
             "fullscreen" => set_bool(&mut rule.fullscreen, key, value),
             "block_capture" => set_bool(&mut rule.block_capture, key, value),
+            "opacity" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => rule.opacity = Some(value.clamp(0.0, 1.0)),
+                _ => tracing::warn!(value, "Expected a finite opacity from 0.0 to 1.0, ignoring"),
+            },
             "position" => match parse_position(value) {
                 Some(pos) => rule.position = Some(pos),
                 None => tracing::warn!(value, "Expected <x>x<y> for a rule's position, ignoring"),
@@ -1558,7 +1620,21 @@ fn config_path() -> PathBuf {
 /// (unshifted) key name, then resolves that name to a `Keysym`. Matching
 /// happens against the unshifted symbol so a bind doesn't silently break
 /// depending on whether the configured letter happened to be upper/lowercase.
-fn parse_keybind(combo: &str, action: &str) -> Option<Keybind> {
+///
+/// `warnings` collects anything worth surfacing on the compositor-owned
+/// diagnostics panel instead of only a `tracing::warn!` line nobody sees
+/// during normal use: dropped entries (bad key name, bad action), and, when
+/// `lint_footguns` is set, a heads-up for a modifier-less bind on a key
+/// normally used for typing. `lint_footguns` is false for submap tables --
+/// bare keys there are the whole point of a submap (see the default `nav`
+/// submap's bare `Escape = exit-submap`), only the always-active base
+/// `[keybinds]` table can silently steal a key from every other window.
+fn parse_keybind(
+    combo: &str,
+    action: &str,
+    lint_footguns: bool,
+    warnings: &mut Vec<String>,
+) -> Option<Keybind> {
     let mut mods = Mods::default();
     let mut key_name = None;
 
@@ -1572,19 +1648,47 @@ fn parse_keybind(combo: &str, action: &str) -> Option<Keybind> {
         }
     }
 
-    let key_name = key_name?;
+    let Some(key_name) = key_name else {
+        warnings.push(format!("Keybind \"{combo}\" has no key, skipped"));
+        return None;
+    };
     let keysym = xkb::keysym_from_name(&key_name, xkb::KEYSYM_CASE_INSENSITIVE);
     if keysym.raw() == 0 {
         tracing::warn!(key = %key_name, combo, "Unknown key name in keybind, skipping");
+        warnings.push(format!("Unknown key \"{key_name}\" in keybind \"{combo}\", skipped"));
         return None;
     }
 
-    let action = parse_action(action)?;
+    let Some(action) = parse_action(action) else {
+        warnings.push(format!(
+            "Unknown action \"{action}\" for keybind \"{combo}\", skipped"
+        ));
+        return None;
+    };
+
+    if lint_footguns && !mods.ctrl && !mods.alt && !mods.shift && !mods.logo && is_typing_key(&key_name) {
+        warnings.push(format!(
+            "\"{combo}\" has no modifier -- it will capture that key everywhere, including text fields"
+        ));
+    }
+
     Some(Keybind {
         mods,
         keysym,
         action,
     })
+}
+
+/// Keys almost never meant to be bound bare (no modifier) in the base
+/// keybind table: doing so steals that key from every focused client,
+/// including plain typing. Single ASCII letters/digits plus the common
+/// editing keys. Deliberately excludes F-keys, media keys, and arrows,
+/// which are commonly and safely bound bare.
+fn is_typing_key(key_name: &str) -> bool {
+    match key_name.to_lowercase().as_str() {
+        "return" | "enter" | "kp_enter" | "tab" | "space" | "backspace" | "escape" => true,
+        name => name.chars().count() == 1 && name.chars().next().unwrap().is_ascii_alphanumeric(),
+    }
 }
 
 /// Also the entry point for `ipc.rs`'s `action` request -- the exact same
@@ -1848,6 +1952,11 @@ input {
         # accel_profile = adaptive
         # workspace_swipe_fingers = 3
         # workspace_swipe_distance = 200
+        # gesture_swipe_fingers = 3
+        # swipe_left = workspace:2
+        # swipe_right = workspace:1
+        # gesture_pinch_fingers = 4
+        # pinch_in = toggle-overview
     }
 }
 
@@ -1983,6 +2092,35 @@ mod tests {
             lower_window_rule_block(&[waves::Entry::Assign("app_id_regex".into(), "[".into())]);
         assert!(invalid.app_id_regex.is_none());
         assert!(!invalid.matches(Some("anything"), None));
+    }
+
+    #[test]
+    fn window_rule_opacity_is_clamped_and_gesture_actions_parse() {
+        let low = lower_window_rule_block(&[
+            waves::Entry::Assign("app_id".into(), "dimmed".into()),
+            waves::Entry::Assign("opacity".into(), "-0.5".into()),
+        ]);
+        let high = lower_window_rule_block(&[
+            waves::Entry::Assign("app_id".into(), "bright".into()),
+            waves::Entry::Assign("opacity".into(), "1.5".into()),
+        ]);
+        assert_eq!(low.opacity, Some(0.0));
+        assert_eq!(high.opacity, Some(1.0));
+
+        let mut touchpad = TouchpadConfig::default();
+        apply_touchpad_block(
+            &mut touchpad,
+            &[
+                waves::Entry::Assign("gesture_swipe_fingers".into(), "3".into()),
+                waves::Entry::Assign("swipe_left".into(), "toggle-overview".into()),
+                waves::Entry::Assign("gesture_pinch_fingers".into(), "4".into()),
+                waves::Entry::Assign("pinch_out".into(), "close-window".into()),
+            ],
+        );
+        assert_eq!(touchpad.gesture_swipe_fingers, Some(3));
+        assert!(matches!(touchpad.swipe_left, Some(Action::ToggleOverview)));
+        assert_eq!(touchpad.gesture_pinch_fingers, Some(4));
+        assert!(matches!(touchpad.pinch_out, Some(Action::CloseWindow)));
     }
 
     #[test]
@@ -2243,7 +2381,7 @@ mod tests {
             .expect("DEFAULT_CONFIG_WAVE must parse");
         let mut raw = lower_entries(&entries);
         substitute_variables_in_raw(&mut raw);
-        Config::from_raw(raw)
+        Config::from_raw(raw).0
     }
 
     #[test]
@@ -2253,7 +2391,7 @@ mod tests {
         // own doc note) -- assert both actually agree, not just that one
         // of them happens to parse.
         for config in [
-            Config::from_raw(RawConfig::default()),
+            Config::from_raw(RawConfig::default()).0,
             parse_default_config(),
         ] {
             let nav = config
@@ -2305,7 +2443,7 @@ mod tests {
         // key, which used to fail the parse loudly -- worth a second look
         // at the template by eye if this test ever breaks unexpectedly).
         for config in [
-            Config::from_raw(RawConfig::default()),
+            Config::from_raw(RawConfig::default()).0,
             parse_default_config(),
         ] {
             let find = |key: &str, mods: Mods| {
@@ -2346,5 +2484,71 @@ mod tests {
                 Some(Action::GrowMaster)
             ));
         }
+    }
+
+    #[test]
+    fn shipped_default_keybinds_never_trip_the_footgun_lint() {
+        // The default config itself must stay clean, or every fresh
+        // install would show the new warning panel on first boot.
+        let (_, warnings) = Config::from_raw(RawConfig::default());
+        assert!(
+            warnings.is_empty(),
+            "RawConfig::default() produced diagnostics: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn bare_typing_key_in_base_keybinds_is_flagged_but_still_bound() {
+        let mut raw = RawConfig::default();
+        raw.keybinds
+            .insert("Return".to_string(), "spawn:kitty".to_string());
+        let (config, warnings) = Config::from_raw(raw);
+
+        // Matches the real incident this lint exists for: applying the
+        // bind is still correct (it's valid config, just risky), the lint
+        // only flags it.
+        let bound = config.keybinds.iter().any(|b| {
+            b.keysym == xkb::keysym_from_name("Return", xkb::KEYSYM_CASE_INSENSITIVE)
+                && b.mods == Mods::default()
+        });
+        assert!(bound, "the bare bind should still be applied");
+        assert!(
+            warnings.iter().any(|w| w.contains("Return")),
+            "expected a footgun warning for bare Return, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn bare_typing_key_in_a_submap_is_not_flagged() {
+        // Submaps rely on bare keys by design (the default `nav` submap's
+        // own Escape = exit-submap) -- only the always-active base table
+        // can silently steal a key from every other window.
+        let mut raw = RawConfig::default();
+        let mut submap = HashMap::new();
+        submap.insert("a".to_string(), "close-window".to_string());
+        raw.submaps.insert("test".to_string(), submap);
+        let (_, warnings) = Config::from_raw(raw);
+        assert!(
+            !warnings.iter().any(|w| w.contains('a')),
+            "submap binds must not trigger the base-table footgun lint: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_keybind_action_is_dropped_and_reported() {
+        let mut raw = RawConfig::default();
+        raw.keybinds.insert(
+            "Super+Z".to_string(),
+            "not-a-real-action".to_string(),
+        );
+        let (config, warnings) = Config::from_raw(raw);
+        assert!(!config
+            .keybinds
+            .iter()
+            .any(|b| b.keysym == xkb::keysym_from_name("z", xkb::KEYSYM_CASE_INSENSITIVE)));
+        assert!(
+            warnings.iter().any(|w| w.contains("not-a-real-action")),
+            "expected the dropped action to be reported: {warnings:?}"
+        );
     }
 }
