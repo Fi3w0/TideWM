@@ -6,7 +6,7 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 
 ### Added
 - Screencast portal now lists monitor, window, and virtual sources with a compositor-owned picker instead of grabbing the first monitor.
-- Touchpad swipe/pinch gestures can trigger any compositor action.
+- Touchpad swipe/pinch gestures can trigger any compositor action. Verified live on real hardware (external USB Apple Magic Trackpad and a ThinkPad's built-in touchpad): all four swipe directions and `pinch_in` confirmed, `pinch_out` not yet confirmed. See AGENT.md's Phase M gesture section for the full account.
 - Per-window `opacity` window rule.
 - `xdg-toplevel-icon-v1` support.
 
