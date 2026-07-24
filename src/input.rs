@@ -1529,15 +1529,15 @@ impl Smallvil {
             Action::ToggleDpms => {
                 self.toggle_dpms();
             }
-            Action::ToggleScratchpad => {
+            Action::ToggleScratchpad(name) => {
                 if let Some(output) = self.primary_output() {
-                    self.toggle_scratchpad(&output);
+                    self.toggle_scratchpad(&output, name.as_deref());
                 }
             }
-            Action::MoveToScratchpad => {
+            Action::MoveToScratchpad(name) => {
                 let focused = self.focused_window_surface();
                 if let Some(surface) = focused {
-                    self.move_to_scratchpad(&surface);
+                    self.move_to_scratchpad(&surface, name.as_deref());
                 }
             }
             Action::CycleFocus => {

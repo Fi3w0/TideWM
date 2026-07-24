@@ -556,6 +556,15 @@ pub struct Smallvil {
     /// fallback workspace regardless of where you actually were.
     scratchpad_previous: HashMap<String, u32>,
 
+    /// Named scratchpads (Hyprland's named "special workspaces"):
+    /// each name is lazily assigned its own reserved workspace number from
+    /// `NAMED_SCRATCHPAD_BASE` upward on first use, then behaves exactly
+    /// like the unnamed scratchpad does -- same `switch_workspace` hide/show
+    /// machinery, no parallel data structure. Session-scoped: numbers are
+    /// allocated in first-use order, which only matters to IPC consumers,
+    /// and those should key on the `scratchpad` name field instead.
+    scratchpad_named: HashMap<String, u32>,
+
     /// Per-output previously-active workspace, updated on every real
     /// `switch_workspace` call -- drives `config.workspace_auto_back_and_forth`
     /// (niri's own feature of the same name). Separate from
@@ -811,6 +820,17 @@ impl MaximizedEntry {
 /// address 1-10), so it stays inert on every output until something
 /// explicitly moves a window there via `Smallvil::move_to_scratchpad`.
 const SCRATCHPAD_WORKSPACE: u32 = 0;
+
+/// Base of the reserved range named scratchpads allocate workspace numbers
+/// from (`NAMED_SCRATCHPAD_BASE..=u32::MAX`, so 4096 names). High enough
+/// that no numbered `workspace:N` bind plausibly collides, same "inert
+/// unless explicitly addressed" reasoning as `SCRATCHPAD_WORKSPACE`.
+const NAMED_SCRATCHPAD_BASE: u32 = u32::MAX - 4095;
+
+/// Whether `workspace` is any scratchpad's reserved number, unnamed or named.
+pub(crate) fn is_scratchpad_workspace(workspace: u32) -> bool {
+    workspace == SCRATCHPAD_WORKSPACE || workspace >= NAMED_SCRATCHPAD_BASE
+}
 
 impl Smallvil {
     pub(crate) fn screencast_picker_element(
@@ -1196,6 +1216,7 @@ impl Smallvil {
             floating_workspace: HashMap::new(),
             pinned: HashSet::new(),
             scratchpad_previous: HashMap::new(),
+            scratchpad_named: HashMap::new(),
             workspace_previous: HashMap::new(),
             pseudo_tiled: HashSet::new(),
             urgent: HashSet::new(),
@@ -3280,10 +3301,19 @@ impl Smallvil {
     /// scratchpad has no structure of its own -- it's just workspace
     /// `SCRATCHPAD_WORKSPACE`, reusing `switch_workspace`'s hide/show
     /// mechanics as-is.
-    pub fn toggle_scratchpad(&mut self, output: &Output) {
+    /// `name` selects a named scratchpad; `None` is the classic unnamed
+    /// one. Toggling scratchpad B while scratchpad A is showing switches
+    /// straight to B (matching Hyprland's special-workspace behavior)
+    /// without recording A as the workspace to return to -- only a real,
+    /// non-scratchpad workspace ever lands in `scratchpad_previous`, so
+    /// toggling off always returns to actual work.
+    pub fn toggle_scratchpad(&mut self, output: &Output, name: Option<&str>) {
+        let Some(target) = self.scratchpad_workspace(name) else {
+            return;
+        };
         let output_name = output.name();
         let current = self.layout.active_workspace(&output_name);
-        if current == SCRATCHPAD_WORKSPACE {
+        if current == target {
             let previous = self
                 .scratchpad_previous
                 .get(&output_name)
@@ -3291,17 +3321,47 @@ impl Smallvil {
                 .unwrap_or(1);
             self.switch_workspace(output, previous);
         } else {
-            self.scratchpad_previous.insert(output_name, current);
-            self.switch_workspace(output, SCRATCHPAD_WORKSPACE);
+            if !is_scratchpad_workspace(current) {
+                self.scratchpad_previous.insert(output_name, current);
+            }
+            self.switch_workspace(output, target);
         }
     }
 
-    /// Moves `surface` to the scratchpad on whichever output it's
-    /// currently on -- just `move_to_workspace` with the reserved
-    /// scratchpad number, so it works for both tiled and floating windows
-    /// exactly like moving to any other workspace does.
-    pub fn move_to_scratchpad(&mut self, surface: &WlSurface) {
-        self.move_to_workspace(surface, SCRATCHPAD_WORKSPACE);
+    /// Moves `surface` to the (possibly named) scratchpad on whichever
+    /// output it's currently on -- just `move_to_workspace` with the
+    /// reserved scratchpad number, so it works for both tiled and floating
+    /// windows exactly like moving to any other workspace does.
+    pub fn move_to_scratchpad(&mut self, surface: &WlSurface, name: Option<&str>) {
+        if let Some(workspace) = self.scratchpad_workspace(name) {
+            self.move_to_workspace(surface, workspace);
+        }
+    }
+
+    /// The reserved workspace number for scratchpad `name`, allocating one
+    /// on first use. `None` (the bare `toggle-scratchpad` action) is the
+    /// classic unnamed scratchpad, workspace `SCRATCHPAD_WORKSPACE`.
+    /// Returns `None` only if all 4096 named slots are somehow exhausted.
+    fn scratchpad_workspace(&mut self, name: Option<&str>) -> Option<u32> {
+        let Some(name) = name else {
+            return Some(SCRATCHPAD_WORKSPACE);
+        };
+        if let Some(&workspace) = self.scratchpad_named.get(name) {
+            return Some(workspace);
+        }
+        let next = NAMED_SCRATCHPAD_BASE.checked_add(self.scratchpad_named.len() as u32)?;
+        self.scratchpad_named.insert(name.to_string(), next);
+        Some(next)
+    }
+
+    /// The name of the named scratchpad `workspace` belongs to, if any.
+    /// Used by the IPC `workspaces` query so bars can label (or hide)
+    /// scratchpad entries instead of showing a raw reserved number.
+    pub(crate) fn scratchpad_name_of(&self, workspace: u32) -> Option<&str> {
+        self.scratchpad_named
+            .iter()
+            .find(|(_, &ws)| ws == workspace)
+            .map(|(name, _)| name.as_str())
     }
 
     /// Toggles `surface` pinned: exempt from every workspace's hide/show

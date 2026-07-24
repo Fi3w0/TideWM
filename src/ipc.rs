@@ -445,12 +445,19 @@ fn workspaces_json(state: &Smallvil) -> serde_json::Value {
                 .values()
                 .filter(|t| t.output == output && t.workspace == workspace)
                 .count();
-            json!({
+            let mut entry = json!({
                 "output": output,
                 "workspace": workspace,
                 "active": state.layout.active_workspace(&output) == workspace,
                 "window_count": tiled + floating,
-            })
+            });
+            // Scratchpad workspaces carry their name ("" for the unnamed
+            // one) so bars can label or hide them instead of showing the
+            // raw reserved number.
+            if crate::state::is_scratchpad_workspace(workspace) {
+                entry["scratchpad"] = json!(state.scratchpad_name_of(workspace).unwrap_or(""));
+            }
+            entry
         })
         .collect();
     json!(workspaces)

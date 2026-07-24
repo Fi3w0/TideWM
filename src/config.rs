@@ -126,8 +126,11 @@ pub enum Action {
     ToggleFloating,
     ToggleFullscreen,
     TogglePin,
-    ToggleScratchpad,
-    MoveToScratchpad,
+    /// `None` is the classic single scratchpad; `Some(name)` a named one
+    /// (Hyprland's named special workspaces) -- see
+    /// `Smallvil::scratchpad_workspace`.
+    ToggleScratchpad(Option<String>),
+    MoveToScratchpad(Option<String>),
     TogglePseudoTile,
     /// Raises/lowers the focused *floating* window within the floating
     /// stack (a no-op on a tiled one -- tiled windows never overlap, so
@@ -1717,6 +1720,16 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
     if let Some(name) = action.strip_prefix("swap-workspaces:") {
         return Some(Action::SwapWorkspacesWithOutput(name.to_string()));
     }
+    if let Some(name) = action.strip_prefix("toggle-scratchpad:") {
+        return Some(Action::ToggleScratchpad(
+            (!name.is_empty()).then(|| name.to_string()),
+        ));
+    }
+    if let Some(name) = action.strip_prefix("move-to-scratchpad:") {
+        return Some(Action::MoveToScratchpad(
+            (!name.is_empty()).then(|| name.to_string()),
+        ));
+    }
     if let Some(name) = action.strip_prefix("submap:") {
         return Some(Action::EnterSubmap(name.to_string()));
     }
@@ -1738,8 +1751,8 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "toggle-floating" => Some(Action::ToggleFloating),
         "toggle-fullscreen" => Some(Action::ToggleFullscreen),
         "toggle-pin" => Some(Action::TogglePin),
-        "toggle-scratchpad" => Some(Action::ToggleScratchpad),
-        "move-to-scratchpad" => Some(Action::MoveToScratchpad),
+        "toggle-scratchpad" => Some(Action::ToggleScratchpad(None)),
+        "move-to-scratchpad" => Some(Action::MoveToScratchpad(None)),
         "toggle-pseudo-tile" => Some(Action::TogglePseudoTile),
         "raise-window" => Some(Action::RaiseWindow),
         "lower-window" => Some(Action::LowerWindow),
@@ -2017,6 +2030,29 @@ mod tests {
             Some(Action::SwitchWorkspace(WorkspaceRef::Number(2)))
         ));
         assert!(parsed.tablet_mode_off.is_none());
+    }
+
+    #[test]
+    fn scratchpad_actions_parse_bare_and_named_forms() {
+        // Bare form stays the classic unnamed scratchpad; a `:name` suffix
+        // selects a named one; a bare trailing colon degrades to unnamed
+        // rather than creating a scratchpad named "".
+        assert!(matches!(
+            parse_action("toggle-scratchpad"),
+            Some(Action::ToggleScratchpad(None))
+        ));
+        assert!(matches!(
+            parse_action("toggle-scratchpad:music"),
+            Some(Action::ToggleScratchpad(Some(ref n))) if n == "music"
+        ));
+        assert!(matches!(
+            parse_action("move-to-scratchpad:music"),
+            Some(Action::MoveToScratchpad(Some(ref n))) if n == "music"
+        ));
+        assert!(matches!(
+            parse_action("toggle-scratchpad:"),
+            Some(Action::ToggleScratchpad(None))
+        ));
     }
 
     #[test]
