@@ -339,10 +339,17 @@ fn print_help() {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_args();
 
+    // Log to stderr, not fmt()'s default stdout: a display-manager session
+    // (SDDM) wires stdout to /dev/null and only stderr to
+    // wayland-session.log, so the default silently discarded every line a
+    // live session ever logged.
     if let Ok(env_filter) = tracing_subscriber::EnvFilter::try_from_default_env() {
-        tracing_subscriber::fmt().with_env_filter(env_filter).init();
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .with_writer(std::io::stderr)
+            .init();
     } else {
-        tracing_subscriber::fmt().init();
+        tracing_subscriber::fmt().with_writer(std::io::stderr).init();
     }
 
     let mut event_loop: EventLoop<'static, Smallvil> = EventLoop::try_new()?;
