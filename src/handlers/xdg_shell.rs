@@ -494,7 +494,8 @@ impl Smallvil {
         };
         // Same area (and gap) tiled windows use, so a maximized floating
         // window looks visually consistent with the tiled layer around it.
-        let rect = crate::layout::inset(area, self.config.gaps);
+        let workspace = self.layout.active_workspace(&output.name());
+        let rect = crate::layout::inset(area, self.gaps_for(&output.name(), workspace));
 
         if !self.maximized.contains_key(wl_surface) {
             let restore_rect = self
@@ -1110,7 +1111,11 @@ impl Smallvil {
         let maximized_rect = self.maximized.get(wl_surface).and_then(|maximized| {
             let output = self.output_by_name(&maximized.output)?;
             let area = self.output_tiling_area(&output)?;
-            Some(crate::layout::inset(area, self.config.gaps))
+            let workspace = self.layout.active_workspace(&maximized.output);
+            Some(crate::layout::inset(
+                area,
+                self.gaps_for(&maximized.output, workspace),
+            ))
         });
         let is_floating = !self.layout.contains(wl_surface);
         if !is_floating {

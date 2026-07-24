@@ -98,7 +98,12 @@ impl TileMoveGrab {
             let pointer_loc = self.last_location.to_i32_round();
             let target = data
                 .layout
-                .layout(&self.output, self.workspace, area, data.config.gaps)
+                .layout(
+                    &self.output,
+                    self.workspace,
+                    area,
+                    data.gaps_for(&self.output, self.workspace),
+                )
                 .into_iter()
                 .find(|(_, rect)| rect.contains(pointer_loc))
                 .and_then(|(window, _)| window.toplevel().map(|t| t.wl_surface().clone()))

@@ -1021,7 +1021,7 @@ impl Smallvil {
                                         &output.name(),
                                         workspace,
                                         area,
-                                        self.config.gaps,
+                                        self.gaps_for(&output.name(), workspace),
                                         pointer.current_location(),
                                     )
                                 });

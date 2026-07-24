@@ -2145,7 +2145,7 @@ impl Smallvil {
             let workspace = self.layout.active_workspace(&output.name());
             let area = self.output_tiling_area(&output)?;
             self.layout
-                .layout(&output.name(), workspace, area, self.config.gaps)
+                .layout(&output.name(), workspace, area, self.gaps_for(&output.name(), workspace))
                 .into_iter()
                 .find(|(_, rect)| rect.contains(pos.to_i32_round()))
                 .and_then(|(window, _)| {
@@ -2658,7 +2658,7 @@ impl Smallvil {
         let area = self.output_tiling_area(&output)?;
         let rect = self
             .layout
-            .layout(output_name, workspace, area, self.config.gaps)
+            .layout(output_name, workspace, area, self.gaps_for(output_name, workspace))
             .into_iter()
             .find_map(|(window, rect)| is_window(&window, surface).then_some(rect))?;
         Some(if self.pseudo_tiled.contains(surface) {
@@ -2723,10 +2723,8 @@ impl Smallvil {
             let full_output_geo = self.space.output_geometry(output);
             let workspace = self.layout.active_workspace(&output.name());
 
-            for (window, mut rect) in
-                self.layout
-                    .layout(&output.name(), workspace, area, self.config.gaps)
-            {
+            let gaps = self.gaps_for(&output.name(), workspace);
+            for (window, mut rect) in self.layout.layout(&output.name(), workspace, area, gaps) {
                 if let Some(surface) = window.toplevel().map(|t| t.wl_surface().clone()) {
                     if let (Some(entry), Some(full)) =
                         (self.fullscreen.get(&surface), full_output_geo)
@@ -2785,7 +2783,7 @@ impl Smallvil {
             // Floating maximized windows also live outside Layouts. Keep
             // them reconciled to the current non-exclusive tiling area so a
             // bar/output geometry change cannot leave stale size/location.
-            let maximized_rect = crate::layout::inset(area, self.config.gaps);
+            let maximized_rect = crate::layout::inset(area, gaps);
             let floating_maximized: Vec<Window> = self
                 .space
                 .elements()
@@ -2945,7 +2943,7 @@ impl Smallvil {
                 let output = self.output_by_name(output_name)?;
                 let area = self.output_tiling_area(&output)?;
                 self.layout
-                    .layout(output_name, workspace, area, self.config.gaps)
+                    .layout(output_name, workspace, area, self.gaps_for(output_name, workspace))
                     .into_iter()
                     .find_map(|(candidate, rect)| is_window(&candidate, surface).then_some(rect))
             });
@@ -3336,6 +3334,22 @@ impl Smallvil {
         if let Some(workspace) = self.scratchpad_workspace(name) {
             self.move_to_workspace(surface, workspace);
         }
+    }
+
+    /// The effective tiling gap for (output, workspace): a per-workspace
+    /// `workspace_gaps` override wins, then the output's own `gaps`, then
+    /// the global `gaps`. Every layout-geometry call site routes through
+    /// this so the three levels can't drift apart.
+    pub(crate) fn gaps_for(&self, output_name: &str, workspace: u32) -> i32 {
+        if let Some(&gaps) = self.config.workspace_gaps.get(&workspace) {
+            return gaps;
+        }
+        self.config
+            .outputs
+            .iter()
+            .find(|o| o.name == output_name)
+            .and_then(|o| o.gaps)
+            .unwrap_or(self.config.gaps)
     }
 
     /// The reserved workspace number for scratchpad `name`, allocating one

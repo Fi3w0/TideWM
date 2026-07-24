@@ -202,7 +202,7 @@ fn block_is_keyed(keyword: &str) -> bool {
 /// mechanism, because this is a property of what each key *means*, not
 /// something a `.wave` file should ever need to say for itself.
 fn assign_is_multi(key: &str) -> bool {
-    matches!(key, "spawn_at_startup" | "workspace_name")
+    matches!(key, "spawn_at_startup" | "workspace_name" | "workspace_gaps")
 }
 
 /// Folds `incoming` onto `target` in place, applying the same policy in

@@ -231,6 +231,12 @@ pub struct Config {
     /// second identity, so nothing but action-string resolution reads it.
     pub workspace_names: HashMap<String, u32>,
     pub gaps: i32,
+    /// Per-workspace gap overrides from repeatable
+    /// `workspace_gaps = <N|name> <pixels>` lines; a workspace not in the
+    /// map uses its output's `gaps` override, then the global `gaps`.
+    /// Same accumulating-line shape as `workspace_name`, and a name here
+    /// resolves through `workspace_names`.
+    pub workspace_gaps: HashMap<u32, i32>,
     /// Starting tiling algorithm for a workspace with no runtime override
     /// (see `"layout:bsp"`/`"layout:master"` keybind actions,
     /// `layout::Layouts::set_default_algorithm`). Read fresh on every
@@ -383,6 +389,7 @@ impl Config {
             SplitBias::Auto
         });
         let workspace_names = parse_workspace_names(&raw.workspace_names);
+        let workspace_gaps = parse_workspace_gaps(&raw.workspace_gaps, &workspace_names);
 
         let config = Self {
             terminal: raw.terminal,
@@ -392,6 +399,7 @@ impl Config {
             cursor_hide_after_ms: raw.cursor_hide_after_ms,
             workspace_auto_back_and_forth: raw.workspace_auto_back_and_forth,
             workspace_names,
+            workspace_gaps,
             gaps: raw.gaps,
             default_layout,
             master_orientation,
@@ -499,6 +507,10 @@ struct RawConfig {
     /// `spawn_at_startup` (see `waves::assign_is_multi`), not a scalar --
     /// a config defines many of these, one per named workspace.
     workspace_names: Vec<String>,
+    /// Raw `"<N|name> <pixels>"` lines, one per `workspace_gaps` entry,
+    /// resolved via `parse_workspace_gaps`. Accumulating like
+    /// `workspace_name` (see `waves::assign_is_multi`).
+    workspace_gaps: Vec<String>,
     pseudo_tile_scale: f64,
     keybinds: HashMap<String, String>,
     input: InputConfig,
@@ -613,6 +625,7 @@ impl Default for RawConfig {
             master_orientation: String::new(),
             bsp_split_bias: String::new(),
             workspace_names: Vec::new(),
+            workspace_gaps: Vec::new(),
             pseudo_tile_scale: 0.7,
             keybinds,
             input: InputConfig::default(),
@@ -772,6 +785,9 @@ pub struct OutputConfig {
     pub position: Option<(i32, i32)>,
     pub scale: f64,
     pub transform: OutputTransformConfig,
+    /// Per-output gap override; `None` falls back to the global `gaps`.
+    /// A `workspace_gaps` entry beats both (see `Smallvil::gaps_for`).
+    pub gaps: Option<i32>,
 }
 
 impl Default for OutputConfig {
@@ -783,6 +799,7 @@ impl Default for OutputConfig {
             position: None,
             scale: 1.0,
             transform: OutputTransformConfig::default(),
+            gaps: None,
         }
     }
 }
@@ -1106,6 +1123,7 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
         "master_orientation" => raw.master_orientation = value.to_string(),
         "bsp_split_bias" => raw.bsp_split_bias = value.to_string(),
         "workspace_name" => raw.workspace_names.push(value.to_string()),
+        "workspace_gaps" => raw.workspace_gaps.push(value.to_string()),
         "pseudo_tile_scale" => set_f64(&mut raw.pseudo_tile_scale, key, value),
         // List-shaped, not scalar -- accumulates because `waves::merge_into`
         // already let every occurrence of this one key through instead of
@@ -1290,6 +1308,10 @@ fn lower_output_block(header: &str, body: &[waves::Entry]) -> OutputConfig {
             "transform" => match parse_transform(value) {
                 Some(t) => cfg.transform = t,
                 None => tracing::warn!(value, "Unknown transform, ignoring"),
+            },
+            "gaps" => match value.parse() {
+                Ok(n) => cfg.gaps = Some(n),
+                Err(_) => tracing::warn!(value, "Expected a pixel gap value, ignoring"),
             },
             other => tracing::warn!(key = %other, "Unknown key in `output` block, ignoring"),
         }
@@ -1826,6 +1848,30 @@ fn parse_split_bias(s: &str) -> Option<SplitBias> {
 /// an unrecognized keybind action. A repeated name keeps the last entry,
 /// same "last one wins" convention `resolve_window_rules` uses for a
 /// scalar field.
+/// Parses every raw `"<N|name> <pixels>"` `workspace_gaps` line into a
+/// `workspace number -> gap` map. A name resolves through the already-parsed
+/// `workspace_name` aliases; malformed entries warn and are skipped, same
+/// convention as `parse_workspace_names`.
+fn parse_workspace_gaps(raw: &[String], names: &HashMap<String, u32>) -> HashMap<u32, i32> {
+    let mut gaps = HashMap::new();
+    for entry in raw {
+        let Some((workspace, pixels)) = entry.split_once(char::is_whitespace) else {
+            tracing::warn!(entry, "workspace_gaps needs a workspace and a pixel value, ignoring");
+            continue;
+        };
+        let number = match workspace.parse::<u32>() {
+            Ok(n) => Some(n),
+            Err(_) => names.get(workspace.trim()).copied(),
+        };
+        let (Some(number), Ok(pixels)) = (number, pixels.trim().parse::<i32>()) else {
+            tracing::warn!(entry, "Invalid workspace or pixel value in workspace_gaps, ignoring");
+            continue;
+        };
+        gaps.insert(number, pixels);
+    }
+    gaps
+}
+
 fn parse_workspace_names(raw: &[String]) -> HashMap<String, u32> {
     let mut names = HashMap::new();
     for entry in raw {
@@ -2056,6 +2102,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_workspace_gaps_resolves_names_and_skips_malformed_entries() {
+        let mut names = HashMap::new();
+        names.insert("web".to_string(), 3);
+        let gaps = parse_workspace_gaps(
+            &[
+                "1 0".to_string(),
+                "web 16".to_string(),      // name resolves via workspace_name
+                "nope 4".to_string(),      // unknown name, skipped
+                "2".to_string(),           // no pixel value, skipped
+                "2 lots".to_string(),      // bad pixel value, skipped
+            ],
+            &names,
+        );
+
+        assert_eq!(gaps.len(), 2);
+        assert_eq!(gaps.get(&1), Some(&0));
+        assert_eq!(gaps.get(&3), Some(&16));
+    }
+
+    #[test]
     fn parse_workspace_names_skips_malformed_entries_and_last_duplicate_wins() {
         let names = parse_workspace_names(&[
             "3 web".to_string(),
@@ -2213,6 +2279,7 @@ mod tests {
             cursor_hide_after_ms: 0,
             workspace_auto_back_and_forth: false,
             workspace_names: HashMap::new(),
+            workspace_gaps: HashMap::new(),
             gaps: 0,
             default_layout: LayoutAlgorithm::Bsp,
             master_orientation: MasterOrientation::Left,
