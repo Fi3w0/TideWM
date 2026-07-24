@@ -1,0 +1,58 @@
+name: Hardware test report
+description: You ran TideWM on your machine and want to report what worked and what didn't — pass or fail, these are gold.
+labels: ["hardware-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Real-hardware reports are what moved this project from "compiles" to "works" — the Nvidia nested pass that fixed four bugs in one day started as exactly this kind of report. Everything here except the hardware line is optional: a partial report beats no report.
+  - type: input
+    id: version
+    attributes:
+      label: TideWM version / commit
+      placeholder: "0.60.0"
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware
+      description: GPU + driver version, CPU, monitors (resolution/refresh/scale).
+      placeholder: "RTX 3060, driver 610.43.03, 1920x1080@180 + 2560x1440@144 @125%"
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend tested
+      options:
+        - Nested (winit) — inside another session
+        - Standalone (udev/DRM) — its own TTY
+        - Both
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Distro / host session
+      placeholder: "CachyOS, KDE Plasma Wayland host"
+  - type: textarea
+    id: worked
+    attributes:
+      label: What worked
+      description: Even "it launched and tiled two terminals" is signal — it marks that path verified on your hardware.
+  - type: textarea
+    id: broke
+    attributes:
+      label: What broke
+      description: Anything that crashed, froze, or behaved wrong. One line per item is fine; file separate bug reports for anything you want tracked individually, or just dump it all here and it'll get split up.
+  - type: textarea
+    id: perf
+    attributes:
+      label: Resource usage (optional)
+      description: "If you measured: PSS from a release build (`grep Pss /proc/<pid>/smaps_rollup`) is the number that's comparable across reports. RSS and CPU% are still useful, just say which you measured."
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Workarounds you needed, things that surprised you, clients you tested against.

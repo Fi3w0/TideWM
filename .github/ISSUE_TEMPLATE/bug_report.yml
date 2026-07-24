@@ -1,0 +1,111 @@
+name: Bug report
+description: Something broke, crashed, or behaved wrong.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. The dropdowns below aren't bureaucracy — backend and GPU genuinely change which code ran, so answering them usually saves a whole round-trip of questions before a fix can start.
+  - type: input
+    id: version
+    attributes:
+      label: TideWM version
+      description: "`tidectl --version`, the CHANGELOG version you built, or a commit hash."
+      placeholder: "0.60.0 / 9e28e65"
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      description: Nested runs as a window inside another session; standalone owns a TTY. They share most code but not all of it.
+      options:
+        - Nested (winit) — a window inside another compositor
+        - Standalone (udev/DRM) — its own TTY session
+        - Both
+        - Not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: gpu
+    attributes:
+      label: GPU
+      options:
+        - AMD
+        - Intel
+        - Nvidia (proprietary driver)
+        - Nvidia (nouveau)
+        - Multiple / hybrid graphics
+        - Virtual machine
+        - Other / not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Best guess is fine.
+      options:
+        - Tiling / layout (BSP, master-stack, gaps, groups)
+        - Floating / fullscreen / maximize / pseudo-tile
+        - Workspaces / scratchpads / pinning
+        - Keyboard input / keybinds / submaps
+        - Pointer / touchpad / gestures / touch
+        - Window rules / swallowing
+        - Screenshots / screencasting
+        - XWayland (X11 apps)
+        - Config / hot-reload
+        - IPC / tidectl
+        - Rendering / visual artifacts
+        - Session / lock screen / idle / DPMS
+        - App compatibility (a specific client misbehaves)
+        - Multi-monitor / outputs
+        - Something else
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: How bad is it?
+      options:
+        - Crash or full freeze
+        - Feature doesn't work at all
+        - Works, but behaves wrong
+        - Cosmetic / minor annoyance
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what actually happened.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: If you can make it happen on demand, list the steps. "Happened once, no idea how" is still worth filing — say that instead.
+      placeholder: |
+        1. Launch nested with default config
+        2. Open two kitty windows
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: "Run with `RUST_LOG=TideWM=debug` (capital TideWM — lowercase silently matches nothing) and paste what's relevant. For a crash, the panic message and backtrace (`RUST_BACKTRACE=1`) are the single most useful thing you can include."
+      render: text
+  - type: textarea
+    id: config
+    attributes:
+      label: Config
+      description: The relevant part of your `config.wave`, if the bug involves config at all. "Default config" is a complete answer.
+      render: text
+  - type: input
+    id: distro
+    attributes:
+      label: Distro / environment
+      placeholder: "Arch, kernel 6.15, host compositor KDE Plasma (if nested)"

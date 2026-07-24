@@ -1,0 +1,40 @@
+name: Feature request
+description: Something TideWM should do that it doesn't.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Two scope notes before you write, so nothing gets filed into a known "no": TideWM exposes protocols for external tools rather than building first-party apps that duplicate them (no built-in screenshot picker, launcher, or bar — grim/rofi/waybar already exist and work here). And features that were considered and parked with reasons live in AGENT.md's Phase N section — worth a skim; several "parked" items got built the moment someone actually asked, so asking is exactly the right move.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that you currently can't, or can only do awkwardly?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd want
+      description: How you imagine it working — a config key, an action string, a protocol. If another WM has this, name it; a reference implementation to study speeds things up a lot.
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind of feature
+      options:
+        - WM behavior (tiling, focus, workspaces, rules)
+        - Input (keybinds, gestures, devices)
+        - Config / IPC surface
+        - Protocol support (a Wayland protocol some client needs)
+        - Water / visual effects
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Workarounds you've tried
+      description: What you're doing instead today, if anything.
