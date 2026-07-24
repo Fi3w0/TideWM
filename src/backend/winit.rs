@@ -142,6 +142,14 @@ pub fn init_winit(
                             None,
                             None,
                         );
+                        // The layer map's cached non_exclusive_zone only
+                        // recomputes on arrange(), which otherwise happens
+                        // solely on layer-surface events -- without this,
+                        // the retile below faithfully lays tiles out into
+                        // the *old* output size (confirmed live: wallpaper
+                        // filled a grown window while the tiled window
+                        // stayed clipped at its old geometry).
+                        smithay::desktop::layer_map_for_output(output).arrange();
                         #[cfg(feature = "screencast")]
                         if let Some(screencast) = &state.screencast {
                             screencast.refresh_outputs(state.space.outputs());

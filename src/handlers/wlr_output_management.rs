@@ -603,6 +603,12 @@ fn finish_configuration(
             let scale = cfg.scale.map(Scale::Fractional);
             let old_position = state.space.output_geometry(output).map(|geo| geo.loc);
             output.change_current_state(None, cfg.transform, scale, cfg.position.map(Into::into));
+            // A transform or scale change alters the output's logical
+            // size, and the layer map's cached non_exclusive_zone only
+            // recomputes on arrange() -- without this the retile below
+            // uses the stale zone (same bug the winit Resized handler
+            // had, found via a real nested-resize repro).
+            smithay::desktop::layer_map_for_output(output).arrange();
             if let Some(pos) = cfg.position {
                 state.space.map_output(output, pos);
                 // retile() below repositions tiled windows for free (their
