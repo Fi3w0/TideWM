@@ -212,6 +212,58 @@ fn export_session_environment(env: &std::collections::HashMap<String, String>) {
     }
 }
 
+/// A systemd `--user` manager commonly outlives a session switch (SDDM
+/// "switch session", or any relogin that doesn't tear the user manager
+/// down) -- so `xdg-desktop-portal.service` may already be running from a
+/// *previous* login, with the previous desktop's `XDG_CURRENT_DESKTOP`
+/// baked into its own process environment. The exports above only change
+/// the activation environment for future activations; they cannot reach
+/// into an already-running process. Confirmed live: a stale `Hyprland`
+/// value on an already-running frontend silently routed every screencast
+/// request (OBS included) to `xdg-desktop-portal-hyprland` instead of this
+/// compositor's own backend, with no error anywhere on TideWM's side to
+/// see -- it just looked like screencasting was broken. Restarting only
+/// the frontend is enough: backends are re-resolved fresh, from the
+/// now-correct activation environment, the next time it starts.
+fn restart_stale_portal_frontend() {
+    let has_fresh_env = std::process::Command::new("systemctl")
+        .args([
+            "--user",
+            "show",
+            "-p",
+            "MainPID",
+            "--value",
+            "xdg-desktop-portal.service",
+        ])
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|pid| pid.trim().parse::<u32>().ok())
+        .filter(|&pid| pid != 0)
+        .and_then(|pid| std::fs::read(format!("/proc/{pid}/environ")).ok())
+        .map(|environ| {
+            environ
+                .split(|&byte| byte == 0)
+                .any(|entry| entry == b"XDG_CURRENT_DESKTOP=tidewm")
+        });
+
+    // `None` covers both "not running yet" and "couldn't check" -- its next
+    // activation already gets the freshly exported environment either way,
+    // so only an already-running, confirmed-stale instance needs a kick.
+    if has_fresh_env == Some(false) {
+        match std::process::Command::new("systemctl")
+            .args(["--user", "restart", "xdg-desktop-portal.service"])
+            .status()
+        {
+            Ok(status) if status.success() => tracing::info!(
+                "Restarted xdg-desktop-portal.service: it was still carrying another desktop's identity"
+            ),
+            Ok(status) => tracing::debug!(?status, "Stale portal frontend restart exited non-zero"),
+            Err(err) => tracing::debug!(%err, "Stale portal frontend restart unavailable"),
+        }
+    }
+}
+
 /// Parsed CLI arguments (`-c`/`--config`, `-s`/`--spawn`; `-v`/`--version`
 /// and `-h`/`--help` exit immediately from `parse_args` itself, since
 /// neither needs the rest of `main` to run at all).
@@ -326,6 +378,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // TideWM owns the graphical session and should publish it normally.
     if !nested {
         export_session_environment(&state.config.env);
+        restart_stale_portal_frontend();
     }
 
     // Bound so it stays alive for the process lifetime, same idiom as
