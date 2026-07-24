@@ -4,6 +4,10 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 
 ## [Unreleased]
 
+## [0.60.0] - 2026-07-24
+
+First pre-release. The milestone this number marks: the WM foundation is feature-complete and the core of it is now tested on real hardware — AMD end to end (including OBS/Discord screencasting on a standalone session), Nvidia through a full nested-backend pass on an RTX 3060. Next up is a code-optimization pass, then `render/` finally starts: the water effects TideWM exists for.
+
 ### Added
 - Screencast portal now lists monitor, window, and virtual sources with a compositor-owned picker instead of grabbing the first monitor.
 - Touchpad swipe/pinch gestures can trigger any compositor action. Verified live on real hardware (external USB Apple Magic Trackpad and a ThinkPad's built-in touchpad): all four swipe directions and `pinch_in` confirmed, `pinch_out` not yet confirmed. See AGENT.md's Phase M gesture section for the full account.
