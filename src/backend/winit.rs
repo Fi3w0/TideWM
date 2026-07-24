@@ -20,7 +20,24 @@ use smithay::{
     wayland::presentation::Refresh,
 };
 
+use smithay::reexports::winit::{dpi::LogicalSize, window::Window as WinitWindow};
+
 use crate::{state::SessionLock, Smallvil};
+
+/// The host monitor's real refresh rate in millihertz, clamped to a sane
+/// range, falling back to 60Hz when the host doesn't report one (a
+/// Wayland host often can't say until the window has actually mapped
+/// onto a monitor). Drives both the advertised output mode and the
+/// render-loop timer cadence, so a 144Hz host panel actually gets tested
+/// at 144Hz nested instead of a hardcoded 60.
+fn host_refresh_millihertz(backend: &WinitGraphicsBackend<GlesRenderer>) -> i32 {
+    backend
+        .window()
+        .current_monitor()
+        .and_then(|monitor| monitor.refresh_rate_millihertz())
+        .map(|millihertz| (millihertz as i32).clamp(30_000, 360_000))
+        .unwrap_or(60_000)
+}
 
 /// One simulated output: a winit window standing in for a monitor.
 struct WinitOutput {
@@ -61,12 +78,20 @@ pub fn init_winit(
     let mut outputs = Vec::with_capacity(output_count);
     let mut x_offset = 0;
     for index in 0..output_count {
-        let (backend, winit_evt) = winit::init()?;
+        // Same window attributes smithay's own `init()` defaults to,
+        // minus its "Smithay" title -- the host shows this title bar.
+        let (backend, winit_evt) = winit::init_from_attributes(
+            WinitWindow::default_attributes()
+                .with_inner_size(LogicalSize::new(1280.0, 800.0))
+                .with_title("TideWM")
+                .with_visible(true),
+        )?;
 
         let mode = Mode {
             size: backend.window_size(),
-            refresh: 60_000,
+            refresh: host_refresh_millihertz(&backend),
         };
+        let scale_factor = backend.scale_factor();
 
         let output = Output::new(
             format!("winit-{index}"),
@@ -85,10 +110,16 @@ pub fn init_winit(
         // retract it from, only process exit tearing down the display
         // (and every global on it) as a whole.
         let _global = output.create_global::<Smallvil>(&state.display_handle);
+        // Forwarding the host's real scale factor (fractional included)
+        // means nested clients get told the truth about pixel density via
+        // wl_output/fractional-scale instead of a hardcoded 1 -- a 125%
+        // host monitor was rendering kitty's image protocol at the wrong
+        // size before this. Mode size stays physical pixels; smithay's
+        // Space derives the logical size from it and this scale.
         output.change_current_state(
             Some(mode),
             Some(Transform::Flipped180),
-            None,
+            Some(smithay::output::Scale::Fractional(scale_factor)),
             Some((x_offset, 0).into()),
         );
         output.set_preferred(mode);
@@ -131,15 +162,19 @@ pub fn init_winit(
             let mut closing = false;
             for entry in &mut outputs {
                 let output = &entry.output;
+                let backend = &entry.backend;
                 entry.winit_evt.dispatch_new_events(|event| match event {
-                    WinitEvent::Resized { size, .. } => {
+                    WinitEvent::Resized { size, scale_factor } => {
+                        // Re-read refresh too: a resize is also how the
+                        // window landing on a different host monitor
+                        // (different Hz, different scale) manifests.
                         output.change_current_state(
                             Some(Mode {
                                 size,
-                                refresh: 60_000,
+                                refresh: host_refresh_millihertz(backend),
                             }),
                             None,
-                            None,
+                            Some(smithay::output::Scale::Fractional(scale_factor)),
                             None,
                         );
                         // The layer map's cached non_exclusive_zone only
@@ -400,7 +435,20 @@ pub fn init_winit(
             state.cleanup_wlr_foreign_toplevels();
             let _ = state.display_handle.flush_clients();
 
-            TimeoutAction::ToDuration(Duration::from_millis(16))
+            // Re-arm at the host panel's real frame period (the mode
+            // refresh set above from the host monitor), not a hardcoded
+            // ~60Hz -- still a bounded Timer, so the no-CPU-spin property
+            // this loop exists for is unchanged; it just ticks at the
+            // rate the host can actually display.
+            let refresh = outputs
+                .iter()
+                .filter_map(|entry| entry.output.current_mode())
+                .map(|mode| mode.refresh)
+                .max()
+                .unwrap_or(60_000);
+            TimeoutAction::ToDuration(Duration::from_micros(
+                1_000_000_000 / refresh.max(1) as u64,
+            ))
         })?;
 
     Ok(())
