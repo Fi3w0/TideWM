@@ -297,6 +297,45 @@ impl Smallvil {
         )
     }
 
+    /// Synthesizes a key-release for every key the seat currently
+    /// believes is pressed. Called when the *host* compositor takes
+    /// keyboard focus away from a nested session's window: any release
+    /// that happens while the host holds the keyboard is never delivered
+    /// here (KDE's own `Super+L` lock mid-chord was the reproduced case),
+    /// leaving xkb's modifier state -- and therefore the
+    /// `wl_keyboard.modifiers` every client is told -- stuck with a
+    /// phantom held modifier (kitty then decodes plain typing as CSI-u
+    /// modifier sequences). Completes what `ad45af8` started: that fix
+    /// stopped compositor-side drag decisions from trusting the stale
+    /// state; this resets the state itself, clients included. Mirrors
+    /// `wl_keyboard.leave` semantics, where a leave implies all keys
+    /// released. Backend-agnostic on purpose -- a udev VT switch that
+    /// eats a release mid-chord is the same shape of problem.
+    pub(crate) fn release_stuck_keys(&mut self) {
+        let Some(keyboard) = self.seat.get_keyboard() else {
+            return;
+        };
+        let pressed: Vec<_> = keyboard.pressed_keys().into_iter().collect();
+        if pressed.is_empty() {
+            return;
+        }
+        tracing::debug!(
+            count = pressed.len(),
+            "Releasing keys stuck across host focus loss"
+        );
+        let time = self.start_time.elapsed().as_millis() as u32;
+        for keycode in pressed {
+            keyboard.input::<(), _>(
+                self,
+                keycode,
+                KeyState::Released,
+                SERIAL_COUNTER.next_serial(),
+                time,
+                |_, _, _| FilterResult::Forward,
+            );
+        }
+    }
+
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) {
         // Device topology changes aren't user activity; every other variant
         // reaching this function is a real keyboard/pointer/touch event.

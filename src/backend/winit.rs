@@ -158,6 +158,10 @@ pub fn init_winit(
                         state.retile();
                     }
                     WinitEvent::Input(event) => state.process_input_event(event),
+                    // The host taking keyboard focus swallows any key
+                    // releases that happen while it holds the keyboard;
+                    // reset our (and every client's) idea of what's held.
+                    WinitEvent::Focus(false) => state.release_stuck_keys(),
                     WinitEvent::CloseRequested => closing = true,
                     _ => (),
                 });
