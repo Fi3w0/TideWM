@@ -446,9 +446,7 @@ pub fn init_winit(
                 .map(|mode| mode.refresh)
                 .max()
                 .unwrap_or(60_000);
-            TimeoutAction::ToDuration(Duration::from_micros(
-                1_000_000_000 / refresh.max(1) as u64,
-            ))
+            TimeoutAction::ToDuration(Duration::from_micros(1_000_000_000 / refresh.max(1) as u64))
         })?;
 
     Ok(())
