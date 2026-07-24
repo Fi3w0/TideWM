@@ -670,17 +670,6 @@ impl Smallvil {
                     .copy_from_slice(&pixels[source_start..source_start + stride]);
             }
             black_out_rects(&mut owned, size, full_rect, &excluded_rects);
-            // TEMP DIAGNOSTIC: sample the center pixel to prove/disprove
-            // real content is reaching this point before it's handed off.
-            let sample_offset = (size.h as usize / 2) * stride + (size.w as usize / 2) * 4;
-            let sample = owned.get(sample_offset..sample_offset + 4);
-            tracing::warn!(
-                width = size.w,
-                height = size.h,
-                targets = targets.len(),
-                ?sample,
-                "DIAG screencast frame ready to complete"
-            );
             let frame = std::sync::Arc::new(crate::screencast::ScreencastFrame {
                 pixels: owned,
                 width: size.w as u32,

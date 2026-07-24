@@ -31,7 +31,12 @@ wayland-protocols-wlr = "0.3.12"
 # a minimal build. Versions match niri's known-good pins.
 zbus = { version = "5.13.2", optional = true }
 async-io = { version = "2.6.0", optional = true }
-pipewire = { version = "0.10.0", optional = true }
+# v0_3_34: unlocks `Stream::trigger_process`/`is_driving`, required for a
+# `StreamFlags::DRIVER` stream to ever produce a frame (see
+# pipewire_thread.rs's `run()`) -- a compile-time API-surface gate only,
+# not a runtime requirement beyond libpipewire >= 0.3.34 (2021), which
+# every current distro ships.
+pipewire = { version = "0.10.0", optional = true, features = ["v0_3_34"] }
 blocking = { version = "1.6", optional = true }
 # Accessibility only (`org.freedesktop.a11y.KeyboardMonitor`): its
 # NameOwnerChanged disconnect-watch stream needs `StreamExt`, matching

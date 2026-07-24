@@ -290,17 +290,6 @@ fn run(
             // a full frame must never stall the compositor's replacement of
             // the latest slot.
             let frame = target_for_process.frame.lock().unwrap().clone();
-            // TEMP DIAGNOSTIC: see whether this thread is ever observing a
-            // completed frame at all, and whether its dimensions actually
-            // match what this stream negotiated.
-            tracing::warn!(
-                stream_width = width,
-                stream_height = height,
-                frame_present = frame.is_some(),
-                frame_width = frame.as_ref().map(|f| f.width),
-                frame_height = frame.as_ref().map(|f| f.height),
-                "DIAG process() frame snapshot"
-            );
             if frame
                 .as_ref()
                 .is_some_and(|frame| frame.width != width || frame.height != height)
@@ -404,6 +393,16 @@ fn run(
         .map_err(|err| err.to_string())?;
 
     let deadline = Instant::now() + Duration::from_secs(5);
+    // A `StreamFlags::DRIVER` stream never gets a `process()` call on its
+    // own -- confirmed live (real consumer negotiated format, PipeWire
+    // reported the link as active and the node as running, yet zero
+    // `process()` calls ever happened): per pipewire/stream.h's "Driving
+    // the graph" section, a driver stream must call `trigger_process()`
+    // itself to start each graph cycle. `is_driving()` only returns true
+    // once the stream reaches `Streaming` (i.e. something is actually
+    // linked and consuming), so this is a no-op while paused/unlinked.
+    let frame_interval = Duration::from_millis(1000 / 30);
+    let mut next_trigger = Instant::now();
     loop {
         if target.is_closed() {
             break;
@@ -412,9 +411,16 @@ fn run(
             Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
             Err(mpsc::TryRecvError::Empty) => {}
         }
-        mainloop
-            .loop_()
-            .iterate(pw::loop_::Timeout::Finite(Duration::from_millis(250)));
+        let wait = next_trigger
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_millis(50));
+        mainloop.loop_().iterate(pw::loop_::Timeout::Finite(wait));
+        if Instant::now() >= next_trigger {
+            if stream.is_driving() {
+                let _ = stream.trigger_process();
+            }
+            next_trigger = Instant::now() + frame_interval;
+        }
         if Instant::now() >= deadline && stream.node_id() == pw::constants::ID_ANY {
             let _ = started.try_send(Err("PipeWire did not assign a node id".into()));
             break;

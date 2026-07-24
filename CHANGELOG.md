@@ -13,9 +13,11 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 ### Fixed
 - Fullscreen windows no longer render beneath layer-shell bars/launchers, in both live frames and screenshots.
 - A crashed session-lock client now fails closed (the compositor exits) instead of leaving the session in an unclear state.
+- PipeWire screencasting now actually produces frames. The producer stream never called `pw_stream_trigger_process()`, which a `StreamFlags::DRIVER` stream needs to start each graph cycle, so `process()` simply never fired. Verified under the nested winit backend against a real PipeWire daemon with a direct consumer: correct, live-updating frames over the MemFd/SHM path, PSS flat over a sustained stream. See AGENT.md's Screencasting section for the full root-cause writeup.
 
 ### Known issues
-- **PipeWire screencasting is broken.** DMA-BUF buffer allocation fails on real hardware and the MemFd fallback isn't reliable either. Don't use TideWM for Discord/OBS screen sharing right now.
+- DMA-BUF export is still disabled and still fails on real hardware, unrelated to the fix above; MemFd/SHM is the supported transport.
+- The fix above is only verified under the nested winit backend; the standalone udev/DRM backend and a real `xdg-desktop-portal`-mediated client (OBS/Discord) on real hardware haven't confirmed frame delivery yet.
 - Portal virtual sources mirror the desktop instead of creating a real headless output.
 
 ## [0.58.0] - 2026-07-22
