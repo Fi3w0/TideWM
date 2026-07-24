@@ -3934,6 +3934,10 @@ impl Smallvil {
                 strip_width: 0,
             });
         }
+        // b's leaf is gone from the tree, so the group's slot just grew;
+        // without this the old geometry stays on screen (dead hole where b
+        // was) until something else happens to retile.
+        self.retile();
         self.request_redraw();
     }
 
