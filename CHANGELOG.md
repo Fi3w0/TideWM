@@ -4,6 +4,9 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 
 ## [Unreleased]
 
+### Fixed
+- A screencast-enabled build froze the entire machine (mouse, keyboard, VT switch all dead, power-cycle needed) seconds into a real SDDM login. The startup check that restarts a stale `xdg-desktop-portal.service` ran synchronously before the event loop started -- and the restarted portal's own backend is a Wayland client of this compositor, so the portal waited for a compositor whose only thread was waiting for the portal. The restart job is now enqueued with `systemctl --no-block` and the compositor proceeds straight into its event loop. Root-caused from the journal of the frozen session (the portal stop/start lines were the last thing logged before the hard reset); the fix itself still needs a fresh SDDM login on real hardware to be called verified.
+
 ## [0.60.0] - 2026-07-24
 
 First pre-release. The milestone this number marks: the WM foundation is feature-complete and the core of it is now tested on real hardware — AMD end to end (including OBS/Discord screencasting on a standalone session), Nvidia through a full nested-backend pass on an RTX 3060. Next up is a code-optimization pass, then `render/` finally starts: the water effects TideWM exists for.

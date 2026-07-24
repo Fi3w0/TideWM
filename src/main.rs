@@ -250,13 +250,21 @@ fn restart_stale_portal_frontend() {
     // `None` covers both "not running yet" and "couldn't check" -- its next
     // activation already gets the freshly exported environment either way,
     // so only an already-running, confirmed-stale instance needs a kick.
+    // `--no-block` is load-bearing, not an optimization: this runs before the
+    // event loop starts, and the restarted frontend's backend (e.g.
+    // xdg-desktop-portal-gtk) is itself a Wayland client of *this*
+    // compositor. A synchronous restart waits for the portal, the portal
+    // waits for a compositor whose only thread is sitting in that wait --
+    // a circular hang that froze the whole session (mouse, keyboard, VT
+    // switch) on a real SDDM login. The restart's outcome only matters for
+    // screencast requests minutes later, so enqueueing the job is enough.
     if has_fresh_env == Some(false) {
         match std::process::Command::new("systemctl")
-            .args(["--user", "restart", "xdg-desktop-portal.service"])
+            .args(["--user", "--no-block", "restart", "xdg-desktop-portal.service"])
             .status()
         {
             Ok(status) if status.success() => tracing::info!(
-                "Restarted xdg-desktop-portal.service: it was still carrying another desktop's identity"
+                "Restarting xdg-desktop-portal.service: it was still carrying another desktop's identity"
             ),
             Ok(status) => tracing::debug!(?status, "Stale portal frontend restart exited non-zero"),
             Err(err) => tracing::debug!(%err, "Stale portal frontend restart unavailable"),
