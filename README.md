@@ -21,7 +21,7 @@ A water-styled Wayland compositor, built in Rust on Smithay.
 </div>
 
 > [!NOTE]
-> TideWM already works as a real Wayland compositor: tiling, multi-monitor, workspaces, IPC, and most of the protocol surface a daily driver needs are all in. What's missing is the actual point of the project, the water/aqua render effects, and they haven't been started yet. Screen sharing (PipeWire/xdg-desktop-portal) now delivers real frames under the nested backend, but hasn't been tested yet on a standalone TTY session or through a real `xdg-desktop-portal`-mediated client like OBS or Discord; treat it as promising, not daily-driver-proven. This is exactly the stage where testing on hardware I don't own is most useful, jump into [Discord](https://discord.gg/ZhkxA83cKk) if something breaks.
+> TideWM already works as a real Wayland compositor: tiling, multi-monitor, workspaces, IPC, and most of the protocol surface a daily driver needs are all in. What's missing is the actual point of the project, the water/aqua render effects, and they haven't been started yet. Screen sharing (PipeWire/xdg-desktop-portal) works end to end on a real standalone session now, verified through both OBS and Discord. This is exactly the stage where testing on hardware I don't own is most useful, jump into [Discord](https://discord.gg/ZhkxA83cKk) if something breaks.
 
 Full modern tiling on the fundamentals: BSP and master/stack, workspaces, groups, multi-monitor, layer-shell, IPC, with a water identity layered on top once the render work starts. Built for low-end hardware first, 1.5GB is the target ceiling in normal use, 3GB is the line where it gets actively optimized.
 
@@ -39,7 +39,7 @@ TideWM is a solo project. I use AI coding agents (OpenCode, Codex, Claude Code) 
 - Layer-shell: bars, launchers, lock screens
 - XWayland, via [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite)
 - Screenshots, clipboard, session lock
-- PipeWire screencasting behind a feature flag, delivers real frames now, not yet proven through a real portal-mediated client (OBS/Discord)
+- PipeWire screencasting behind a feature flag, verified end to end through real OBS and Discord on a standalone session
 - A low-memory built-in Tide wallpaper; layer-shell wallpaper tools replace it normally
 - Hot-reloadable config in Waves, TideWM's own format, split across files, `env`/`$variables`/`$wave(...)`
 - Per-app window rules, including regex matching, initial fullscreen/maximize, and capture privacy
@@ -62,8 +62,8 @@ Full config reference, every action string, and the protocol matrix: [DOCUMENTAT
 - **Nvidia**: overlay-plane workaround is written, not yet run on real Nvidia hardware.
 - **DPMS / gamma**: protocol-complete and verified on AMD hardware; lid/tablet switches still need broader hardware coverage.
 - **Touchpad config**: built (tap, natural-scroll, accel, click-method, ...), not yet verified on real hardware.
-- **Touchpad gestures**: compositor workspace swipes are built; broader real-device coverage is pending.
-- **Screencasting**: built behind `--features screencast` with a real `xdg-desktop-portal` backend. The SHM/MemFd path delivers real frames now under the nested (winit) backend, verified with a direct PipeWire consumer (`glxgears` content, correctly oriented, live-updating, PSS flat over a sustained stream). Not yet verified on a standalone TTY (udev/DRM) session, and DMA-BUF still fails on real hardware and stays disabled. Not yet tested end to end through a real portal-mediated client (OBS/Discord) -- promising, not proven for daily use.
+- **Touchpad gestures**: swipe/pinch can trigger any compositor action, plus a relative-workspace-swipe shortcut. Verified live on two real trackpads (an external USB Apple Magic Trackpad and a ThinkPad's built-in touchpad): all four swipe directions and pinch-in confirmed, pinch-out not yet confirmed.
+- **Screencasting**: built behind `--features screencast` with a real `xdg-desktop-portal` backend. The SHM/MemFd path delivers real frames, verified on a standalone TTY (udev/DRM) session end to end through both real OBS and real Discord. DMA-BUF still fails on real hardware and stays disabled; MemFd/SHM is the supported transport.
 - **AUR package**: not yet, build from source below.
 
 ## Roadmap
@@ -71,7 +71,6 @@ Full config reference, every action string, and the protocol matrix: [DOCUMENTAT
 Foundation before visuals has been the plan from the start. The WM itself, tiling, multi-monitor, workspaces, layer-shell, IPC, XWayland, is done, and it already runs as a daily compositor on AMD hardware. What's left:
 
 - **Water/aqua render effects.** Ripples, wave-based workspace transitions, liquid window drag. This is the reason TideWM exists and it hasn't been started; render work was deliberately held off until the WM foundation was solid.
-- **PipeWire screen sharing.** Frame delivery works now; not yet proven through a real portal-mediated client. Not something to depend on for Discord/OBS yet, but closer than it was.
 - **Nvidia hardware.** The overlay-plane workaround exists in code but has never run on a real Nvidia GPU.
 - **AUR package.** Not yet, build from source for now.
 
@@ -151,9 +150,9 @@ Backend auto-selects: nested (winit) when `WAYLAND_DISPLAY`/`DISPLAY` is set, st
 
 To launch from a display manager (GDM, SDDM, greetd): put the `TideWM` binary (note the case, `[[bin]] name` in `Cargo.toml` builds it capitalized, and `tidewm.desktop`'s own `Exec=` line expects exactly that) on `PATH`, copy `share/wayland-sessions/tidewm.desktop` into `/usr/share/wayland-sessions/`, and copy `share/icons/TideWM-logo-faithful-4k.png` to `/usr/share/pixmaps/tidewm.png` for the session picker's icon.
 
-### Screen sharing (works, not yet proven through a real portal client)
+### Screen sharing (works, verified through OBS and Discord)
 
-Discord, OBS, and anything else that shares your screen go through `xdg-desktop-portal`, not TideWM directly. TideWM implements its own `org.freedesktop.impl.portal.ScreenCast` backend so no `xdg-desktop-portal-gnome`/GTK4 chain is needed. The PipeWire buffer path (SHM/MemFd) delivers real frames under the nested backend; it hasn't yet been run on a standalone TTY session or end to end through a real `xdg-desktop-portal` process with OBS or Discord, so treat it as testing-ready rather than daily-use-proven. DMA-BUF export stays disabled either way.
+Discord, OBS, and anything else that shares your screen go through `xdg-desktop-portal`, not TideWM directly. TideWM implements its own `org.freedesktop.impl.portal.ScreenCast` backend so no `xdg-desktop-portal-gnome`/GTK4 chain is needed. The PipeWire buffer path (SHM/MemFd) delivers real frames, verified end to end on a standalone TTY (udev/DRM) session through both real OBS and real Discord. DMA-BUF export stays disabled either way.
 
 Build with `cargo build --release --locked --features screencast`, then install the portal files so `xdg-desktop-portal` knows to route screen-share requests to TideWM:
 
