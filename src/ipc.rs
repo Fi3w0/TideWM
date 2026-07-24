@@ -521,7 +521,7 @@ fn window_json(
         state.layout.workspace_of(surface)
     };
 
-    Some(json!({
+    let mut entry = json!({
         "window_id": state.foreign_toplevel_numeric_ids.get(surface).copied(),
         "title": title,
         "app_id": app_id,
@@ -538,5 +538,11 @@ fn window_json(
         "maximized": state.maximized.contains_key(surface)
             && !state.fullscreen.contains_key(surface),
         "focused": focused == Some(surface),
-    }))
+    });
+    if let Some(workspace) = workspace {
+        if crate::state::is_scratchpad_workspace(workspace) {
+            entry["scratchpad"] = json!(state.scratchpad_name_of(workspace).unwrap_or(""));
+        }
+    }
+    Some(entry)
 }

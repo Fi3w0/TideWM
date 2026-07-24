@@ -229,7 +229,8 @@ fn print_workspaces(data: &Value) {
         let active = w.get("active").and_then(Value::as_bool).unwrap_or(false);
         let count = w.get("window_count").and_then(Value::as_u64).unwrap_or(0);
         let marker = if active { "*" } else { " " };
-        println!("{marker} {output}  workspace={workspace}  windows={count}");
+        let place = scratchpad_label(w).unwrap_or_else(|| format!("workspace={workspace}"));
+        println!("{marker} {output}  {place}  windows={count}");
     }
 }
 
@@ -254,11 +255,14 @@ fn print_window(w: &Value) {
     let title = w.get("title").and_then(Value::as_str).unwrap_or("");
     let app_id = w.get("app_id").and_then(Value::as_str).unwrap_or("");
     let output = w.get("output").and_then(Value::as_str).unwrap_or("?");
-    let workspace = w
-        .get("workspace")
-        .and_then(Value::as_u64)
-        .map(|n| n.to_string())
-        .unwrap_or_else(|| "-".to_string());
+    let place = scratchpad_label(w).unwrap_or_else(|| {
+        let workspace = w
+            .get("workspace")
+            .and_then(Value::as_u64)
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        format!("workspace={workspace}")
+    });
     let mut flags = Vec::new();
     for (key, label) in [
         ("floating", "floating"),
@@ -278,7 +282,19 @@ fn print_window(w: &Value) {
     } else {
         format!("  [{}]", flags.join(", "))
     };
-    println!("{app_id}  \"{title}\"  output={output}  workspace={workspace}{flags}");
+    println!("{app_id}  \"{title}\"  output={output}  {place}{flags}");
+}
+
+/// A scratchpad's synthetic workspace number (0, or counting down from
+/// `u32::MAX`) is meaningless to a reader; the server sends the name
+/// alongside it, so show that instead when present.
+fn scratchpad_label(w: &Value) -> Option<String> {
+    let name = w.get("scratchpad")?.as_str()?;
+    Some(if name.is_empty() {
+        "scratchpad".to_string()
+    } else {
+        format!("scratchpad:{name}")
+    })
 }
 
 fn print_help() {
