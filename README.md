@@ -59,7 +59,7 @@ Full config reference, every action string, and the protocol matrix: [DOCUMENTAT
 - **XWayland**: yes, via xwayland-satellite. X11 apps tile like any other window.
 - **Nested (dev/testing)**: yes, `cargo run` opens TideWM as a window inside any existing session.
 - **Real hardware**: verified on AMD, backend, tiling, pointer-constraints (tested against real Minecraft), interactive drag/resize.
-- **Nvidia**: overlay-plane workaround is written, not yet run on real Nvidia hardware.
+- **Nvidia**: nested backend verified on a real RTX 3060 (proprietary driver 610.43): clean EGL/GLES context, correct rendering, no crashes. The standalone DRM backend and its overlay-plane workaround still need a native (TTY) Nvidia run.
 - **DPMS / gamma**: protocol-complete and verified on AMD hardware; lid/tablet switches still need broader hardware coverage.
 - **Touchpad config**: built (tap, natural-scroll, accel, click-method, ...), not yet verified on real hardware.
 - **Touchpad gestures**: swipe/pinch can trigger any compositor action, plus a relative-workspace-swipe shortcut. Verified live on two real trackpads (an external USB Apple Magic Trackpad and a ThinkPad's built-in touchpad): all four swipe directions and pinch-in confirmed, pinch-out not yet confirmed.
