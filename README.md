@@ -32,7 +32,7 @@ TideWM is a solo project. I use AI coding agents (OpenCode, Codex, Claude Code) 
 ## Features
 
 - Dynamic BSP tiling (dwindle-style) plus master/stack, switchable per workspace
-- Workspaces per output, scratchpad, per-window pinning
+- Workspaces per output, scratchpads (the classic one plus any number of named ones), per-window pinning
 - Window groups: tab several windows into one tile, first-party tab-strip UI
 - Floating, fullscreen, maximize, pseudo-tiling
 - Multi-monitor with hotplug, independent tiling tree per output, mixed-DPI
@@ -42,7 +42,7 @@ TideWM is a solo project. I use AI coding agents (OpenCode, Codex, Claude Code) 
 - PipeWire screencasting behind a feature flag, verified end to end through real OBS and Discord on a standalone session
 - A low-memory built-in Tide wallpaper; layer-shell wallpaper tools replace it normally
 - Hot-reloadable config in Waves, TideWM's own format, split across files, `env`/`$variables`/`$wave(...)`
-- Per-app window rules, including regex matching, initial fullscreen/maximize, and capture privacy
+- Per-app window rules, including regex matching, initial fullscreen/maximize, capture privacy, and window swallowing
 - Submaps: temporary keybind layers (sway/Hyprland's "mode")
 - Workspace overview (`Super+O`)
 - Keyboard layout and touchpad (libinput) config

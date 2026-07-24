@@ -66,6 +66,7 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | `workspace_auto_back_and_forth` | bool | `false` | Re-selecting the already-active workspace jumps back to whichever one was active immediately before it, instead of no-opping (niri's own feature of the same name). |
 | `workspace_name` | repeatable key | none | Names a workspace number for use in `workspace:<name>`/`move-to-workspace:<name>` (niri's `set-workspace-name`, Hyprland's `workspace name:foo`) — `workspace_name = 3 web`, repeat the key once per name. Purely an addressing convenience: the workspace's real identity is still its number. An unknown name at action time warns and no-ops rather than switching. |
 | `gaps` | integer | `8` | Pixel gap the tiling engine applies around and between tiles, both layout algorithms. |
+| `workspace_gaps` | repeatable key | none | Per-workspace gap override — `workspace_gaps = 3 0` (workspace 3, no gaps), repeat the key once per workspace. Accepts a `workspace_name` alias in place of the number. Beats both the output-level `gaps` override and the global `gaps`. |
 | `default_layout` | `bsp` \| `master` | `bsp` | Starting tiling algorithm for a workspace with no runtime override (see `layout:bsp`/`layout:master` actions below). `bsp` is dwindle-style: split orientation follows each window's own aspect ratio. `master` is one master pane plus an evenly-split stack. |
 | `master_orientation` | `left` \| `right` \| `top` \| `bottom` | `left` | Which side the master pane sits on under `default_layout = master`. `left`/`right` stack the other windows vertically in the remaining strip; `top`/`bottom` stack them horizontally instead. One global setting, not per-workspace. |
 | `bsp_split_bias` | `auto` \| `horizontal` \| `vertical` | `auto` | Manual override for `default_layout = bsp`'s per-split axis choice. `auto` is the existing aspect-ratio-driven behavior, unchanged. `horizontal`/`vertical` force every split one way regardless of window/output shape (Hyprland dwindle's `force_split` idea). One global setting, not per-workspace. |
@@ -156,6 +157,7 @@ Per-connector overrides, **udev backend only** — winit's single simulated outp
 | `position` | `WxH`, optional | auto-layout | e.g. `1920x0`. Falls back to auto-layout (rightmost edge of already-mapped outputs) if unset. |
 | `scale` | float | `1.0` | |
 | `transform` | string | `normal` | One of `normal`, `90`, `180`, `270`, `flipped`, `flipped-90`, `flipped-180`, `flipped-270`. |
+| `gaps` | integer, optional | global `gaps` | Per-output gap override for every workspace shown on this connector. A `workspace_gaps` entry beats it. |
 
 ```
 output eDP-1 {
@@ -207,6 +209,7 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 | `maximize` | bool | Default `false`. Opens maximized and implies floating placement. |
 | `fullscreen` | bool | Default `false`. Opens fullscreen on its selected output. |
 | `block_capture` | bool | Default `false`. A per-window capture/screencast source renders black instead of exposing the window. |
+| `swallow` | bool | Default `false`. Marks matching windows as swallowers (Hyprland's `misc:enable_swallow`): when a tiled match spawns a process that opens its own window, the match is hidden and the new window takes over its exact tile; closing that window puts it back in the same slot. Detection is PID ancestry via `/proc`, so any terminal works without shell integration. Tiled matches only — a floating terminal keeps both windows visible. |
 | `opacity` | float | Per-window alpha, clamped to `0.0`–`1.0`. Applies to the whole window surface tree. |
 | `position` | `<x>x<y>`, optional | Exact floating placement. No-op unless the window ends up floating. |
 | `size` | `<width>x<height>`, optional | Exact floating size. No-op unless the window ends up floating. |
@@ -228,6 +231,11 @@ rule {
 rule {
     app_id = Slack
     workspace = 3
+}
+
+rule {
+    app_id = kitty
+    swallow = true
 }
 ```
 
@@ -279,6 +287,7 @@ The same set of strings works after `bind ... =` at the top level or inside a `s
 - `toggle-pseudo-tile`
 - `toggle-scratchpad`
 - `move-to-scratchpad`
+- `toggle-scratchpad:<name>` / `move-to-scratchpad:<name>` — named scratchpads (Hyprland's named special workspaces), any number of them, independent of the unnamed one. A name is created on first use; no declaration needed. The IPC `workspaces` query reports these entries with a `scratchpad` field holding the name (`""` for the unnamed scratchpad) so bars can label or hide them.
 - `raise-window` / `lower-window` — floating windows only, no-op on a tiled one
 
 **Focus and layout**

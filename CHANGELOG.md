@@ -9,6 +9,9 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 - Touchpad swipe/pinch gestures can trigger any compositor action. Verified live on real hardware (external USB Apple Magic Trackpad and a ThinkPad's built-in touchpad): all four swipe directions and `pinch_in` confirmed, `pinch_out` not yet confirmed. See AGENT.md's Phase M gesture section for the full account.
 - Per-window `opacity` window rule.
 - `xdg-toplevel-icon-v1` support.
+- Named scratchpads: `toggle-scratchpad:<name>` / `move-to-scratchpad:<name>` action variants, any number of them, on top of the existing single scratchpad (which stays the bare `toggle-scratchpad`). Each name is just another reserved workspace under the hood -- same hide/show machinery, no new data structure. The IPC `workspaces` query tags scratchpad entries with a `scratchpad` name field so bars can label or hide them.
+- Per-workspace and per-output gap overrides: repeatable `workspace_gaps = <N|name> <pixels>` lines (names resolve through `workspace_name` aliases) and a `gaps` key inside `output` blocks. Workspace beats output beats the global `gaps`.
+- Window swallowing: a tiled window matching a `swallow = true` window rule is hidden when a window its process spawned maps, and that child takes over its exact tile; closing the child puts it back in the same slot. PID ancestry is read from `/proc`, so it works for any terminal without shell integration. Verified live in a nested session with grim screenshots: exact-slot replacement and restore, uninvolved tiles untouched.
 
 ### Fixed
 - Fullscreen windows no longer render beneath layer-shell bars/launchers, in both live frames and screenshots.
