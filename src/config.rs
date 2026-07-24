@@ -451,6 +451,7 @@ impl Config {
             effective.maximize |= rule.maximize;
             effective.fullscreen |= rule.fullscreen;
             effective.block_capture |= rule.block_capture;
+            effective.swallow |= rule.swallow;
             if rule.position.is_some() {
                 effective.position = rule.position;
             }
@@ -908,6 +909,15 @@ pub struct WindowRule {
     pub maximize: bool,
     pub fullscreen: bool,
     pub block_capture: bool,
+    /// Marks matching windows as swallowers (Hyprland's
+    /// `misc:enable_swallow`, i3's window swallowing): a tiled window this
+    /// rule matches gets hidden when a window whose process it spawned
+    /// maps (PID ancestry via `/proc`), which takes over its tile; closing
+    /// the child puts the swallower back in that exact slot. The classic
+    /// use is `app_id = kitty, swallow = true` so a video/image viewer
+    /// launched from a terminal replaces it instead of splitting it.
+    /// Tiled swallowers only -- a floating terminal keeps both visible.
+    pub swallow: bool,
     /// Per-window render alpha in the inclusive range 0.0..=1.0. Applied
     /// to the complete surface tree (including subsurfaces and popups).
     pub opacity: Option<f32>,
@@ -1350,6 +1360,7 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
             "maximize" => set_bool(&mut rule.maximize, key, value),
             "fullscreen" => set_bool(&mut rule.fullscreen, key, value),
             "block_capture" => set_bool(&mut rule.block_capture, key, value),
+            "swallow" => set_bool(&mut rule.swallow, key, value),
             "opacity" => match value.parse::<f32>() {
                 Ok(value) if value.is_finite() => rule.opacity = Some(value.clamp(0.0, 1.0)),
                 _ => tracing::warn!(value, "Expected a finite opacity from 0.0 to 1.0, ignoring"),

@@ -556,6 +556,14 @@ pub struct Smallvil {
     /// fallback workspace regardless of where you actually were.
     scratchpad_previous: HashMap<String, u32>,
 
+    /// Windows hidden by swallowing (`WindowRule::swallow`), keyed by the
+    /// *child* surface that took over their tile. Holds the actual
+    /// `Window` handle, not just the surface -- a hidden window isn't in
+    /// `space.elements()` at all, so the surface alone couldn't get it
+    /// back (same lesson `FloatingTag` already encodes). Restored by
+    /// `restore_swallowed` when the child unmaps or is destroyed.
+    pub swallowed: HashMap<WlSurface, SwallowedWindow>,
+
     /// Named scratchpads (Hyprland's named "special workspaces"):
     /// each name is lazily assigned its own reserved workspace number from
     /// `NAMED_SCRATCHPAD_BASE` upward on first use, then behaves exactly
@@ -830,6 +838,13 @@ const NAMED_SCRATCHPAD_BASE: u32 = u32::MAX - 4095;
 /// Whether `workspace` is any scratchpad's reserved number, unnamed or named.
 pub(crate) fn is_scratchpad_workspace(workspace: u32) -> bool {
     workspace == SCRATCHPAD_WORKSPACE || workspace >= NAMED_SCRATCHPAD_BASE
+}
+
+/// A window hidden because a child window it spawned swallowed it
+/// (see `WindowRule::swallow` and `Smallvil::swallowed`).
+pub struct SwallowedWindow {
+    pub surface: WlSurface,
+    pub window: Window,
 }
 
 impl Smallvil {
@@ -1217,6 +1232,7 @@ impl Smallvil {
             pinned: HashSet::new(),
             scratchpad_previous: HashMap::new(),
             scratchpad_named: HashMap::new(),
+            swallowed: HashMap::new(),
             workspace_previous: HashMap::new(),
             pseudo_tiled: HashSet::new(),
             urgent: HashSet::new(),

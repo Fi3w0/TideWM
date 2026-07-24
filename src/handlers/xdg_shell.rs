@@ -13,7 +13,10 @@ use smithay::{
     output::Output,
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
-        wayland_server::protocol::{wl_output, wl_seat, wl_surface::WlSurface},
+        wayland_server::{
+            protocol::{wl_output, wl_seat, wl_surface::WlSurface},
+            Resource,
+        },
     },
     utils::{Rectangle, Serial, SERIAL_COUNTER},
     wayland::shell::xdg::{
@@ -49,6 +52,7 @@ impl XdgShellHandler for Smallvil {
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         let preferred_output = self.preferred_output_for_toplevel(surface.wl_surface());
 
+        self.restore_swallowed(surface.wl_surface());
         self.unmapped_toplevels.remove(surface.wl_surface());
         self.detach_mapped_toplevel(surface.wl_surface());
         self.forget_window_focus(surface.wl_surface());
@@ -845,8 +849,24 @@ impl Smallvil {
         let workspace = rule
             .workspace
             .unwrap_or_else(|| self.layout.active_workspace(&output.name()));
-        self.layout
-            .insert(&output.name(), workspace, window, focused.as_ref());
+        // Window swallowing (`swallow = true` window rule): a tiled window
+        // whose process spawned this one gets replaced by it. Inserting
+        // targeted at the swallower splits its tile; detaching the
+        // swallower right after collapses the split, leaving this window
+        // exactly in its place. Skipped when the new window is about to
+        // float -- hiding the terminal under a floating child would leave
+        // an empty tile behind.
+        let swallow_target = if rule.float || rule.pin || implicit_float {
+            None
+        } else {
+            self.swallow_candidate(surface, &output.name(), workspace)
+        };
+        self.layout.insert(
+            &output.name(),
+            workspace,
+            window,
+            swallow_target.as_ref().or(focused.as_ref()),
+        );
         // `toggle_floating`/`toggle_pseudo_tile` below look the window up
         // via `self.space.elements()`, which `layout.insert` alone does not
         // populate -- only `retile()`'s own `space.map_element` call does.
@@ -856,6 +876,19 @@ impl Smallvil {
         // until the backend's own render loop runs, strictly after this
         // function returns.
         self.retile();
+
+        if let Some(swallower) = swallow_target {
+            if let Some(hidden) = self.detach_mapped_toplevel(&swallower) {
+                self.swallowed.insert(
+                    surface.clone(),
+                    crate::state::SwallowedWindow {
+                        surface: swallower,
+                        window: hidden,
+                    },
+                );
+                self.retile();
+            }
+        }
 
         // Tiling it first and immediately converting here (reusing the
         // exact same logic the interactive toggles use, rather than
@@ -895,6 +928,17 @@ impl Smallvil {
             self.focus_window(Some(surface.clone()), SERIAL_COUNTER.next_serial());
         }
 
+        self.announce_foreign_toplevel(surface);
+    }
+
+    /// Announces `surface` to both foreign-toplevel protocols (the newer
+    /// read-only ext- list and the older bidirectional wlr- one). Split
+    /// out of `map_toplevel` so a swallow restore -- which re-shows a
+    /// window without going through the map path -- looks like a fresh
+    /// map to bars, matching the handle retirement its hide did in
+    /// `detach_mapped_toplevel`.
+    fn announce_foreign_toplevel(&mut self, surface: &WlSurface) {
+        let (app_id, title) = self.toplevel_identity(surface);
         let handle = self.foreign_toplevel_list_state.new_toplevel::<Self>(
             title.clone().unwrap_or_default(),
             app_id.clone().unwrap_or_default(),
@@ -913,19 +957,20 @@ impl Smallvil {
             let wlr_handle = wlr_state.track(title.unwrap_or_default(), app_id.unwrap_or_default());
             self.wlr_foreign_toplevels
                 .insert(surface.clone(), wlr_handle);
-            // `focus_window` above already ran and, per this codebase's
-            // established "role creation alone must never steal focus, a
-            // real first buffer does" rule, a freshly-mapped window is
-            // typically activated by this point -- but that activation
-            // happened before this handle existed to receive it, so
-            // `init_instance`'s empty initial `state` array is stale from
-            // the moment it's sent. Push the real state now that the
-            // handle is actually registered in `wlr_foreign_toplevels`.
+            // On a fresh map, `focus_window` already ran and, per this
+            // codebase's established "role creation alone must never steal
+            // focus, a real first buffer does" rule, a freshly-mapped
+            // window is typically activated by this point -- but that
+            // activation happened before this handle existed to receive
+            // it, so `init_instance`'s empty initial `state` array is
+            // stale from the moment it's sent. Push the real state now
+            // that the handle is actually registered.
             self.refresh_wlr_toplevel_state(surface);
         }
     }
 
     fn unmap_toplevel(&mut self, surface: &WlSurface) {
+        self.restore_swallowed(surface);
         resize_grab::cancel(surface);
         let preferred_output = self.preferred_output_for_toplevel(surface);
         let Some(window) = self.detach_mapped_toplevel(surface) else {
@@ -954,6 +999,11 @@ impl Smallvil {
     /// handle so an xdg unmap can retain it for a later remap. This is also
     /// used by permanent role destruction, which simply drops the result.
     fn detach_mapped_toplevel(&mut self, surface: &WlSurface) -> Option<Window> {
+        // A swallower dying while hidden must be forgotten, or a later
+        // child close would re-insert a dead window's handle. (At swallow
+        // time this is a no-op: the entry is recorded only after this
+        // function returns.)
+        self.swallowed.retain(|_, entry| entry.surface != *surface);
         let window = self.mapped_toplevel_window(surface);
         if let Some(window) = &window {
             self.space.unmap_elem(window);
@@ -990,6 +1040,104 @@ impl Smallvil {
             }
         }
         window
+    }
+
+    /// If `surface` (a closing or unmapping window) swallowed another
+    /// window, puts it back: re-inserted targeted at `surface`'s own slot
+    /// while `surface` is still in the tree, so the teardown that follows
+    /// collapses the split and leaves the restored window exactly where
+    /// the pair sat. Must run before `detach_mapped_toplevel(surface)`;
+    /// the caller's usual retile + focus repair then remaps it.
+    fn restore_swallowed(&mut self, surface: &WlSurface) {
+        let Some(entry) = self.swallowed.remove(surface) else {
+            return;
+        };
+        let (output, workspace) = match (
+            self.layout.output_of(surface).map(str::to_string),
+            self.layout.workspace_of(surface),
+        ) {
+            (Some(output), Some(workspace)) => (output, workspace),
+            // The child left the tiled tree since the swallow (floated or
+            // fullscreened into a different shape of teardown) -- restore
+            // somewhere sensible instead of guessing its old slot.
+            _ => {
+                let Some(output) = self.primary_output() else {
+                    return;
+                };
+                let name = output.name();
+                let workspace = self.layout.active_workspace(&name);
+                (name, workspace)
+            }
+        };
+        self.layout
+            .insert(&output, workspace, entry.window, Some(surface));
+        // Re-apply identity-derived rule state and re-announce to bars --
+        // `detach_mapped_toplevel` cleared both when the window was hidden.
+        let (app_id, title) = self.toplevel_identity(&entry.surface);
+        let rule = self
+            .config
+            .resolve_window_rules(app_id.as_deref(), title.as_deref());
+        if let Some(opacity) = rule.opacity {
+            self.window_opacity.insert(entry.surface.clone(), opacity);
+        }
+        self.announce_foreign_toplevel(&entry.surface);
+        // Hand focus back to the restored window if the closing child had
+        // it, through the normal focus authority -- which requires the
+        // window to be visible first, hence the retile (pure `Space`
+        // bookkeeping; the caller's own later retile is idempotent).
+        if self.focused_window_surface().as_ref() == Some(surface) {
+            self.retile();
+            self.focus_window(Some(entry.surface), SERIAL_COUNTER.next_serial());
+        }
+    }
+
+    /// The visible tiled window on (`output`, `workspace`) that `child`
+    /// should swallow, if any: it must match a `swallow = true` window
+    /// rule and its client process must be an ancestor of `child`'s (the
+    /// terminal this app was launched from). Tiled windows only -- a
+    /// floating terminal spawning a viewer keeps both visible.
+    fn swallow_candidate(
+        &self,
+        child: &WlSurface,
+        output: &str,
+        workspace: u32,
+    ) -> Option<WlSurface> {
+        // Almost every config has no swallow rule; don't touch /proc then.
+        if !self.config.window_rules.iter().any(|rule| rule.swallow) {
+            return None;
+        }
+        let child_pid = self.client_pid(child)?;
+        let ancestors = ancestor_pids(child_pid);
+        self.layout
+            .windows_in(output, workspace)
+            .into_iter()
+            .find_map(|window| {
+                let surface = window.toplevel()?.wl_surface().clone();
+                if surface == *child {
+                    return None;
+                }
+                let pid = self.client_pid(&surface)?;
+                // Strict ancestor: a client opening a second window of its
+                // own process (pid == child_pid) isn't a spawned child.
+                if pid == child_pid || !ancestors.contains(&pid) {
+                    return None;
+                }
+                let (app_id, title) = self.toplevel_identity(&surface);
+                self.config
+                    .resolve_window_rules(app_id.as_deref(), title.as_deref())
+                    .swallow
+                    .then_some(surface)
+            })
+    }
+
+    /// The process ID on the other end of `surface`'s client socket
+    /// (`SO_PEERCRED`), or `None` for a dead client.
+    fn client_pid(&self, surface: &WlSurface) -> Option<i32> {
+        surface
+            .client()?
+            .get_credentials(&self.display_handle)
+            .ok()
+            .map(|credentials| credentials.pid)
     }
 
     pub(crate) fn preferred_output_for_toplevel(&self, surface: &WlSurface) -> Option<String> {
@@ -1246,6 +1394,33 @@ impl Smallvil {
     }
 }
 
+/// `pid`'s ancestor process chain (nearest first) from `/proc`, stopping
+/// at init. Capped well past any realistic terminal -> shell -> app
+/// nesting depth, in case of a PPid cycle in a racing/dying process tree.
+fn ancestor_pids(pid: i32) -> Vec<i32> {
+    let mut ancestors = Vec::new();
+    let mut current = pid;
+    for _ in 0..16 {
+        let Some(ppid) = std::fs::read_to_string(format!("/proc/{current}/status"))
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("PPid:"))
+                    .and_then(|value| value.trim().parse::<i32>().ok())
+            })
+        else {
+            break;
+        };
+        if ppid <= 1 {
+            break;
+        }
+        ancestors.push(ppid);
+        current = ppid;
+    }
+    ancestors
+}
+
 #[cfg(test)]
 mod tests {
     use super::{lifecycle_transition, ToplevelTracking, ToplevelTransition};
@@ -1284,6 +1459,18 @@ mod tests {
             lifecycle_transition(ToplevelTracking::Unmapped, true),
             ToplevelTransition::Map
         );
+    }
+
+    #[test]
+    fn ancestor_pids_walks_up_without_including_self() {
+        // The test process really has ancestors (the cargo test runner at
+        // minimum), and the walk must never report the process itself.
+        let own_pid = std::process::id() as i32;
+        let ancestors = super::ancestor_pids(own_pid);
+        assert!(!ancestors.is_empty());
+        assert!(!ancestors.contains(&own_pid));
+        // A PID that can't exist yields an empty chain, not a panic.
+        assert!(super::ancestor_pids(-1).is_empty());
     }
 
     #[test]
