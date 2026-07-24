@@ -2161,7 +2161,12 @@ impl Smallvil {
             let workspace = self.layout.active_workspace(&output.name());
             let area = self.output_tiling_area(&output)?;
             self.layout
-                .layout(&output.name(), workspace, area, self.gaps_for(&output.name(), workspace))
+                .layout(
+                    &output.name(),
+                    workspace,
+                    area,
+                    self.gaps_for(&output.name(), workspace),
+                )
                 .into_iter()
                 .find(|(_, rect)| rect.contains(pos.to_i32_round()))
                 .and_then(|(window, _)| {
@@ -2674,7 +2679,12 @@ impl Smallvil {
         let area = self.output_tiling_area(&output)?;
         let rect = self
             .layout
-            .layout(output_name, workspace, area, self.gaps_for(output_name, workspace))
+            .layout(
+                output_name,
+                workspace,
+                area,
+                self.gaps_for(output_name, workspace),
+            )
             .into_iter()
             .find_map(|(window, rect)| is_window(&window, surface).then_some(rect))?;
         Some(if self.pseudo_tiled.contains(surface) {
@@ -2959,7 +2969,12 @@ impl Smallvil {
                 let output = self.output_by_name(output_name)?;
                 let area = self.output_tiling_area(&output)?;
                 self.layout
-                    .layout(output_name, workspace, area, self.gaps_for(output_name, workspace))
+                    .layout(
+                        output_name,
+                        workspace,
+                        area,
+                        self.gaps_for(output_name, workspace),
+                    )
                     .into_iter()
                     .find_map(|(candidate, rect)| is_window(&candidate, surface).then_some(rect))
             });

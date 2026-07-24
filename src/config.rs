@@ -1867,7 +1867,10 @@ fn parse_workspace_gaps(raw: &[String], names: &HashMap<String, u32>) -> HashMap
     let mut gaps = HashMap::new();
     for entry in raw {
         let Some((workspace, pixels)) = entry.split_once(char::is_whitespace) else {
-            tracing::warn!(entry, "workspace_gaps needs a workspace and a pixel value, ignoring");
+            tracing::warn!(
+                entry,
+                "workspace_gaps needs a workspace and a pixel value, ignoring"
+            );
             continue;
         };
         let number = match workspace.parse::<u32>() {
@@ -1875,7 +1878,10 @@ fn parse_workspace_gaps(raw: &[String], names: &HashMap<String, u32>) -> HashMap
             Err(_) => names.get(workspace.trim()).copied(),
         };
         let (Some(number), Ok(pixels)) = (number, pixels.trim().parse::<i32>()) else {
-            tracing::warn!(entry, "Invalid workspace or pixel value in workspace_gaps, ignoring");
+            tracing::warn!(
+                entry,
+                "Invalid workspace or pixel value in workspace_gaps, ignoring"
+            );
             continue;
         };
         gaps.insert(number, pixels);
@@ -2119,10 +2125,10 @@ mod tests {
         let gaps = parse_workspace_gaps(
             &[
                 "1 0".to_string(),
-                "web 16".to_string(),      // name resolves via workspace_name
-                "nope 4".to_string(),      // unknown name, skipped
-                "2".to_string(),           // no pixel value, skipped
-                "2 lots".to_string(),      // bad pixel value, skipped
+                "web 16".to_string(), // name resolves via workspace_name
+                "nope 4".to_string(), // unknown name, skipped
+                "2".to_string(),      // no pixel value, skipped
+                "2 lots".to_string(), // bad pixel value, skipped
             ],
             &names,
         );
