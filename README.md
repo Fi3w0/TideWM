@@ -68,11 +68,16 @@ Full config reference, every action string, and the protocol matrix: [DOCUMENTAT
 
 ## Roadmap
 
-Foundation before visuals has been the plan from the start. The WM itself, tiling, multi-monitor, workspaces, layer-shell, IPC, XWayland, is done, and it already runs as a daily compositor on AMD hardware. What's left:
+Foundation before visuals has been the plan from the start, and as of 0.60.0 the foundation part is done: the WM itself — tiling, multi-monitor, workspaces, layer-shell, IPC, XWayland, screencasting — is feature-complete, runs as a daily compositor on AMD hardware, and has now passed a full nested test on real Nvidia hardware too. What's next, in order:
 
-- **Water/aqua render effects.** Ripples, wave-based workspace transitions, liquid window drag. This is the reason TideWM exists and it hasn't been started; render work was deliberately held off until the WM foundation was solid.
-- **Nvidia hardware.** The overlay-plane workaround exists in code but has never run on a real Nvidia GPU.
+- **An optimization pass.** Tighten what's there before building on top of it.
+- **Water/aqua render effects.** Ripples, wave-based workspace transitions, liquid window drag. This is the reason TideWM exists, and with the foundation milestone reached, it's finally next.
+- **Nvidia native run.** The nested (EGL/GLES) stack is verified on a real RTX 3060; the standalone DRM backend and its overlay-plane workaround still need a TTY session on Nvidia.
 - **AUR package.** Not yet, build from source for now.
+
+## Reporting bugs
+
+Bug reports are genuinely welcome, especially hardware/driver reports — real-hardware testing is what moved this project from "compiles" to "works". The issue templates ask for the details that actually matter (backend, GPU, logs), so filling one out usually gets a fix moving without a round-trip of questions.
 
 ## Quick Start
 
