@@ -526,7 +526,24 @@ impl Smallvil {
             }
         }
 
-        let mut damage_tracker = OutputDamageTracker::from_output(&output);
+        // Not `from_output`: that inherits the output's advertised
+        // transform, and the winit backend advertises `Flipped180` purely
+        // to cancel its EGL surface's y-orientation at present time (see
+        // `backend/winit.rs`) -- `render_output` multiplies the transform
+        // into the GL projection (smithay `damage/mod.rs`), so inheriting
+        // it bakes a real vertical flip into this offscreen texture and
+        // breaks `finish_capture_readback`'s top-down orientation contract
+        // (grim captures came out upside-down on winit, while real
+        // hardware with a Normal transform was fine). `Transform::Normal`
+        // matches what the window-capture path above always used. Known
+        // simplification: a udev output configured rotated/flipped gets
+        // its capture in logical (upright) orientation, not scanout
+        // orientation -- untested territory before this change too.
+        let mut damage_tracker = OutputDamageTracker::new(
+            (size.w, size.h),
+            output.current_scale().fractional_scale(),
+            Transform::Normal,
+        );
         let render_result = if locked {
             let lock_elements = self.lock_render_elements(&output, renderer);
             damage_tracker.render_output(
@@ -617,7 +634,10 @@ impl Smallvil {
                 .layers()
                 .filter(|layer| self.config.layer_blocks_capture(layer.namespace()))
                 .filter_map(|layer| layer_map.layer_geometry(layer))
-                .map(|geo| logical_rect_to_buffer(geo, size, scale, output.current_transform()))
+                // Must use the same transform the capture render above
+                // used (now always Normal), or the black-out rects land
+                // mirrored/rotated relative to the actual image content.
+                .map(|geo| logical_rect_to_buffer(geo, size, scale, Transform::Normal))
                 .collect()
         };
         self.finish_capture_readback(renderer, target, size, rect, excluded_rects, completion);
