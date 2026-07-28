@@ -1584,11 +1584,37 @@ fn parse_bool(value: &str) -> Option<bool> {
     }
 }
 
-/// Parses a CSS-style hex color: `#RRGGBB` or `#RRGGBBAA` (alpha byte
-/// silently ignored -- `peak_alpha` is the dedicated transparency knob).
+/// Parses a hex color in any of the forms users naturally write:
+/// - `#RRGGBB` / `#RRGGBBAA` -- requires quotes in `config.wave`, since
+///   the Waves grammar strips `#` as a comment outside quotes
+/// - `RRGGBB` / `RRGGBBAA` -- bare hex, no quotes needed
+/// - `rgb(RRGGBB)` / `rgba(RRGGBB, AA)` -- Hyprland-style, also no
+///   quotes needed (the alpha byte/argument is silently ignored for now;
+///   `peak_alpha` is the dedicated transparency knob).
+///
 /// Returns linear-space RGB in `[0.0, 1.0]`.
 fn parse_ripple_color(value: &str) -> Option<[f32; 3]> {
-    let hex = value.strip_prefix('#')?;
+    let v = value.trim();
+    // Hyprland-style: rgb(...) / rgba(...)
+    if let Some(inner) = v
+        .strip_prefix("rgb(")
+        .or_else(|| v.strip_prefix("rgba("))
+        .and_then(|s| s.strip_suffix(')'))
+    {
+        // rgba() may have a second comma-separated alpha argument --
+        // drop it (silently), since peak_alpha is the knob that controls
+        // transparency for ripples.
+        let hex_part = inner.split(',').next()?.trim();
+        return decode_hex_rgb(hex_part);
+    }
+    // Strip an optional leading `#` (only present if the user quoted
+    // the value in the config, since Waves otherwise eats `#` as a
+    // comment).
+    let v = v.strip_prefix('#').unwrap_or(v);
+    decode_hex_rgb(v)
+}
+
+fn decode_hex_rgb(hex: &str) -> Option<[f32; 3]> {
     let hex = match hex.len() {
         6 => hex,
         8 => &hex[..6],
@@ -1597,11 +1623,7 @@ fn parse_ripple_color(value: &str) -> Option<[f32; 3]> {
     let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
     let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
     let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-    Some([
-        r as f32 / 255.0,
-        g as f32 / 255.0,
-        b as f32 / 255.0,
-    ])
+    Some([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0])
 }
 
 fn parse_shapes(value: &str) -> Option<Vec<RippleShape>> {
@@ -3096,5 +3118,20 @@ mod tests {
             warnings.iter().any(|w| w.contains("not-a-real-action")),
             "expected the dropped action to be reported: {warnings:?}"
         );
+    }
+
+    #[test]
+    fn ripple_color_accepts_hash_bare_and_rgb_forms() {
+        // #RRGGBB (quoted in config.wave), bare RRGGBB (no quotes needed),
+        // and Hyprland-style rgb()/rgba() must all resolve to the same
+        // color, and an 8-digit hex silently drops its alpha byte.
+        let cyan = Some([0.0, 1.0, 1.0]);
+        assert_eq!(parse_ripple_color("#00ffff"), cyan);
+        assert_eq!(parse_ripple_color("00ffff"), cyan);
+        assert_eq!(parse_ripple_color("#00ffffff"), cyan);
+        assert_eq!(parse_ripple_color("rgb(00ffff)"), cyan);
+        assert_eq!(parse_ripple_color("rgba(00ffff, 128)"), cyan);
+        assert_eq!(parse_ripple_color("not-a-color"), None);
+        assert_eq!(parse_ripple_color("#zzzzzz"), None);
     }
 }
