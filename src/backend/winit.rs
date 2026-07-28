@@ -337,6 +337,12 @@ pub fn init_winit(
                             .chain(state.tab_strip_elements(renderer))
                             .chain(welcome_element)
                             .map(crate::backend::udev::OutputRenderElements::Composited)
+                            // Ripples render over windows but below the
+                            // chrome (toast/overview/picker/tab-strip)
+                            // above, so they chain in ahead of water-glass
+                            // and the space elements but after the
+                            // Composited chain. Phase R1, see ripple.rs.
+                            .chain(state.ripple_frame_elements(renderer, &entry.output))
                             .chain(water_glass_elements)
                             .chain(
                                 space_elements

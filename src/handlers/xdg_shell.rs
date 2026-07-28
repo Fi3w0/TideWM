@@ -928,6 +928,13 @@ impl Smallvil {
             self.focus_window(Some(surface.clone()), SERIAL_COUNTER.next_serial());
         }
 
+        // Droplet-impact ripple at the window's center -- Phase R1, see
+        // `ripple.rs`. After the placement/retile/focus block above so the
+        // window's `space.element_location` reflects its final spot,
+        // including any floating-rule conversion. No-op when `water_effects`
+        // is off; see `spawn_window_map_ripple`'s own doc.
+        self.spawn_window_map_ripple(surface);
+
         self.announce_foreign_toplevel(surface);
     }
 

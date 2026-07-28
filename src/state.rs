@@ -16,7 +16,7 @@ use smithay::{
                 surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
                 AsRenderElements, Kind, RenderElementStates,
             },
-            gles::{GlesRenderer, GlesTexProgram},
+            gles::{GlesPixelProgram, GlesRenderer, GlesTexProgram},
             utils::CommitCounter,
             ImportAll, ImportMem,
         },
@@ -193,6 +193,17 @@ pub struct Smallvil {
     /// `toast::font()`'s process-global `OnceLock`); see
     /// `water_glass::water_glass_program`.
     pub(crate) water_glass_program: Option<GlesTexProgram>,
+    /// Active impulse ripples (Phase R1, see `ripple.rs`). Each one lives
+    /// on a specific output, decays over its own `duration`, and is
+    /// `retain`-pruned once `finished()` inside `ripple_frame_elements`
+    /// so this Vec never grows past the in-flight count. Capped at a
+    /// small constant by `spawn_ripple` to bound the worst case (rapid
+    /// window mapping shouldn't stack unboundedly), matching the same
+    /// no-unbounded-growth steady-state discipline every other animation
+    /// field in this struct obeys.
+    pub(crate) ripples: Vec<crate::ripple::Ripple>,
+    /// Compiled lazily on first use; see `ripple::ripple_program`.
+    pub(crate) ripple_program: Option<GlesPixelProgram>,
     pub loop_handle: LoopHandle<'static, Smallvil>,
     pub loop_signal: LoopSignal,
 
@@ -1185,6 +1196,8 @@ impl Smallvil {
             window_opacity: HashMap::new(),
             backdrop_textures: HashMap::new(),
             water_glass_program: None,
+            ripples: Vec::new(),
+            ripple_program: None,
             loop_handle,
             loop_signal,
             socket_name,
@@ -2530,6 +2543,7 @@ impl Smallvil {
         self.toast
             .as_ref()
             .is_some_and(|toast| toast.needs_continued_redraw())
+            || self.ripples.iter().any(|r| !r.finished())
     }
 
     #[cfg(feature = "accessibility")]
@@ -2893,6 +2907,89 @@ impl Smallvil {
                     program.clone(),
                 ),
             ));
+        }
+        result
+    }
+
+    /// Spawns an impulse ripple (`ripple.rs`, Phase R1) at the center of
+    /// `surface`'s current rect on its primary output. The first trigger
+    /// wired up: a window mapping is a droplet impact at its center, the
+    /// most universally recognizable "water" cue and the easiest to
+    /// verify in a nested test (open a window, see the ripple). Focus-
+    /// change and urgent-hint triggers are deliberate later scope, see
+    /// AGENT.md's Phase R1 entry. No-op when `water_effects` is off (the
+    /// same master toggle water-glass respects), or when the window has
+    /// no current position (not yet mapped, on an inactive workspace),
+    /// or when the ripple cap is already reached -- bounding the worst-
+    /// case cost of rapid window mapping so this Vec can't grow
+    /// unboundedly.
+    pub(crate) fn spawn_window_map_ripple(&mut self, surface: &WlSurface) {
+        if !self.config.water_effects {
+            return;
+        }
+        const MAX_ACTIVE_RIPPLES: usize = 16;
+        if self.ripples.iter().filter(|r| !r.finished()).count() >= MAX_ACTIVE_RIPPLES {
+            return;
+        }
+        let Some(window) = self.mapped_toplevel_window(surface) else {
+            return;
+        };
+        let Some(output) = self.output_for_window(&window) else {
+            return;
+        };
+        let Some(output_geo) = self.space.output_geometry(&output) else {
+            return;
+        };
+        let Some(loc) = self.space.element_location(&window) else {
+            return;
+        };
+        let size = window.geometry().size;
+        // Output-local center, the coordinate space `Ripple::center`
+        // documents and `ripple_frame_elements` assumes.
+        let center = Point::from((
+            (loc.x - output_geo.loc.x + size.w / 2) as f64,
+            (loc.y - output_geo.loc.y + size.h / 2) as f64,
+        ));
+        self.ripples
+            .push(crate::ripple::Ripple::new(output.name(), center));
+        self.request_redraw();
+    }
+
+    /// Builds, for every not-yet-finished ripple on `output`, a
+    /// `RippleElement` ready to prepend into a frame's render-element
+    /// list. Prunes finished ripples as a side effect, so this Vec stays
+    /// bounded by the in-flight count between frames even if a caller
+    /// forgets to drain it. Lazily compiles the shader on first call.
+    pub(crate) fn ripple_frame_elements(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+    ) -> Vec<crate::backend::udev::OutputRenderElements> {
+        if !self.config.water_effects || self.ripples.is_empty() {
+            return Vec::new();
+        }
+        self.ripples.retain(|r| !r.finished());
+        if self.ripples.is_empty() {
+            return Vec::new();
+        }
+        let Some(program) = crate::ripple::ripple_program(&mut self.ripple_program, renderer)
+        else {
+            return Vec::new();
+        };
+        let output_name = output.name();
+        let mut result = Vec::new();
+        for ripple in self.ripples.iter_mut() {
+            if ripple.output != output_name {
+                continue;
+            }
+            if let Some(element) = crate::ripple::RippleElement::from_ripple(ripple, program.clone())
+            {
+                // `OutputRenderElements` doesn't have a `From<RippleElement>`
+                // impl; the `render_elements!` macro generates per-variant
+                // constructors as `OutputRenderElements::Ripple(..)` -- use
+                // that directly to avoid an unused `Into` chain.
+                result.push(crate::backend::udev::OutputRenderElements::Ripple(element));
+            }
         }
         result
     }

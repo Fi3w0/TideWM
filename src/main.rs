@@ -16,6 +16,7 @@ mod input;
 mod ipc;
 mod layout;
 mod overview;
+mod ripple;
 #[cfg(feature = "screencast")]
 mod screencast;
 #[cfg(feature = "screencast")]

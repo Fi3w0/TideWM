@@ -559,7 +559,10 @@ impl Smallvil {
             // water-glass window would show its plain, unrefracted content
             // instead of what's actually on screen, the exact "separate
             // render path forgot the new effect" bug class this codebase
-            // already hit once with session-lock (see AGENT.md).
+            // already hit once with session-lock (see AGENT.md). Same
+            // reasoning applies to ripples -- a screenshot mid-ripple
+            // would otherwise drop the ring from the captured frame.
+            let ripple_elements = self.ripple_frame_elements(renderer, &output);
             let water_glass_surfaces = self.water_glass_eligible_surfaces(&output);
             let water_glass_elements =
                 self.water_glass_frame_elements(renderer, &output, &water_glass_surfaces);
@@ -570,6 +573,7 @@ impl Smallvil {
             };
             match self.desktop_render_elements(renderer, &output, skip) {
                 Some(space_elements) => {
+                    elements.extend(ripple_elements);
                     elements.extend(water_glass_elements);
                     elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
                     if let Some(wallpaper) = self.wallpaper_element(&output, renderer) {

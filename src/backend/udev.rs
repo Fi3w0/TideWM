@@ -117,6 +117,10 @@ smithay::backend::renderer::element::render_elements! {
     /// Water-glass (Phase R1, see water_glass.rs), the reason this enum
     /// stopped being generic over the renderer -- see the comment above.
     WaterGlass = crate::water_glass::WaterGlassElement,
+    /// Impulse ripple (Phase R1, see ripple.rs), drawn over windows but
+    /// below toast/overview/picker/tab-strip chrome. Same renderer-
+    /// concrete-ness reason as `WaterGlass` above.
+    Ripple = crate::ripple::RippleElement,
 }
 
 struct SurfaceData {
@@ -1396,6 +1400,10 @@ fn render_surface(
             .chain(welcome_element)
             .map(OutputRenderElements::Composited)
             .chain(cursor_surface_element.into_iter().map(OutputRenderElements::Cursor))
+            // Ripples render over windows but below chrome; Phase R1,
+            // see ripple.rs. No-op (empty Vec) while locked or with
+            // water_effects off.
+            .chain(state.ripple_frame_elements(renderer, output))
             .chain(space_elements.into_iter().map(OutputRenderElements::Space))
             // Last is backmost: the built-in image never covers a client
             // or a layer-shell wallpaper placed above it.
