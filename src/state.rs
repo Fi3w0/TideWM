@@ -3004,11 +3004,47 @@ impl Smallvil {
         let Some(output_geo) = self.space.output_geometry(&output) else {
             return;
         };
-        let Some(loc) = self.space.element_location(&window) else {
+        // A tiled window's `window.geometry()` can lag one client
+        // round-trip behind retile()'s own just-computed target rect:
+        // retile() only *sends* a configure proposing the new size, it
+        // doesn't block on the client acking and committing a matching
+        // buffer -- so reading geometry() synchronously right after (as
+        // the map trigger does, straight after retile() in map_toplevel)
+        // sees the window's pre-tile size at its already-updated post-tile
+        // location. Confirmed live: a freshly mapped tiled window's map
+        // ripple anchored at (8, 8) -- the gap offset, i.e. loc with a
+        // near-zero size -- while a later ripple on the same settled
+        // window anchored at its real center. Same "space reflects where
+        // this is being moved to, not its real slot" gap
+        // `TileMoveGrab::drop` already hit; its own doc comment is why
+        // this reads from `Layouts::layout()` instead when possible.
+        // Skipped for fullscreen/pseudo-tiled windows, whose rect
+        // `retile()` overrides after reading it from `layout()` -- rarer,
+        // and reusing the plain path here is a no-op change for them, not
+        // a regression.
+        let win = self
+            .layout
+            .workspace_of(surface)
+            .filter(|_| {
+                !self.fullscreen.contains_key(surface) && !self.pseudo_tiled.contains(surface)
+            })
+            .zip(self.output_tiling_area(&output))
+            .and_then(|(workspace, area)| {
+                self.layout
+                    .layout(&output.name(), workspace, area, self.gaps_for(&output.name(), workspace))
+                    .into_iter()
+                    .find(|(w, _)| w.toplevel().is_some_and(|t| t.wl_surface() == surface))
+                    .map(|(_, rect)| rect)
+            })
+            .or_else(|| {
+                self.space
+                    .element_location(&window)
+                    .map(|loc| Rectangle::new(loc, window.geometry().size))
+            });
+        let Some(win) = win else {
             return;
         };
-        let size = window.geometry().size;
-        let win = Rectangle::new(loc - output_geo.loc, size);
+        let win = Rectangle::new(win.loc - output_geo.loc, win.size);
         let anchor = cfg.anchor.unwrap_or(RippleAnchor::Center);
         let (dx, dy) = cfg.offset.unwrap_or((0, 0));
         let base: Point<f64, Logical> = match anchor {
