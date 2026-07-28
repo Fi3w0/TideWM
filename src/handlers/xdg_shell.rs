@@ -1024,6 +1024,7 @@ impl Smallvil {
         self.pseudo_tiled.remove(surface);
         self.urgent.remove(surface);
         self.window_opacity.remove(surface);
+        self.backdrop_textures.remove(surface);
         self.focus_history.retain(|s| s != surface);
         // Closing the foreign-toplevel handle here (rather than only on
         // role destruction) means an xdg unmap also retires it; a later

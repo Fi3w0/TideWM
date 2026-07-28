@@ -554,7 +554,7 @@ impl Smallvil {
                 [0.0, 0.0, 0.0, 1.0],
             )
         } else {
-            match self.desktop_render_elements(renderer, &output) {
+            match self.desktop_render_elements(renderer, &output, None) {
                 Some(space_elements) => {
                     elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
                     if let Some(wallpaper) = self.wallpaper_element(&output, renderer) {

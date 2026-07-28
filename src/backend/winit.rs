@@ -292,7 +292,7 @@ pub fn init_winit(
                             .and_then(|hint| hint.render_element(renderer, size));
                         let wallpaper_element = state.wallpaper_element(&entry.output, renderer);
                         let space_elements =
-                            match state.desktop_render_elements(renderer, &entry.output) {
+                            match state.desktop_render_elements(renderer, &entry.output, None) {
                                 Some(elements) => elements,
                                 None => {
                                     tracing::warn!("Failed to gather nested output elements");
@@ -395,6 +395,11 @@ pub fn init_winit(
                 // of TideWM's own frame.
                 let renderer = entry.backend.renderer();
                 state.render_pending_captures(renderer, &entry.output, false);
+                // Same FBO-only, post-submit timing as the capture call
+                // just above, for the same reason (see its own comment)
+                // -- Phase R0.5, see AGENT.md's "Render and visual
+                // identity roadmap".
+                state.capture_floating_backdrops(renderer, &entry.output);
 
                 let output = &entry.output;
                 if locked {

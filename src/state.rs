@@ -16,7 +16,7 @@ use smithay::{
                 surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
                 AsRenderElements, Kind, RenderElementStates,
             },
-            gles::GlesRenderer,
+            gles::{GlesRenderer, GlesTexture},
             ImportAll, ImportMem,
         },
         session::libseat::LibSeatSession,
@@ -182,6 +182,14 @@ pub struct Smallvil {
     /// Per-mapped-window alpha resolved from window rules. Missing entries
     /// are fully opaque.
     pub(crate) window_opacity: HashMap<WlSurface, f32>,
+    /// One frame behind: captured via `backdrop::capture_backdrop` after a
+    /// frame renders, for a water/decoration effect to sample building the
+    /// *next* frame's elements (Phase R0.5, see AGENT.md's "Render and
+    /// visual identity roadmap"). Nothing reads this yet -- capture and
+    /// storage land before the shader that consumes it. Evicted in
+    /// `detach_mapped_toplevel` alongside `window_opacity`, or this grows
+    /// for the life of the session.
+    pub(crate) backdrop_textures: HashMap<WlSurface, GlesTexture>,
     pub loop_handle: LoopHandle<'static, Smallvil>,
     pub loop_signal: LoopSignal,
 
@@ -872,10 +880,21 @@ impl Smallvil {
     /// `space_render_elements` helper. The returned vector is front-to-back.
     /// Fullscreen windows cover layer-shell Top/Overlay surfaces as requested;
     /// regular windows retain the protocol order above Bottom/Background.
+    /// `skip` omits one surface's own elements from the result -- used by
+    /// backdrop capture (`backdrop.rs`, Phase R0.5) to render "everything
+    /// behind window X" without X itself in the way. Built into the same
+    /// real walk every other caller uses (`None`) rather than filtering an
+    /// already-built list by index afterward: this list mixes windows and
+    /// layer-shell surfaces across two fullscreen-ordering passes, and
+    /// index arithmetic against that composition is exactly the kind of
+    /// off-by-one this project's front-to-back element-order convention
+    /// has already been burned by once (see session-lock's element-order
+    /// bug, AGENT.md).
     pub(crate) fn desktop_render_elements(
         &self,
         renderer: &mut GlesRenderer,
         output: &Output,
+        skip: Option<&WlSurface>,
     ) -> Option<Vec<SpaceRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>>>
     {
         self.space.output_geometry(output)?;
@@ -886,6 +905,7 @@ impl Smallvil {
             renderer: &mut GlesRenderer,
             output: &Output,
             fullscreen: bool,
+            skip: Option<&WlSurface>,
             result: &mut Vec<
                 SpaceRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>,
             >,
@@ -900,6 +920,9 @@ impl Smallvil {
                 if surface.is_some_and(|surface| state.fullscreen.contains_key(surface))
                     != fullscreen
                 {
+                    continue;
+                }
+                if surface.is_some_and(|surface| Some(surface) == skip) {
                     continue;
                 }
                 let Some(location) = state.space.element_location(window) else {
@@ -959,7 +982,7 @@ impl Smallvil {
             }
         }
 
-        append_windows(self, renderer, output, true, &mut result);
+        append_windows(self, renderer, output, true, skip, &mut result);
         append_layers(
             self,
             renderer,
@@ -967,7 +990,7 @@ impl Smallvil {
             &[WlrLayer::Overlay, WlrLayer::Top],
             &mut result,
         );
-        append_windows(self, renderer, output, false, &mut result);
+        append_windows(self, renderer, output, false, skip, &mut result);
         append_layers(
             self,
             renderer,
@@ -1152,6 +1175,7 @@ impl Smallvil {
             },
             space,
             window_opacity: HashMap::new(),
+            backdrop_textures: HashMap::new(),
             loop_handle,
             loop_signal,
             socket_name,
@@ -2679,6 +2703,75 @@ impl Smallvil {
             mode.size,
             output.current_scale().fractional_scale(),
         )
+    }
+
+    /// Captures the backdrop behind every currently-visible floating window
+    /// on `output` into `backdrop_textures`, one frame behind (see
+    /// `backdrop.rs`'s own doc comment for why this can't run inside the
+    /// same frame it's captured for). Gated on `water_effects` -- the
+    /// master toggle for this whole roadmap, and the first thing that
+    /// actually reads it. Nothing yet samples the stored texture; this is
+    /// capture and storage only (Phase R0.5), not the water-glass shader
+    /// (Phase R1) that will consume it.
+    ///
+    /// Tiled windows are deliberately out of scope here: they tile edge to
+    /// edge, so "what's behind" one is either another tile (visually
+    /// uninteresting to refract) or nothing this pass has a reason to
+    /// capture yet. Floating windows overlapping other content are the
+    /// case this effect is actually for.
+    pub(crate) fn capture_floating_backdrops(&mut self, renderer: &mut GlesRenderer, output: &Output) {
+        if !self.config.water_effects {
+            return;
+        }
+        let Some(output_geo) = self.space.output_geometry(output) else {
+            return;
+        };
+        let output_scale = output.current_scale().fractional_scale();
+
+        let surfaces: Vec<WlSurface> = self
+            .floating_workspace
+            .iter()
+            .filter(|(_, tag)| tag.output == output.name())
+            .map(|(surface, _)| surface.clone())
+            .collect();
+
+        for surface in surfaces {
+            let Some(location) = self
+                .floating_workspace
+                .get(&surface)
+                .map(|tag| tag.window.clone())
+                .and_then(|window| self.space.element_location(&window))
+            else {
+                // Hidden (different workspace) right now -- nothing to
+                // capture until it's visible again.
+                continue;
+            };
+            let Some(size) = self.mapped_toplevel_window(&surface).map(|w| w.geometry().size)
+            else {
+                continue;
+            };
+            let logical_rect = Rectangle::new(location - output_geo.loc, size);
+            let physical_rect = logical_rect.to_physical_precise_round(output_scale);
+
+            let Some(space_elements) = self.desktop_render_elements(renderer, output, Some(&surface))
+            else {
+                continue;
+            };
+            let behind: Vec<crate::backend::udev::OutputRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>> =
+                self.wallpaper_element(output, renderer)
+                    .map(crate::backend::udev::OutputRenderElements::Composited)
+                    .into_iter()
+                    .chain(
+                        space_elements
+                            .into_iter()
+                            .map(crate::backend::udev::OutputRenderElements::Space),
+                    )
+                    .collect();
+
+            if let Some(texture) = crate::backdrop::capture_backdrop(renderer, physical_rect, behind) {
+                self.backdrop_textures.insert(surface, texture);
+            }
+        }
     }
 
     pub(crate) fn tiled_rect_for_surface(

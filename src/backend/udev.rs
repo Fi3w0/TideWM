@@ -1341,7 +1341,7 @@ fn render_surface(
     let space_elements = if locked {
         Vec::new()
     } else {
-        state.desktop_render_elements(renderer, output)?
+        state.desktop_render_elements(renderer, output, None)?
     };
 
     let lock_elements = if locked {
