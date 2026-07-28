@@ -202,6 +202,11 @@ pub struct Config {
     /// checked once, at startup (see `main.rs`).
     pub show_welcome_hint: bool,
     pub water_effects: bool,
+    /// Global ripple defaults (Phase R1, see `ripple.rs`). Per-app
+    /// `rule { ripple { } }` overrides merge over these at resolve time
+    /// (`merge_over`). Stays `system_default()` when the user has no
+    /// `ripple { }` block so any new field added later just works.
+    pub ripple: RippleConfig,
     /// Forces the udev backend's software cursor to stay visible even when
     /// a client asks to hide it (`wl_pointer.set_cursor` with a null
     /// buffer, e.g. a terminal hiding its pointer glyph after inactivity --
@@ -395,6 +400,7 @@ impl Config {
             terminal: raw.terminal,
             show_welcome_hint: raw.show_welcome_hint,
             water_effects: raw.water_effects,
+            ripple: raw.ripple,
             cursor_always_visible: raw.cursor_always_visible,
             cursor_hide_after_ms: raw.cursor_hide_after_ms,
             workspace_auto_back_and_forth: raw.workspace_auto_back_and_forth,
@@ -461,6 +467,19 @@ impl Config {
             if rule.opacity.is_some() {
                 effective.opacity = rule.opacity;
             }
+            if let Some(rule_ripple) = &rule.ripple {
+                // Per-rule ripple overrides accumulate field-by-field:
+                // an earlier matching rule sets some knobs, a later one
+                // can layer more on top. Distinct from the "last wins"
+                // of scalars above because a `ripple { }` sub-block is
+                // itself a partial set, not a single value. Each
+                // matched rule's sub-block merges over whatever the
+                // previous matches left.
+                effective.ripple = Some(match effective.ripple.take() {
+                    Some(existing) => existing.merge_over(rule_ripple),
+                    None => rule_ripple.clone(),
+                });
+            }
         }
         effective
     }
@@ -485,6 +504,9 @@ struct RawConfig {
     terminal: String,
     show_welcome_hint: bool,
     water_effects: bool,
+    /// Same shape as `Config::ripple`. Stays `system_default()` if no
+    /// `ripple { }` block exists; mutated in place by `apply_ripple_block`.
+    ripple: RippleConfig,
     cursor_always_visible: bool,
     cursor_hide_after_ms: i32,
     workspace_auto_back_and_forth: bool,
@@ -618,6 +640,7 @@ impl Default for RawConfig {
             // (welcome.rs), that must resolve to off, not back to on.
             show_welcome_hint: false,
             water_effects: true,
+            ripple: RippleConfig::system_default(),
             cursor_always_visible: false,
             cursor_hide_after_ms: 0,
             workspace_auto_back_and_forth: false,
@@ -929,6 +952,212 @@ pub struct WindowRule {
     pub position: Option<(i32, i32)>,
     /// Exact floating size, `<width>x<height>` (same syntax as `position`).
     pub size: Option<(i32, i32)>,
+    /// Per-app ripple overrides; `None` fields inherit the global
+    /// `ripple { }` block. Set `enabled = false` inside this sub-block to
+    /// suppress ripples entirely for matching windows. See `RippleConfig`.
+    pub ripple: Option<RippleConfig>,
+}
+
+/// Which built-in shape a ripple draws. Multiple shapes can stack
+/// concurrently (the `shapes = ring square` config syntax), each
+/// producing its own per-frame render element sharing the same center,
+/// size, and alpha.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RippleShape {
+    /// Thin annulus expanding from the center. The classic droplet ring.
+    #[default]
+    Ring,
+    /// Square outline (Chebyshev-distance falloff) -- the same bounding
+    /// square, drawn as four edge segments instead of a circle.
+    Square,
+    /// Ring plus a small filled disc at the center that fades faster
+    /// than the ring, mimicking the impact crater a real droplet leaves
+    /// for a moment after the ring has begun to radiate.
+    Droplet,
+    /// Plus-sign / cross. Two perpendicular bars meeting at the center,
+    /// each fading at the bounding-square edge.
+    Cross,
+}
+
+/// Which Wayland/WM event causes a ripple. Multiple triggers can be
+/// enabled at once (the `triggers = map focus` config syntax); an
+/// empty `triggers` list means "use the global default triggers."
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum RippleTrigger {
+    /// A window's first real buffer mapping (the moment it appears on
+    /// screen). The default trigger if none are listed.
+    #[default]
+    Map,
+    /// Keyboard focus moving from one window to another.
+    Focus,
+    /// An xdg-protocol urgent hint (a window wanting attention without
+    /// stealing focus, e.g. an IM reply arriving).
+    Urgent,
+}
+
+/// Where a ripple's center sits relative to the trigger window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RippleAnchor {
+    /// The trigger window's geometric center. The default.
+    #[default]
+    Center,
+    /// The current pointer position when the ripple is spawned -- a
+    /// window-map ripple then appears where the click that spawned it
+    /// happened (or wherever the cursor was on focus change).
+    Cursor,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+/// Z-order layer a ripple renders in. Picks where in each backend's
+/// render-element chain the ripple elements get inserted -- the chains
+/// are front-to-back, index 0 topmost (this codebase's standing
+/// convention, see AGENT.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RippleLayer {
+    /// Above all windows, below chrome (toast/overview/picker/tab-strip).
+    /// The default; reads as a window-level effect.
+    #[default]
+    AboveWindows,
+    /// Below all windows, just above the wallpaper. Reads as a
+    /// background-level effect rather than an interaction cue.
+    BelowWindows,
+    /// Above everything, including chrome. Use when a ripple should
+    /// never be occluded by a bar or picker.
+    AboveAll,
+    /// Below everything, including the wallpaper. Rarely useful but
+    /// symmetric with `AboveAll`.
+    BelowAll,
+}
+
+/// Easing function for the ripple's radius/alpha progression. Picked
+/// once at spawn time and applied to both the radius and the alpha
+/// curve, so changing this single knob reshapes the whole feel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RippleEase {
+    /// Constant velocity. Visually mechanical, not water-like -- mostly
+    /// useful as a baseline for comparison when tuning other shapes.
+    Linear,
+    /// Fast start, decelerating toward peak radius. Default; matches the
+    /// physical-feel of a droplet impact's wavefront radiating outward
+    /// against increasing circumference.
+    #[default]
+    CubicOut,
+    /// Slow start and slow end, fast through the middle.
+    CubicInOut,
+    /// Slightly softer than `CubicOut`.
+    QuadOut,
+    /// Very fast start, near-instant deceleration. Aggressive, can read
+    /// as "snappy" rather than "watery" -- included because it suits
+    /// non-ring shapes (a cross or square outline) better than the
+    /// softer water easing does.
+    ExpOut,
+}
+
+/// A complete ripple configuration: every knob a user can set. Lives in
+/// `Config::ripple` as the global defaults; a partial copy lives on
+/// each `WindowRule::ripple` with only the fields the user explicitly
+/// set, merged over the globals at resolve time. `None` fields mean
+/// "inherit from the layer below" when this is a per-rule override;
+/// the global config has every field set to `Some(...)` via
+/// `system_default`.
+#[derive(Debug, Clone, Default)]
+pub struct RippleConfig {
+    /// Master enable. `None` in a per-rule config means "use the global
+    /// value"; `Some(false)` is how a rule disables ripples for a
+    /// specific app.
+    pub enabled: Option<bool>,
+    /// Shape(s) to draw. Empty in a per-rule config means "inherit the
+    /// global shapes." Multiple shapes layer concurrently, each as its
+    /// own render element sharing the same center/size/alpha.
+    pub shapes: Vec<RippleShape>,
+    /// Tint as linear RGB in `[0.0, 1.0]`. Parsed from CSS-style hex
+    /// (`#RRGGBB` / `#RRGGBBAA`, the alpha silently ignored for now --
+    /// transparency has its own `peak_alpha` knob).
+    pub color: Option<[f32; 3]>,
+    pub peak_radius: Option<f32>,
+    /// Ring/outline half-width in logical pixels.
+    pub thickness: Option<f32>,
+    pub duration_ms: Option<u32>,
+    /// Maximum alpha reached at spawn, in `[0.0, 1.0]`. Separate from
+    /// `color`'s alpha channel so a single hex color can be reused
+    /// across ripple intensities.
+    pub peak_alpha: Option<f32>,
+    pub ease: Option<RippleEase>,
+    pub anchor: Option<RippleAnchor>,
+    /// Logical-pixel offset from the anchor point, `<dx>x<dy>`. Lets a
+    /// rule shift the ripple without redefining the anchor itself.
+    pub offset: Option<(i32, i32)>,
+    pub layer: Option<RippleLayer>,
+    /// Which events trigger ripples in this scope. Empty in a per-rule
+    /// config means "inherit the global triggers"; empty in the global
+    /// config means `[Map]` (the conservative default, not the whole
+    /// event surface -- ripples on every focus change can feel busy).
+    pub triggers: Vec<RippleTrigger>,
+}
+
+impl RippleConfig {
+    /// The values used when the user has no `ripple { }` block at all.
+    /// Every field `Some`, so per-rule merges always have a real value
+    /// to fall back to.
+    pub fn system_default() -> Self {
+        Self {
+            enabled: Some(true),
+            shapes: vec![RippleShape::Ring],
+            color: Some([0.55, 0.85, 1.0]),
+            peak_radius: Some(220.0),
+            thickness: Some(8.0),
+            duration_ms: Some(650),
+            peak_alpha: Some(1.0),
+            ease: Some(RippleEase::CubicOut),
+            anchor: Some(RippleAnchor::Center),
+            offset: Some((0, 0)),
+            layer: Some(RippleLayer::AboveWindows),
+            triggers: vec![RippleTrigger::Map],
+        }
+    }
+
+    /// Merge `other` (per-rule, sparse) onto `self` (global, fully
+    /// populated). `Some` fields in `other` win; `None` inherits. Vec
+    /// fields (`shapes`, `triggers`) replace wholesale if non-empty,
+    /// else inherit -- consistent with how the rest of the config
+    /// treats "explicit list vs unset."
+    pub fn merge_over(&self, other: &RippleConfig) -> RippleConfig {
+        RippleConfig {
+            enabled: other.enabled.or(self.enabled),
+            shapes: if other.shapes.is_empty() {
+                self.shapes.clone()
+            } else {
+                other.shapes.clone()
+            },
+            color: other.color.or(self.color),
+            peak_radius: other.peak_radius.or(self.peak_radius),
+            thickness: other.thickness.or(self.thickness),
+            duration_ms: other.duration_ms.or(self.duration_ms),
+            peak_alpha: other.peak_alpha.or(self.peak_alpha),
+            ease: other.ease.or(self.ease),
+            anchor: other.anchor.or(self.anchor),
+            offset: other.offset.or(self.offset),
+            layer: other.layer.or(self.layer),
+            triggers: if other.triggers.is_empty() {
+                self.triggers.clone()
+            } else {
+                other.triggers.clone()
+            },
+        }
+    }
+
+    /// Whether this config wants a ripple on the given trigger.
+    pub fn fires_on(&self, trigger: RippleTrigger) -> bool {
+        let active = if self.triggers.is_empty() {
+            &[RippleTrigger::Map][..]
+        } else {
+            &self.triggers[..]
+        };
+        active.contains(&trigger)
+    }
 }
 
 impl WindowRule {
@@ -1147,6 +1376,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
     match keyword {
         "input" => apply_input_block(&mut raw.input, body),
         "xwayland" => apply_xwayland_block(&mut raw.xwayland, body),
+        "ripple" => apply_ripple_block(&mut raw.ripple, body),
         "output" => raw.outputs.push(lower_output_block(header, body)),
         "rule" => raw.window_rules.push(lower_window_rule_block(body)),
         "layer_rule" => raw.layer_rules.push(lower_layer_rule_block(body)),
@@ -1281,6 +1511,159 @@ fn apply_xwayland_block(xwayland: &mut XwaylandConfig, body: &[waves::Entry]) {
     }
 }
 
+/// Parses the body of a `ripple { }` block. Used both for the global
+/// block (mutating `RawConfig::ripple` in place) and for a per-rule
+/// `rule { ripple { } }` sub-block (mutating a fresh `RippleConfig` and
+/// stashing it on the rule). Empty fields stay `None`, which is what
+/// `merge_over` later reads as "inherit from the layer below."
+fn apply_ripple_block(cfg: &mut RippleConfig, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `ripple` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "enabled" => match parse_bool(value) {
+                Some(v) => cfg.enabled = Some(v),
+                None => tracing::warn!(value, "Expected `true` or `false` for ripple.enabled, ignoring"),
+            },
+            "shape" | "shapes" | "form" => match parse_shapes(value) {
+                Some(shapes) if !shapes.is_empty() => cfg.shapes = shapes,
+                _ => tracing::warn!(value, "Expected one or more of: ring square droplet cross, ignoring"),
+            },
+            "color" => match parse_ripple_color(value) {
+                Some(c) => cfg.color = Some(c),
+                None => tracing::warn!(value, "Expected a hex color (#RRGGBB or #RRGGBBAA), ignoring"),
+            },
+            "peak_radius" | "radius" => match value.parse::<f32>() {
+                Ok(v) if v.is_finite() && v > 0.0 => cfg.peak_radius = Some(v),
+                _ => tracing::warn!(value, "Expected a positive number for ripple.peak_radius, ignoring"),
+            },
+            "thickness" => match value.parse::<f32>() {
+                Ok(v) if v.is_finite() && v > 0.0 => cfg.thickness = Some(v),
+                _ => tracing::warn!(value, "Expected a positive number for ripple.thickness, ignoring"),
+            },
+            "duration_ms" | "duration" => match value.parse::<u32>() {
+                Ok(v) if v > 0 => cfg.duration_ms = Some(v),
+                _ => tracing::warn!(value, "Expected a positive integer for ripple.duration_ms, ignoring"),
+            },
+            "peak_alpha" | "alpha" => match value.parse::<f32>() {
+                Ok(v) if v.is_finite() => cfg.peak_alpha = Some(v.clamp(0.0, 1.0)),
+                _ => tracing::warn!(value, "Expected a number from 0.0 to 1.0 for ripple.peak_alpha, ignoring"),
+            },
+            "ease" => match parse_ease(value) {
+                Some(e) => cfg.ease = Some(e),
+                None => tracing::warn!(value, "Expected one of: linear cubic-out cubic-in-out quad-out exp-out, ignoring"),
+            },
+            "anchor" => match parse_anchor(value) {
+                Some(a) => cfg.anchor = Some(a),
+                None => tracing::warn!(value, "Expected one of: center cursor topleft topright bottomleft bottomright, ignoring"),
+            },
+            "offset" => match parse_position(value) {
+                Some(o) => cfg.offset = Some(o),
+                None => tracing::warn!(value, "Expected <dx>x<dy> for ripple.offset, ignoring"),
+            },
+            "layer" => match parse_layer(value) {
+                Some(l) => cfg.layer = Some(l),
+                None => tracing::warn!(value, "Expected one of: above-windows below-windows above-all below-all, ignoring"),
+            },
+            "triggers" => match parse_triggers(value) {
+                Some(triggers) if !triggers.is_empty() => cfg.triggers = triggers,
+                _ => tracing::warn!(value, "Expected one or more of: map focus urgent, ignoring"),
+            },
+            other => tracing::warn!(key = %other, "Unknown key in `ripple` block, ignoring"),
+        }
+    }
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// Parses a CSS-style hex color: `#RRGGBB` or `#RRGGBBAA` (alpha byte
+/// silently ignored -- `peak_alpha` is the dedicated transparency knob).
+/// Returns linear-space RGB in `[0.0, 1.0]`.
+fn parse_ripple_color(value: &str) -> Option<[f32; 3]> {
+    let hex = value.strip_prefix('#')?;
+    let hex = match hex.len() {
+        6 => hex,
+        8 => &hex[..6],
+        _ => return None,
+    };
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some([
+        r as f32 / 255.0,
+        g as f32 / 255.0,
+        b as f32 / 255.0,
+    ])
+}
+
+fn parse_shapes(value: &str) -> Option<Vec<RippleShape>> {
+    let mut out = Vec::new();
+    for tok in value.split_whitespace() {
+        match tok {
+            "ring" => out.push(RippleShape::Ring),
+            "square" => out.push(RippleShape::Square),
+            "droplet" => out.push(RippleShape::Droplet),
+            "cross" => out.push(RippleShape::Cross),
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+fn parse_triggers(value: &str) -> Option<Vec<RippleTrigger>> {
+    let mut out = Vec::new();
+    for tok in value.split_whitespace() {
+        match tok {
+            "map" => out.push(RippleTrigger::Map),
+            "focus" => out.push(RippleTrigger::Focus),
+            "urgent" => out.push(RippleTrigger::Urgent),
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+fn parse_anchor(value: &str) -> Option<RippleAnchor> {
+    match value {
+        "center" => Some(RippleAnchor::Center),
+        "cursor" => Some(RippleAnchor::Cursor),
+        "topleft" => Some(RippleAnchor::TopLeft),
+        "topright" => Some(RippleAnchor::TopRight),
+        "bottomleft" => Some(RippleAnchor::BottomLeft),
+        "bottomright" => Some(RippleAnchor::BottomRight),
+        _ => None,
+    }
+}
+
+fn parse_layer(value: &str) -> Option<RippleLayer> {
+    match value {
+        "above-windows" => Some(RippleLayer::AboveWindows),
+        "below-windows" => Some(RippleLayer::BelowWindows),
+        "above-all" => Some(RippleLayer::AboveAll),
+        "below-all" => Some(RippleLayer::BelowAll),
+        _ => None,
+    }
+}
+
+fn parse_ease(value: &str) -> Option<RippleEase> {
+    match value {
+        "linear" => Some(RippleEase::Linear),
+        "cubic-out" => Some(RippleEase::CubicOut),
+        "cubic-in-out" => Some(RippleEase::CubicInOut),
+        "quad-out" => Some(RippleEase::QuadOut),
+        "exp-out" => Some(RippleEase::ExpOut),
+        _ => None,
+    }
+}
+
 fn apply_switch_events_block(switch_events: &mut SwitchEventsRaw, body: &[waves::Entry]) {
     for entry in body {
         let waves::Entry::Assign(key, value) = entry else {
@@ -1332,51 +1715,67 @@ fn lower_output_block(header: &str, body: &[waves::Entry]) -> OutputConfig {
 fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
     let mut rule = WindowRule::default();
     for entry in body {
-        let waves::Entry::Assign(key, value) = entry else {
-            tracing::warn!("Unexpected entry in `rule` block, ignoring");
-            continue;
-        };
-        match key.as_str() {
-            "app_id" => rule.app_id = Some(value.clone()),
-            "title" => rule.title = Some(value.clone()),
-            "app_id_regex" => match regex::Regex::new(value) {
-                Ok(pattern) => rule.app_id_regex = Some(pattern),
-                Err(err) => tracing::warn!(value, %err, "Invalid app_id_regex, ignoring"),
+        match entry {
+            waves::Entry::Assign(key, value) => match key.as_str() {
+                "app_id" => rule.app_id = Some(value.clone()),
+                "title" => rule.title = Some(value.clone()),
+                "app_id_regex" => match regex::Regex::new(value) {
+                    Ok(pattern) => rule.app_id_regex = Some(pattern),
+                    Err(err) => tracing::warn!(value, %err, "Invalid app_id_regex, ignoring"),
+                },
+                "title_regex" => match regex::Regex::new(value) {
+                    Ok(pattern) => rule.title_regex = Some(pattern),
+                    Err(err) => tracing::warn!(value, %err, "Invalid title_regex, ignoring"),
+                },
+                "workspace" => match value.parse() {
+                    Ok(n) => rule.workspace = Some(n),
+                    Err(_) => tracing::warn!(value, "Expected a workspace number, ignoring"),
+                },
+                "output" => rule.output = Some(value.clone()),
+                "float" => set_bool(&mut rule.float, key, value),
+                "pseudo_tile" => set_bool(&mut rule.pseudo_tile, key, value),
+                "pin" => set_bool(&mut rule.pin, key, value),
+                "tile" => set_bool(&mut rule.tile, key, value),
+                "no_focus" => set_bool(&mut rule.no_focus, key, value),
+                "maximize" => set_bool(&mut rule.maximize, key, value),
+                "fullscreen" => set_bool(&mut rule.fullscreen, key, value),
+                "block_capture" => set_bool(&mut rule.block_capture, key, value),
+                "swallow" => set_bool(&mut rule.swallow, key, value),
+                "opacity" => match value.parse::<f32>() {
+                    Ok(value) if value.is_finite() => rule.opacity = Some(value.clamp(0.0, 1.0)),
+                    _ => tracing::warn!(value, "Expected a finite opacity from 0.0 to 1.0, ignoring"),
+                },
+                "position" => match parse_position(value) {
+                    Some(pos) => rule.position = Some(pos),
+                    None => tracing::warn!(value, "Expected <x>x<y> for a rule's position, ignoring"),
+                },
+                "size" => match parse_position(value) {
+                    Some(size) => rule.size = Some(size),
+                    None => tracing::warn!(
+                        value,
+                        "Expected <width>x<height> for a rule's size, ignoring"
+                    ),
+                },
+                "ripple" if value == "none" => {
+                    // Shorthand for a rule that matches the window but
+                    // suppresses any ripple on it. Equivalent to a full
+                    // `ripple { enabled = false }` sub-block.
+                    rule.ripple = Some(RippleConfig {
+                        enabled: Some(false),
+                        ..Default::default()
+                    });
+                }
+                other => tracing::warn!(key = %other, "Unknown key in `rule` block, ignoring"),
             },
-            "title_regex" => match regex::Regex::new(value) {
-                Ok(pattern) => rule.title_regex = Some(pattern),
-                Err(err) => tracing::warn!(value, %err, "Invalid title_regex, ignoring"),
-            },
-            "workspace" => match value.parse() {
-                Ok(n) => rule.workspace = Some(n),
-                Err(_) => tracing::warn!(value, "Expected a workspace number, ignoring"),
-            },
-            "output" => rule.output = Some(value.clone()),
-            "float" => set_bool(&mut rule.float, key, value),
-            "pseudo_tile" => set_bool(&mut rule.pseudo_tile, key, value),
-            "pin" => set_bool(&mut rule.pin, key, value),
-            "tile" => set_bool(&mut rule.tile, key, value),
-            "no_focus" => set_bool(&mut rule.no_focus, key, value),
-            "maximize" => set_bool(&mut rule.maximize, key, value),
-            "fullscreen" => set_bool(&mut rule.fullscreen, key, value),
-            "block_capture" => set_bool(&mut rule.block_capture, key, value),
-            "swallow" => set_bool(&mut rule.swallow, key, value),
-            "opacity" => match value.parse::<f32>() {
-                Ok(value) if value.is_finite() => rule.opacity = Some(value.clamp(0.0, 1.0)),
-                _ => tracing::warn!(value, "Expected a finite opacity from 0.0 to 1.0, ignoring"),
-            },
-            "position" => match parse_position(value) {
-                Some(pos) => rule.position = Some(pos),
-                None => tracing::warn!(value, "Expected <x>x<y> for a rule's position, ignoring"),
-            },
-            "size" => match parse_position(value) {
-                Some(size) => rule.size = Some(size),
-                None => tracing::warn!(
-                    value,
-                    "Expected <width>x<height> for a rule's size, ignoring"
-                ),
-            },
-            other => tracing::warn!(key = %other, "Unknown key in `rule` block, ignoring"),
+            waves::Entry::Block(keyword, _, ripple_body) if keyword == "ripple" => {
+                // Per-app ripple overrides. Start from a fresh empty
+                // `RippleConfig` (every field `None`) so unset fields
+                // inherit the global `ripple { }` block via `merge_over`.
+                let mut overrides = RippleConfig::default();
+                apply_ripple_block(&mut overrides, ripple_body);
+                rule.ripple = Some(overrides);
+            }
+            _ => tracing::warn!("Unexpected entry in `rule` block, ignoring"),
         }
     }
     rule
@@ -1943,6 +2342,24 @@ gaps = 8
 default_layout = bsp
 master_orientation = left
 bsp_split_bias = auto
+
+# Ripple (Phase R1 water identity). All values are the system defaults --
+# copy and uncomment what you want to change. Per-app overrides go in a
+# `rule { ripple { } }` sub-block (see below); the same fields work there.
+# ripple {
+#     enabled = true
+#     shapes = ring                # ring square droplet cross (multi = concurrent)
+#     color = #8EDDFF              # hex RGB
+#     peak_radius = 220            # logical pixels
+#     thickness = 8                # outline half-width, logical pixels
+#     duration_ms = 650
+#     peak_alpha = 1.0             # 0.0 to 1.0
+#     ease = cubic-out             # linear cubic-out cubic-in-out quad-out exp-out
+#     anchor = center              # center cursor topleft topright bottomleft bottomright
+#     offset = 0x0                 # <dx>x<dy>, added to anchor
+#     layer = above-windows        # above-all above-windows below-windows below-all
+#     triggers = map               # map focus urgent
+# }
 pseudo_tile_scale = 0.7
 
 # spawn_at_startup = waybar
@@ -2292,6 +2709,7 @@ mod tests {
             terminal: String::new(),
             show_welcome_hint: false,
             water_effects: true,
+            ripple: RippleConfig::system_default(),
             cursor_always_visible: false,
             cursor_hide_after_ms: 0,
             workspace_auto_back_and_forth: false,

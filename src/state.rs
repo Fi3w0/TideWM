@@ -114,6 +114,36 @@ smithay::backend::renderer::element::render_elements! {
     Surface = WaylandSurfaceRenderElement<R>,
 }
 
+/// The per-frame ripple elements grouped by their configured
+/// `RippleLayer`. Each backend's element-chain builder splices these
+/// four groups into the right positions in its front-to-back list --
+/// `AboveWindows` between chrome and windows, `BelowWindows` between
+/// wallpaper and windows, `AboveAll` at the very front, `BelowAll` at
+/// the very back. Empty groups just don't appear in the chain.
+#[derive(Default)]
+pub(crate) struct RippleLayers {
+    pub above_all: Vec<crate::backend::udev::OutputRenderElements>,
+    pub above_windows: Vec<crate::backend::udev::OutputRenderElements>,
+    pub below_windows: Vec<crate::backend::udev::OutputRenderElements>,
+    pub below_all: Vec<crate::backend::udev::OutputRenderElements>,
+}
+
+impl RippleLayers {
+    fn push(
+        &mut self,
+        layer: crate::config::RippleLayer,
+        element: crate::ripple::RippleElement,
+    ) {
+        let element = crate::backend::udev::OutputRenderElements::Ripple(element);
+        match layer {
+            crate::config::RippleLayer::AboveAll => self.above_all.push(element),
+            crate::config::RippleLayer::AboveWindows => self.above_windows.push(element),
+            crate::config::RippleLayer::BelowWindows => self.below_windows.push(element),
+            crate::config::RippleLayer::BelowAll => self.below_all.push(element),
+        }
+    }
+}
+
 pub struct Smallvil {
     pub start_time: std::time::Instant,
     pub socket_name: OsString,
@@ -1636,9 +1666,22 @@ impl Smallvil {
         surface: Option<WlSurface>,
         serial: smithay::utils::Serial,
     ) {
+        let previous_focus = self.window_focus.clone();
         self.on_demand_layer_focus = None;
         self.window_focus = surface.filter(|surface| self.window_is_visible(surface));
         self.reconcile_keyboard_focus(serial);
+
+        // Focus-change ripple: only on a transition between two real
+        // windows, not on the very first focus (from None) or when
+        // focus is being dropped (to None) -- both of those are noisy
+        // events that shouldn't animate anything. The map trigger
+        // already covers a window's first appearance; focus-trigger
+        // fires only on a real handoff.
+        if let Some(new_surface) = self.window_focus.clone() {
+            if previous_focus.as_ref() != Some(&new_surface) && previous_focus.is_some() {
+                self.spawn_ripple(&new_surface, crate::config::RippleTrigger::Focus);
+            }
+        }
     }
 
     /// Requests focus for an OnDemand/Exclusive layer selected by first map
@@ -2911,19 +2954,23 @@ impl Smallvil {
         result
     }
 
-    /// Spawns an impulse ripple (`ripple.rs`, Phase R1) at the center of
-    /// `surface`'s current rect on its primary output. The first trigger
-    /// wired up: a window mapping is a droplet impact at its center, the
-    /// most universally recognizable "water" cue and the easiest to
-    /// verify in a nested test (open a window, see the ripple). Focus-
-    /// change and urgent-hint triggers are deliberate later scope, see
-    /// AGENT.md's Phase R1 entry. No-op when `water_effects` is off (the
-    /// same master toggle water-glass respects), or when the window has
-    /// no current position (not yet mapped, on an inactive workspace),
-    /// or when the ripple cap is already reached -- bounding the worst-
-    /// case cost of rapid window mapping so this Vec can't grow
-    /// unboundedly.
-    pub(crate) fn spawn_window_map_ripple(&mut self, surface: &WlSurface) {
+    /// Spawns an impulse ripple (`ripple.rs`, Phase R1) on `trigger`,
+    /// centered per the resolved `ripple { }` config (and any per-rule
+    /// `ripple { }` override matched by `surface`'s app_id/title). The
+    /// map trigger is the only call site today; focus-change and urgent
+    /// triggers will reuse this same function once they're wired up.
+    ///
+    /// No-op when:
+    /// - `water_effects` is off (the master identity toggle),
+    /// - the resolved ripple config's `enabled` is `false` (e.g. a rule
+    ///   set `ripple = none` for this app),
+    /// - the resolved config's `triggers` doesn't include `trigger`,
+    /// - the window has no current position (not yet mapped, on an
+    ///   inactive workspace),
+    /// - the ripple cap is reached (bounding the worst-case cost of
+    ///   rapid window mapping so `self.ripples` can't grow unboundedly).
+    pub(crate) fn spawn_ripple(&mut self, surface: &WlSurface, trigger: crate::config::RippleTrigger) {
+        use crate::config::RippleAnchor;
         if !self.config.water_effects {
             return;
         }
@@ -2931,6 +2978,23 @@ impl Smallvil {
         if self.ripples.iter().filter(|r| !r.finished()).count() >= MAX_ACTIVE_RIPPLES {
             return;
         }
+        // Resolve the per-window-rule ripple override and merge over the
+        // global `ripple { }` block. `resolve_window_rules` returns a
+        // WindowRule whose `ripple` field is `Some(...)` only if at
+        // least one matching rule declared a ripple sub-block (or the
+        // `ripple = none` shorthand).
+        let (app_id, title) = self.toplevel_identity(surface);
+        let rule = self
+            .config
+            .resolve_window_rules(app_id.as_deref(), title.as_deref());
+        let cfg = match &rule.ripple {
+            Some(rule_cfg) => self.config.ripple.merge_over(rule_cfg),
+            None => self.config.ripple.clone(),
+        };
+        if cfg.enabled == Some(false) || !cfg.fires_on(trigger) {
+            return;
+        }
+
         let Some(window) = self.mapped_toplevel_window(surface) else {
             return;
         };
@@ -2944,15 +3008,58 @@ impl Smallvil {
             return;
         };
         let size = window.geometry().size;
-        // Output-local center, the coordinate space `Ripple::center`
-        // documents and `ripple_frame_elements` assumes.
-        let center = Point::from((
-            (loc.x - output_geo.loc.x + size.w / 2) as f64,
-            (loc.y - output_geo.loc.y + size.h / 2) as f64,
-        ));
+        let win = Rectangle::new(loc - output_geo.loc, size);
+        let anchor = cfg.anchor.unwrap_or(RippleAnchor::Center);
+        let (dx, dy) = cfg.offset.unwrap_or((0, 0));
+        let base: Point<f64, Logical> = match anchor {
+            RippleAnchor::Center => Point::from((
+                win.loc.x as f64 + win.size.w as f64 / 2.0,
+                win.loc.y as f64 + win.size.h as f64 / 2.0,
+            )),
+            RippleAnchor::Cursor => {
+                // Cursor is in global logical coords; convert to this
+                // output's local space by subtracting its geometry loc.
+                self.seat
+                    .get_pointer()
+                    .map(|p| p.current_location())
+                    .map(|g| {
+                        Point::from((
+                            g.x - output_geo.loc.x as f64,
+                            g.y - output_geo.loc.y as f64,
+                        ))
+                    })
+                    .unwrap_or_else(|| {
+                        Point::from((
+                            win.loc.x as f64 + win.size.w as f64 / 2.0,
+                            win.loc.y as f64 + win.size.h as f64 / 2.0,
+                        ))
+                    })
+            }
+            RippleAnchor::TopLeft => Point::from((win.loc.x as f64, win.loc.y as f64)),
+            RippleAnchor::TopRight => Point::from((
+                win.loc.x as f64 + win.size.w as f64,
+                win.loc.y as f64,
+            )),
+            RippleAnchor::BottomLeft => Point::from((
+                win.loc.x as f64,
+                win.loc.y as f64 + win.size.h as f64,
+            )),
+            RippleAnchor::BottomRight => Point::from((
+                win.loc.x as f64 + win.size.w as f64,
+                win.loc.y as f64 + win.size.h as f64,
+            )),
+        };
+        let center = Point::from((base.x + dx as f64, base.y + dy as f64));
         self.ripples
-            .push(crate::ripple::Ripple::new(output.name(), center));
+            .push(crate::ripple::Ripple::new(output.name(), center, cfg));
         self.request_redraw();
+    }
+
+    /// Back-compat alias for the first call site, kept while focus/urgent
+    /// triggers are being wired up -- new call sites should use
+    /// `spawn_ripple` with an explicit trigger directly.
+    pub(crate) fn spawn_window_map_ripple(&mut self, surface: &WlSurface) {
+        self.spawn_ripple(surface, crate::config::RippleTrigger::Map);
     }
 
     /// Builds, for every not-yet-finished ripple on `output`, a
@@ -2960,38 +3067,39 @@ impl Smallvil {
     /// list. Prunes finished ripples as a side effect, so this Vec stays
     /// bounded by the in-flight count between frames even if a caller
     /// forgets to drain it. Lazily compiles the shader on first call.
+    ///
+    /// Ripples are grouped by their configured `layer` (`RippleLayer`)
+    /// so the backend element-chain builders can splice each group into
+    /// the right z-position: `AboveWindows` ripples go over windows but
+    /// under chrome, `BelowWindows` go between wallpaper and windows,
+    /// `AboveAll` goes at the very front, `BelowAll` at the very back.
     pub(crate) fn ripple_frame_elements(
         &mut self,
         renderer: &mut GlesRenderer,
         output: &Output,
-    ) -> Vec<crate::backend::udev::OutputRenderElements> {
+    ) -> RippleLayers {
+        let mut layers = RippleLayers::default();
         if !self.config.water_effects || self.ripples.is_empty() {
-            return Vec::new();
+            return layers;
         }
         self.ripples.retain(|r| !r.finished());
         if self.ripples.is_empty() {
-            return Vec::new();
+            return layers;
         }
         let Some(program) = crate::ripple::ripple_program(&mut self.ripple_program, renderer)
         else {
-            return Vec::new();
+            return layers;
         };
         let output_name = output.name();
-        let mut result = Vec::new();
         for ripple in self.ripples.iter_mut() {
             if ripple.output != output_name {
                 continue;
             }
-            if let Some(element) = crate::ripple::RippleElement::from_ripple(ripple, program.clone())
-            {
-                // `OutputRenderElements` doesn't have a `From<RippleElement>`
-                // impl; the `render_elements!` macro generates per-variant
-                // constructors as `OutputRenderElements::Ripple(..)` -- use
-                // that directly to avoid an unused `Into` chain.
-                result.push(crate::backend::udev::OutputRenderElements::Ripple(element));
+            for element in crate::ripple::RippleElement::from_ripple(ripple, program.clone()) {
+                layers.push(ripple.layer(), element);
             }
         }
-        result
+        layers
     }
 
     pub(crate) fn tiled_rect_for_surface(

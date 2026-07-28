@@ -329,31 +329,41 @@ pub fn init_winit(
                                 continue;
                             }
                         };
-                        let elements: Vec<crate::backend::udev::OutputRenderElements> = picker_element
-                            .into_iter()
-                            .chain(overview_element)
-                            .chain(toast_element)
-                            .chain(error_element)
-                            .chain(state.tab_strip_elements(renderer))
-                            .chain(welcome_element)
-                            .map(crate::backend::udev::OutputRenderElements::Composited)
-                            // Ripples render over windows but below the
-                            // chrome (toast/overview/picker/tab-strip)
-                            // above, so they chain in ahead of water-glass
-                            // and the space elements but after the
-                            // Composited chain. Phase R1, see ripple.rs.
-                            .chain(state.ripple_frame_elements(renderer, &entry.output))
-                            .chain(water_glass_elements)
-                            .chain(
-                                space_elements
-                                    .into_iter()
-                                    .map(crate::backend::udev::OutputRenderElements::Space),
-                            )
-                            .chain(
-                                wallpaper_element
-                                    .map(crate::backend::udev::OutputRenderElements::Composited),
-                            )
-                            .collect();
+                        // Ripple layers are grouped by `RippleLayer` so
+                        // each backend can splice them at the right z
+                        // position in the front-to-back list: AboveAll
+                        // at the very front, AboveWindows between chrome
+                        // and windows, BelowWindows between windows and
+                        // wallpaper, BelowAll at the very back. Built as
+                        // a Vec directly rather than `.chain()`ed because
+                        // four distinct insertion points don't fit the
+                        // chain's single-insertion-point shape.
+                        let ripple_layers = state.ripple_frame_elements(renderer, &entry.output);
+                        let mut elements: Vec<crate::backend::udev::OutputRenderElements> =
+                            ripple_layers.above_all;
+                        elements.extend(
+                            picker_element
+                                .into_iter()
+                                .chain(overview_element)
+                                .chain(toast_element)
+                                .chain(error_element)
+                                .chain(state.tab_strip_elements(renderer))
+                                .chain(welcome_element)
+                                .map(crate::backend::udev::OutputRenderElements::Composited),
+                        );
+                        elements.extend(ripple_layers.above_windows);
+                        elements.extend(water_glass_elements);
+                        elements.extend(
+                            space_elements
+                                .into_iter()
+                                .map(crate::backend::udev::OutputRenderElements::Space),
+                        );
+                        elements.extend(ripple_layers.below_windows);
+                        elements.extend(
+                            wallpaper_element
+                                .map(crate::backend::udev::OutputRenderElements::Composited),
+                        );
+                        elements.extend(ripple_layers.below_all);
 
                         entry.damage_tracker.render_output(
                             renderer,

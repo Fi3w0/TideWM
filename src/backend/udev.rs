@@ -1387,9 +1387,9 @@ fn render_surface(
         state.wallpaper_element(output, renderer)
     };
 
-    let elements: Vec<OutputRenderElements> =
-        // Drawn first so it ends up topmost (index 0 is the front, this
-        // codebase's established render-element-list convention).
+    let ripple_layers = state.ripple_frame_elements(renderer, output);
+    let mut elements: Vec<OutputRenderElements> = ripple_layers.above_all;
+    elements.extend(
         picker_element
             .into_iter()
             .chain(overview_element)
@@ -1398,18 +1398,15 @@ fn render_surface(
             .chain(cursor_glyph_element)
             .chain(tab_strip_elements)
             .chain(welcome_element)
-            .map(OutputRenderElements::Composited)
-            .chain(cursor_surface_element.into_iter().map(OutputRenderElements::Cursor))
-            // Ripples render over windows but below chrome; Phase R1,
-            // see ripple.rs. No-op (empty Vec) while locked or with
-            // water_effects off.
-            .chain(state.ripple_frame_elements(renderer, output))
-            .chain(space_elements.into_iter().map(OutputRenderElements::Space))
-            // Last is backmost: the built-in image never covers a client
-            // or a layer-shell wallpaper placed above it.
-            .chain(wallpaper_element.map(OutputRenderElements::Composited))
-            .chain(lock_elements.into_iter().map(OutputRenderElements::Lock))
-            .collect();
+            .map(OutputRenderElements::Composited),
+    );
+    elements.extend(cursor_surface_element.into_iter().map(OutputRenderElements::Cursor));
+    elements.extend(ripple_layers.above_windows);
+    elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
+    elements.extend(ripple_layers.below_windows);
+    elements.extend(wallpaper_element.map(OutputRenderElements::Composited));
+    elements.extend(lock_elements.into_iter().map(OutputRenderElements::Lock));
+    elements.extend(ripple_layers.below_all);
 
     let render_result = surface.compositor.render_frame::<_, OutputRenderElements>(
         renderer,

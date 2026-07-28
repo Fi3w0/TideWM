@@ -562,7 +562,10 @@ impl Smallvil {
             // already hit once with session-lock (see AGENT.md). Same
             // reasoning applies to ripples -- a screenshot mid-ripple
             // would otherwise drop the ring from the captured frame.
-            let ripple_elements = self.ripple_frame_elements(renderer, &output);
+            // Ripple layers are respected just like the visible-frame
+            // loops: AboveAll frontmost, then chrome-less AboveWindows,
+            // then windows, then BelowWindows/wallpaper, then BelowAll.
+            let ripple_layers = self.ripple_frame_elements(renderer, &output);
             let water_glass_surfaces = self.water_glass_eligible_surfaces(&output);
             let water_glass_elements =
                 self.water_glass_frame_elements(renderer, &output, &water_glass_surfaces);
@@ -573,12 +576,15 @@ impl Smallvil {
             };
             match self.desktop_render_elements(renderer, &output, skip) {
                 Some(space_elements) => {
-                    elements.extend(ripple_elements);
+                    elements.extend(ripple_layers.above_all);
+                    elements.extend(ripple_layers.above_windows);
                     elements.extend(water_glass_elements);
                     elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
+                    elements.extend(ripple_layers.below_windows);
                     if let Some(wallpaper) = self.wallpaper_element(&output, renderer) {
                         elements.push(OutputRenderElements::Composited(wallpaper));
                     }
+                    elements.extend(ripple_layers.below_all);
                     damage_tracker.render_output(
                         renderer,
                         &mut target,
