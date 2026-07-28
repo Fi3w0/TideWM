@@ -3050,6 +3050,15 @@ impl Smallvil {
             )),
         };
         let center = Point::from((base.x + dx as f64, base.y + dy as f64));
+        tracing::debug!(
+            trigger = ?trigger,
+            output = output.name(),
+            center = ?center,
+            shapes = ?cfg.shapes,
+            color = ?cfg.color,
+            layer = ?cfg.layer,
+            "spawning ripple"
+        );
         self.ripples
             .push(crate::ripple::Ripple::new(output.name(), center, cfg));
         self.request_redraw();
