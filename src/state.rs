@@ -4615,6 +4615,11 @@ impl Smallvil {
             return;
         }
         self.urgent.insert(surface.clone());
+        // Single-shot for now, same as the map/focus triggers -- a no-op
+        // if the window's workspace is hidden, since spawn_ripple needs a
+        // real on-screen location. A repeating "pulse until acknowledged"
+        // is later scope (AGENT.md's Phase R1 entry), not built here.
+        self.spawn_ripple(surface, crate::config::RippleTrigger::Urgent);
         self.request_redraw();
     }
 
