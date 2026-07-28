@@ -24,6 +24,7 @@ mod state;
 mod tab_strip;
 mod toast;
 mod wallpaper;
+mod water_glass;
 mod waves;
 mod welcome;
 mod xwayland;

@@ -417,7 +417,7 @@ impl Smallvil {
         // layer-shell content from `layer_map_for_output` unconditionally,
         // independent of whatever `spaces` it's given.
         let mut elements: Vec<
-            OutputRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>,
+            OutputRenderElements,
         > = Vec::new();
         if !locked {
             // Pushed first so it ends up topmost (index 0 is the front,
@@ -554,8 +554,23 @@ impl Smallvil {
                 [0.0, 0.0, 0.0, 1.0],
             )
         } else {
-            match self.desktop_render_elements(renderer, &output, None) {
+            // Same water-glass substitution the visible-frame loops apply
+            // (`backend/winit.rs`) -- without it, a screenshot of a
+            // water-glass window would show its plain, unrefracted content
+            // instead of what's actually on screen, the exact "separate
+            // render path forgot the new effect" bug class this codebase
+            // already hit once with session-lock (see AGENT.md).
+            let water_glass_surfaces = self.water_glass_eligible_surfaces(&output);
+            let water_glass_elements =
+                self.water_glass_frame_elements(renderer, &output, &water_glass_surfaces);
+            let skip: &[WlSurface] = if water_glass_elements.is_empty() {
+                &[]
+            } else {
+                &water_glass_surfaces
+            };
+            match self.desktop_render_elements(renderer, &output, skip) {
                 Some(space_elements) => {
+                    elements.extend(water_glass_elements);
                     elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
                     if let Some(wallpaper) = self.wallpaper_element(&output, renderer) {
                         elements.push(OutputRenderElements::Composited(wallpaper));

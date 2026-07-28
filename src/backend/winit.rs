@@ -3,7 +3,7 @@ use std::time::Duration;
 use smithay::{
     backend::{
         renderer::{
-            damage::OutputDamageTracker, element::surface::WaylandSurfaceRenderElement,
+            damage::OutputDamageTracker,
             gles::GlesRenderer,
         },
         winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend},
@@ -15,6 +15,7 @@ use smithay::{
             EventLoop,
         },
         wayland_protocols::wp::presentation_time::server::wp_presentation_feedback,
+        wayland_server::protocol::wl_surface::WlSurface,
     },
     utils::{Rectangle, Transform},
     wayland::presentation::Refresh,
@@ -291,21 +292,44 @@ pub fn init_winit(
                             .flatten()
                             .and_then(|hint| hint.render_element(renderer, size));
                         let wallpaper_element = state.wallpaper_element(&entry.output, renderer);
-                        let space_elements =
-                            match state.desktop_render_elements(renderer, &entry.output, None) {
-                                Some(elements) => elements,
-                                None => {
-                                    tracing::warn!("Failed to gather nested output elements");
-                                    entry.dirty = true;
-                                    continue;
-                                }
-                            };
-                        let elements: Vec<
-                            crate::backend::udev::OutputRenderElements<
-                                GlesRenderer,
-                                WaylandSurfaceRenderElement<GlesRenderer>,
-                            >,
-                        > = picker_element
+                        // Pulled out of their normal z-slot (skip) and
+                        // rebuilt as their own element plus a water-glass
+                        // layer, prepended ahead of everything else in
+                        // space_elements -- see water_glass_frame_elements'
+                        // own doc comment for why this means "topmost
+                        // among windows," not real multi-window z-order.
+                        let water_glass_surfaces =
+                            state.water_glass_eligible_surfaces(&entry.output);
+                        let water_glass_elements = state.water_glass_frame_elements(
+                            renderer,
+                            &entry.output,
+                            &water_glass_surfaces,
+                        );
+                        // Only skip from the normal walk what actually got a
+                        // replacement element built -- a shader-compile
+                        // failure or missing output geometry makes
+                        // water_glass_frame_elements return empty, and
+                        // skipping windows the empty result won't draw would
+                        // make them vanish from the frame entirely rather
+                        // than just losing the effect.
+                        let skip: &[WlSurface] = if water_glass_elements.is_empty() {
+                            &[]
+                        } else {
+                            &water_glass_surfaces
+                        };
+                        let space_elements = match state.desktop_render_elements(
+                            renderer,
+                            &entry.output,
+                            skip,
+                        ) {
+                            Some(elements) => elements,
+                            None => {
+                                tracing::warn!("Failed to gather nested output elements");
+                                entry.dirty = true;
+                                continue;
+                            }
+                        };
+                        let elements: Vec<crate::backend::udev::OutputRenderElements> = picker_element
                             .into_iter()
                             .chain(overview_element)
                             .chain(toast_element)
@@ -313,6 +337,7 @@ pub fn init_winit(
                             .chain(state.tab_strip_elements(renderer))
                             .chain(welcome_element)
                             .map(crate::backend::udev::OutputRenderElements::Composited)
+                            .chain(water_glass_elements)
                             .chain(
                                 space_elements
                                     .into_iter()

@@ -16,7 +16,8 @@ use smithay::{
                 surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
                 AsRenderElements, Kind, RenderElementStates,
             },
-            gles::{GlesRenderer, GlesTexture},
+            gles::{GlesRenderer, GlesTexProgram},
+            utils::CommitCounter,
             ImportAll, ImportMem,
         },
         session::libseat::LibSeatSession,
@@ -49,7 +50,7 @@ use smithay::{
             Client, Display, DisplayHandle, Resource,
         },
     },
-    utils::{Clock, Logical, Monotonic, Point, Rectangle, Scale, Size, SERIAL_COUNTER},
+    utils::{Clock, Logical, Monotonic, Physical, Point, Rectangle, Scale, Size, SERIAL_COUNTER},
     wayland::{
         compositor::{get_parent, CompositorClientState, CompositorState},
         cursor_shape::CursorShapeManagerState,
@@ -183,13 +184,15 @@ pub struct Smallvil {
     /// are fully opaque.
     pub(crate) window_opacity: HashMap<WlSurface, f32>,
     /// One frame behind: captured via `backdrop::capture_backdrop` after a
-    /// frame renders, for a water/decoration effect to sample building the
-    /// *next* frame's elements (Phase R0.5, see AGENT.md's "Render and
-    /// visual identity roadmap"). Nothing reads this yet -- capture and
-    /// storage land before the shader that consumes it. Evicted in
+    /// frame renders, for water-glass (`water_glass.rs`, Phase R1) to
+    /// sample building the *next* frame's elements. Evicted in
     /// `detach_mapped_toplevel` alongside `window_opacity`, or this grows
     /// for the life of the session.
-    pub(crate) backdrop_textures: HashMap<WlSurface, GlesTexture>,
+    pub(crate) backdrop_textures: HashMap<WlSurface, crate::backdrop::BackdropCapture>,
+    /// Compiled lazily on first use (needs a live renderer, unlike
+    /// `toast::font()`'s process-global `OnceLock`); see
+    /// `water_glass::water_glass_program`.
+    pub(crate) water_glass_program: Option<GlesTexProgram>,
     pub loop_handle: LoopHandle<'static, Smallvil>,
     pub loop_signal: LoopSignal,
 
@@ -880,21 +883,26 @@ impl Smallvil {
     /// `space_render_elements` helper. The returned vector is front-to-back.
     /// Fullscreen windows cover layer-shell Top/Overlay surfaces as requested;
     /// regular windows retain the protocol order above Bottom/Background.
-    /// `skip` omits one surface's own elements from the result -- used by
-    /// backdrop capture (`backdrop.rs`, Phase R0.5) to render "everything
-    /// behind window X" without X itself in the way. Built into the same
-    /// real walk every other caller uses (`None`) rather than filtering an
-    /// already-built list by index afterward: this list mixes windows and
-    /// layer-shell surfaces across two fullscreen-ordering passes, and
-    /// index arithmetic against that composition is exactly the kind of
-    /// off-by-one this project's front-to-back element-order convention
-    /// has already been burned by once (see session-lock's element-order
-    /// bug, AGENT.md).
+    /// `skip` omits each listed surface's own elements from the result --
+    /// used by backdrop capture (`backdrop.rs`, Phase R0.5) to render
+    /// "everything behind window X" without X itself in the way, and by
+    /// water-glass (`water_glass.rs`, Phase R1) to pull every eligible
+    /// window out of its normal z-slot so it can be reinserted (its own
+    /// element plus a water-glass layer) at a caller-chosen position. A
+    /// slice rather than one surface since more than one window can be
+    /// water-glass-eligible on the same output at once. Built into the
+    /// same real walk every other caller uses (`&[]`) rather than
+    /// filtering an already-built list by index afterward: this list
+    /// mixes windows and layer-shell surfaces across two
+    /// fullscreen-ordering passes, and index arithmetic against that
+    /// composition is exactly the kind of off-by-one this project's
+    /// front-to-back element-order convention has already been burned by
+    /// once (see session-lock's element-order bug, AGENT.md).
     pub(crate) fn desktop_render_elements(
         &self,
         renderer: &mut GlesRenderer,
         output: &Output,
-        skip: Option<&WlSurface>,
+        skip: &[WlSurface],
     ) -> Option<Vec<SpaceRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>>>
     {
         self.space.output_geometry(output)?;
@@ -905,7 +913,7 @@ impl Smallvil {
             renderer: &mut GlesRenderer,
             output: &Output,
             fullscreen: bool,
-            skip: Option<&WlSurface>,
+            skip: &[WlSurface],
             result: &mut Vec<
                 SpaceRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>,
             >,
@@ -922,7 +930,7 @@ impl Smallvil {
                 {
                     continue;
                 }
-                if surface.is_some_and(|surface| Some(surface) == skip) {
+                if surface.is_some_and(|surface| skip.contains(surface)) {
                     continue;
                 }
                 let Some(location) = state.space.element_location(window) else {
@@ -1176,6 +1184,7 @@ impl Smallvil {
             space,
             window_opacity: HashMap::new(),
             backdrop_textures: HashMap::new(),
+            water_glass_program: None,
             loop_handle,
             loop_signal,
             socket_name,
@@ -2705,6 +2714,26 @@ impl Smallvil {
         )
     }
 
+    /// The physical-space rect a floating `surface` currently occupies on
+    /// `output`, or `None` if it's not visible there right now (hidden on
+    /// a different workspace -- a hidden window isn't in `space.elements()`
+    /// at all). Shared by backdrop capture and water-glass element
+    /// placement so both agree on exactly the same rect the window itself
+    /// renders at.
+    pub(crate) fn floating_window_physical_rect(
+        &self,
+        surface: &WlSurface,
+        output: &Output,
+    ) -> Option<Rectangle<i32, Physical>> {
+        let output_geo = self.space.output_geometry(output)?;
+        let output_scale = output.current_scale().fractional_scale();
+        let window = self.floating_workspace.get(surface)?.window.clone();
+        let location = self.space.element_location(&window)?;
+        let size = window.geometry().size;
+        let logical_rect = Rectangle::new(location - output_geo.loc, size);
+        Some(logical_rect.to_physical_precise_round(output_scale))
+    }
+
     /// Captures the backdrop behind every currently-visible floating window
     /// on `output` into `backdrop_textures`, one frame behind (see
     /// `backdrop.rs`'s own doc comment for why this can't run inside the
@@ -2723,10 +2752,6 @@ impl Smallvil {
         if !self.config.water_effects {
             return;
         }
-        let Some(output_geo) = self.space.output_geometry(output) else {
-            return;
-        };
-        let output_scale = output.current_scale().fractional_scale();
 
         let surfaces: Vec<WlSurface> = self
             .floating_workspace
@@ -2736,28 +2761,18 @@ impl Smallvil {
             .collect();
 
         for surface in surfaces {
-            let Some(location) = self
-                .floating_workspace
-                .get(&surface)
-                .map(|tag| tag.window.clone())
-                .and_then(|window| self.space.element_location(&window))
-            else {
+            let Some(physical_rect) = self.floating_window_physical_rect(&surface, output) else {
                 // Hidden (different workspace) right now -- nothing to
                 // capture until it's visible again.
                 continue;
             };
-            let Some(size) = self.mapped_toplevel_window(&surface).map(|w| w.geometry().size)
-            else {
-                continue;
-            };
-            let logical_rect = Rectangle::new(location - output_geo.loc, size);
-            let physical_rect = logical_rect.to_physical_precise_round(output_scale);
 
-            let Some(space_elements) = self.desktop_render_elements(renderer, output, Some(&surface))
+            let Some(space_elements) =
+                self.desktop_render_elements(renderer, output, std::slice::from_ref(&surface))
             else {
                 continue;
             };
-            let behind: Vec<crate::backend::udev::OutputRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>> =
+            let behind: Vec<crate::backend::udev::OutputRenderElements> =
                 self.wallpaper_element(output, renderer)
                     .map(crate::backend::udev::OutputRenderElements::Composited)
                     .into_iter()
@@ -2769,9 +2784,117 @@ impl Smallvil {
                     .collect();
 
             if let Some(texture) = crate::backdrop::capture_backdrop(renderer, physical_rect, behind) {
-                self.backdrop_textures.insert(surface, texture);
+                let (id, mut commit) = match self.backdrop_textures.get(&surface) {
+                    Some(existing) => (existing.id.clone(), existing.commit),
+                    None => (smithay::backend::renderer::element::Id::new(), CommitCounter::default()),
+                };
+                commit.increment();
+                self.backdrop_textures.insert(
+                    surface,
+                    crate::backdrop::BackdropCapture {
+                        texture,
+                        id,
+                        commit,
+                    },
+                );
             }
         }
+    }
+
+    /// Floating windows on `output` eligible for a water-glass layer this
+    /// frame: `water_effects` on, an `opacity` window rule below 1.0 set
+    /// (reusing that existing rule as the trigger rather than adding a new
+    /// config key -- "what shows through a semi-transparent window" is
+    /// already exactly what it means), and a backdrop already captured for
+    /// them. Callers pass this list to `desktop_render_elements`'s `skip`
+    /// so these windows are pulled out of their normal z-slot, then use
+    /// `water_glass_frame_elements` to build what replaces them.
+    pub(crate) fn water_glass_eligible_surfaces(&self, output: &Output) -> Vec<WlSurface> {
+        if !self.config.water_effects {
+            return Vec::new();
+        }
+        self.floating_workspace
+            .iter()
+            .filter(|(surface, tag)| {
+                tag.output == output.name()
+                    && self.window_opacity.get(*surface).is_some_and(|alpha| *alpha < 1.0)
+                    && self.backdrop_textures.contains_key(*surface)
+            })
+            .map(|(surface, _)| surface.clone())
+            .collect()
+    }
+
+    /// Builds, for each of `surfaces` (from `water_glass_eligible_surfaces`),
+    /// the window's own surface element immediately followed by its
+    /// water-glass layer -- in that order so the window's real (semi-
+    /// transparent) content draws on top of the opaque refracted backdrop,
+    /// not the other way around. Meant to be prepended ahead of the rest of
+    /// `desktop_render_elements`'s output (called with the same `surfaces`
+    /// as `skip`), which puts every eligible window topmost among windows;
+    /// see `water_glass.rs`'s module doc comment for why plain layering
+    /// (not real multi-window z-order) is the deliberate scope for this
+    /// first cut. Lazily compiles the shader on first call.
+    pub(crate) fn water_glass_frame_elements(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+        surfaces: &[WlSurface],
+    ) -> Vec<crate::backend::udev::OutputRenderElements>
+    {
+        let mut result = Vec::new();
+        if surfaces.is_empty() {
+            return result;
+        }
+        let Some(program) =
+            crate::water_glass::water_glass_program(&mut self.water_glass_program, renderer)
+        else {
+            return result;
+        };
+        let Some(output_geo) = self.space.output_geometry(output) else {
+            return result;
+        };
+        let output_scale = output.current_scale().fractional_scale();
+        let scale = Scale::from(output_scale);
+
+        for surface in surfaces {
+            let Some(capture) = self.backdrop_textures.get(surface) else {
+                continue;
+            };
+            let Some(physical_rect) = self.floating_window_physical_rect(surface, output) else {
+                continue;
+            };
+            let Some(window) = self.mapped_toplevel_window(surface) else {
+                continue;
+            };
+            let Some(location) = self.space.element_location(&window) else {
+                continue;
+            };
+            let alpha = self.window_opacity.get(surface).copied().unwrap_or(1.0);
+            let render_location = location - output_geo.loc - window.geometry().loc;
+
+            result.extend(
+                window
+                    .render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
+                        renderer,
+                        render_location.to_physical_precise_round(output_scale),
+                        scale,
+                        alpha,
+                    )
+                    .into_iter()
+                    .map(SpaceRenderElements::Surface)
+                    .map(crate::backend::udev::OutputRenderElements::Space),
+            );
+            result.push(crate::backend::udev::OutputRenderElements::WaterGlass(
+                crate::water_glass::WaterGlassElement::new(
+                    capture.id.clone(),
+                    capture.commit,
+                    capture.texture.clone(),
+                    physical_rect,
+                    program.clone(),
+                ),
+            ));
+        }
+        result
     }
 
     pub(crate) fn tiled_rect_for_surface(

@@ -25,13 +25,29 @@ use smithay::backend::{
         damage::OutputDamageTracker,
         element::{
             utils::{Relocate, RelocateRenderElement},
-            RenderElement,
+            Id, RenderElement,
         },
         gles::{GlesRenderer, GlesTexture},
+        utils::CommitCounter,
         Bind, Offscreen,
     },
 };
 use smithay::utils::{Buffer, Physical, Rectangle, Size, Transform};
+
+/// A backdrop capture plus the stable identity (`Id`) and change counter
+/// (`CommitCounter`) a `water_glass::WaterGlassElement` built from it needs
+/// to report to the damage tracker. `id` is created once per window the
+/// first time it's captured and reused on every recapture -- a fresh `Id`
+/// every frame would leak an orphaned entry in the damage tracker's own
+/// per-element bookkeeping for every frame this window is water-glass-
+/// eligible, never pruned. `commit` increments on every recapture so the
+/// tracker knows the content changed and redraws it, rather than assuming
+/// unchanged content and skipping the draw.
+pub struct BackdropCapture {
+    pub texture: GlesTexture,
+    pub id: Id,
+    pub commit: CommitCounter,
+}
 
 /// Renders `behind` -- elements positioned in the same output-physical
 /// space `rect` itself is given in -- into a fresh texture sized to

@@ -44,7 +44,7 @@ use smithay::{
                 Kind,
             },
             gles::GlesRenderer,
-            ImportAll, ImportDma, ImportMem,
+            ImportDma,
         },
         session::{libseat::LibSeatSession, Event as SessionEvent, Session},
         udev::{self, UdevBackend, UdevEvent},
@@ -89,19 +89,34 @@ type GbmDrmCompositor = DrmCompositor<
     DrmDeviceFd,
 >;
 
+// Fixed to `GlesRenderer` (the `<=GlesRenderer>` form, no remaining
+// generic parameter at all) rather than generic over a renderer type `R`
+// the way this used to be declared: water-glass (Phase R1, see
+// water_glass.rs) draws via a custom `GlesTexProgram`, which has no
+// generic-renderer equivalent, so a `WaterGlass` variant here can only
+// ever implement `RenderElement<GlesRenderer>`. This type was already only
+// ever instantiated with `GlesRenderer` (and its `E` parameter always
+// `WaylandSurfaceRenderElement<GlesRenderer>`) throughout this codebase --
+// there is no second renderer backend -- so making both concrete costs
+// nothing in practice and sidesteps a real limitation in how this macro
+// threads a `where` bound through to the generated enum's own field types
+// when a generic parameter is still involved.
 smithay::backend::renderer::element::render_elements! {
-    pub OutputRenderElements<R, E> where R: ImportAll + ImportMem;
-    Space = SpaceRenderElements<R, E>,
-    Cursor = WaylandSurfaceRenderElement<R>,
+    pub OutputRenderElements<=GlesRenderer>;
+    Space = SpaceRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>,
+    Cursor = WaylandSurfaceRenderElement<GlesRenderer>,
     /// Toast (see toast.rs) and the udev-only fallback cursor glyph (see
     /// cursor.rs) are both single CPU-composited memory buffers -- no need
     /// for two variants wrapping the same underlying element type.
-    Composited = MemoryRenderBufferRenderElement<R>,
+    Composited = MemoryRenderBufferRenderElement<GlesRenderer>,
     /// `state::LockRenderElement<R>` (blank fill + lock-surface content)
     /// nested as its own variant rather than two separate ones -- avoids
     /// an ambiguous `From<WaylandSurfaceRenderElement<R>>` with `Cursor`
     /// above, and keeps the blank-vs-surface choice in one shared place.
-    Lock = LockRenderElement<R>,
+    Lock = LockRenderElement<GlesRenderer>,
+    /// Water-glass (Phase R1, see water_glass.rs), the reason this enum
+    /// stopped being generic over the renderer -- see the comment above.
+    WaterGlass = crate::water_glass::WaterGlassElement,
 }
 
 struct SurfaceData {
@@ -1341,7 +1356,7 @@ fn render_surface(
     let space_elements = if locked {
         Vec::new()
     } else {
-        state.desktop_render_elements(renderer, output, None)?
+        state.desktop_render_elements(renderer, output, &[])?
     };
 
     let lock_elements = if locked {
@@ -1368,7 +1383,7 @@ fn render_surface(
         state.wallpaper_element(output, renderer)
     };
 
-    let elements: Vec<OutputRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>> =
+    let elements: Vec<OutputRenderElements> =
         // Drawn first so it ends up topmost (index 0 is the front, this
         // codebase's established render-element-list convention).
         picker_element
@@ -1388,10 +1403,7 @@ fn render_surface(
             .chain(lock_elements.into_iter().map(OutputRenderElements::Lock))
             .collect();
 
-    let render_result = surface.compositor.render_frame::<_, OutputRenderElements<
-        GlesRenderer,
-        WaylandSurfaceRenderElement<GlesRenderer>,
-    >>(
+    let render_result = surface.compositor.render_frame::<_, OutputRenderElements>(
         renderer,
         &elements,
         [0.05, 0.05, 0.05, 1.0],
