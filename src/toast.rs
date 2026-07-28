@@ -17,6 +17,8 @@ use smithay::{
     utils::{Physical, Size, Transform},
 };
 
+use crate::animation::Animation;
+
 const FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/AdwaitaSans-Regular.ttf");
 const FONT_SIZE: f32 = 15.0;
 // Errors carry a lot more text (a file path plus a parser message) than the
@@ -153,14 +155,14 @@ impl Toast {
         let alpha = match self.visible_for {
             None => 1.0,
             Some(visible_for) => {
-                let elapsed = self.shown_at.elapsed();
-                if elapsed < visible_for {
-                    1.0
-                } else if elapsed < visible_for + FADE_FOR {
-                    1.0 - (elapsed - visible_for).as_secs_f32() / FADE_FOR.as_secs_f32()
-                } else {
+                // Anchored at `shown_at + visible_for`, not "now" -- holds
+                // at 1.0 (its own `from`) until that instant arrives, same
+                // hold-then-fade shape the old elapsed-time branches had.
+                let fade = Animation::new(1.0, 0.0, self.shown_at + visible_for, FADE_FOR);
+                if fade.finished() {
                     return None;
                 }
+                fade.value()
             }
         };
 

@@ -4,6 +4,7 @@ mod handlers;
 
 #[cfg(feature = "accessibility")]
 mod accessibility;
+mod animation;
 mod backend;
 mod capture;
 mod config;

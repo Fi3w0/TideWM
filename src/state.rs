@@ -2487,6 +2487,18 @@ impl Smallvil {
         self.schedule_accessibility_sync();
     }
 
+    /// Whether something is still mid-animation and needs another frame
+    /// even though nothing else marked itself dirty in the meantime --
+    /// today that's just a fading toast, but this is the one place a future
+    /// water/decoration effect (ripple decay, workspace-transition
+    /// progress) plugs into instead of both backends growing their own
+    /// copy of this check, the way they used to for the toast alone.
+    pub fn has_active_animation(&self) -> bool {
+        self.toast
+            .as_ref()
+            .is_some_and(|toast| toast.needs_continued_redraw())
+    }
+
     #[cfg(feature = "accessibility")]
     fn schedule_accessibility_sync(&mut self) {
         const COALESCE: Duration = Duration::from_millis(50);
