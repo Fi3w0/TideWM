@@ -459,9 +459,14 @@ impl Smallvil {
             let idle_hidden = self.config.cursor_hide_after_ms > 0
                 && self.last_pointer_motion.elapsed()
                     >= std::time::Duration::from_millis(self.config.cursor_hide_after_ms as u64);
+            // Same lock-aware hide as `backend/udev.rs::render_surface` --
+            // a locked pointer's on-screen position is permanently stale,
+            // so a screenshot/screencast frame taken during a lock should
+            // not show a frozen system cursor glyph either.
+            let pointer_locked = self.pointer_is_locked();
             let forced_visible = CursorImageStatus::Named(CursorIcon::Default);
             let hidden = CursorImageStatus::Hidden;
-            let cursor_status = if idle_hidden {
+            let cursor_status = if idle_hidden || pointer_locked {
                 &hidden
             } else if matches!(self.cursor_status, CursorImageStatus::Hidden)
                 && self.config.cursor_always_visible

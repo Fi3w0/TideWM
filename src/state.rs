@@ -67,7 +67,7 @@ use smithay::{
         input_method::InputMethodManagerState,
         keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitState,
         output::OutputManagerState,
-        pointer_constraints::{with_pointer_constraint, PointerConstraintsState},
+        pointer_constraints::{with_pointer_constraint, PointerConstraint, PointerConstraintsState},
         pointer_gestures::PointerGesturesState,
         presentation::PresentationState,
         relative_pointer::RelativePointerManagerState,
@@ -2163,6 +2163,36 @@ impl Smallvil {
             current = get_parent(&s);
         }
         None
+    }
+
+    /// Whether the pointer sits under an active `wp-pointer-constraints-v1`
+    /// lock right now. A locked pointer never receives absolute motion
+    /// (`input.rs`'s motion handler skips the regular `motion()` call
+    /// entirely once locked), so its on-screen position is frozen wherever
+    /// the lock engaged -- rendering the system cursor glyph there just
+    /// shows a static arrow sitting on top of whatever the client (a game)
+    /// is drawing its own crosshair for. `cursor_position_hint`'s own doc
+    /// comment already claims the system cursor is hidden during a lock;
+    /// this is what actually makes that true.
+    pub(crate) fn pointer_is_locked(&self) -> bool {
+        let Some(pointer) = self.seat.get_pointer() else {
+            return false;
+        };
+        let Some(focus) = pointer.current_focus() else {
+            return false;
+        };
+        let Some(root) = self.root_with_constraint(&focus, &pointer) else {
+            return false;
+        };
+        let mut locked = false;
+        with_pointer_constraint(&root, &pointer, |c| {
+            if let Some(c) = c {
+                if c.is_active() {
+                    locked = matches!(&*c, PointerConstraint::Locked(_));
+                }
+            }
+        });
+        locked
     }
 
     /// Walk up through `surface`'s parent chain and return its root

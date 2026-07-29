@@ -1294,13 +1294,19 @@ fn render_surface(
     let idle_hidden = state.config.cursor_hide_after_ms > 0
         && state.last_pointer_motion.elapsed()
             >= Duration::from_millis(state.config.cursor_hide_after_ms as u64);
+    // A locked pointer (`wp-pointer-constraints-v1`, e.g. Minecraft's mouse
+    // look) never receives absolute motion, so its last on-screen position
+    // is permanently stale -- always hide the system cursor while locked
+    // rather than render a frozen arrow, regardless of `cursor_always_visible`
+    // (which only concerns a client's own hide request, not this).
+    let pointer_locked = state.pointer_is_locked();
     // Otherwise, `cursor_always_visible` overrides a client's own hide
     // request (`CursorImageStatus::Hidden`, e.g. a terminal hiding its
     // pointer glyph after inactivity) -- falls back to the plain default
     // arrow, the same as an unrecognized named icon would.
     let forced_visible_status = CursorImageStatus::Named(CursorIcon::Default);
     let hidden_status = CursorImageStatus::Hidden;
-    let effective_cursor_status = if idle_hidden {
+    let effective_cursor_status = if idle_hidden || pointer_locked {
         &hidden_status
     } else if matches!(state.cursor_status, CursorImageStatus::Hidden)
         && state.config.cursor_always_visible
