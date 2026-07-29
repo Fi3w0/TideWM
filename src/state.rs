@@ -2957,8 +2957,7 @@ impl Smallvil {
     /// Spawns an impulse ripple (`ripple.rs`, Phase R1) on `trigger`,
     /// centered per the resolved `ripple { }` config (and any per-rule
     /// `ripple { }` override matched by `surface`'s app_id/title). The
-    /// map trigger is the only call site today; focus-change and urgent
-    /// triggers will reuse this same function once they're wired up.
+    /// Map, focus-change, and urgent triggers all reuse this path.
     ///
     /// No-op when:
     /// - `water_effects` is off (the master identity toggle),
@@ -3004,7 +3003,7 @@ impl Smallvil {
         let Some(output_geo) = self.space.output_geometry(&output) else {
             return;
         };
-        // A tiled window's `window.geometry()` can lag one client
+        // A window's `window.geometry()` can lag one client
         // round-trip behind retile()'s own just-computed target rect:
         // retile() only *sends* a configure proposing the new size, it
         // doesn't block on the client acking and committing a matching
@@ -3017,7 +3016,12 @@ impl Smallvil {
         // window anchored at its real center. Same "space reflects where
         // this is being moved to, not its real slot" gap
         // `TileMoveGrab::drop` already hit; its own doc comment is why
-        // this reads from `Layouts::layout()` instead when possible.
+        // this reads from the retained placement state instead when possible.
+        // A first-map floating conversion has the same lag: its
+        // `FloatingTag::rect` already records the configure target while the
+        // committed buffer may still have the old size. Use that rect for an
+        // ordinary floater so its map ripple lands at the settled center,
+        // including an exact rule-provided position/size.
         // Skipped for fullscreen/pseudo-tiled windows, whose rect
         // `retile()` overrides after reading it from `layout()` -- rarer,
         // and reusing the plain path here is a no-op change for them, not
@@ -3035,6 +3039,12 @@ impl Smallvil {
                     .into_iter()
                     .find(|(w, _)| w.toplevel().is_some_and(|t| t.wl_surface() == surface))
                     .map(|(_, rect)| rect)
+            })
+            .or_else(|| {
+                (!self.fullscreen.contains_key(surface)
+                    && !self.maximized.contains_key(surface))
+                .then(|| self.floating_workspace.get(surface).map(|tag| tag.rect))
+                .flatten()
             })
             .or_else(|| {
                 self.space
