@@ -38,7 +38,7 @@
 
 use std::{
     cell::Cell,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashSet, VecDeque},
     io::{Read, Write},
     os::unix::fs::PermissionsExt,
     os::unix::net::{UnixListener, UnixStream},
@@ -53,16 +53,13 @@ use std::{
 
 use serde::Deserialize;
 use serde_json::json;
-use smithay::{
-    desktop::Window,
-    reexports::{
-        calloop::{
-            generic::Generic,
-            timer::{TimeoutAction, Timer},
-            EventLoop, Interest, LoopHandle, Mode, PostAction, RegistrationToken,
-        },
-        wayland_server::protocol::wl_surface::WlSurface,
+use smithay::reexports::{
+    calloop::{
+        generic::Generic,
+        timer::{TimeoutAction, Timer},
+        EventLoop, Interest, LoopHandle, Mode, PostAction, RegistrationToken,
     },
+    wayland_server::protocol::wl_surface::WlSurface,
 };
 
 use crate::{config, state::Smallvil};
@@ -146,8 +143,15 @@ impl EventKind {
 /// split borrow at every call site.
 pub(crate) enum IpcEvent {
     WindowOpened { surface: WlSurface },
+    /// Identity captured at the call site *before* the per-window tracking
+    /// maps are drained -- by the time the close event fires, the window
+    /// has already been detached from `space` and its foreign-toplevel /
+    /// identity entries have been cleaned up, so the snapshot helpers
+    /// can't read them after the fact.
     WindowClosed {
-        surface: WlSurface,
+        window_id: Option<u64>,
+        app_id: Option<String>,
+        title: Option<String>,
     },
     WindowChanged { surface: WlSurface },
     WorkspaceChanged {
@@ -196,13 +200,21 @@ impl IpcEvent {
 
     /// Build the complete JSON line for this event (including the trailing
     /// newline) using `state` for any window/workspace snapshotting.
-    pub(crate) fn to_json_line(&self, state: &Smallvil) -> Vec<u8> {
+    pub(crate)     fn to_json_line(&self, state: &Smallvil) -> Vec<u8> {
         let data: serde_json::Value = match self {
             IpcEvent::WindowOpened { surface }
             | IpcEvent::WindowChanged { surface } => {
                 snapshot_window(state, surface).unwrap_or(serde_json::Value::Null)
             }
-            IpcEvent::WindowClosed { surface } => snapshot_closed_window(state, surface),
+            IpcEvent::WindowClosed {
+                window_id,
+                app_id,
+                title,
+            } => json!({
+                "window_id": window_id,
+                "app_id": app_id,
+                "title": title,
+            }),
             IpcEvent::WorkspaceChanged { output, from, to } => json!({
                 "output": output,
                 "from": from,
@@ -254,22 +266,6 @@ fn snapshot_window(state: &Smallvil, surface: &WlSurface) -> Option<serde_json::
         .elements()
         .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface))?;
     window_json(state, window, focused.as_ref())
-}
-
-/// Minimal identity for a `WindowClosed` event: the full snapshot helpers
-/// above can't be used because by the time the close event fires, the
-/// window has already been detached from `space` and most of its
-/// per-window tracking maps have been cleaned up. We snapshot the few
-/// fields that survive just long enough to be readable here, and the
-/// identity fields are best-effort.
-fn snapshot_closed_window(state: &Smallvil, surface: &WlSurface) -> serde_json::Value {
-    let window_id = state.foreign_toplevel_numeric_ids.get(surface).copied();
-    let (app_id, title) = state.toplevel_identity(surface);
-    json!({
-        "window_id": window_id,
-        "app_id": app_id,
-        "title": title,
-    })
 }
 
 /// A long-lived subscribe connection. One per `subscribe` request, stored

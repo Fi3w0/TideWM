@@ -1530,18 +1530,30 @@ impl Smallvil {
         self.depth_last_tick = Instant::now();
         let enabled = self.config.water_effects && self.config.depth.enabled;
         let mut changed = false;
-        for depth in self.window_depths.values_mut() {
-            changed |= if enabled {
+        // Collect per-surface tier transitions while we still hold the
+        // mutable borrow on `window_depths`, then emit after the loop --
+        // `emit_ipc_event` needs `&mut self` and can't run mid-iteration.
+        let mut tier_changes: Vec<(WlSurface, u8)> = Vec::new();
+        for (surface, depth) in self.window_depths.iter_mut() {
+            let old_tier = depth.tier();
+            let local_changed = if enabled {
                 depth.update(&self.config.depth)
             } else {
                 depth.reset_disabled()
             };
+            changed |= local_changed;
+            if local_changed && depth.tier() != old_tier {
+                tier_changes.push((surface.clone(), depth.tier()));
+            }
         }
         if !enabled {
             self.depth_schematics.clear();
         }
         if changed {
             self.request_redraw();
+        }
+        for (surface, tier) in tier_changes {
+            self.emit_ipc_event(crate::ipc::IpcEvent::DepthChanged { surface, tier });
         }
     }
 
@@ -2492,6 +2504,9 @@ impl Smallvil {
 
         let mut activation_changed = false;
         if old_window != new_window {
+            // Capture the focus target for the IPC event before the
+            // `if let Some(surface) = new_window` block below moves it.
+            let new_window_for_event = new_window.clone();
             if let Some(surface) = old_window {
                 activation_changed |= self.set_window_activated(&surface, false);
                 self.refresh_wlr_toplevel_state(&surface);
@@ -2504,12 +2519,24 @@ impl Smallvil {
                     if let Some(depth) = self.window_depths.get_mut(&surface) {
                         depth.visual_changed();
                     }
+                    self.emit_ipc_event(crate::ipc::IpcEvent::UrgentChanged {
+                        surface: surface.clone(),
+                        urgent: false,
+                    });
                 }
                 if !self.cycling_focus {
                     self.focus_history.retain(|s| s != &surface);
                     self.focus_history.insert(0, surface);
                 }
             }
+            // Focus handoff between two real windows (or window -> none).
+            // `reconcile_keyboard_focus` is called from many paths -- focus
+            // authority, popup grab release, layer-surface interactivity
+            // changes, workspace switches, window map -- all of which are
+            // exactly the transitions a bar widget wants to know about.
+            self.emit_ipc_event(crate::ipc::IpcEvent::FocusChanged {
+                surface: new_window_for_event,
+            });
         }
 
         if let Some(keyboard) = self.seat.get_keyboard() {
@@ -4974,6 +5001,9 @@ impl Smallvil {
         }
 
         self.retile();
+        self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
+            surface: surface.clone(),
+        });
     }
 
     /// Resolves a `"workspace:N"`/`"move-to-workspace:N"` target to a real
@@ -5135,6 +5165,12 @@ impl Smallvil {
         self.retile();
 
         self.refocus_after_hide(&output_name);
+
+        self.emit_ipc_event(crate::ipc::IpcEvent::WorkspaceChanged {
+            output: output_name,
+            from: current,
+            to: workspace,
+        });
 
         self.request_redraw();
     }
@@ -5416,6 +5452,9 @@ impl Smallvil {
                     entry.pin_floated_it = false;
                 }
             }
+            self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
+                surface: surface.clone(),
+            });
             self.request_redraw();
             return;
         }
@@ -5440,6 +5479,9 @@ impl Smallvil {
                     tag.workspace = active;
                 }
             }
+            self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
+                surface: surface.clone(),
+            });
             self.request_redraw();
             return;
         }
@@ -5447,6 +5489,9 @@ impl Smallvil {
             self.toggle_floating(surface);
         }
         self.pinned.insert(surface.clone());
+        self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
+            surface: surface.clone(),
+        });
         self.request_redraw();
     }
 
@@ -5463,6 +5508,9 @@ impl Smallvil {
             self.pseudo_tiled.insert(surface.clone());
         }
         self.retile();
+        self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
+            surface: surface.clone(),
+        });
     }
 
     /// Moves every window owned by `from_output` onto `to_output`, preserving
@@ -6106,6 +6154,10 @@ impl Smallvil {
         // real on-screen location. A repeating "pulse until acknowledged"
         // is later scope (AGENT.md's Phase R1 entry), not built here.
         self.spawn_ripple(surface, crate::config::RippleTrigger::Urgent);
+        self.emit_ipc_event(crate::ipc::IpcEvent::UrgentChanged {
+            surface: surface.clone(),
+            urgent: true,
+        });
         self.request_redraw();
     }
 
@@ -7074,6 +7126,10 @@ impl Smallvil {
                 self.request_redraw();
             }
         }
+        // Emit on both success and failure: a bar may want to refresh
+        // config-derived state either way, and a reload that failed
+        // still left the previously-applied config in place.
+        self.emit_ipc_event(crate::ipc::IpcEvent::ConfigReloaded);
     }
 }
 

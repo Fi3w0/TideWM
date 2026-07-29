@@ -1008,6 +1008,16 @@ impl Smallvil {
             // that the handle is actually registered.
             self.refresh_wlr_toplevel_state(surface);
         }
+
+        // WindowOpened fires here, the single announcement chokepoint, so
+        // the swallow-restore path (which re-shows a window without going
+        // through `map_toplevel`) looks like a fresh open to subscribers
+        // too -- matching the bar-facing semantics of the foreign-toplevel
+        // announcement that runs immediately above. The window's
+        // numeric_id was just assigned, so the snapshot carries it.
+        self.emit_ipc_event(crate::ipc::IpcEvent::WindowOpened {
+            surface: surface.clone(),
+        });
     }
 
     fn unmap_toplevel(&mut self, surface: &WlSurface) {
@@ -1043,6 +1053,13 @@ impl Smallvil {
     /// handle so an xdg unmap can retain it for a later remap. This is also
     /// used by permanent role destruction, which simply drops the result.
     fn detach_mapped_toplevel(&mut self, surface: &WlSurface) -> Option<Window> {
+        // Capture identity before any cleanup drains the per-window maps,
+        // so the WindowClosed event carries a useful payload (window_id +
+        // app_id + title) rather than None/None. The event itself is
+        // emitted at the end of the function so the desktop is already
+        // consistent by the time a subscriber receives it.
+        let closed_window_id = self.foreign_toplevel_numeric_ids.get(surface).copied();
+        let (closed_app_id, closed_title) = self.toplevel_identity(surface);
         // A swallower dying while hidden must be forgotten, or a later
         // child close would re-insert a dead window's handle. (At swallow
         // time this is a no-op: the entry is recorded only after this
@@ -1092,6 +1109,11 @@ impl Smallvil {
                 wlr_state.untrack(&handle);
             }
         }
+        self.emit_ipc_event(crate::ipc::IpcEvent::WindowClosed {
+            window_id: closed_window_id,
+            app_id: closed_app_id,
+            title: closed_title,
+        });
         window
     }
 
@@ -1449,6 +1471,7 @@ impl Smallvil {
         } else {
             self.fullscreen_request(toplevel, None);
         }
+        self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged { surface });
     }
 }
 
