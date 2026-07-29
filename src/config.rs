@@ -1080,6 +1080,11 @@ pub struct WorkspaceTransitionConfig {
     /// Automatic follows workspace-number direction; fixed modes make
     /// every switch travel the same way.
     pub direction: WorkspaceTransitionDirectionMode,
+    /// Captures both desktops and slides them together under the wave.
+    /// Off by default so the second full-output texture is opt-in.
+    pub workspace_motion: bool,
+    /// Delay after the wave begins before desktop motion starts.
+    pub workspace_motion_delay_ms: u32,
     /// Horizontal displacement of the wipe boundary, in physical pixels.
     pub wave_amplitude: f32,
     /// Number of sine cycles from the top of the output to the bottom.
@@ -1129,6 +1134,8 @@ impl Default for WorkspaceTransitionConfig {
             speed: 1.0,
             curve: RippleEase::CubicInOut,
             direction: WorkspaceTransitionDirectionMode::Auto,
+            workspace_motion: false,
+            workspace_motion_delay_ms: 150,
             wave_amplitude: 34.0,
             wave_frequency: 3.0,
             edge_width: 18.0,
@@ -1138,7 +1145,7 @@ impl Default for WorkspaceTransitionConfig {
             glow_size: 46.0,
             glow_alpha: 0.25,
             water_depth: 260.0,
-            water_alpha: 0.98,
+            water_alpha: 0.88,
             foam_color: [232.0 / 255.0, 252.0 / 255.0, 1.0],
             foam_size: 18.0,
             foam_alpha: 0.95,
@@ -1656,6 +1663,16 @@ fn apply_workspace_transition_block(cfg: &mut WorkspaceTransitionConfig, body: &
                 _ => tracing::warn!(
                     value,
                     "Expected workspace_transition.direction: auto left-to-right right-to-left, ignoring"
+                ),
+            },
+            "workspace_motion" | "move_workspaces" => {
+                set_bool(&mut cfg.workspace_motion, key, value)
+            }
+            "workspace_motion_delay_ms" | "motion_delay_ms" => match value.parse::<u32>() {
+                Ok(value) if value <= 5000 => cfg.workspace_motion_delay_ms = value,
+                _ => tracing::warn!(
+                    value,
+                    "Expected workspace_transition.workspace_motion_delay_ms from 0 to 5000, ignoring"
                 ),
             },
             "wave_amplitude" | "amplitude" => match value.parse::<f32>() {
@@ -2665,6 +2682,8 @@ bsp_split_bias = auto
 #     speed = 1.0                  # multiplier; 2.0 twice as fast, 0.5 half
 #     curve = cubic-in-out          # linear cubic-out cubic-in-out quad-out exp-out
 #     direction = auto              # auto left-to-right right-to-left
+#     workspace_motion = false      # slide both desktops; costs one extra texture
+#     workspace_motion_delay_ms = 150
 #     wave_amplitude = 34           # horizontal displacement, physical pixels
 #     wave_frequency = 3            # sine cycles from top to bottom
 #     edge_width = 18               # soft boundary half-width, physical pixels
@@ -2674,7 +2693,7 @@ bsp_split_bias = auto
 #     glow_size = 46                # glow-style reach beyond core, physical pixels
 #     glow_alpha = 0.25             # glow-style opacity
 #     water_depth = 260             # water shading/travel scale, physical pixels
-#     water_alpha = 0.98            # opacity while water fills the output
+#     water_alpha = 0.88            # opacity while water fills the output
 #     foam_color = E8FCFF
 #     foam_size = 18                # white crest half-width, physical pixels
 #     foam_alpha = 0.95
@@ -3282,6 +3301,8 @@ mod tests {
              speed = 1.75\n\
              curve = exp-out\n\
              direction = left-to-right\n\
+             workspace_motion = true\n\
+             workspace_motion_delay_ms = 225\n\
              wave_amplitude = 72.5\n\
              wave_frequency = 4.5\n\
              edge_width = 26\n\
@@ -3313,6 +3334,8 @@ mod tests {
             transition.direction,
             WorkspaceTransitionDirectionMode::LeftToRight
         );
+        assert!(transition.workspace_motion);
+        assert_eq!(transition.workspace_motion_delay_ms, 225);
         assert_eq!(transition.wave_amplitude, 72.5);
         assert_eq!(transition.wave_frequency, 4.5);
         assert_eq!(transition.edge_width, 26.0);
@@ -3343,6 +3366,8 @@ mod tests {
             assert_eq!(transition.speed, 1.0);
             assert_eq!(transition.curve, RippleEase::CubicInOut);
             assert_eq!(transition.direction, WorkspaceTransitionDirectionMode::Auto);
+            assert!(!transition.workspace_motion);
+            assert_eq!(transition.workspace_motion_delay_ms, 150);
             assert_eq!(transition.wave_amplitude, 34.0);
             assert_eq!(transition.wave_frequency, 3.0);
             assert_eq!(transition.edge_width, 18.0);
@@ -3352,7 +3377,7 @@ mod tests {
             assert_eq!(transition.glow_size, 46.0);
             assert_eq!(transition.glow_alpha, 0.25);
             assert_eq!(transition.water_depth, 260.0);
-            assert_eq!(transition.water_alpha, 0.98);
+            assert_eq!(transition.water_alpha, 0.88);
             assert_eq!(transition.foam_color, [232.0 / 255.0, 252.0 / 255.0, 1.0]);
             assert_eq!(transition.foam_size, 18.0);
             assert_eq!(transition.foam_alpha, 0.95);

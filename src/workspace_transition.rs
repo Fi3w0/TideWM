@@ -6,10 +6,12 @@
 //! water body before its trailing edge reveals the new workspace; the
 //! original colored boundary remains as the alternate `glow` style. Water,
 //! foam, spray, core, and glow are analytical shader geometry, so tuning
-//! them adds no extra render targets. The owning state keeps at most one
-//! captured texture per output and drops it as soon as the animation
-//! finishes, giving the effect a bounded transient cost instead of retaining
-//! workspace history.
+//! them adds no extra render targets. Optional workspace motion captures the
+//! incoming desktop too and slides both captures edge-to-edge under the wave.
+//! The owning state therefore keeps one texture normally or two while that
+//! option is enabled, and drops them as soon as the animation finishes,
+//! giving the effect a bounded transient cost instead of retaining workspace
+//! history.
 
 use std::time::{Duration, Instant};
 
@@ -50,6 +52,7 @@ uniform sampler2D tex;
 uniform float alpha;
 uniform float progress;
 uniform float direction;
+uniform float motion_enabled;
 uniform float style;
 uniform float output_aspect;
 uniform float wave_amplitude;
@@ -108,6 +111,7 @@ void main() {
         float water_mask = smoothstep(-edge_width, edge_width, water_distance);
         float old_workspace = entering
             * (1.0 - smoothstep(-edge_width, edge_width, water_distance));
+        old_workspace *= 1.0 - motion_enabled;
 
         // Layered moving streaks keep the fully-covered midpoint reading as
         // animated water rather than a flat blue color card.
@@ -190,6 +194,7 @@ void main() {
     float boundary = 1.0 - progress + wave;
     float signed_distance = boundary - coordinate;
     float old_workspace = smoothstep(-edge_width, edge_width, signed_distance);
+    old_workspace *= 1.0 - motion_enabled;
     float front_distance = abs(signed_distance);
     float core = 1.0 - smoothstep(wave_size, wave_size + edge_width, front_distance);
     float glow = 1.0 - smoothstep(
@@ -238,6 +243,11 @@ impl WorkspaceTransitionDirection {
     }
 }
 
+fn delayed_motion_progress(raw_progress: f32, delay_fraction: f32) -> f32 {
+    let delay_fraction = delay_fraction.clamp(0.0, 0.95);
+    ((raw_progress - delay_fraction) / (1.0 - delay_fraction)).clamp(0.0, 1.0)
+}
+
 pub fn workspace_transition_program(
     cache: &mut Option<GlesTexProgram>,
     renderer: &mut GlesRenderer,
@@ -248,6 +258,7 @@ pub fn workspace_transition_program(
     let uniforms = [
         UniformName::new("progress", UniformType::_1f),
         UniformName::new("direction", UniformType::_1f),
+        UniformName::new("motion_enabled", UniformType::_1f),
         UniformName::new("style", UniformType::_1f),
         UniformName::new("output_aspect", UniformType::_1f),
         UniformName::new("wave_amplitude", UniformType::_1f),
@@ -281,8 +292,11 @@ pub fn workspace_transition_program(
 pub struct WorkspaceTransition {
     id: Id,
     commit: CommitCounter,
-    texture: GlesTexture,
+    outgoing_texture: GlesTexture,
+    incoming_texture: Option<GlesTexture>,
     animation: Animation,
+    duration: Duration,
+    workspace_motion_delay: Duration,
     curve: RippleEase,
     direction: WorkspaceTransitionDirection,
     style: WorkspaceTransitionStyle,
@@ -306,23 +320,23 @@ pub struct WorkspaceTransition {
 
 impl WorkspaceTransition {
     pub fn new(
-        texture: GlesTexture,
+        outgoing_texture: GlesTexture,
+        incoming_texture: Option<GlesTexture>,
         direction: WorkspaceTransitionDirection,
         geometry: Rectangle<i32, Physical>,
         config: &WorkspaceTransitionConfig,
     ) -> Self {
+        let duration = Duration::from_secs_f32(
+            Duration::from_millis(config.duration_ms as u64).as_secs_f32() / config.speed,
+        );
         Self {
             id: Id::new(),
             commit: CommitCounter::default(),
-            texture,
-            animation: Animation::new(
-                0.0,
-                1.0,
-                Instant::now(),
-                Duration::from_secs_f32(
-                    Duration::from_millis(config.duration_ms as u64).as_secs_f32() / config.speed,
-                ),
-            ),
+            outgoing_texture,
+            incoming_texture,
+            animation: Animation::new(0.0, 1.0, Instant::now(), duration),
+            duration,
+            workspace_motion_delay: Duration::from_millis(config.workspace_motion_delay_ms as u64),
             curve: config.curve,
             direction,
             style: config.style,
@@ -353,11 +367,21 @@ impl WorkspaceTransition {
         self.commit.increment();
         let width = self.geometry.size.w.max(1) as f32;
         let height = self.geometry.size.h.max(1) as f32;
+        let raw_progress = self.animation.value();
+        let delay_fraction = if self.duration.is_zero() {
+            0.0
+        } else {
+            (self.workspace_motion_delay.as_secs_f32() / self.duration.as_secs_f32())
+                .clamp(0.0, 0.95)
+        };
+        let motion_progress = delayed_motion_progress(raw_progress, delay_fraction);
         WorkspaceTransitionElement {
             id: self.id.clone(),
             commit: self.commit,
-            texture: self.texture.clone(),
-            progress: crate::ripple::ease_value(self.curve, self.animation.value()),
+            outgoing_texture: self.outgoing_texture.clone(),
+            incoming_texture: self.incoming_texture.clone(),
+            progress: crate::ripple::ease_value(self.curve, raw_progress),
+            motion_progress: crate::ripple::ease_value(self.curve, motion_progress),
             direction: self.direction,
             style: self.style,
             output_aspect: width / height,
@@ -385,8 +409,10 @@ impl WorkspaceTransition {
 pub struct WorkspaceTransitionElement {
     id: Id,
     commit: CommitCounter,
-    texture: GlesTexture,
+    outgoing_texture: GlesTexture,
+    incoming_texture: Option<GlesTexture>,
     progress: f32,
+    motion_progress: f32,
     direction: WorkspaceTransitionDirection,
     style: WorkspaceTransitionStyle,
     output_aspect: f32,
@@ -419,7 +445,7 @@ impl Element for WorkspaceTransitionElement {
     }
 
     fn src(&self) -> Rectangle<f64, Buffer> {
-        Rectangle::from_size(self.texture.size().to_f64())
+        Rectangle::from_size(self.outgoing_texture.size().to_f64())
     }
 
     fn geometry(&self, _scale: Scale<f64>) -> Rectangle<i32, Physical> {
@@ -441,9 +467,56 @@ impl RenderElement<GlesRenderer> for WorkspaceTransitionElement {
         opaque_regions: &[Rectangle<i32, Physical>],
         _cache: Option<&UserDataMap>,
     ) -> Result<(), GlesError> {
+        if let Some(incoming_texture) = &self.incoming_texture {
+            let width = dst.size.w;
+            let offset = (self.motion_progress * width as f32).round() as i32;
+            let travel_sign = match self.direction {
+                WorkspaceTransitionDirection::LeftToRight => 1,
+                WorkspaceTransitionDirection::RightToLeft => -1,
+            };
+            let outgoing_dst = Rectangle::new(
+                (dst.loc.x + travel_sign * offset, dst.loc.y).into(),
+                dst.size,
+            );
+            let incoming_dst = Rectangle::new(
+                (dst.loc.x + travel_sign * (offset - width), dst.loc.y).into(),
+                dst.size,
+            );
+            frame.render_texture_from_to(
+                incoming_texture,
+                src,
+                incoming_dst,
+                damage,
+                &[],
+                Transform::Normal,
+                self.alpha(),
+                None,
+                &[],
+            )?;
+            frame.render_texture_from_to(
+                &self.outgoing_texture,
+                src,
+                outgoing_dst,
+                damage,
+                &[],
+                Transform::Normal,
+                self.alpha(),
+                None,
+                &[],
+            )?;
+        }
+
         let uniforms = [
             Uniform::new("progress", self.progress),
             Uniform::new("direction", self.direction.uniform()),
+            Uniform::new(
+                "motion_enabled",
+                if self.incoming_texture.is_some() {
+                    1.0
+                } else {
+                    0.0
+                },
+            ),
             Uniform::new(
                 "style",
                 match self.style {
@@ -469,7 +542,7 @@ impl RenderElement<GlesRenderer> for WorkspaceTransitionElement {
             Uniform::new("water_alpha", self.water_alpha),
         ];
         frame.render_texture_from_to(
-            &self.texture,
+            &self.outgoing_texture,
             src,
             dst,
             damage,
@@ -493,6 +566,7 @@ mod tests {
         assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float alpha"));
         assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float progress"));
         assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float direction"));
+        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float motion_enabled"));
         assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float style"));
         assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float output_aspect"));
         assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float wave_amplitude"));
@@ -514,18 +588,28 @@ mod tests {
     }
 
     #[test]
-    fn transition_memory_is_one_argb_texture_per_output() {
+    fn transition_memory_is_bounded_to_one_or_two_argb_textures_per_output() {
         fn bytes(width: usize, height: usize) -> usize {
             width * height * 4
         }
 
         assert_eq!(bytes(1920, 1080), 8_294_400);
         assert_eq!(bytes(3840, 2160), 33_177_600);
+        assert_eq!(bytes(1920, 1080) * 2, 16_588_800);
+        assert_eq!(bytes(3840, 2160) * 2, 66_355_200);
     }
 
     #[test]
     fn direction_uniform_matches_the_named_sweep() {
         assert_eq!(WorkspaceTransitionDirection::LeftToRight.uniform(), -1.0);
         assert_eq!(WorkspaceTransitionDirection::RightToLeft.uniform(), 1.0);
+    }
+
+    #[test]
+    fn workspace_motion_waits_for_delay_then_finishes_with_transition() {
+        assert_eq!(delayed_motion_progress(0.1, 0.25), 0.0);
+        assert!((delayed_motion_progress(0.625, 0.25) - 0.5).abs() < f32::EPSILON);
+        assert_eq!(delayed_motion_progress(1.0, 0.25), 1.0);
+        assert!((delayed_motion_progress(0.96, 2.0) - 0.2).abs() < 0.000_01);
     }
 }

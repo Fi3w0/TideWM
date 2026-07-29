@@ -16,7 +16,7 @@ use smithay::{
                 surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
                 AsRenderElements, Kind, RenderElementStates,
             },
-            gles::{GlesPixelProgram, GlesRenderer, GlesTexProgram},
+            gles::{GlesPixelProgram, GlesRenderer, GlesTexProgram, GlesTexture},
             utils::CommitCounter,
             ImportAll, ImportMem,
         },
@@ -2987,13 +2987,45 @@ impl Smallvil {
         result
     }
 
+    fn capture_workspace_desktop(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+        geometry: Rectangle<i32, Physical>,
+    ) -> Option<GlesTexture> {
+        let water_glass_surfaces = self.water_glass_eligible_surfaces(output);
+        let water_glass_elements =
+            self.water_glass_frame_elements(renderer, output, &water_glass_surfaces);
+        let skip: &[WlSurface] = if water_glass_elements.is_empty() {
+            &[]
+        } else {
+            &water_glass_surfaces
+        };
+        let space_elements = self.desktop_render_elements(renderer, output, skip)?;
+        let elements: Vec<crate::backend::udev::OutputRenderElements> = water_glass_elements
+            .into_iter()
+            .chain(
+                space_elements
+                    .into_iter()
+                    .map(crate::backend::udev::OutputRenderElements::Space),
+            )
+            .chain(
+                self.wallpaper_element(output, renderer)
+                    .map(crate::backend::udev::OutputRenderElements::Composited),
+            )
+            .collect();
+        crate::backdrop::capture_backdrop(renderer, geometry, elements)
+    }
+
     /// Captures the currently-visible desktop for a queued workspace
-    /// switch, applies the switch, then starts the outgoing-texture wipe.
+    /// switch, applies the switch, optionally captures the incoming desktop
+    /// for synchronized motion, then starts the transition.
     ///
     /// Both backends call this only after submitting the visible outgoing
-    /// frame. The capture intentionally contains the desktop and wallpaper,
-    /// while compositor chrome (cursor, toast, overview, tab strip) remains
-    /// live above the transition. If allocation or rendering fails, the
+    /// frame. Captures contain the desktop and wallpaper, while compositor
+    /// chrome (cursor, toast, overview, tab strip) remains live above the
+    /// transition. If the optional incoming capture fails, the effect falls
+    /// back to the one-texture wipe. If the outgoing capture fails, the
     /// workspace still switches immediately rather than leaving input
     /// apparently ignored.
     pub(crate) fn capture_pending_workspace_transition(
@@ -3032,38 +3064,24 @@ impl Smallvil {
             .current_mode()
             .map(|mode| Rectangle::from_size(mode.size));
 
-        let texture = geometry.and_then(|geometry| {
-            let water_glass_surfaces = self.water_glass_eligible_surfaces(output);
-            let water_glass_elements =
-                self.water_glass_frame_elements(renderer, output, &water_glass_surfaces);
-            let skip: &[WlSurface] = if water_glass_elements.is_empty() {
-                &[]
-            } else {
-                &water_glass_surfaces
-            };
-            let space_elements = self.desktop_render_elements(renderer, output, skip)?;
-            let elements: Vec<crate::backend::udev::OutputRenderElements> = water_glass_elements
-                .into_iter()
-                .chain(
-                    space_elements
-                        .into_iter()
-                        .map(crate::backend::udev::OutputRenderElements::Space),
-                )
-                .chain(
-                    self.wallpaper_element(output, renderer)
-                        .map(crate::backend::udev::OutputRenderElements::Composited),
-                )
-                .collect();
-            crate::backdrop::capture_backdrop(renderer, geometry, elements)
-        });
+        let outgoing_texture = geometry
+            .and_then(|geometry| self.capture_workspace_desktop(renderer, output, geometry));
+        let workspace_motion = self.config.workspace_transition.workspace_motion;
 
         self.apply_workspace_switch(output, current, target);
 
-        if let (Some(texture), Some(geometry)) = (texture, geometry) {
+        let incoming_texture = if workspace_motion && outgoing_texture.is_some() {
+            geometry.and_then(|geometry| self.capture_workspace_desktop(renderer, output, geometry))
+        } else {
+            None
+        };
+
+        if let (Some(outgoing_texture), Some(geometry)) = (outgoing_texture, geometry) {
             self.workspace_transitions.insert(
                 output_name,
                 crate::workspace_transition::WorkspaceTransition::new(
-                    texture,
+                    outgoing_texture,
+                    incoming_texture,
                     direction,
                     geometry,
                     &self.config.workspace_transition,
