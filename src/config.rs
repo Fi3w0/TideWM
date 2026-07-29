@@ -668,6 +668,9 @@ impl Config {
             if rule.sway.is_some() {
                 effective.sway = rule.sway;
             }
+            if rule.depth.is_some() {
+                effective.depth = rule.depth;
+            }
             if let Some(rule_frost) = &rule.frost {
                 effective.frost = Some(match effective.frost.take() {
                     Some(existing) => existing.merge_over(rule_frost),
@@ -1214,6 +1217,14 @@ pub struct WindowRule {
     /// Per-app opt-in/out for floating sway. Last matching rule wins;
     /// unset falls back to the global `sway { enabled }` value.
     pub sway: Option<bool>,
+    /// Per-app buoyancy override for the automatic depth/attention system
+    /// (Phase R1). `Some(false)` pins the matched window at tier zero
+    /// forever -- it never dims or sinks regardless of inactivity, useful
+    /// for a widget or player the user always wants to see live. `Some(true)`
+    /// affirms the normal automatic behavior (mainly useful to override an
+    /// earlier matching rule's `false`). Unset inherits the global
+    /// `depth { enabled }` behavior. Last matching rule wins.
+    pub depth: Option<bool>,
     /// Per-app frost overrides. Unset fields inherit the global
     /// `frost { }` block, and multiple matching rules merge field by field.
     pub frost: Option<FrostOverrides>,
@@ -4416,6 +4427,7 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                     }
                 },
                 "sway" => set_opt_bool(&mut rule.sway, key, value),
+                "depth" => set_opt_bool(&mut rule.depth, key, value),
                 "shadow" => match value.as_str() {
                     "true" | "on" => {
                         rule.shadow
@@ -6102,6 +6114,30 @@ mod tests {
         let defaults = parse_default_config().sway;
         assert!(!defaults.enabled);
         assert_eq!(defaults, SwayConfig::default());
+    }
+
+    #[test]
+    fn rule_depth_override_uses_the_last_matching_rule() {
+        let entries = waves::parse(
+            "rule {\n\
+             app_id = kitty\n\
+             depth = false\n\
+             }\n\
+             rule {\n\
+             app_id = kitty\n\
+             depth = true\n\
+             }\n",
+            Path::new("<depth-rule-test>"),
+        )
+        .unwrap();
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        // Two matching rules for the same app: the later one wins, same
+        // fold rule every other Option<bool> rule field uses.
+        assert_eq!(
+            config.resolve_window_rules(Some("kitty"), None).depth,
+            Some(true)
+        );
+        assert_eq!(config.resolve_window_rules(Some("foot"), None).depth, None);
     }
 
     #[test]

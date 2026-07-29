@@ -1116,6 +1116,17 @@ impl Smallvil {
             .unwrap_or(self.config.sway.enabled)
     }
 
+    /// `true` when this window's resolved rule pins it buoyant (`depth =
+    /// false`), exempting it from the automatic inactivity sink regardless
+    /// of the global `depth { enabled }` setting.
+    fn depth_exempt(&self, surface: &WlSurface) -> bool {
+        let (app_id, title) = self.toplevel_identity(surface);
+        self.config
+            .resolve_window_rules(app_id.as_deref(), title.as_deref())
+            .depth
+            == Some(false)
+    }
+
     /// Feeds one horizontal floating-drag delta into the window's lateral
     /// sway. Called from the move grab's motion path; a no-op when the
     /// water identity, the mechanic, or this window's rule disables it.
@@ -1529,6 +1540,23 @@ impl Smallvil {
         }
         self.depth_last_tick = Instant::now();
         let enabled = self.config.water_effects && self.config.depth.enabled;
+        // Resolved separately, before the mutable loop below: `depth_exempt`
+        // needs `&self` (it reads surface identity + config), which can't
+        // run while `window_depths` is mutably borrowed. Skipped entirely
+        // when depth is globally off, since every window takes the
+        // `reset_disabled` branch regardless of exemption in that case.
+        // A plain Vec (not a HashSet) -- realistic window counts are small
+        // enough that a linear `contains` below is cheaper than dealing
+        // with `WlSurface`'s interior-mutable liveness flag as a hash key.
+        let exempt: Vec<WlSurface> = if enabled {
+            self.window_depths
+                .keys()
+                .filter(|surface| self.depth_exempt(surface))
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut changed = false;
         // Collect per-surface tier transitions while we still hold the
         // mutable borrow on `window_depths`, then emit after the loop --
@@ -1536,7 +1564,7 @@ impl Smallvil {
         let mut tier_changes: Vec<(WlSurface, u8)> = Vec::new();
         for (surface, depth) in self.window_depths.iter_mut() {
             let old_tier = depth.tier();
-            let local_changed = if enabled {
+            let local_changed = if enabled && !exempt.contains(surface) {
                 depth.update(&self.config.depth)
             } else {
                 depth.reset_disabled()

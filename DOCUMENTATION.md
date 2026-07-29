@@ -313,6 +313,8 @@ Configures automatic attention depth and buoyancy. A mapped window starts at the
 
 Depth state is bounded to one small record per mapped toplevel. Schematic buffers exist only for visible tier-2-or-deeper windows and are evicted when a window resurfaces, unmaps, or is destroyed. The inactivity scan reuses the backend’s bounded timer and is throttled to 10Hz. `water_effects = false` disables the model regardless of this block.
 
+A matching `rule { depth = false }` pins that window buoyant: it stays at tier 0 forever, regardless of inactivity, useful for a widget or player you always want live. `rule { depth = true }` affirms the normal automatic behavior (mainly useful to override an earlier matching rule's `false`). Last matching rule wins, same as `sway`/`viscosity`/`glass`.
+
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | Disables only automatic depth/buoyancy; other water effects remain active. |
@@ -758,6 +760,7 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 | `glass` | `water`, `frost`, or `none` | Captured-backdrop treatment for a floating window. Explicit `water`/`frost` works with client-provided alpha; when unset, a TideWM `opacity` below `1.0` implicitly selects `water`. `none` preserves plain transparency. `glass_mode` is an alias. |
 | `viscosity` | float, `0`–`4` | Per-app interactive move/resize damping. Last matching rule wins; `0` disables it for the matched app. |
 | `sway` | bool | Per-app opt-in/out for floating sway. Last matching rule wins; unset falls back to `sway.enabled`. |
+| `depth` | bool | Per-app buoyancy override for the automatic depth/attention system. `false` pins the window at tier 0 forever (never dims/sinks); `true` affirms the normal automatic behavior. Last matching rule wins; unset falls back to `depth.enabled`. |
 | `frost { }` | sub-block | Per-app overrides for every global frost field. Unspecified fields inherit the global block; multiple matching rules merge field by field. |
 | `shadow` | bool / `on`, `off`, `none` | Shorthand to enable or disable compositor shadows for matching windows. |
 | `shadow { }` | sub-block | Per-app overrides for every global shadow field. Unspecified fields inherit the global block; multiple matching rules merge field by field. |
