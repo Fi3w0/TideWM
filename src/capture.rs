@@ -578,7 +578,7 @@ impl Smallvil {
                     elements.extend(workspace_transition);
                     elements.extend(depth_elements);
                     elements.extend(glass_elements);
-                    elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
+                    elements.extend(space_elements);
                     elements.extend(ripple_layers.below_windows);
                     if let Some(wallpaper) = self.wallpaper_element(&output, renderer) {
                         elements.push(OutputRenderElements::Composited(wallpaper));

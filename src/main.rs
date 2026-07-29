@@ -21,6 +21,7 @@ mod overview;
 mod ripple;
 #[cfg(feature = "screencast")]
 mod screencast;
+mod shadow;
 #[cfg(feature = "screencast")]
 mod source_picker;
 mod state;

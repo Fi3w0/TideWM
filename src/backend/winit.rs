@@ -348,11 +348,7 @@ pub fn init_winit(
                         elements.extend(workspace_transition);
                         elements.extend(depth_elements);
                         elements.extend(glass_elements);
-                        elements.extend(
-                            space_elements
-                                .into_iter()
-                                .map(crate::backend::udev::OutputRenderElements::Space),
-                        );
+                        elements.extend(space_elements);
                         elements.extend(ripple_layers.below_windows);
                         elements.extend(
                             wallpaper_element

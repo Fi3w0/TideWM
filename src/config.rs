@@ -214,6 +214,10 @@ pub struct Config {
     /// `glass = frost` in its rule; water remains the compatibility default
     /// for translucent floating windows with no explicit glass choice.
     pub frost: FrostConfig,
+    /// Analytical window shadows. Independent of `water_effects`: shadows
+    /// are general compositor decoration, while the water master toggle
+    /// only gates TideWM's water/glass/depth identity effects.
+    pub shadow: ShadowConfig,
     /// Global ripple defaults (Phase R1, see `ripple.rs`). Per-app
     /// `rule { ripple { } }` overrides merge over these at resolve time
     /// (`merge_over`). Stays `system_default()` when the user has no
@@ -415,6 +419,7 @@ impl Config {
             workspace_transition: raw.workspace_transition,
             depth: raw.depth,
             frost: raw.frost,
+            shadow: raw.shadow,
             ripple: raw.ripple,
             cursor_always_visible: raw.cursor_always_visible,
             cursor_hide_after_ms: raw.cursor_hide_after_ms,
@@ -500,6 +505,12 @@ impl Config {
                     None => rule_frost.clone(),
                 });
             }
+            if let Some(rule_shadow) = &rule.shadow {
+                effective.shadow = Some(match effective.shadow.take() {
+                    Some(existing) => existing.merge_over(rule_shadow),
+                    None => rule_shadow.clone(),
+                });
+            }
             if let Some(rule_ripple) = &rule.ripple {
                 // Per-rule ripple overrides accumulate field-by-field:
                 // an earlier matching rule sets some knobs, a later one
@@ -540,6 +551,7 @@ struct RawConfig {
     workspace_transition: WorkspaceTransitionConfig,
     depth: DepthConfig,
     frost: FrostConfig,
+    shadow: ShadowConfig,
     /// Same shape as `Config::ripple`. Stays `system_default()` if no
     /// `ripple { }` block exists; mutated in place by `apply_ripple_block`.
     ripple: RippleConfig,
@@ -679,6 +691,7 @@ impl Default for RawConfig {
             workspace_transition: WorkspaceTransitionConfig::default(),
             depth: DepthConfig::default(),
             frost: FrostConfig::default(),
+            shadow: ShadowConfig::default(),
             ripple: RippleConfig::system_default(),
             cursor_always_visible: false,
             cursor_hide_after_ms: 0,
@@ -999,6 +1012,9 @@ pub struct WindowRule {
     /// Per-app frost overrides. Unset fields inherit the global
     /// `frost { }` block, and multiple matching rules merge field by field.
     pub frost: Option<FrostOverrides>,
+    /// Per-app analytical-shadow overrides. Unset fields inherit the global
+    /// `shadow { }` block; matching rule sub-blocks merge field by field.
+    pub shadow: Option<ShadowOverrides>,
     /// Exact floating placement (top-left corner), `<x>x<y>` -- the same
     /// syntax `[[output]]`'s `position` already uses. No-op unless the
     /// window ends up floating (from `float`/`pin`/the auto-float
@@ -1169,6 +1185,144 @@ impl FrostOverrides {
             tint_alpha: self.tint_alpha.unwrap_or(base.tint_alpha),
             corner_radius: self.corner_radius.unwrap_or(base.corner_radius),
             corner_softness: self.corner_softness.unwrap_or(base.corner_softness),
+        }
+    }
+}
+
+/// Fixed-cost analytical window-shadow tuning. The terminology deliberately
+/// accepts both niri's CSS-like model and Hyprland's model:
+/// `softness`/`spread`/`draw_behind_window`, plus
+/// `render_power`/`sharp`/`scale`.
+#[derive(Debug, Clone)]
+pub struct ShadowConfig {
+    pub enabled: bool,
+    /// Soft falloff reach in logical pixels (`range`/`size` are aliases).
+    pub softness: f32,
+    /// CSS-style expansion before falloff; may be negative.
+    pub spread: f32,
+    /// Logical-pixel x/y offset.
+    pub offset: (f32, f32),
+    /// Scales the shadow's base rectangle around the window center.
+    pub scale: f32,
+    /// Falloff exponent; higher values concentrate the shadow at the edge.
+    pub render_power: f32,
+    /// Hard edge, bypassing the soft falloff.
+    pub sharp: bool,
+    /// If false, cut the actual window rectangle out of the shadow. This is
+    /// the color-safe default for translucent/frosted windows.
+    pub draw_behind_window: bool,
+    pub color: [f32; 4],
+    pub inactive_color: [f32; 4],
+    /// TideWM extension: urgent windows can glow aqua without needing a
+    /// separate border implementation.
+    pub urgent_color: [f32; 4],
+    pub opacity: f32,
+    pub inactive_opacity: f32,
+    pub urgent_opacity: f32,
+    /// Shadow geometry rounding in logical pixels. This becomes the shared
+    /// compositor corner radius when the next R2 rounded-corners slice lands.
+    pub corner_radius: f32,
+    /// Limit shadows to floating windows. Off matches compositor-wide
+    /// Hyprland/niri behavior; useful to enable when tiled gaps are narrow.
+    pub floating_only: bool,
+    /// Fullscreen shadows are normally invisible beyond the output and just
+    /// consume fill rate, so they default off but remain selectable.
+    pub fullscreen: bool,
+}
+
+impl Default for ShadowConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            softness: 28.0,
+            spread: 2.0,
+            offset: (0.0, 8.0),
+            scale: 1.0,
+            render_power: 2.0,
+            sharp: false,
+            // Do not put a dark/color filter under translucent windows.
+            draw_behind_window: false,
+            color: [4.0 / 255.0, 14.0 / 255.0, 19.0 / 255.0, 122.0 / 255.0],
+            inactive_color: [3.0 / 255.0, 8.0 / 255.0, 12.0 / 255.0, 77.0 / 255.0],
+            urgent_color: [46.0 / 255.0, 199.0 / 255.0, 1.0, 184.0 / 255.0],
+            opacity: 1.0,
+            inactive_opacity: 1.0,
+            urgent_opacity: 1.0,
+            corner_radius: 0.0,
+            floating_only: false,
+            fullscreen: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ShadowOverrides {
+    pub enabled: Option<bool>,
+    pub softness: Option<f32>,
+    pub spread: Option<f32>,
+    pub offset_x: Option<f32>,
+    pub offset_y: Option<f32>,
+    pub scale: Option<f32>,
+    pub render_power: Option<f32>,
+    pub sharp: Option<bool>,
+    pub draw_behind_window: Option<bool>,
+    pub color: Option<[f32; 4]>,
+    pub inactive_color: Option<[f32; 4]>,
+    pub urgent_color: Option<[f32; 4]>,
+    pub opacity: Option<f32>,
+    pub inactive_opacity: Option<f32>,
+    pub urgent_opacity: Option<f32>,
+    pub corner_radius: Option<f32>,
+    pub floating_only: Option<bool>,
+    pub fullscreen: Option<bool>,
+}
+
+impl ShadowOverrides {
+    pub fn merge_over(&self, other: &Self) -> Self {
+        Self {
+            enabled: other.enabled.or(self.enabled),
+            softness: other.softness.or(self.softness),
+            spread: other.spread.or(self.spread),
+            offset_x: other.offset_x.or(self.offset_x),
+            offset_y: other.offset_y.or(self.offset_y),
+            scale: other.scale.or(self.scale),
+            render_power: other.render_power.or(self.render_power),
+            sharp: other.sharp.or(self.sharp),
+            draw_behind_window: other.draw_behind_window.or(self.draw_behind_window),
+            color: other.color.or(self.color),
+            inactive_color: other.inactive_color.or(self.inactive_color),
+            urgent_color: other.urgent_color.or(self.urgent_color),
+            opacity: other.opacity.or(self.opacity),
+            inactive_opacity: other.inactive_opacity.or(self.inactive_opacity),
+            urgent_opacity: other.urgent_opacity.or(self.urgent_opacity),
+            corner_radius: other.corner_radius.or(self.corner_radius),
+            floating_only: other.floating_only.or(self.floating_only),
+            fullscreen: other.fullscreen.or(self.fullscreen),
+        }
+    }
+
+    pub fn apply_to(&self, base: &ShadowConfig) -> ShadowConfig {
+        ShadowConfig {
+            enabled: self.enabled.unwrap_or(base.enabled),
+            softness: self.softness.unwrap_or(base.softness),
+            spread: self.spread.unwrap_or(base.spread),
+            offset: (
+                self.offset_x.unwrap_or(base.offset.0),
+                self.offset_y.unwrap_or(base.offset.1),
+            ),
+            scale: self.scale.unwrap_or(base.scale),
+            render_power: self.render_power.unwrap_or(base.render_power),
+            sharp: self.sharp.unwrap_or(base.sharp),
+            draw_behind_window: self.draw_behind_window.unwrap_or(base.draw_behind_window),
+            color: self.color.unwrap_or(base.color),
+            inactive_color: self.inactive_color.unwrap_or(base.inactive_color),
+            urgent_color: self.urgent_color.unwrap_or(base.urgent_color),
+            opacity: self.opacity.unwrap_or(base.opacity),
+            inactive_opacity: self.inactive_opacity.unwrap_or(base.inactive_opacity),
+            urgent_opacity: self.urgent_opacity.unwrap_or(base.urgent_opacity),
+            corner_radius: self.corner_radius.unwrap_or(base.corner_radius),
+            floating_only: self.floating_only.unwrap_or(base.floating_only),
+            fullscreen: self.fullscreen.unwrap_or(base.fullscreen),
         }
     }
 }
@@ -1730,6 +1884,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         }
         "depth" => apply_depth_block(&mut raw.depth, body),
         "frost" => apply_frost_block(&mut raw.frost, body),
+        "shadow" => apply_shadow_block(&mut raw.shadow, body),
         "ripple" => apply_ripple_block(&mut raw.ripple, body),
         "output" => raw.outputs.push(lower_output_block(header, body)),
         "rule" => raw.window_rules.push(lower_window_rule_block(body)),
@@ -2246,6 +2401,163 @@ fn apply_frost_override_block(cfg: &mut FrostOverrides, body: &[waves::Entry]) {
     }
 }
 
+fn apply_shadow_block(cfg: &mut ShadowConfig, body: &[waves::Entry]) {
+    let mut overrides = ShadowOverrides::default();
+    apply_shadow_override_block(&mut overrides, body);
+    *cfg = overrides.apply_to(cfg);
+}
+
+fn apply_shadow_override_block(cfg: &mut ShadowOverrides, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `shadow` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "enabled" => match parse_bool(value) {
+                Some(value) => cfg.enabled = Some(value),
+                None => tracing::warn!(
+                    value,
+                    "Expected shadow.enabled to be true or false, ignoring"
+                ),
+            },
+            "softness" | "range" | "size" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.softness = Some(value.clamp(0.0, 256.0)),
+                _ => tracing::warn!(value, "Expected shadow.softness from 0 to 256, ignoring"),
+            },
+            "spread" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.spread = Some(value.clamp(-128.0, 256.0)),
+                _ => tracing::warn!(value, "Expected shadow.spread from -128 to 256, ignoring"),
+            },
+            "offset" => match parse_shadow_offset(value) {
+                Some((x, y)) => {
+                    cfg.offset_x = Some(x);
+                    cfg.offset_y = Some(y);
+                }
+                None => tracing::warn!(
+                    value,
+                    "Expected shadow.offset as <x>x<y>, `x y`, or `{{x, y}}`, ignoring"
+                ),
+            },
+            "offset_x" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => {
+                    cfg.offset_x = Some(value.clamp(-512.0, 512.0));
+                }
+                _ => tracing::warn!(value, "Expected a finite shadow.offset_x, ignoring"),
+            },
+            "offset_y" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => {
+                    cfg.offset_y = Some(value.clamp(-512.0, 512.0));
+                }
+                _ => tracing::warn!(value, "Expected a finite shadow.offset_y, ignoring"),
+            },
+            "scale" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.scale = Some(value.clamp(0.0, 1.0)),
+                _ => tracing::warn!(value, "Expected shadow.scale from 0 to 1, ignoring"),
+            },
+            "render_power" | "falloff_power" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.render_power = Some(value.clamp(1.0, 8.0)),
+                _ => tracing::warn!(value, "Expected shadow.render_power from 1 to 8, ignoring"),
+            },
+            "sharp" => match parse_bool(value) {
+                Some(value) => cfg.sharp = Some(value),
+                None => {
+                    tracing::warn!(value, "Expected shadow.sharp to be true or false, ignoring")
+                }
+            },
+            "draw_behind_window" | "draw_behind" => match parse_bool(value) {
+                Some(value) => cfg.draw_behind_window = Some(value),
+                None => tracing::warn!(
+                    value,
+                    "Expected shadow.draw_behind_window to be true or false, ignoring"
+                ),
+            },
+            // Hyprland's historical inverse spelling.
+            "ignore_window" => match parse_bool(value) {
+                Some(value) => cfg.draw_behind_window = Some(!value),
+                None => tracing::warn!(
+                    value,
+                    "Expected shadow.ignore_window to be true or false, ignoring"
+                ),
+            },
+            "color" | "active_color" => match parse_rgba_color(value) {
+                Some(value) => cfg.color = Some(value),
+                None => tracing::warn!(value, "Expected a shadow RGBA color, ignoring"),
+            },
+            "inactive_color" | "color_inactive" => match parse_rgba_color(value) {
+                Some(value) => cfg.inactive_color = Some(value),
+                None => tracing::warn!(value, "Expected an inactive shadow RGBA color, ignoring"),
+            },
+            "urgent_color" | "color_urgent" => match parse_rgba_color(value) {
+                Some(value) => cfg.urgent_color = Some(value),
+                None => tracing::warn!(value, "Expected an urgent shadow RGBA color, ignoring"),
+            },
+            "opacity" | "active_opacity" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.opacity = Some(value.clamp(0.0, 1.0)),
+                _ => tracing::warn!(value, "Expected shadow.opacity from 0 to 1, ignoring"),
+            },
+            "inactive_opacity" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => {
+                    cfg.inactive_opacity = Some(value.clamp(0.0, 1.0))
+                }
+                _ => tracing::warn!(
+                    value,
+                    "Expected shadow.inactive_opacity from 0 to 1, ignoring"
+                ),
+            },
+            "urgent_opacity" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.urgent_opacity = Some(value.clamp(0.0, 1.0)),
+                _ => tracing::warn!(
+                    value,
+                    "Expected shadow.urgent_opacity from 0 to 1, ignoring"
+                ),
+            },
+            "corner_radius" | "rounding" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.corner_radius = Some(value.clamp(0.0, 256.0)),
+                _ => tracing::warn!(
+                    value,
+                    "Expected shadow.corner_radius from 0 to 256, ignoring"
+                ),
+            },
+            "floating_only" => match parse_bool(value) {
+                Some(value) => cfg.floating_only = Some(value),
+                None => tracing::warn!(
+                    value,
+                    "Expected shadow.floating_only to be true or false, ignoring"
+                ),
+            },
+            "fullscreen" | "fullscreen_enabled" => match parse_bool(value) {
+                Some(value) => cfg.fullscreen = Some(value),
+                None => tracing::warn!(
+                    value,
+                    "Expected shadow.fullscreen to be true or false, ignoring"
+                ),
+            },
+            other => tracing::warn!(key = %other, "Unknown key in `shadow` block, ignoring"),
+        }
+    }
+}
+
+fn parse_shadow_offset(value: &str) -> Option<(f32, f32)> {
+    let trimmed = value
+        .trim()
+        .trim_start_matches(['{', '[', '('])
+        .trim_end_matches(['}', ']', ')']);
+    let parts: Vec<&str> = if trimmed.contains('x') {
+        trimmed.splitn(2, 'x').collect()
+    } else if trimmed.contains(',') {
+        trimmed.splitn(2, ',').collect()
+    } else {
+        trimmed.split_whitespace().collect()
+    };
+    if parts.len() != 2 {
+        return None;
+    }
+    let x = parts[0].trim().parse::<f32>().ok()?;
+    let y = parts[1].trim().parse::<f32>().ok()?;
+    (x.is_finite() && y.is_finite()).then_some((x.clamp(-512.0, 512.0), y.clamp(-512.0, 512.0)))
+}
+
 /// Parses the body of a `ripple { }` block. Used both for the global
 /// block (mutating `RawConfig::ripple` in place) and for a per-rule
 /// `rule { ripple { } }` sub-block (mutating a fresh `RippleConfig` and
@@ -2359,6 +2671,95 @@ fn decode_hex_rgb(hex: &str) -> Option<[f32; 3]> {
     let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
     let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
     Some([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0])
+}
+
+/// Shadow colors keep their alpha channel, unlike ripple/frost colors which
+/// have a separate dedicated alpha knob. Accepts CSS/Hyprland-shaped hex,
+/// decimal `rgb()`/`rgba()`, and Hyprland's legacy `0xAARRGGBB`.
+fn parse_rgba_color(value: &str) -> Option<[f32; 4]> {
+    let value = value.trim();
+    if let Some(hex) = value.strip_prefix("0x") {
+        if hex.len() != 8 {
+            return None;
+        }
+        let a = u8::from_str_radix(&hex[0..2], 16).ok()?;
+        let r = u8::from_str_radix(&hex[2..4], 16).ok()?;
+        let g = u8::from_str_radix(&hex[4..6], 16).ok()?;
+        let b = u8::from_str_radix(&hex[6..8], 16).ok()?;
+        return Some([r, g, b, a].map(|channel| channel as f32 / 255.0));
+    }
+
+    if let Some(inner) = value
+        .strip_prefix("rgb(")
+        .and_then(|inner| inner.strip_suffix(')'))
+    {
+        if inner.contains(',') {
+            let channels: Vec<_> = inner.split(',').map(str::trim).collect();
+            if channels.len() != 3 {
+                return None;
+            }
+            return Some([
+                parse_rgb_channel(channels[0])?,
+                parse_rgb_channel(channels[1])?,
+                parse_rgb_channel(channels[2])?,
+                1.0,
+            ]);
+        }
+        return decode_hex_rgba(inner);
+    }
+
+    if let Some(inner) = value
+        .strip_prefix("rgba(")
+        .and_then(|inner| inner.strip_suffix(')'))
+    {
+        let channels: Vec<_> = inner.split(',').map(str::trim).collect();
+        return match channels.as_slice() {
+            // Hyprland's current compact form: rgba(RRGGBBAA).
+            [hex] => decode_hex_rgba(hex),
+            // TideWM's already-documented compatibility form:
+            // rgba(RRGGBB, AA), accepting byte or normalized alpha.
+            [hex, alpha] => {
+                let mut color = decode_hex_rgba(hex)?;
+                color[3] = parse_alpha_channel(alpha)?;
+                Some(color)
+            }
+            // CSS decimal rgba(r,g,b,a).
+            [r, g, b, a] => Some([
+                parse_rgb_channel(r)?,
+                parse_rgb_channel(g)?,
+                parse_rgb_channel(b)?,
+                parse_alpha_channel(a)?,
+            ]),
+            _ => None,
+        };
+    }
+
+    decode_hex_rgba(value.strip_prefix('#').unwrap_or(value))
+}
+
+fn decode_hex_rgba(hex: &str) -> Option<[f32; 4]> {
+    let (rgb, alpha) = match hex.len() {
+        6 => (hex, 255),
+        8 => (&hex[..6], u8::from_str_radix(&hex[6..8], 16).ok()?),
+        _ => return None,
+    };
+    let color = decode_hex_rgb(rgb)?;
+    Some([color[0], color[1], color[2], alpha as f32 / 255.0])
+}
+
+fn parse_rgb_channel(value: &str) -> Option<f32> {
+    let value = value.parse::<f32>().ok()?;
+    value.is_finite().then_some((value / 255.0).clamp(0.0, 1.0))
+}
+
+fn parse_alpha_channel(value: &str) -> Option<f32> {
+    if value.len() <= 2 && value.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Some(u8::from_str_radix(value, 16).ok()? as f32 / 255.0);
+    }
+    let value = value.parse::<f32>().ok()?;
+    value
+        .is_finite()
+        .then_some(if value > 1.0 { value / 255.0 } else { value }.clamp(0.0, 1.0))
 }
 
 fn parse_shapes(value: &str) -> Option<Vec<RippleShape>> {
@@ -2536,6 +2937,22 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                         "Expected a rule glass mode: water frost none, ignoring"
                     ),
                 },
+                "shadow" => match value.as_str() {
+                    "true" | "on" => {
+                        rule.shadow
+                            .get_or_insert_with(ShadowOverrides::default)
+                            .enabled = Some(true);
+                    }
+                    "false" | "off" | "none" => {
+                        rule.shadow
+                            .get_or_insert_with(ShadowOverrides::default)
+                            .enabled = Some(false);
+                    }
+                    _ => tracing::warn!(
+                        value,
+                        "Expected rule shadow to be true/false/on/off/none, ignoring"
+                    ),
+                },
                 "position" => match parse_position(value) {
                     Some(pos) => rule.position = Some(pos),
                     None => {
@@ -2572,6 +2989,11 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                 let mut overrides = FrostOverrides::default();
                 apply_frost_override_block(&mut overrides, frost_body);
                 rule.frost = Some(overrides);
+            }
+            waves::Entry::Block(keyword, _, shadow_body) if keyword == "shadow" => {
+                let mut overrides = ShadowOverrides::default();
+                apply_shadow_override_block(&mut overrides, shadow_body);
+                rule.shadow = Some(overrides);
             }
             _ => tracing::warn!("Unexpected entry in `rule` block, ignoring"),
         }
@@ -3207,6 +3629,29 @@ bsp_split_bias = auto
 #     corner_radius = 0              # physical pixels
 #     corner_softness = 1.0          # antialias width, physical pixels
 # }
+
+# Analytical drop shadows (Phase R2). These are independent of
+# `water_effects`: disabling the water identity does not remove ordinary
+# window decoration. Values are logical pixels and follow output scale.
+# shadow {
+#     enabled = true
+#     softness = 28                  # niri blur radius / Hyprland range
+#     spread = 2                     # CSS-style; negative values contract
+#     offset = 0x8                   # <x>x<y>; `0 8` and `{0, 8}` also work
+#     scale = 1.0                    # Hyprland-compatible 0 to 1
+#     render_power = 2               # 1 soft/long, higher falls off faster
+#     sharp = false                  # hard edge, bypassing softness
+#     draw_behind_window = false     # false avoids tinting transparent apps
+#     color = 040E137A               # RRGGBBAA; active/focused
+#     inactive_color = 03080C4D
+#     urgent_color = 2EC7FFB8        # TideWM bioluminescent attention state
+#     opacity = 1.0
+#     inactive_opacity = 1.0
+#     urgent_opacity = 1.0
+#     corner_radius = 0
+#     floating_only = false
+#     fullscreen = false
+# }
 #
 # Ripple (Phase R1 water identity). All values are the system defaults --
 # copy and uncomment what you want to change. Per-app overrides go in a
@@ -3357,6 +3802,14 @@ xwayland {
 #         opacity = 1.0
 #         tint_alpha = 0.0
 #         noise = 0.015
+#         corner_radius = 12
+#     }
+#     shadow {
+#         softness = 36
+#         spread = 4
+#         offset = 0x10
+#         color = 04131A80
+#         inactive_color = 02080C4D
 #         corner_radius = 12
 #     }
 # }
@@ -3589,6 +4042,7 @@ mod tests {
             workspace_transition: WorkspaceTransitionConfig::default(),
             depth: DepthConfig::default(),
             frost: FrostConfig::default(),
+            shadow: ShadowConfig::default(),
             ripple: RippleConfig::system_default(),
             cursor_always_visible: false,
             cursor_hide_after_ms: 0,
@@ -3956,6 +4410,84 @@ mod tests {
     }
 
     #[test]
+    fn shadow_block_and_per_window_overrides_parse_and_merge() {
+        let entries = waves::parse(
+            "shadow {\n\
+             enabled = false\n\
+             range = 42\n\
+             spread = -3\n\
+             offset = 4x-6\n\
+             scale = 0.9\n\
+             render_power = 4\n\
+             sharp = true\n\
+             ignore_window = false\n\
+             color = rgba(11223380)\n\
+             color_inactive = 0x40102030\n\
+             urgent_color = rgba(00CCFF, 192)\n\
+             opacity = 0.8\n\
+             inactive_opacity = 0.5\n\
+             urgent_opacity = 0.95\n\
+             corner_radius = 18\n\
+             floating_only = true\n\
+             fullscreen = true\n\
+             }\n\
+             rule {\n\
+             app_id = kitty\n\
+             shadow {\n\
+             enabled = true\n\
+             softness = 24\n\
+             offset_y = 12\n\
+             draw_behind_window = false\n\
+             }\n\
+             }\n\
+             rule {\n\
+             app_id = kitty\n\
+             shadow {\n\
+             spread = 5\n\
+             inactive_opacity = 0.7\n\
+             }\n\
+             }\n",
+            Path::new("<shadow-test>"),
+        )
+        .unwrap();
+        let config = Config::from_raw(lower_entries(&entries)).0;
+
+        assert!(!config.shadow.enabled);
+        assert_eq!(config.shadow.softness, 42.0);
+        assert_eq!(config.shadow.spread, -3.0);
+        assert_eq!(config.shadow.offset, (4.0, -6.0));
+        assert_eq!(config.shadow.scale, 0.9);
+        assert_eq!(config.shadow.render_power, 4.0);
+        assert!(config.shadow.sharp);
+        assert!(config.shadow.draw_behind_window);
+        assert_eq!(
+            config.shadow.color,
+            [17.0 / 255.0, 34.0 / 255.0, 51.0 / 255.0, 128.0 / 255.0]
+        );
+        assert_eq!(
+            config.shadow.inactive_color,
+            [16.0 / 255.0, 32.0 / 255.0, 48.0 / 255.0, 64.0 / 255.0]
+        );
+        assert_eq!(config.shadow.opacity, 0.8);
+        assert_eq!(config.shadow.inactive_opacity, 0.5);
+        assert_eq!(config.shadow.urgent_opacity, 0.95);
+        assert_eq!(config.shadow.corner_radius, 18.0);
+        assert!(config.shadow.floating_only);
+        assert!(config.shadow.fullscreen);
+
+        let resolved = config.resolve_window_rules(Some("kitty"), None);
+        let shadow = resolved.shadow.unwrap().apply_to(&config.shadow);
+        assert!(shadow.enabled);
+        assert_eq!(shadow.softness, 24.0);
+        assert_eq!(shadow.spread, 5.0);
+        // Per-axis sparse override keeps the global X offset.
+        assert_eq!(shadow.offset, (4.0, 12.0));
+        assert_eq!(shadow.inactive_opacity, 0.7);
+        assert!(!shadow.draw_behind_window);
+        assert_eq!(shadow.render_power, 4.0);
+    }
+
+    #[test]
     fn glass_mode_is_last_match_wins_and_plain_is_explicit() {
         let entries = waves::parse(
             "rule {\n app_id = kitty\n glass = frost\n }\n\
@@ -4243,5 +4775,20 @@ mod tests {
         assert_eq!(parse_ripple_color("rgba(00ffff, 128)"), cyan);
         assert_eq!(parse_ripple_color("not-a-color"), None);
         assert_eq!(parse_ripple_color("#zzzzzz"), None);
+    }
+
+    #[test]
+    fn shadow_color_keeps_alpha_across_css_and_hyprland_forms() {
+        let expected = [0.0, 1.0, 1.0, 128.0 / 255.0];
+        assert_eq!(parse_rgba_color("00ffff80"), Some(expected));
+        assert_eq!(parse_rgba_color("#00ffff80"), Some(expected));
+        assert_eq!(parse_rgba_color("rgba(00ffff80)"), Some(expected));
+        assert_eq!(parse_rgba_color("rgba(00ffff, 128)"), Some(expected));
+        assert_eq!(
+            parse_rgba_color("rgba(0,255,255,0.5019608)"),
+            Some(expected)
+        );
+        assert_eq!(parse_rgba_color("0x8000ffff"), Some(expected));
+        assert_eq!(parse_rgba_color("nope"), None);
     }
 }

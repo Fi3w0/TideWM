@@ -226,6 +226,8 @@ pub struct Smallvil {
     /// Frost is a separate program over the same capture texture; compiled
     /// lazily only when a rule actually selects `glass = frost`.
     pub(crate) frost_glass_program: Option<GlesTexProgram>,
+    /// Analytical window-shadow shader, compiled once on first use.
+    pub(crate) shadow_program: Option<GlesPixelProgram>,
     /// Active impulse ripples (Phase R1, see `ripple.rs`). Each one lives
     /// on a specific output, decays over its own `duration`, and is
     /// `retain`-pruned once `finished()` inside `ripple_frame_elements`
@@ -966,14 +968,17 @@ impl Smallvil {
     /// front-to-back element-order convention has already been burned by
     /// once (see session-lock's element-order bug, AGENT.md).
     pub(crate) fn desktop_render_elements(
-        &self,
+        &mut self,
         renderer: &mut GlesRenderer,
         output: &Output,
         skip: &[WlSurface],
-    ) -> Option<Vec<SpaceRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>>>
-    {
+    ) -> Option<Vec<crate::backend::udev::OutputRenderElements>> {
         self.space.output_geometry(output)?;
         let mut result = Vec::new();
+        let shadow_program = self
+            .shadows_possible()
+            .then(|| crate::shadow::shadow_program(&mut self.shadow_program, renderer))
+            .flatten();
 
         fn append_windows(
             state: &Smallvil,
@@ -981,9 +986,8 @@ impl Smallvil {
             output: &Output,
             fullscreen: bool,
             skip: &[WlSurface],
-            result: &mut Vec<
-                SpaceRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>,
-            >,
+            shadow_program: Option<&GlesPixelProgram>,
+            result: &mut Vec<crate::backend::udev::OutputRenderElements>,
         ) {
             let Some(output_geo) = state.space.output_geometry(output) else {
                 return;
@@ -1019,8 +1023,16 @@ impl Smallvil {
                             alpha,
                         )
                         .into_iter()
-                        .map(SpaceRenderElements::Surface),
+                        .map(SpaceRenderElements::Surface)
+                        .map(crate::backend::udev::OutputRenderElements::Space),
                 );
+                if let (Some(surface), Some(program)) = (surface, shadow_program) {
+                    if let Some(shadow) =
+                        state.window_shadow_element(output, window, surface, program.clone())
+                    {
+                        result.push(crate::backend::udev::OutputRenderElements::Shadow(shadow));
+                    }
+                }
             }
         }
 
@@ -1029,9 +1041,7 @@ impl Smallvil {
             renderer: &mut GlesRenderer,
             output: &Output,
             kinds: &[WlrLayer],
-            result: &mut Vec<
-                SpaceRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>,
-            >,
+            result: &mut Vec<crate::backend::udev::OutputRenderElements>,
         ) {
             let output_scale = output.current_scale().fractional_scale();
             let scale = Scale::from(output_scale);
@@ -1053,13 +1063,22 @@ impl Smallvil {
                                 1.0,
                             )
                             .into_iter()
-                            .map(SpaceRenderElements::Surface),
+                            .map(SpaceRenderElements::Surface)
+                            .map(crate::backend::udev::OutputRenderElements::Space),
                     );
                 }
             }
         }
 
-        append_windows(self, renderer, output, true, skip, &mut result);
+        append_windows(
+            self,
+            renderer,
+            output,
+            true,
+            skip,
+            shadow_program.as_ref(),
+            &mut result,
+        );
         append_layers(
             self,
             renderer,
@@ -1067,7 +1086,15 @@ impl Smallvil {
             &[WlrLayer::Overlay, WlrLayer::Top],
             &mut result,
         );
-        append_windows(self, renderer, output, false, skip, &mut result);
+        append_windows(
+            self,
+            renderer,
+            output,
+            false,
+            skip,
+            shadow_program.as_ref(),
+            &mut result,
+        );
         append_layers(
             self,
             renderer,
@@ -1390,6 +1417,7 @@ impl Smallvil {
             backdrop_textures: HashMap::new(),
             water_glass_program: None,
             frost_glass_program: None,
+            shadow_program: None,
             ripples: Vec::new(),
             ripple_program: None,
             window_depths: HashMap::new(),
@@ -3012,6 +3040,65 @@ impl Smallvil {
             .unwrap_or_else(|| self.config.frost.clone())
     }
 
+    fn shadow_config_for_surface(&self, surface: &WlSurface) -> crate::config::ShadowConfig {
+        let (app_id, title) = self.toplevel_identity(surface);
+        let rule = self
+            .config
+            .resolve_window_rules(app_id.as_deref(), title.as_deref());
+        rule.shadow
+            .as_ref()
+            .map(|overrides| overrides.apply_to(&self.config.shadow))
+            .unwrap_or_else(|| self.config.shadow.clone())
+    }
+
+    fn shadows_possible(&self) -> bool {
+        self.config.shadow.enabled
+            || self.config.window_rules.iter().any(|rule| {
+                rule.shadow
+                    .as_ref()
+                    .and_then(|shadow| shadow.enabled)
+                    .unwrap_or(false)
+            })
+    }
+
+    fn window_shadow_element(
+        &self,
+        output: &Output,
+        window: &Window,
+        surface: &WlSurface,
+        program: GlesPixelProgram,
+    ) -> Option<crate::shadow::ShadowElement> {
+        let config = self.shadow_config_for_surface(surface);
+        let fullscreen = self.fullscreen.contains_key(surface);
+        if !config.enabled
+            || (config.floating_only && !self.floating_workspace.contains_key(surface))
+            || (fullscreen && !config.fullscreen)
+        {
+            return None;
+        }
+
+        let output_geo = self.space.output_geometry(output)?;
+        let output_scale = output.current_scale().fractional_scale();
+        let location = self.space.element_location(window)?;
+        let logical_rect = Rectangle::new(location - output_geo.loc, window.geometry().size);
+        let physical_rect = logical_rect.to_physical_precise_round(output_scale);
+        let focused = matches!(
+            &self.keyboard_focus,
+            KeyboardFocusTarget::Window(focused) if focused == surface
+        );
+        let urgent = self.urgent.contains(surface);
+        let id = crate::shadow::shadow_id(surface, &config, focused, urgent);
+        Some(crate::shadow::ShadowElement::new(
+            id,
+            physical_rect,
+            output_scale,
+            program,
+            config,
+            focused,
+            urgent,
+        ))
+    }
+
     /// Captures the backdrop behind every currently-visible floating window
     /// on `output` into `backdrop_textures`, one frame behind (see
     /// `backdrop.rs`'s own doc comment for why this can't run inside the
@@ -3064,11 +3151,7 @@ impl Smallvil {
                 .wallpaper_element(output, renderer)
                 .map(crate::backend::udev::OutputRenderElements::Composited)
                 .into_iter()
-                .chain(
-                    space_elements
-                        .into_iter()
-                        .map(crate::backend::udev::OutputRenderElements::Space),
-                )
+                .chain(space_elements)
                 .collect();
 
             if let Some(texture) =
@@ -3167,6 +3250,10 @@ impl Smallvil {
                 crate::frost_glass::frost_glass_program(&mut self.frost_glass_program, renderer)
             })
             .flatten();
+        let shadow_program = self
+            .shadows_possible()
+            .then(|| crate::shadow::shadow_program(&mut self.shadow_program, renderer))
+            .flatten();
         let Some(output_geo) = self.space.output_geometry(output) else {
             return result;
         };
@@ -3231,6 +3318,17 @@ impl Smallvil {
                     }
                 }
             }
+            // Front-to-back ordering: the real client surface is first,
+            // then its sampled glass backdrop, then the shadow immediately
+            // behind both. This keeps translucent text/content above the
+            // glass and prevents the shadow from becoming a full-window tint.
+            if let Some(program) = &shadow_program {
+                if let Some(shadow) =
+                    self.window_shadow_element(output, &window, surface, program.clone())
+                {
+                    result.push(crate::backend::udev::OutputRenderElements::Shadow(shadow));
+                }
+            }
         }
         result
     }
@@ -3252,11 +3350,7 @@ impl Smallvil {
         let elements: Vec<crate::backend::udev::OutputRenderElements> = depth_elements
             .into_iter()
             .chain(glass_elements)
-            .chain(
-                space_elements
-                    .into_iter()
-                    .map(crate::backend::udev::OutputRenderElements::Space),
-            )
+            .chain(space_elements)
             .chain(
                 self.wallpaper_element(output, renderer)
                     .map(crate::backend::udev::OutputRenderElements::Composited),

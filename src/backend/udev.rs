@@ -119,6 +119,8 @@ smithay::backend::renderer::element::render_elements! {
     WaterGlass = crate::water_glass::WaterGlassElement,
     /// Frosted-glass mode over the same captured backdrop as water glass.
     FrostGlass = crate::frost_glass::FrostGlassElement,
+    /// Fixed-cost analytical shadow inserted directly behind each window.
+    Shadow = crate::shadow::ShadowElement,
     /// Impulse ripple (Phase R1, see ripple.rs), drawn over windows but
     /// below toast/overview/picker/tab-strip chrome. Same renderer-
     /// concrete-ness reason as `WaterGlass` above.
@@ -1445,7 +1447,7 @@ fn render_surface(
     elements.extend(workspace_transition);
     elements.extend(depth_elements);
     elements.extend(glass_elements);
-    elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
+    elements.extend(space_elements);
     elements.extend(ripple_layers.below_windows);
     elements.extend(wallpaper_element.map(OutputRenderElements::Composited));
     elements.extend(lock_elements.into_iter().map(OutputRenderElements::Lock));

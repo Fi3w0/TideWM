@@ -234,6 +234,67 @@ rule {
 
 For the example above, configure Kitty with `background_opacity 0.72` (or launch it with `kitty -o background_opacity=0.72`). Add TideWM’s own `opacity = 0.72` only when intentionally making the complete client surface—including its text—translucent.
 
+### `shadow { }`
+
+Configures Phase R2 compositor-drawn drop shadows. TideWM combines niri’s CSS-like `softness`, signed `spread`, `offset`, and draw-behind behavior with Hyprland’s `render_power`, `sharp`, and `scale` controls. The shader is an analytical rounded-rectangle distance field: it allocates no texture or framebuffer and adds no cache whose size can grow with time. Shadows are inserted immediately behind their own window in real front-to-back z-order, including screenshot, screencast, backdrop, and workspace-transition capture paths.
+
+Shadows are ordinary decoration and therefore independent of `water_effects`. The default `draw_behind_window = false` is especially important for transparent/frosted apps: TideWM cuts the actual window body out of the shadow, so the shadow cannot become a dark or colored filter over the client. Set it to `true` only when a client’s unknown rounded CSD shape would otherwise leave artifacts.
+
+Every key also works inside `rule { shadow { } }`; omitted fields inherit the global block and multiple matching shadow sub-blocks merge field by field. Colors accept `RRGGBB`, `RRGGBBAA`, quoted `"#RRGGBBAA"`, `rgb(...)`, `rgba(...)`, and legacy Hyprland `0xAARRGGBB`.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | Master switch for this scope. A rule can re-enable or disable it per app. |
+| `softness` | float, `0`–`256` | `28` | Soft falloff reach in logical pixels. `range` and `size` are aliases. Zero gives a hard edge. |
+| `spread` | float, `-128`–`256` | `2` | CSS-style expansion before falloff; negative values contract the shadow. |
+| `offset` | pair | `0x8` | Logical-pixel X/Y offset. Accepts `<x>x<y>`, `x y`, or `{x, y}`. `offset_x`/`offset_y` can override one axis. |
+| `scale` | float, `0`–`1` | `1.0` | Scales the base shadow rectangle around the window center. |
+| `render_power` | float, `1`–`8` | `2` | Higher values make the falloff disappear faster. `falloff_power` is an alias. |
+| `sharp` | bool | `false` | Bypasses the soft falloff and draws a hard shadow shape. |
+| `draw_behind_window` | bool | `false` | If false, cuts the window body out to protect transparent content from tinting. `draw_behind` is an alias; historical Hyprland `ignore_window` is accepted with inverse meaning. |
+| `color` | RGBA color | dark blue-black, alpha `0.48` | Focused shadow color. `active_color` is an alias. |
+| `inactive_color` | RGBA color | dark blue-black, alpha `0.30` | Unfocused shadow. `color_inactive` is an alias. |
+| `urgent_color` | RGBA color | aqua, alpha `0.72` | TideWM extension: bioluminescent attention shadow. `color_urgent` is an alias. |
+| `opacity` | float, `0`–`1` | `1.0` | Extra focused alpha multiplier, applied after color alpha. `active_opacity` is an alias. |
+| `inactive_opacity` | float, `0`–`1` | `1.0` | Extra unfocused alpha multiplier. |
+| `urgent_opacity` | float, `0`–`1` | `1.0` | Extra urgent alpha multiplier. |
+| `corner_radius` | float, `0`–`256` | `0` | Rounded shadow geometry in logical pixels. `rounding` is an alias. |
+| `floating_only` | bool | `false` | When true, tiled windows do not get compositor shadows. |
+| `fullscreen` | bool | `false` | Enables fullscreen shadows. Usually wasted beyond the output edge, so off by default. |
+
+```wave
+shadow {
+    enabled = true
+    softness = 28
+    spread = 2
+    offset = 0x8
+    scale = 1.0
+    render_power = 2
+    sharp = false
+    draw_behind_window = false
+    color = 040E137A
+    inactive_color = 03080C4D
+    urgent_color = 2EC7FFB8
+    opacity = 1.0
+    inactive_opacity = 1.0
+    urgent_opacity = 1.0
+    corner_radius = 0
+    floating_only = false
+    fullscreen = false
+}
+
+rule {
+    app_id = kitty
+    shadow {
+        softness = 36
+        spread = 4
+        offset_y = 12
+        color = 04131A80
+        corner_radius = 12
+    }
+}
+```
+
 ### `ripple { }`
 
 Configures the Phase R1 impulse ripple shared by window-map, focus-change, and urgent-attention events. `water_effects = false` disables every ripple regardless of this block. The active ripple list is capped at 16 so rapid mapping cannot grow render state without bound.
@@ -405,13 +466,15 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 | `fullscreen_opacity` | float | Extra multiplier while fullscreen; takes priority over active/inactive state. |
 | `glass` | `water`, `frost`, or `none` | Captured-backdrop treatment for a floating window. Explicit `water`/`frost` works with client-provided alpha; when unset, a TideWM `opacity` below `1.0` implicitly selects `water`. `none` preserves plain transparency. `glass_mode` is an alias. |
 | `frost { }` | sub-block | Per-app overrides for every global frost field. Unspecified fields inherit the global block; multiple matching rules merge field by field. |
+| `shadow` | bool / `on`, `off`, `none` | Shorthand to enable or disable compositor shadows for matching windows. |
+| `shadow { }` | sub-block | Per-app overrides for every global shadow field. Unspecified fields inherit the global block; multiple matching rules merge field by field. |
 | `position` | `<x>x<y>`, optional | Exact floating placement. No-op unless the window ends up floating. |
 | `size` | `<width>x<height>`, optional | Exact floating size. No-op unless the window ends up floating. |
 | `ripple { }` | sub-block | Per-app overrides for any global ripple field; unspecified fields inherit the global block. `ripple = none` suppresses ripples for matching windows. |
 
 The effective surface opacity is `opacity × state opacity`, clamped to `0`–`1`; for example, `opacity = 0.9` plus `inactive_opacity = 0.8` renders at `0.72`. This compositor opacity affects text and foreground pixels too. For colorless frost with opaque text, keep these at `1.0`, set per-app `frost.tint_alpha = 0.0`, and use the app's own background transparency when available.
 
-Multiple rules can match the same window: scalar fields take the *last* match; `frost { }` and `ripple { }` sub-blocks merge field by field; boolean effects accumulate (any match sets one, never unsets it).
+Multiple rules can match the same window: scalar fields take the *last* match; `frost { }`, `shadow { }`, and `ripple { }` sub-blocks merge field by field; boolean effects accumulate (any match sets one, never unsets it).
 
 ```
 rule {
