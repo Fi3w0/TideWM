@@ -290,30 +290,26 @@ pub fn init_winit(
                             .and_then(|hint| hint.render_element(renderer, size));
                         let wallpaper_element = state.wallpaper_element(&entry.output, renderer);
                         // Pulled out of their normal z-slot (skip) and
-                        // rebuilt as their own element plus a water-glass
+                        // rebuilt as their own element plus a selected glass
                         // layer, prepended ahead of everything else in
-                        // space_elements -- see water_glass_frame_elements'
+                        // space_elements -- see glass_frame_elements'
                         // own doc comment for why this means "topmost
                         // among windows," not real multi-window z-order.
-                        let water_glass_surfaces =
-                            state.water_glass_eligible_surfaces(&entry.output);
-                        let water_glass_elements = state.water_glass_frame_elements(
-                            renderer,
-                            &entry.output,
-                            &water_glass_surfaces,
-                        );
+                        let glass_surfaces = state.glass_eligible_surfaces(&entry.output);
+                        let glass_elements =
+                            state.glass_frame_elements(renderer, &entry.output, &glass_surfaces);
                         let (depth_elements, depth_surfaces) =
                             state.depth_frame_elements(renderer, &entry.output);
                         // Only skip from the normal walk what actually got a
                         // replacement element built -- a shader-compile
                         // failure or missing output geometry makes
-                        // water_glass_frame_elements return empty, and
+                        // glass_frame_elements return empty, and
                         // skipping windows the empty result won't draw would
                         // make them vanish from the frame entirely rather
                         // than just losing the effect.
                         let mut skip = depth_surfaces;
-                        if !water_glass_elements.is_empty() {
-                            skip.extend(water_glass_surfaces.iter().cloned());
+                        if !glass_elements.is_empty() {
+                            skip.extend(glass_surfaces.iter().cloned());
                         }
                         let space_elements =
                             match state.desktop_render_elements(renderer, &entry.output, &skip) {
@@ -351,7 +347,7 @@ pub fn init_winit(
                         elements.extend(ripple_layers.above_windows);
                         elements.extend(workspace_transition);
                         elements.extend(depth_elements);
-                        elements.extend(water_glass_elements);
+                        elements.extend(glass_elements);
                         elements.extend(
                             space_elements
                                 .into_iter()

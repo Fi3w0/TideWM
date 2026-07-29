@@ -12,6 +12,7 @@ mod config;
 mod cursor;
 mod depth;
 mod error_overlay;
+mod frost_glass;
 mod grabs;
 mod input;
 mod ipc;

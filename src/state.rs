@@ -206,12 +206,16 @@ pub struct Smallvil {
 
     pub layout: Layouts,
     pub space: Space<Window>,
-    /// Per-mapped-window alpha resolved from window rules. Missing entries
-    /// are fully opaque.
-    pub(crate) window_opacity: HashMap<WlSurface, f32>,
+    /// Per-mapped-window base/active/inactive/fullscreen alpha multipliers
+    /// resolved from window rules. Missing entries preserve client alpha.
+    pub(crate) window_opacity: HashMap<WlSurface, crate::config::WindowOpacity>,
+    /// Explicit captured-backdrop mode resolved from window rules. Missing
+    /// entries preserve the original behavior: translucent floating windows
+    /// use water refraction.
+    pub(crate) window_glass_modes: HashMap<WlSurface, crate::config::GlassMode>,
     /// One frame behind: captured via `backdrop::capture_backdrop` after a
-    /// frame renders, for water-glass (`water_glass.rs`, Phase R1) to
-    /// sample building the *next* frame's elements. Evicted in
+    /// frame renders, for water/frost glass to sample while building the
+    /// *next* frame's elements. Evicted in
     /// `detach_mapped_toplevel` alongside `window_opacity`, or this grows
     /// for the life of the session.
     pub(crate) backdrop_textures: HashMap<WlSurface, crate::backdrop::BackdropCapture>,
@@ -219,6 +223,9 @@ pub struct Smallvil {
     /// `toast::font()`'s process-global `OnceLock`); see
     /// `water_glass::water_glass_program`.
     pub(crate) water_glass_program: Option<GlesTexProgram>,
+    /// Frost is a separate program over the same capture texture; compiled
+    /// lazily only when a rule actually selects `glass = frost`.
+    pub(crate) frost_glass_program: Option<GlesTexProgram>,
     /// Active impulse ripples (Phase R1, see `ripple.rs`). Each one lives
     /// on a specific output, decays over its own `duration`, and is
     /// `retain`-pruned once `finished()` inside `ripple_frame_elements`
@@ -997,8 +1004,7 @@ impl Smallvil {
                     continue;
                 };
                 let alpha = surface
-                    .and_then(|surface| state.window_opacity.get(surface))
-                    .copied()
+                    .map(|surface| state.window_render_alpha(surface))
                     .unwrap_or(1.0)
                     * surface
                         .map(|surface| state.depth_live_alpha(surface))
@@ -1380,8 +1386,10 @@ impl Smallvil {
             },
             space,
             window_opacity: HashMap::new(),
+            window_glass_modes: HashMap::new(),
             backdrop_textures: HashMap::new(),
             water_glass_program: None,
+            frost_glass_program: None,
             ripples: Vec::new(),
             ripple_program: None,
             window_depths: HashMap::new(),
@@ -2973,14 +2981,43 @@ impl Smallvil {
         Some(logical_rect.to_physical_precise_round(output_scale))
     }
 
+    fn glass_mode_for_surface(&self, surface: &WlSurface) -> Option<crate::config::GlassMode> {
+        let frost = self.frost_config_for_surface(surface);
+        let opacity = self.window_render_alpha(surface);
+        selected_glass_mode(
+            self.window_glass_modes.get(surface).copied(),
+            (opacity < 1.0).then_some(opacity),
+            frost.enabled,
+        )
+    }
+
+    pub(crate) fn window_render_alpha(&self, surface: &WlSurface) -> f32 {
+        let focused = matches!(&self.keyboard_focus, KeyboardFocusTarget::Window(focused) if focused == surface);
+        let fullscreen = self.fullscreen.contains_key(surface);
+        self.window_opacity
+            .get(surface)
+            .copied()
+            .map(|opacity| opacity.alpha(focused, fullscreen))
+            .unwrap_or(1.0)
+    }
+
+    fn frost_config_for_surface(&self, surface: &WlSurface) -> crate::config::FrostConfig {
+        let (app_id, title) = self.toplevel_identity(surface);
+        let rule = self
+            .config
+            .resolve_window_rules(app_id.as_deref(), title.as_deref());
+        rule.frost
+            .as_ref()
+            .map(|overrides| overrides.apply_to(&self.config.frost))
+            .unwrap_or_else(|| self.config.frost.clone())
+    }
+
     /// Captures the backdrop behind every currently-visible floating window
     /// on `output` into `backdrop_textures`, one frame behind (see
     /// `backdrop.rs`'s own doc comment for why this can't run inside the
     /// same frame it's captured for). Gated on `water_effects` -- the
-    /// master toggle for this whole roadmap, and the first thing that
-    /// actually reads it. Nothing yet samples the stored texture; this is
-    /// capture and storage only (Phase R0.5), not the water-glass shader
-    /// (Phase R1) that will consume it.
+    /// master toggle for this whole roadmap. Water and frost glass sample
+    /// the stored texture on the next frame.
     ///
     /// Tiled windows are deliberately out of scope here: they tile edge to
     /// edge, so "what's behind" one is either another tile (visually
@@ -2999,10 +3036,18 @@ impl Smallvil {
         let surfaces: Vec<WlSurface> = self
             .floating_workspace
             .iter()
-            .filter(|(_, tag)| tag.output == output.name())
+            .filter(|(surface, tag)| {
+                tag.output == output.name()
+                    && self
+                        .window_depths
+                        .get(*surface)
+                        .is_none_or(|depth| depth.tier() < 2)
+                    && self.glass_mode_for_surface(surface).is_some()
+            })
             .map(|(surface, _)| surface.clone())
             .collect();
 
+        let mut captured_first_backdrop = false;
         for surface in surfaces {
             let Some(physical_rect) = self.floating_window_physical_rect(&surface, output) else {
                 // Hidden (different workspace) right now -- nothing to
@@ -3029,6 +3074,7 @@ impl Smallvil {
             if let Some(texture) =
                 crate::backdrop::capture_backdrop(renderer, physical_rect, behind)
             {
+                let first_capture = !self.backdrop_textures.contains_key(&surface);
                 let (id, mut commit) = match self.backdrop_textures.get(&surface) {
                     Some(existing) => (existing.id.clone(), existing.commit),
                     None => (
@@ -3045,19 +3091,26 @@ impl Smallvil {
                         commit,
                     },
                 );
+                captured_first_backdrop |= first_capture;
             }
+        }
+        // The frame that triggered the first capture could otherwise be the
+        // last dirty frame on a static desktop. Schedule exactly one more so
+        // the newly available texture is actually consumed; later capture
+        // replacements do not self-sustain an idle redraw loop.
+        if captured_first_backdrop {
+            self.request_redraw();
         }
     }
 
-    /// Floating windows on `output` eligible for a water-glass layer this
-    /// frame: `water_effects` on, an `opacity` window rule below 1.0 set
-    /// (reusing that existing rule as the trigger rather than adding a new
-    /// config key -- "what shows through a semi-transparent window" is
-    /// already exactly what it means), and a backdrop already captured for
-    /// them. Callers pass this list to `desktop_render_elements`'s `skip`
+    /// Floating windows on `output` eligible for a captured glass layer this
+    /// frame: `water_effects` on, either an explicit `glass` mode or the
+    /// backward-compatible implicit trigger (`opacity` below 1.0 means
+    /// water), and a backdrop already captured for them. Callers pass this
+    /// list to `desktop_render_elements`'s `skip`
     /// so these windows are pulled out of their normal z-slot, then use
-    /// `water_glass_frame_elements` to build what replaces them.
-    pub(crate) fn water_glass_eligible_surfaces(&self, output: &Output) -> Vec<WlSurface> {
+    /// `glass_frame_elements` to build what replaces them.
+    pub(crate) fn glass_eligible_surfaces(&self, output: &Output) -> Vec<WlSurface> {
         if !self.config.water_effects {
             return Vec::new();
         }
@@ -3069,27 +3122,24 @@ impl Smallvil {
                         .window_depths
                         .get(*surface)
                         .is_none_or(|depth| depth.tier() < 2)
-                    && self
-                        .window_opacity
-                        .get(*surface)
-                        .is_some_and(|alpha| *alpha < 1.0)
+                    && self.glass_mode_for_surface(surface).is_some()
                     && self.backdrop_textures.contains_key(*surface)
             })
             .map(|(surface, _)| surface.clone())
             .collect()
     }
 
-    /// Builds, for each of `surfaces` (from `water_glass_eligible_surfaces`),
+    /// Builds, for each of `surfaces` (from `glass_eligible_surfaces`),
     /// the window's own surface element immediately followed by its
-    /// water-glass layer -- in that order so the window's real (semi-
-    /// transparent) content draws on top of the opaque refracted backdrop,
-    /// not the other way around. Meant to be prepended ahead of the rest of
+    /// selected glass layer -- in that order so the window's real (semi-
+    /// transparent) content draws on top of the treated backdrop. Meant to
+    /// be prepended ahead of the rest of
     /// `desktop_render_elements`'s output (called with the same `surfaces`
     /// as `skip`), which puts every eligible window topmost among windows;
     /// see `water_glass.rs`'s module doc comment for why plain layering
     /// (not real multi-window z-order) is the deliberate scope for this
     /// first cut. Lazily compiles the shader on first call.
-    pub(crate) fn water_glass_frame_elements(
+    pub(crate) fn glass_frame_elements(
         &mut self,
         renderer: &mut GlesRenderer,
         output: &Output,
@@ -3099,11 +3149,24 @@ impl Smallvil {
         if surfaces.is_empty() {
             return result;
         }
-        let Some(program) =
-            crate::water_glass::water_glass_program(&mut self.water_glass_program, renderer)
-        else {
-            return result;
-        };
+        let needs_water = surfaces.iter().any(|surface| {
+            self.window_glass_modes
+                .get(surface)
+                .is_none_or(|mode| *mode == crate::config::GlassMode::Water)
+        });
+        let needs_frost = surfaces.iter().any(|surface| {
+            self.window_glass_modes.get(surface) == Some(&crate::config::GlassMode::Frost)
+        });
+        let water_program = needs_water
+            .then(|| {
+                crate::water_glass::water_glass_program(&mut self.water_glass_program, renderer)
+            })
+            .flatten();
+        let frost_program = needs_frost
+            .then(|| {
+                crate::frost_glass::frost_glass_program(&mut self.frost_glass_program, renderer)
+            })
+            .flatten();
         let Some(output_geo) = self.space.output_geometry(output) else {
             return result;
         };
@@ -3123,8 +3186,7 @@ impl Smallvil {
             let Some(location) = self.space.element_location(&window) else {
                 continue;
             };
-            let alpha = self.window_opacity.get(surface).copied().unwrap_or(1.0)
-                * self.depth_live_alpha(surface);
+            let alpha = self.window_render_alpha(surface) * self.depth_live_alpha(surface);
             let render_location = location - output_geo.loc - window.geometry().loc;
 
             result.extend(
@@ -3139,15 +3201,36 @@ impl Smallvil {
                     .map(SpaceRenderElements::Surface)
                     .map(crate::backend::udev::OutputRenderElements::Space),
             );
-            result.push(crate::backend::udev::OutputRenderElements::WaterGlass(
-                crate::water_glass::WaterGlassElement::new(
-                    capture.id.clone(),
-                    capture.commit,
-                    capture.texture.clone(),
-                    physical_rect,
-                    program.clone(),
-                ),
-            ));
+            match self.window_glass_modes.get(surface).copied() {
+                Some(crate::config::GlassMode::Frost) => {
+                    if let Some(program) = &frost_program {
+                        result.push(crate::backend::udev::OutputRenderElements::FrostGlass(
+                            crate::frost_glass::FrostGlassElement::new(
+                                capture.id.clone(),
+                                capture.commit,
+                                capture.texture.clone(),
+                                physical_rect,
+                                program.clone(),
+                                self.frost_config_for_surface(surface),
+                            ),
+                        ));
+                    }
+                }
+                Some(crate::config::GlassMode::Plain) => {}
+                Some(crate::config::GlassMode::Water) | None => {
+                    if let Some(program) = &water_program {
+                        result.push(crate::backend::udev::OutputRenderElements::WaterGlass(
+                            crate::water_glass::WaterGlassElement::new(
+                                capture.id.clone(),
+                                capture.commit,
+                                capture.texture.clone(),
+                                physical_rect,
+                                program.clone(),
+                            ),
+                        ));
+                    }
+                }
+            }
         }
         result
     }
@@ -3158,18 +3241,17 @@ impl Smallvil {
         output: &Output,
         geometry: Rectangle<i32, Physical>,
     ) -> Option<GlesTexture> {
-        let water_glass_surfaces = self.water_glass_eligible_surfaces(output);
-        let water_glass_elements =
-            self.water_glass_frame_elements(renderer, output, &water_glass_surfaces);
+        let glass_surfaces = self.glass_eligible_surfaces(output);
+        let glass_elements = self.glass_frame_elements(renderer, output, &glass_surfaces);
         let (depth_elements, depth_surfaces) = self.depth_frame_elements(renderer, output);
         let mut skip = depth_surfaces;
-        if !water_glass_elements.is_empty() {
-            skip.extend(water_glass_surfaces.iter().cloned());
+        if !glass_elements.is_empty() {
+            skip.extend(glass_surfaces.iter().cloned());
         }
         let space_elements = self.desktop_render_elements(renderer, output, &skip)?;
         let elements: Vec<crate::backend::udev::OutputRenderElements> = depth_elements
             .into_iter()
-            .chain(water_glass_elements)
+            .chain(glass_elements)
             .chain(
                 space_elements
                     .into_iter()
@@ -5903,12 +5985,28 @@ impl Smallvil {
                     .keys()
                     .filter_map(|surface| {
                         let (app_id, title) = self.toplevel_identity(surface);
-                        self.config
-                            .resolve_window_rules(app_id.as_deref(), title.as_deref())
-                            .opacity
+                        let rule = self
+                            .config
+                            .resolve_window_rules(app_id.as_deref(), title.as_deref());
+                        crate::config::WindowOpacity::from_rule(&rule)
                             .map(|opacity| (surface.clone(), opacity))
                     })
                     .collect();
+                self.window_glass_modes = self
+                    .foreign_toplevels
+                    .keys()
+                    .filter_map(|surface| {
+                        let (app_id, title) = self.toplevel_identity(surface);
+                        self.config
+                            .resolve_window_rules(app_id.as_deref(), title.as_deref())
+                            .glass
+                            .map(|mode| (surface.clone(), mode))
+                    })
+                    .collect();
+                // The mode or frost tuning may have changed. Force the
+                // shared one-frame-behind pipeline to rebuild from the next
+                // submitted frame instead of briefly showing a stale capture.
+                self.backdrop_textures.clear();
                 // A reload that dropped or renamed the currently-active
                 // submap would otherwise leave every key silently
                 // unmatched (falling through as plain input) with no
@@ -5982,6 +6080,27 @@ fn is_window(window: &Window, surface: &WlSurface) -> bool {
         .unwrap_or(false)
 }
 
+fn selected_glass_mode(
+    explicit: Option<crate::config::GlassMode>,
+    compositor_opacity: Option<f32>,
+    frost_enabled: bool,
+) -> Option<crate::config::GlassMode> {
+    match explicit {
+        Some(crate::config::GlassMode::Plain) => None,
+        Some(crate::config::GlassMode::Frost) if frost_enabled => {
+            Some(crate::config::GlassMode::Frost)
+        }
+        Some(crate::config::GlassMode::Frost) => None,
+        Some(crate::config::GlassMode::Water) => Some(crate::config::GlassMode::Water),
+        None if compositor_opacity.is_some_and(|alpha| alpha < 1.0) => {
+            // Backward compatibility: before `glass` existed, opacity below
+            // one was itself the water-glass trigger.
+            Some(crate::config::GlassMode::Water)
+        }
+        None => None,
+    }
+}
+
 /// Pure index bookkeeping for `leave_group`: given a group's member count
 /// and active index *before* removal, and the position being removed,
 /// returns the active index to use *after* removal, and whether the group
@@ -6050,6 +6169,32 @@ mod tests {
         entry.remember_restore_rect(later_tile);
 
         assert_eq!(entry.restore_rect, Some(original));
+    }
+
+    #[test]
+    fn explicit_glass_supports_client_alpha_without_whole_window_opacity() {
+        use crate::config::GlassMode;
+
+        assert_eq!(
+            selected_glass_mode(Some(GlassMode::Frost), None, true),
+            Some(GlassMode::Frost)
+        );
+        assert_eq!(
+            selected_glass_mode(Some(GlassMode::Water), None, true),
+            Some(GlassMode::Water)
+        );
+        assert_eq!(
+            selected_glass_mode(None, Some(0.7), true),
+            Some(GlassMode::Water)
+        );
+        assert_eq!(
+            selected_glass_mode(Some(GlassMode::Plain), Some(0.7), true),
+            None
+        );
+        assert_eq!(
+            selected_glass_mode(Some(GlassMode::Frost), None, false),
+            None
+        );
     }
 
     #[test]

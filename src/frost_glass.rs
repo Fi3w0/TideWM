@@ -1,0 +1,318 @@
+//! Frosted-glass mode for the shared captured-backdrop pipeline.
+//!
+//! Unlike water glass, which offsets one sharp sample, frost diffuses the
+//! captured backdrop with a bounded 25-tap Gaussian kernel and then applies
+//! adjustable strength, opacity, saturation, contrast, brightness, grain,
+//! vibrancy, tint, and rounded clipping. The capture is window-sized and
+//! reused from `backdrop.rs`; this pass allocates no additional textures per
+//! frame.
+
+use smithay::{
+    backend::renderer::{
+        element::{Element, Id, Kind, RenderElement},
+        gles::{
+            GlesError, GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture, Uniform, UniformName,
+            UniformType,
+        },
+        utils::CommitCounter,
+        Texture,
+    },
+    utils::{user_data::UserDataMap, Buffer, Physical, Rectangle, Scale, Transform},
+};
+
+use crate::config::FrostConfig;
+
+const FROST_GLASS_FRAGMENT_SHADER: &str = r#"
+#version 100
+
+//_DEFINES_
+
+#if defined(EXTERNAL)
+#extension GL_OES_EGL_image_external : require
+#endif
+
+precision highp float;
+#if defined(EXTERNAL)
+uniform samplerExternalOES tex;
+#else
+uniform sampler2D tex;
+#endif
+
+uniform float alpha;
+uniform vec2 u_texel;
+uniform vec2 u_size;
+uniform float u_radius;
+uniform float u_strength;
+uniform float u_saturation;
+uniform float u_contrast;
+uniform float u_brightness;
+uniform float u_noise;
+uniform float u_noise_scale;
+uniform float u_vibrancy;
+uniform float u_vibrancy_darkness;
+uniform vec3 u_tint_color;
+uniform float u_tint_alpha;
+uniform float u_corner_radius;
+uniform float u_corner_softness;
+varying vec2 v_coords;
+
+#if defined(DEBUG_FLAGS)
+uniform float tint;
+#endif
+
+vec4 sample_clamped(vec2 offset) {
+    return texture2D(tex, clamp(v_coords + offset, 0.0, 1.0));
+}
+
+float grain(vec2 point) {
+    vec2 cell = floor(point / u_noise_scale);
+    return fract(sin(dot(cell, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+float rounded_mask() {
+    float radius = min(u_corner_radius, min(u_size.x, u_size.y) * 0.5);
+    if (radius < 0.01) {
+        return 1.0;
+    }
+    vec2 point = v_coords * u_size;
+    vec2 half_size = u_size * 0.5;
+    vec2 q = abs(point - half_size) - (half_size - vec2(radius));
+    float distance = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
+    return 1.0 - smoothstep(-u_corner_softness, u_corner_softness, distance);
+}
+
+void main() {
+    // The outer axial taps sit at 2x step, so half-radius here keeps the
+    // configured value equal to the kernel's maximum physical reach.
+    vec2 step_uv = u_texel * u_radius * 0.5;
+    vec4 original = texture2D(tex, v_coords);
+    vec4 blurred;
+    if (u_radius < 0.01) {
+        blurred = original;
+    } else {
+        // Separable [1 4 6 4 1] Gaussian weights expanded into one fixed
+        // 5x5 pass. Unlike a sparse radial kernel, adjacent samples overlap
+        // across both axes instead of producing visible duplicate images.
+        blurred  = sample_clamped(vec2(-2.0 * step_uv.x, -2.0 * step_uv.y)) * 0.00390625;
+        blurred += sample_clamped(vec2(-1.0 * step_uv.x, -2.0 * step_uv.y)) * 0.015625;
+        blurred += sample_clamped(vec2( 0.0,              -2.0 * step_uv.y)) * 0.0234375;
+        blurred += sample_clamped(vec2( 1.0 * step_uv.x, -2.0 * step_uv.y)) * 0.015625;
+        blurred += sample_clamped(vec2( 2.0 * step_uv.x, -2.0 * step_uv.y)) * 0.00390625;
+
+        blurred += sample_clamped(vec2(-2.0 * step_uv.x, -1.0 * step_uv.y)) * 0.015625;
+        blurred += sample_clamped(vec2(-1.0 * step_uv.x, -1.0 * step_uv.y)) * 0.0625;
+        blurred += sample_clamped(vec2( 0.0,              -1.0 * step_uv.y)) * 0.09375;
+        blurred += sample_clamped(vec2( 1.0 * step_uv.x, -1.0 * step_uv.y)) * 0.0625;
+        blurred += sample_clamped(vec2( 2.0 * step_uv.x, -1.0 * step_uv.y)) * 0.015625;
+
+        blurred += sample_clamped(vec2(-2.0 * step_uv.x, 0.0)) * 0.0234375;
+        blurred += sample_clamped(vec2(-1.0 * step_uv.x, 0.0)) * 0.09375;
+        blurred += sample_clamped(vec2( 0.0,              0.0)) * 0.140625;
+        blurred += sample_clamped(vec2( 1.0 * step_uv.x, 0.0)) * 0.09375;
+        blurred += sample_clamped(vec2( 2.0 * step_uv.x, 0.0)) * 0.0234375;
+
+        blurred += sample_clamped(vec2(-2.0 * step_uv.x, 1.0 * step_uv.y)) * 0.015625;
+        blurred += sample_clamped(vec2(-1.0 * step_uv.x, 1.0 * step_uv.y)) * 0.0625;
+        blurred += sample_clamped(vec2( 0.0,              1.0 * step_uv.y)) * 0.09375;
+        blurred += sample_clamped(vec2( 1.0 * step_uv.x, 1.0 * step_uv.y)) * 0.0625;
+        blurred += sample_clamped(vec2( 2.0 * step_uv.x, 1.0 * step_uv.y)) * 0.015625;
+
+        blurred += sample_clamped(vec2(-2.0 * step_uv.x, 2.0 * step_uv.y)) * 0.00390625;
+        blurred += sample_clamped(vec2(-1.0 * step_uv.x, 2.0 * step_uv.y)) * 0.015625;
+        blurred += sample_clamped(vec2( 0.0,              2.0 * step_uv.y)) * 0.0234375;
+        blurred += sample_clamped(vec2( 1.0 * step_uv.x, 2.0 * step_uv.y)) * 0.015625;
+        blurred += sample_clamped(vec2( 2.0 * step_uv.x, 2.0 * step_uv.y)) * 0.00390625;
+    }
+
+    vec4 color = mix(original, blurred, u_strength);
+    float luminance = dot(color.rgb, vec3(0.299, 0.587, 0.114));
+    float dark_bias = mix(1.0, 1.0 - luminance, u_vibrancy_darkness);
+    float saturation = u_saturation + u_vibrancy * dark_bias;
+    color.rgb = mix(vec3(luminance), color.rgb, saturation);
+    color.rgb = (color.rgb - vec3(0.5)) * u_contrast + vec3(0.5);
+    color.rgb *= u_brightness;
+    color.rgb += vec3((grain(gl_FragCoord.xy) - 0.5) * 2.0 * u_noise);
+    color.rgb = mix(color.rgb, u_tint_color, u_tint_alpha);
+    color.rgb = clamp(color.rgb, 0.0, 1.0);
+
+#if defined(NO_ALPHA)
+    color = vec4(color.rgb, 1.0) * alpha;
+#else
+    color = color * alpha;
+#endif
+
+    color *= rounded_mask();
+
+#if defined(DEBUG_FLAGS)
+    if (tint == 1.0)
+        color = vec4(0.0, 0.2, 0.0, 0.2) + color * 0.8;
+#endif
+
+    gl_FragColor = color;
+}
+"#;
+
+pub fn frost_glass_program(
+    cache: &mut Option<GlesTexProgram>,
+    renderer: &mut GlesRenderer,
+) -> Option<GlesTexProgram> {
+    if let Some(program) = cache {
+        return Some(program.clone());
+    }
+    match renderer.compile_custom_texture_shader(
+        FROST_GLASS_FRAGMENT_SHADER,
+        &[
+            UniformName::new("u_texel", UniformType::_2f),
+            UniformName::new("u_size", UniformType::_2f),
+            UniformName::new("u_radius", UniformType::_1f),
+            UniformName::new("u_strength", UniformType::_1f),
+            UniformName::new("u_saturation", UniformType::_1f),
+            UniformName::new("u_contrast", UniformType::_1f),
+            UniformName::new("u_brightness", UniformType::_1f),
+            UniformName::new("u_noise", UniformType::_1f),
+            UniformName::new("u_noise_scale", UniformType::_1f),
+            UniformName::new("u_vibrancy", UniformType::_1f),
+            UniformName::new("u_vibrancy_darkness", UniformType::_1f),
+            UniformName::new("u_tint_color", UniformType::_3f),
+            UniformName::new("u_tint_alpha", UniformType::_1f),
+            UniformName::new("u_corner_radius", UniformType::_1f),
+            UniformName::new("u_corner_softness", UniformType::_1f),
+        ],
+    ) {
+        Ok(program) => {
+            *cache = Some(program.clone());
+            Some(program)
+        }
+        Err(err) => {
+            tracing::warn!(%err, "Failed to compile frost-glass shader");
+            None
+        }
+    }
+}
+
+pub struct FrostGlassElement {
+    id: Id,
+    commit: CommitCounter,
+    texture: GlesTexture,
+    geometry: Rectangle<i32, Physical>,
+    program: GlesTexProgram,
+    texel: [f32; 2],
+    config: FrostConfig,
+}
+
+impl FrostGlassElement {
+    pub fn new(
+        id: Id,
+        commit: CommitCounter,
+        texture: GlesTexture,
+        geometry: Rectangle<i32, Physical>,
+        program: GlesTexProgram,
+        config: FrostConfig,
+    ) -> Self {
+        let size = texture.size();
+        let texel = [1.0 / size.w.max(1) as f32, 1.0 / size.h.max(1) as f32];
+        Self {
+            id,
+            commit,
+            texture,
+            geometry,
+            program,
+            texel,
+            config,
+        }
+    }
+}
+
+impl Element for FrostGlassElement {
+    fn id(&self) -> &Id {
+        &self.id
+    }
+
+    fn current_commit(&self) -> CommitCounter {
+        self.commit
+    }
+
+    fn src(&self) -> Rectangle<f64, Buffer> {
+        Rectangle::from_size(self.texture.size().to_f64())
+    }
+
+    fn geometry(&self, _scale: Scale<f64>) -> Rectangle<i32, Physical> {
+        self.geometry
+    }
+
+    fn alpha(&self) -> f32 {
+        self.config.opacity
+    }
+
+    fn kind(&self) -> Kind {
+        Kind::Unspecified
+    }
+}
+
+impl RenderElement<GlesRenderer> for FrostGlassElement {
+    fn draw(
+        &self,
+        frame: &mut GlesFrame<'_, '_>,
+        src: Rectangle<f64, Buffer>,
+        dst: Rectangle<i32, Physical>,
+        damage: &[Rectangle<i32, Physical>],
+        opaque_regions: &[Rectangle<i32, Physical>],
+        _cache: Option<&UserDataMap>,
+    ) -> Result<(), GlesError> {
+        frame.render_texture_from_to(
+            &self.texture,
+            src,
+            dst,
+            damage,
+            opaque_regions,
+            Transform::Normal,
+            self.alpha(),
+            Some(&self.program),
+            &[
+                Uniform::new("u_texel", self.texel),
+                Uniform::new(
+                    "u_size",
+                    [
+                        self.geometry.size.w.max(1) as f32,
+                        self.geometry.size.h.max(1) as f32,
+                    ],
+                ),
+                Uniform::new("u_radius", self.config.radius),
+                Uniform::new("u_strength", self.config.strength),
+                Uniform::new("u_saturation", self.config.saturation),
+                Uniform::new("u_contrast", self.config.contrast),
+                Uniform::new("u_brightness", self.config.brightness),
+                Uniform::new("u_noise", self.config.noise),
+                Uniform::new("u_noise_scale", self.config.noise_scale),
+                Uniform::new("u_vibrancy", self.config.vibrancy),
+                Uniform::new("u_vibrancy_darkness", self.config.vibrancy_darkness),
+                Uniform::new("u_tint_color", self.config.tint_color),
+                Uniform::new("u_tint_alpha", self.config.tint_alpha),
+                Uniform::new("u_corner_radius", self.config.corner_radius),
+                Uniform::new("u_corner_softness", self.config.corner_softness),
+            ],
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shader_contract_and_bounded_kernel_stay_intact() {
+        assert!(FROST_GLASS_FRAGMENT_SHADER.contains("//_DEFINES_"));
+        assert!(FROST_GLASS_FRAGMENT_SHADER.contains("uniform sampler2D tex"));
+        assert!(FROST_GLASS_FRAGMENT_SHADER.contains("uniform float alpha"));
+        assert!(FROST_GLASS_FRAGMENT_SHADER.contains("uniform vec2 u_texel"));
+        assert!(FROST_GLASS_FRAGMENT_SHADER.contains("uniform float u_strength"));
+        assert!(FROST_GLASS_FRAGMENT_SHADER.contains("uniform float u_noise"));
+        assert!(FROST_GLASS_FRAGMENT_SHADER.contains("rounded_mask()"));
+        assert_eq!(
+            FROST_GLASS_FRAGMENT_SHADER
+                .matches("sample_clamped(")
+                .count(),
+            26
+        );
+    }
+}

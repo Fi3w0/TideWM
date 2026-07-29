@@ -117,6 +117,8 @@ smithay::backend::renderer::element::render_elements! {
     /// Water-glass (Phase R1, see water_glass.rs), the reason this enum
     /// stopped being generic over the renderer -- see the comment above.
     WaterGlass = crate::water_glass::WaterGlassElement,
+    /// Frosted-glass mode over the same captured backdrop as water glass.
+    FrostGlass = crate::frost_glass::FrostGlassElement,
     /// Impulse ripple (Phase R1, see ripple.rs), drawn over windows but
     /// below toast/overview/picker/tab-strip chrome. Same renderer-
     /// concrete-ness reason as `WaterGlass` above.
@@ -759,7 +761,8 @@ pub fn init_udev(
                         state.fail_captures_for_output(&surface.output);
                         continue;
                     }
-                    if surface.dirty && !surface.pending {
+                    let rendered_visible_frame = surface.dirty && !surface.pending;
+                    if rendered_visible_frame {
                         if let Some(delay) = render_surface(state, surface, &mut renderer) {
                             retries.push((crtc, delay));
                         }
@@ -770,6 +773,12 @@ pub fn init_udev(
                     // (see capture.rs).
                     state.render_pending_captures(&mut renderer, &surface.output, true);
                     state.capture_pending_workspace_transition(&mut renderer, &surface.output);
+                    // Same post-visible-render, FBO-only timing as winit.
+                    // Rebuild only after an attempted visible frame rather
+                    // than on every cleanup tick while the output is idle.
+                    if rendered_visible_frame {
+                        state.capture_floating_backdrops(&mut renderer, &surface.output);
+                    }
                 }
             }
             drop(dev);
@@ -1370,10 +1379,23 @@ fn render_surface(
     } else {
         state.depth_frame_elements(renderer, output)
     };
+    let (glass_elements, glass_surfaces) = if locked {
+        (Vec::new(), Vec::new())
+    } else {
+        let surfaces = state.glass_eligible_surfaces(output);
+        let elements = state.glass_frame_elements(renderer, output, &surfaces);
+        (elements, surfaces)
+    };
+    let mut replaced_surfaces = depth_surfaces;
+    // A shader compile failure produces no replacement elements. In that
+    // case keep the real window in the ordinary walk rather than hiding it.
+    if !glass_elements.is_empty() {
+        replaced_surfaces.extend(glass_surfaces);
+    }
     let space_elements = if locked {
         Vec::new()
     } else {
-        state.desktop_render_elements(renderer, output, &depth_surfaces)?
+        state.desktop_render_elements(renderer, output, &replaced_surfaces)?
     };
 
     let lock_elements = if locked {
@@ -1422,6 +1444,7 @@ fn render_surface(
     elements.extend(ripple_layers.above_windows);
     elements.extend(workspace_transition);
     elements.extend(depth_elements);
+    elements.extend(glass_elements);
     elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
     elements.extend(ripple_layers.below_windows);
     elements.extend(wallpaper_element.map(OutputRenderElements::Composited));

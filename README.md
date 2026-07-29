@@ -21,7 +21,7 @@ A water-styled Wayland compositor, built in Rust on Smithay.
 </div>
 
 > [!NOTE]
-> TideWM already works as a real Wayland compositor: tiling, multi-monitor, workspaces, IPC, and most of the protocol surface a daily driver needs are all in. The first water/aqua identity slice is now built: water-glass, configurable impulse ripples, captured wave workspace transitions, and automatic depth/buoyancy. Screen sharing (PipeWire/xdg-desktop-portal) works end to end on a real standalone session now, verified through both OBS and Discord. This is exactly the stage where testing on hardware I don't own is most useful, jump into [Discord](https://discord.gg/ZhkxA83cKk) if something breaks.
+> TideWM already works as a real Wayland compositor: tiling, multi-monitor, workspaces, IPC, and most of the protocol surface a daily driver needs are all in. The first water/aqua identity slice is built, and Phase R2 has started with selectable frosted glass alongside water refraction. Screen sharing (PipeWire/xdg-desktop-portal) works end to end on a real standalone session now, verified through both OBS and Discord. This is exactly the stage where testing on hardware I don't own is most useful, jump into [Discord](https://discord.gg/ZhkxA83cKk) if something breaks.
 
 Full modern tiling on the fundamentals: BSP and master/stack, workspaces, groups, multi-monitor, layer-shell, IPC, with the water identity now taking shape on top. Built for low-end hardware first, 1.5GB is the target ceiling in normal use, 3GB is the line where it gets actively optimized.
 
@@ -40,7 +40,7 @@ TideWM is a solo project. I use AI coding agents (OpenCode, Codex, Claude Code) 
 - XWayland, via [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite)
 - Screenshots, clipboard, session lock
 - PipeWire screencasting behind a feature flag, verified end to end through real OBS and Discord on a standalone session
-- Water-glass refraction, configurable impulse ripples, adjustable full-screen water-wave workspace transitions, and automatic window depth/buoyancy
+- Selectable water-glass refraction or per-app adjustable frosted glass, focus/fullscreen-aware window opacity, configurable impulse ripples, full-screen water-wave workspace transitions, and automatic window depth/buoyancy
 - A low-memory built-in Tide wallpaper; layer-shell wallpaper tools replace it normally
 - Hot-reloadable config in Waves, TideWM's own format, split across files, `env`/`$variables`/`$wave(...)`
 - Per-app window rules, including regex matching, initial fullscreen/maximize, capture privacy, and window swallowing
@@ -71,8 +71,8 @@ Full config reference, every action string, and the protocol matrix: [DOCUMENTAT
 
 Foundation before visuals has been the plan from the start, and as of 0.60.0 the foundation part is done: the WM itself — tiling, multi-monitor, workspaces, layer-shell, IPC, XWayland, screencasting — is feature-complete, runs as a daily compositor on AMD hardware, and has now passed a full nested test on real Nvidia hardware too. What's next, in order:
 
-- **Polish the R1 identity slice.** Water-glass, impulse ripples, wave-based workspace transitions, and the first automatic depth/buoyancy model are built. Nested and real-hardware tuning now decides which parts need another pass before R2 decorations.
-- **Broaden the render layer.** Liquid window drag, blur, shadows, rounded corners, borders, and animation tuning build on the R0/R1 foundation.
+- **Continue R2 decoration parity.** Selectable frosted glass is built on the shared R0.5 capture path. Shadows, rounded corners, borders, animation tuning, and liquid window drag follow.
+- **Polish the R1 identity slice.** Water-glass, impulse ripples, wave-based workspace transitions, and the first automatic depth/buoyancy model are built; nested and real-hardware tuning can still refine them.
 - **Nvidia native run.** The nested (EGL/GLES) stack is verified on a real RTX 3060; the standalone DRM backend and its overlay-plane workaround still need a TTY session on Nvidia.
 - **AUR package.** Not yet, build from source for now.
 

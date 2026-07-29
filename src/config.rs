@@ -210,6 +210,10 @@ pub struct Config {
     /// `water_effects` remains the master toggle; this block controls the
     /// depth model without disabling ripples, water-glass, or transitions.
     pub depth: DepthConfig,
+    /// Shared frosted-glass appearance. A window opts into this shader with
+    /// `glass = frost` in its rule; water remains the compatibility default
+    /// for translucent floating windows with no explicit glass choice.
+    pub frost: FrostConfig,
     /// Global ripple defaults (Phase R1, see `ripple.rs`). Per-app
     /// `rule { ripple { } }` overrides merge over these at resolve time
     /// (`merge_over`). Stays `system_default()` when the user has no
@@ -410,6 +414,7 @@ impl Config {
             water_effects: raw.water_effects,
             workspace_transition: raw.workspace_transition,
             depth: raw.depth,
+            frost: raw.frost,
             ripple: raw.ripple,
             cursor_always_visible: raw.cursor_always_visible,
             cursor_hide_after_ms: raw.cursor_hide_after_ms,
@@ -477,6 +482,24 @@ impl Config {
             if rule.opacity.is_some() {
                 effective.opacity = rule.opacity;
             }
+            if rule.active_opacity.is_some() {
+                effective.active_opacity = rule.active_opacity;
+            }
+            if rule.inactive_opacity.is_some() {
+                effective.inactive_opacity = rule.inactive_opacity;
+            }
+            if rule.fullscreen_opacity.is_some() {
+                effective.fullscreen_opacity = rule.fullscreen_opacity;
+            }
+            if rule.glass.is_some() {
+                effective.glass = rule.glass;
+            }
+            if let Some(rule_frost) = &rule.frost {
+                effective.frost = Some(match effective.frost.take() {
+                    Some(existing) => existing.merge_over(rule_frost),
+                    None => rule_frost.clone(),
+                });
+            }
             if let Some(rule_ripple) = &rule.ripple {
                 // Per-rule ripple overrides accumulate field-by-field:
                 // an earlier matching rule sets some knobs, a later one
@@ -516,6 +539,7 @@ struct RawConfig {
     water_effects: bool,
     workspace_transition: WorkspaceTransitionConfig,
     depth: DepthConfig,
+    frost: FrostConfig,
     /// Same shape as `Config::ripple`. Stays `system_default()` if no
     /// `ripple { }` block exists; mutated in place by `apply_ripple_block`.
     ripple: RippleConfig,
@@ -654,6 +678,7 @@ impl Default for RawConfig {
             water_effects: true,
             workspace_transition: WorkspaceTransitionConfig::default(),
             depth: DepthConfig::default(),
+            frost: FrostConfig::default(),
             ripple: RippleConfig::system_default(),
             cursor_always_visible: false,
             cursor_hide_after_ms: 0,
@@ -956,8 +981,24 @@ pub struct WindowRule {
     /// Tiled swallowers only -- a floating terminal keeps both visible.
     pub swallow: bool,
     /// Per-window render alpha in the inclusive range 0.0..=1.0. Applied
-    /// to the complete surface tree (including subsurfaces and popups).
+    /// as a base multiplier to the complete surface tree (including
+    /// subsurfaces and popups).
     pub opacity: Option<f32>,
+    /// State-specific opacity multipliers. These multiply `opacity` when
+    /// it is set, matching Hyprland's active/inactive/fullscreen model.
+    /// Fullscreen wins over focus state.
+    pub active_opacity: Option<f32>,
+    pub inactive_opacity: Option<f32>,
+    pub fullscreen_opacity: Option<f32>,
+    /// Which captured-backdrop shader sits behind this floating window.
+    /// Explicit modes also work with client-provided surface alpha, which
+    /// keeps glyphs/foreground pixels opaque. Missing preserves the original
+    /// behavior where compositor `opacity` below one implies water;
+    /// `Plain` disables backdrop substitution while preserving `opacity`.
+    pub glass: Option<GlassMode>,
+    /// Per-app frost overrides. Unset fields inherit the global
+    /// `frost { }` block, and multiple matching rules merge field by field.
+    pub frost: Option<FrostOverrides>,
     /// Exact floating placement (top-left corner), `<x>x<y>` -- the same
     /// syntax `[[output]]`'s `position` already uses. No-op unless the
     /// window ends up floating (from `float`/`pin`/the auto-float
@@ -970,6 +1011,166 @@ pub struct WindowRule {
     /// `ripple { }` block. Set `enabled = false` inside this sub-block to
     /// suppress ripples entirely for matching windows. See `RippleConfig`.
     pub ripple: Option<RippleConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlassMode {
+    Water,
+    Frost,
+    Plain,
+}
+
+/// Resolved compositor opacity multipliers for one window. A missing entry
+/// means the window stays at its client-provided opacity.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct WindowOpacity {
+    pub base: Option<f32>,
+    pub active: Option<f32>,
+    pub inactive: Option<f32>,
+    pub fullscreen: Option<f32>,
+}
+
+impl WindowOpacity {
+    pub fn from_rule(rule: &WindowRule) -> Option<Self> {
+        let opacity = Self {
+            base: rule.opacity,
+            active: rule.active_opacity,
+            inactive: rule.inactive_opacity,
+            fullscreen: rule.fullscreen_opacity,
+        };
+        (opacity.base.is_some()
+            || opacity.active.is_some()
+            || opacity.inactive.is_some()
+            || opacity.fullscreen.is_some())
+        .then_some(opacity)
+    }
+
+    pub fn alpha(self, focused: bool, fullscreen: bool) -> f32 {
+        let state = if fullscreen {
+            self.fullscreen
+        } else if focused {
+            self.active
+        } else {
+            self.inactive
+        };
+        (self.base.unwrap_or(1.0) * state.unwrap_or(1.0)).clamp(0.0, 1.0)
+    }
+}
+
+/// Global tuning for the bounded single-pass frost shader. The backdrop
+/// capture is already window-sized, so cost scales with translucent window
+/// area rather than allocating another full-output buffer.
+#[derive(Debug, Clone)]
+pub struct FrostConfig {
+    pub enabled: bool,
+    /// Sampling radius in physical pixels. Zero keeps the color treatment
+    /// but bypasses diffusion.
+    pub radius: f32,
+    /// Mix between the original sharp capture and the diffused result.
+    pub strength: f32,
+    /// Opacity of the processed backdrop layer. Reducing this lets the
+    /// undistorted desktop beneath it show through.
+    pub opacity: f32,
+    pub saturation: f32,
+    pub contrast: f32,
+    pub brightness: f32,
+    /// Static grain used to reduce banding in smooth blur gradients.
+    pub noise: f32,
+    pub noise_scale: f32,
+    /// Additional saturation, optionally biased toward darker pixels.
+    pub vibrancy: f32,
+    pub vibrancy_darkness: f32,
+    pub tint_color: [f32; 3],
+    pub tint_alpha: f32,
+    /// Rounded clipping of the frost layer itself, in physical pixels.
+    pub corner_radius: f32,
+    pub corner_softness: f32,
+}
+
+impl Default for FrostConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            radius: 12.0,
+            strength: 1.0,
+            opacity: 1.0,
+            saturation: 1.0,
+            contrast: 1.0,
+            brightness: 1.0,
+            noise: 0.0,
+            noise_scale: 1.0,
+            vibrancy: 0.0,
+            vibrancy_darkness: 0.0,
+            tint_color: [142.0 / 255.0, 221.0 / 255.0, 1.0],
+            tint_alpha: 0.0,
+            corner_radius: 0.0,
+            corner_softness: 1.0,
+        }
+    }
+}
+
+/// Sparse per-window overrides for [`FrostConfig`]. Every `None` inherits
+/// the global frost value; this makes a rule able to change one knob
+/// without copying the complete global block.
+#[derive(Debug, Clone, Default)]
+pub struct FrostOverrides {
+    pub enabled: Option<bool>,
+    pub radius: Option<f32>,
+    pub strength: Option<f32>,
+    pub opacity: Option<f32>,
+    pub saturation: Option<f32>,
+    pub contrast: Option<f32>,
+    pub brightness: Option<f32>,
+    pub noise: Option<f32>,
+    pub noise_scale: Option<f32>,
+    pub vibrancy: Option<f32>,
+    pub vibrancy_darkness: Option<f32>,
+    pub tint_color: Option<[f32; 3]>,
+    pub tint_alpha: Option<f32>,
+    pub corner_radius: Option<f32>,
+    pub corner_softness: Option<f32>,
+}
+
+impl FrostOverrides {
+    pub fn merge_over(&self, other: &Self) -> Self {
+        Self {
+            enabled: other.enabled.or(self.enabled),
+            radius: other.radius.or(self.radius),
+            strength: other.strength.or(self.strength),
+            opacity: other.opacity.or(self.opacity),
+            saturation: other.saturation.or(self.saturation),
+            contrast: other.contrast.or(self.contrast),
+            brightness: other.brightness.or(self.brightness),
+            noise: other.noise.or(self.noise),
+            noise_scale: other.noise_scale.or(self.noise_scale),
+            vibrancy: other.vibrancy.or(self.vibrancy),
+            vibrancy_darkness: other.vibrancy_darkness.or(self.vibrancy_darkness),
+            tint_color: other.tint_color.or(self.tint_color),
+            tint_alpha: other.tint_alpha.or(self.tint_alpha),
+            corner_radius: other.corner_radius.or(self.corner_radius),
+            corner_softness: other.corner_softness.or(self.corner_softness),
+        }
+    }
+
+    pub fn apply_to(&self, base: &FrostConfig) -> FrostConfig {
+        FrostConfig {
+            enabled: self.enabled.unwrap_or(base.enabled),
+            radius: self.radius.unwrap_or(base.radius),
+            strength: self.strength.unwrap_or(base.strength),
+            opacity: self.opacity.unwrap_or(base.opacity),
+            saturation: self.saturation.unwrap_or(base.saturation),
+            contrast: self.contrast.unwrap_or(base.contrast),
+            brightness: self.brightness.unwrap_or(base.brightness),
+            noise: self.noise.unwrap_or(base.noise),
+            noise_scale: self.noise_scale.unwrap_or(base.noise_scale),
+            vibrancy: self.vibrancy.unwrap_or(base.vibrancy),
+            vibrancy_darkness: self.vibrancy_darkness.unwrap_or(base.vibrancy_darkness),
+            tint_color: self.tint_color.unwrap_or(base.tint_color),
+            tint_alpha: self.tint_alpha.unwrap_or(base.tint_alpha),
+            corner_radius: self.corner_radius.unwrap_or(base.corner_radius),
+            corner_softness: self.corner_softness.unwrap_or(base.corner_softness),
+        }
+    }
 }
 
 /// Which built-in shape a ripple draws. Multiple shapes can stack
@@ -1528,6 +1729,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
             apply_workspace_transition_block(&mut raw.workspace_transition, body)
         }
         "depth" => apply_depth_block(&mut raw.depth, body),
+        "frost" => apply_frost_block(&mut raw.frost, body),
         "ripple" => apply_ripple_block(&mut raw.ripple, body),
         "output" => raw.outputs.push(lower_output_block(header, body)),
         "rule" => raw.window_rules.push(lower_window_rule_block(body)),
@@ -1941,6 +2143,109 @@ fn apply_depth_block(cfg: &mut DepthConfig, body: &[waves::Entry]) {
     }
 }
 
+fn apply_frost_block(cfg: &mut FrostConfig, body: &[waves::Entry]) {
+    let mut overrides = FrostOverrides::default();
+    apply_frost_override_block(&mut overrides, body);
+    *cfg = overrides.apply_to(cfg);
+}
+
+fn apply_frost_override_block(cfg: &mut FrostOverrides, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `frost` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "enabled" => match parse_bool(value) {
+                Some(value) => cfg.enabled = Some(value),
+                None => tracing::warn!(
+                    value,
+                    "Expected frost.enabled to be true or false, ignoring"
+                ),
+            },
+            "radius" | "blur_radius" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.radius = Some(value.clamp(0.0, 64.0)),
+                _ => tracing::warn!(value, "Expected frost.radius from 0 to 64, ignoring"),
+            },
+            "strength" | "blur_strength" | "frost" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.strength = Some(value.clamp(0.0, 1.0)),
+                _ => tracing::warn!(value, "Expected frost.strength from 0 to 1, ignoring"),
+            },
+            "opacity" | "glass_opacity" | "background_opacity" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.opacity = Some(value.clamp(0.0, 1.0)),
+                _ => tracing::warn!(value, "Expected frost.opacity from 0 to 1, ignoring"),
+            },
+            "saturation" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.saturation = Some(value.clamp(0.0, 2.0)),
+                _ => tracing::warn!(value, "Expected frost.saturation from 0 to 2, ignoring"),
+            },
+            "contrast" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.contrast = Some(value.clamp(0.0, 2.0)),
+                _ => tracing::warn!(value, "Expected frost.contrast from 0 to 2, ignoring"),
+            },
+            "brightness" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.brightness = Some(value.clamp(0.0, 2.0)),
+                _ => tracing::warn!(value, "Expected frost.brightness from 0 to 2, ignoring"),
+            },
+            "noise" | "grain" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.noise = Some(value.clamp(0.0, 0.25)),
+                _ => tracing::warn!(value, "Expected frost.noise from 0 to 0.25, ignoring"),
+            },
+            "noise_scale" | "grain_scale" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.noise_scale = Some(value.clamp(0.25, 16.0)),
+                _ => {
+                    tracing::warn!(
+                        value,
+                        "Expected frost.noise_scale from 0.25 to 16, ignoring"
+                    )
+                }
+            },
+            "vibrancy" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.vibrancy = Some(value.clamp(0.0, 1.0)),
+                _ => tracing::warn!(value, "Expected frost.vibrancy from 0 to 1, ignoring"),
+            },
+            "vibrancy_darkness" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => {
+                    cfg.vibrancy_darkness = Some(value.clamp(0.0, 1.0))
+                }
+                _ => tracing::warn!(
+                    value,
+                    "Expected frost.vibrancy_darkness from 0 to 1, ignoring"
+                ),
+            },
+            "tint_color" | "color" => match parse_ripple_color(value) {
+                Some(value) => cfg.tint_color = Some(value),
+                None => {
+                    tracing::warn!(value, "Expected a hex color for frost.tint_color, ignoring")
+                }
+            },
+            "tint_alpha" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.tint_alpha = Some(value.clamp(0.0, 1.0)),
+                _ => tracing::warn!(value, "Expected frost.tint_alpha from 0 to 1, ignoring"),
+            },
+            "corner_radius" | "rounding" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.corner_radius = Some(value.clamp(0.0, 256.0)),
+                _ => {
+                    tracing::warn!(
+                        value,
+                        "Expected frost.corner_radius from 0 to 256, ignoring"
+                    )
+                }
+            },
+            "corner_softness" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => {
+                    cfg.corner_softness = Some(value.clamp(0.25, 8.0))
+                }
+                _ => tracing::warn!(
+                    value,
+                    "Expected frost.corner_softness from 0.25 to 8, ignoring"
+                ),
+            },
+            other => tracing::warn!(key = %other, "Unknown key in `frost` block, ignoring"),
+        }
+    }
+}
+
 /// Parses the body of a `ripple { }` block. Used both for the global
 /// block (mutating `RawConfig::ripple` in place) and for a per-rule
 /// `rule { ripple { } }` sub-block (mutating a fresh `RippleConfig` and
@@ -2199,6 +2504,38 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                         tracing::warn!(value, "Expected a finite opacity from 0.0 to 1.0, ignoring")
                     }
                 },
+                "active_opacity" | "focused_opacity" => match value.parse::<f32>() {
+                    Ok(value) if value.is_finite() => {
+                        rule.active_opacity = Some(value.clamp(0.0, 1.0))
+                    }
+                    _ => tracing::warn!(value, "Expected active_opacity from 0.0 to 1.0, ignoring"),
+                },
+                "inactive_opacity" | "unfocused_opacity" => match value.parse::<f32>() {
+                    Ok(value) if value.is_finite() => {
+                        rule.inactive_opacity = Some(value.clamp(0.0, 1.0))
+                    }
+                    _ => {
+                        tracing::warn!(value, "Expected inactive_opacity from 0.0 to 1.0, ignoring")
+                    }
+                },
+                "fullscreen_opacity" => match value.parse::<f32>() {
+                    Ok(value) if value.is_finite() => {
+                        rule.fullscreen_opacity = Some(value.clamp(0.0, 1.0))
+                    }
+                    _ => tracing::warn!(
+                        value,
+                        "Expected fullscreen_opacity from 0.0 to 1.0, ignoring"
+                    ),
+                },
+                "glass" | "glass_mode" => match value.as_str() {
+                    "water" => rule.glass = Some(GlassMode::Water),
+                    "frost" => rule.glass = Some(GlassMode::Frost),
+                    "none" | "plain" => rule.glass = Some(GlassMode::Plain),
+                    _ => tracing::warn!(
+                        value,
+                        "Expected a rule glass mode: water frost none, ignoring"
+                    ),
+                },
                 "position" => match parse_position(value) {
                     Some(pos) => rule.position = Some(pos),
                     None => {
@@ -2230,6 +2567,11 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                 let mut overrides = RippleConfig::default();
                 apply_ripple_block(&mut overrides, ripple_body);
                 rule.ripple = Some(overrides);
+            }
+            waves::Entry::Block(keyword, _, frost_body) if keyword == "frost" => {
+                let mut overrides = FrostOverrides::default();
+                apply_frost_override_block(&mut overrides, frost_body);
+                rule.frost = Some(overrides);
             }
             _ => tracing::warn!("Unexpected entry in `rule` block, ignoring"),
         }
@@ -2846,6 +3188,26 @@ bsp_split_bias = auto
 #     urgent_alpha = 0.95
 # }
 
+# Frosted glass (Phase R2). Add `glass = frost` to a translucent floating
+# window rule to select it; an unset glass mode keeps water refraction.
+# frost {
+#     enabled = true
+#     radius = 12                    # physical pixels, 0 disables blur
+#     strength = 1.0                 # 0 sharp capture, 1 fully blurred
+#     opacity = 1.0                  # opacity of the processed backdrop layer
+#     saturation = 1.0              # 0 grayscale, 1 original, up to 2 vivid
+#     contrast = 1.0
+#     brightness = 1.0
+#     noise = 0.0                    # subtle grain; useful around 0.01-0.03
+#     noise_scale = 1.0              # physical size of the grain
+#     vibrancy = 0.0                 # extra saturation, 0 to 1
+#     vibrancy_darkness = 0.0        # bias vibrancy toward dark pixels
+#     tint_color = 8EDDFF
+#     tint_alpha = 0.0               # neutral by default; raise to mix in tint_color
+#     corner_radius = 0              # physical pixels
+#     corner_softness = 1.0          # antialias width, physical pixels
+# }
+#
 # Ripple (Phase R1 water identity). All values are the system defaults --
 # copy and uncomment what you want to change. Per-app overrides go in a
 # `rule { ripple { } }` sub-block (see below); the same fields work there.
@@ -2985,6 +3347,18 @@ xwayland {
 # rule {
 #     app_id = pavucontrol
 #     float = true
+#     glass = frost
+#     active_opacity = 1.0
+#     inactive_opacity = 0.92
+#     fullscreen_opacity = 1.0
+#     frost {
+#         radius = 18
+#         strength = 1.0
+#         opacity = 1.0
+#         tint_alpha = 0.0
+#         noise = 0.015
+#         corner_radius = 12
+#     }
 # }
 "#;
 
@@ -3214,6 +3588,7 @@ mod tests {
             water_effects: true,
             workspace_transition: WorkspaceTransitionConfig::default(),
             depth: DepthConfig::default(),
+            frost: FrostConfig::default(),
             ripple: RippleConfig::system_default(),
             cursor_always_visible: false,
             cursor_hide_after_ms: 0,
@@ -3497,6 +3872,104 @@ mod tests {
         assert_eq!(transition.foam_alpha, 0.88);
         assert_eq!(transition.spray_amount, 0.6);
         assert_eq!(transition.turbulence, 1.2);
+    }
+
+    #[test]
+    fn frost_block_and_per_window_glass_mode_parse() {
+        let entries = waves::parse(
+            "frost {\n\
+             enabled = false\n\
+             radius = 24\n\
+             strength = 0.75\n\
+             opacity = 0.8\n\
+             saturation = 1.25\n\
+             contrast = 0.9\n\
+             brightness = 0.8\n\
+             noise = 0.03\n\
+             noise_scale = 2\n\
+             vibrancy = 0.4\n\
+             vibrancy_darkness = 0.6\n\
+             tint_color = 88CCFF\n\
+             tint_alpha = 0.2\n\
+             corner_radius = 16\n\
+             corner_softness = 1.5\n\
+             }\n\
+             rule {\n\
+             app_id = kitty\n\
+             opacity = 0.7\n\
+             active_opacity = 1.0\n\
+             inactive_opacity = 0.75\n\
+             fullscreen_opacity = 0.95\n\
+             glass = frost\n\
+             frost {\n\
+             radius = 32\n\
+             opacity = 0.65\n\
+             tint_alpha = 0.0\n\
+             noise = 0.02\n\
+             }\n\
+             }\n",
+            Path::new("<frost-test>"),
+        )
+        .unwrap();
+        let config = Config::from_raw(lower_entries(&entries)).0;
+
+        assert!(!config.frost.enabled);
+        assert_eq!(config.frost.radius, 24.0);
+        assert_eq!(config.frost.strength, 0.75);
+        assert_eq!(config.frost.opacity, 0.8);
+        assert_eq!(config.frost.saturation, 1.25);
+        assert_eq!(config.frost.contrast, 0.9);
+        assert_eq!(config.frost.brightness, 0.8);
+        assert_eq!(config.frost.noise, 0.03);
+        assert_eq!(config.frost.noise_scale, 2.0);
+        assert_eq!(config.frost.vibrancy, 0.4);
+        assert_eq!(config.frost.vibrancy_darkness, 0.6);
+        assert_eq!(config.frost.tint_color, [136.0 / 255.0, 204.0 / 255.0, 1.0]);
+        assert_eq!(config.frost.tint_alpha, 0.2);
+        assert_eq!(config.frost.corner_radius, 16.0);
+        assert_eq!(config.frost.corner_softness, 1.5);
+        let rule = config.resolve_window_rules(Some("kitty"), None);
+        assert_eq!(rule.opacity, Some(0.7));
+        assert_eq!(rule.active_opacity, Some(1.0));
+        assert_eq!(rule.inactive_opacity, Some(0.75));
+        assert_eq!(rule.fullscreen_opacity, Some(0.95));
+        assert_eq!(rule.glass, Some(GlassMode::Frost));
+        let frost = rule.frost.unwrap().apply_to(&config.frost);
+        assert_eq!(frost.radius, 32.0);
+        assert_eq!(frost.opacity, 0.65);
+        assert_eq!(frost.tint_alpha, 0.0);
+        assert_eq!(frost.noise, 0.02);
+        assert_eq!(frost.contrast, 0.9);
+    }
+
+    #[test]
+    fn window_opacity_multiplies_base_and_focus_state_with_fullscreen_priority() {
+        let opacity = WindowOpacity {
+            base: Some(0.8),
+            active: Some(1.0),
+            inactive: Some(0.6),
+            fullscreen: Some(0.95),
+        };
+        assert_eq!(opacity.alpha(true, false), 0.8);
+        assert!((opacity.alpha(false, false) - 0.48).abs() < f32::EPSILON);
+        assert!((opacity.alpha(false, true) - 0.76).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn glass_mode_is_last_match_wins_and_plain_is_explicit() {
+        let entries = waves::parse(
+            "rule {\n app_id = kitty\n glass = frost\n }\n\
+             rule {\n app_id = kitty\n glass = none\n }\n",
+            Path::new("<glass-rule-test>"),
+        )
+        .unwrap();
+        let config = Config::from_raw(lower_entries(&entries)).0;
+
+        assert_eq!(
+            config.resolve_window_rules(Some("kitty"), None).glass,
+            Some(GlassMode::Plain)
+        );
+        assert_eq!(config.resolve_window_rules(Some("foot"), None).glass, None);
     }
 
     #[test]

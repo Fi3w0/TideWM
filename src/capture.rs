@@ -373,8 +373,7 @@ impl Smallvil {
             });
             let opacity = window_target
                 .toplevel()
-                .and_then(|toplevel| self.window_opacity.get(toplevel.wl_surface()))
-                .copied()
+                .map(|toplevel| self.window_render_alpha(toplevel.wl_surface()))
                 .unwrap_or(1.0);
             let window_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = if blocked {
                 Vec::new()
@@ -565,13 +564,12 @@ impl Smallvil {
             // then windows, then BelowWindows/wallpaper, then BelowAll.
             let ripple_layers = self.ripple_frame_elements(renderer, &output);
             let workspace_transition = self.workspace_transition_frame_element(renderer, &output);
-            let water_glass_surfaces = self.water_glass_eligible_surfaces(&output);
-            let water_glass_elements =
-                self.water_glass_frame_elements(renderer, &output, &water_glass_surfaces);
+            let glass_surfaces = self.glass_eligible_surfaces(&output);
+            let glass_elements = self.glass_frame_elements(renderer, &output, &glass_surfaces);
             let (depth_elements, depth_surfaces) = self.depth_frame_elements(renderer, &output);
             let mut skip = depth_surfaces;
-            if !water_glass_elements.is_empty() {
-                skip.extend(water_glass_surfaces.iter().cloned());
+            if !glass_elements.is_empty() {
+                skip.extend(glass_surfaces.iter().cloned());
             }
             match self.desktop_render_elements(renderer, &output, &skip) {
                 Some(space_elements) => {
@@ -579,7 +577,7 @@ impl Smallvil {
                     elements.extend(ripple_layers.above_windows);
                     elements.extend(workspace_transition);
                     elements.extend(depth_elements);
-                    elements.extend(water_glass_elements);
+                    elements.extend(glass_elements);
                     elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
                     elements.extend(ripple_layers.below_windows);
                     if let Some(wallpaper) = self.wallpaper_element(&output, renderer) {

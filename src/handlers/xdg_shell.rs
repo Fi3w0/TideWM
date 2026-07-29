@@ -637,14 +637,18 @@ pub fn handle_commit(state: &mut Smallvil, surface: &WlSurface) {
     // doesn't emit a spurious `done` event to every bar watching.
     if transition != ToplevelTransition::Unmap && state.foreign_toplevels.contains_key(surface) {
         let (app_id, title) = state.toplevel_identity(surface);
-        if let Some(opacity) = state
+        let render_rule = state
             .config
-            .resolve_window_rules(app_id.as_deref(), title.as_deref())
-            .opacity
-        {
+            .resolve_window_rules(app_id.as_deref(), title.as_deref());
+        if let Some(opacity) = crate::config::WindowOpacity::from_rule(&render_rule) {
             state.window_opacity.insert(surface.clone(), opacity);
         } else {
             state.window_opacity.remove(surface);
+        }
+        if let Some(mode) = render_rule.glass {
+            state.window_glass_modes.insert(surface.clone(), mode);
+        } else {
+            state.window_glass_modes.remove(surface);
         }
         let title = title.unwrap_or_default();
         let app_id = app_id.unwrap_or_default();
@@ -800,10 +804,15 @@ impl Smallvil {
         let rule = self
             .config
             .resolve_window_rules(app_id.as_deref(), title.as_deref());
-        if let Some(opacity) = rule.opacity {
+        if let Some(opacity) = crate::config::WindowOpacity::from_rule(&rule) {
             self.window_opacity.insert(surface.clone(), opacity);
         } else {
             self.window_opacity.remove(surface);
+        }
+        if let Some(mode) = rule.glass {
+            self.window_glass_modes.insert(surface.clone(), mode);
+        } else {
+            self.window_glass_modes.remove(surface);
         }
 
         let output = self
@@ -1033,6 +1042,7 @@ impl Smallvil {
         self.pseudo_tiled.remove(surface);
         self.urgent.remove(surface);
         self.window_opacity.remove(surface);
+        self.window_glass_modes.remove(surface);
         self.backdrop_textures.remove(surface);
         self.window_depths.remove(surface);
         self.depth_schematics.remove(surface);
@@ -1089,8 +1099,11 @@ impl Smallvil {
         let rule = self
             .config
             .resolve_window_rules(app_id.as_deref(), title.as_deref());
-        if let Some(opacity) = rule.opacity {
+        if let Some(opacity) = crate::config::WindowOpacity::from_rule(&rule) {
             self.window_opacity.insert(entry.surface.clone(), opacity);
+        }
+        if let Some(mode) = rule.glass {
+            self.window_glass_modes.insert(entry.surface.clone(), mode);
         }
         self.window_depths
             .insert(entry.surface.clone(), crate::depth::WindowDepth::new());

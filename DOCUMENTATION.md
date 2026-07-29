@@ -175,6 +175,65 @@ depth {
 }
 ```
 
+### `frost { }`
+
+Configures Phase R2 frosted glass. A floating window selects it with `glass = frost` in a matching `rule { }`. The preferred path is client-provided background transparency (for example Kitty’s `background_opacity`): the client keeps text/foreground pixels opaque while TideWM blurs what its transparent background reveals. A TideWM `opacity` rule remains available, but it multiplies the entire surface, including text. For backward compatibility, an `opacity` below `1.0` with no explicit glass mode still selects water refraction. `glass = none` keeps ordinary compositor transparency without a captured-backdrop shader. `water_effects = false` bypasses both modes.
+
+The frost shader uses a fixed-cost 25-tap Gaussian kernel over the existing window-sized backdrop capture, followed by adjustable strength, saturation, vibrancy, contrast, brightness, noise, and tint treatment. Changing these values does not allocate more buffers or increase the tap count. Captures remain one frame behind the visible desktop and one ARGB8888 texture per eligible floating window. Every key in this table also works inside a matching `rule { frost { } }` sub-block; omitted per-app keys inherit the global value.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | Disables frost windows without changing water glass or their opacity rules. |
+| `radius` | float, `0`–`64` | `12` | Maximum blur reach in physical pixels. `blur_radius` is an alias. Zero disables diffusion. |
+| `strength` | float, `0`–`1` | `1.0` | Mix of sharp capture to fully diffused result. `blur_strength` and `frost` are aliases. |
+| `opacity` | float, `0`–`1` | `1.0` | Opacity of the processed backdrop layer. Lower values mix the frost with the real, sharp desktop beneath it. `glass_opacity` and `background_opacity` are aliases. This does not change client text/content opacity. |
+| `saturation` | float, `0`–`2` | `1.0` | `0` is grayscale, `1` preserves the captured color, values above `1` increase color. |
+| `contrast` | float, `0`–`2` | `1.0` | Contrast modulation; inspired by Hyprland blur tuning. |
+| `brightness` | float, `0`–`2` | `1.0` | Multiplier applied after saturation. |
+| `noise` | float, `0`–`0.25` | `0.0` | Static grain that can hide banding in smooth blurred gradients. `grain` is an alias. |
+| `noise_scale` | float, `0.25`–`16` | `1.0` | Physical size of the noise cells. `grain_scale` is an alias. |
+| `vibrancy` | float, `0`–`1` | `0.0` | Extra saturation beyond the base `saturation`. |
+| `vibrancy_darkness` | float, `0`–`1` | `0.0` | Biases extra vibrancy toward darker pixels. |
+| `tint_color` | color | `8EDDFF` | Optional frost tint. `color` is an alias. It has no effect while `tint_alpha = 0`. |
+| `tint_alpha` | float, `0`–`1` | `0.0` | Strength of the tint mix. The neutral default adds no color layer. |
+| `corner_radius` | float, `0`–`256` | `0` | Rounded clipping radius in physical pixels. `rounding` is an alias. |
+| `corner_softness` | float, `0.25`–`8` | `1.0` | Antialias/feather width at the rounded edge, in physical pixels. |
+
+```wave
+frost {
+    enabled = true
+    radius = 12
+    strength = 1.0
+    opacity = 1.0
+    saturation = 1.0
+    contrast = 1.0
+    brightness = 1.0
+    noise = 0.0
+    noise_scale = 1.0
+    vibrancy = 0.0
+    vibrancy_darkness = 0.0
+    tint_color = 8EDDFF
+    tint_alpha = 0.0
+    corner_radius = 0
+    corner_softness = 1.0
+}
+
+rule {
+    app_id = kitty
+    float = true
+    glass = frost
+    frost {
+        radius = 20
+        opacity = 0.9
+        noise = 0.015
+        tint_alpha = 0.0
+        corner_radius = 12
+    }
+}
+```
+
+For the example above, configure Kitty with `background_opacity 0.72` (or launch it with `kitty -o background_opacity=0.72`). Add TideWM’s own `opacity = 0.72` only when intentionally making the complete client surface—including its text—translucent.
+
 ### `ripple { }`
 
 Configures the Phase R1 impulse ripple shared by window-map, focus-change, and urgent-attention events. `water_effects = false` disables every ripple regardless of this block. The active ripple list is capped at 16 so rapid mapping cannot grow render state without bound.
@@ -340,12 +399,19 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 | `fullscreen` | bool | Default `false`. Opens fullscreen on its selected output. |
 | `block_capture` | bool | Default `false`. A per-window capture/screencast source renders black instead of exposing the window. |
 | `swallow` | bool | Default `false`. Marks matching windows as swallowers (Hyprland's `misc:enable_swallow`): when a tiled match spawns a process that opens its own window, the match is hidden and the new window takes over its exact tile; closing that window puts it back in the same slot. Detection is PID ancestry via `/proc`, so any terminal works without shell integration. Tiled matches only — a floating terminal keeps both windows visible. |
-| `opacity` | float | Per-window alpha, clamped to `0.0`–`1.0`. Applies to the whole window surface tree. A floating translucent window uses water-glass refraction behind it while `water_effects` is enabled. |
+| `opacity` | float | Base per-window alpha multiplier, clamped to `0.0`–`1.0`. Applies to the whole window surface tree. |
+| `active_opacity` | float | Extra multiplier while the window is focused. `focused_opacity` is an alias. |
+| `inactive_opacity` | float | Extra multiplier while the window is unfocused. `unfocused_opacity` is an alias. |
+| `fullscreen_opacity` | float | Extra multiplier while fullscreen; takes priority over active/inactive state. |
+| `glass` | `water`, `frost`, or `none` | Captured-backdrop treatment for a floating window. Explicit `water`/`frost` works with client-provided alpha; when unset, a TideWM `opacity` below `1.0` implicitly selects `water`. `none` preserves plain transparency. `glass_mode` is an alias. |
+| `frost { }` | sub-block | Per-app overrides for every global frost field. Unspecified fields inherit the global block; multiple matching rules merge field by field. |
 | `position` | `<x>x<y>`, optional | Exact floating placement. No-op unless the window ends up floating. |
 | `size` | `<width>x<height>`, optional | Exact floating size. No-op unless the window ends up floating. |
 | `ripple { }` | sub-block | Per-app overrides for any global ripple field; unspecified fields inherit the global block. `ripple = none` suppresses ripples for matching windows. |
 
-Multiple rules can match the same window: `workspace`/`output`/`position`/`size` take the *last* match; boolean effects accumulate (any match sets one, never unsets it).
+The effective surface opacity is `opacity × state opacity`, clamped to `0`–`1`; for example, `opacity = 0.9` plus `inactive_opacity = 0.8` renders at `0.72`. This compositor opacity affects text and foreground pixels too. For colorless frost with opaque text, keep these at `1.0`, set per-app `frost.tint_alpha = 0.0`, and use the app's own background transparency when available.
+
+Multiple rules can match the same window: scalar fields take the *last* match; `frost { }` and `ripple { }` sub-blocks merge field by field; boolean effects accumulate (any match sets one, never unsets it).
 
 ```
 rule {
@@ -367,6 +433,17 @@ rule {
 rule {
     app_id = kitty
     swallow = true
+    active_opacity = 1.0
+    inactive_opacity = 0.92
+    fullscreen_opacity = 1.0
+    glass = frost
+    frost {
+        radius = 18
+        strength = 1.0
+        opacity = 1.0
+        tint_alpha = 0.0
+        noise = 0.015
+    }
 }
 ```
 
