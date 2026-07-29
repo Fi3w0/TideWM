@@ -28,6 +28,7 @@ mod wallpaper;
 mod water_glass;
 mod waves;
 mod welcome;
+mod workspace_transition;
 mod xwayland;
 
 use std::{process::Child, sync::Mutex};

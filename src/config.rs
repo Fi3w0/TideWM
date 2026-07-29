@@ -202,6 +202,10 @@ pub struct Config {
     /// checked once, at startup (see `main.rs`).
     pub show_welcome_hint: bool,
     pub water_effects: bool,
+    /// Directional captured workspace wipe. Kept separate from the master
+    /// `water_effects` toggle so the transition can be disabled or tuned
+    /// without suppressing water-glass and ripples.
+    pub workspace_transition: WorkspaceTransitionConfig,
     /// Global ripple defaults (Phase R1, see `ripple.rs`). Per-app
     /// `rule { ripple { } }` overrides merge over these at resolve time
     /// (`merge_over`). Stays `system_default()` when the user has no
@@ -400,6 +404,7 @@ impl Config {
             terminal: raw.terminal,
             show_welcome_hint: raw.show_welcome_hint,
             water_effects: raw.water_effects,
+            workspace_transition: raw.workspace_transition,
             ripple: raw.ripple,
             cursor_always_visible: raw.cursor_always_visible,
             cursor_hide_after_ms: raw.cursor_hide_after_ms,
@@ -504,6 +509,7 @@ struct RawConfig {
     terminal: String,
     show_welcome_hint: bool,
     water_effects: bool,
+    workspace_transition: WorkspaceTransitionConfig,
     /// Same shape as `Config::ripple`. Stays `system_default()` if no
     /// `ripple { }` block exists; mutated in place by `apply_ripple_block`.
     ripple: RippleConfig,
@@ -640,6 +646,7 @@ impl Default for RawConfig {
             // (welcome.rs), that must resolve to off, not back to on.
             show_welcome_hint: false,
             water_effects: true,
+            workspace_transition: WorkspaceTransitionConfig::default(),
             ripple: RippleConfig::system_default(),
             cursor_always_visible: false,
             cursor_hide_after_ms: 0,
@@ -1056,6 +1063,36 @@ pub enum RippleEase {
     ExpOut,
 }
 
+/// Tuning for the captured directional workspace wipe. Niri's current
+/// per-animation shape informed the `enabled` + duration + curve split;
+/// TideWM adds wave-specific geometry knobs because its transition is a
+/// custom shader rather than a camera translation.
+#[derive(Debug, Clone)]
+pub struct WorkspaceTransitionConfig {
+    pub enabled: bool,
+    pub duration_ms: u32,
+    pub curve: RippleEase,
+    /// Horizontal displacement of the wipe boundary, in physical pixels.
+    pub wave_amplitude: f32,
+    /// Number of sine cycles from the top of the output to the bottom.
+    pub wave_frequency: f32,
+    /// Half-width of the soft cross-fade boundary, in physical pixels.
+    pub edge_width: f32,
+}
+
+impl Default for WorkspaceTransitionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            duration_ms: 520,
+            curve: RippleEase::CubicInOut,
+            wave_amplitude: 34.0,
+            wave_frequency: 3.0,
+            edge_width: 18.0,
+        }
+    }
+}
+
 /// A complete ripple configuration: every knob a user can set. Lives in
 /// `Config::ripple` as the global defaults; a partial copy lives on
 /// each `WindowRule::ripple` with only the fields the user explicitly
@@ -1376,6 +1413,9 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
     match keyword {
         "input" => apply_input_block(&mut raw.input, body),
         "xwayland" => apply_xwayland_block(&mut raw.xwayland, body),
+        "workspace_transition" => {
+            apply_workspace_transition_block(&mut raw.workspace_transition, body)
+        }
         "ripple" => apply_ripple_block(&mut raw.ripple, body),
         "output" => raw.outputs.push(lower_output_block(header, body)),
         "rule" => raw.window_rules.push(lower_window_rule_block(body)),
@@ -1507,6 +1547,63 @@ fn apply_xwayland_block(xwayland: &mut XwaylandConfig, body: &[waves::Entry]) {
             "enabled" => set_bool(&mut xwayland.enabled, key, value),
             "path" => xwayland.path = value.clone(),
             other => tracing::warn!(key = %other, "Unknown key in `xwayland` block, ignoring"),
+        }
+    }
+}
+
+fn apply_workspace_transition_block(cfg: &mut WorkspaceTransitionConfig, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `workspace_transition` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "enabled" => set_bool(&mut cfg.enabled, key, value),
+            "duration_ms" | "duration" => match value.parse::<u32>() {
+                Ok(value) if (50..=5000).contains(&value) => cfg.duration_ms = value,
+                _ => tracing::warn!(
+                    value,
+                    "Expected workspace_transition.duration_ms from 50 to 5000, ignoring"
+                ),
+            },
+            "curve" | "ease" => match parse_ease(value) {
+                Some(curve) => cfg.curve = curve,
+                None => tracing::warn!(
+                    value,
+                    "Expected one of: linear cubic-out cubic-in-out quad-out exp-out, ignoring"
+                ),
+            },
+            "wave_amplitude" | "amplitude" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() && (0.0..=500.0).contains(&value) => {
+                    cfg.wave_amplitude = value
+                }
+                _ => tracing::warn!(
+                    value,
+                    "Expected workspace_transition.wave_amplitude from 0 to 500, ignoring"
+                ),
+            },
+            "wave_frequency" | "frequency" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() && (0.0..=20.0).contains(&value) => {
+                    cfg.wave_frequency = value
+                }
+                _ => tracing::warn!(
+                    value,
+                    "Expected workspace_transition.wave_frequency from 0 to 20, ignoring"
+                ),
+            },
+            "edge_width" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() && (0.5..=250.0).contains(&value) => {
+                    cfg.edge_width = value
+                }
+                _ => tracing::warn!(
+                    value,
+                    "Expected workspace_transition.edge_width from 0.5 to 250, ignoring"
+                ),
+            },
+            other => tracing::warn!(
+                key = %other,
+                "Unknown key in `workspace_transition` block, ignoring"
+            ),
         }
     }
 }
@@ -2369,6 +2466,18 @@ default_layout = bsp
 master_orientation = left
 bsp_split_bias = auto
 
+# Workspace transition (Phase R1 water identity). Inspired by niri's
+# per-animation enabled/duration/curve controls, with TideWM-specific wave
+# geometry. All values below are the defaults.
+# workspace_transition {
+#     enabled = true
+#     duration_ms = 520
+#     curve = cubic-in-out          # linear cubic-out cubic-in-out quad-out exp-out
+#     wave_amplitude = 34           # horizontal displacement, physical pixels
+#     wave_frequency = 3            # sine cycles from top to bottom
+#     edge_width = 18               # soft boundary half-width, physical pixels
+# }
+
 # Ripple (Phase R1 water identity). All values are the system defaults --
 # copy and uncomment what you want to change. Per-app overrides go in a
 # `rule { ripple { } }` sub-block (see below); the same fields work there.
@@ -2735,6 +2844,7 @@ mod tests {
             terminal: String::new(),
             show_welcome_hint: false,
             water_effects: true,
+            workspace_transition: WorkspaceTransitionConfig::default(),
             ripple: RippleConfig::system_default(),
             cursor_always_visible: false,
             cursor_hide_after_ms: 0,
@@ -2956,6 +3066,47 @@ mod tests {
         let mut raw = lower_entries(&entries);
         substitute_variables_in_raw(&mut raw);
         Config::from_raw(raw).0
+    }
+
+    #[test]
+    fn workspace_transition_block_parses_every_tuning_knob() {
+        let entries = waves::parse(
+            "workspace_transition {\n\
+             enabled = false\n\
+             duration_ms = 900\n\
+             curve = exp-out\n\
+             wave_amplitude = 72.5\n\
+             wave_frequency = 4.5\n\
+             edge_width = 26\n\
+             }\n",
+            Path::new("<workspace-transition-test>"),
+        )
+        .unwrap();
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        let transition = config.workspace_transition;
+
+        assert!(!transition.enabled);
+        assert_eq!(transition.duration_ms, 900);
+        assert_eq!(transition.curve, RippleEase::ExpOut);
+        assert_eq!(transition.wave_amplitude, 72.5);
+        assert_eq!(transition.wave_frequency, 4.5);
+        assert_eq!(transition.edge_width, 26.0);
+    }
+
+    #[test]
+    fn workspace_transition_defaults_match_generated_config() {
+        for config in [
+            Config::from_raw(RawConfig::default()).0,
+            parse_default_config(),
+        ] {
+            let transition = config.workspace_transition;
+            assert!(transition.enabled);
+            assert_eq!(transition.duration_ms, 520);
+            assert_eq!(transition.curve, RippleEase::CubicInOut);
+            assert_eq!(transition.wave_amplitude, 34.0);
+            assert_eq!(transition.wave_frequency, 3.0);
+            assert_eq!(transition.edge_width, 18.0);
+        }
     }
 
     #[test]

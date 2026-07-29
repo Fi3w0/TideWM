@@ -230,6 +230,18 @@ pub struct Smallvil {
     pub(crate) ripples: Vec<crate::ripple::Ripple>,
     /// Compiled lazily on first use; see `ripple::ripple_program`.
     pub(crate) ripple_program: Option<GlesPixelProgram>,
+    /// Requested workspace target awaiting an outgoing-frame capture,
+    /// keyed by output name. A HashMap deliberately makes this one slot
+    /// per output: repeated switches replace the target instead of
+    /// accumulating full-output work.
+    pub(crate) pending_workspace_transitions: HashMap<String, u32>,
+    /// At most one captured outgoing texture per output, dropped as soon
+    /// as its wipe completes (see `workspace_transition.rs`).
+    pub(crate) workspace_transitions:
+        HashMap<String, crate::workspace_transition::WorkspaceTransition>,
+    /// Lazily compiled custom texture shader shared by every output's
+    /// transition element.
+    pub(crate) workspace_transition_program: Option<GlesTexProgram>,
     pub loop_handle: LoopHandle<'static, Smallvil>,
     pub loop_signal: LoopSignal,
 
@@ -1224,6 +1236,9 @@ impl Smallvil {
             water_glass_program: None,
             ripples: Vec::new(),
             ripple_program: None,
+            pending_workspace_transitions: HashMap::new(),
+            workspace_transitions: HashMap::new(),
+            workspace_transition_program: None,
             loop_handle,
             loop_signal,
             socket_name,
@@ -2358,6 +2373,10 @@ impl Smallvil {
         #[cfg(feature = "screencast")]
         self.screencast_picker.take();
 
+        // A transition texture contains the unlocked desktop. Release it
+        // before the fail-closed lock render path can begin.
+        self.pending_workspace_transitions.clear();
+        self.workspace_transitions.clear();
         self.locked_outputs.clear();
 
         let serial = SERIAL_COUNTER.next_serial();
@@ -2578,11 +2597,18 @@ impl Smallvil {
     /// water/decoration effect (ripple decay, workspace-transition
     /// progress) plugs into instead of both backends growing their own
     /// copy of this check, the way they used to for the toast alone.
-    pub fn has_active_animation(&self) -> bool {
+    pub fn has_active_animation(&mut self) -> bool {
+        // Completion cleanup must not depend on an output actually being
+        // rendered. A DPMS-off/minimized output can skip its frame path;
+        // pruning here still releases the full-output transition texture
+        // on the event-loop tick that notices the animation ended.
+        self.workspace_transitions
+            .retain(|_, transition| !transition.finished());
         self.toast
             .as_ref()
             .is_some_and(|toast| toast.needs_continued_redraw())
             || self.ripples.iter().any(|r| !r.finished())
+            || !self.workspace_transitions.is_empty()
     }
 
     #[cfg(feature = "accessibility")]
@@ -2959,6 +2985,128 @@ impl Smallvil {
             ));
         }
         result
+    }
+
+    /// Captures the currently-visible desktop for a queued workspace
+    /// switch, applies the switch, then starts the outgoing-texture wipe.
+    ///
+    /// Both backends call this only after submitting the visible outgoing
+    /// frame. The capture intentionally contains the desktop and wallpaper,
+    /// while compositor chrome (cursor, toast, overview, tab strip) remains
+    /// live above the transition. If allocation or rendering fails, the
+    /// workspace still switches immediately rather than leaving input
+    /// apparently ignored.
+    pub(crate) fn capture_pending_workspace_transition(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+    ) {
+        let output_name = output.name();
+        let Some(target) = self.pending_workspace_transitions.remove(&output_name) else {
+            return;
+        };
+        let current = self.layout.active_workspace(&output_name);
+        if current == target {
+            return;
+        }
+        if !self.config.water_effects || !self.config.workspace_transition.enabled {
+            self.apply_workspace_switch(output, current, target);
+            return;
+        }
+
+        let direction = if target > current {
+            crate::workspace_transition::WorkspaceTransitionDirection::Forward
+        } else {
+            crate::workspace_transition::WorkspaceTransitionDirection::Backward
+        };
+        let geometry = output
+            .current_mode()
+            .map(|mode| Rectangle::from_size(mode.size));
+
+        let texture = geometry.and_then(|geometry| {
+            let water_glass_surfaces = self.water_glass_eligible_surfaces(output);
+            let water_glass_elements =
+                self.water_glass_frame_elements(renderer, output, &water_glass_surfaces);
+            let skip: &[WlSurface] = if water_glass_elements.is_empty() {
+                &[]
+            } else {
+                &water_glass_surfaces
+            };
+            let space_elements = self.desktop_render_elements(renderer, output, skip)?;
+            let elements: Vec<crate::backend::udev::OutputRenderElements> = water_glass_elements
+                .into_iter()
+                .chain(
+                    space_elements
+                        .into_iter()
+                        .map(crate::backend::udev::OutputRenderElements::Space),
+                )
+                .chain(
+                    self.wallpaper_element(output, renderer)
+                        .map(crate::backend::udev::OutputRenderElements::Composited),
+                )
+                .collect();
+            crate::backdrop::capture_backdrop(renderer, geometry, elements)
+        });
+
+        self.apply_workspace_switch(output, current, target);
+
+        if let (Some(texture), Some(geometry)) = (texture, geometry) {
+            self.workspace_transitions.insert(
+                output_name,
+                crate::workspace_transition::WorkspaceTransition::new(
+                    texture,
+                    direction,
+                    geometry,
+                    &self.config.workspace_transition,
+                ),
+            );
+        }
+    }
+
+    /// Builds this output's active wipe element and eagerly evicts its
+    /// texture once the animation has finished.
+    pub(crate) fn workspace_transition_frame_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+    ) -> Option<crate::backend::udev::OutputRenderElements> {
+        if !self.config.water_effects
+            || !self.config.workspace_transition.enabled
+            || !matches!(self.session_lock, SessionLock::Unlocked)
+        {
+            return None;
+        }
+        let output_name = output.name();
+        if self
+            .workspace_transitions
+            .get(&output_name)
+            .is_some_and(|transition| transition.finished())
+        {
+            self.workspace_transitions.remove(&output_name);
+            return None;
+        }
+        if !self.workspace_transitions.contains_key(&output_name) {
+            return None;
+        }
+        let program = crate::workspace_transition::workspace_transition_program(
+            &mut self.workspace_transition_program,
+            renderer,
+        )?;
+        self.workspace_transitions
+            .get_mut(&output_name)
+            .map(|transition| {
+                crate::backend::udev::OutputRenderElements::WorkspaceTransition(
+                    transition.frame_element(program),
+                )
+            })
+    }
+
+    /// Drops transient render state for a disconnected output. In
+    /// particular, this releases a full-output texture immediately instead
+    /// of retaining VRAM under an orphaned connector name.
+    pub(crate) fn remove_workspace_transition_output(&mut self, output_name: &str) {
+        self.pending_workspace_transitions.remove(output_name);
+        self.workspace_transitions.remove(output_name);
     }
 
     /// Spawns an impulse ripple (`ripple.rs`, Phase R1) on `trigger`,
@@ -3597,6 +3745,19 @@ impl Smallvil {
         }
         let output_name = output.name();
         let current = self.layout.active_workspace(&output_name);
+        // A second request before the first one's outgoing capture ran can
+        // cancel it by selecting the still-visible workspace. Treating
+        // this as auto-back-and-forth would instead jump somewhere the
+        // user did not ask to see.
+        if self
+            .pending_workspace_transitions
+            .contains_key(&output_name)
+            && current == workspace
+        {
+            self.pending_workspace_transitions.remove(&output_name);
+            self.request_redraw();
+            return;
+        }
         let workspace = if current != workspace {
             workspace
         } else if self.config.workspace_auto_back_and_forth {
@@ -3610,6 +3771,40 @@ impl Smallvil {
         } else {
             return;
         };
+
+        if self.config.water_effects && self.config.workspace_transition.enabled {
+            // A new switch supersedes any wipe already running on this
+            // output. That keeps both latency and texture memory bounded:
+            // never a queue, never more than one full-output capture.
+            self.workspace_transitions.remove(&output_name);
+            self.pending_workspace_transitions
+                .insert(output_name, workspace);
+            self.request_redraw();
+            return;
+        }
+
+        self.apply_workspace_switch(output, current, workspace);
+    }
+
+    /// Immediate variant for protocol-driven activation: focus must land
+    /// on the newly visible surface in the same dispatch, so this path
+    /// cannot wait for the render loop's outgoing-frame capture.
+    fn switch_workspace_immediate(&mut self, output: &Output, workspace: u32) {
+        if self.exclusive_layer().is_some() {
+            return;
+        }
+        let output_name = output.name();
+        let current = self.layout.active_workspace(&output_name);
+        if current == workspace {
+            return;
+        }
+        self.pending_workspace_transitions.remove(&output_name);
+        self.workspace_transitions.remove(&output_name);
+        self.apply_workspace_switch(output, current, workspace);
+    }
+
+    fn apply_workspace_switch(&mut self, output: &Output, current: u32, workspace: u32) {
+        let output_name = output.name();
         self.workspace_previous.insert(output_name.clone(), current);
 
         // Hide everything on the outgoing workspace. Tiled windows come
@@ -4162,6 +4357,9 @@ impl Smallvil {
             None => true,
         };
         if applied {
+            if !on {
+                self.remove_workspace_transition_output(&output.name());
+            }
             self.wlr_output_power_management_state.set(output, on);
         }
         applied
@@ -4692,7 +4890,7 @@ impl Smallvil {
                 && !self.pinned.contains(surface);
             if hidden {
                 if let Some(output) = self.output_by_name(&output_name) {
-                    self.switch_workspace(&output, workspace);
+                    self.switch_workspace_immediate(&output, workspace);
                 }
             }
         }
@@ -5492,6 +5690,15 @@ impl Smallvil {
                     self.welcome_hint = None;
                 }
                 self.config = new_config;
+                if !self.config.water_effects || !self.config.workspace_transition.enabled {
+                    self.workspace_transitions.clear();
+                    let pending = std::mem::take(&mut self.pending_workspace_transitions);
+                    for (output_name, workspace) in pending {
+                        if let Some(output) = self.output_by_name(&output_name) {
+                            self.switch_workspace_immediate(&output, workspace);
+                        }
+                    }
+                }
                 self.window_opacity = self
                     .foreign_toplevels
                     .keys()

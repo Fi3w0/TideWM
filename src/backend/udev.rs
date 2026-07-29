@@ -121,6 +121,9 @@ smithay::backend::renderer::element::render_elements! {
     /// below toast/overview/picker/tab-strip chrome. Same renderer-
     /// concrete-ness reason as `WaterGlass` above.
     Ripple = crate::ripple::RippleElement,
+    /// Captured outgoing workspace peeled away over the live incoming
+    /// workspace (Phase R1, see workspace_transition.rs).
+    WorkspaceTransition = crate::workspace_transition::WorkspaceTransitionElement,
 }
 
 struct SurfaceData {
@@ -763,6 +766,7 @@ pub fn init_udev(
                     // compositing is honored for clients that request it
                     // (see capture.rs).
                     state.render_pending_captures(&mut renderer, &surface.output, true);
+                    state.capture_pending_workspace_transition(&mut renderer, &surface.output);
                 }
             }
             drop(dev);
@@ -1077,6 +1081,7 @@ fn handle_connector_change(
                     // neither tiled nor floating content becomes permanently
                     // unreachable. No-op if this was the only output.
                     let disconnected_name = surface.output.name();
+                    state.remove_workspace_transition_output(&disconnected_name);
                     let fallback: Option<String> = state
                         .space
                         .outputs()
@@ -1388,6 +1393,7 @@ fn render_surface(
     };
 
     let ripple_layers = state.ripple_frame_elements(renderer, output);
+    let workspace_transition = state.workspace_transition_frame_element(renderer, output);
     let mut elements: Vec<OutputRenderElements> = ripple_layers.above_all;
     elements.extend(
         picker_element
@@ -1406,6 +1412,7 @@ fn render_surface(
             .map(OutputRenderElements::Cursor),
     );
     elements.extend(ripple_layers.above_windows);
+    elements.extend(workspace_transition);
     elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
     elements.extend(ripple_layers.below_windows);
     elements.extend(wallpaper_element.map(OutputRenderElements::Composited));

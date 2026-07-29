@@ -60,7 +60,7 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | --- | --- | --- | --- |
 | `terminal` | string | `"kitty"` | Spawned by the default `Super+Return` bind. The shipped default is `$wave(kitty, alacritty, foot, xterm)` — see [`$wave(...)`](#waves-format) above. |
 | `show_welcome_hint` | bool | `true` | Shows a persistent "fake window" card pointing you at `Super+Return` whenever the desktop is otherwise empty. Disappears the instant a real window maps; delete this key (or set it `false`) to stop it coming back. Checked on every reload, not just at startup. |
-| `water_effects` | bool | `true` | Master toggle for TideWM's water/aqua render identity. Disables water-glass, backdrop capture, and impulse ripples when `false`. |
+| `water_effects` | bool | `true` | Master toggle for TideWM's water/aqua render identity. Disables water-glass, backdrop capture, impulse ripples, and wave workspace transitions when `false`. |
 | `cursor_always_visible` | bool | `false` | Forces the udev backend's software cursor to stay visible even when a client asks to hide it (e.g. a terminal hiding its own pointer glyph after inactivity). Off by default — respecting a client's own hide request is correct behavior; this is an opt-in override. |
 | `cursor_hide_after_ms` | integer | `0` | udev backend only: hides the software cursor after this many milliseconds of no real pointer motion (niri's `cursor.hide-after-inactive-ms`). `0` disables it. Independent of `cursor_always_visible` — that overrides a *client's* hide request, this is a compositor-driven idle timer, and the two can be combined. |
 | `workspace_auto_back_and_forth` | bool | `false` | Re-selecting the already-active workspace jumps back to whichever one was active immediately before it, instead of no-opping (niri's own feature of the same name). |
@@ -72,6 +72,32 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | `bsp_split_bias` | `auto` \| `horizontal` \| `vertical` | `auto` | Manual override for `default_layout = bsp`'s per-split axis choice. `auto` is the existing aspect-ratio-driven behavior, unchanged. `horizontal`/`vertical` force every split one way regardless of window/output shape (Hyprland dwindle's `force_split` idea). One global setting, not per-workspace. |
 | `pseudo_tile_scale` | float, `0.05`–`1.0` | `0.7` | Fraction of its tile a pseudo-tiled window keeps, centered within it. Out-of-range values are clamped, not rejected. |
 | `spawn_at_startup` | repeatable key | none | Commands launched once at startup — repeat the key once per command (`spawn_at_startup = waybar` on its own line, again for the next one), not one line holding a list. Args split on whitespace — no shell involved, so quoting/globs/pipes aren't supported; wrap in `sh -c "..."` yourself if you need those. |
+
+### Workspace transitions
+
+Workspace actions use a directional wave wipe while both `water_effects` and `workspace_transition.enabled` are true. TideWM captures the outgoing desktop after its submitted frame, switches to the live incoming workspace, then peels the capture away; cursor and compositor chrome remain live above it. State is bounded to one pending target and one transient ARGB8888 full-output texture per output (about 7.9MiB at 1080p or 31.6MiB at 4K), with newer switches replacing rather than queueing. The texture is released when the wipe ends. Disabling either toggle makes workspace switching immediate.
+
+The enable/duration/curve split follows niri’s useful per-animation configuration shape; the wave geometry controls are TideWM-specific.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | Disables only workspace transitions; other water effects stay active. |
+| `duration_ms` | integer, `50`–`5000` | `520` | Transition lifetime in milliseconds. `duration` is an alias. |
+| `curve` | enum | `cubic-in-out` | Progress easing: `linear`, `cubic-out`, `cubic-in-out`, `quad-out`, or `exp-out`. `ease` is an alias. |
+| `wave_amplitude` | float, `0`–`500` | `34` | Maximum horizontal displacement of the moving boundary in physical pixels. `0` produces a straight wipe. `amplitude` is an alias. |
+| `wave_frequency` | float, `0`–`20` | `3` | Sine cycles from the output’s top edge to its bottom edge. `0` removes vertical waviness. `frequency` is an alias. |
+| `edge_width` | float, `0.5`–`250` | `18` | Half-width of the soft cross-fade boundary in physical pixels. Lower is sharper; higher is softer. |
+
+```wave
+workspace_transition {
+    enabled = true
+    duration_ms = 650
+    curve = cubic-out
+    wave_amplitude = 48
+    wave_frequency = 3.5
+    edge_width = 22
+}
+```
 
 ### `ripple { }`
 

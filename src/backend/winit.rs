@@ -333,6 +333,8 @@ pub fn init_winit(
                         // four distinct insertion points don't fit the
                         // chain's single-insertion-point shape.
                         let ripple_layers = state.ripple_frame_elements(renderer, &entry.output);
+                        let workspace_transition =
+                            state.workspace_transition_frame_element(renderer, &entry.output);
                         let mut elements: Vec<crate::backend::udev::OutputRenderElements> =
                             ripple_layers.above_all;
                         elements.extend(
@@ -346,6 +348,7 @@ pub fn init_winit(
                                 .map(crate::backend::udev::OutputRenderElements::Composited),
                         );
                         elements.extend(ripple_layers.above_windows);
+                        elements.extend(workspace_transition);
                         elements.extend(water_glass_elements);
                         elements.extend(
                             space_elements
@@ -430,6 +433,7 @@ pub fn init_winit(
                 // of TideWM's own frame.
                 let renderer = entry.backend.renderer();
                 state.render_pending_captures(renderer, &entry.output, false);
+                state.capture_pending_workspace_transition(renderer, &entry.output);
                 // Same FBO-only, post-submit timing as the capture call
                 // just above, for the same reason (see its own comment)
                 // -- Phase R0.5, see AGENT.md's "Render and visual

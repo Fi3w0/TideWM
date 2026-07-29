@@ -564,6 +564,7 @@ impl Smallvil {
             // loops: AboveAll frontmost, then chrome-less AboveWindows,
             // then windows, then BelowWindows/wallpaper, then BelowAll.
             let ripple_layers = self.ripple_frame_elements(renderer, &output);
+            let workspace_transition = self.workspace_transition_frame_element(renderer, &output);
             let water_glass_surfaces = self.water_glass_eligible_surfaces(&output);
             let water_glass_elements =
                 self.water_glass_frame_elements(renderer, &output, &water_glass_surfaces);
@@ -576,6 +577,7 @@ impl Smallvil {
                 Some(space_elements) => {
                     elements.extend(ripple_layers.above_all);
                     elements.extend(ripple_layers.above_windows);
+                    elements.extend(workspace_transition);
                     elements.extend(water_glass_elements);
                     elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
                     elements.extend(ripple_layers.below_windows);
