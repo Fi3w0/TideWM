@@ -1400,7 +1400,11 @@ fn render_surface(
             .chain(welcome_element)
             .map(OutputRenderElements::Composited),
     );
-    elements.extend(cursor_surface_element.into_iter().map(OutputRenderElements::Cursor));
+    elements.extend(
+        cursor_surface_element
+            .into_iter()
+            .map(OutputRenderElements::Cursor),
+    );
     elements.extend(ripple_layers.above_windows);
     elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
     elements.extend(ripple_layers.below_windows);

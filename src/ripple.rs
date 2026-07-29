@@ -467,7 +467,13 @@ mod tests {
             for i in 0..=10 {
                 let t = i as f32 / 10.0;
                 let v = ease_value(ease, t);
-                assert!(v >= 0.0 && v <= 1.01, "ease {:?} at t={} gave {}", ease, t, v);
+                assert!(
+                    (0.0..=1.01).contains(&v),
+                    "ease {:?} at t={} gave {}",
+                    ease,
+                    t,
+                    v
+                );
                 assert!(v >= prev - 1e-6, "ease {:?} not monotonic at t={}", ease, t);
                 prev = v;
             }
@@ -480,17 +486,16 @@ mod tests {
     fn from_ripple_returns_one_element_per_shape() {
         let mut cfg = RippleConfig::system_default();
         cfg.shapes = vec![RippleShape::Ring, RippleShape::Square];
-        let mut ripple = Ripple::new(
-            "eDP-1".to_string(),
-            Point::from((100.0, 100.0)),
-            cfg,
-        );
+        let ripple = Ripple::new("eDP-1".to_string(), Point::from((100.0, 100.0)), cfg);
         // A real GlesPixelProgram can't be constructed without an EGL
         // context, so this test stops at the multiplicity check by
         // short-circuiting through `finished()` -- which we don't want
         // to flip. Use the shapes() helper directly to verify the
         // shape list logic.
-        assert_eq!(ripple.shapes(), vec![RippleShape::Ring, RippleShape::Square]);
+        assert_eq!(
+            ripple.shapes(),
+            vec![RippleShape::Ring, RippleShape::Square]
+        );
         assert!(!ripple.finished());
     }
 }

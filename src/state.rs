@@ -129,11 +129,7 @@ pub(crate) struct RippleLayers {
 }
 
 impl RippleLayers {
-    fn push(
-        &mut self,
-        layer: crate::config::RippleLayer,
-        element: crate::ripple::RippleElement,
-    ) {
+    fn push(&mut self, layer: crate::config::RippleLayer, element: crate::ripple::RippleElement) {
         let element = crate::backend::udev::OutputRenderElements::Ripple(element);
         match layer {
             crate::config::RippleLayer::AboveAll => self.above_all.push(element),
@@ -2805,7 +2801,11 @@ impl Smallvil {
     /// uninteresting to refract) or nothing this pass has a reason to
     /// capture yet. Floating windows overlapping other content are the
     /// case this effect is actually for.
-    pub(crate) fn capture_floating_backdrops(&mut self, renderer: &mut GlesRenderer, output: &Output) {
+    pub(crate) fn capture_floating_backdrops(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+    ) {
         if !self.config.water_effects {
             return;
         }
@@ -2829,21 +2829,26 @@ impl Smallvil {
             else {
                 continue;
             };
-            let behind: Vec<crate::backend::udev::OutputRenderElements> =
-                self.wallpaper_element(output, renderer)
-                    .map(crate::backend::udev::OutputRenderElements::Composited)
-                    .into_iter()
-                    .chain(
-                        space_elements
-                            .into_iter()
-                            .map(crate::backend::udev::OutputRenderElements::Space),
-                    )
-                    .collect();
+            let behind: Vec<crate::backend::udev::OutputRenderElements> = self
+                .wallpaper_element(output, renderer)
+                .map(crate::backend::udev::OutputRenderElements::Composited)
+                .into_iter()
+                .chain(
+                    space_elements
+                        .into_iter()
+                        .map(crate::backend::udev::OutputRenderElements::Space),
+                )
+                .collect();
 
-            if let Some(texture) = crate::backdrop::capture_backdrop(renderer, physical_rect, behind) {
+            if let Some(texture) =
+                crate::backdrop::capture_backdrop(renderer, physical_rect, behind)
+            {
                 let (id, mut commit) = match self.backdrop_textures.get(&surface) {
                     Some(existing) => (existing.id.clone(), existing.commit),
-                    None => (smithay::backend::renderer::element::Id::new(), CommitCounter::default()),
+                    None => (
+                        smithay::backend::renderer::element::Id::new(),
+                        CommitCounter::default(),
+                    ),
                 };
                 commit.increment();
                 self.backdrop_textures.insert(
@@ -2874,7 +2879,10 @@ impl Smallvil {
             .iter()
             .filter(|(surface, tag)| {
                 tag.output == output.name()
-                    && self.window_opacity.get(*surface).is_some_and(|alpha| *alpha < 1.0)
+                    && self
+                        .window_opacity
+                        .get(*surface)
+                        .is_some_and(|alpha| *alpha < 1.0)
                     && self.backdrop_textures.contains_key(*surface)
             })
             .map(|(surface, _)| surface.clone())
@@ -2896,8 +2904,7 @@ impl Smallvil {
         renderer: &mut GlesRenderer,
         output: &Output,
         surfaces: &[WlSurface],
-    ) -> Vec<crate::backend::udev::OutputRenderElements>
-    {
+    ) -> Vec<crate::backend::udev::OutputRenderElements> {
         let mut result = Vec::new();
         if surfaces.is_empty() {
             return result;
@@ -2968,7 +2975,11 @@ impl Smallvil {
     ///   inactive workspace),
     /// - the ripple cap is reached (bounding the worst-case cost of
     ///   rapid window mapping so `self.ripples` can't grow unboundedly).
-    pub(crate) fn spawn_ripple(&mut self, surface: &WlSurface, trigger: crate::config::RippleTrigger) {
+    pub(crate) fn spawn_ripple(
+        &mut self,
+        surface: &WlSurface,
+        trigger: crate::config::RippleTrigger,
+    ) {
         use crate::config::RippleAnchor;
         if !self.config.water_effects {
             return;
@@ -3035,16 +3046,20 @@ impl Smallvil {
             .zip(self.output_tiling_area(&output))
             .and_then(|(workspace, area)| {
                 self.layout
-                    .layout(&output.name(), workspace, area, self.gaps_for(&output.name(), workspace))
+                    .layout(
+                        &output.name(),
+                        workspace,
+                        area,
+                        self.gaps_for(&output.name(), workspace),
+                    )
                     .into_iter()
                     .find(|(w, _)| w.toplevel().is_some_and(|t| t.wl_surface() == surface))
                     .map(|(_, rect)| rect)
             })
             .or_else(|| {
-                (!self.fullscreen.contains_key(surface)
-                    && !self.maximized.contains_key(surface))
-                .then(|| self.floating_workspace.get(surface).map(|tag| tag.rect))
-                .flatten()
+                (!self.fullscreen.contains_key(surface) && !self.maximized.contains_key(surface))
+                    .then(|| self.floating_workspace.get(surface).map(|tag| tag.rect))
+                    .flatten()
             })
             .or_else(|| {
                 self.space
@@ -3069,10 +3084,7 @@ impl Smallvil {
                     .get_pointer()
                     .map(|p| p.current_location())
                     .map(|g| {
-                        Point::from((
-                            g.x - output_geo.loc.x as f64,
-                            g.y - output_geo.loc.y as f64,
-                        ))
+                        Point::from((g.x - output_geo.loc.x as f64, g.y - output_geo.loc.y as f64))
                     })
                     .unwrap_or_else(|| {
                         Point::from((
@@ -3082,14 +3094,12 @@ impl Smallvil {
                     })
             }
             RippleAnchor::TopLeft => Point::from((win.loc.x as f64, win.loc.y as f64)),
-            RippleAnchor::TopRight => Point::from((
-                win.loc.x as f64 + win.size.w as f64,
-                win.loc.y as f64,
-            )),
-            RippleAnchor::BottomLeft => Point::from((
-                win.loc.x as f64,
-                win.loc.y as f64 + win.size.h as f64,
-            )),
+            RippleAnchor::TopRight => {
+                Point::from((win.loc.x as f64 + win.size.w as f64, win.loc.y as f64))
+            }
+            RippleAnchor::BottomLeft => {
+                Point::from((win.loc.x as f64, win.loc.y as f64 + win.size.h as f64))
+            }
             RippleAnchor::BottomRight => Point::from((
                 win.loc.x as f64 + win.size.w as f64,
                 win.loc.y as f64 + win.size.h as f64,

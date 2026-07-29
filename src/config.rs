@@ -1765,11 +1765,15 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                 "swallow" => set_bool(&mut rule.swallow, key, value),
                 "opacity" => match value.parse::<f32>() {
                     Ok(value) if value.is_finite() => rule.opacity = Some(value.clamp(0.0, 1.0)),
-                    _ => tracing::warn!(value, "Expected a finite opacity from 0.0 to 1.0, ignoring"),
+                    _ => {
+                        tracing::warn!(value, "Expected a finite opacity from 0.0 to 1.0, ignoring")
+                    }
                 },
                 "position" => match parse_position(value) {
                     Some(pos) => rule.position = Some(pos),
-                    None => tracing::warn!(value, "Expected <x>x<y> for a rule's position, ignoring"),
+                    None => {
+                        tracing::warn!(value, "Expected <x>x<y> for a rule's position, ignoring")
+                    }
                 },
                 "size" => match parse_position(value) {
                     Some(size) => rule.size = Some(size),

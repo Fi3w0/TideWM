@@ -416,9 +416,7 @@ impl Smallvil {
         // visible-frame render loops skip it: `render_output` below pulls
         // layer-shell content from `layer_map_for_output` unconditionally,
         // independent of whatever `spaces` it's given.
-        let mut elements: Vec<
-            OutputRenderElements,
-        > = Vec::new();
+        let mut elements: Vec<OutputRenderElements> = Vec::new();
         if !locked {
             // Pushed first so it ends up topmost (index 0 is the front,
             // this codebase's established render-element-list convention)

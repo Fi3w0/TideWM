@@ -2,10 +2,7 @@ use std::time::Duration;
 
 use smithay::{
     backend::{
-        renderer::{
-            damage::OutputDamageTracker,
-            gles::GlesRenderer,
-        },
+        renderer::{damage::OutputDamageTracker, gles::GlesRenderer},
         winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend},
     },
     output::{Mode, Output, PhysicalProperties, Subpixel},
@@ -317,18 +314,15 @@ pub fn init_winit(
                         } else {
                             &water_glass_surfaces
                         };
-                        let space_elements = match state.desktop_render_elements(
-                            renderer,
-                            &entry.output,
-                            skip,
-                        ) {
-                            Some(elements) => elements,
-                            None => {
-                                tracing::warn!("Failed to gather nested output elements");
-                                entry.dirty = true;
-                                continue;
-                            }
-                        };
+                        let space_elements =
+                            match state.desktop_render_elements(renderer, &entry.output, skip) {
+                                Some(elements) => elements,
+                                None => {
+                                    tracing::warn!("Failed to gather nested output elements");
+                                    entry.dirty = true;
+                                    continue;
+                                }
+                            };
                         // Ripple layers are grouped by `RippleLayer` so
                         // each backend can splice them at the right z
                         // position in the front-to-back list: AboveAll

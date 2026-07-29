@@ -353,7 +353,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_writer(std::io::stderr)
             .init();
     } else {
-        tracing_subscriber::fmt().with_writer(std::io::stderr).init();
+        tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .init();
     }
 
     let mut event_loop: EventLoop<'static, Smallvil> = EventLoop::try_new()?;

@@ -80,13 +80,9 @@ pub fn capture_backdrop<E: RenderElement<GlesRenderer>>(
         .ok()?;
     let mut damage_tracker =
         OutputDamageTracker::new((rect.size.w, rect.size.h), 1.0, Transform::Normal);
-    if let Err(err) = damage_tracker.render_output(
-        renderer,
-        &mut target,
-        0,
-        &translated,
-        [0.0, 0.0, 0.0, 0.0],
-    ) {
+    if let Err(err) =
+        damage_tracker.render_output(renderer, &mut target, 0, &translated, [0.0, 0.0, 0.0, 0.0])
+    {
         tracing::warn!(%err, "Failed to render backdrop capture frame");
         return None;
     }
