@@ -1,8 +1,15 @@
-//! Minimal JSON-over-Unix-socket control interface (Phase A item 3 of the
-//! WM feature-parity roadmap, see AGENT.md). One connection, one request
-//! line in, one response line out, then the server closes it -- not a
-//! persistent multi-request session and no event-stream mode, both left for
-//! a later phase once something actually needs them.
+//! JSON-over-Unix-socket control interface. Two modes share one socket:
+//!
+//! * **Request-response** (Phase A item 3 of the WM feature-parity roadmap):
+//!   one connection, one request line in, one response line out, then the
+//!   server closes it.
+//! * **Subscribe** (Phase R3 of the render/visual-identity roadmap, see
+//!   AGENT.md): the connection stays open and the server pushes JSON lines
+//!   as the desktop changes -- so a reactive widget (a waybar module, an
+//!   eww `deflisten`, a QuickShell socket reader) doesn't have to poll the
+//!   one-shot queries. Clean documented JSON, deliberately not a mimicry
+//!   of Hyprland's `socket2` event-string wire shape: there's no
+//!   compatibility reason to match that specific format.
 //!
 //! Read queries: `{"request": "outputs"}`, `{"request": "workspaces"}`,
 //! `{"request": "windows"}`, `{"request": "focused-window"}`,
@@ -16,14 +23,22 @@
 //! a keybind can trigger is IPC-addressable for free, including ones added
 //! by later phases, with zero new dispatch code here.
 //!
-//! Every response is `{"ok": true, "data": ...}` or `{"ok": false, "error":
-//! "..."}` -- malformed JSON or an unrecognized action string gets an error
-//! response, not a dropped connection, so a scripting mistake is visible to
-//! whatever's on the other end of the socket.
+//! Subscribe: `{"request": "subscribe", "events": ["window", "workspace",
+//! "focus", "urgent", "depth", "config"]}`. Omitting `events` (or sending
+//! an empty array) subscribes to all of them. The server replies with one
+//! ack line, then keeps the connection open and writes one JSON line per
+//! matching event: `{"event": "<kind>", "data": ...}`. The connection's
+//! lifetime is the subscription's lifetime -- closing it unsubscribes.
+//!
+//! Every request-response reply is `{"ok": true, "data": ...}` or
+//! `{"ok": false, "error": "..."}` -- malformed JSON or an unrecognized
+//! action string gets an error response, not a dropped connection, so a
+//! scripting mistake is visible to whatever's on the other end of the
+//! socket.
 
 use std::{
     cell::Cell,
-    collections::HashSet,
+    collections::{HashMap, HashSet, VecDeque},
     io::{Read, Write},
     os::unix::fs::PermissionsExt,
     os::unix::net::{UnixListener, UnixStream},
@@ -38,10 +53,16 @@ use std::{
 
 use serde::Deserialize;
 use serde_json::json;
-use smithay::reexports::calloop::{
-    generic::Generic,
-    timer::{TimeoutAction, Timer},
-    EventLoop, Interest, LoopHandle, Mode, PostAction,
+use smithay::{
+    desktop::Window,
+    reexports::{
+        calloop::{
+            generic::Generic,
+            timer::{TimeoutAction, Timer},
+            EventLoop, Interest, LoopHandle, Mode, PostAction, RegistrationToken,
+        },
+        wayland_server::protocol::wl_surface::WlSurface,
+    },
 };
 
 use crate::{config, state::Smallvil};
@@ -71,9 +92,245 @@ enum Request {
     ActiveSubmap,
     Action { action: String },
     Batch { actions: Vec<String> },
+    /// Long-lived subscribe mode -- see the module docs. `events: None`
+    /// means "all event kinds"; an explicit list filters server-side so a
+    /// bar that only cares about workspace changes doesn't pay for
+    /// per-window snapshot serialization at all.
+    Subscribe { events: Option<Vec<EventKind>> },
 }
 
 const MAX_BATCH_ACTIONS: usize = 128;
+
+/// Subscriber-selected event channel. Matches the `events` array of a
+/// `subscribe` request: a subscriber with `filter.is_empty()` receives
+/// every event kind, otherwise only those listed.
+#[derive(Deserialize, Copy, Clone, PartialEq, Eq, Hash, Debug)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum EventKind {
+    /// `window-opened`, `window-closed`, `window-changed`.
+    Window,
+    /// `workspace-changed`.
+    Workspace,
+    /// `focus-changed`.
+    Focus,
+    /// `urgent-changed`.
+    Urgent,
+    /// `depth-changed`.
+    Depth,
+    /// `config-reloaded`.
+    Config,
+}
+
+impl EventKind {
+    const ALL: [EventKind; 6] = [
+        EventKind::Window,
+        EventKind::Workspace,
+        EventKind::Focus,
+        EventKind::Urgent,
+        EventKind::Depth,
+        EventKind::Config,
+    ];
+}
+
+/// One state change broadcast to matching subscribers. Constructed at the
+/// call site where the change actually happens (`state.rs`/`xdg_shell.rs`)
+/// and handed to `Smallvil::emit_ipc_event`, which snapshots the relevant
+/// window/workspace data and writes a JSON line per matching subscriber.
+///
+/// The `WlSurface`-carrying variants are intentionally surface-driven
+/// rather than pre-snapshotting the JSON at the call site: the snapshot
+/// helpers in this file need `&Smallvil` (to look up the `Window` from the
+/// surface, plus focused/pinned/etc. flags), and the call site already
+/// holds `&mut Smallvil`. Carrying the surface into `emit_ipc_event` and
+/// letting it do the single shared-borrow snapshot avoids a clumsy
+/// split borrow at every call site.
+pub(crate) enum IpcEvent {
+    WindowOpened { surface: WlSurface },
+    WindowClosed {
+        surface: WlSurface,
+    },
+    WindowChanged { surface: WlSurface },
+    WorkspaceChanged {
+        output: String,
+        from: u32,
+        to: u32,
+    },
+    FocusChanged { surface: Option<WlSurface> },
+    UrgentChanged { surface: WlSurface, urgent: bool },
+    DepthChanged { surface: WlSurface, tier: u8 },
+    ConfigReloaded,
+}
+
+impl IpcEvent {
+    /// Top-level channel name (`window`, `workspace`, ...) used to filter
+    /// against a subscriber's `EventKind` set. The fine-grained event
+    /// string (`window-opened` etc.) is chosen later in `event_name`.
+    pub(crate) fn kind(&self) -> EventKind {
+        match self {
+            IpcEvent::WindowOpened { .. }
+            | IpcEvent::WindowClosed { .. }
+            | IpcEvent::WindowChanged { .. } => EventKind::Window,
+            IpcEvent::WorkspaceChanged { .. } => EventKind::Workspace,
+            IpcEvent::FocusChanged { .. } => EventKind::Focus,
+            IpcEvent::UrgentChanged { .. } => EventKind::Urgent,
+            IpcEvent::DepthChanged { .. } => EventKind::Depth,
+            IpcEvent::ConfigReloaded => EventKind::Config,
+        }
+    }
+
+    /// Fine-grained event string for the JSON `event` field. One per
+    /// variant so a widget can route on the specific change without
+    /// re-deriving it from the payload shape.
+    fn event_name(&self) -> &'static str {
+        match self {
+            IpcEvent::WindowOpened { .. } => "window-opened",
+            IpcEvent::WindowClosed { .. } => "window-closed",
+            IpcEvent::WindowChanged { .. } => "window-changed",
+            IpcEvent::WorkspaceChanged { .. } => "workspace-changed",
+            IpcEvent::FocusChanged { .. } => "focus-changed",
+            IpcEvent::UrgentChanged { .. } => "urgent-changed",
+            IpcEvent::DepthChanged { .. } => "depth-changed",
+            IpcEvent::ConfigReloaded => "config-reloaded",
+        }
+    }
+
+    /// Build the complete JSON line for this event (including the trailing
+    /// newline) using `state` for any window/workspace snapshotting.
+    pub(crate) fn to_json_line(&self, state: &Smallvil) -> Vec<u8> {
+        let data: serde_json::Value = match self {
+            IpcEvent::WindowOpened { surface }
+            | IpcEvent::WindowChanged { surface } => {
+                snapshot_window(state, surface).unwrap_or(serde_json::Value::Null)
+            }
+            IpcEvent::WindowClosed { surface } => snapshot_closed_window(state, surface),
+            IpcEvent::WorkspaceChanged { output, from, to } => json!({
+                "output": output,
+                "from": from,
+                "to": to,
+            }),
+            IpcEvent::FocusChanged { surface } => match surface {
+                Some(surface) => snapshot_window(state, surface).unwrap_or(serde_json::Value::Null),
+                None => serde_json::Value::Null,
+            },
+            IpcEvent::UrgentChanged { surface, urgent } => {
+                let mut snap = snapshot_window(state, surface).unwrap_or_else(|| {
+                    // Window already unmapped by the time the urgent-clear
+                    // fires (closed without losing focus first) -- emit a
+                    // minimal identity so the widget can still match on
+                    // window_id if it has one in flight.
+                    json!({ "window_id": state.foreign_toplevel_numeric_ids.get(surface).copied() })
+                });
+                if let serde_json::Value::Object(ref mut map) = snap {
+                    map.insert("urgent".into(), json!(urgent));
+                }
+                snap
+            }
+            IpcEvent::DepthChanged { surface, tier } => {
+                let mut snap = snapshot_window(state, surface).unwrap_or_else(|| {
+                    json!({ "window_id": state.foreign_toplevel_numeric_ids.get(surface).copied() })
+                });
+                if let serde_json::Value::Object(ref mut map) = snap {
+                    map.insert("tier".into(), json!(tier));
+                }
+                snap
+            }
+            IpcEvent::ConfigReloaded => serde_json::Value::Null,
+        };
+        let mut line = serde_json::to_vec(&json!({ "event": self.event_name(), "data": data }))
+            .unwrap_or_else(|_| b"{\"event\":\"error\",\"data\":null}\n".to_vec());
+        line.push(b'\n');
+        line
+    }
+}
+
+/// Window snapshot shared by `WindowOpened`/`WindowChanged`/`FocusChanged`/
+/// `UrgentChanged`/`DepthChanged`. Returns `None` if the surface is no
+/// longer mapped (race: closed between the emit call and the snapshot) --
+/// callers each have a sensible fallback for that case.
+fn snapshot_window(state: &Smallvil, surface: &WlSurface) -> Option<serde_json::Value> {
+    let focused = state.focused_window_surface();
+    let window = state
+        .space
+        .elements()
+        .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface))?;
+    window_json(state, window, focused.as_ref())
+}
+
+/// Minimal identity for a `WindowClosed` event: the full snapshot helpers
+/// above can't be used because by the time the close event fires, the
+/// window has already been detached from `space` and most of its
+/// per-window tracking maps have been cleaned up. We snapshot the few
+/// fields that survive just long enough to be readable here, and the
+/// identity fields are best-effort.
+fn snapshot_closed_window(state: &Smallvil, surface: &WlSurface) -> serde_json::Value {
+    let window_id = state.foreign_toplevel_numeric_ids.get(surface).copied();
+    let (app_id, title) = state.toplevel_identity(surface);
+    json!({
+        "window_id": window_id,
+        "app_id": app_id,
+        "title": title,
+    })
+}
+
+/// A long-lived subscribe connection. One per `subscribe` request, stored
+/// in `Smallvil::ipc_subscribers` keyed by a process-unique `usize` id.
+pub(crate) struct IpcSubscriber {
+    /// Write handle. Distinct FD from `read_source`'s owned stream (both
+    /// are `dup()`s of the original socket), so a write here doesn't
+    /// disturb calloop's read-side readiness tracking.
+    pub(crate) stream: UnixStream,
+    /// Empty means "subscribe to all". Otherwise only `EventKind`s in
+    /// this set are delivered, filtered server-side.
+    pub(crate) filter: HashSet<EventKind>,
+    /// Bytes queued but not yet accepted by the kernel (write returned
+    /// short or `WouldBlock`). Drained opportunistically by both
+    /// `emit_ipc_event` (inline attempt immediately after queueing) and
+    /// the periodic `flush_ipc_subscribers` timer.
+    pub(crate) pending: VecDeque<u8>,
+    /// The calloop source token for the read-side EOF watcher. Stored so
+    /// `remove_ipc_subscriber` (which can fire from `emit_ipc_event`'s
+    /// slow-subscriber path, not from the read callback itself) can
+    /// retire the source via `loop_handle.remove`. `None` only between
+    /// insert and token-patch in `register_subscriber`.
+    pub(crate) read_token: Option<RegistrationToken>,
+}
+
+/// Per-subscriber cap on accumulated unwritten bytes. A subscriber that
+/// can't keep up with this stream of small JSON lines (no `read()` in
+/// roughly the time it takes to fill a quarter-meg of events) is
+/// unconditionally dropped -- bounded memory matters more than best-effort
+/// delivery to a wedged client, see AGENT.md's RAM constraint.
+pub(crate) const SUBSCRIBER_PENDING_CAP: usize = 256 * 1024;
+
+/// Periodic flush interval. Matches the frame budget (60Hz) so a bar
+/// widget reacting to a workspace switch lands its update in the same
+/// frame the user sees the new workspace. Fast subscribers (the common
+/// case) are already drained inline by `emit_ipc_event` -- this timer is
+/// the retry path for subscribers whose kernel write buffer was full at
+/// emit time.
+const FLUSH_INTERVAL: Duration = Duration::from_millis(16);
+
+impl IpcSubscriber {
+    /// Non-blocking write of as much of `pending` as the kernel will take.
+    /// Returns `true` if the connection looks healthy afterwards (either
+    /// fully drained, or partial progress without error), `false` if the
+    /// peer has closed -- in which case the caller should retire the
+    /// subscriber entirely.
+    pub(crate) fn try_flush(&mut self) -> bool {
+        while !self.pending.is_empty() {
+            match self.stream.write(self.pending.as_slices().0) {
+                Ok(0) => return false,
+                Ok(n) => {
+                    self.pending.drain(..n);
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return true,
+                // EPIPE / ECONNRESET / etc. -- peer is gone.
+                Err(_) => return false,
+            }
+        }
+        true
+    }
+}
 
 /// Unlinks its socket file on drop. Keep the returned guard alive for the
 /// process lifetime; dropping it early tears down the control interface
@@ -143,6 +400,24 @@ pub fn init(event_loop: &mut EventLoop<Smallvil>) -> std::io::Result<SocketGuard
         )
         .map_err(|err| std::io::Error::other(err.to_string()))?;
 
+    // Periodic subscriber flush. The fast path (write buffer not full at
+    // emit time) is already handled inline inside `emit_ipc_event`; this
+    // timer is the retry path for subscribers whose kernel write buffer
+    // was momentarily full, and also the probe that retires a wedged
+    // subscriber once its pending cap is exceeded. Re-arms itself on the
+    // same interval rather than using `Timer::immediate()` so an idle
+    // compositor with no subscribers costs one short wakeup per frame --
+    // the same cost both backends' own redraw-timer already pays.
+    loop_handle
+        .insert_source(
+            Timer::from_duration(FLUSH_INTERVAL),
+            |_, _, state: &mut Smallvil| {
+                state.flush_ipc_subscribers();
+                TimeoutAction::ToDuration(FLUSH_INTERVAL)
+            },
+        )
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+
     std::env::set_var("TIDEWM_SOCKET", &path);
     tracing::info!(path = %path.display(), "IPC socket listening");
     Ok(SocketGuard(path))
@@ -188,19 +463,45 @@ fn register_connection(
                         }
                         if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
                             let line = buf[..pos].to_vec();
-                            let payload = response_payload(&line, state);
-                            match stream.try_clone() {
-                                Ok(stream) => register_response(
-                                    &connection_handle,
-                                    stream,
-                                    payload,
-                                    response_connections.clone(),
-                                ),
-                                Err(err) => {
-                                    tracing::warn!(%err, "Failed to clone IPC response stream")
+                            // Subscribe takes a different lifecycle than the
+                            // one-line-in/one-line-out requests: the connection
+                            // stays open and gets converted into a long-lived
+                            // subscriber. Detected here, before
+                            // `response_payload` runs, so a Subscribe doesn't
+                            // get formatted into the standard ok/error
+                            // envelope (its ack is written by
+                            // `register_subscriber` directly through the new
+                            // subscriber's own pending buffer).
+                            match serde_json::from_slice::<Request>(&line) {
+                                Ok(Request::Subscribe { events }) => {
+                                    let filter = events
+                                        .unwrap_or_default()
+                                        .into_iter()
+                                        .collect();
+                                    register_subscriber(
+                                        &connection_handle,
+                                        stream,
+                                        filter,
+                                        state,
+                                    );
+                                    finish!();
+                                }
+                                _ => {
+                                    let payload = response_payload(&line, state);
+                                    match stream.try_clone() {
+                                        Ok(stream) => register_response(
+                                            &connection_handle,
+                                            stream,
+                                            payload,
+                                            response_connections.clone(),
+                                        ),
+                                        Err(err) => {
+                                            tracing::warn!(%err, "Failed to clone IPC response stream")
+                                        }
+                                    }
+                                    finish!();
                                 }
                             }
-                            finish!();
                         }
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
@@ -243,6 +544,145 @@ fn register_connection(
                 loop_handle.remove(token);
             }
         }
+    }
+}
+
+/// Converts an incoming `subscribe` request's connection into a long-lived
+/// subscriber. Called from inside `register_connection`'s read callback,
+/// right before that source retires via `PostAction::Remove` -- the
+/// connection's request-response phase is over, and the subscribe phase
+/// takes over with its own read-side EOF watcher on a cloned FD.
+///
+/// The original stream is owned by calloop's retiring source and will be
+/// closed when that source drops. We `try_clone()` twice: once for our
+/// write side and once for a new calloop READ source whose only job is to
+/// detect peer-side close (so a widget that disconnects is reaped even if
+/// no events would otherwise probe the connection).
+fn register_subscriber(
+    loop_handle: &LoopHandle<Smallvil>,
+    stream: &UnixStream,
+    filter: HashSet<EventKind>,
+    state: &mut Smallvil,
+) {
+    let write_stream = match stream.try_clone() {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::warn!(%err, "Failed to clone IPC subscriber write stream");
+            return;
+        }
+    };
+    let eof_stream = match stream.try_clone() {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::warn!(%err, "Failed to clone IPC subscriber EOF stream");
+            return;
+        }
+    };
+
+    let id = state.next_ipc_subscriber_id;
+    state.next_ipc_subscriber_id += 1;
+
+    state.ipc_subscribers.insert(
+        id,
+        IpcSubscriber {
+            stream: write_stream,
+            filter: filter.clone(),
+            pending: VecDeque::new(),
+            read_token: None,
+        },
+    );
+
+    // The ack echoes back the resolved event set: the full menu when the
+    // subscriber asked for "all", the actual filter otherwise -- so a
+    // widget can tell at handshake time which events it will in fact
+    // receive, including a typo'd filter rejecting nothing silently.
+    let resolved_events: Vec<&'static str> = if filter.is_empty() {
+        EventKind::ALL
+            .iter()
+            .map(|k| match k {
+                EventKind::Window => "window",
+                EventKind::Workspace => "workspace",
+                EventKind::Focus => "focus",
+                EventKind::Urgent => "urgent",
+                EventKind::Depth => "depth",
+                EventKind::Config => "config",
+            })
+            .collect()
+    } else {
+        filter
+            .iter()
+            .map(|k| match k {
+                EventKind::Window => "window",
+                EventKind::Workspace => "workspace",
+                EventKind::Focus => "focus",
+                EventKind::Urgent => "urgent",
+                EventKind::Depth => "depth",
+                EventKind::Config => "config",
+            })
+            .collect()
+    };
+    let ack_line = serde_json::to_vec(&json!({
+        "ok": true,
+        "data": {
+            "subscription_id": id,
+            "events": resolved_events,
+        }
+    }))
+    .unwrap_or_else(|_| br#"{"ok":true,"data":{"subscription_id":0,"events":[]}}"#.to_vec());
+    if let Some(sub) = state.ipc_subscribers.get_mut(&id) {
+        sub.pending.extend(ack_line);
+        sub.pending.push_back(b'\n');
+        // Best-effort inline flush. The periodic `flush_ipc_subscribers`
+        // timer is the retry path if the kernel buffer was full.
+        sub.try_flush();
+    }
+
+    // EOF watcher on the cloned read side. Any data the client sends after
+    // the initial subscribe request is silently drained -- the protocol is
+    // strictly subscribe-then-receive, no second request. EOF or read
+    // error tears down the subscriber.
+    let result = loop_handle.insert_source(
+        Generic::new(eof_stream, Interest::READ, Mode::Level),
+        move |_readiness, stream, state: &mut Smallvil| {
+            let mut buf = [0u8; 64];
+            let mut reader: &UnixStream = stream;
+            match reader.read(&mut buf) {
+                Ok(0) => {
+                    // Clean client-side close.
+                    state.ipc_subscribers.remove(&id);
+                    Ok(PostAction::Remove)
+                }
+                Ok(_) => {
+                    // Stray bytes post-subscribe -- drain and ignore, the
+                    // subscription is the only valid request on this
+                    // connection.
+                    Ok(PostAction::Continue)
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    Ok(PostAction::Continue)
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "IPC subscriber read error; dropping");
+                    state.ipc_subscribers.remove(&id);
+                    Ok(PostAction::Remove)
+                }
+            }
+        },
+    );
+    let token = match result {
+        Ok(token) => token,
+        Err(err) => {
+            tracing::warn!(%err, "Failed to register IPC subscriber EOF source; dropping subscriber");
+            state.ipc_subscribers.remove(&id);
+            return;
+        }
+    };
+    // Patch the registration token so a later slow-subscriber drop from
+    // `emit_ipc_event`/`flush_ipc_subscribers` can retire this source via
+    // `loop_handle.remove`. Without it, a wedged subscriber's read source
+    // would leak until the next EOF, which may never come.
+    if let Some(sub) = state.ipc_subscribers.get_mut(&id) {
+        sub.read_token = Some(token);
     }
 }
 
@@ -343,6 +783,15 @@ fn handle_request(state: &mut Smallvil, request: Request) -> serde_json::Value {
         Request::Windows => json!({ "ok": true, "data": windows_json(state) }),
         Request::FocusedWindow => json!({ "ok": true, "data": focused_window_json(state) }),
         Request::ActiveSubmap => json!({ "ok": true, "data": state.active_submap }),
+        // Subscribe is intercepted upstream in `register_connection` before
+        // `response_payload` ever runs, since handling it requires the
+        // connection's stream (not available here). Reaching this arm means
+        // Subscribe was sent after another request on the same connection --
+        // not a valid sequence on this one-shot protocol.
+        Request::Subscribe { .. } => json!({
+            "ok": false,
+            "error": "subscribe must be the first and only request on a fresh connection"
+        }),
         Request::Action { action } => match config::parse_action(&action) {
             Some(parsed) => match run_ipc_action(state, parsed) {
                 Ok(()) => json!({ "ok": true }),

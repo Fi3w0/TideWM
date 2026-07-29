@@ -205,6 +205,18 @@ pub struct Smallvil {
     /// behavior.
     pub active_submap: Option<String>,
 
+    /// Long-lived IPC subscribe connections, keyed by a process-unique id
+    /// assigned at subscribe time. Empty in the steady state where no
+    /// widget is connected, which makes `emit_ipc_event` a cheap
+    /// early-return on every state change. See `ipc::IpcSubscriber` for
+    /// the per-connection fields and lifecycle.
+    pub(crate) ipc_subscribers: HashMap<usize, crate::ipc::IpcSubscriber>,
+    /// Next subscriber id. Monotonic across the process lifetime rather
+    /// than recycled, so a stale reference inside an in-flight calloop
+    /// callback can't accidentally target a fresh subscriber that reused
+    /// the same id.
+    pub(crate) next_ipc_subscriber_id: usize,
+
     pub layout: Layouts,
     pub space: Space<Window>,
     /// Per-mapped-window base/active/inactive/fullscreen alpha multipliers
@@ -1533,6 +1545,95 @@ impl Smallvil {
         }
     }
 
+    /// Broadcasts one state-change event to every matching IPC subscriber.
+    /// The fast path (no subscribers connected) is a single `is_empty`
+    /// check and return -- this is called from focus/workspace/map/unmap
+    /// hot paths and must stay cheap when nothing is listening.
+    ///
+    /// For real subscribers, the per-event JSON line is snapshotted once
+    /// (the borrow-checker-friendly shared-borrow path through
+    /// `IpcEvent::to_json_line`), then appended to each subscriber's
+    /// `pending` deque with an inline `try_flush` so a healthy subscriber
+    /// gets sub-millisecond latency without waiting on the periodic timer.
+    /// A subscriber whose `pending` exceeds `SUBSCRIBER_PENDING_CAP` after
+    /// the attempt is retired via `remove_ipc_subscriber` -- bounded
+    /// memory wins over best-effort delivery to a wedged client.
+    pub(crate) fn emit_ipc_event(&mut self, event: crate::ipc::IpcEvent) {
+        if self.ipc_subscribers.is_empty() {
+            return;
+        }
+        let kind = event.kind();
+        let payload = event.to_json_line(self);
+        let mut to_drop: Vec<usize> = Vec::new();
+        for (id, sub) in self.ipc_subscribers.iter_mut() {
+            if !sub.filter.is_empty() && !sub.filter.contains(&kind) {
+                continue;
+            }
+            sub.pending.extend(&payload);
+            if !sub.try_flush() {
+                // Peer closed between events. Don't keep queuing; drop on
+                // the next sweep unless `remove_ipc_subscriber` already
+                // grabbed it (the read-side EOF watcher may have beaten us
+                // to the entry). Marking here makes the next flush's
+                // `remove_ipc_subscriber` retire the entry.
+                to_drop.push(*id);
+                continue;
+            }
+            if sub.pending.len() > crate::ipc::SUBSCRIBER_PENDING_CAP {
+                tracing::warn!(
+                    id,
+                    pending = sub.pending.len(),
+                    cap = crate::ipc::SUBSCRIBER_PENDING_CAP,
+                    "IPC subscriber exceeded pending cap; dropping"
+                );
+                to_drop.push(*id);
+            }
+        }
+        for id in to_drop {
+            self.remove_ipc_subscriber(id);
+        }
+    }
+
+    /// Periodic retry path for subscribers whose kernel write buffer was
+    /// full at `emit_ipc_event` time. Registered as a recurring 16ms
+    /// `Timer` in `ipc::init`. Also retires any subscriber flagged for
+    /// removal mid-emit (peer-closed or cap-exceeded).
+    pub(crate) fn flush_ipc_subscribers(&mut self) {
+        if self.ipc_subscribers.is_empty() {
+            return;
+        }
+        let mut to_drop: Vec<usize> = Vec::new();
+        for (id, sub) in self.ipc_subscribers.iter_mut() {
+            if !sub.try_flush() {
+                to_drop.push(*id);
+                continue;
+            }
+            if sub.pending.len() > crate::ipc::SUBSCRIBER_PENDING_CAP {
+                to_drop.push(*id);
+            }
+        }
+        for id in to_drop {
+            self.remove_ipc_subscriber(id);
+        }
+    }
+
+    /// Tears down a subscriber: removes its entry from `ipc_subscribers`
+    /// (dropping the write-side FD) and retires its read-side EOF source
+    /// via `loop_handle.remove`. Safe to call from inside any calloop
+    /// callback, not just the EOF source itself -- calloop's
+    /// `loop_handle.remove` is documented as idempotent against
+    /// already-removed tokens, and cross-source removal from within
+    /// another source's callback is the supported pattern (interior
+    /// `RefCell` borrow, brief).
+    fn remove_ipc_subscriber(&mut self, id: usize) {
+        if let Some(mut sub) = self.ipc_subscribers.remove(&id) {
+            if let Some(token) = sub.read_token.take() {
+                self.loop_handle.remove(token);
+            }
+            drop(sub);
+        }
+    }
+
     /// Builds the depth-specific replacement/overlay elements for one output.
     /// The returned surface list contains only deep windows whose schematic
     /// replacement was successfully built, so callers can safely omit those
@@ -1789,6 +1890,9 @@ impl Smallvil {
             cursor_idle_timer_armed: false,
             needs_redraw: true,
             active_submap: None,
+
+            ipc_subscribers: HashMap::new(),
+            next_ipc_subscriber_id: 1,
 
             layout: {
                 let mut layout = Layouts::default();
