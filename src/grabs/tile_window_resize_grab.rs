@@ -2,12 +2,12 @@
 //! to `resize_grab.rs`'s floating resize and matching Hyprland's own
 //! `bindm ... resizewindow` convention -- unlike `tile_resize_grab.rs`
 //! (dragging the shared border directly, no modifier needed), this doesn't
-//! require hitting the border pixel-exactly. Drives up to two split
-//! ratios at once (`Layouts::resize_splits` finds the nearest enclosing
-//! split per axis), so a diagonal drag can resize both dimensions in one
-//! gesture when the window has ancestors on both axes.
+//! require hitting the border pixel-exactly. Drives up to two connected
+//! split chains at once (`Layouts::resize_splits` finds the nearest
+//! enclosing split per axis), so a diagonal drag can resize both dimensions
+//! in one gesture when the window has ancestors on both axes.
 
-use crate::{layout::Axis, layout::SplitHit, Smallvil};
+use crate::{layout::Axis, layout::SplitResizeHandle, Smallvil};
 use smithay::{
     input::pointer::{
         AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
@@ -21,17 +21,15 @@ use smithay::{
 
 pub struct TileWindowResizeGrab {
     start_data: PointerGrabStartData<Smallvil>,
-    /// Each split to drive, paired with its ratio at grab start (see
-    /// `TileResizeGrab`'s own `start_ratio`/`area_size` for why: recomputing
-    /// either from the live, already-changing ratio would make the math
-    /// chase its own tail).
-    handles: Vec<(SplitHit, f32)>,
+    /// Nearest split per axis plus their damped same-axis ancestors. Ratios,
+    /// spans, and target-side signs are fixed at grab start.
+    handles: Vec<SplitResizeHandle>,
 }
 
 impl TileWindowResizeGrab {
     pub fn start(
         start_data: PointerGrabStartData<Smallvil>,
-        handles: Vec<(SplitHit, f32)>,
+        handles: Vec<SplitResizeHandle>,
     ) -> Self {
         Self {
             start_data,
@@ -54,27 +52,26 @@ impl PointerGrab<Smallvil> for TileWindowResizeGrab {
         if self
             .handles
             .iter()
-            .any(|(hit, _)| !data.layout.split_is_current(hit))
+            .any(|handle| !data.layout.split_is_current(&handle.hit))
         {
             return;
         }
 
         let delta = event.location - self.start_data.location;
-        for (hit, start_ratio) in &self.handles {
-            let span = match hit.axis {
-                Axis::Horizontal => hit.area.size.w,
-                Axis::Vertical => hit.area.size.h,
+        for handle in &self.handles {
+            let delta_pixels = match handle.hit.axis {
+                Axis::Horizontal => delta.x,
+                Axis::Vertical => delta.y,
             };
-            if span <= 0 {
+            let Some(new_ratio) = handle.ratio_for_delta(delta_pixels) else {
                 continue;
-            }
-            let delta_ratio = match hit.axis {
-                Axis::Horizontal => delta.x / span as f64,
-                Axis::Vertical => delta.y / span as f64,
             };
-            let new_ratio = *start_ratio as f64 + delta_ratio;
-            data.layout
-                .set_ratio(&hit.output, hit.workspace, &hit.path, new_ratio as f32);
+            data.layout.set_ratio(
+                &handle.hit.output,
+                handle.hit.workspace,
+                &handle.hit.path,
+                new_ratio,
+            );
         }
         data.retile_viscous();
     }

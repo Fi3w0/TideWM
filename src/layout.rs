@@ -64,7 +64,33 @@ pub struct SplitHit {
     pub path: Vec<Side>,
     pub axis: Axis,
     pub area: Rectangle<i32, Logical>,
+    /// Full tiling area at grab start. Connected-vessel propagation uses
+    /// this to recover each ancestor split's stable span.
+    root_area: Rectangle<i32, Logical>,
+    /// Which child contains the resized window. Set for body/keyboard
+    /// resize, absent for a directly dragged split border.
+    target_side: Option<Side>,
     topology_revision: u64,
+}
+
+/// One split participating in a connected-vessel resize. `weight` includes
+/// both spatial falloff and the sign needed to grow the target leaf when it
+/// sits in this split's second child.
+#[derive(Debug, Clone)]
+pub(crate) struct SplitResizeHandle {
+    pub(crate) hit: SplitHit,
+    start_ratio: f32,
+    weight: f32,
+}
+
+impl SplitResizeHandle {
+    pub(crate) fn ratio_for_delta(&self, delta_pixels: f64) -> Option<f32> {
+        let span = match self.hit.axis {
+            Axis::Horizontal => self.hit.area.size.w,
+            Axis::Vertical => self.hit.area.size.h,
+        };
+        (span > 0).then(|| self.start_ratio + (delta_pixels as f32 * self.weight) / span as f32)
+    }
 }
 
 #[derive(Default)]
@@ -167,7 +193,15 @@ impl BspLayout {
         point: Point<f64, Logical>,
         bias: SplitBias,
     ) -> Option<SplitHit> {
-        hit_test(self.root.as_ref()?, area, gap, point, bias, Vec::new())
+        hit_test(
+            self.root.as_ref()?,
+            area,
+            area,
+            gap,
+            point,
+            bias,
+            Vec::new(),
+        )
     }
 
     /// The nearest enclosing split for each axis along the path from the
@@ -187,22 +221,13 @@ impl BspLayout {
         area: Rectangle<i32, Logical>,
         bias: SplitBias,
     ) -> Vec<SplitHit> {
-        let mut horizontal = None;
-        let mut vertical = None;
+        let mut found = [None, None];
         if let Some(root) = &self.root {
             if node_contains(root, target) {
-                collect_resize_splits(
-                    root,
-                    target,
-                    area,
-                    bias,
-                    Vec::new(),
-                    &mut horizontal,
-                    &mut vertical,
-                );
+                collect_resize_splits(root, target, area, area, bias, Vec::new(), &mut found);
             }
         }
-        [horizontal, vertical].into_iter().flatten().collect()
+        found.into_iter().flatten().collect()
     }
 
     /// The current ratio of the split addressed by `path` (see `SplitHit`).
@@ -463,7 +488,13 @@ impl Layouts {
     /// once at startup and again on every config reload, same as
     /// `set_master_orientation`.
     pub fn set_split_bias(&mut self, bias: SplitBias) {
-        self.split_bias = bias;
+        if self.split_bias != bias {
+            self.split_bias = bias;
+            // A live grab's stored axis and split spans were computed under
+            // the old bias. Invalidate it instead of driving geometry with
+            // stale metadata after a config reload.
+            self.bump_topology_revision();
+        }
     }
 
     /// The master/stack split fraction for `output`'s `workspace` (master
@@ -606,6 +637,79 @@ impl Layouts {
         if let Some(layout) = self.trees.get_mut(&(output.to_string(), workspace)) {
             layout.set_ratio(path, ratio);
         }
+    }
+
+    /// Builds the fixed set of parallel splits driven by one resize
+    /// gesture. The primary split receives the full pointer displacement;
+    /// same-axis ancestors receive geometrically damped pressure until
+    /// `max_splits` is reached. A border drag moves every boundary in the
+    /// pointer direction. A window-body/keyboard resize instead signs each
+    /// ancestor from the target leaf's side, so positive displacement grows
+    /// that window even when it lives in a split's second child.
+    pub(crate) fn connected_resize_handles(
+        &self,
+        hit: &SplitHit,
+        falloff: f32,
+        max_splits: u8,
+    ) -> Vec<SplitResizeHandle> {
+        if !self.split_is_current(hit) {
+            return Vec::new();
+        }
+        let Some(tree) = self.trees.get(&(hit.output.clone(), hit.workspace)) else {
+            return Vec::new();
+        };
+        let Some(root) = tree.root.as_ref() else {
+            return Vec::new();
+        };
+        let mut path_splits = Vec::new();
+        collect_split_path(
+            root,
+            hit.root_area,
+            self.split_bias,
+            &hit.path,
+            Vec::new(),
+            &mut path_splits,
+        );
+
+        let falloff = falloff.clamp(0.0, 1.0);
+        let max_splits = usize::from(max_splits.max(1));
+        let primary_depth = hit.path.len();
+        path_splits
+            .into_iter()
+            .rev()
+            .filter(|split| split.axis == hit.axis)
+            .filter_map(|split| {
+                let distance = primary_depth.checked_sub(split.path.len())?;
+                let magnitude = propagation_weight(falloff, distance);
+                if magnitude <= f32::EPSILON {
+                    return None;
+                }
+                let target_side = if hit.target_side.is_some() {
+                    if distance == 0 {
+                        hit.target_side
+                    } else {
+                        hit.path.get(split.path.len()).copied()
+                    }
+                } else {
+                    None
+                };
+                Some(SplitResizeHandle {
+                    hit: SplitHit {
+                        output: hit.output.clone(),
+                        workspace: hit.workspace,
+                        path: split.path,
+                        axis: split.axis,
+                        area: split.area,
+                        root_area: hit.root_area,
+                        target_side,
+                        topology_revision: hit.topology_revision,
+                    },
+                    start_ratio: split.ratio,
+                    weight: signed_resize_weight(magnitude, target_side),
+                })
+            })
+            .take(max_splits)
+            .collect()
     }
 
     /// Whether a split captured by an active pointer grab still names the
@@ -764,6 +868,71 @@ fn replace_leaf(node: &mut Node, old: &WlSurface, new_window: &Window) {
     }
 }
 
+struct PathSplit {
+    path: Vec<Side>,
+    axis: Axis,
+    area: Rectangle<i32, Logical>,
+    ratio: f32,
+}
+
+/// Records every split from the root through `target_path`, including the
+/// addressed split itself. Areas are derived from the ratios captured at
+/// grab start, so every connected handle keeps stable pixel-to-ratio math
+/// for the gesture's full lifetime.
+fn collect_split_path(
+    node: &Node,
+    area: Rectangle<i32, Logical>,
+    bias: SplitBias,
+    target_path: &[Side],
+    path: Vec<Side>,
+    out: &mut Vec<PathSplit>,
+) {
+    let Node::Split {
+        ratio,
+        first,
+        second,
+    } = node
+    else {
+        return;
+    };
+    out.push(PathSplit {
+        path: path.clone(),
+        axis: split_axis(area, bias),
+        area,
+        ratio: *ratio,
+    });
+    let Some(side) = target_path.first().copied() else {
+        return;
+    };
+    let (first_area, second_area) = split(area, *ratio, bias);
+    let mut child_path = path;
+    child_path.push(side);
+    match side {
+        Side::First => {
+            collect_split_path(first, first_area, bias, &target_path[1..], child_path, out)
+        }
+        Side::Second => collect_split_path(
+            second,
+            second_area,
+            bias,
+            &target_path[1..],
+            child_path,
+            out,
+        ),
+    }
+}
+
+fn propagation_weight(falloff: f32, distance: usize) -> f32 {
+    falloff.clamp(0.0, 1.0).powi(distance as i32)
+}
+
+fn signed_resize_weight(magnitude: f32, target_side: Option<Side>) -> f32 {
+    match target_side {
+        Some(Side::Second) => -magnitude,
+        Some(Side::First) | None => magnitude,
+    }
+}
+
 /// Pre-order walk down the true path to `target` (deciding direction with
 /// `node_contains`, same as `insert_into`), recording each `Split` crossed
 /// into `horizontal`/`vertical` by its axis. Writes happen on the way down,
@@ -774,10 +943,10 @@ fn collect_resize_splits(
     node: &Node,
     target: &WlSurface,
     area: Rectangle<i32, Logical>,
+    root_area: Rectangle<i32, Logical>,
     bias: SplitBias,
     mut path: Vec<Side>,
-    horizontal: &mut Option<SplitHit>,
-    vertical: &mut Option<SplitHit>,
+    found: &mut [Option<SplitHit>; 2],
 ) {
     let Node::Split {
         ratio,
@@ -791,39 +960,41 @@ fn collect_resize_splits(
     let (first_area, second_area) = split(area, *ratio, bias);
     let axis = split_axis(area, bias);
 
+    let target_side = if node_contains(first, target) {
+        Some(Side::First)
+    } else if node_contains(second, target) {
+        Some(Side::Second)
+    } else {
+        None
+    };
     let hit = SplitHit {
         output: String::new(),
         workspace: 0,
         path: path.clone(),
         axis,
         area,
+        root_area,
+        target_side,
         topology_revision: 0,
     };
     match axis {
-        Axis::Horizontal => *horizontal = Some(hit),
-        Axis::Vertical => *vertical = Some(hit),
+        Axis::Horizontal => found[0] = Some(hit),
+        Axis::Vertical => found[1] = Some(hit),
     }
 
-    if node_contains(first, target) {
+    if target_side == Some(Side::First) {
         path.push(Side::First);
-        collect_resize_splits(first, target, first_area, bias, path, horizontal, vertical);
-    } else if node_contains(second, target) {
+        collect_resize_splits(first, target, first_area, root_area, bias, path, found);
+    } else if target_side == Some(Side::Second) {
         path.push(Side::Second);
-        collect_resize_splits(
-            second,
-            target,
-            second_area,
-            bias,
-            path,
-            horizontal,
-            vertical,
-        );
+        collect_resize_splits(second, target, second_area, root_area, bias, path, found);
     }
 }
 
 fn hit_test(
     node: &Node,
     area: Rectangle<i32, Logical>,
+    root_area: Rectangle<i32, Logical>,
     gap: i32,
     point: Point<f64, Logical>,
     bias: SplitBias,
@@ -866,16 +1037,18 @@ fn hit_test(
             path,
             axis,
             area,
+            root_area,
+            target_side: None,
             topology_revision: 0,
         });
     }
 
     if rect_contains(first_area, point) {
         path.push(Side::First);
-        hit_test(first, first_area, gap, point, bias, path)
+        hit_test(first, first_area, root_area, gap, point, bias, path)
     } else {
         path.push(Side::Second);
-        hit_test(second, second_area, gap, point, bias, path)
+        hit_test(second, second_area, root_area, gap, point, bias, path)
     }
 }
 
@@ -1154,6 +1327,42 @@ mod tests {
         // A forced bias wins regardless of the area's own shape.
         assert_eq!(split_axis(tall, SplitBias::Horizontal), Axis::Horizontal);
         assert_eq!(split_axis(wide, SplitBias::Vertical), Axis::Vertical);
+    }
+
+    #[test]
+    fn connected_resize_falloff_is_geometric_and_side_aware() {
+        assert!((propagation_weight(0.5, 0) - 1.0).abs() < f32::EPSILON);
+        assert!((propagation_weight(0.5, 1) - 0.5).abs() < f32::EPSILON);
+        assert!((propagation_weight(0.5, 3) - 0.125).abs() < f32::EPSILON);
+
+        assert_eq!(signed_resize_weight(0.5, None), 0.5);
+        assert_eq!(signed_resize_weight(0.5, Some(Side::First)), 0.5);
+        assert_eq!(signed_resize_weight(0.5, Some(Side::Second)), -0.5);
+    }
+
+    #[test]
+    fn resize_handle_converts_stable_pixel_motion_into_ratio_motion() {
+        let first = SplitResizeHandle {
+            hit: SplitHit {
+                output: "DP-1".to_string(),
+                workspace: 1,
+                path: Vec::new(),
+                axis: Axis::Horizontal,
+                area: area(1000, 800),
+                root_area: area(1000, 800),
+                target_side: Some(Side::First),
+                topology_revision: 0,
+            },
+            start_ratio: 0.5,
+            weight: 1.0,
+        };
+        assert!((first.ratio_for_delta(100.0).unwrap() - 0.6).abs() < f32::EPSILON);
+
+        let second = SplitResizeHandle {
+            weight: -0.5,
+            ..first
+        };
+        assert!((second.ratio_for_delta(100.0).unwrap() - 0.45).abs() < f32::EPSILON);
     }
 
     fn area(w: i32, h: i32) -> Rectangle<i32, Logical> {

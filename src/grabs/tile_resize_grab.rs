@@ -2,10 +2,11 @@
 //! the tiled counterpart to `resize_grab.rs` (which resizes a single
 //! floating window's buffer via xdg-shell configure). This grab doesn't
 //! touch any client's buffer size directly -- it mutates the `BspLayout`
-//! split ratio addressed by `path` and lets `Smallvil::retile()` push the
-//! resulting geometry out, same as any other layout change.
+//! split addressed by `path` plus its configured parallel ancestor chain,
+//! then lets `Smallvil::retile()` push the resulting geometry out like any
+//! other layout change.
 
-use crate::{layout::Axis, layout::SplitHit, Smallvil};
+use crate::{layout::Axis, layout::SplitResizeHandle, Smallvil};
 use smithay::{
     input::pointer::{
         AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
@@ -19,23 +20,20 @@ use smithay::{
 
 pub struct TileResizeGrab {
     start_data: PointerGrabStartData<Smallvil>,
-    start_ratio: f32,
-    /// Includes the split path, topology revision, and its fixed area at
-    /// grab start. Recomputing the latter from the live ratio would make
-    /// the ratio math chase its own tail.
-    hit: SplitHit,
+    /// Primary split followed by same-axis ancestors with damped weights.
+    /// Every ratio and span is captured at grab start, so the math never
+    /// chases geometry it already changed.
+    handles: Vec<SplitResizeHandle>,
 }
 
 impl TileResizeGrab {
     pub fn start(
         start_data: PointerGrabStartData<Smallvil>,
-        hit: SplitHit,
-        start_ratio: f32,
+        handles: Vec<SplitResizeHandle>,
     ) -> Self {
         Self {
             start_data,
-            start_ratio,
-            hit,
+            handles,
         }
     }
 }
@@ -51,30 +49,33 @@ impl PointerGrab<Smallvil> for TileResizeGrab {
         // While the grab is active, no client has pointer focus.
         handle.motion(data, None, event);
 
-        if !data.layout.split_is_current(&self.hit) {
+        if self
+            .handles
+            .iter()
+            .any(|handle| !data.layout.split_is_current(&handle.hit))
+        {
             return;
         }
 
         let delta = event.location - self.start_data.location;
-        let span = match self.hit.axis {
-            Axis::Horizontal => self.hit.area.size.w,
-            Axis::Vertical => self.hit.area.size.h,
-        };
-        if span <= 0 {
+        let Some(primary) = self.handles.first() else {
             return;
-        }
-        let delta_ratio = match self.hit.axis {
-            Axis::Horizontal => delta.x / span as f64,
-            Axis::Vertical => delta.y / span as f64,
         };
-        let new_ratio = self.start_ratio as f64 + delta_ratio;
-
-        data.layout.set_ratio(
-            &self.hit.output,
-            self.hit.workspace,
-            &self.hit.path,
-            new_ratio as f32,
-        );
+        let delta_pixels = match primary.hit.axis {
+            Axis::Horizontal => delta.x,
+            Axis::Vertical => delta.y,
+        };
+        for handle in &self.handles {
+            let Some(new_ratio) = handle.ratio_for_delta(delta_pixels) else {
+                continue;
+            };
+            data.layout.set_ratio(
+                &handle.hit.output,
+                handle.hit.workspace,
+                &handle.hit.path,
+                new_ratio,
+            );
+        }
         data.retile_viscous();
     }
 

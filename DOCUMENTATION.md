@@ -61,7 +61,7 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | `terminal` | string | `"kitty"` | Spawned by the default `Super+Return` bind. The shipped default is `$wave(kitty, alacritty, foot, xterm)` — see [`$wave(...)`](#waves-format) above. |
 | `pointer_modifier` | modifier or `+`-joined modifiers | `super` | Modifier physically held for compositor mouse actions: left-drag moves floating windows or drag-swaps tiles; right-drag resizes floating or tiled windows. Accepts `super`/`logo`/`mod4`, `alt`/`mod1`, `ctrl`/`control`, and `shift`. The shipped config sets it to `$mod`, so changing `$mod` can update keyboard and mouse behavior together. `mouse_modifier` and `drag_modifier` are aliases. |
 | `show_welcome_hint` | bool | `true` | Shows a persistent "fake window" card pointing you at `Super+Return` whenever the desktop is otherwise empty. Disappears the instant a real window maps; delete this key (or set it `false`) to stop it coming back. Checked on every reload, not just at startup. |
-| `water_effects` | bool | `true` | Master toggle for TideWM's water/aqua render identity. Disables water-glass, backdrop capture, impulse ripples, wave workspace transitions, automatic depth/buoyancy, and interactive viscosity when `false`. |
+| `water_effects` | bool | `true` | Master toggle for TideWM's water/aqua render identity. Disables water-glass, backdrop capture, impulse ripples, wave workspace transitions, automatic depth/buoyancy, interactive viscosity, and connected-vessel resize when `false`. |
 | `viscosity` | float, `0`–`4` | `1.0` | Interactive window move/resize damping. `0` follows the pointer immediately; higher values settle more slowly. Render-only: logical geometry and hit-testing stay at the pointer target. Disabled by `water_effects = false`. |
 | `cursor_always_visible` | bool | `false` | Forces the udev backend's software cursor to stay visible even when a client asks to hide it (e.g. a terminal hiding its own pointer glyph after inactivity). Off by default — respecting a client's own hide request is correct behavior; this is an opt-in override. |
 | `cursor_hide_after_ms` | integer | `0` | udev backend only: hides the software cursor after this many milliseconds of no real pointer motion (niri's `cursor.hide-after-inactive-ms`). `0` disables it. Independent of `cursor_always_visible` — that overrides a *client's* hide request, this is a compositor-driven idle timer, and the two can be combined. |
@@ -239,6 +239,40 @@ history, textures, or framebuffers. `0` disables it, `1.0` is the default,
 and values up to `4.0` progressively slow settling. `water_effects = false`
 bypasses it globally. A matching `rule { viscosity = ... }` overrides the
 global value for one app.
+
+### `connected_vessels { }`
+
+Connected-vessel resize spreads BSP pressure beyond the nearest split. The
+split selected by a direct border drag, modifier-right-drag, or keyboard resize
+receives the full displacement. Parallel ancestor splits receive progressively
+less pressure according to `falloff ^ tree-distance`, so nearby tiles move more
+than distant ones. Perpendicular ancestors are untouched.
+
+Window-body and keyboard resize track which child contains the target window,
+so positive horizontal/vertical motion grows it consistently even when it is
+the second child of a split. A direct border drag retains literal pointer
+direction. Ratios and spans are captured once at gesture start, and topology or
+split-axis changes invalidate the handles instead of retargeting another node.
+The implementation stores only a short handle vector for an active grab and
+allocates no render resources.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | Enables spatial BSP resize propagation. `false` restores the original one-split path without disabling viscosity or other water effects. |
+| `falloff` | float, `0`–`1` | `0.5` | Pressure retained per ancestor tree level. `0` is equivalent to one-split resize. `damping` is an alias. |
+| `max_splits` | integer, `1`–`8` | `4` | Maximum handles per resized axis, including the primary split. `depth` is an alias. |
+
+```wave
+connected_vessels {
+    enabled = true
+    falloff = 0.5
+    max_splits = 4
+}
+```
+
+`water_effects = false` is the master bypass and also restores one-split BSP
+resize. Master/stack layout has no BSP split chain, so this block has no effect
+there.
 
 ### `depth { }`
 
@@ -796,7 +830,7 @@ The same set of strings works after `bind ... =` at the top level or inside a `s
 - `focus-urgent` — jump to whichever window is currently marked urgent, if any
 - `focus-left` / `focus-right` / `focus-up` / `focus-down`
 - `swap-left` / `swap-right` / `swap-up` / `swap-down`
-- `resize-left` / `resize-right` / `resize-up` / `resize-down` — shrink/grow the focused floating window by 24 logical pixels, or move its nearest BSP split
+- `resize-left` / `resize-right` / `resize-up` / `resize-down` — shrink/grow the focused floating window by 24 logical pixels, or resize its nearest BSP split and connected parallel ancestors
 - `layout:bsp` / `layout:master` — switch the current workspace's tiling algorithm
 - `master-grow` / `master-shrink` — nudge the master/stack ratio (master layout only, no-op under BSP)
 

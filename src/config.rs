@@ -107,6 +107,26 @@ pub enum SplitBias {
     Vertical,
 }
 
+/// Spatial pressure propagation for BSP resize. The primary split always
+/// follows the full pointer displacement; parallel ancestor splits receive
+/// `falloff ^ tree_distance` of it, capped to `max_splits` total handles.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConnectedVesselsConfig {
+    pub enabled: bool,
+    pub falloff: f32,
+    pub max_splits: u8,
+}
+
+impl Default for ConnectedVesselsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            falloff: 0.5,
+            max_splits: 4,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Left,
@@ -222,6 +242,10 @@ pub struct Config {
     /// larger values settle more slowly. `water_effects` is the master
     /// bypass. Matching window rules may override this per app.
     pub viscosity: f64,
+    /// BSP resize pressure propagated through parallel ancestor splits.
+    /// `water_effects` is the master bypass; this block can independently
+    /// restore the legacy one-split resize path.
+    pub connected_vessels: ConnectedVesselsConfig,
     /// Window lifecycle and layout-motion animation timing. Logical state
     /// changes immediately; this controls only visual settling.
     pub animations: WindowAnimationsConfig,
@@ -459,6 +483,7 @@ impl Config {
             show_welcome_hint: raw.show_welcome_hint,
             water_effects: raw.water_effects,
             viscosity: raw.viscosity.clamp(0.0, 4.0),
+            connected_vessels: raw.connected_vessels,
             animations: raw.animations,
             workspace_transition: raw.workspace_transition,
             depth: raw.depth,
@@ -672,6 +697,7 @@ struct RawConfig {
     show_welcome_hint: bool,
     water_effects: bool,
     viscosity: f64,
+    connected_vessels: ConnectedVesselsConfig,
     animations: WindowAnimationsConfig,
     workspace_transition: WorkspaceTransitionConfig,
     depth: DepthConfig,
@@ -818,6 +844,7 @@ impl Default for RawConfig {
             show_welcome_hint: false,
             water_effects: true,
             viscosity: 1.0,
+            connected_vessels: ConnectedVesselsConfig::default(),
             animations: WindowAnimationsConfig::default(),
             workspace_transition: WorkspaceTransitionConfig::default(),
             depth: DepthConfig::default(),
@@ -2652,6 +2679,9 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "workspace_transition" => {
             apply_workspace_transition_block(&mut raw.workspace_transition, body)
         }
+        "connected_vessels" | "connected_resize" => {
+            apply_connected_vessels_block(&mut raw.connected_vessels, body)
+        }
         "animations" | "window_animations" => apply_animations_block(&mut raw.animations, body),
         "depth" => apply_depth_block(&mut raw.depth, body),
         "frost" => apply_frost_block(&mut raw.frost, body),
@@ -3229,6 +3259,35 @@ fn apply_workspace_transition_block(cfg: &mut WorkspaceTransitionConfig, body: &
                 key = %other,
                 "Unknown key in `workspace_transition` block, ignoring"
             ),
+        }
+    }
+}
+
+fn apply_connected_vessels_block(cfg: &mut ConnectedVesselsConfig, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `connected_vessels` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "enabled" => set_bool(&mut cfg.enabled, key, value),
+            "falloff" | "damping" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.falloff = value.clamp(0.0, 1.0),
+                _ => tracing::warn!(
+                    value,
+                    "Expected connected_vessels.falloff from 0 to 1, ignoring"
+                ),
+            },
+            "max_splits" | "depth" => match value.parse::<u8>() {
+                Ok(value) if (1..=8).contains(&value) => cfg.max_splits = value,
+                _ => tracing::warn!(
+                    value,
+                    "Expected connected_vessels.max_splits from 1 to 8, ignoring"
+                ),
+            },
+            other => {
+                tracing::warn!(key = %other, "Unknown key in `connected_vessels` block, ignoring")
+            }
         }
     }
 }
@@ -4991,6 +5050,11 @@ pointer_modifier = $mod             # left-drag moves; right-drag resizes
 show_welcome_hint = true
 water_effects = true
 viscosity = 1.0                    # 0 off; higher = slower drag/resize settling
+connected_vessels {
+    enabled = true
+    falloff = 0.5                  # pressure retained per ancestor tree level
+    max_splits = 4                 # primary split plus up to three ancestors
+}
 cursor_always_visible = false
 cursor_hide_after_ms = 0
 workspace_auto_back_and_forth = false
@@ -5609,6 +5673,7 @@ mod tests {
             show_welcome_hint: false,
             water_effects: true,
             viscosity: 1.0,
+            connected_vessels: ConnectedVesselsConfig::default(),
             animations: WindowAnimationsConfig::default(),
             workspace_transition: WorkspaceTransitionConfig::default(),
             depth: DepthConfig::default(),
@@ -5898,6 +5963,28 @@ mod tests {
             None
         );
         assert_eq!(parse_default_config().viscosity, 1.0);
+    }
+
+    #[test]
+    fn connected_vessels_block_parses_clamps_and_matches_generated_defaults() {
+        let entries = waves::parse(
+            "connected_vessels {\n\
+             enabled = false\n\
+             falloff = 1.7\n\
+             max_splits = 7\n\
+             }\n",
+            Path::new("<connected-vessels-test>"),
+        )
+        .unwrap();
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        assert!(!config.connected_vessels.enabled);
+        assert_eq!(config.connected_vessels.falloff, 1.0);
+        assert_eq!(config.connected_vessels.max_splits, 7);
+
+        let defaults = parse_default_config().connected_vessels;
+        assert!(defaults.enabled);
+        assert_eq!(defaults.falloff, 0.5);
+        assert_eq!(defaults.max_splits, 4);
     }
 
     #[test]

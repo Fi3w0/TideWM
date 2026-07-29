@@ -990,14 +990,7 @@ impl Smallvil {
                                         .layout
                                         .resize_splits(&output.name(), workspace, area, &wl_surface)
                                         .into_iter()
-                                        .filter_map(|hit| {
-                                            let ratio = self.layout.ratio_at(
-                                                &hit.output,
-                                                hit.workspace,
-                                                &hit.path,
-                                            )?;
-                                            Some((hit, ratio))
-                                        })
+                                        .flat_map(|hit| self.connected_resize_handles(&hit))
                                         .collect();
                                     if !handles.is_empty() {
                                         self.focus_window(Some(wl_surface.clone()), serial);
@@ -1079,15 +1072,14 @@ impl Smallvil {
                                     )
                                 });
                         if let Some(hit) = hit {
-                            if let Some(start_ratio) =
-                                self.layout.ratio_at(&hit.output, hit.workspace, &hit.path)
-                            {
+                            let handles = self.connected_resize_handles(&hit);
+                            if !handles.is_empty() {
                                 let start_data = PointerGrabStartData {
                                     focus: None,
                                     button,
                                     location: pointer.current_location(),
                                 };
-                                let grab = TileResizeGrab::start(start_data, hit, start_ratio);
+                                let grab = TileResizeGrab::start(start_data, handles);
                                 pointer.set_grab(self, grab, serial, Focus::Clear);
                                 return;
                             }

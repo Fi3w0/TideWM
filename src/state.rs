@@ -1029,6 +1029,22 @@ impl Smallvil {
             .clamp(0.0, 4.0)
     }
 
+    pub(crate) fn connected_resize_handles(
+        &self,
+        hit: &crate::layout::SplitHit,
+    ) -> Vec<crate::layout::SplitResizeHandle> {
+        let config = self.config.connected_vessels;
+        let (falloff, max_splits) = if self.config.water_effects && config.enabled {
+            (config.falloff, config.max_splits)
+        } else {
+            // The primary split is still returned, preserving ordinary BSP
+            // resize when the water identity or this mechanic is disabled.
+            (0.0, 1)
+        };
+        self.layout
+            .connected_resize_handles(hit, falloff, max_splits)
+    }
+
     /// Retargets one mapped window's render-only interactive follower.
     /// Returns `false` when viscosity is bypassed, allowing a tiled resize
     /// to fall back to the ordinary layout-movement animation.
@@ -6530,8 +6546,9 @@ impl Smallvil {
     }
 
     /// Resizes the focused window without a pointer grab. Floating windows
-    /// change in 24-logical-pixel steps; BSP windows move the nearest split
-    /// on the requested axis while preserving the 5% safety clamp.
+    /// change in 24-logical-pixel steps; BSP windows drive the nearest split
+    /// and its connected parallel ancestors while preserving the 5% safety
+    /// clamp.
     pub fn keyboard_resize(&mut self, direction: Direction) {
         const STEP: i32 = 24;
         let Some(surface) = self.focused_window_surface() else {
@@ -6588,38 +6605,23 @@ impl Smallvil {
         else {
             return;
         };
-        let Some(ratio) = self.layout.ratio_at(&hit.output, hit.workspace, &hit.path) else {
-            return;
+        let handles = self.connected_resize_handles(&hit);
+        let delta_pixels = if matches!(direction, Direction::Right | Direction::Down) {
+            f64::from(STEP)
+        } else {
+            f64::from(-STEP)
         };
-        let span = match hit.axis {
-            crate::layout::Axis::Horizontal => hit.area.size.w,
-            crate::layout::Axis::Vertical => hit.area.size.h,
-        };
-        if span <= 0 {
-            return;
+        for handle in handles {
+            let Some(new_ratio) = handle.ratio_for_delta(delta_pixels) else {
+                continue;
+            };
+            self.layout.set_ratio(
+                &handle.hit.output,
+                handle.hit.workspace,
+                &handle.hit.path,
+                new_ratio,
+            );
         }
-        let geometry = window.geometry();
-        let target_center = match hit.axis {
-            crate::layout::Axis::Horizontal => geometry.loc.x + geometry.size.w / 2,
-            crate::layout::Axis::Vertical => geometry.loc.y + geometry.size.h / 2,
-        };
-        let boundary = match hit.axis {
-            crate::layout::Axis::Horizontal => {
-                hit.area.loc.x + (hit.area.size.w as f32 * ratio) as i32
-            }
-            crate::layout::Axis::Vertical => {
-                hit.area.loc.y + (hit.area.size.h as f32 * ratio) as i32
-            }
-        };
-        let target_is_first = target_center < boundary;
-        let grow = matches!(direction, Direction::Right | Direction::Down);
-        let sign = if grow == target_is_first { 1.0 } else { -1.0 };
-        self.layout.set_ratio(
-            &hit.output,
-            hit.workspace,
-            &hit.path,
-            ratio + sign * STEP as f32 / span as f32,
-        );
         self.retile();
     }
 
