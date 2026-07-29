@@ -52,6 +52,10 @@ impl XdgShellHandler for Smallvil {
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         let preferred_output = self.preferred_output_for_toplevel(surface.wl_surface());
 
+        // Many clients destroy the xdg role directly without first
+        // committing a null buffer. The last-frame snapshot is independent
+        // of the live role, so this path can animate exactly like unmap.
+        self.start_window_close_animation(surface.wl_surface());
         self.restore_swallowed(surface.wl_surface());
         self.unmapped_toplevels.remove(surface.wl_surface());
         self.detach_mapped_toplevel(surface.wl_surface());
@@ -624,7 +628,9 @@ pub fn handle_commit(state: &mut Smallvil, surface: &WlSurface) {
 
     let transition = lifecycle_transition(tracking, has_buffer);
     match transition {
-        ToplevelTransition::Map => state.map_toplevel(surface),
+        ToplevelTransition::Map => {
+            state.map_toplevel(surface);
+        }
         ToplevelTransition::Unmap => state.unmap_toplevel(surface),
         ToplevelTransition::None => {}
     }
@@ -952,6 +958,10 @@ impl Smallvil {
             );
         }
 
+        // Logical placement/focus above is already final. The open animation
+        // only offsets/fades the first rendered frames toward that state.
+        self.start_window_open_animation(surface);
+
         // Droplet-impact ripple at the window's center -- Phase R1, see
         // `ripple.rs`. After the placement/retile/focus block above so the
         // window's `space.element_location` reflects its final spot,
@@ -1001,10 +1011,13 @@ impl Smallvil {
     }
 
     fn unmap_toplevel(&mut self, surface: &WlSurface) {
+        self.start_window_close_animation(surface);
         self.restore_swallowed(surface);
         resize_grab::cancel(surface);
         let preferred_output = self.preferred_output_for_toplevel(surface);
         let Some(window) = self.detach_mapped_toplevel(surface) else {
+            self.closing_window_animations
+                .retain(|closing| closing.surface != *surface);
             return;
         };
         self.forget_window_focus(surface);
@@ -1056,6 +1069,9 @@ impl Smallvil {
         self.urgent.remove(surface);
         self.window_opacity.remove(surface);
         self.window_glass_modes.remove(surface);
+        self.window_open_animations.remove(surface);
+        self.window_move_animations.remove(surface);
+        self.window_frame_snapshots.remove(surface);
         self.backdrop_textures.remove(surface);
         self.window_depths.remove(surface);
         self.depth_schematics.remove(surface);

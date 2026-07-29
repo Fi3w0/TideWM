@@ -243,6 +243,20 @@ pub struct Smallvil {
     pub(crate) ripples: Vec<crate::ripple::Ripple>,
     /// Compiled lazily on first use; see `ripple::ripple_program`.
     pub(crate) ripple_program: Option<GlesPixelProgram>,
+    /// Short-lived visual state for mapped windows. Logical geometry and
+    /// input move immediately; these maps only interpolate what is drawn.
+    pub(crate) window_open_animations:
+        HashMap<WlSurface, crate::window_animation::WindowVisualAnimation>,
+    pub(crate) window_move_animations:
+        HashMap<WlSurface, crate::window_animation::WindowVisualAnimation>,
+    /// Last already-imported surface tree for each visible mapped window.
+    /// Texture handles are cloned, not framebuffer contents; the entry is
+    /// transferred to the bounded close list on unmap.
+    pub(crate) window_frame_snapshots:
+        HashMap<WlSurface, crate::window_animation::WindowFrameSnapshot>,
+    /// Detached windows retaining their last drawable GPU snapshot until
+    /// the configured close animation finishes.
+    pub(crate) closing_window_animations: Vec<crate::window_animation::ClosingWindowAnimation>,
     /// Per-mapped-window automatic attention depth. Entries are created on
     /// map and removed on unmap/destroy, so time-based sinking cannot grow
     /// state beyond the current mapped toplevel count.
@@ -971,6 +985,162 @@ impl Smallvil {
     /// composition is exactly the kind of off-by-one this project's
     /// front-to-back element-order convention has already been burned by
     /// once (see session-lock's element-order bug, AGENT.md).
+    fn window_visual_sample(&self, surface: &WlSurface) -> crate::window_animation::VisualSample {
+        let mut sample = crate::window_animation::VisualSample::default();
+        if let Some(open) = self.window_open_animations.get(surface) {
+            let current = open.sample();
+            sample.offset += current.offset;
+            sample.opacity *= current.opacity;
+        }
+        if let Some(movement) = self.window_move_animations.get(surface) {
+            let current = movement.sample();
+            sample.offset += current.offset;
+            sample.opacity *= current.opacity;
+        }
+        sample
+    }
+
+    pub(crate) fn start_window_open_animation(&mut self, surface: &WlSurface) {
+        self.closing_window_animations
+            .retain(|closing| closing.surface != *surface);
+        let animations = self.config.animations.clone();
+        if !animations.enabled || !animations.open.enabled {
+            self.window_open_animations.remove(surface);
+            return;
+        }
+        let offset = self
+            .window_lifecycle_offset(surface, &animations.open)
+            .unwrap_or_else(|| {
+                Point::from((
+                    animations.open.offset.0 as f64,
+                    animations.open.offset.1 as f64,
+                ))
+            });
+        self.window_open_animations.insert(
+            surface.clone(),
+            crate::window_animation::WindowVisualAnimation::open(
+                &animations.open,
+                animations.slowdown,
+                offset,
+            ),
+        );
+        self.request_redraw();
+    }
+
+    fn window_lifecycle_offset(
+        &self,
+        surface: &WlSurface,
+        config: &crate::config::WindowAnimationConfig,
+    ) -> Option<Point<f64, Logical>> {
+        let window = self.mapped_toplevel_window(surface)?;
+        let output = self.output_for_window(&window)?;
+        let output_rect = self.space.output_geometry(&output)?;
+        let window_rect = self
+            .tiled_rect_for_surface(surface)
+            .or_else(|| self.floating_workspace.get(surface).map(|tag| tag.rect))
+            .or_else(|| self.space.element_geometry(&window))?;
+        Some(crate::window_animation::lifecycle_offset(
+            config,
+            window_rect,
+            output_rect,
+        ))
+    }
+
+    /// Starts/re-targets visual movement while preserving the current
+    /// on-screen position. Input and layout already use `new_location`.
+    fn start_window_move_animation(
+        &mut self,
+        surface: &WlSurface,
+        old_location: Point<i32, Logical>,
+        new_location: Point<i32, Logical>,
+    ) {
+        let animations = &self.config.animations;
+        if !animations.enabled || !animations.movement.enabled {
+            self.window_move_animations.remove(surface);
+            return;
+        }
+        let current_offset = self
+            .window_move_animations
+            .get(surface)
+            .filter(|animation| !animation.finished())
+            .map(|animation| animation.sample().offset)
+            .unwrap_or_else(|| Point::from((0.0, 0.0)));
+        let from_offset = Point::from((
+            (old_location.x - new_location.x) as f64 + current_offset.x,
+            (old_location.y - new_location.y) as f64 + current_offset.y,
+        ));
+        if from_offset.x.abs() < 0.01 && from_offset.y.abs() < 0.01 {
+            return;
+        }
+        self.window_move_animations.insert(
+            surface.clone(),
+            crate::window_animation::WindowVisualAnimation::movement(
+                &animations.movement,
+                animations.slowdown,
+                from_offset,
+            ),
+        );
+        self.request_redraw();
+    }
+
+    /// Transfers the last drawable surface snapshot into a short close
+    /// animation. Smithay's null-buffer commit still proceeds normally.
+    pub(crate) fn start_window_close_animation(&mut self, surface: &WlSurface) {
+        let animations = self.config.animations.clone();
+        if !animations.enabled || !animations.close.enabled {
+            return;
+        }
+        let offset = self
+            .window_lifecycle_offset(surface, &animations.close)
+            .unwrap_or_else(|| {
+                Point::from((
+                    animations.close.offset.0 as f64,
+                    animations.close.offset.1 as f64,
+                ))
+            });
+        let Some(snapshot) = self.window_frame_snapshots.remove(surface) else {
+            return;
+        };
+        self.window_open_animations.remove(surface);
+        self.window_move_animations.remove(surface);
+        self.closing_window_animations
+            .retain(|closing| closing.surface != *surface);
+        self.closing_window_animations
+            .push(crate::window_animation::ClosingWindowAnimation::new(
+                surface.clone(),
+                snapshot,
+                crate::window_animation::WindowVisualAnimation::close(
+                    &animations.close,
+                    animations.slowdown,
+                    offset,
+                ),
+            ));
+        self.request_redraw();
+    }
+
+    pub(crate) fn closing_window_frame_elements(
+        &mut self,
+        _renderer: &mut GlesRenderer,
+        output: &Output,
+    ) -> Vec<crate::backend::udev::OutputRenderElements> {
+        let output_scale = output.current_scale().fractional_scale();
+        let scale = Scale::from(output_scale);
+        let mut result = Vec::new();
+        for closing in self
+            .closing_window_animations
+            .iter_mut()
+            .filter(|closing| closing.snapshot.output == output.name())
+        {
+            result.extend(
+                closing
+                    .frame_elements(scale)
+                    .into_iter()
+                    .map(crate::backend::udev::OutputRenderElements::WindowSnapshot),
+            );
+        }
+        result
+    }
+
     pub(crate) fn desktop_render_elements(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -998,7 +1168,7 @@ impl Smallvil {
             .flatten();
         #[allow(clippy::too_many_arguments)]
         fn append_windows(
-            state: &Smallvil,
+            state: &mut Smallvil,
             renderer: &mut GlesRenderer,
             output: &Output,
             fullscreen: bool,
@@ -1013,7 +1183,13 @@ impl Smallvil {
             };
             let output_scale = output.current_scale().fractional_scale();
             let scale = Scale::from(output_scale);
-            for window in state.space.elements_for_output(output).rev() {
+            let windows: Vec<_> = state
+                .space
+                .elements_for_output(output)
+                .rev()
+                .cloned()
+                .collect();
+            for window in &windows {
                 let surface = window.toplevel().map(|toplevel| toplevel.wl_surface());
                 if surface.is_some_and(|surface| state.fullscreen.contains_key(surface))
                     != fullscreen
@@ -1026,13 +1202,22 @@ impl Smallvil {
                 let Some(location) = state.space.element_location(window) else {
                     continue;
                 };
+                let visual = surface
+                    .map(|surface| state.window_visual_sample(surface))
+                    .unwrap_or_default();
                 let alpha = surface
                     .map(|surface| state.window_render_alpha(surface))
                     .unwrap_or(1.0)
                     * surface
                         .map(|surface| state.depth_live_alpha(surface))
-                        .unwrap_or(1.0);
-                let render_location = location - output_geo.loc - window.geometry().loc;
+                        .unwrap_or(1.0)
+                    * visual.opacity;
+                let visual_offset: Point<i32, Logical> = Point::from((
+                    visual.offset.x.round() as i32,
+                    visual.offset.y.round() as i32,
+                ));
+                let render_location =
+                    location - output_geo.loc - window.geometry().loc + visual_offset;
                 if let Some(surface) = surface {
                     let (popups, main) = state.window_surface_elements(
                         renderer,
@@ -1045,9 +1230,14 @@ impl Smallvil {
                     );
                     result.extend(popups);
                     if let Some(program) = border_program {
-                        if let Some(border) =
-                            state.window_border_element(output, window, surface, program.clone())
-                        {
+                        if let Some(border) = state.window_border_element(
+                            output,
+                            window,
+                            surface,
+                            program.clone(),
+                            visual_offset,
+                            visual.opacity,
+                        ) {
                             result.push(crate::backend::udev::OutputRenderElements::Border(border));
                         }
                     }
@@ -1067,9 +1257,14 @@ impl Smallvil {
                     );
                 }
                 if let (Some(surface), Some(program)) = (surface, shadow_program) {
-                    if let Some(shadow) =
-                        state.window_shadow_element(output, window, surface, program.clone())
-                    {
+                    if let Some(shadow) = state.window_shadow_element(
+                        output,
+                        window,
+                        surface,
+                        program.clone(),
+                        visual_offset,
+                        visual.opacity,
+                    ) {
                         result.push(crate::backend::udev::OutputRenderElements::Shadow(shadow));
                     }
                 }
@@ -1221,7 +1416,12 @@ impl Smallvil {
             .rev()
             .filter_map(|window| {
                 let surface = window.toplevel()?.wl_surface().clone();
-                let rect = self.space.element_geometry(window)?;
+                let mut rect = self.space.element_geometry(window)?;
+                let visual = self.window_visual_sample(&surface);
+                rect.loc += Point::from((
+                    visual.offset.x.round() as i32,
+                    visual.offset.y.round() as i32,
+                ));
                 Some((
                     surface,
                     Rectangle::new(rect.loc - output_geo.loc, rect.size),
@@ -1466,6 +1666,10 @@ impl Smallvil {
             border_program: None,
             ripples: Vec::new(),
             ripple_program: None,
+            window_open_animations: HashMap::new(),
+            window_move_animations: HashMap::new(),
+            window_frame_snapshots: HashMap::new(),
+            closing_window_animations: Vec::new(),
             window_depths: HashMap::new(),
             depth_schematics: HashMap::new(),
             depth_overlay_program: None,
@@ -2870,11 +3074,20 @@ impl Smallvil {
         // on the event-loop tick that notices the animation ended.
         self.workspace_transitions
             .retain(|_, transition| !transition.finished());
+        self.window_open_animations
+            .retain(|_, animation| !animation.finished());
+        self.window_move_animations
+            .retain(|_, animation| !animation.finished());
+        self.closing_window_animations
+            .retain(|closing| !closing.animation.finished());
         self.toast
             .as_ref()
             .is_some_and(|toast| toast.needs_continued_redraw())
             || self.ripples.iter().any(|r| !r.finished())
             || !self.workspace_transitions.is_empty()
+            || !self.window_open_animations.is_empty()
+            || !self.window_move_animations.is_empty()
+            || !self.closing_window_animations.is_empty()
             || self.animated_borders_possible()
     }
 
@@ -3207,7 +3420,7 @@ impl Smallvil {
     /// toplevel's own surface/subsurface tree is rounded.
     #[allow(clippy::too_many_arguments)]
     fn window_surface_elements(
-        &self,
+        &mut self,
         renderer: &mut GlesRenderer,
         output: &Output,
         window: &Window,
@@ -3243,48 +3456,59 @@ impl Smallvil {
 
         let rounding = self.rounding_config_for_surface(surface);
         let clip = self.rounding_applies(surface, &rounding);
-        let physical_rect = self
-            .space
-            .output_geometry(output)
-            .and_then(|output_geo| {
-                self.space
-                    .element_location(window)
-                    .map(|loc| loc - output_geo.loc)
-            })
-            .map(|loc| Rectangle::new(loc, window.geometry().size))
-            .map(|rect| rect.to_physical_precise_round(output_scale));
+        let physical_rect = Some(
+            Rectangle::new(
+                render_location + window.geometry().loc,
+                window.geometry().size,
+            )
+            .to_physical_precise_round(output_scale),
+        );
         let radii = rounding.radii.map(|radius| radius * output_scale as f32);
-        let main = render_elements_from_surface_tree(
+        let raw_main = render_elements_from_surface_tree(
             renderer,
             surface,
             physical_location,
             scale,
             alpha,
             Kind::Unspecified,
-        )
-        .into_iter()
-        .map(|element| {
-            if let (true, Some(program), Some(geometry)) =
-                (clip, rounded_program.clone(), physical_rect)
-            {
-                crate::backend::udev::OutputRenderElements::RoundedSurface(
-                    crate::decoration::RoundedSurfaceElement::new(
-                        element,
-                        program,
-                        geometry,
-                        radii,
-                        rounding.power,
-                        rounding.antialias * output_scale as f32,
-                        scale,
-                    ),
-                )
-            } else {
-                crate::backend::udev::OutputRenderElements::Space(SpaceRenderElements::Surface(
-                    element,
-                ))
+        );
+        let snapshot_anchor =
+            (render_location + window.geometry().loc).to_physical_precise_round(output_scale);
+        if self.config.animations.enabled && self.config.animations.close.enabled {
+            if let Some(snapshot) = crate::window_animation::WindowFrameSnapshot::capture(
+                output.name(),
+                snapshot_anchor,
+                scale,
+                &raw_main,
+            ) {
+                self.window_frame_snapshots
+                    .insert(surface.clone(), snapshot);
             }
-        })
-        .collect();
+        }
+        let main = raw_main
+            .into_iter()
+            .map(|element| {
+                if let (true, Some(program), Some(geometry)) =
+                    (clip, rounded_program.clone(), physical_rect)
+                {
+                    crate::backend::udev::OutputRenderElements::RoundedSurface(
+                        crate::decoration::RoundedSurfaceElement::new(
+                            element,
+                            program,
+                            geometry,
+                            radii,
+                            rounding.power,
+                            rounding.antialias * output_scale as f32,
+                            scale,
+                        ),
+                    )
+                } else {
+                    crate::backend::udev::OutputRenderElements::Space(SpaceRenderElements::Surface(
+                        element,
+                    ))
+                }
+            })
+            .collect();
         (popups, main)
     }
 
@@ -3294,8 +3518,13 @@ impl Smallvil {
         window: &Window,
         surface: &WlSurface,
         program: GlesPixelProgram,
+        visual_offset: Point<i32, Logical>,
+        visual_opacity: f32,
     ) -> Option<crate::decoration::BorderElement> {
-        let border = self.border_config_for_surface(surface);
+        let mut border = self.border_config_for_surface(surface);
+        border.opacity *= visual_opacity;
+        border.inactive_opacity *= visual_opacity;
+        border.urgent_opacity *= visual_opacity;
         let fullscreen = self.fullscreen.contains_key(surface);
         let focused = matches!(
             &self.keyboard_focus,
@@ -3313,7 +3542,10 @@ impl Smallvil {
         let output_geo = self.space.output_geometry(output)?;
         let output_scale = output.current_scale().fractional_scale();
         let location = self.space.element_location(window)?;
-        let logical_rect = Rectangle::new(location - output_geo.loc, window.geometry().size);
+        let logical_rect = Rectangle::new(
+            location - output_geo.loc + visual_offset,
+            window.geometry().size,
+        );
         let physical_rect = logical_rect.to_physical_precise_round(output_scale);
         let mut rounding = self.rounding_config_for_surface(surface);
         if !rounding.enabled {
@@ -3349,8 +3581,13 @@ impl Smallvil {
         window: &Window,
         surface: &WlSurface,
         program: GlesPixelProgram,
+        visual_offset: Point<i32, Logical>,
+        visual_opacity: f32,
     ) -> Option<crate::shadow::ShadowElement> {
         let mut config = self.shadow_config_for_surface(surface);
+        config.opacity *= visual_opacity;
+        config.inactive_opacity *= visual_opacity;
+        config.urgent_opacity *= visual_opacity;
         if config.corner_radius == 0.0 {
             let rounding = self.rounding_config_for_surface(surface);
             if rounding.enabled {
@@ -3368,7 +3605,10 @@ impl Smallvil {
         let output_geo = self.space.output_geometry(output)?;
         let output_scale = output.current_scale().fractional_scale();
         let location = self.space.element_location(window)?;
-        let logical_rect = Rectangle::new(location - output_geo.loc, window.geometry().size);
+        let logical_rect = Rectangle::new(
+            location - output_geo.loc + visual_offset,
+            window.geometry().size,
+        );
         let physical_rect = logical_rect.to_physical_precise_round(output_scale);
         let focused = matches!(
             &self.keyboard_focus,
@@ -3423,11 +3663,19 @@ impl Smallvil {
 
         let mut captured_first_backdrop = false;
         for surface in surfaces {
-            let Some(physical_rect) = self.floating_window_physical_rect(&surface, output) else {
+            let Some(mut physical_rect) = self.floating_window_physical_rect(&surface, output)
+            else {
                 // Hidden (different workspace) right now -- nothing to
                 // capture until it's visible again.
                 continue;
             };
+            let visual = self.window_visual_sample(&surface);
+            let visual_offset: Point<i32, Logical> = Point::from((
+                visual.offset.x.round() as i32,
+                visual.offset.y.round() as i32,
+            ));
+            physical_rect.loc +=
+                visual_offset.to_physical_precise_round(output.current_scale().fractional_scale());
 
             let Some(space_elements) =
                 self.desktop_render_elements(renderer, output, std::slice::from_ref(&surface))
@@ -3562,10 +3810,15 @@ impl Smallvil {
             return result;
         };
         for surface in surfaces {
-            let Some(capture) = self.backdrop_textures.get(surface) else {
+            let Some((capture_id, capture_commit, capture_texture)) = self
+                .backdrop_textures
+                .get(surface)
+                .map(|capture| (capture.id.clone(), capture.commit, capture.texture.clone()))
+            else {
                 continue;
             };
-            let Some(physical_rect) = self.floating_window_physical_rect(surface, output) else {
+            let Some(mut physical_rect) = self.floating_window_physical_rect(surface, output)
+            else {
                 continue;
             };
             let Some(window) = self.mapped_toplevel_window(surface) else {
@@ -3574,8 +3827,16 @@ impl Smallvil {
             let Some(location) = self.space.element_location(&window) else {
                 continue;
             };
-            let alpha = self.window_render_alpha(surface) * self.depth_live_alpha(surface);
-            let render_location = location - output_geo.loc - window.geometry().loc;
+            let visual = self.window_visual_sample(surface);
+            let visual_offset: Point<i32, Logical> = Point::from((
+                visual.offset.x.round() as i32,
+                visual.offset.y.round() as i32,
+            ));
+            physical_rect.loc +=
+                visual_offset.to_physical_precise_round(output.current_scale().fractional_scale());
+            let alpha =
+                self.window_render_alpha(surface) * self.depth_live_alpha(surface) * visual.opacity;
+            let render_location = location - output_geo.loc - window.geometry().loc + visual_offset;
 
             let (popups, main) = self.window_surface_elements(
                 renderer,
@@ -3588,9 +3849,14 @@ impl Smallvil {
             );
             result.extend(popups);
             if let Some(program) = &border_program {
-                if let Some(border) =
-                    self.window_border_element(output, &window, surface, program.clone())
-                {
+                if let Some(border) = self.window_border_element(
+                    output,
+                    &window,
+                    surface,
+                    program.clone(),
+                    visual_offset,
+                    visual.opacity,
+                ) {
                     result.push(crate::backend::udev::OutputRenderElements::Border(border));
                 }
             }
@@ -3598,7 +3864,8 @@ impl Smallvil {
             match self.window_glass_modes.get(surface).copied() {
                 Some(crate::config::GlassMode::Frost) => {
                     if let Some(program) = &frost_program {
-                        let frost = self.frost_config_for_surface(surface);
+                        let mut frost = self.frost_config_for_surface(surface);
+                        frost.opacity *= visual.opacity;
                         let rounding = self.rounding_config_for_surface(surface);
                         let output_scale = output.current_scale().fractional_scale() as f32;
                         let (corner_radii, rounding_power, corner_softness) = if rounding.enabled {
@@ -3616,9 +3883,9 @@ impl Smallvil {
                         };
                         result.push(crate::backend::udev::OutputRenderElements::FrostGlass(
                             crate::frost_glass::FrostGlassElement::new(
-                                capture.id.clone(),
-                                capture.commit,
-                                capture.texture.clone(),
+                                capture_id.clone(),
+                                capture_commit,
+                                capture_texture.clone(),
                                 physical_rect,
                                 program.clone(),
                                 frost,
@@ -3642,15 +3909,16 @@ impl Smallvil {
                         };
                         result.push(crate::backend::udev::OutputRenderElements::WaterGlass(
                             crate::water_glass::WaterGlassElement::new(
-                                capture.id.clone(),
-                                capture.commit,
-                                capture.texture.clone(),
+                                capture_id.clone(),
+                                capture_commit,
+                                capture_texture.clone(),
                                 physical_rect,
                                 program.clone(),
                                 corner_radii,
                                 rounding.power,
                                 rounding.antialias
                                     * output.current_scale().fractional_scale() as f32,
+                                visual.opacity,
                             ),
                         ));
                     }
@@ -3661,9 +3929,14 @@ impl Smallvil {
             // behind both. This keeps translucent text/content above the
             // glass and prevents the shadow from becoming a full-window tint.
             if let Some(program) = &shadow_program {
-                if let Some(shadow) =
-                    self.window_shadow_element(output, &window, surface, program.clone())
-                {
+                if let Some(shadow) = self.window_shadow_element(
+                    output,
+                    &window,
+                    surface,
+                    program.clone(),
+                    visual_offset,
+                    visual.opacity,
+                ) {
                     result.push(crate::backend::udev::OutputRenderElements::Shadow(shadow));
                 }
             }
@@ -3685,8 +3958,10 @@ impl Smallvil {
             skip.extend(glass_surfaces.iter().cloned());
         }
         let space_elements = self.desktop_render_elements(renderer, output, &skip)?;
-        let elements: Vec<crate::backend::udev::OutputRenderElements> = depth_elements
+        let closing_windows = self.closing_window_frame_elements(renderer, output);
+        let elements: Vec<crate::backend::udev::OutputRenderElements> = closing_windows
             .into_iter()
+            .chain(depth_elements)
             .chain(glass_elements)
             .chain(space_elements)
             .chain(
@@ -4101,6 +4376,13 @@ impl Smallvil {
                         state.size = Some(rect.size);
                     });
                     toplevel.send_pending_configure();
+                }
+                if let Some(surface) = window.toplevel().map(|t| t.wl_surface().clone()) {
+                    if let Some(old_location) = self.space.element_location(&window) {
+                        if old_location != rect.loc {
+                            self.start_window_move_animation(&surface, old_location, rect.loc);
+                        }
+                    }
                 }
                 self.set_window_fractional_scale(&window, output);
                 self.space.map_element(window, rect.loc, false);
@@ -6380,6 +6662,16 @@ impl Smallvil {
                     self.welcome_hint = None;
                 }
                 self.config = new_config;
+                if !self.config.animations.enabled || !self.config.animations.open.enabled {
+                    self.window_open_animations.clear();
+                }
+                if !self.config.animations.enabled || !self.config.animations.movement.enabled {
+                    self.window_move_animations.clear();
+                }
+                if !self.config.animations.enabled || !self.config.animations.close.enabled {
+                    self.window_frame_snapshots.clear();
+                    self.closing_window_animations.clear();
+                }
                 self.depth_schematics.clear();
                 self.depth_last_tick = Instant::now() - Duration::from_millis(100);
                 self.update_window_depths();

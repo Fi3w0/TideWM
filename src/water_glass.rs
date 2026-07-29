@@ -165,6 +165,7 @@ pub struct WaterGlassElement {
     corner_radii: [f32; 4],
     rounding_power: f32,
     antialias: f32,
+    opacity: f32,
 }
 
 impl WaterGlassElement {
@@ -178,6 +179,7 @@ impl WaterGlassElement {
         corner_radii: [f32; 4],
         rounding_power: f32,
         antialias: f32,
+        opacity: f32,
     ) -> Self {
         Self {
             id,
@@ -188,6 +190,7 @@ impl WaterGlassElement {
             corner_radii,
             rounding_power,
             antialias,
+            opacity,
         }
     }
 }
@@ -209,13 +212,17 @@ impl Element for WaterGlassElement {
         self.geometry
     }
 
+    fn alpha(&self) -> f32 {
+        self.opacity
+    }
+
     fn kind(&self) -> Kind {
         Kind::Unspecified
     }
 
     // `opaque_regions` deliberately left at its default (empty): this
-    // element's own alpha is always 1.0 (see the module doc comment for
-    // why), but claiming opacity here would tell the damage tracker it
+    // element normally draws at alpha 1.0 (temporarily lower during a
+    // lifecycle fade), but claiming opacity here would tell the damage tracker it
     // can skip drawing whatever's behind it -- and the whole point of
     // this element existing is that it visually replaces that content,
     // not that nothing needs to be there. Getting this wrong is exactly

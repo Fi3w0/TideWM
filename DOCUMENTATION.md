@@ -138,6 +138,85 @@ workspace_transition {
 
 To retain the earlier boundary-only animation, set `style = glow`; the shared timing, direction, color, and geometry fields continue to apply, while the `wave_alpha`, `glow_size`, and `glow_alpha` fields control that style’s appearance.
 
+### `animations { }`
+
+Controls window opening, closing, and layout movement. TideWM applies focus,
+input, and final layout geometry immediately; animation is only a visual
+offset/opacity settling over that real state. Retargeting movement mid-flight
+starts from the current on-screen position, avoiding a snap to either the old
+or new layout. Closing uses the last already-imported surface textures recorded
+by the normal frame walk, so direct xdg-role destruction and null-buffer unmap
+both remain drawable after Smithay releases the live surface. Cloning these GPU
+handles does not allocate another framebuffer or copy the window.
+
+`preset` selects a complete baseline: `tide` (the calm default), `wave` (more
+visible oscillation), `riptide` (short and sharp), or `hypr-smooth`. The
+`hypr-smooth` preset mirrors the maintainer's real Hyprland window settings:
+open geometry uses the 300ms `overshot` curve, close geometry uses the 300ms
+`easeInOut` curve, both slide through the nearest output edge, both fade on a
+separate 400ms `easeInOut` clock, and layout motion uses 400ms `easeInOut`.
+Explicit values in the same block always override the preset, even when
+`preset` appears later. The top-level `enabled` disables all three transitions.
+`slowdown` multiplies both geometry and opacity durations (`0.5` is twice as
+fast, `2` twice as slow). Each `open`, `close`, and `movement` sub-block
+supports:
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | Disables only this transition. |
+| `duration_ms` | integer, `1`–`10000` | open `190`, close `160`, movement `190` | Geometry lifetime before the visual state reaches its logical target. `duration` is an alias. |
+| `curve` | easing | see example | `linear`, `quad-out`, `cubic-out`, `cubic-in-out`, `exp-out`, or CSS-compatible `cubic-bezier(x1,y1,x2,y2)`. `ease-out-quad`, `ease-out-cubic`, and `ease-out-expo` aliases are accepted. |
+| `opacity_duration_ms` | integer, `1`–`10000` | follows `duration_ms` | Independent opacity lifetime. `fade_duration_ms` and `opacity_duration` are aliases. |
+| `opacity_curve` | easing | follows `curve` | Independent opacity easing. Accepts the same values as `curve`; `fade_curve` and `opacity_ease` are aliases. |
+| `origin` | direction | `offset` | `offset` uses the configured travel. `nearest-edge` mirrors an unforced Hyprland `slide`; `top`, `right`, `bottom`, and `left` force an output edge. `slide_from`, `slide-from`, and `direction` are aliases. |
+| `offset` | `<x>x<y>` | open `0x24`, close `0x18` | Opening begins at this logical-pixel offset and settles to zero. Closing travels from zero to this offset. Used when `origin = offset`; movement derives its offset from old/new geometry. `travel` is an alias. |
+| `from_opacity` | float, `0`–`1` | open `0.28`, close/movement `1` | Opacity at transition start. |
+| `to_opacity` | float, `0`–`1` | open/movement `1`, close `0` | Opacity at transition end. |
+| `effect` | `glide`, `tide`, or `wave` | `tide` | `glide` follows only the eased path. `tide` adds one broad perpendicular swell. `wave` adds a decaying oscillation. `motion` is an alias. |
+| `wave_amplitude` | float, `0`–`512` | open `4`, close `2.5`, movement `1.25` | Maximum perpendicular displacement in logical pixels. `amplitude` is an alias. |
+| `wave_cycles` | float, `0`–`8` | `0.5` | Oscillations across the lifetime for `wave`; `tide` always uses one broad swell. `cycles` and `frequency` are aliases. |
+| `wave_decay` | float, `0`–`8` | varies | How quickly the extra water trajectory settles near the target. `decay` is an alias. |
+
+```wave
+animations {
+    preset = tide
+    enabled = true
+    slowdown = 1.0
+
+    open {
+        duration_ms = 190
+        curve = cubic-bezier(0.16,1,0.3,1)
+        origin = offset
+        offset = 0x24
+        from_opacity = 0.28
+        to_opacity = 1
+        effect = tide
+        wave_amplitude = 4
+        wave_decay = 2.2
+    }
+
+    close {
+        duration_ms = 160
+        curve = cubic-out
+        origin = offset
+        offset = 0x18
+        from_opacity = 1
+        to_opacity = 0
+        effect = tide
+        wave_amplitude = 2.5
+        wave_decay = 2
+    }
+
+    movement {
+        duration_ms = 190
+        curve = cubic-bezier(0.16,1,0.3,1)
+        effect = tide
+        wave_amplitude = 1.25
+        wave_decay = 2.4
+    }
+}
+```
+
 ### `depth { }`
 
 Configures automatic attention depth and buoyancy. A mapped window starts at the surface. After `sink_after_ms` without focus or keyboard input it moves to tier 1, keeping its live content with reduced opacity and a cool-water wash. Each additional `tier_interval_ms` moves it one tier deeper, capped by `max_tier`; tier 2 and below use a cached box-and-title schematic instead of live client pixels. Focusing, clicking, or typing into the window returns it to tier 0 immediately. Urgent windows retain a bright bioluminescent border at every tier.

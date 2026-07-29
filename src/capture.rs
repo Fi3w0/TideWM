@@ -564,6 +564,7 @@ impl Smallvil {
             // then windows, then BelowWindows/wallpaper, then BelowAll.
             let ripple_layers = self.ripple_frame_elements(renderer, &output);
             let workspace_transition = self.workspace_transition_frame_element(renderer, &output);
+            let closing_windows = self.closing_window_frame_elements(renderer, &output);
             let glass_surfaces = self.glass_eligible_surfaces(&output);
             let glass_elements = self.glass_frame_elements(renderer, &output, &glass_surfaces);
             let (depth_elements, depth_surfaces) = self.depth_frame_elements(renderer, &output);
@@ -576,6 +577,7 @@ impl Smallvil {
                     elements.extend(ripple_layers.above_all);
                     elements.extend(ripple_layers.above_windows);
                     elements.extend(workspace_transition);
+                    elements.extend(closing_windows);
                     elements.extend(depth_elements);
                     elements.extend(glass_elements);
                     elements.extend(space_elements);

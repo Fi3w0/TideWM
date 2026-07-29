@@ -71,7 +71,7 @@ Full config reference, every action string, and the protocol matrix: [DOCUMENTAT
 
 Foundation before visuals has been the plan from the start, and as of 0.60.0 the foundation part is done: the WM itself — tiling, multi-monitor, workspaces, layer-shell, IPC, XWayland, screencasting — is feature-complete, runs as a daily compositor on AMD hardware, and has now passed a full nested test on real Nvidia hardware too. What's next, in order:
 
-- **Continue R2 decoration parity.** Selectable frost, analytical shadows, rounded clipping, and animated gradient borders are built. Bezier-configurable window animation timing and liquid window drag follow.
+- **Continue R2 decoration parity.** Selectable frost, analytical shadows, rounded clipping, animated gradient borders, and Tide-native window animation presets are built. Liquid window drag and the mechanical resize layer follow.
 - **Polish the R1 identity slice.** Water-glass, impulse ripples, wave-based workspace transitions, and the first automatic depth/buoyancy model are built; nested and real-hardware tuning can still refine them.
 - **Nvidia native run.** The nested (EGL/GLES) stack is verified on a real RTX 3060; the standalone DRM backend and its overlay-plane workaround still need a TTY session on Nvidia.
 - **AUR package.** Not yet, build from source for now.

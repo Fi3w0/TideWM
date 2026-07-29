@@ -217,6 +217,9 @@ pub struct Config {
     /// checked once, at startup (see `main.rs`).
     pub show_welcome_hint: bool,
     pub water_effects: bool,
+    /// Window lifecycle and layout-motion animation timing. Logical state
+    /// changes immediately; this controls only visual settling.
+    pub animations: WindowAnimationsConfig,
     /// Directional captured workspace wipe. Kept separate from the master
     /// `water_effects` toggle so the transition can be disabled or tuned
     /// without suppressing water-glass and ripples.
@@ -450,6 +453,7 @@ impl Config {
             pointer_modifier,
             show_welcome_hint: raw.show_welcome_hint,
             water_effects: raw.water_effects,
+            animations: raw.animations,
             workspace_transition: raw.workspace_transition,
             depth: raw.depth,
             frost: raw.frost,
@@ -658,6 +662,7 @@ struct RawConfig {
     pointer_modifier: String,
     show_welcome_hint: bool,
     water_effects: bool,
+    animations: WindowAnimationsConfig,
     workspace_transition: WorkspaceTransitionConfig,
     depth: DepthConfig,
     frost: FrostConfig,
@@ -802,6 +807,7 @@ impl Default for RawConfig {
             // (welcome.rs), that must resolve to off, not back to on.
             show_welcome_hint: false,
             water_effects: true,
+            animations: WindowAnimationsConfig::default(),
             workspace_transition: WorkspaceTransitionConfig::default(),
             depth: DepthConfig::default(),
             frost: FrostConfig::default(),
@@ -1815,6 +1821,230 @@ pub enum RippleLayer {
     BelowAll,
 }
 
+/// Easing used by lifecycle and layout-motion animations. Cubic Bézier
+/// stores CSS-compatible `(x1, y1, x2, y2)` control points; x is solved
+/// numerically so the curve remains a function of elapsed time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WindowAnimationCurve {
+    Linear,
+    QuadOut,
+    CubicOut,
+    ExpOut,
+    CubicInOut,
+    CubicBezier([f32; 4]),
+}
+
+/// Extra trajectory layered over the normal eased start-to-end path.
+/// `Tide` makes one broad sideways swell; `Wave` makes a configurable
+/// decaying oscillation. Both return exactly to the logical target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowAnimationEffect {
+    Glide,
+    Tide,
+    Wave,
+}
+
+/// Lifecycle travel source. `NearestEdge` matches Hyprland's unforced
+/// `slide`: choose the shortest midpoint-to-output-edge distance, then
+/// place the window just beyond that edge for open/close.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowAnimationOrigin {
+    Offset,
+    NearestEdge,
+    Top,
+    Right,
+    Bottom,
+    Left,
+}
+
+/// One visual transition. `offset` is the lifecycle travel distance:
+/// opening starts there and settles to zero, closing starts at zero and
+/// travels there. Movement derives its offset from old/new layout geometry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowAnimationConfig {
+    pub enabled: bool,
+    pub duration_ms: u32,
+    pub curve: WindowAnimationCurve,
+    /// Separate alpha clock/easing. `None` follows `duration_ms`/`curve`.
+    pub opacity_duration_ms: Option<u32>,
+    pub opacity_curve: Option<WindowAnimationCurve>,
+    pub offset: (i32, i32),
+    pub from_opacity: f32,
+    pub to_opacity: f32,
+    pub origin: WindowAnimationOrigin,
+    pub effect: WindowAnimationEffect,
+    pub wave_amplitude: f32,
+    pub wave_cycles: f32,
+    pub wave_decay: f32,
+}
+
+/// Product-wide window animation controls. A single slowdown multiplier is
+/// useful for visual tuning and accessibility; values below one speed up.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowAnimationsConfig {
+    pub enabled: bool,
+    pub slowdown: f32,
+    pub open: WindowAnimationConfig,
+    pub close: WindowAnimationConfig,
+    pub movement: WindowAnimationConfig,
+}
+
+impl Default for WindowAnimationsConfig {
+    fn default() -> Self {
+        Self::tide()
+    }
+}
+
+impl WindowAnimationsConfig {
+    pub fn hypr_smooth() -> Self {
+        Self {
+            enabled: true,
+            slowdown: 1.0,
+            open: WindowAnimationConfig {
+                enabled: true,
+                duration_ms: 300,
+                curve: WindowAnimationCurve::CubicBezier([0.05, 0.9, 0.1, 1.1]),
+                opacity_duration_ms: Some(400),
+                opacity_curve: Some(WindowAnimationCurve::CubicBezier([0.65, 0.05, 0.36, 1.0])),
+                offset: (0, 42),
+                from_opacity: 0.0,
+                to_opacity: 1.0,
+                origin: WindowAnimationOrigin::NearestEdge,
+                effect: WindowAnimationEffect::Glide,
+                wave_amplitude: 0.0,
+                wave_cycles: 1.0,
+                wave_decay: 1.5,
+            },
+            close: WindowAnimationConfig {
+                enabled: true,
+                duration_ms: 300,
+                curve: WindowAnimationCurve::CubicBezier([0.65, 0.05, 0.36, 1.0]),
+                opacity_duration_ms: Some(400),
+                opacity_curve: Some(WindowAnimationCurve::CubicBezier([0.65, 0.05, 0.36, 1.0])),
+                offset: (0, 30),
+                from_opacity: 1.0,
+                to_opacity: 0.0,
+                origin: WindowAnimationOrigin::NearestEdge,
+                effect: WindowAnimationEffect::Glide,
+                wave_amplitude: 0.0,
+                wave_cycles: 1.0,
+                wave_decay: 1.5,
+            },
+            movement: WindowAnimationConfig {
+                enabled: true,
+                duration_ms: 400,
+                curve: WindowAnimationCurve::CubicBezier([0.65, 0.05, 0.36, 1.0]),
+                opacity_duration_ms: None,
+                opacity_curve: None,
+                offset: (0, 0),
+                from_opacity: 1.0,
+                to_opacity: 1.0,
+                origin: WindowAnimationOrigin::Offset,
+                effect: WindowAnimationEffect::Glide,
+                wave_amplitude: 0.0,
+                wave_cycles: 1.0,
+                wave_decay: 1.5,
+            },
+        }
+    }
+
+    /// TideWM's calm default: fast exponential settling with one broad,
+    /// low-amplitude sideways swell. It reads as water without making
+    /// ordinary window management feel delayed.
+    pub fn tide() -> Self {
+        Self {
+            enabled: true,
+            slowdown: 1.0,
+            open: WindowAnimationConfig {
+                enabled: true,
+                duration_ms: 190,
+                curve: WindowAnimationCurve::CubicBezier([0.16, 1.0, 0.3, 1.0]),
+                opacity_duration_ms: None,
+                opacity_curve: None,
+                offset: (0, 24),
+                from_opacity: 0.28,
+                to_opacity: 1.0,
+                origin: WindowAnimationOrigin::Offset,
+                effect: WindowAnimationEffect::Tide,
+                wave_amplitude: 4.0,
+                wave_cycles: 0.5,
+                wave_decay: 2.2,
+            },
+            close: WindowAnimationConfig {
+                enabled: true,
+                duration_ms: 160,
+                curve: WindowAnimationCurve::CubicOut,
+                opacity_duration_ms: None,
+                opacity_curve: None,
+                offset: (0, 18),
+                from_opacity: 1.0,
+                to_opacity: 0.0,
+                origin: WindowAnimationOrigin::Offset,
+                effect: WindowAnimationEffect::Tide,
+                wave_amplitude: 2.5,
+                wave_cycles: 0.5,
+                wave_decay: 2.0,
+            },
+            movement: WindowAnimationConfig {
+                enabled: true,
+                duration_ms: 190,
+                curve: WindowAnimationCurve::CubicBezier([0.16, 1.0, 0.3, 1.0]),
+                opacity_duration_ms: None,
+                opacity_curve: None,
+                offset: (0, 0),
+                from_opacity: 1.0,
+                to_opacity: 1.0,
+                origin: WindowAnimationOrigin::Offset,
+                effect: WindowAnimationEffect::Tide,
+                wave_amplitude: 1.25,
+                wave_cycles: 0.5,
+                wave_decay: 2.4,
+            },
+        }
+    }
+
+    /// More visible water motion for users who want the animation itself
+    /// to be part of the desktop's personality.
+    pub fn wave() -> Self {
+        let mut preset = Self::tide();
+        preset.open.duration_ms = 280;
+        preset.open.offset = (0, 34);
+        preset.open.effect = WindowAnimationEffect::Wave;
+        preset.open.wave_amplitude = 15.0;
+        preset.open.wave_cycles = 1.15;
+        preset.open.wave_decay = 1.35;
+        preset.close.duration_ms = 230;
+        preset.close.curve = WindowAnimationCurve::CubicOut;
+        preset.close.offset = (0, 28);
+        preset.close.effect = WindowAnimationEffect::Wave;
+        preset.close.wave_amplitude = 12.0;
+        preset.close.wave_cycles = 1.0;
+        preset.close.wave_decay = 1.2;
+        preset.movement.duration_ms = 250;
+        preset.movement.effect = WindowAnimationEffect::Wave;
+        preset.movement.wave_amplitude = 6.0;
+        preset.movement.wave_cycles = 0.85;
+        preset
+    }
+
+    /// A short, sharper breaker: strong motion but less wall-clock delay.
+    pub fn riptide() -> Self {
+        let mut preset = Self::wave();
+        preset.open.duration_ms = 155;
+        preset.open.offset = (0, 38);
+        preset.open.wave_amplitude = 9.0;
+        preset.open.wave_cycles = 0.85;
+        preset.close.duration_ms = 135;
+        preset.close.offset = (0, 30);
+        preset.close.wave_amplitude = 7.0;
+        preset.close.wave_cycles = 0.8;
+        preset.movement.duration_ms = 165;
+        preset.movement.wave_amplitude = 3.0;
+        preset.movement.wave_cycles = 0.7;
+        preset
+    }
+}
+
 /// Easing function for the ripple's radius/alpha progression. Picked
 /// once at spawn time and applied to both the radius and the alpha
 /// curve, so changing this single knob reshapes the whole feel.
@@ -2395,6 +2625,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "workspace_transition" => {
             apply_workspace_transition_block(&mut raw.workspace_transition, body)
         }
+        "animations" | "window_animations" => apply_animations_block(&mut raw.animations, body),
         "depth" => apply_depth_block(&mut raw.depth, body),
         "frost" => apply_frost_block(&mut raw.frost, body),
         "shadow" => apply_shadow_block(&mut raw.shadow, body),
@@ -2545,6 +2776,226 @@ fn apply_xwayland_block(xwayland: &mut XwaylandConfig, body: &[waves::Entry]) {
             other => tracing::warn!(key = %other, "Unknown key in `xwayland` block, ignoring"),
         }
     }
+}
+
+fn apply_animations_block(cfg: &mut WindowAnimationsConfig, body: &[waves::Entry]) {
+    // Presets establish a complete baseline first, regardless of where the
+    // assignment appears in the block. Every explicit setting below then
+    // remains an override, which is much less surprising while live-tuning.
+    if let Some(preset) = body.iter().rev().find_map(|entry| match entry {
+        waves::Entry::Assign(key, value) if key == "preset" => Some(value.as_str()),
+        _ => None,
+    }) {
+        match preset
+            .trim()
+            .to_ascii_lowercase()
+            .replace('_', "-")
+            .as_str()
+        {
+            "tide" | "calm-tide" | "default" => *cfg = WindowAnimationsConfig::tide(),
+            "wave" | "rolling-wave" => *cfg = WindowAnimationsConfig::wave(),
+            "riptide" | "breaker" => *cfg = WindowAnimationsConfig::riptide(),
+            "hypr" | "hyprland" | "hypr-smooth" => *cfg = WindowAnimationsConfig::hypr_smooth(),
+            other => tracing::warn!(
+                preset = %other,
+                "Unknown animation preset; expected tide, wave, riptide, or hypr-smooth"
+            ),
+        }
+    }
+
+    for entry in body {
+        match entry {
+            waves::Entry::Assign(key, value) => match key.as_str() {
+                "preset" => {}
+                "enabled" => match parse_bool(value) {
+                    Some(value) => cfg.enabled = value,
+                    None => tracing::warn!(
+                        value,
+                        "Expected `true` or `false` for animations.enabled, ignoring"
+                    ),
+                },
+                "slowdown" | "speed_scale" => match value.parse::<f32>() {
+                    Ok(value) if value.is_finite() && value > 0.0 => {
+                        cfg.slowdown = value.clamp(0.1, 10.0)
+                    }
+                    _ => tracing::warn!(
+                        value,
+                        "Expected animations.slowdown from 0.1 to 10, ignoring"
+                    ),
+                },
+                other => tracing::warn!(
+                    key = %other,
+                    "Unknown assignment in `animations` block, ignoring"
+                ),
+            },
+            waves::Entry::Block(keyword, header, child) => {
+                if !header.trim().is_empty() {
+                    tracing::warn!(header, "Animation sub-block headers are ignored");
+                }
+                let target = match keyword.as_str() {
+                    "open" | "window_open" | "window-open" => &mut cfg.open,
+                    "close" | "window_close" | "window-close" => &mut cfg.close,
+                    "move" | "movement" | "window_movement" | "window-movement" => {
+                        &mut cfg.movement
+                    }
+                    other => {
+                        tracing::warn!(
+                            block = %other,
+                            "Unknown animation sub-block, ignoring"
+                        );
+                        continue;
+                    }
+                };
+                apply_window_animation_block(target, child);
+            }
+            _ => tracing::warn!("Unexpected entry in `animations` block, ignoring"),
+        }
+    }
+}
+
+fn apply_window_animation_block(cfg: &mut WindowAnimationConfig, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Animation sub-blocks contain assignments only, ignoring entry");
+            continue;
+        };
+        match key.as_str() {
+            "enabled" => match parse_bool(value) {
+                Some(value) => cfg.enabled = value,
+                None => tracing::warn!(
+                    value,
+                    "Expected `true` or `false` for animation enabled, ignoring"
+                ),
+            },
+            "duration_ms" | "duration" => match value.parse::<u32>() {
+                Ok(value) if (1..=10_000).contains(&value) => cfg.duration_ms = value,
+                _ => tracing::warn!(
+                    value,
+                    "Expected animation duration from 1 to 10000ms, ignoring"
+                ),
+            },
+            "curve" | "ease" => match parse_window_animation_curve(value) {
+                Some(value) => cfg.curve = value,
+                None => tracing::warn!(
+                    value,
+                    "Expected a built-in easing or cubic-bezier(x1,y1,x2,y2), ignoring"
+                ),
+            },
+            "opacity_duration_ms" | "fade_duration_ms" | "opacity_duration" => {
+                match value.parse::<u32>() {
+                    Ok(value) if (1..=10_000).contains(&value) => {
+                        cfg.opacity_duration_ms = Some(value)
+                    }
+                    _ => tracing::warn!(
+                        value,
+                        "Expected opacity animation duration from 1 to 10000ms, ignoring"
+                    ),
+                }
+            }
+            "opacity_curve" | "fade_curve" | "opacity_ease" => {
+                match parse_window_animation_curve(value) {
+                    Some(value) => cfg.opacity_curve = Some(value),
+                    None => tracing::warn!(
+                        value,
+                        "Expected an opacity easing or cubic-bezier(x1,y1,x2,y2), ignoring"
+                    ),
+                }
+            }
+            "offset" | "travel" => match parse_position(value) {
+                Some(value) => cfg.offset = value,
+                None => tracing::warn!(value, "Expected animation offset as <x>x<y>, ignoring"),
+            },
+            "from_opacity" | "opacity_from" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.from_opacity = value.clamp(0.0, 1.0),
+                _ => tracing::warn!(value, "Expected from_opacity from 0 to 1, ignoring"),
+            },
+            "to_opacity" | "opacity_to" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.to_opacity = value.clamp(0.0, 1.0),
+                _ => tracing::warn!(value, "Expected to_opacity from 0 to 1, ignoring"),
+            },
+            "origin" | "slide_from" | "slide-from" | "direction" => {
+                match value.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+                    "offset" | "fixed" => cfg.origin = WindowAnimationOrigin::Offset,
+                    "nearest" | "nearest-edge" | "auto" => {
+                        cfg.origin = WindowAnimationOrigin::NearestEdge
+                    }
+                    "top" => cfg.origin = WindowAnimationOrigin::Top,
+                    "right" => cfg.origin = WindowAnimationOrigin::Right,
+                    "bottom" => cfg.origin = WindowAnimationOrigin::Bottom,
+                    "left" => cfg.origin = WindowAnimationOrigin::Left,
+                    _ => tracing::warn!(
+                        value,
+                        "Expected animation origin offset, nearest-edge, top, right, bottom, or left, ignoring"
+                    ),
+                }
+            }
+            "effect" | "motion" => {
+                match value.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+                    "glide" | "none" => cfg.effect = WindowAnimationEffect::Glide,
+                    "tide" | "swell" => cfg.effect = WindowAnimationEffect::Tide,
+                    "wave" | "rolling-wave" => cfg.effect = WindowAnimationEffect::Wave,
+                    _ => tracing::warn!(
+                        value,
+                        "Expected animation effect glide, tide, or wave, ignoring"
+                    ),
+                }
+            }
+            "wave_amplitude" | "amplitude" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.wave_amplitude = value.clamp(0.0, 512.0),
+                _ => tracing::warn!(
+                    value,
+                    "Expected wave_amplitude from 0 to 512 logical pixels, ignoring"
+                ),
+            },
+            "wave_cycles" | "cycles" | "frequency" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.wave_cycles = value.clamp(0.0, 8.0),
+                _ => tracing::warn!(value, "Expected wave_cycles from 0 to 8, ignoring"),
+            },
+            "wave_decay" | "decay" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.wave_decay = value.clamp(0.0, 8.0),
+                _ => tracing::warn!(value, "Expected wave_decay from 0 to 8, ignoring"),
+            },
+            other => tracing::warn!(
+                key = %other,
+                "Unknown animation setting, ignoring"
+            ),
+        }
+    }
+}
+
+fn parse_window_animation_curve(value: &str) -> Option<WindowAnimationCurve> {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    match normalized.as_str() {
+        "linear" => return Some(WindowAnimationCurve::Linear),
+        "quad-out" | "ease-out-quad" => return Some(WindowAnimationCurve::QuadOut),
+        "cubic-out" | "ease-out-cubic" => return Some(WindowAnimationCurve::CubicOut),
+        "exp-out" | "expo-out" | "ease-out-expo" => {
+            return Some(WindowAnimationCurve::ExpOut);
+        }
+        "cubic-in-out" | "ease-in-out-cubic" => {
+            return Some(WindowAnimationCurve::CubicInOut);
+        }
+        _ => {}
+    }
+
+    let inner = normalized
+        .strip_prefix("cubic-bezier(")?
+        .strip_suffix(')')?;
+    let values: Vec<f32> = inner
+        .split([',', ' '])
+        .filter(|part| !part.is_empty())
+        .map(str::parse::<f32>)
+        .collect::<Result<_, _>>()
+        .ok()?;
+    if values.len() != 4 || values.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    if !(0.0..=1.0).contains(&values[0]) || !(0.0..=1.0).contains(&values[2]) {
+        return None;
+    }
+    Some(WindowAnimationCurve::CubicBezier([
+        values[0], values[1], values[2], values[3],
+    ]))
 }
 
 fn apply_workspace_transition_block(cfg: &mut WorkspaceTransitionConfig, body: &[waves::Entry]) {
@@ -4528,6 +4979,53 @@ bsp_split_bias = auto
 #     turbulence = 0.7              # secondary waves and moving streaks
 # }
 
+# Window lifecycle/layout motion. Logical state and input change
+# immediately; these values only interpolate the pixels toward that state.
+# Presets: tide (default), wave, riptide, hypr-smooth. Explicit values below
+# always override the preset, regardless of assignment order.
+# animations {
+#     preset = tide
+#     enabled = true
+#     slowdown = 1.0
+#     open {
+#         enabled = true
+#         duration_ms = 190
+#         curve = cubic-bezier(0.16,1.0,0.3,1.0)
+#         # opacity_duration_ms = 190 # omitted follows duration_ms
+#         # opacity_curve = cubic-bezier(0.16,1.0,0.3,1.0)
+#         origin = offset             # offset | nearest-edge | top | right | bottom | left
+#         offset = 0x24
+#         from_opacity = 0.28
+#         to_opacity = 1.0
+#         effect = tide               # glide | tide | wave
+#         wave_amplitude = 4          # logical pixels, perpendicular to travel
+#         wave_cycles = 0.5           # used by wave; tide is one broad swell
+#         wave_decay = 2.2
+#     }
+#     close {
+#         enabled = true
+#         duration_ms = 160
+#         curve = cubic-out
+#         origin = offset
+#         offset = 0x18
+#         from_opacity = 1.0
+#         to_opacity = 0.0
+#         effect = tide
+#         wave_amplitude = 2.5
+#         wave_cycles = 0.5
+#         wave_decay = 2.0
+#     }
+#     movement {
+#         enabled = true
+#         duration_ms = 190
+#         curve = cubic-bezier(0.16,1.0,0.3,1.0)
+#         effect = tide
+#         wave_amplitude = 1.25
+#         wave_cycles = 0.5
+#         wave_decay = 2.4
+#     }
+# }
+
 # Automatic attention depth / buoyancy. Inactive windows keep their live
 # content at tier 1, then become lightweight title cards at tier 2+.
 # Focusing or typing into a window returns it to the surface immediately.
@@ -5060,6 +5558,7 @@ mod tests {
             },
             show_welcome_hint: false,
             water_effects: true,
+            animations: WindowAnimationsConfig::default(),
             workspace_transition: WorkspaceTransitionConfig::default(),
             depth: DepthConfig::default(),
             frost: FrostConfig::default(),
@@ -5401,6 +5900,68 @@ mod tests {
         assert_eq!(transition.foam_alpha, 0.88);
         assert_eq!(transition.spray_amount, 0.6);
         assert_eq!(transition.turbulence, 1.2);
+    }
+
+    #[test]
+    fn window_animation_blocks_parse_bezier_offsets_and_opacity() {
+        let entries = waves::parse(
+            "animations {\n\
+             preset = wave\n\
+             enabled = true\n\
+             slowdown = 1.5\n\
+             open {\n\
+             duration_ms = 240\n\
+             curve = cubic-bezier(0.1,0.8,0.2,1.1)\n\
+             opacity_duration_ms = 410\n\
+             opacity_curve = cubic-in-out\n\
+             offset = -12x32\n\
+             from_opacity = 0.2\n\
+             to_opacity = 0.95\n\
+             origin = nearest-edge\n\
+             effect = tide\n\
+             wave_amplitude = 22\n\
+             wave_cycles = 1.75\n\
+             wave_decay = 2.25\n\
+             }\n\
+             close {\n\
+             enabled = false\n\
+             curve = ease-out-quad\n\
+             }\n\
+             movement {\n\
+             duration = 360\n\
+             curve = exp-out\n\
+             }\n\
+             }\n",
+            Path::new("<window-animation-test>"),
+        )
+        .unwrap();
+        let animations = Config::from_raw(lower_entries(&entries)).0.animations;
+
+        assert!(animations.enabled);
+        assert_eq!(animations.slowdown, 1.5);
+        assert_eq!(animations.open.duration_ms, 240);
+        assert_eq!(
+            animations.open.curve,
+            WindowAnimationCurve::CubicBezier([0.1, 0.8, 0.2, 1.1])
+        );
+        assert_eq!(animations.open.opacity_duration_ms, Some(410));
+        assert_eq!(
+            animations.open.opacity_curve,
+            Some(WindowAnimationCurve::CubicInOut)
+        );
+        assert_eq!(animations.open.offset, (-12, 32));
+        assert_eq!(animations.open.from_opacity, 0.2);
+        assert_eq!(animations.open.to_opacity, 0.95);
+        assert_eq!(animations.open.origin, WindowAnimationOrigin::NearestEdge);
+        assert_eq!(animations.open.effect, WindowAnimationEffect::Tide);
+        assert_eq!(animations.open.wave_amplitude, 22.0);
+        assert_eq!(animations.open.wave_cycles, 1.75);
+        assert_eq!(animations.open.wave_decay, 2.25);
+        assert!(!animations.close.enabled);
+        assert_eq!(animations.close.curve, WindowAnimationCurve::QuadOut);
+        assert_eq!(animations.close.effect, WindowAnimationEffect::Wave);
+        assert_eq!(animations.movement.duration_ms, 360);
+        assert_eq!(animations.movement.curve, WindowAnimationCurve::ExpOut);
     }
 
     #[test]

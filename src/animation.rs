@@ -11,6 +11,8 @@
 
 use std::time::{Duration, Instant};
 
+use crate::config::WindowAnimationCurve;
+
 /// A linear interpolation from `from` to `to` over `duration`, anchored at
 /// `start` -- which does not have to be "now": a delayed-start animation
 /// (e.g. a fade that only begins once an earlier hold period elapses) just
@@ -55,6 +57,52 @@ impl Animation {
     }
 }
 
+/// Converts linear elapsed progress into a configured window-animation
+/// progress. Cubic Bézier uses CSS semantics: solve the x curve for elapsed
+/// time, then return y at the same parameter. Twelve bisection steps are
+/// deterministic and comfortably below a physical pixel of error for the
+/// short compositor animations that consume it.
+pub fn ease_progress(curve: WindowAnimationCurve, progress: f32) -> f32 {
+    let progress = progress.clamp(0.0, 1.0);
+    match curve {
+        WindowAnimationCurve::Linear => progress,
+        WindowAnimationCurve::QuadOut => 1.0 - (1.0 - progress).powi(2),
+        WindowAnimationCurve::CubicOut => 1.0 - (1.0 - progress).powi(3),
+        WindowAnimationCurve::CubicInOut => {
+            if progress < 0.5 {
+                4.0 * progress.powi(3)
+            } else {
+                1.0 - (-2.0 * progress + 2.0).powi(3) / 2.0
+            }
+        }
+        WindowAnimationCurve::ExpOut => {
+            if progress >= 1.0 {
+                1.0
+            } else {
+                1.0 - 2.0_f32.powf(-10.0 * progress)
+            }
+        }
+        WindowAnimationCurve::CubicBezier(points) => {
+            fn coordinate(t: f32, first: f32, second: f32) -> f32 {
+                let inverse = 1.0 - t;
+                3.0 * inverse * inverse * t * first + 3.0 * inverse * t * t * second + t * t * t
+            }
+
+            let mut low = 0.0;
+            let mut high = 1.0;
+            for _ in 0..12 {
+                let middle = (low + high) * 0.5;
+                if coordinate(middle, points[0], points[2]) < progress {
+                    low = middle;
+                } else {
+                    high = middle;
+                }
+            }
+            coordinate((low + high) * 0.5, points[1], points[3])
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,5 +137,18 @@ mod tests {
         let anim = Animation::new(1.0, 0.0, future_start, Duration::from_millis(10));
         assert_eq!(anim.value(), 1.0);
         assert!(!anim.finished());
+    }
+
+    #[test]
+    fn css_bezier_preserves_endpoints_and_is_monotonic() {
+        let curve = WindowAnimationCurve::CubicBezier([0.16, 1.0, 0.3, 1.0]);
+        assert!(ease_progress(curve, 0.0).abs() < 0.001);
+        assert!((ease_progress(curve, 1.0) - 1.0).abs() < 0.001);
+        let mut previous = 0.0;
+        for step in 1..=100 {
+            let value = ease_progress(curve, step as f32 / 100.0);
+            assert!(value >= previous);
+            previous = value;
+        }
     }
 }

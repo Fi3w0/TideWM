@@ -123,6 +123,9 @@ smithay::backend::renderer::element::render_elements! {
     Shadow = crate::shadow::ShadowElement,
     /// Client surface tree clipped to compositor-owned rounded geometry.
     RoundedSurface = crate::decoration::RoundedSurfaceElement,
+    /// Last imported client textures retained for the bounded close
+    /// animation after the live Wayland surface has unmapped.
+    WindowSnapshot = crate::window_animation::WindowSnapshotElement,
     /// Analytical solid/gradient border above its own window.
     Border = crate::decoration::BorderElement,
     /// Impulse ripple (Phase R1, see ripple.rs), drawn over windows but
@@ -1432,6 +1435,7 @@ fn render_surface(
 
     let ripple_layers = state.ripple_frame_elements(renderer, output);
     let workspace_transition = state.workspace_transition_frame_element(renderer, output);
+    let closing_windows = state.closing_window_frame_elements(renderer, output);
     let mut elements: Vec<OutputRenderElements> = ripple_layers.above_all;
     elements.extend(
         picker_element
@@ -1451,6 +1455,7 @@ fn render_surface(
     );
     elements.extend(ripple_layers.above_windows);
     elements.extend(workspace_transition);
+    elements.extend(closing_windows);
     elements.extend(depth_elements);
     elements.extend(glass_elements);
     elements.extend(space_elements);

@@ -32,6 +32,7 @@ mod wallpaper;
 mod water_glass;
 mod waves;
 mod welcome;
+mod window_animation;
 mod workspace_transition;
 mod xwayland;
 

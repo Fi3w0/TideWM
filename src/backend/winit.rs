@@ -342,6 +342,8 @@ pub fn init_winit(
                         let ripple_layers = state.ripple_frame_elements(renderer, &entry.output);
                         let workspace_transition =
                             state.workspace_transition_frame_element(renderer, &entry.output);
+                        let closing_windows =
+                            state.closing_window_frame_elements(renderer, &entry.output);
                         let mut elements: Vec<crate::backend::udev::OutputRenderElements> =
                             ripple_layers.above_all;
                         elements.extend(
@@ -356,6 +358,7 @@ pub fn init_winit(
                         );
                         elements.extend(ripple_layers.above_windows);
                         elements.extend(workspace_transition);
+                        elements.extend(closing_windows);
                         elements.extend(depth_elements);
                         elements.extend(glass_elements);
                         elements.extend(space_elements);
