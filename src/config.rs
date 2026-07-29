@@ -506,6 +506,47 @@ impl Config {
                 ..Default::default()
             }
         });
+        // `$mod` is only a Waves variable, not real compositor state (see
+        // `Config::pointer_modifier`'s doc comment) -- so a user who points
+        // it at Alt to free up Super for clients gets no structural
+        // guarantee Super is actually free. It stays live wherever a bind
+        // still spells it out literally: an un-updated `pointer_modifier`,
+        // or any `[keybinds]` entry the user didn't rewrite with `$mod`
+        // (including ones RawConfig::default() fills in for combos the
+        // user's own file never mentions at all). Warn rather than silently
+        // leaving Super still swallowed.
+        if raw
+            .variables
+            .get("mod")
+            .and_then(|value| parse_modifiers(value))
+            .is_some_and(|mods| !mods.logo)
+        {
+            if pointer_modifier.logo {
+                warnings.push(
+                    "$mod is set away from Super, but pointer_modifier still resolves to Super \
+                     -- set pointer_modifier = $mod"
+                        .to_string(),
+                );
+            }
+            let mut stuck: Vec<&str> = raw
+                .keybinds
+                .keys()
+                .filter(|combo| {
+                    combo
+                        .split('+')
+                        .any(|part| matches!(part.to_lowercase().as_str(), "super" | "logo" | "mod4"))
+                })
+                .map(String::as_str)
+                .collect();
+            if !stuck.is_empty() {
+                stuck.sort_unstable();
+                warnings.push(format!(
+                    "$mod is set away from Super, but these keybinds still use Super: {}",
+                    stuck.join(", ")
+                ));
+            }
+        }
+
         let workspace_names = parse_workspace_names(&raw.workspace_names);
         let workspace_gaps = parse_workspace_gaps(&raw.workspace_gaps, &workspace_names);
 
@@ -6157,6 +6198,71 @@ mod tests {
         assert!(warnings
             .iter()
             .any(|warning| warning.contains("Invalid pointer_modifier")));
+    }
+
+    #[test]
+    fn mod_freed_from_super_warns_about_leftover_super_pointer_modifier_and_keybinds() {
+        // The shipped default config's own convention: `$mod = ALT` at the
+        // top, everything else still spelled with literal Super because the
+        // user's file (or RawConfig::default()'s own fallback binds) never
+        // got updated to match.
+        let mut variables = HashMap::new();
+        variables.insert("mod".to_string(), "ALT".to_string());
+        let raw = RawConfig {
+            variables,
+            ..Default::default()
+        };
+        let (_, warnings) = Config::from_raw(raw);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("pointer_modifier still resolves to Super")),
+            "expected a pointer_modifier warning, got: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("Super+Return")),
+            "expected the stuck default keybinds to be named, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn mod_left_at_super_or_undefined_produces_no_leftover_super_lint() {
+        let (_, warnings) = Config::from_raw(RawConfig::default());
+        assert!(!warnings
+            .iter()
+            .any(|w| w.contains("$mod is set away from Super")));
+
+        let mut variables = HashMap::new();
+        variables.insert("mod".to_string(), "SUPER".to_string());
+        let raw = RawConfig {
+            variables,
+            ..Default::default()
+        };
+        let (_, warnings) = Config::from_raw(raw);
+        assert!(!warnings
+            .iter()
+            .any(|w| w.contains("$mod is set away from Super")));
+    }
+
+    #[test]
+    fn mod_freed_from_super_with_every_bind_rewritten_has_nothing_left_to_warn_about() {
+        let mut variables = HashMap::new();
+        variables.insert("mod".to_string(), "ALT".to_string());
+        let mut keybinds = HashMap::new();
+        keybinds.insert("ALT+Return".to_string(), "spawn:kitty".to_string());
+        let raw = RawConfig {
+            variables,
+            keybinds,
+            pointer_modifier: "ALT".to_string(),
+            ..Default::default()
+        };
+        let (_, warnings) = Config::from_raw(raw);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.contains("$mod is set away from Super")),
+            "got: {warnings:?}"
+        );
     }
 
     #[test]
