@@ -127,6 +127,35 @@ impl Default for ConnectedVesselsConfig {
     }
 }
 
+/// Optional lateral sway for dragged floating windows. Explicitly opt-in:
+/// `enabled` defaults false and `water_effects` remains the master bypass.
+/// A matching `rule { sway = true|false }` overrides this per app.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SwayConfig {
+    pub enabled: bool,
+    /// Fraction of each horizontal drag delta converted into sway
+    /// displacement. 0.0 freezes the effect, 1.0 follows the pointer.
+    pub response: f32,
+    /// Hard cap on lateral displacement, logical pixels.
+    pub max_offset: f32,
+    /// Oscillation frequency, hertz.
+    pub frequency: f32,
+    /// Exponential decay rate, per second. Higher settles back sooner.
+    pub damping: f32,
+}
+
+impl Default for SwayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            response: 0.08,
+            max_offset: 24.0,
+            frequency: 1.6,
+            damping: 3.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Left,
@@ -246,6 +275,9 @@ pub struct Config {
     /// `water_effects` is the master bypass; this block can independently
     /// restore the legacy one-split resize path.
     pub connected_vessels: ConnectedVesselsConfig,
+    /// Optional lateral sway for dragged floating windows. Opt-in and
+    /// bypassed by the `water_effects` master toggle like viscosity.
+    pub sway: SwayConfig,
     /// Window lifecycle and layout-motion animation timing. Logical state
     /// changes immediately; this controls only visual settling.
     pub animations: WindowAnimationsConfig,
@@ -484,6 +516,7 @@ impl Config {
             water_effects: raw.water_effects,
             viscosity: raw.viscosity.clamp(0.0, 4.0),
             connected_vessels: raw.connected_vessels,
+            sway: raw.sway,
             animations: raw.animations,
             workspace_transition: raw.workspace_transition,
             depth: raw.depth,
@@ -632,6 +665,9 @@ impl Config {
             if rule.viscosity.is_some() {
                 effective.viscosity = rule.viscosity;
             }
+            if rule.sway.is_some() {
+                effective.sway = rule.sway;
+            }
             if let Some(rule_frost) = &rule.frost {
                 effective.frost = Some(match effective.frost.take() {
                     Some(existing) => existing.merge_over(rule_frost),
@@ -698,6 +734,7 @@ struct RawConfig {
     water_effects: bool,
     viscosity: f64,
     connected_vessels: ConnectedVesselsConfig,
+    sway: SwayConfig,
     animations: WindowAnimationsConfig,
     workspace_transition: WorkspaceTransitionConfig,
     depth: DepthConfig,
@@ -845,6 +882,7 @@ impl Default for RawConfig {
             water_effects: true,
             viscosity: 1.0,
             connected_vessels: ConnectedVesselsConfig::default(),
+            sway: SwayConfig::default(),
             animations: WindowAnimationsConfig::default(),
             workspace_transition: WorkspaceTransitionConfig::default(),
             depth: DepthConfig::default(),
@@ -1173,6 +1211,9 @@ pub struct WindowRule {
     /// Per-window interactive move/resize damping. Last matching rule wins;
     /// `0.0` disables damping for the matched app.
     pub viscosity: Option<f64>,
+    /// Per-app opt-in/out for floating sway. Last matching rule wins;
+    /// unset falls back to the global `sway { enabled }` value.
+    pub sway: Option<bool>,
     /// Per-app frost overrides. Unset fields inherit the global
     /// `frost { }` block, and multiple matching rules merge field by field.
     pub frost: Option<FrostOverrides>,
@@ -2682,6 +2723,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "connected_vessels" | "connected_resize" => {
             apply_connected_vessels_block(&mut raw.connected_vessels, body)
         }
+        "sway" => apply_sway_block(&mut raw.sway, body),
         "animations" | "window_animations" => apply_animations_block(&mut raw.animations, body),
         "depth" => apply_depth_block(&mut raw.depth, body),
         "frost" => apply_frost_block(&mut raw.frost, body),
@@ -3288,6 +3330,35 @@ fn apply_connected_vessels_block(cfg: &mut ConnectedVesselsConfig, body: &[waves
             other => {
                 tracing::warn!(key = %other, "Unknown key in `connected_vessels` block, ignoring")
             }
+        }
+    }
+}
+
+fn apply_sway_block(cfg: &mut SwayConfig, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `sway` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "enabled" => set_bool(&mut cfg.enabled, key, value),
+            "response" | "gain" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.response = value.clamp(0.0, 1.0),
+                _ => tracing::warn!(value, "Expected sway.response from 0 to 1, ignoring"),
+            },
+            "max_offset" | "amplitude" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.max_offset = value.clamp(0.0, 128.0),
+                _ => tracing::warn!(value, "Expected sway.max_offset from 0 to 128, ignoring"),
+            },
+            "frequency" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.frequency = value.clamp(0.1, 10.0),
+                _ => tracing::warn!(value, "Expected sway.frequency from 0.1 to 10, ignoring"),
+            },
+            "damping" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.damping = value.clamp(0.1, 20.0),
+                _ => tracing::warn!(value, "Expected sway.damping from 0.1 to 20, ignoring"),
+            },
+            other => tracing::warn!(key = %other, "Unknown key in `sway` block, ignoring"),
         }
     }
 }
@@ -4344,6 +4415,7 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                         tracing::warn!(value, "Expected rule viscosity from 0.0 to 4.0, ignoring")
                     }
                 },
+                "sway" => set_opt_bool(&mut rule.sway, key, value),
                 "shadow" => match value.as_str() {
                     "true" | "on" => {
                         rule.shadow
@@ -5055,6 +5127,16 @@ connected_vessels {
     falloff = 0.5                  # pressure retained per ancestor tree level
     max_splits = 4                 # primary split plus up to three ancestors
 }
+
+# Floating windows can sway side to side while dragged, like they are
+# sitting in water. Off by default; `rule { sway = true }` opts one app in.
+# sway {
+#     enabled = false
+#     response = 0.08              # fraction of each drag step turned into sway
+#     max_offset = 24              # lateral cap, logical pixels
+#     frequency = 1.6              # oscillations per second
+#     damping = 3.0                # higher settles back sooner
+# }
 cursor_always_visible = false
 cursor_hide_after_ms = 0
 workspace_auto_back_and_forth = false
@@ -5674,6 +5756,7 @@ mod tests {
             water_effects: true,
             viscosity: 1.0,
             connected_vessels: ConnectedVesselsConfig::default(),
+            sway: SwayConfig::default(),
             animations: WindowAnimationsConfig::default(),
             workspace_transition: WorkspaceTransitionConfig::default(),
             depth: DepthConfig::default(),
@@ -5985,6 +6068,40 @@ mod tests {
         assert!(defaults.enabled);
         assert_eq!(defaults.falloff, 0.5);
         assert_eq!(defaults.max_splits, 4);
+    }
+
+    #[test]
+    fn sway_block_parses_clamps_rules_and_matches_generated_defaults() {
+        let entries = waves::parse(
+            "sway {\n\
+             enabled = true\n\
+             response = 2.5\n\
+             max_offset = 999\n\
+             frequency = 0\n\
+             damping = 42\n\
+             }\n\
+             rule {\n\
+             app_id = kitty\n\
+             sway = false\n\
+             }\n",
+            Path::new("<sway-test>"),
+        )
+        .unwrap();
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        assert!(config.sway.enabled);
+        assert_eq!(config.sway.response, 1.0);
+        assert_eq!(config.sway.max_offset, 128.0);
+        assert_eq!(config.sway.frequency, 0.1);
+        assert_eq!(config.sway.damping, 20.0);
+        assert_eq!(
+            config.resolve_window_rules(Some("kitty"), None).sway,
+            Some(false)
+        );
+        assert_eq!(config.resolve_window_rules(Some("foot"), None).sway, None);
+
+        let defaults = parse_default_config().sway;
+        assert!(!defaults.enabled);
+        assert_eq!(defaults, SwayConfig::default());
     }
 
     #[test]

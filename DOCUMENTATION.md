@@ -61,7 +61,7 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | `terminal` | string | `"kitty"` | Spawned by the default `Super+Return` bind. The shipped default is `$wave(kitty, alacritty, foot, xterm)` — see [`$wave(...)`](#waves-format) above. |
 | `pointer_modifier` | modifier or `+`-joined modifiers | `super` | Modifier physically held for compositor mouse actions: left-drag moves floating windows or drag-swaps tiles; right-drag resizes floating or tiled windows. Accepts `super`/`logo`/`mod4`, `alt`/`mod1`, `ctrl`/`control`, and `shift`. The shipped config sets it to `$mod`, so changing `$mod` can update keyboard and mouse behavior together. `mouse_modifier` and `drag_modifier` are aliases. |
 | `show_welcome_hint` | bool | `true` | Shows a persistent "fake window" card pointing you at `Super+Return` whenever the desktop is otherwise empty. Disappears the instant a real window maps; delete this key (or set it `false`) to stop it coming back. Checked on every reload, not just at startup. |
-| `water_effects` | bool | `true` | Master toggle for TideWM's water/aqua render identity. Disables water-glass, backdrop capture, impulse ripples, wave workspace transitions, automatic depth/buoyancy, interactive viscosity, and connected-vessel resize when `false`. |
+| `water_effects` | bool | `true` | Master toggle for TideWM's water/aqua render identity. Disables water-glass, backdrop capture, impulse ripples, wave workspace transitions, automatic depth/buoyancy, interactive viscosity, connected-vessel resize, and floating sway when `false`. |
 | `viscosity` | float, `0`–`4` | `1.0` | Interactive window move/resize damping. `0` follows the pointer immediately; higher values settle more slowly. Render-only: logical geometry and hit-testing stay at the pointer target. Disabled by `water_effects = false`. |
 | `cursor_always_visible` | bool | `false` | Forces the udev backend's software cursor to stay visible even when a client asks to hide it (e.g. a terminal hiding its own pointer glyph after inactivity). Off by default — respecting a client's own hide request is correct behavior; this is an opt-in override. |
 | `cursor_hide_after_ms` | integer | `0` | udev backend only: hides the software cursor after this many milliseconds of no real pointer motion (niri's `cursor.hide-after-inactive-ms`). `0` disables it. Independent of `cursor_always_visible` — that overrides a *client's* hide request, this is a compositor-driven idle timer, and the two can be combined. |
@@ -273,6 +273,39 @@ connected_vessels {
 `water_effects = false` is the master bypass and also restores one-split BSP
 resize. Master/stack layout has no BSP split chain, so this block has no effect
 there.
+
+### `sway { }`
+
+Optional lateral sway for floating windows while they are dragged, like they
+are sitting in water. Each horizontal drag step kicks a damped oscillation
+that offsets only what is drawn; the window's real position, focus, and
+hit-testing always follow the pointer immediately. Once the drag stops, the
+offset swings side to side and decays back to rest on its own, then stops
+consuming frames entirely.
+
+The effect is explicitly opt-in: `enabled` defaults to `false`, and a matching
+`rule { sway = true }` opts a single app in (or out) without changing the
+global value. `water_effects = false` bypasses it regardless of this block.
+State is one small closed-form record per swaying window — no motion history,
+textures, or framebuffers.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Master switch for the mechanic. A per-app `rule { sway = ... }` overrides it. |
+| `response` | float, `0`–`1` | `0.08` | Fraction of each horizontal drag step converted into sway displacement. `0` freezes the effect. `gain` is an alias. |
+| `max_offset` | float, `0`–`128` | `24.0` | Hard cap on lateral displacement in logical pixels. `amplitude` is an alias. |
+| `frequency` | float, `0.1`–`10` | `1.6` | Oscillations per second. |
+| `damping` | float, `0.1`–`20` | `3.0` | Exponential decay rate; higher settles back sooner. |
+
+```wave
+sway {
+    enabled = true
+    response = 0.08
+    max_offset = 24
+    frequency = 1.6
+    damping = 3.0
+}
+```
 
 ### `depth { }`
 
@@ -724,6 +757,7 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 | `fullscreen_opacity` | float | Extra multiplier while fullscreen; takes priority over active/inactive state. |
 | `glass` | `water`, `frost`, or `none` | Captured-backdrop treatment for a floating window. Explicit `water`/`frost` works with client-provided alpha; when unset, a TideWM `opacity` below `1.0` implicitly selects `water`. `none` preserves plain transparency. `glass_mode` is an alias. |
 | `viscosity` | float, `0`–`4` | Per-app interactive move/resize damping. Last matching rule wins; `0` disables it for the matched app. |
+| `sway` | bool | Per-app opt-in/out for floating sway. Last matching rule wins; unset falls back to `sway.enabled`. |
 | `frost { }` | sub-block | Per-app overrides for every global frost field. Unspecified fields inherit the global block; multiple matching rules merge field by field. |
 | `shadow` | bool / `on`, `off`, `none` | Shorthand to enable or disable compositor shadows for matching windows. |
 | `shadow { }` | sub-block | Per-app overrides for every global shadow field. Unspecified fields inherit the global block; multiple matching rules merge field by field. |

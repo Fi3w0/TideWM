@@ -49,12 +49,19 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
         let delta = event.location - self.start_data.location;
         let new_location = self.initial_window_location.to_f64() + delta;
         let new_location = new_location.to_i32_round();
+        let previous_x = data
+            .space
+            .element_location(&self.window)
+            .map(|location| location.x);
         data.retarget_window_viscosity(
             surface,
             Rectangle::new(new_location, self.window.geometry().size),
         );
         data.space
             .map_element(self.window.clone(), new_location, false);
+        if let Some(previous_x) = previous_x {
+            data.sway_kick(surface, (new_location.x - previous_x) as f64);
+        }
         data.request_redraw();
     }
 

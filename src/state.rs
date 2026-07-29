@@ -254,6 +254,10 @@ pub struct Smallvil {
     /// Logical geometry stays at the pointer target; one entry per active
     /// mapped window bounds this state without retaining motion history.
     pub(crate) window_viscosity: HashMap<WlSurface, crate::viscosity::ViscousMotion>,
+    /// Lateral damped oscillation for dragged floating windows. One small
+    /// closed-form record per mapped window; a settled entry finishes and
+    /// is pruned, so idle windows never keep the frame pump alive.
+    pub(crate) window_sway: HashMap<WlSurface, crate::sway::FloatingSway>,
     /// Last already-imported surface tree for each visible mapped window.
     /// Texture handles are cloned, not framebuffer contents; the entry is
     /// transferred to the bounded close list on unmap.
@@ -1014,6 +1018,9 @@ impl Smallvil {
             sample.size = current.size;
             sample.opacity *= current.opacity;
         }
+        if let Some(sway) = self.window_sway.get(surface) {
+            sample.offset.x += sway.sample();
+        }
         sample
     }
 
@@ -1084,6 +1091,43 @@ impl Smallvil {
         // ordinary movement animation.
         self.request_redraw();
         true
+    }
+
+    fn sway_enabled_for_surface(&self, surface: &WlSurface) -> bool {
+        if !self.config.water_effects {
+            return false;
+        }
+        let (app_id, title) = self.toplevel_identity(surface);
+        self.config
+            .resolve_window_rules(app_id.as_deref(), title.as_deref())
+            .sway
+            .unwrap_or(self.config.sway.enabled)
+    }
+
+    /// Feeds one horizontal floating-drag delta into the window's lateral
+    /// sway. Called from the move grab's motion path; a no-op when the
+    /// water identity, the mechanic, or this window's rule disables it.
+    pub(crate) fn sway_kick(&mut self, surface: &WlSurface, delta_x: f64) {
+        if delta_x.abs() < f64::EPSILON || !self.sway_enabled_for_surface(surface) {
+            return;
+        }
+        let config = self.config.sway;
+        let response = config.response as f64;
+        let max_offset = config.max_offset as f64;
+        match self.window_sway.get_mut(surface) {
+            Some(sway) => sway.kick(delta_x, response, max_offset),
+            None => {
+                self.window_sway.insert(
+                    surface.clone(),
+                    crate::sway::FloatingSway::kicked(
+                        (delta_x * response).clamp(-max_offset, max_offset),
+                        config.frequency as f64,
+                        config.damping as f64,
+                    ),
+                );
+            }
+        }
+        self.request_redraw();
     }
 
     pub(crate) fn start_window_open_animation(&mut self, surface: &WlSurface) {
@@ -1767,6 +1811,7 @@ impl Smallvil {
             window_open_animations: HashMap::new(),
             window_move_animations: HashMap::new(),
             window_viscosity: HashMap::new(),
+            window_sway: HashMap::new(),
             window_frame_snapshots: HashMap::new(),
             closing_window_animations: Vec::new(),
             window_depths: HashMap::new(),
@@ -3178,6 +3223,7 @@ impl Smallvil {
         self.window_move_animations
             .retain(|_, animation| !animation.finished());
         self.window_viscosity.retain(|_, motion| !motion.finished());
+        self.window_sway.retain(|_, sway| !sway.finished());
         self.closing_window_animations
             .retain(|closing| !closing.animation.finished());
         self.toast
@@ -3188,6 +3234,7 @@ impl Smallvil {
             || !self.window_open_animations.is_empty()
             || !self.window_move_animations.is_empty()
             || !self.window_viscosity.is_empty()
+            || !self.window_sway.is_empty()
             || !self.closing_window_animations.is_empty()
             || self.animated_borders_possible()
     }
@@ -6807,6 +6854,15 @@ impl Smallvil {
                     .collect();
                 for surface in disabled_viscosity {
                     self.window_viscosity.remove(&surface);
+                }
+                let disabled_sway: Vec<WlSurface> = self
+                    .window_sway
+                    .keys()
+                    .filter(|surface| !self.sway_enabled_for_surface(surface))
+                    .cloned()
+                    .collect();
+                for surface in disabled_sway {
+                    self.window_sway.remove(&surface);
                 }
                 if !self.config.animations.enabled || !self.config.animations.close.enabled {
                     self.window_frame_snapshots.clear();

@@ -26,6 +26,7 @@ mod shadow;
 #[cfg(feature = "screencast")]
 mod source_picker;
 mod state;
+mod sway;
 mod tab_strip;
 mod toast;
 mod viscosity;
