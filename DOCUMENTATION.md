@@ -295,6 +295,84 @@ rule {
 }
 ```
 
+### `rounding { }`
+
+Controls compositor-owned window geometry. TideWM clips the main toplevel surface and its subsurfaces while leaving real xdg-popups independent, matching niri’s `geometry-corner-radius` plus `clip-to-geometry` behavior. The same resolved radius drives borders, water/frost glass, and shadows so transparent corners cannot reveal a square effect layer underneath. Values are logical pixels and scale with the output.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | Enables rounded geometry. |
+| `radius` | one or four floats | `12` | One radius for all corners, or CSS order: top-left, top-right, bottom-right, bottom-left. `radii` and `geometry_corner_radius` are aliases. |
+| `top_left`, `top_right`, `bottom_right`, `bottom_left` | float | inherited | Sparse per-corner overrides. |
+| `power` | float, `1`–`10` | `2` | Superellipse exponent. `2` is circular; higher values produce squarer Hyprland-style corners. `rounding_power` is an alias. |
+| `antialias` | float, `0`–`8` | `1` | Edge feather width in physical pixels. |
+| `clip` | bool | `true` | Clips actual client content. `clip_to_geometry` is an alias. |
+| `floating_only` | bool | `false` | Leaves tiled windows square when enabled. |
+| `fullscreen` | bool | `false` | Allows rounding while fullscreen. |
+
+```wave
+rounding {
+    enabled = true
+    radius = 18 18 12 12
+    power = 2.35
+    antialias = 1
+    clip = true
+}
+```
+
+`corners { }` is accepted as a block alias. Inside a rule, `rounding = 20`, `rounding = off`, and `clip_to_geometry = true` are convenient shorthands.
+
+### `border { }`
+
+Draws a fixed-cost rounded border immediately above its window. Equal start/end colors produce a solid border; different colors produce a linear gradient. Active, inactive, and urgent states have independent gradients and opacity. Rotation/pulse animation is opt-in because an animated border intentionally keeps the output redrawing.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | Master switch for this scope. |
+| `width` | float, `0`–`64` | `2` | Logical-pixel thickness. `size` and `border_size` are aliases. |
+| `placement` | `outside`, `center`, `inside` | `outside` | Chooses how much border overlaps client geometry. |
+| `active_from`, `active_to` | RGBA colors | aqua gradient | Focused gradient. `color`/`active_color` alias the start color. |
+| `inactive_from`, `inactive_to` | RGBA colors | dark aqua gradient | Unfocused gradient. |
+| `urgent_from`, `urgent_to` | RGBA colors | bright blue gradient | Bioluminescent attention gradient. |
+| `angle` | degrees | `135` | Static gradient angle. `gradient_angle` is an alias. |
+| `opacity`, `inactive_opacity`, `urgent_opacity` | float, `0`–`1` | `1` | State alpha multipliers applied after color alpha. |
+| `animate` | bool | `false` | Continuously rotates and optionally pulses the gradient. |
+| `animate_focused` | bool | `true` | Allows motion while focused. `animate_active` and `animate_on_focus` are aliases. |
+| `animate_inactive` | bool | `true` | Allows motion while unfocused. Disable this for focus-only animation while retaining a static inactive border. |
+| `animate_urgent` | bool | `true` | Allows motion in the urgent state. |
+| `inactive_enabled` | bool | `true` | Shows the inactive border. `focus_only = true` disables it while keeping focused/urgent borders. |
+| `animation_speed` | degrees/second | `28` | Signed rotation speed. |
+| `pulse_amount` | float, `0`–`1` | `0` | Brightness/alpha modulation depth. |
+| `pulse_speed` | cycles/second | `1` | Pulse frequency. |
+| `radius_offset` | float | `0` | Expands or contracts border rounding relative to window rounding. |
+| `antialias` | float, `0`–`8` | `1` | Physical-pixel edge feather. |
+| `floating_only` | bool | `false` | Omits borders from tiled windows. |
+| `fullscreen` | bool | `false` | Allows fullscreen borders. |
+
+```wave
+border {
+    width = 3
+    placement = outside
+    active_from = 22BEEFFF
+    active_to = 61FFD6FF
+    inactive_from = 123746B8
+    inactive_to = 071821B8
+    urgent_from = 7BEFFFFF
+    urgent_to = 586FFFFF
+    angle = 135
+    animate = true
+    animate_focused = true
+    animate_inactive = true
+    animate_urgent = true
+    inactive_enabled = true
+    animation_speed = 45
+    pulse_amount = 0.12
+    pulse_speed = 1.2
+}
+```
+
+Every field can be overridden inside `rule { border { } }`; matching blocks merge field by field. `border = on|off|none` is the rule shorthand.
+
 ### `ripple { }`
 
 Configures the Phase R1 impulse ripple shared by window-map, focus-change, and urgent-attention events. `water_effects = false` disables every ripple regardless of this block. The active ripple list is capped at 16 so rapid mapping cannot grow render state without bound.
@@ -468,13 +546,18 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 | `frost { }` | sub-block | Per-app overrides for every global frost field. Unspecified fields inherit the global block; multiple matching rules merge field by field. |
 | `shadow` | bool / `on`, `off`, `none` | Shorthand to enable or disable compositor shadows for matching windows. |
 | `shadow { }` | sub-block | Per-app overrides for every global shadow field. Unspecified fields inherit the global block; multiple matching rules merge field by field. |
+| `rounding` | radius / `on`, `off`, `none` | Shorthand for per-app rounding radius or enablement. `corners` is an alias. |
+| `clip_to_geometry` | bool | Per-app shorthand for `rounding.clip`. |
+| `rounding { }` | sub-block | Per-app radius, power, clipping, antialias and scope overrides. Matching rules merge field by field. |
+| `border` | bool / `on`, `off`, `none` | Shorthand to enable or disable compositor borders. |
+| `border { }` | sub-block | Per-app border geometry, state-gradient, animation and scope overrides. Matching rules merge field by field. |
 | `position` | `<x>x<y>`, optional | Exact floating placement. No-op unless the window ends up floating. |
 | `size` | `<width>x<height>`, optional | Exact floating size. No-op unless the window ends up floating. |
 | `ripple { }` | sub-block | Per-app overrides for any global ripple field; unspecified fields inherit the global block. `ripple = none` suppresses ripples for matching windows. |
 
 The effective surface opacity is `opacity × state opacity`, clamped to `0`–`1`; for example, `opacity = 0.9` plus `inactive_opacity = 0.8` renders at `0.72`. This compositor opacity affects text and foreground pixels too. For colorless frost with opaque text, keep these at `1.0`, set per-app `frost.tint_alpha = 0.0`, and use the app's own background transparency when available.
 
-Multiple rules can match the same window: scalar fields take the *last* match; `frost { }`, `shadow { }`, and `ripple { }` sub-blocks merge field by field; boolean effects accumulate (any match sets one, never unsets it).
+Multiple rules can match the same window: scalar fields take the *last* match; `frost { }`, `shadow { }`, `rounding { }`, `border { }`, and `ripple { }` sub-blocks merge field by field; boolean effects accumulate (any match sets one, never unsets it).
 
 ```
 rule {

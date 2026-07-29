@@ -10,6 +10,7 @@ mod backend;
 mod capture;
 mod config;
 mod cursor;
+mod decoration;
 mod depth;
 mod error_overlay;
 mod frost_glass;

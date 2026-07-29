@@ -52,7 +52,8 @@ uniform float u_vibrancy;
 uniform float u_vibrancy_darkness;
 uniform vec3 u_tint_color;
 uniform float u_tint_alpha;
-uniform float u_corner_radius;
+uniform vec4 u_corner_radii;
+uniform float u_rounding_power;
 uniform float u_corner_softness;
 varying vec2 v_coords;
 
@@ -70,15 +71,34 @@ float grain(vec2 point) {
 }
 
 float rounded_mask() {
-    float radius = min(u_corner_radius, min(u_size.x, u_size.y) * 0.5);
-    if (radius < 0.01) {
+    vec2 point = v_coords * u_size;
+    vec2 center;
+    float radius;
+    if (point.x < u_corner_radii.x && point.y < u_corner_radii.x) {
+        radius = u_corner_radii.x;
+        center = vec2(radius);
+    } else if (point.x > u_size.x - u_corner_radii.y && point.y < u_corner_radii.y) {
+        radius = u_corner_radii.y;
+        center = vec2(u_size.x - radius, radius);
+    } else if (point.x > u_size.x - u_corner_radii.z && point.y > u_size.y - u_corner_radii.z) {
+        radius = u_corner_radii.z;
+        center = vec2(u_size.x - radius, u_size.y - radius);
+    } else if (point.x < u_corner_radii.w && point.y > u_size.y - u_corner_radii.w) {
+        radius = u_corner_radii.w;
+        center = vec2(radius, u_size.y - radius);
+    } else {
         return 1.0;
     }
-    vec2 point = v_coords * u_size;
-    vec2 half_size = u_size * 0.5;
-    vec2 q = abs(point - half_size) - (half_size - vec2(radius));
-    float distance = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
-    return 1.0 - smoothstep(-u_corner_softness, u_corner_softness, distance);
+    radius = min(radius, min(u_size.x, u_size.y) * 0.5);
+    if (radius < 0.01)
+        return 1.0;
+    vec2 q = abs(point - center) / radius;
+    float distance = pow(
+        pow(q.x, u_rounding_power) + pow(q.y, u_rounding_power),
+        1.0 / u_rounding_power
+    );
+    float antialias = u_corner_softness / radius;
+    return 1.0 - smoothstep(1.0 - antialias, 1.0 + antialias, distance);
 }
 
 void main() {
@@ -175,7 +195,8 @@ pub fn frost_glass_program(
             UniformName::new("u_vibrancy_darkness", UniformType::_1f),
             UniformName::new("u_tint_color", UniformType::_3f),
             UniformName::new("u_tint_alpha", UniformType::_1f),
-            UniformName::new("u_corner_radius", UniformType::_1f),
+            UniformName::new("u_corner_radii", UniformType::_4f),
+            UniformName::new("u_rounding_power", UniformType::_1f),
             UniformName::new("u_corner_softness", UniformType::_1f),
         ],
     ) {
@@ -198,9 +219,13 @@ pub struct FrostGlassElement {
     program: GlesTexProgram,
     texel: [f32; 2],
     config: FrostConfig,
+    corner_radii: [f32; 4],
+    rounding_power: f32,
+    corner_softness: f32,
 }
 
 impl FrostGlassElement {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: Id,
         commit: CommitCounter,
@@ -208,6 +233,9 @@ impl FrostGlassElement {
         geometry: Rectangle<i32, Physical>,
         program: GlesTexProgram,
         config: FrostConfig,
+        corner_radii: [f32; 4],
+        rounding_power: f32,
+        corner_softness: f32,
     ) -> Self {
         let size = texture.size();
         let texel = [1.0 / size.w.max(1) as f32, 1.0 / size.h.max(1) as f32];
@@ -219,6 +247,9 @@ impl FrostGlassElement {
             program,
             texel,
             config,
+            corner_radii,
+            rounding_power,
+            corner_softness,
         }
     }
 }
@@ -288,8 +319,9 @@ impl RenderElement<GlesRenderer> for FrostGlassElement {
                 Uniform::new("u_vibrancy_darkness", self.config.vibrancy_darkness),
                 Uniform::new("u_tint_color", self.config.tint_color),
                 Uniform::new("u_tint_alpha", self.config.tint_alpha),
-                Uniform::new("u_corner_radius", self.config.corner_radius),
-                Uniform::new("u_corner_softness", self.config.corner_softness),
+                Uniform::new("u_corner_radii", self.corner_radii),
+                Uniform::new("u_rounding_power", self.rounding_power),
+                Uniform::new("u_corner_softness", self.corner_softness),
             ],
         )
     }
@@ -307,6 +339,8 @@ mod tests {
         assert!(FROST_GLASS_FRAGMENT_SHADER.contains("uniform vec2 u_texel"));
         assert!(FROST_GLASS_FRAGMENT_SHADER.contains("uniform float u_strength"));
         assert!(FROST_GLASS_FRAGMENT_SHADER.contains("uniform float u_noise"));
+        assert!(FROST_GLASS_FRAGMENT_SHADER.contains("uniform vec4 u_corner_radii"));
+        assert!(FROST_GLASS_FRAGMENT_SHADER.contains("uniform float u_rounding_power"));
         assert!(FROST_GLASS_FRAGMENT_SHADER.contains("rounded_mask()"));
         assert_eq!(
             FROST_GLASS_FRAGMENT_SHADER

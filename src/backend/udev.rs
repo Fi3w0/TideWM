@@ -121,6 +121,10 @@ smithay::backend::renderer::element::render_elements! {
     FrostGlass = crate::frost_glass::FrostGlassElement,
     /// Fixed-cost analytical shadow inserted directly behind each window.
     Shadow = crate::shadow::ShadowElement,
+    /// Client surface tree clipped to compositor-owned rounded geometry.
+    RoundedSurface = crate::decoration::RoundedSurfaceElement,
+    /// Analytical solid/gradient border above its own window.
+    Border = crate::decoration::BorderElement,
     /// Impulse ripple (Phase R1, see ripple.rs), drawn over windows but
     /// below toast/overview/picker/tab-strip chrome. Same renderer-
     /// concrete-ness reason as `WaterGlass` above.

@@ -218,6 +218,11 @@ pub struct Config {
     /// are general compositor decoration, while the water master toggle
     /// only gates TideWM's water/glass/depth identity effects.
     pub shadow: ShadowConfig,
+    /// Compositor-owned window geometry clipping. The same resolved
+    /// radii feed surface clipping, borders, glass and shadows.
+    pub rounding: RoundingConfig,
+    /// Analytical solid/gradient window borders.
+    pub border: BorderConfig,
     /// Global ripple defaults (Phase R1, see `ripple.rs`). Per-app
     /// `rule { ripple { } }` overrides merge over these at resolve time
     /// (`merge_over`). Stays `system_default()` when the user has no
@@ -420,6 +425,8 @@ impl Config {
             depth: raw.depth,
             frost: raw.frost,
             shadow: raw.shadow,
+            rounding: raw.rounding,
+            border: raw.border,
             ripple: raw.ripple,
             cursor_always_visible: raw.cursor_always_visible,
             cursor_hide_after_ms: raw.cursor_hide_after_ms,
@@ -511,6 +518,18 @@ impl Config {
                     None => rule_shadow.clone(),
                 });
             }
+            if let Some(rule_rounding) = &rule.rounding {
+                effective.rounding = Some(match effective.rounding.take() {
+                    Some(existing) => existing.merge_over(rule_rounding),
+                    None => rule_rounding.clone(),
+                });
+            }
+            if let Some(rule_border) = &rule.border {
+                effective.border = Some(match effective.border.take() {
+                    Some(existing) => existing.merge_over(rule_border),
+                    None => rule_border.clone(),
+                });
+            }
             if let Some(rule_ripple) = &rule.ripple {
                 // Per-rule ripple overrides accumulate field-by-field:
                 // an earlier matching rule sets some knobs, a later one
@@ -552,6 +571,8 @@ struct RawConfig {
     depth: DepthConfig,
     frost: FrostConfig,
     shadow: ShadowConfig,
+    rounding: RoundingConfig,
+    border: BorderConfig,
     /// Same shape as `Config::ripple`. Stays `system_default()` if no
     /// `ripple { }` block exists; mutated in place by `apply_ripple_block`.
     ripple: RippleConfig,
@@ -692,6 +713,8 @@ impl Default for RawConfig {
             depth: DepthConfig::default(),
             frost: FrostConfig::default(),
             shadow: ShadowConfig::default(),
+            rounding: RoundingConfig::default(),
+            border: BorderConfig::default(),
             ripple: RippleConfig::system_default(),
             cursor_always_visible: false,
             cursor_hide_after_ms: 0,
@@ -1015,6 +1038,11 @@ pub struct WindowRule {
     /// Per-app analytical-shadow overrides. Unset fields inherit the global
     /// `shadow { }` block; matching rule sub-blocks merge field by field.
     pub shadow: Option<ShadowOverrides>,
+    /// Per-app rounded-geometry overrides. Unset fields inherit the global
+    /// `rounding { }` block; matching rules merge field by field.
+    pub rounding: Option<RoundingOverrides>,
+    /// Per-app analytical-border overrides.
+    pub border: Option<BorderOverrides>,
     /// Exact floating placement (top-left corner), `<x>x<y>` -- the same
     /// syntax `[[output]]`'s `position` already uses. No-op unless the
     /// window ends up floating (from `float`/`pin`/the auto-float
@@ -1321,6 +1349,250 @@ impl ShadowOverrides {
             inactive_opacity: self.inactive_opacity.unwrap_or(base.inactive_opacity),
             urgent_opacity: self.urgent_opacity.unwrap_or(base.urgent_opacity),
             corner_radius: self.corner_radius.unwrap_or(base.corner_radius),
+            floating_only: self.floating_only.unwrap_or(base.floating_only),
+            fullscreen: self.fullscreen.unwrap_or(base.fullscreen),
+        }
+    }
+}
+
+/// Rounded client geometry shared by clipping and compositor decoration.
+/// Radii use CSS order: top-left, top-right, bottom-right, bottom-left.
+#[derive(Debug, Clone)]
+pub struct RoundingConfig {
+    pub enabled: bool,
+    pub radii: [f32; 4],
+    /// Superellipse exponent. 2 is a circle; higher values produce
+    /// Hyprland-style squarer corners while keeping the same radius.
+    pub power: f32,
+    /// Physical-pixel antialias width.
+    pub antialias: f32,
+    /// Clip the actual toplevel surface tree to the rounded geometry.
+    pub clip: bool,
+    pub floating_only: bool,
+    pub fullscreen: bool,
+}
+
+impl Default for RoundingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            radii: [12.0; 4],
+            power: 2.0,
+            antialias: 1.0,
+            clip: true,
+            floating_only: false,
+            fullscreen: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RoundingOverrides {
+    pub enabled: Option<bool>,
+    pub top_left: Option<f32>,
+    pub top_right: Option<f32>,
+    pub bottom_right: Option<f32>,
+    pub bottom_left: Option<f32>,
+    pub power: Option<f32>,
+    pub antialias: Option<f32>,
+    pub clip: Option<bool>,
+    pub floating_only: Option<bool>,
+    pub fullscreen: Option<bool>,
+}
+
+impl RoundingOverrides {
+    pub fn merge_over(&self, other: &Self) -> Self {
+        Self {
+            enabled: other.enabled.or(self.enabled),
+            top_left: other.top_left.or(self.top_left),
+            top_right: other.top_right.or(self.top_right),
+            bottom_right: other.bottom_right.or(self.bottom_right),
+            bottom_left: other.bottom_left.or(self.bottom_left),
+            power: other.power.or(self.power),
+            antialias: other.antialias.or(self.antialias),
+            clip: other.clip.or(self.clip),
+            floating_only: other.floating_only.or(self.floating_only),
+            fullscreen: other.fullscreen.or(self.fullscreen),
+        }
+    }
+
+    pub fn apply_to(&self, base: &RoundingConfig) -> RoundingConfig {
+        RoundingConfig {
+            enabled: self.enabled.unwrap_or(base.enabled),
+            radii: [
+                self.top_left.unwrap_or(base.radii[0]),
+                self.top_right.unwrap_or(base.radii[1]),
+                self.bottom_right.unwrap_or(base.radii[2]),
+                self.bottom_left.unwrap_or(base.radii[3]),
+            ],
+            power: self.power.unwrap_or(base.power),
+            antialias: self.antialias.unwrap_or(base.antialias),
+            clip: self.clip.unwrap_or(base.clip),
+            floating_only: self.floating_only.unwrap_or(base.floating_only),
+            fullscreen: self.fullscreen.unwrap_or(base.fullscreen),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BorderPlacement {
+    Outside,
+    Center,
+    Inside,
+}
+
+/// Fixed-cost rounded border with independent focus-state gradients.
+#[derive(Debug, Clone)]
+pub struct BorderConfig {
+    pub enabled: bool,
+    pub width: f32,
+    pub placement: BorderPlacement,
+    pub active_from: [f32; 4],
+    pub active_to: [f32; 4],
+    pub inactive_from: [f32; 4],
+    pub inactive_to: [f32; 4],
+    pub urgent_from: [f32; 4],
+    pub urgent_to: [f32; 4],
+    pub angle: f32,
+    pub opacity: f32,
+    pub inactive_opacity: f32,
+    pub urgent_opacity: f32,
+    pub animate: bool,
+    pub animate_focused: bool,
+    pub animate_inactive: bool,
+    pub animate_urgent: bool,
+    /// Keep the inactive border visible. Turning this off gives a classic
+    /// focus-ring-only look without affecting urgent borders.
+    pub inactive_enabled: bool,
+    /// Gradient rotation in degrees per second.
+    pub animation_speed: f32,
+    /// Optional sine-wave brightness modulation.
+    pub pulse_amount: f32,
+    pub pulse_speed: f32,
+    /// Added to the rounding radius before the placement expansion.
+    pub radius_offset: f32,
+    pub antialias: f32,
+    pub floating_only: bool,
+    pub fullscreen: bool,
+}
+
+impl Default for BorderConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            width: 2.0,
+            placement: BorderPlacement::Outside,
+            active_from: [46.0 / 255.0, 199.0 / 255.0, 1.0, 0.92],
+            active_to: [92.0 / 255.0, 1.0, 210.0 / 255.0, 0.92],
+            inactive_from: [20.0 / 255.0, 58.0 / 255.0, 72.0 / 255.0, 0.62],
+            inactive_to: [8.0 / 255.0, 28.0 / 255.0, 38.0 / 255.0, 0.62],
+            urgent_from: [94.0 / 255.0, 232.0 / 255.0, 1.0, 1.0],
+            urgent_to: [71.0 / 255.0, 117.0 / 255.0, 1.0, 1.0],
+            angle: 135.0,
+            opacity: 1.0,
+            inactive_opacity: 1.0,
+            urgent_opacity: 1.0,
+            animate: false,
+            animate_focused: true,
+            animate_inactive: true,
+            animate_urgent: true,
+            inactive_enabled: true,
+            animation_speed: 28.0,
+            pulse_amount: 0.0,
+            pulse_speed: 1.0,
+            radius_offset: 0.0,
+            antialias: 1.0,
+            floating_only: false,
+            fullscreen: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BorderOverrides {
+    pub enabled: Option<bool>,
+    pub width: Option<f32>,
+    pub placement: Option<BorderPlacement>,
+    pub active_from: Option<[f32; 4]>,
+    pub active_to: Option<[f32; 4]>,
+    pub inactive_from: Option<[f32; 4]>,
+    pub inactive_to: Option<[f32; 4]>,
+    pub urgent_from: Option<[f32; 4]>,
+    pub urgent_to: Option<[f32; 4]>,
+    pub angle: Option<f32>,
+    pub opacity: Option<f32>,
+    pub inactive_opacity: Option<f32>,
+    pub urgent_opacity: Option<f32>,
+    pub animate: Option<bool>,
+    pub animate_focused: Option<bool>,
+    pub animate_inactive: Option<bool>,
+    pub animate_urgent: Option<bool>,
+    pub inactive_enabled: Option<bool>,
+    pub animation_speed: Option<f32>,
+    pub pulse_amount: Option<f32>,
+    pub pulse_speed: Option<f32>,
+    pub radius_offset: Option<f32>,
+    pub antialias: Option<f32>,
+    pub floating_only: Option<bool>,
+    pub fullscreen: Option<bool>,
+}
+
+impl BorderOverrides {
+    pub fn merge_over(&self, other: &Self) -> Self {
+        Self {
+            enabled: other.enabled.or(self.enabled),
+            width: other.width.or(self.width),
+            placement: other.placement.or(self.placement),
+            active_from: other.active_from.or(self.active_from),
+            active_to: other.active_to.or(self.active_to),
+            inactive_from: other.inactive_from.or(self.inactive_from),
+            inactive_to: other.inactive_to.or(self.inactive_to),
+            urgent_from: other.urgent_from.or(self.urgent_from),
+            urgent_to: other.urgent_to.or(self.urgent_to),
+            angle: other.angle.or(self.angle),
+            opacity: other.opacity.or(self.opacity),
+            inactive_opacity: other.inactive_opacity.or(self.inactive_opacity),
+            urgent_opacity: other.urgent_opacity.or(self.urgent_opacity),
+            animate: other.animate.or(self.animate),
+            animate_focused: other.animate_focused.or(self.animate_focused),
+            animate_inactive: other.animate_inactive.or(self.animate_inactive),
+            animate_urgent: other.animate_urgent.or(self.animate_urgent),
+            inactive_enabled: other.inactive_enabled.or(self.inactive_enabled),
+            animation_speed: other.animation_speed.or(self.animation_speed),
+            pulse_amount: other.pulse_amount.or(self.pulse_amount),
+            pulse_speed: other.pulse_speed.or(self.pulse_speed),
+            radius_offset: other.radius_offset.or(self.radius_offset),
+            antialias: other.antialias.or(self.antialias),
+            floating_only: other.floating_only.or(self.floating_only),
+            fullscreen: other.fullscreen.or(self.fullscreen),
+        }
+    }
+
+    pub fn apply_to(&self, base: &BorderConfig) -> BorderConfig {
+        BorderConfig {
+            enabled: self.enabled.unwrap_or(base.enabled),
+            width: self.width.unwrap_or(base.width),
+            placement: self.placement.unwrap_or(base.placement),
+            active_from: self.active_from.unwrap_or(base.active_from),
+            active_to: self.active_to.unwrap_or(base.active_to),
+            inactive_from: self.inactive_from.unwrap_or(base.inactive_from),
+            inactive_to: self.inactive_to.unwrap_or(base.inactive_to),
+            urgent_from: self.urgent_from.unwrap_or(base.urgent_from),
+            urgent_to: self.urgent_to.unwrap_or(base.urgent_to),
+            angle: self.angle.unwrap_or(base.angle),
+            opacity: self.opacity.unwrap_or(base.opacity),
+            inactive_opacity: self.inactive_opacity.unwrap_or(base.inactive_opacity),
+            urgent_opacity: self.urgent_opacity.unwrap_or(base.urgent_opacity),
+            animate: self.animate.unwrap_or(base.animate),
+            animate_focused: self.animate_focused.unwrap_or(base.animate_focused),
+            animate_inactive: self.animate_inactive.unwrap_or(base.animate_inactive),
+            animate_urgent: self.animate_urgent.unwrap_or(base.animate_urgent),
+            inactive_enabled: self.inactive_enabled.unwrap_or(base.inactive_enabled),
+            animation_speed: self.animation_speed.unwrap_or(base.animation_speed),
+            pulse_amount: self.pulse_amount.unwrap_or(base.pulse_amount),
+            pulse_speed: self.pulse_speed.unwrap_or(base.pulse_speed),
+            radius_offset: self.radius_offset.unwrap_or(base.radius_offset),
+            antialias: self.antialias.unwrap_or(base.antialias),
             floating_only: self.floating_only.unwrap_or(base.floating_only),
             fullscreen: self.fullscreen.unwrap_or(base.fullscreen),
         }
@@ -1885,6 +2157,8 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "depth" => apply_depth_block(&mut raw.depth, body),
         "frost" => apply_frost_block(&mut raw.frost, body),
         "shadow" => apply_shadow_block(&mut raw.shadow, body),
+        "rounding" | "corners" => apply_rounding_block(&mut raw.rounding, body),
+        "border" => apply_border_block(&mut raw.border, body),
         "ripple" => apply_ripple_block(&mut raw.ripple, body),
         "output" => raw.outputs.push(lower_output_block(header, body)),
         "rule" => raw.window_rules.push(lower_window_rule_block(body)),
@@ -2762,6 +3036,209 @@ fn parse_alpha_channel(value: &str) -> Option<f32> {
         .then_some(if value > 1.0 { value / 255.0 } else { value }.clamp(0.0, 1.0))
 }
 
+fn apply_rounding_block(cfg: &mut RoundingConfig, body: &[waves::Entry]) {
+    let mut overrides = RoundingOverrides::default();
+    apply_rounding_override_block(&mut overrides, body);
+    *cfg = overrides.apply_to(cfg);
+}
+
+fn parse_corner_radii(value: &str) -> Option<[f32; 4]> {
+    let values = value
+        .trim_matches(|c| matches!(c, '[' | ']' | '{' | '}'))
+        .split(|c: char| c.is_ascii_whitespace() || c == ',')
+        .filter(|part| !part.is_empty())
+        .map(str::parse::<f32>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    let clamp = |value: f32| value.clamp(0.0, 512.0);
+    match values.as_slice() {
+        [one] if one.is_finite() => Some([clamp(*one); 4]),
+        [tl, tr, br, bl] if values.iter().all(|value| value.is_finite()) => {
+            Some([clamp(*tl), clamp(*tr), clamp(*br), clamp(*bl)])
+        }
+        _ => None,
+    }
+}
+
+fn apply_rounding_override_block(cfg: &mut RoundingOverrides, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `rounding` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "enabled" => match parse_bool(value) {
+                Some(value) => cfg.enabled = Some(value),
+                None => tracing::warn!(value, "Expected rounding.enabled boolean, ignoring"),
+            },
+            "radius" | "radii" | "geometry_corner_radius" | "geometry-corner-radius" => {
+                match parse_corner_radii(value) {
+                    Some([tl, tr, br, bl]) => {
+                        cfg.top_left = Some(tl);
+                        cfg.top_right = Some(tr);
+                        cfg.bottom_right = Some(br);
+                        cfg.bottom_left = Some(bl);
+                    }
+                    None => tracing::warn!(
+                        value,
+                        "Expected one radius or four CSS-order radii, ignoring"
+                    ),
+                }
+            }
+            "top_left" | "top-left" => {
+                cfg.top_left = parse_f32_clamped(value, 0.0, 512.0, "rounding.top_left");
+            }
+            "top_right" | "top-right" => {
+                cfg.top_right = parse_f32_clamped(value, 0.0, 512.0, "rounding.top_right");
+            }
+            "bottom_right" | "bottom-right" => {
+                cfg.bottom_right = parse_f32_clamped(value, 0.0, 512.0, "rounding.bottom_right");
+            }
+            "bottom_left" | "bottom-left" => {
+                cfg.bottom_left = parse_f32_clamped(value, 0.0, 512.0, "rounding.bottom_left");
+            }
+            "power" | "rounding_power" => {
+                cfg.power = parse_f32_clamped(value, 1.0, 10.0, "rounding.power");
+            }
+            "antialias" | "corner_softness" => {
+                cfg.antialias = parse_f32_clamped(value, 0.0, 8.0, "rounding.antialias");
+            }
+            "clip" | "clip_to_geometry" | "clip-to-geometry" => match parse_bool(value) {
+                Some(value) => cfg.clip = Some(value),
+                None => tracing::warn!(value, "Expected rounding.clip boolean, ignoring"),
+            },
+            "floating_only" => match parse_bool(value) {
+                Some(value) => cfg.floating_only = Some(value),
+                None => tracing::warn!(value, "Expected rounding.floating_only boolean, ignoring"),
+            },
+            "fullscreen" => match parse_bool(value) {
+                Some(value) => cfg.fullscreen = Some(value),
+                None => tracing::warn!(value, "Expected rounding.fullscreen boolean, ignoring"),
+            },
+            _ => tracing::warn!(key, "Unknown rounding key, ignoring"),
+        }
+    }
+}
+
+fn apply_border_block(cfg: &mut BorderConfig, body: &[waves::Entry]) {
+    let mut overrides = BorderOverrides::default();
+    apply_border_override_block(&mut overrides, body);
+    *cfg = overrides.apply_to(cfg);
+}
+
+fn parse_f32_clamped(value: &str, min: f32, max: f32, key: &str) -> Option<f32> {
+    match value.parse::<f32>() {
+        Ok(value) if value.is_finite() => Some(value.clamp(min, max)),
+        _ => {
+            tracing::warn!(value, key, "Expected a finite numeric value, ignoring");
+            None
+        }
+    }
+}
+
+fn apply_border_override_block(cfg: &mut BorderOverrides, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `border` block, ignoring");
+            continue;
+        };
+        let color = |value: &str, key: &str| {
+            parse_rgba_color(value).or_else(|| {
+                tracing::warn!(value, key, "Expected an RGBA border color, ignoring");
+                None
+            })
+        };
+        match key.as_str() {
+            "enabled" => match parse_bool(value) {
+                Some(value) => cfg.enabled = Some(value),
+                None => tracing::warn!(value, "Expected border.enabled boolean, ignoring"),
+            },
+            "width" | "size" | "border_size" => {
+                cfg.width = parse_f32_clamped(value, 0.0, 64.0, "border.width");
+            }
+            "placement" | "position" => {
+                cfg.placement = match value.trim().to_ascii_lowercase().as_str() {
+                    "outside" | "outer" => Some(BorderPlacement::Outside),
+                    "center" | "centered" => Some(BorderPlacement::Center),
+                    "inside" | "inner" => Some(BorderPlacement::Inside),
+                    _ => {
+                        tracing::warn!(value, "Expected border placement outside|center|inside");
+                        None
+                    }
+                }
+            }
+            "color" | "active_color" | "active_from" => cfg.active_from = color(value, key),
+            "color_to" | "active_color_to" | "active_to" => cfg.active_to = color(value, key),
+            "inactive_color" | "inactive_from" => cfg.inactive_from = color(value, key),
+            "inactive_color_to" | "inactive_to" => cfg.inactive_to = color(value, key),
+            "urgent_color" | "urgent_from" => cfg.urgent_from = color(value, key),
+            "urgent_color_to" | "urgent_to" => cfg.urgent_to = color(value, key),
+            "angle" | "gradient_angle" => {
+                cfg.angle = parse_f32_clamped(value, -3600.0, 3600.0, "border.angle");
+            }
+            "opacity" | "active_opacity" => {
+                cfg.opacity = parse_f32_clamped(value, 0.0, 1.0, "border.opacity");
+            }
+            "inactive_opacity" => {
+                cfg.inactive_opacity =
+                    parse_f32_clamped(value, 0.0, 1.0, "border.inactive_opacity");
+            }
+            "urgent_opacity" => {
+                cfg.urgent_opacity = parse_f32_clamped(value, 0.0, 1.0, "border.urgent_opacity");
+            }
+            "animate" | "animated" => match parse_bool(value) {
+                Some(value) => cfg.animate = Some(value),
+                None => tracing::warn!(value, "Expected border.animate boolean, ignoring"),
+            },
+            "animate_focused" | "animate_active" | "animate_on_focus" => match parse_bool(value) {
+                Some(value) => cfg.animate_focused = Some(value),
+                None => tracing::warn!(value, "Expected border.animate_focused boolean, ignoring"),
+            },
+            "animate_inactive" | "animate_unfocused" => match parse_bool(value) {
+                Some(value) => cfg.animate_inactive = Some(value),
+                None => tracing::warn!(value, "Expected border.animate_inactive boolean, ignoring"),
+            },
+            "animate_urgent" => match parse_bool(value) {
+                Some(value) => cfg.animate_urgent = Some(value),
+                None => tracing::warn!(value, "Expected border.animate_urgent boolean, ignoring"),
+            },
+            "inactive_enabled" | "show_inactive" => match parse_bool(value) {
+                Some(value) => cfg.inactive_enabled = Some(value),
+                None => tracing::warn!(value, "Expected border.inactive_enabled boolean, ignoring"),
+            },
+            "focus_only" | "active_only" => match parse_bool(value) {
+                Some(value) => cfg.inactive_enabled = Some(!value),
+                None => tracing::warn!(value, "Expected border.focus_only boolean, ignoring"),
+            },
+            "animation_speed" | "rotation_speed" => {
+                cfg.animation_speed =
+                    parse_f32_clamped(value, -720.0, 720.0, "border.animation_speed");
+            }
+            "pulse_amount" | "pulse" => {
+                cfg.pulse_amount = parse_f32_clamped(value, 0.0, 1.0, "border.pulse_amount");
+            }
+            "pulse_speed" => {
+                cfg.pulse_speed = parse_f32_clamped(value, 0.0, 20.0, "border.pulse_speed");
+            }
+            "radius_offset" => {
+                cfg.radius_offset = parse_f32_clamped(value, -128.0, 128.0, "border.radius_offset");
+            }
+            "antialias" | "softness" => {
+                cfg.antialias = parse_f32_clamped(value, 0.0, 8.0, "border.antialias");
+            }
+            "floating_only" => match parse_bool(value) {
+                Some(value) => cfg.floating_only = Some(value),
+                None => tracing::warn!(value, "Expected border.floating_only boolean, ignoring"),
+            },
+            "fullscreen" => match parse_bool(value) {
+                Some(value) => cfg.fullscreen = Some(value),
+                None => tracing::warn!(value, "Expected border.fullscreen boolean, ignoring"),
+            },
+            _ => tracing::warn!(key, "Unknown border key, ignoring"),
+        }
+    }
+}
+
 fn parse_shapes(value: &str) -> Option<Vec<RippleShape>> {
     let mut out = Vec::new();
     for tok in value.split_whitespace() {
@@ -2953,6 +3430,50 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                         "Expected rule shadow to be true/false/on/off/none, ignoring"
                     ),
                 },
+                "rounding" | "corners" => {
+                    let overrides = rule.rounding.get_or_insert_with(RoundingOverrides::default);
+                    match value.trim().to_ascii_lowercase().as_str() {
+                        "true" | "on" => overrides.enabled = Some(true),
+                        "false" | "off" | "none" => overrides.enabled = Some(false),
+                        _ => match parse_corner_radii(value) {
+                            Some([tl, tr, br, bl]) => {
+                                overrides.enabled = Some(true);
+                                overrides.top_left = Some(tl);
+                                overrides.top_right = Some(tr);
+                                overrides.bottom_right = Some(br);
+                                overrides.bottom_left = Some(bl);
+                            }
+                            None => tracing::warn!(
+                                value,
+                                "Expected rule rounding on|off or one/four radii, ignoring"
+                            ),
+                        },
+                    }
+                }
+                "clip_to_geometry" | "clip-to-geometry" => match parse_bool(value) {
+                    Some(value) => {
+                        rule.rounding
+                            .get_or_insert_with(RoundingOverrides::default)
+                            .clip = Some(value);
+                    }
+                    None => tracing::warn!(value, "Expected clip_to_geometry boolean, ignoring"),
+                },
+                "border" => match value.as_str() {
+                    "true" | "on" => {
+                        rule.border
+                            .get_or_insert_with(BorderOverrides::default)
+                            .enabled = Some(true);
+                    }
+                    "false" | "off" | "none" => {
+                        rule.border
+                            .get_or_insert_with(BorderOverrides::default)
+                            .enabled = Some(false);
+                    }
+                    _ => tracing::warn!(
+                        value,
+                        "Expected rule border true/false/on/off/none, ignoring"
+                    ),
+                },
                 "position" => match parse_position(value) {
                     Some(pos) => rule.position = Some(pos),
                     None => {
@@ -2994,6 +3515,18 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                 let mut overrides = ShadowOverrides::default();
                 apply_shadow_override_block(&mut overrides, shadow_body);
                 rule.shadow = Some(overrides);
+            }
+            waves::Entry::Block(keyword, _, rounding_body)
+                if keyword == "rounding" || keyword == "corners" =>
+            {
+                let mut overrides = RoundingOverrides::default();
+                apply_rounding_override_block(&mut overrides, rounding_body);
+                rule.rounding = Some(overrides);
+            }
+            waves::Entry::Block(keyword, _, border_body) if keyword == "border" => {
+                let mut overrides = BorderOverrides::default();
+                apply_border_override_block(&mut overrides, border_body);
+                rule.border = Some(overrides);
             }
             _ => tracing::warn!("Unexpected entry in `rule` block, ignoring"),
         }
@@ -3653,6 +4186,48 @@ bsp_split_bias = auto
 #     fullscreen = false
 # }
 #
+# Rounded toplevel geometry. Radius accepts one value or CSS-order
+# top-left, top-right, bottom-right, bottom-left values.
+# rounding {
+#     enabled = true
+#     radius = 12
+#     power = 2.0                    # 2 circular; higher is more square
+#     antialias = 1.0                # physical pixels
+#     clip = true                    # clips content; popups stay independent
+#     floating_only = false
+#     fullscreen = false
+# }
+#
+# Fixed-cost solid/gradient borders. Equal from/to colors make a solid
+# border. Animation is opt-in because it continuously redraws.
+# border {
+#     enabled = true
+#     width = 2
+#     placement = outside            # outside, center, inside
+#     active_from = 2EC7FFEB
+#     active_to = 5CFFD2EB
+#     inactive_from = 143A489E
+#     inactive_to = 081C269E
+#     urgent_from = 5EE8FFFF
+#     urgent_to = 4775FFFF
+#     angle = 135
+#     opacity = 1.0
+#     inactive_opacity = 1.0
+#     urgent_opacity = 1.0
+#     animate = false
+#     animate_focused = true          # moving focused gradient
+#     animate_inactive = true         # moving unfocused gradient
+#     animate_urgent = true
+#     inactive_enabled = true         # false = focus/urgent ring only
+#     animation_speed = 28           # degrees per second
+#     pulse_amount = 0.0
+#     pulse_speed = 1.0              # cycles per second
+#     radius_offset = 0
+#     antialias = 1.0
+#     floating_only = false
+#     fullscreen = false
+# }
+#
 # Ripple (Phase R1 water identity). All values are the system defaults --
 # copy and uncomment what you want to change. Per-app overrides go in a
 # `rule { ripple { } }` sub-block (see below); the same fields work there.
@@ -3811,6 +4386,18 @@ xwayland {
 #         color = 04131A80
 #         inactive_color = 02080C4D
 #         corner_radius = 12
+#     }
+#     rounding {
+#         radius = 18 18 10 10
+#         power = 2.4
+#         clip = true
+#     }
+#     border {
+#         width = 3
+#         active_from = 2EC7FFFF
+#         active_to = 5CFFD2FF
+#         animate = true
+#         animation_speed = 35
 #     }
 # }
 "#;
@@ -4043,6 +4630,8 @@ mod tests {
             depth: DepthConfig::default(),
             frost: FrostConfig::default(),
             shadow: ShadowConfig::default(),
+            rounding: RoundingConfig::default(),
+            border: BorderConfig::default(),
             ripple: RippleConfig::system_default(),
             cursor_always_visible: false,
             cursor_hide_after_ms: 0,
@@ -4485,6 +5074,74 @@ mod tests {
         assert_eq!(shadow.inactive_opacity, 0.7);
         assert!(!shadow.draw_behind_window);
         assert_eq!(shadow.render_power, 4.0);
+    }
+
+    #[test]
+    fn rounding_and_border_blocks_parse_and_merge_per_window() {
+        let entries = waves::parse(
+            "rounding {\n\
+             radius = 18 14 10 6\n\
+             power = 2.5\n\
+             antialias = 1.25\n\
+             clip = true\n\
+             floating_only = true\n\
+             }\n\
+             border {\n\
+             width = 3.5\n\
+             placement = center\n\
+             active_from = 2EC7FFEE\n\
+             active_to = 5CFFD2EE\n\
+             inactive_color = 10203080\n\
+             urgent_color_to = 4775FFFF\n\
+             angle = 120\n\
+             animate = true\n\
+             animate_focused = true\n\
+             animate_inactive = false\n\
+             animate_urgent = true\n\
+             inactive_enabled = true\n\
+             animation_speed = 42\n\
+             pulse_amount = 0.2\n\
+             pulse_speed = 1.5\n\
+             radius_offset = 2\n\
+             }\n\
+             rule {\n\
+             app_id = kitty\n\
+             rounding {\n\
+             top_right = 22\n\
+             floating_only = false\n\
+             }\n\
+             border {\n\
+             placement = inside\n\
+             inactive_opacity = 0.45\n\
+             }\n\
+             }\n",
+            Path::new("<decoration-test>"),
+        )
+        .unwrap();
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        assert_eq!(config.rounding.radii, [18.0, 14.0, 10.0, 6.0]);
+        assert_eq!(config.rounding.power, 2.5);
+        assert_eq!(config.rounding.antialias, 1.25);
+        assert!(config.rounding.clip);
+        assert!(config.rounding.floating_only);
+        assert_eq!(config.border.width, 3.5);
+        assert_eq!(config.border.placement, BorderPlacement::Center);
+        assert!(config.border.animate);
+        assert!(config.border.animate_focused);
+        assert!(!config.border.animate_inactive);
+        assert!(config.border.animate_urgent);
+        assert!(config.border.inactive_enabled);
+        assert_eq!(config.border.animation_speed, 42.0);
+        assert_eq!(config.border.pulse_amount, 0.2);
+
+        let resolved = config.resolve_window_rules(Some("kitty"), None);
+        let rounding = resolved.rounding.unwrap().apply_to(&config.rounding);
+        let border = resolved.border.unwrap().apply_to(&config.border);
+        assert_eq!(rounding.radii, [18.0, 22.0, 10.0, 6.0]);
+        assert!(!rounding.floating_only);
+        assert_eq!(border.placement, BorderPlacement::Inside);
+        assert_eq!(border.inactive_opacity, 0.45);
+        assert_eq!(border.active_to, config.border.active_to);
     }
 
     #[test]

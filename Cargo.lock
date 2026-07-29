@@ -2510,6 +2510,7 @@ dependencies = [
  "bitflags 2.13.1",
  "blocking",
  "calloop 0.14.4",
+ "cgmath",
  "fontdue",
  "futures-util",
  "notify",

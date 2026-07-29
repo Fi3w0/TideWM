@@ -228,6 +228,10 @@ pub struct Smallvil {
     pub(crate) frost_glass_program: Option<GlesTexProgram>,
     /// Analytical window-shadow shader, compiled once on first use.
     pub(crate) shadow_program: Option<GlesPixelProgram>,
+    /// Texture override used to clip main toplevel surface trees.
+    pub(crate) rounded_surface_program: Option<GlesTexProgram>,
+    /// Analytical solid/gradient window-border shader.
+    pub(crate) border_program: Option<GlesPixelProgram>,
     /// Active impulse ripples (Phase R1, see `ripple.rs`). Each one lives
     /// on a specific output, decays over its own `duration`, and is
     /// `retain`-pruned once `finished()` inside `ripple_frame_elements`
@@ -979,7 +983,20 @@ impl Smallvil {
             .shadows_possible()
             .then(|| crate::shadow::shadow_program(&mut self.shadow_program, renderer))
             .flatten();
-
+        let rounded_program = self
+            .rounding_possible()
+            .then(|| {
+                crate::decoration::rounded_surface_program(
+                    &mut self.rounded_surface_program,
+                    renderer,
+                )
+            })
+            .flatten();
+        let border_program = self
+            .borders_possible()
+            .then(|| crate::decoration::border_program(&mut self.border_program, renderer))
+            .flatten();
+        #[allow(clippy::too_many_arguments)]
         fn append_windows(
             state: &Smallvil,
             renderer: &mut GlesRenderer,
@@ -987,6 +1004,8 @@ impl Smallvil {
             fullscreen: bool,
             skip: &[WlSurface],
             shadow_program: Option<&GlesPixelProgram>,
+            rounded_program: Option<&GlesTexProgram>,
+            border_program: Option<&GlesPixelProgram>,
             result: &mut Vec<crate::backend::udev::OutputRenderElements>,
         ) {
             let Some(output_geo) = state.space.output_geometry(output) else {
@@ -1014,18 +1033,39 @@ impl Smallvil {
                         .map(|surface| state.depth_live_alpha(surface))
                         .unwrap_or(1.0);
                 let render_location = location - output_geo.loc - window.geometry().loc;
-                result.extend(
-                    window
-                        .render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
-                            renderer,
-                            render_location.to_physical_precise_round(output_scale),
-                            scale,
-                            alpha,
-                        )
-                        .into_iter()
-                        .map(SpaceRenderElements::Surface)
-                        .map(crate::backend::udev::OutputRenderElements::Space),
-                );
+                if let Some(surface) = surface {
+                    let (popups, main) = state.window_surface_elements(
+                        renderer,
+                        output,
+                        window,
+                        surface,
+                        render_location,
+                        alpha,
+                        rounded_program.cloned(),
+                    );
+                    result.extend(popups);
+                    if let Some(program) = border_program {
+                        if let Some(border) =
+                            state.window_border_element(output, window, surface, program.clone())
+                        {
+                            result.push(crate::backend::udev::OutputRenderElements::Border(border));
+                        }
+                    }
+                    result.extend(main);
+                } else {
+                    result.extend(
+                        window
+                            .render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
+                                renderer,
+                                render_location.to_physical_precise_round(output_scale),
+                                scale,
+                                alpha,
+                            )
+                            .into_iter()
+                            .map(SpaceRenderElements::Surface)
+                            .map(crate::backend::udev::OutputRenderElements::Space),
+                    );
+                }
                 if let (Some(surface), Some(program)) = (surface, shadow_program) {
                     if let Some(shadow) =
                         state.window_shadow_element(output, window, surface, program.clone())
@@ -1077,6 +1117,8 @@ impl Smallvil {
             true,
             skip,
             shadow_program.as_ref(),
+            rounded_program.as_ref(),
+            border_program.as_ref(),
             &mut result,
         );
         append_layers(
@@ -1093,6 +1135,8 @@ impl Smallvil {
             false,
             skip,
             shadow_program.as_ref(),
+            rounded_program.as_ref(),
+            border_program.as_ref(),
             &mut result,
         );
         append_layers(
@@ -1418,6 +1462,8 @@ impl Smallvil {
             water_glass_program: None,
             frost_glass_program: None,
             shadow_program: None,
+            rounded_surface_program: None,
+            border_program: None,
             ripples: Vec::new(),
             ripple_program: None,
             window_depths: HashMap::new(),
@@ -2805,6 +2851,7 @@ impl Smallvil {
             .is_some_and(|toast| toast.needs_continued_redraw())
             || self.ripples.iter().any(|r| !r.finished())
             || !self.workspace_transitions.is_empty()
+            || self.animated_borders_possible()
     }
 
     #[cfg(feature = "accessibility")]
@@ -3051,6 +3098,217 @@ impl Smallvil {
             .unwrap_or_else(|| self.config.shadow.clone())
     }
 
+    fn rounding_config_for_surface(&self, surface: &WlSurface) -> crate::config::RoundingConfig {
+        let (app_id, title) = self.toplevel_identity(surface);
+        let rule = self
+            .config
+            .resolve_window_rules(app_id.as_deref(), title.as_deref());
+        rule.rounding
+            .as_ref()
+            .map(|overrides| overrides.apply_to(&self.config.rounding))
+            .unwrap_or_else(|| self.config.rounding.clone())
+    }
+
+    fn border_config_for_surface(&self, surface: &WlSurface) -> crate::config::BorderConfig {
+        let (app_id, title) = self.toplevel_identity(surface);
+        let rule = self
+            .config
+            .resolve_window_rules(app_id.as_deref(), title.as_deref());
+        rule.border
+            .as_ref()
+            .map(|overrides| overrides.apply_to(&self.config.border))
+            .unwrap_or_else(|| self.config.border.clone())
+    }
+
+    fn rounding_applies(
+        &self,
+        surface: &WlSurface,
+        config: &crate::config::RoundingConfig,
+    ) -> bool {
+        config.enabled
+            && config.clip
+            && (!config.floating_only || self.floating_workspace.contains_key(surface))
+            && (!self.fullscreen.contains_key(surface) || config.fullscreen)
+            && config.radii.iter().any(|radius| *radius > 0.0)
+    }
+
+    fn rounding_possible(&self) -> bool {
+        (self.config.rounding.enabled && self.config.rounding.clip)
+            || self.config.window_rules.iter().any(|rule| {
+                rule.rounding.as_ref().is_some_and(|rounding| {
+                    rounding.enabled == Some(true) || rounding.clip == Some(true)
+                })
+            })
+    }
+
+    fn borders_possible(&self) -> bool {
+        self.config.border.enabled
+            || self.config.window_rules.iter().any(|rule| {
+                rule.border
+                    .as_ref()
+                    .and_then(|border| border.enabled)
+                    .unwrap_or(false)
+            })
+    }
+
+    fn animated_borders_possible(&self) -> bool {
+        self.space.elements().any(|window| {
+            let Some(surface) = window.toplevel().map(|toplevel| toplevel.wl_surface()) else {
+                return false;
+            };
+            let border = self.border_config_for_surface(surface);
+            let focused = matches!(
+                &self.keyboard_focus,
+                KeyboardFocusTarget::Window(focused) if focused == surface
+            );
+            let urgent = self.urgent.contains(surface);
+            let state_animated = if urgent {
+                border.animate_urgent
+            } else if focused {
+                border.animate_focused
+            } else {
+                border.animate_inactive
+            };
+            border.enabled
+                && border.width > 0.0
+                && border.animate
+                && state_animated
+                && (focused || urgent || border.inactive_enabled)
+                && (!border.floating_only || self.floating_workspace.contains_key(surface))
+                && (!self.fullscreen.contains_key(surface) || border.fullscreen)
+        })
+    }
+
+    /// Popups remain unclipped above compositor decoration; only the
+    /// toplevel's own surface/subsurface tree is rounded.
+    #[allow(clippy::too_many_arguments)]
+    fn window_surface_elements(
+        &self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+        window: &Window,
+        surface: &WlSurface,
+        render_location: Point<i32, Logical>,
+        alpha: f32,
+        rounded_program: Option<GlesTexProgram>,
+    ) -> (
+        Vec<crate::backend::udev::OutputRenderElements>,
+        Vec<crate::backend::udev::OutputRenderElements>,
+    ) {
+        let output_scale = output.current_scale().fractional_scale();
+        let scale = Scale::from(output_scale);
+        let physical_location = render_location.to_physical_precise_round(output_scale);
+        let mut popups = Vec::new();
+        for (popup, popup_offset) in PopupManager::popups_for_surface(surface) {
+            let offset = (window.geometry().loc + popup_offset - popup.geometry().loc)
+                .to_physical_precise_round(scale);
+            popups.extend(
+                render_elements_from_surface_tree(
+                    renderer,
+                    popup.wl_surface(),
+                    physical_location + offset,
+                    scale,
+                    alpha,
+                    Kind::Unspecified,
+                )
+                .into_iter()
+                .map(SpaceRenderElements::Surface)
+                .map(crate::backend::udev::OutputRenderElements::Space),
+            );
+        }
+
+        let rounding = self.rounding_config_for_surface(surface);
+        let clip = self.rounding_applies(surface, &rounding);
+        let physical_rect = self
+            .space
+            .output_geometry(output)
+            .and_then(|output_geo| {
+                self.space
+                    .element_location(window)
+                    .map(|loc| loc - output_geo.loc)
+            })
+            .map(|loc| Rectangle::new(loc, window.geometry().size))
+            .map(|rect| rect.to_physical_precise_round(output_scale));
+        let radii = rounding.radii.map(|radius| radius * output_scale as f32);
+        let main = render_elements_from_surface_tree(
+            renderer,
+            surface,
+            physical_location,
+            scale,
+            alpha,
+            Kind::Unspecified,
+        )
+        .into_iter()
+        .map(|element| {
+            if let (true, Some(program), Some(geometry)) =
+                (clip, rounded_program.clone(), physical_rect)
+            {
+                crate::backend::udev::OutputRenderElements::RoundedSurface(
+                    crate::decoration::RoundedSurfaceElement::new(
+                        element,
+                        program,
+                        geometry,
+                        radii,
+                        rounding.power,
+                        rounding.antialias * output_scale as f32,
+                        scale,
+                    ),
+                )
+            } else {
+                crate::backend::udev::OutputRenderElements::Space(SpaceRenderElements::Surface(
+                    element,
+                ))
+            }
+        })
+        .collect();
+        (popups, main)
+    }
+
+    fn window_border_element(
+        &self,
+        output: &Output,
+        window: &Window,
+        surface: &WlSurface,
+        program: GlesPixelProgram,
+    ) -> Option<crate::decoration::BorderElement> {
+        let border = self.border_config_for_surface(surface);
+        let fullscreen = self.fullscreen.contains_key(surface);
+        let focused = matches!(
+            &self.keyboard_focus,
+            KeyboardFocusTarget::Window(focused) if focused == surface
+        );
+        let urgent = self.urgent.contains(surface);
+        if !border.enabled
+            || border.width <= 0.0
+            || (!focused && !urgent && !border.inactive_enabled)
+            || (border.floating_only && !self.floating_workspace.contains_key(surface))
+            || (fullscreen && !border.fullscreen)
+        {
+            return None;
+        }
+        let output_geo = self.space.output_geometry(output)?;
+        let output_scale = output.current_scale().fractional_scale();
+        let location = self.space.element_location(window)?;
+        let logical_rect = Rectangle::new(location - output_geo.loc, window.geometry().size);
+        let physical_rect = logical_rect.to_physical_precise_round(output_scale);
+        let mut rounding = self.rounding_config_for_surface(surface);
+        if !rounding.enabled {
+            rounding.radii = [0.0; 4];
+        }
+        let id = smithay::backend::renderer::element::Id::from(surface);
+        Some(crate::decoration::BorderElement::new(
+            &id,
+            physical_rect,
+            output_scale,
+            program,
+            &rounding,
+            &border,
+            focused,
+            urgent,
+            self.start_time.elapsed().as_secs_f32(),
+        ))
+    }
+
     fn shadows_possible(&self) -> bool {
         self.config.shadow.enabled
             || self.config.window_rules.iter().any(|rule| {
@@ -3068,7 +3326,13 @@ impl Smallvil {
         surface: &WlSurface,
         program: GlesPixelProgram,
     ) -> Option<crate::shadow::ShadowElement> {
-        let config = self.shadow_config_for_surface(surface);
+        let mut config = self.shadow_config_for_surface(surface);
+        if config.corner_radius == 0.0 {
+            let rounding = self.rounding_config_for_surface(surface);
+            if rounding.enabled {
+                config.corner_radius = rounding.radii[0];
+            }
+        }
         let fullscreen = self.fullscreen.contains_key(surface);
         if !config.enabled
             || (config.floating_only && !self.floating_workspace.contains_key(surface))
@@ -3254,12 +3518,22 @@ impl Smallvil {
             .shadows_possible()
             .then(|| crate::shadow::shadow_program(&mut self.shadow_program, renderer))
             .flatten();
+        let rounded_program = self
+            .rounding_possible()
+            .then(|| {
+                crate::decoration::rounded_surface_program(
+                    &mut self.rounded_surface_program,
+                    renderer,
+                )
+            })
+            .flatten();
+        let border_program = self
+            .borders_possible()
+            .then(|| crate::decoration::border_program(&mut self.border_program, renderer))
+            .flatten();
         let Some(output_geo) = self.space.output_geometry(output) else {
             return result;
         };
-        let output_scale = output.current_scale().fractional_scale();
-        let scale = Scale::from(output_scale);
-
         for surface in surfaces {
             let Some(capture) = self.backdrop_textures.get(surface) else {
                 continue;
@@ -3276,21 +3550,43 @@ impl Smallvil {
             let alpha = self.window_render_alpha(surface) * self.depth_live_alpha(surface);
             let render_location = location - output_geo.loc - window.geometry().loc;
 
-            result.extend(
-                window
-                    .render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
-                        renderer,
-                        render_location.to_physical_precise_round(output_scale),
-                        scale,
-                        alpha,
-                    )
-                    .into_iter()
-                    .map(SpaceRenderElements::Surface)
-                    .map(crate::backend::udev::OutputRenderElements::Space),
+            let (popups, main) = self.window_surface_elements(
+                renderer,
+                output,
+                &window,
+                surface,
+                render_location,
+                alpha,
+                rounded_program.clone(),
             );
+            result.extend(popups);
+            if let Some(program) = &border_program {
+                if let Some(border) =
+                    self.window_border_element(output, &window, surface, program.clone())
+                {
+                    result.push(crate::backend::udev::OutputRenderElements::Border(border));
+                }
+            }
+            result.extend(main);
             match self.window_glass_modes.get(surface).copied() {
                 Some(crate::config::GlassMode::Frost) => {
                     if let Some(program) = &frost_program {
+                        let frost = self.frost_config_for_surface(surface);
+                        let rounding = self.rounding_config_for_surface(surface);
+                        let output_scale = output.current_scale().fractional_scale() as f32;
+                        let (corner_radii, rounding_power, corner_softness) = if rounding.enabled {
+                            (
+                                rounding.radii.map(|radius| radius * output_scale),
+                                rounding.power,
+                                rounding.antialias * output_scale,
+                            )
+                        } else {
+                            (
+                                [frost.corner_radius * output_scale; 4],
+                                2.0,
+                                frost.corner_softness * output_scale,
+                            )
+                        };
                         result.push(crate::backend::udev::OutputRenderElements::FrostGlass(
                             crate::frost_glass::FrostGlassElement::new(
                                 capture.id.clone(),
@@ -3298,7 +3594,10 @@ impl Smallvil {
                                 capture.texture.clone(),
                                 physical_rect,
                                 program.clone(),
-                                self.frost_config_for_surface(surface),
+                                frost,
+                                corner_radii,
+                                rounding_power,
+                                corner_softness,
                             ),
                         ));
                     }
@@ -3306,6 +3605,14 @@ impl Smallvil {
                 Some(crate::config::GlassMode::Plain) => {}
                 Some(crate::config::GlassMode::Water) | None => {
                     if let Some(program) = &water_program {
+                        let rounding = self.rounding_config_for_surface(surface);
+                        let corner_radii = if rounding.enabled {
+                            rounding.radii.map(|radius| {
+                                radius * output.current_scale().fractional_scale() as f32
+                            })
+                        } else {
+                            [0.0; 4]
+                        };
                         result.push(crate::backend::udev::OutputRenderElements::WaterGlass(
                             crate::water_glass::WaterGlassElement::new(
                                 capture.id.clone(),
@@ -3313,6 +3620,10 @@ impl Smallvil {
                                 capture.texture.clone(),
                                 physical_rect,
                                 program.clone(),
+                                corner_radii,
+                                rounding.power,
+                                rounding.antialias
+                                    * output.current_scale().fractional_scale() as f32,
                             ),
                         ));
                     }

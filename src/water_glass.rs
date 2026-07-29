@@ -17,7 +17,10 @@
 use smithay::{
     backend::renderer::{
         element::{Element, Id, Kind, RenderElement},
-        gles::{GlesError, GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture},
+        gles::{
+            GlesError, GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture, Uniform, UniformName,
+            UniformType,
+        },
         utils::CommitCounter,
         Texture,
     },
@@ -51,11 +54,44 @@ uniform sampler2D tex;
 #endif
 
 uniform float alpha;
+uniform vec2 u_size;
+uniform vec4 u_corner_radii;
+uniform float u_rounding_power;
+uniform float u_antialias;
 varying vec2 v_coords;
 
 #if defined(DEBUG_FLAGS)
 uniform float tint;
 #endif
+
+float rounded_coverage(vec2 point) {
+    vec2 center;
+    float radius;
+    if (point.x < u_corner_radii.x && point.y < u_corner_radii.x) {
+        radius = u_corner_radii.x;
+        center = vec2(radius);
+    } else if (point.x > u_size.x - u_corner_radii.y && point.y < u_corner_radii.y) {
+        radius = u_corner_radii.y;
+        center = vec2(u_size.x - radius, radius);
+    } else if (point.x > u_size.x - u_corner_radii.z && point.y > u_size.y - u_corner_radii.z) {
+        radius = u_corner_radii.z;
+        center = vec2(u_size.x - radius, u_size.y - radius);
+    } else if (point.x < u_corner_radii.w && point.y > u_size.y - u_corner_radii.w) {
+        radius = u_corner_radii.w;
+        center = vec2(radius, u_size.y - radius);
+    } else {
+        return 1.0;
+    }
+    if (radius < 0.01)
+        return 1.0;
+    vec2 q = abs(point - center) / radius;
+    float d = pow(
+        pow(q.x, u_rounding_power) + pow(q.y, u_rounding_power),
+        1.0 / u_rounding_power
+    );
+    float aa = u_antialias / radius;
+    return 1.0 - smoothstep(1.0 - aa, 1.0 + aa, d);
+}
 
 void main() {
     vec2 distorted = v_coords + vec2(
@@ -70,6 +106,7 @@ void main() {
 #else
     color = color * alpha;
 #endif
+    color *= rounded_coverage(v_coords * u_size);
 
 #if defined(DEBUG_FLAGS)
     if (tint == 1.0)
@@ -92,7 +129,15 @@ pub fn water_glass_program(
     if let Some(program) = cache {
         return Some(program.clone());
     }
-    match renderer.compile_custom_texture_shader(WATER_GLASS_FRAGMENT_SHADER, &[]) {
+    match renderer.compile_custom_texture_shader(
+        WATER_GLASS_FRAGMENT_SHADER,
+        &[
+            UniformName::new("u_size", UniformType::_2f),
+            UniformName::new("u_corner_radii", UniformType::_4f),
+            UniformName::new("u_rounding_power", UniformType::_1f),
+            UniformName::new("u_antialias", UniformType::_1f),
+        ],
+    ) {
         Ok(program) => {
             *cache = Some(program.clone());
             Some(program)
@@ -117,15 +162,22 @@ pub struct WaterGlassElement {
     texture: GlesTexture,
     geometry: Rectangle<i32, Physical>,
     program: GlesTexProgram,
+    corner_radii: [f32; 4],
+    rounding_power: f32,
+    antialias: f32,
 }
 
 impl WaterGlassElement {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: Id,
         commit: CommitCounter,
         texture: GlesTexture,
         geometry: Rectangle<i32, Physical>,
         program: GlesTexProgram,
+        corner_radii: [f32; 4],
+        rounding_power: f32,
+        antialias: f32,
     ) -> Self {
         Self {
             id,
@@ -133,6 +185,9 @@ impl WaterGlassElement {
             texture,
             geometry,
             program,
+            corner_radii,
+            rounding_power,
+            antialias,
         }
     }
 }
@@ -188,7 +243,18 @@ impl RenderElement<GlesRenderer> for WaterGlassElement {
             Transform::Normal,
             self.alpha(),
             Some(&self.program),
-            &[],
+            &[
+                Uniform::new(
+                    "u_size",
+                    [
+                        self.geometry.size.w.max(1) as f32,
+                        self.geometry.size.h.max(1) as f32,
+                    ],
+                ),
+                Uniform::new("u_corner_radii", self.corner_radii),
+                Uniform::new("u_rounding_power", self.rounding_power),
+                Uniform::new("u_antialias", self.antialias),
+            ],
         )
     }
 }
@@ -207,5 +273,6 @@ mod tests {
         assert!(WATER_GLASS_FRAGMENT_SHADER.contains("uniform sampler2D tex"));
         assert!(WATER_GLASS_FRAGMENT_SHADER.contains("uniform float alpha"));
         assert!(WATER_GLASS_FRAGMENT_SHADER.contains("varying vec2 v_coords"));
+        assert!(WATER_GLASS_FRAGMENT_SHADER.contains("u_corner_radii"));
     }
 }
