@@ -1528,6 +1528,15 @@ impl Smallvil {
         if depth.note_attention() {
             self.depth_schematics.remove(surface);
             self.request_redraw();
+            // The periodic `update_window_depths` tick is the only other
+            // place tier changes, and it emits this same event -- without
+            // it here, a subscriber sees a window sink but never sees it
+            // resurface, since by the next tick `old_tier` and the new
+            // tier are already equal (both zero) and no change is detected.
+            self.emit_ipc_event(crate::ipc::IpcEvent::DepthChanged {
+                surface: surface.clone(),
+                tier: 0,
+            });
         }
     }
 
