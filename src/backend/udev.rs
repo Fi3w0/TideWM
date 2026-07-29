@@ -123,6 +123,15 @@ smithay::backend::renderer::element::render_elements! {
     Shadow = crate::shadow::ShadowElement,
     /// Client surface tree clipped to compositor-owned rounded geometry.
     RoundedSurface = crate::decoration::RoundedSurfaceElement,
+    /// Surface/subsurface or popup scaled around its window's top-left while
+    /// a layout resize interpolates toward the new logical geometry.
+    AnimatedSurface = smithay::backend::renderer::element::utils::RescaleRenderElement<
+        WaylandSurfaceRenderElement<GlesRenderer>
+    >,
+    /// Rounded main surface with the same allocation-free resize transform.
+    AnimatedRoundedSurface = smithay::backend::renderer::element::utils::RescaleRenderElement<
+        crate::decoration::RoundedSurfaceElement
+    >,
     /// Last imported client textures retained for the bounded close
     /// animation after the live Wayland surface has unmapped.
     WindowSnapshot = crate::window_animation::WindowSnapshotElement,

@@ -1863,6 +1863,9 @@ pub enum WindowAnimationOrigin {
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowAnimationConfig {
     pub enabled: bool,
+    /// Interpolate the outer window size during layout movement. Lifecycle
+    /// transitions currently use position/opacity only.
+    pub animate_size: bool,
     pub duration_ms: u32,
     pub curve: WindowAnimationCurve,
     /// Separate alpha clock/easing. `None` follows `duration_ms`/`curve`.
@@ -1902,6 +1905,7 @@ impl WindowAnimationsConfig {
             slowdown: 1.0,
             open: WindowAnimationConfig {
                 enabled: true,
+                animate_size: false,
                 duration_ms: 300,
                 curve: WindowAnimationCurve::CubicBezier([0.05, 0.9, 0.1, 1.1]),
                 opacity_duration_ms: Some(400),
@@ -1917,6 +1921,7 @@ impl WindowAnimationsConfig {
             },
             close: WindowAnimationConfig {
                 enabled: true,
+                animate_size: false,
                 duration_ms: 300,
                 curve: WindowAnimationCurve::CubicBezier([0.65, 0.05, 0.36, 1.0]),
                 opacity_duration_ms: Some(400),
@@ -1932,6 +1937,7 @@ impl WindowAnimationsConfig {
             },
             movement: WindowAnimationConfig {
                 enabled: true,
+                animate_size: true,
                 duration_ms: 400,
                 curve: WindowAnimationCurve::CubicBezier([0.65, 0.05, 0.36, 1.0]),
                 opacity_duration_ms: None,
@@ -1957,6 +1963,7 @@ impl WindowAnimationsConfig {
             slowdown: 1.0,
             open: WindowAnimationConfig {
                 enabled: true,
+                animate_size: false,
                 duration_ms: 190,
                 curve: WindowAnimationCurve::CubicBezier([0.16, 1.0, 0.3, 1.0]),
                 opacity_duration_ms: None,
@@ -1972,6 +1979,7 @@ impl WindowAnimationsConfig {
             },
             close: WindowAnimationConfig {
                 enabled: true,
+                animate_size: false,
                 duration_ms: 160,
                 curve: WindowAnimationCurve::CubicOut,
                 opacity_duration_ms: None,
@@ -1987,6 +1995,7 @@ impl WindowAnimationsConfig {
             },
             movement: WindowAnimationConfig {
                 enabled: true,
+                animate_size: true,
                 duration_ms: 190,
                 curve: WindowAnimationCurve::CubicBezier([0.16, 1.0, 0.3, 1.0]),
                 opacity_duration_ms: None,
@@ -2865,6 +2874,13 @@ fn apply_window_animation_block(cfg: &mut WindowAnimationConfig, body: &[waves::
                 None => tracing::warn!(
                     value,
                     "Expected `true` or `false` for animation enabled, ignoring"
+                ),
+            },
+            "animate_size" | "animate-size" | "resize" | "size" => match parse_bool(value) {
+                Some(value) => cfg.animate_size = value,
+                None => tracing::warn!(
+                    value,
+                    "Expected `true` or `false` for animate_size, ignoring"
                 ),
             },
             "duration_ms" | "duration" => match value.parse::<u32>() {
@@ -5017,6 +5033,7 @@ bsp_split_bias = auto
 #     }
 #     movement {
 #         enabled = true
+#         animate_size = true          # scale position and size together
 #         duration_ms = 190
 #         curve = cubic-bezier(0.16,1.0,0.3,1.0)
 #         effect = tide
@@ -5928,6 +5945,7 @@ mod tests {
              curve = ease-out-quad\n\
              }\n\
              movement {\n\
+             animate_size = false\n\
              duration = 360\n\
              curve = exp-out\n\
              }\n\
@@ -5962,6 +5980,7 @@ mod tests {
         assert_eq!(animations.close.effect, WindowAnimationEffect::Wave);
         assert_eq!(animations.movement.duration_ms, 360);
         assert_eq!(animations.movement.curve, WindowAnimationCurve::ExpOut);
+        assert!(!animations.movement.animate_size);
     }
 
     #[test]

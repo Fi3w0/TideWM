@@ -14,6 +14,7 @@ use smithay::{
                 memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
                 solid::{SolidColorBuffer, SolidColorRenderElement},
                 surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
+                utils::RescaleRenderElement,
                 AsRenderElements, Kind, RenderElementStates,
             },
             gles::{GlesPixelProgram, GlesRenderer, GlesTexProgram, GlesTexture},
@@ -995,6 +996,7 @@ impl Smallvil {
         if let Some(movement) = self.window_move_animations.get(surface) {
             let current = movement.sample();
             sample.offset += current.offset;
+            sample.size = current.size;
             sample.opacity *= current.opacity;
         }
         sample
@@ -1051,25 +1053,33 @@ impl Smallvil {
     fn start_window_move_animation(
         &mut self,
         surface: &WlSurface,
-        old_location: Point<i32, Logical>,
-        new_location: Point<i32, Logical>,
+        old_rect: Rectangle<i32, Logical>,
+        new_rect: Rectangle<i32, Logical>,
     ) {
         let animations = &self.config.animations;
         if !animations.enabled || !animations.movement.enabled {
             self.window_move_animations.remove(surface);
             return;
         }
-        let current_offset = self
+        let current = self
             .window_move_animations
             .get(surface)
             .filter(|animation| !animation.finished())
-            .map(|animation| animation.sample().offset)
+            .map(|animation| animation.sample());
+        let current_offset = current
+            .map(|sample| sample.offset)
             .unwrap_or_else(|| Point::from((0.0, 0.0)));
+        let current_size = current
+            .and_then(|sample| sample.size)
+            .unwrap_or_else(|| old_rect.size.to_f64());
         let from_offset = Point::from((
-            (old_location.x - new_location.x) as f64 + current_offset.x,
-            (old_location.y - new_location.y) as f64 + current_offset.y,
+            (old_rect.loc.x - new_rect.loc.x) as f64 + current_offset.x,
+            (old_rect.loc.y - new_rect.loc.y) as f64 + current_offset.y,
         ));
-        if from_offset.x.abs() < 0.01 && from_offset.y.abs() < 0.01 {
+        let size_changed = animations.movement.animate_size
+            && ((current_size.w - new_rect.size.w as f64).abs() >= 0.01
+                || (current_size.h - new_rect.size.h as f64).abs() >= 0.01);
+        if from_offset.x.abs() < 0.01 && from_offset.y.abs() < 0.01 && !size_changed {
             return;
         }
         self.window_move_animations.insert(
@@ -1078,6 +1088,8 @@ impl Smallvil {
                 &animations.movement,
                 animations.slowdown,
                 from_offset,
+                current_size,
+                new_rect.size.to_f64(),
             ),
         );
         self.request_redraw();
@@ -1216,6 +1228,7 @@ impl Smallvil {
                     visual.offset.x.round() as i32,
                     visual.offset.y.round() as i32,
                 ));
+                let visual_size = visual.rounded_size_or(window.geometry().size);
                 let render_location =
                     location - output_geo.loc - window.geometry().loc + visual_offset;
                 if let Some(surface) = surface {
@@ -1225,6 +1238,7 @@ impl Smallvil {
                         window,
                         surface,
                         render_location,
+                        visual_size,
                         alpha,
                         rounded_program.cloned(),
                     );
@@ -1235,8 +1249,7 @@ impl Smallvil {
                             window,
                             surface,
                             program.clone(),
-                            visual_offset,
-                            visual.opacity,
+                            visual,
                         ) {
                             result.push(crate::backend::udev::OutputRenderElements::Border(border));
                         }
@@ -1262,8 +1275,7 @@ impl Smallvil {
                         window,
                         surface,
                         program.clone(),
-                        visual_offset,
-                        visual.opacity,
+                        visual,
                     ) {
                         result.push(crate::backend::udev::OutputRenderElements::Shadow(shadow));
                     }
@@ -1422,6 +1434,7 @@ impl Smallvil {
                     visual.offset.x.round() as i32,
                     visual.offset.y.round() as i32,
                 ));
+                rect.size = visual.rounded_size_or(rect.size);
                 Some((
                     surface,
                     Rectangle::new(rect.loc - output_geo.loc, rect.size),
@@ -3426,6 +3439,7 @@ impl Smallvil {
         window: &Window,
         surface: &WlSurface,
         render_location: Point<i32, Logical>,
+        visual_size: Size<i32, Logical>,
         alpha: f32,
         rounded_program: Option<GlesTexProgram>,
     ) -> (
@@ -3435,33 +3449,44 @@ impl Smallvil {
         let output_scale = output.current_scale().fractional_scale();
         let scale = Scale::from(output_scale);
         let physical_location = render_location.to_physical_precise_round(output_scale);
+        let natural_size = window.geometry().size;
+        let resize_scale = Scale::from((
+            visual_size.w as f64 / natural_size.w.max(1) as f64,
+            visual_size.h as f64 / natural_size.h.max(1) as f64,
+        ));
+        let resize_active =
+            (resize_scale.x - 1.0).abs() > 0.0001 || (resize_scale.y - 1.0).abs() > 0.0001;
+        let physical_anchor =
+            (render_location + window.geometry().loc).to_physical_precise_round(output_scale);
         let mut popups = Vec::new();
         for (popup, popup_offset) in PopupManager::popups_for_surface(surface) {
             let offset = (window.geometry().loc + popup_offset - popup.geometry().loc)
                 .to_physical_precise_round(scale);
-            popups.extend(
-                render_elements_from_surface_tree(
-                    renderer,
-                    popup.wl_surface(),
-                    physical_location + offset,
-                    scale,
-                    alpha,
-                    Kind::Unspecified,
-                )
-                .into_iter()
-                .map(SpaceRenderElements::Surface)
-                .map(crate::backend::udev::OutputRenderElements::Space),
-            );
+            for element in render_elements_from_surface_tree(
+                renderer,
+                popup.wl_surface(),
+                physical_location + offset,
+                scale,
+                alpha,
+                Kind::Unspecified,
+            ) {
+                if resize_active {
+                    popups.push(crate::backend::udev::OutputRenderElements::AnimatedSurface(
+                        RescaleRenderElement::from_element(element, physical_anchor, resize_scale),
+                    ));
+                } else {
+                    popups.push(crate::backend::udev::OutputRenderElements::Space(
+                        SpaceRenderElements::Surface(element),
+                    ));
+                }
+            }
         }
 
         let rounding = self.rounding_config_for_surface(surface);
         let clip = self.rounding_applies(surface, &rounding);
         let physical_rect = Some(
-            Rectangle::new(
-                render_location + window.geometry().loc,
-                window.geometry().size,
-            )
-            .to_physical_precise_round(output_scale),
+            Rectangle::new(render_location + window.geometry().loc, natural_size)
+                .to_physical_precise_round(output_scale),
         );
         let radii = rounding.radii.map(|radius| radius * output_scale as f32);
         let raw_main = render_elements_from_surface_tree(
@@ -3472,43 +3497,57 @@ impl Smallvil {
             alpha,
             Kind::Unspecified,
         );
-        let snapshot_anchor =
-            (render_location + window.geometry().loc).to_physical_precise_round(output_scale);
         if self.config.animations.enabled && self.config.animations.close.enabled {
             if let Some(snapshot) = crate::window_animation::WindowFrameSnapshot::capture(
                 output.name(),
-                snapshot_anchor,
+                physical_anchor,
                 scale,
+                resize_scale,
                 &raw_main,
             ) {
                 self.window_frame_snapshots
                     .insert(surface.clone(), snapshot);
             }
         }
-        let main = raw_main
-            .into_iter()
-            .map(|element| {
-                if let (true, Some(program), Some(geometry)) =
-                    (clip, rounded_program.clone(), physical_rect)
-                {
-                    crate::backend::udev::OutputRenderElements::RoundedSurface(
-                        crate::decoration::RoundedSurfaceElement::new(
-                            element,
-                            program,
-                            geometry,
-                            radii,
-                            rounding.power,
-                            rounding.antialias * output_scale as f32,
-                            scale,
+        let mut main = Vec::with_capacity(raw_main.len());
+        for element in raw_main {
+            if let (true, Some(program), Some(geometry)) =
+                (clip, rounded_program.clone(), physical_rect)
+            {
+                let rounded = crate::decoration::RoundedSurfaceElement::new(
+                    element,
+                    program,
+                    geometry,
+                    radii,
+                    rounding.power,
+                    rounding.antialias * output_scale as f32,
+                    scale,
+                );
+                if resize_active {
+                    main.push(
+                        crate::backend::udev::OutputRenderElements::AnimatedRoundedSurface(
+                            RescaleRenderElement::from_element(
+                                rounded,
+                                physical_anchor,
+                                resize_scale,
+                            ),
                         ),
-                    )
+                    );
                 } else {
-                    crate::backend::udev::OutputRenderElements::Space(SpaceRenderElements::Surface(
-                        element,
-                    ))
+                    main.push(crate::backend::udev::OutputRenderElements::RoundedSurface(
+                        rounded,
+                    ));
                 }
-            })
-            .collect();
+            } else if resize_active {
+                main.push(crate::backend::udev::OutputRenderElements::AnimatedSurface(
+                    RescaleRenderElement::from_element(element, physical_anchor, resize_scale),
+                ));
+            } else {
+                main.push(crate::backend::udev::OutputRenderElements::Space(
+                    SpaceRenderElements::Surface(element),
+                ));
+            }
+        }
         (popups, main)
     }
 
@@ -3518,13 +3557,12 @@ impl Smallvil {
         window: &Window,
         surface: &WlSurface,
         program: GlesPixelProgram,
-        visual_offset: Point<i32, Logical>,
-        visual_opacity: f32,
+        visual: crate::window_animation::VisualSample,
     ) -> Option<crate::decoration::BorderElement> {
         let mut border = self.border_config_for_surface(surface);
-        border.opacity *= visual_opacity;
-        border.inactive_opacity *= visual_opacity;
-        border.urgent_opacity *= visual_opacity;
+        border.opacity *= visual.opacity;
+        border.inactive_opacity *= visual.opacity;
+        border.urgent_opacity *= visual.opacity;
         let fullscreen = self.fullscreen.contains_key(surface);
         let focused = matches!(
             &self.keyboard_focus,
@@ -3542,10 +3580,12 @@ impl Smallvil {
         let output_geo = self.space.output_geometry(output)?;
         let output_scale = output.current_scale().fractional_scale();
         let location = self.space.element_location(window)?;
-        let logical_rect = Rectangle::new(
-            location - output_geo.loc + visual_offset,
-            window.geometry().size,
-        );
+        let visual_offset = Point::from((
+            visual.offset.x.round() as i32,
+            visual.offset.y.round() as i32,
+        ));
+        let visual_size = visual.rounded_size_or(window.geometry().size);
+        let logical_rect = Rectangle::new(location - output_geo.loc + visual_offset, visual_size);
         let physical_rect = logical_rect.to_physical_precise_round(output_scale);
         let mut rounding = self.rounding_config_for_surface(surface);
         if !rounding.enabled {
@@ -3581,13 +3621,12 @@ impl Smallvil {
         window: &Window,
         surface: &WlSurface,
         program: GlesPixelProgram,
-        visual_offset: Point<i32, Logical>,
-        visual_opacity: f32,
+        visual: crate::window_animation::VisualSample,
     ) -> Option<crate::shadow::ShadowElement> {
         let mut config = self.shadow_config_for_surface(surface);
-        config.opacity *= visual_opacity;
-        config.inactive_opacity *= visual_opacity;
-        config.urgent_opacity *= visual_opacity;
+        config.opacity *= visual.opacity;
+        config.inactive_opacity *= visual.opacity;
+        config.urgent_opacity *= visual.opacity;
         if config.corner_radius == 0.0 {
             let rounding = self.rounding_config_for_surface(surface);
             if rounding.enabled {
@@ -3605,10 +3644,12 @@ impl Smallvil {
         let output_geo = self.space.output_geometry(output)?;
         let output_scale = output.current_scale().fractional_scale();
         let location = self.space.element_location(window)?;
-        let logical_rect = Rectangle::new(
-            location - output_geo.loc + visual_offset,
-            window.geometry().size,
-        );
+        let visual_offset = Point::from((
+            visual.offset.x.round() as i32,
+            visual.offset.y.round() as i32,
+        ));
+        let visual_size = visual.rounded_size_or(window.geometry().size);
+        let logical_rect = Rectangle::new(location - output_geo.loc + visual_offset, visual_size);
         let physical_rect = logical_rect.to_physical_precise_round(output_scale);
         let focused = matches!(
             &self.keyboard_focus,
@@ -3674,6 +3715,11 @@ impl Smallvil {
                 visual.offset.x.round() as i32,
                 visual.offset.y.round() as i32,
             ));
+            if let Some(window) = self.mapped_toplevel_window(&surface) {
+                let visual_size = visual.rounded_size_or(window.geometry().size);
+                physical_rect.size = visual_size
+                    .to_physical_precise_round(output.current_scale().fractional_scale());
+            }
             physical_rect.loc +=
                 visual_offset.to_physical_precise_round(output.current_scale().fractional_scale());
 
@@ -3832,6 +3878,9 @@ impl Smallvil {
                 visual.offset.x.round() as i32,
                 visual.offset.y.round() as i32,
             ));
+            let visual_size = visual.rounded_size_or(window.geometry().size);
+            physical_rect.size =
+                visual_size.to_physical_precise_round(output.current_scale().fractional_scale());
             physical_rect.loc +=
                 visual_offset.to_physical_precise_round(output.current_scale().fractional_scale());
             let alpha =
@@ -3844,19 +3893,15 @@ impl Smallvil {
                 &window,
                 surface,
                 render_location,
+                visual_size,
                 alpha,
                 rounded_program.clone(),
             );
             result.extend(popups);
             if let Some(program) = &border_program {
-                if let Some(border) = self.window_border_element(
-                    output,
-                    &window,
-                    surface,
-                    program.clone(),
-                    visual_offset,
-                    visual.opacity,
-                ) {
+                if let Some(border) =
+                    self.window_border_element(output, &window, surface, program.clone(), visual)
+                {
                     result.push(crate::backend::udev::OutputRenderElements::Border(border));
                 }
             }
@@ -3929,14 +3974,9 @@ impl Smallvil {
             // behind both. This keeps translucent text/content above the
             // glass and prevents the shadow from becoming a full-window tint.
             if let Some(program) = &shadow_program {
-                if let Some(shadow) = self.window_shadow_element(
-                    output,
-                    &window,
-                    surface,
-                    program.clone(),
-                    visual_offset,
-                    visual.opacity,
-                ) {
+                if let Some(shadow) =
+                    self.window_shadow_element(output, &window, surface, program.clone(), visual)
+                {
                     result.push(crate::backend::udev::OutputRenderElements::Shadow(shadow));
                 }
             }
@@ -4379,8 +4419,9 @@ impl Smallvil {
                 }
                 if let Some(surface) = window.toplevel().map(|t| t.wl_surface().clone()) {
                     if let Some(old_location) = self.space.element_location(&window) {
-                        if old_location != rect.loc {
-                            self.start_window_move_animation(&surface, old_location, rect.loc);
+                        let old_rect = Rectangle::new(old_location, window.geometry().size);
+                        if old_rect != rect {
+                            self.start_window_move_animation(&surface, old_rect, rect);
                         }
                     }
                 }

@@ -21,7 +21,7 @@ use smithay::{
         Color32F,
     },
     reexports::wayland_server::protocol::wl_surface::WlSurface,
-    utils::{Buffer, Logical, Physical, Point, Rectangle, Scale, Transform},
+    utils::{Buffer, Logical, Physical, Point, Rectangle, Scale, Size, Transform},
 };
 
 use crate::{
@@ -34,6 +34,9 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VisualSample {
     pub offset: Point<f64, Logical>,
+    /// Desired outer window size while a layout resize is in flight.
+    /// Lifecycle-only animations leave this as `None`.
+    pub size: Option<Size<f64, Logical>>,
     pub opacity: f32,
 }
 
@@ -41,8 +44,22 @@ impl Default for VisualSample {
     fn default() -> Self {
         Self {
             offset: Point::from((0.0, 0.0)),
+            size: None,
             opacity: 1.0,
         }
+    }
+}
+
+impl VisualSample {
+    pub fn rounded_size_or(self, fallback: Size<i32, Logical>) -> Size<i32, Logical> {
+        self.size
+            .map(|size| {
+                Size::from((
+                    size.w.round().max(1.0) as i32,
+                    size.h.round().max(1.0) as i32,
+                ))
+            })
+            .unwrap_or(fallback)
     }
 }
 
@@ -54,6 +71,8 @@ pub struct WindowVisualAnimation {
     opacity_curve: WindowAnimationCurve,
     from_offset: Point<f64, Logical>,
     to_offset: Point<f64, Logical>,
+    from_size: Option<Size<f64, Logical>>,
+    to_size: Option<Size<f64, Logical>>,
     from_opacity: f32,
     to_opacity: f32,
     effect: WindowAnimationEffect,
@@ -68,6 +87,7 @@ impl WindowVisualAnimation {
         slowdown: f32,
         from_offset: Point<f64, Logical>,
         to_offset: Point<f64, Logical>,
+        sizes: Option<(Size<f64, Logical>, Size<f64, Logical>)>,
     ) -> Self {
         let scaled_duration = |duration_ms: u32| {
             (duration_ms as f32 * slowdown)
@@ -84,6 +104,8 @@ impl WindowVisualAnimation {
             opacity_curve: config.opacity_curve.unwrap_or(config.curve),
             from_offset,
             to_offset,
+            from_size: sizes.map(|(from, _)| from),
+            to_size: sizes.map(|(_, to)| to),
             from_opacity: config.from_opacity,
             to_opacity: config.to_opacity,
             effect: config.effect,
@@ -98,7 +120,7 @@ impl WindowVisualAnimation {
         slowdown: f32,
         offset: Point<f64, Logical>,
     ) -> Self {
-        Self::new(config, slowdown, offset, Point::from((0.0, 0.0)))
+        Self::new(config, slowdown, offset, Point::from((0.0, 0.0)), None)
     }
 
     pub fn close(
@@ -106,15 +128,23 @@ impl WindowVisualAnimation {
         slowdown: f32,
         offset: Point<f64, Logical>,
     ) -> Self {
-        Self::new(config, slowdown, Point::from((0.0, 0.0)), offset)
+        Self::new(config, slowdown, Point::from((0.0, 0.0)), offset, None)
     }
 
     pub fn movement(
         config: &WindowAnimationConfig,
         slowdown: f32,
         from_offset: Point<f64, Logical>,
+        from_size: Size<f64, Logical>,
+        to_size: Size<f64, Logical>,
     ) -> Self {
-        Self::new(config, slowdown, from_offset, Point::from((0.0, 0.0)))
+        Self::new(
+            config,
+            slowdown,
+            from_offset,
+            Point::from((0.0, 0.0)),
+            config.animate_size.then_some((from_size, to_size)),
+        )
     }
 
     fn progress_for(&self, duration: Duration) -> f32 {
@@ -152,8 +182,15 @@ impl WindowVisualAnimation {
                     * envelope
             }
         } as f64;
+        let size = self.from_size.zip(self.to_size).map(|(from, to)| {
+            Size::from((
+                (from.w + (to.w - from.w) * progress as f64).max(1.0),
+                (from.h + (to.h - from.h) * progress as f64).max(1.0),
+            ))
+        });
         VisualSample {
             offset: Point::from((base_x + normal_x * wave, base_y + normal_y * wave)),
+            size,
             // An overshooting Bézier is useful for geometry but alpha above
             // one causes driver-dependent bright flashes. Keep opacity
             // physically valid while leaving the spatial overshoot intact.
@@ -246,6 +283,7 @@ impl WindowFrameSnapshot {
         output: String,
         anchor: Point<i32, Physical>,
         scale: Scale<f64>,
+        resize_scale: Scale<f64>,
         elements: &[WaylandSurfaceRenderElement<GlesRenderer>],
     ) -> Option<Self> {
         let parts: Vec<_> = elements
@@ -253,6 +291,7 @@ impl WindowFrameSnapshot {
             .map(|element| {
                 let mut geometry = element.geometry(scale);
                 geometry.loc -= anchor;
+                geometry = geometry.to_f64().upscale(resize_scale).to_i32_round();
                 let content = match element.texture() {
                     WaylandSurfaceTexture::Texture(texture) => {
                         SnapshotContent::Texture(texture.clone())
@@ -410,6 +449,7 @@ mod tests {
     fn linear_config() -> WindowAnimationConfig {
         WindowAnimationConfig {
             enabled: true,
+            animate_size: true,
             duration_ms: 1000,
             curve: WindowAnimationCurve::Linear,
             opacity_duration_ms: None,
@@ -437,11 +477,37 @@ mod tests {
 
     #[test]
     fn movement_uses_real_interruption_offset() {
-        let animation =
-            WindowVisualAnimation::movement(&linear_config(), 1.0, Point::from((-120.0, 35.0)));
+        let animation = WindowVisualAnimation::movement(
+            &linear_config(),
+            1.0,
+            Point::from((-120.0, 35.0)),
+            Size::from((800.0, 600.0)),
+            Size::from((400.0, 600.0)),
+        );
         let sample = animation.sample();
         assert!((sample.offset.x + 120.0).abs() < 1.0);
         assert!((sample.offset.y - 35.0).abs() < 1.0);
+        let size = sample.size.expect("movement size animation enabled");
+        assert!((size.w - 800.0).abs() < 1.0);
+        assert!((size.h - 600.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn movement_size_reaches_the_exact_target() {
+        let mut animation = WindowVisualAnimation::movement(
+            &linear_config(),
+            1.0,
+            Point::from((-120.0, 35.0)),
+            Size::from((800.0, 600.0)),
+            Size::from((400.0, 300.0)),
+        );
+        animation.start = Instant::now() - animation.duration;
+        let size = animation
+            .sample()
+            .size
+            .expect("movement size animation enabled");
+        assert!((size.w - 400.0).abs() < 0.001);
+        assert!((size.h - 300.0).abs() < 0.001);
     }
 
     #[test]

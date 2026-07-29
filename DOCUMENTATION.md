@@ -143,11 +143,15 @@ To retain the earlier boundary-only animation, set `style = glow`; the shared ti
 Controls window opening, closing, and layout movement. TideWM applies focus,
 input, and final layout geometry immediately; animation is only a visual
 offset/opacity settling over that real state. Retargeting movement mid-flight
-starts from the current on-screen position, avoiding a snap to either the old
-or new layout. Closing uses the last already-imported surface textures recorded
-by the normal frame walk, so direct xdg-role destruction and null-buffer unmap
-both remain drawable after Smithay releases the live surface. Cloning these GPU
-handles does not allocate another framebuffer or copy the window.
+starts from the current on-screen rectangle, avoiding a snap to either the old
+or new position or size. With `movement.animate_size = true` (the default),
+client surfaces, subsurfaces, popups, rounded clipping, borders, shadows,
+glass, and depth geometry resize together. This is a direct render-element
+transform and allocates no intermediate framebuffer. Closing uses the last
+already-imported surface textures recorded by the normal frame walk, so direct
+xdg-role destruction and null-buffer unmap both remain drawable after Smithay
+releases the live surface. Cloning these GPU handles does not allocate another
+framebuffer or copy the window.
 
 `preset` selects a complete baseline: `tide` (the calm default), `wave` (more
 visible oscillation), `riptide` (short and sharp), or `hypr-smooth`. The
@@ -164,6 +168,7 @@ supports:
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | Disables only this transition. |
+| `animate_size` | bool | movement `true`, lifecycle `false` | Interpolates the outer window size together with movement. It currently affects the `movement` block; `resize`, `size`, and `animate-size` are aliases. |
 | `duration_ms` | integer, `1`–`10000` | open `190`, close `160`, movement `190` | Geometry lifetime before the visual state reaches its logical target. `duration` is an alias. |
 | `curve` | easing | see example | `linear`, `quad-out`, `cubic-out`, `cubic-in-out`, `exp-out`, or CSS-compatible `cubic-bezier(x1,y1,x2,y2)`. `ease-out-quad`, `ease-out-cubic`, and `ease-out-expo` aliases are accepted. |
 | `opacity_duration_ms` | integer, `1`–`10000` | follows `duration_ms` | Independent opacity lifetime. `fade_duration_ms` and `opacity_duration` are aliases. |
@@ -208,6 +213,7 @@ animations {
     }
 
     movement {
+        animate_size = true
         duration_ms = 190
         curve = cubic-bezier(0.16,1,0.3,1)
         effect = tide
