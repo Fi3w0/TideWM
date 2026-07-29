@@ -2375,7 +2375,7 @@ bsp_split_bias = auto
 # ripple {
 #     enabled = true
 #     shapes = ring                # ring square droplet cross (multi = concurrent)
-#     color = #8EDDFF              # hex RGB
+#     color = 8EDDFF               # bare RRGGBB; quote a leading-hash form
 #     peak_radius = 220            # logical pixels
 #     thickness = 8                # outline half-width, logical pixels
 #     duration_ms = 650

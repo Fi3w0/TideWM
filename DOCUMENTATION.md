@@ -60,7 +60,7 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | --- | --- | --- | --- |
 | `terminal` | string | `"kitty"` | Spawned by the default `Super+Return` bind. The shipped default is `$wave(kitty, alacritty, foot, xterm)` — see [`$wave(...)`](#waves-format) above. |
 | `show_welcome_hint` | bool | `true` | Shows a persistent "fake window" card pointing you at `Super+Return` whenever the desktop is otherwise empty. Disappears the instant a real window maps; delete this key (or set it `false`) to stop it coming back. Checked on every reload, not just at startup. |
-| `water_effects` | bool | `true` | Reserved for the water/aqua visual identity. The toggle exists now so config written today won't need migrating later; nothing reads it yet since `render/` isn't built. |
+| `water_effects` | bool | `true` | Master toggle for TideWM's water/aqua render identity. Disables water-glass, backdrop capture, and impulse ripples when `false`. |
 | `cursor_always_visible` | bool | `false` | Forces the udev backend's software cursor to stay visible even when a client asks to hide it (e.g. a terminal hiding its own pointer glyph after inactivity). Off by default — respecting a client's own hide request is correct behavior; this is an opt-in override. |
 | `cursor_hide_after_ms` | integer | `0` | udev backend only: hides the software cursor after this many milliseconds of no real pointer motion (niri's `cursor.hide-after-inactive-ms`). `0` disables it. Independent of `cursor_always_visible` — that overrides a *client's* hide request, this is a compositor-driven idle timer, and the two can be combined. |
 | `workspace_auto_back_and_forth` | bool | `false` | Re-selecting the already-active workspace jumps back to whichever one was active immediately before it, instead of no-opping (niri's own feature of the same name). |
@@ -72,6 +72,34 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | `bsp_split_bias` | `auto` \| `horizontal` \| `vertical` | `auto` | Manual override for `default_layout = bsp`'s per-split axis choice. `auto` is the existing aspect-ratio-driven behavior, unchanged. `horizontal`/`vertical` force every split one way regardless of window/output shape (Hyprland dwindle's `force_split` idea). One global setting, not per-workspace. |
 | `pseudo_tile_scale` | float, `0.05`–`1.0` | `0.7` | Fraction of its tile a pseudo-tiled window keeps, centered within it. Out-of-range values are clamped, not rejected. |
 | `spawn_at_startup` | repeatable key | none | Commands launched once at startup — repeat the key once per command (`spawn_at_startup = waybar` on its own line, again for the next one), not one line holding a list. Args split on whitespace — no shell involved, so quoting/globs/pipes aren't supported; wrap in `sh -c "..."` yourself if you need those. |
+
+### `ripple { }`
+
+Configures the Phase R1 impulse ripple shared by window-map, focus-change, and urgent-attention events. `water_effects = false` disables every ripple regardless of this block. The active ripple list is capped at 16 so rapid mapping cannot grow render state without bound.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | Enables ripples in this scope. |
+| `shapes` | space-separated list | `ring` | Any combination of `ring`, `square`, `droplet`, and `cross`; multiple shapes render together. `shape` and `form` are accepted aliases. |
+| `color` | color | `8EDDFF` | RGB tint. Use bare `RRGGBB`, quoted `"#RRGGBB"`, `rgb(RRGGBB)`, or `rgba(RRGGBB, AA)`. A bare leading `#` starts a Waves comment, so it must be quoted. Alpha in the color form is currently ignored; use `peak_alpha`. |
+| `peak_radius` | positive float | `220` | Maximum radius in logical pixels. `radius` is an alias. |
+| `thickness` | positive float | `8` | Outline half-width in logical pixels. |
+| `duration_ms` | positive integer | `650` | Ripple lifetime in milliseconds. `duration` is an alias. |
+| `peak_alpha` | float | `1.0` | Peak opacity, clamped to `0.0`–`1.0`. `alpha` is an alias. |
+| `ease` | enum | `cubic-out` | `linear`, `cubic-out`, `cubic-in-out`, `quad-out`, or `exp-out`. |
+| `anchor` | enum | `center` | `center`, `cursor`, `topleft`, `topright`, `bottomleft`, or `bottomright`, relative to the triggering window. |
+| `offset` | `<dx>x<dy>` | `0x0` | Logical-pixel offset added to the selected anchor. |
+| `layer` | enum | `above-windows` | `above-all`, `above-windows`, `below-windows`, or `below-all`. |
+| `triggers` | space-separated list | `map` | Any combination of `map`, `focus`, and `urgent`. |
+
+```
+ripple {
+    shapes = ring droplet
+    color = rgb(8EDDFF)
+    duration_ms = 700
+    triggers = map focus urgent
+}
+```
 
 ### `env { }`
 
@@ -210,9 +238,10 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 | `fullscreen` | bool | Default `false`. Opens fullscreen on its selected output. |
 | `block_capture` | bool | Default `false`. A per-window capture/screencast source renders black instead of exposing the window. |
 | `swallow` | bool | Default `false`. Marks matching windows as swallowers (Hyprland's `misc:enable_swallow`): when a tiled match spawns a process that opens its own window, the match is hidden and the new window takes over its exact tile; closing that window puts it back in the same slot. Detection is PID ancestry via `/proc`, so any terminal works without shell integration. Tiled matches only — a floating terminal keeps both windows visible. |
-| `opacity` | float | Per-window alpha, clamped to `0.0`–`1.0`. Applies to the whole window surface tree. |
+| `opacity` | float | Per-window alpha, clamped to `0.0`–`1.0`. Applies to the whole window surface tree. A floating translucent window uses water-glass refraction behind it while `water_effects` is enabled. |
 | `position` | `<x>x<y>`, optional | Exact floating placement. No-op unless the window ends up floating. |
 | `size` | `<width>x<height>`, optional | Exact floating size. No-op unless the window ends up floating. |
+| `ripple { }` | sub-block | Per-app overrides for any global ripple field; unspecified fields inherit the global block. `ripple = none` suppresses ripples for matching windows. |
 
 Multiple rules can match the same window: `workspace`/`output`/`position`/`size` take the *last* match; boolean effects accumulate (any match sets one, never unsets it).
 
