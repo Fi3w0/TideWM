@@ -897,6 +897,10 @@ The same set of strings works after `bind ... =` at the top level or inside a `s
 
 Queries: `outputs`, `workspaces`, `windows`, `focused-window`, `active-submap`.
 
+**Subscribe (event stream).** The same socket also supports a long-lived mode for reactive widgets (a waybar module, an eww `deflisten`, a QuickShell socket reader) that shouldn't have to poll the queries above. Send `{"request": "subscribe", "events": ["window", "workspace", "focus", "urgent", "depth", "config"]}` as the first and only request on a fresh connection; omitting `events` (or sending an empty array) subscribes to all six channels. The server replies with one ack line (`{"ok": true, "data": {"subscription_id": <n>, "events": [...]}}` — the resolved channel list, so a typo'd filter is visible at handshake time instead of silently matching nothing), then keeps the connection open and writes one `{"event": "<kind>", "data": ...}` line per matching change until the client disconnects. The connection's lifetime is the subscription's lifetime.
+
+Event kinds: `window-opened` / `window-closed` / `window-changed` (channel `window`), `workspace-changed` (`workspace`), `focus-changed` (`focus`), `urgent-changed` (`urgent`), `depth-changed` (`depth`), `config-reloaded` (`config`). Window-carrying events embed the same object shape the `windows` query returns; `focus-changed` is `null` when focus clears to nothing, and `window-closed` carries the closed window's last-known `window_id`/`app_id`/`title` directly (its tracking state is already gone by the time the event serializes). A subscriber that falls behind (roughly a quarter-meg of unwritten JSON) is disconnected outright rather than let its backlog grow unbounded.
+
 `tidectl` (built alongside the compositor: `cargo build --bin tidectl`) is a small CLI over this socket, auto-discovering the running instance:
 
 ```bash
