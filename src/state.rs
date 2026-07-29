@@ -1574,11 +1574,10 @@ impl Smallvil {
         if self.ipc_subscribers.is_empty() {
             return;
         }
-        let kind = event.kind();
         let payload = event.to_json_line(self);
         let mut to_drop: Vec<usize> = Vec::new();
         for (id, sub) in self.ipc_subscribers.iter_mut() {
-            if !sub.filter.is_empty() && !sub.filter.contains(&kind) {
+            if !crate::ipc::event_matches(&sub.filter, &event) {
                 continue;
             }
             sub.pending.extend(&payload);

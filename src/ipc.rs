@@ -79,7 +79,7 @@ impl Drop for ConnectionLease {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 #[serde(tag = "request", rename_all = "kebab-case")]
 enum Request {
     Outputs,
@@ -127,6 +127,29 @@ impl EventKind {
         EventKind::Depth,
         EventKind::Config,
     ];
+
+    /// Lowercase kebab string used in the ack and in the `events` array of
+    /// a subscribe request. Kept in one place so the ack in
+    /// `register_subscriber` and the test's idea of the wire format can't
+    /// drift apart.
+    fn wire_name(self) -> &'static str {
+        match self {
+            EventKind::Window => "window",
+            EventKind::Workspace => "workspace",
+            EventKind::Focus => "focus",
+            EventKind::Urgent => "urgent",
+            EventKind::Depth => "depth",
+            EventKind::Config => "config",
+        }
+    }
+}
+
+/// Subscriber-side delivery decision: an empty filter means "subscribe to
+/// everything", otherwise the event's top-level kind must be in the set.
+/// Extracted to a free function so the filter rule has a unit test without
+/// having to spin up a Smallvil.
+pub(crate) fn event_matches(filter: &HashSet<EventKind>, event: &IpcEvent) -> bool {
+    filter.is_empty() || filter.contains(&event.kind())
 }
 
 /// One state change broadcast to matching subscribers. Constructed at the
@@ -593,29 +616,9 @@ fn register_subscriber(
     // widget can tell at handshake time which events it will in fact
     // receive, including a typo'd filter rejecting nothing silently.
     let resolved_events: Vec<&'static str> = if filter.is_empty() {
-        EventKind::ALL
-            .iter()
-            .map(|k| match k {
-                EventKind::Window => "window",
-                EventKind::Workspace => "workspace",
-                EventKind::Focus => "focus",
-                EventKind::Urgent => "urgent",
-                EventKind::Depth => "depth",
-                EventKind::Config => "config",
-            })
-            .collect()
+        EventKind::ALL.iter().map(|k| k.wire_name()).collect()
     } else {
-        filter
-            .iter()
-            .map(|k| match k {
-                EventKind::Window => "window",
-                EventKind::Workspace => "workspace",
-                EventKind::Focus => "focus",
-                EventKind::Urgent => "urgent",
-                EventKind::Depth => "depth",
-                EventKind::Config => "config",
-            })
-            .collect()
+        filter.iter().map(|k| k.wire_name()).collect()
     };
     let ack_line = serde_json::to_vec(&json!({
         "ok": true,
@@ -990,4 +993,330 @@ fn window_json(
         }
     }
     Some(entry)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+
+    /// Marker type satisfying both `ClientData` (for the throwaway test
+    /// client) and `Dispatch<WlSurface, ()>` (for resource creation) --
+    /// `request` is never called since these tests never dispatch a real
+    /// client's bytes.
+    struct DummyDispatch;
+
+    impl smithay::reexports::wayland_server::backend::ClientData for DummyDispatch {}
+
+    impl smithay::reexports::wayland_server::Dispatch<WlSurface, ()> for DummyDispatch {
+        fn request(
+            _state: &mut Self,
+            _client: &smithay::reexports::wayland_server::Client,
+            _resource: &WlSurface,
+            _request: <WlSurface as smithay::reexports::wayland_server::Resource>::Request,
+            _data: &(),
+            _dhandle: &smithay::reexports::wayland_server::DisplayHandle,
+            _data_init: &mut smithay::reexports::wayland_server::DataInit<'_, Self>,
+        ) {
+            unreachable!("test surfaces never receive real protocol requests")
+        }
+    }
+
+    /// Surface stand-in for tests that don't touch Smallvil. `kind`/
+    /// `event_name`/`event_matches` only read the variant discriminant, not
+    /// the surface's content, but wayland-server has no "unbound" resource
+    /// constructor -- a `WlSurface` is only ever produced by creating a real
+    /// (if never-dispatched) protocol object on an in-process client. The
+    /// backing `Display` is leaked so the returned resource stays valid for
+    /// the life of the test process; nothing ever reads or writes its
+    /// socket half.
+    fn dummy_surface() -> WlSurface {
+        use smithay::reexports::wayland_server::Display;
+
+        let display: &'static mut Display<DummyDispatch> =
+            Box::leak(Box::new(Display::new().unwrap()));
+        let mut handle = display.handle();
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let client = handle
+            .insert_client(stream, std::sync::Arc::new(DummyDispatch))
+            .unwrap();
+        client
+            .create_resource::<WlSurface, (), DummyDispatch>(&handle, 1, ())
+            .unwrap()
+    }
+
+    #[test]
+    fn event_kind_deserializes_from_kebab_case() {
+        // Matches the rename_all on the enum and the wire format documented
+        // in the module docs. A typo here would silently parse-fail and the
+        // subscriber would get "all events" instead of the filtered set.
+        let parsed: EventKind = serde_json::from_str("\"window\"").unwrap();
+        assert_eq!(parsed, EventKind::Window);
+        assert_eq!(
+            serde_json::from_str::<EventKind>("\"workspace\"").unwrap(),
+            EventKind::Workspace
+        );
+        assert_eq!(
+            serde_json::from_str::<EventKind>("\"focus\"").unwrap(),
+            EventKind::Focus
+        );
+        assert_eq!(
+            serde_json::from_str::<EventKind>("\"urgent\"").unwrap(),
+            EventKind::Urgent
+        );
+        assert_eq!(
+            serde_json::from_str::<EventKind>("\"depth\"").unwrap(),
+            EventKind::Depth
+        );
+        assert_eq!(
+            serde_json::from_str::<EventKind>("\"config\"").unwrap(),
+            EventKind::Config
+        );
+    }
+
+    #[test]
+    fn unknown_event_kind_is_rejected_not_silently_defaulted() {
+        // A typo in a subscribe filter must fail loudly (the deserializer
+        // returns Err), not fall back to a default variant -- otherwise a
+        // widget subscribing to "windows" (plural) would silently get
+        // nothing it asked for.
+        assert!(serde_json::from_str::<EventKind>("\"windows\"").is_err());
+        assert!(serde_json::from_str::<EventKind>("\"WINDOW\"").is_err());
+        assert!(serde_json::from_str::<EventKind>("\"scratchpad\"").is_err());
+    }
+
+    #[test]
+    fn subscribe_with_no_events_field_means_all() {
+        // The wire format documented in the module docs: omitting `events`
+        // is the same as listing all six channels.
+        let parsed: Request =
+            serde_json::from_str(r#"{"request":"subscribe"}"#).unwrap();
+        match parsed {
+            Request::Subscribe { events: None } => {}
+            other => panic!("expected Subscribe with no events, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subscribe_with_explicit_filter_round_trips() {
+        let parsed: Request = serde_json::from_str(
+            r#"{"request":"subscribe","events":["workspace","focus"]}"#,
+        )
+        .unwrap();
+        match parsed {
+            Request::Subscribe {
+                events: Some(list),
+            } => {
+                    assert_eq!(list, vec![EventKind::Workspace, EventKind::Focus]);
+            }
+            other => panic!("expected Subscribe with events, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn event_name_and_kind_are_consistent_per_variant() {
+        let surface = dummy_surface();
+        // Every variant's `kind()` must match its top-level channel, and
+        // every `event_name()` must be the documented wire string -- a
+        // widget routing on these strings would silently miss events
+        // otherwise.
+        let cases: Vec<(IpcEvent, EventKind, &'static str)> = vec![
+            (
+                IpcEvent::WindowOpened { surface: surface.clone() },
+                EventKind::Window,
+                "window-opened",
+            ),
+            (
+                IpcEvent::WindowClosed {
+                    window_id: None,
+                    app_id: None,
+                    title: None,
+                },
+                EventKind::Window,
+                "window-closed",
+            ),
+            (
+                IpcEvent::WindowChanged { surface: surface.clone() },
+                EventKind::Window,
+                "window-changed",
+            ),
+            (
+                IpcEvent::WorkspaceChanged {
+                    output: "eDP-1".into(),
+                    from: 1,
+                    to: 2,
+                },
+                EventKind::Workspace,
+                "workspace-changed",
+            ),
+            (
+                IpcEvent::FocusChanged {
+                    surface: Some(surface.clone()),
+                },
+                EventKind::Focus,
+                "focus-changed",
+            ),
+            (
+                IpcEvent::UrgentChanged {
+                    surface: surface.clone(),
+                    urgent: true,
+                },
+                EventKind::Urgent,
+                "urgent-changed",
+            ),
+            (
+                IpcEvent::DepthChanged {
+                    surface: surface.clone(),
+                    tier: 1,
+                },
+                EventKind::Depth,
+                "depth-changed",
+            ),
+            (IpcEvent::ConfigReloaded, EventKind::Config, "config-reloaded"),
+        ];
+        for (event, kind, name) in cases {
+            assert_eq!(event.kind(), kind, "mismatch for {name}");
+            assert_eq!(event.event_name(), name, "name mismatch");
+        }
+    }
+
+    #[test]
+    fn empty_filter_matches_everything() {
+        // The "subscribe to all" semantic: an empty filter set must
+        // accept every event variant. A regression here would silently
+        // drop events from subscribers that sent `{}` or omitted `events`.
+        let filter = HashSet::new();
+        assert!(event_matches(
+            &filter,
+            &IpcEvent::WorkspaceChanged {
+                output: "x".into(),
+                from: 0,
+                to: 1,
+            }
+        ));
+        assert!(event_matches(
+            &filter,
+            &IpcEvent::ConfigReloaded
+        ));
+        assert!(event_matches(
+            &filter,
+            &IpcEvent::FocusChanged { surface: None }
+        ));
+    }
+
+    #[test]
+    fn explicit_filter_passes_only_listed_kinds() {
+        let mut filter = HashSet::new();
+        filter.insert(EventKind::Workspace);
+        filter.insert(EventKind::Focus);
+
+        assert!(event_matches(
+            &filter,
+            &IpcEvent::WorkspaceChanged {
+                output: "x".into(),
+                from: 0,
+                to: 1,
+            }
+        ));
+        assert!(event_matches(
+            &filter,
+            &IpcEvent::FocusChanged {
+                surface: Some(dummy_surface())
+            }
+        ));
+
+        // A bar that asked only for workspace/focus must not be pinged on
+        // every window-opened or urgent change -- those are different
+        // channels, even though they're per-window.
+        assert!(!event_matches(
+            &filter,
+            &IpcEvent::WindowOpened {
+                surface: dummy_surface()
+            }
+        ));
+        assert!(!event_matches(
+            &filter,
+            &IpcEvent::UrgentChanged {
+                surface: dummy_surface(),
+                urgent: true,
+            }
+        ));
+        assert!(!event_matches(
+            &filter,
+            &IpcEvent::ConfigReloaded
+        ));
+    }
+
+    #[test]
+    fn try_flush_drains_pending_into_the_kernel_buffer() {
+        // Two-end Unix stream: we push bytes into the subscriber's
+        // `pending`, call `try_flush`, then read them out the peer end.
+        // This is the fast-path (peer is reading) that emit_ipc_event
+        // exercises inline.
+        let (subscriber_end, mut peer_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        subscriber_end.set_nonblocking(true).unwrap();
+        peer_end.set_nonblocking(true).unwrap();
+
+        let mut sub = IpcSubscriber {
+            stream: subscriber_end,
+            filter: HashSet::new(),
+            pending: VecDeque::from(b"hello\n".to_vec()),
+            read_token: None,
+        };
+
+        assert!(sub.try_flush());
+        assert!(sub.pending.is_empty(), "fast-path drain should empty pending");
+
+        let mut got = [0u8; 8];
+        let n = peer_end.read(&mut got).unwrap();
+        assert_eq!(&got[..n], b"hello\n");
+    }
+
+    #[test]
+    fn try_flush_returns_false_when_peer_has_closed() {
+        // Drop the peer before flushing -- a write must fail, and
+        // try_flush must report that so emit_ipc_event retires the
+        // subscriber instead of accumulating bytes forever.
+        let (subscriber_end, peer_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        subscriber_end.set_nonblocking(true).unwrap();
+        drop(peer_end);
+
+        let mut sub = IpcSubscriber {
+            stream: subscriber_end,
+            filter: HashSet::new(),
+            pending: VecDeque::from(b"never-delivered\n".to_vec()),
+            read_token: None,
+        };
+        // On most kernels the first write to a closed AF_UNIX socketpair
+        // end returns EPIPE/ECONNRESET immediately. If a particular kernel
+        // ever did accept the write into a buffer before observing the
+        // close, try_flush would still report true for that one call and
+        // false on the next -- so loop a bounded number of times.
+        for _ in 0..16 {
+            if !sub.try_flush() {
+                return;
+            }
+            let delivered_clean = sub.pending.is_empty();
+            if delivered_clean {
+                // Refill so the next try actually writes again.
+                sub.pending.extend(b"more\n");
+            }
+        }
+        panic!(
+            "try_flush never reported peer-closed after 16 attempts; kernel is buffering forever?"
+        );
+    }
+
+    #[test]
+    fn wire_name_is_lowercase_kebab_for_every_kind() {
+        // The ack's `events` array uses wire_name directly -- a stray
+        // capital or hyphen here would mismatch the documented wire
+        // format silently.
+        assert_eq!(EventKind::Window.wire_name(), "window");
+        assert_eq!(EventKind::Workspace.wire_name(), "workspace");
+        assert_eq!(EventKind::Focus.wire_name(), "focus");
+        assert_eq!(EventKind::Urgent.wire_name(), "urgent");
+        assert_eq!(EventKind::Depth.wire_name(), "depth");
+        assert_eq!(EventKind::Config.wire_name(), "config");
+    }
 }
