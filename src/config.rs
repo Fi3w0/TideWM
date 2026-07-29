@@ -206,6 +206,10 @@ pub struct Config {
     /// `water_effects` toggle so the transition can be disabled or tuned
     /// without suppressing water-glass and ripples.
     pub workspace_transition: WorkspaceTransitionConfig,
+    /// Automatic visual depth/buoyancy for inactive windows (Phase R1).
+    /// `water_effects` remains the master toggle; this block controls the
+    /// depth model without disabling ripples, water-glass, or transitions.
+    pub depth: DepthConfig,
     /// Global ripple defaults (Phase R1, see `ripple.rs`). Per-app
     /// `rule { ripple { } }` overrides merge over these at resolve time
     /// (`merge_over`). Stays `system_default()` when the user has no
@@ -405,6 +409,7 @@ impl Config {
             show_welcome_hint: raw.show_welcome_hint,
             water_effects: raw.water_effects,
             workspace_transition: raw.workspace_transition,
+            depth: raw.depth,
             ripple: raw.ripple,
             cursor_always_visible: raw.cursor_always_visible,
             cursor_hide_after_ms: raw.cursor_hide_after_ms,
@@ -510,6 +515,7 @@ struct RawConfig {
     show_welcome_hint: bool,
     water_effects: bool,
     workspace_transition: WorkspaceTransitionConfig,
+    depth: DepthConfig,
     /// Same shape as `Config::ripple`. Stays `system_default()` if no
     /// `ripple { }` block exists; mutated in place by `apply_ripple_block`.
     ripple: RippleConfig,
@@ -647,6 +653,7 @@ impl Default for RawConfig {
             show_welcome_hint: false,
             water_effects: true,
             workspace_transition: WorkspaceTransitionConfig::default(),
+            depth: DepthConfig::default(),
             ripple: RippleConfig::system_default(),
             cursor_always_visible: false,
             cursor_hide_after_ms: 0,
@@ -1155,6 +1162,48 @@ impl Default for WorkspaceTransitionConfig {
     }
 }
 
+/// Automatic attention-distance depth for mapped windows. A window stays at
+/// the surface until `sink_after_ms` elapses without focus/input, then moves
+/// down one visual tier every `tier_interval_ms`. Focusing or typing into it
+/// returns it to tier zero immediately.
+#[derive(Debug, Clone)]
+pub struct DepthConfig {
+    pub enabled: bool,
+    pub sink_after_ms: u32,
+    pub tier_interval_ms: u32,
+    /// Bounded visual depth. Tier one keeps live content; tier two and below
+    /// use the schematic title-card representation.
+    pub max_tier: u8,
+    /// Live-content opacity at tier one before the cool overlay is applied.
+    pub tier_one_alpha: f32,
+    pub cool_color: [f32; 3],
+    pub cool_alpha: f32,
+    pub schematic_color: [f32; 3],
+    pub schematic_alpha: f32,
+    pub border_color: [f32; 3],
+    pub urgent_color: [f32; 3],
+    pub urgent_alpha: f32,
+}
+
+impl Default for DepthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            sink_after_ms: 30_000,
+            tier_interval_ms: 30_000,
+            max_tier: 2,
+            tier_one_alpha: 0.78,
+            cool_color: [45.0 / 255.0, 112.0 / 255.0, 150.0 / 255.0],
+            cool_alpha: 0.24,
+            schematic_color: [16.0 / 255.0, 35.0 / 255.0, 48.0 / 255.0],
+            schematic_alpha: 0.9,
+            border_color: [82.0 / 255.0, 166.0 / 255.0, 198.0 / 255.0],
+            urgent_color: [118.0 / 255.0, 241.0 / 255.0, 1.0],
+            urgent_alpha: 0.95,
+        }
+    }
+}
+
 /// A complete ripple configuration: every knob a user can set. Lives in
 /// `Config::ripple` as the global defaults; a partial copy lives on
 /// each `WindowRule::ripple` with only the fields the user explicitly
@@ -1478,6 +1527,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "workspace_transition" => {
             apply_workspace_transition_block(&mut raw.workspace_transition, body)
         }
+        "depth" => apply_depth_block(&mut raw.depth, body),
         "ripple" => apply_ripple_block(&mut raw.ripple, body),
         "output" => raw.outputs.push(lower_output_block(header, body)),
         "rule" => raw.window_rules.push(lower_window_rule_block(body)),
@@ -1810,6 +1860,83 @@ fn apply_workspace_transition_block(cfg: &mut WorkspaceTransitionConfig, body: &
                 key = %other,
                 "Unknown key in `workspace_transition` block, ignoring"
             ),
+        }
+    }
+}
+
+fn apply_depth_block(cfg: &mut DepthConfig, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `depth` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "enabled" => set_bool(&mut cfg.enabled, key, value),
+            "sink_after_ms" | "delay_ms" => match value.parse::<u32>() {
+                Ok(value) if value <= 86_400_000 => cfg.sink_after_ms = value,
+                _ => tracing::warn!(
+                    value,
+                    "Expected depth.sink_after_ms from 0 to 86400000, ignoring"
+                ),
+            },
+            "tier_interval_ms" | "interval_ms" => match value.parse::<u32>() {
+                Ok(value) if (1..=86_400_000).contains(&value) => cfg.tier_interval_ms = value,
+                _ => tracing::warn!(
+                    value,
+                    "Expected depth.tier_interval_ms from 1 to 86400000, ignoring"
+                ),
+            },
+            "max_tier" | "tiers" => match value.parse::<u8>() {
+                Ok(value) if (1..=8).contains(&value) => cfg.max_tier = value,
+                _ => tracing::warn!(value, "Expected depth.max_tier from 1 to 8, ignoring"),
+            },
+            "tier_one_alpha" | "live_alpha" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.tier_one_alpha = value.clamp(0.0, 1.0),
+                _ => tracing::warn!(value, "Expected depth.tier_one_alpha from 0 to 1, ignoring"),
+            },
+            "cool_color" => match parse_ripple_color(value) {
+                Some(value) => cfg.cool_color = value,
+                None => {
+                    tracing::warn!(value, "Expected a hex color for depth.cool_color, ignoring")
+                }
+            },
+            "cool_alpha" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.cool_alpha = value.clamp(0.0, 1.0),
+                _ => tracing::warn!(value, "Expected depth.cool_alpha from 0 to 1, ignoring"),
+            },
+            "schematic_color" => match parse_ripple_color(value) {
+                Some(value) => cfg.schematic_color = value,
+                None => tracing::warn!(
+                    value,
+                    "Expected a hex color for depth.schematic_color, ignoring"
+                ),
+            },
+            "schematic_alpha" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.schematic_alpha = value.clamp(0.0, 1.0),
+                _ => tracing::warn!(
+                    value,
+                    "Expected depth.schematic_alpha from 0 to 1, ignoring"
+                ),
+            },
+            "border_color" => match parse_ripple_color(value) {
+                Some(value) => cfg.border_color = value,
+                None => tracing::warn!(
+                    value,
+                    "Expected a hex color for depth.border_color, ignoring"
+                ),
+            },
+            "urgent_color" => match parse_ripple_color(value) {
+                Some(value) => cfg.urgent_color = value,
+                None => tracing::warn!(
+                    value,
+                    "Expected a hex color for depth.urgent_color, ignoring"
+                ),
+            },
+            "urgent_alpha" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.urgent_alpha = value.clamp(0.0, 1.0),
+                _ => tracing::warn!(value, "Expected depth.urgent_alpha from 0 to 1, ignoring"),
+            },
+            other => tracing::warn!(key = %other, "Unknown key in `depth` block, ignoring"),
         }
     }
 }
@@ -2701,6 +2828,24 @@ bsp_split_bias = auto
 #     turbulence = 0.7              # secondary waves and moving streaks
 # }
 
+# Automatic attention depth / buoyancy. Inactive windows keep their live
+# content at tier 1, then become lightweight title cards at tier 2+.
+# Focusing or typing into a window returns it to the surface immediately.
+# depth {
+#     enabled = true
+#     sink_after_ms = 30000
+#     tier_interval_ms = 30000
+#     max_tier = 2
+#     tier_one_alpha = 0.78
+#     cool_color = 2D7096
+#     cool_alpha = 0.24
+#     schematic_color = 102330
+#     schematic_alpha = 0.9
+#     border_color = 52A6C6
+#     urgent_color = 76F1FF
+#     urgent_alpha = 0.95
+# }
+
 # Ripple (Phase R1 water identity). All values are the system defaults --
 # copy and uncomment what you want to change. Per-app overrides go in a
 # `rule { ripple { } }` sub-block (see below); the same fields work there.
@@ -3068,6 +3213,7 @@ mod tests {
             show_welcome_hint: false,
             water_effects: true,
             workspace_transition: WorkspaceTransitionConfig::default(),
+            depth: DepthConfig::default(),
             ripple: RippleConfig::system_default(),
             cursor_always_visible: false,
             cursor_hide_after_ms: 0,
@@ -3383,6 +3529,65 @@ mod tests {
             assert_eq!(transition.foam_alpha, 0.95);
             assert_eq!(transition.spray_amount, 0.7);
             assert_eq!(transition.turbulence, 0.7);
+        }
+    }
+
+    #[test]
+    fn depth_block_parses_every_tuning_knob() {
+        let entries = waves::parse(
+            "depth {\n\
+             enabled = false\n\
+             sink_after_ms = 1200\n\
+             tier_interval_ms = 800\n\
+             max_tier = 4\n\
+             tier_one_alpha = 0.61\n\
+             cool_color = 123456\n\
+             cool_alpha = 0.33\n\
+             schematic_color = 102030\n\
+             schematic_alpha = 0.75\n\
+             border_color = AABBCC\n\
+             urgent_color = FFEEDD\n\
+             urgent_alpha = 0.84\n\
+             }\n",
+            Path::new("<depth-test>"),
+        )
+        .unwrap();
+        let depth = Config::from_raw(lower_entries(&entries)).0.depth;
+        assert!(!depth.enabled);
+        assert_eq!(depth.sink_after_ms, 1200);
+        assert_eq!(depth.tier_interval_ms, 800);
+        assert_eq!(depth.max_tier, 4);
+        assert_eq!(depth.tier_one_alpha, 0.61);
+        assert_eq!(depth.cool_color, [18.0 / 255.0, 52.0 / 255.0, 86.0 / 255.0]);
+        assert_eq!(depth.cool_alpha, 0.33);
+        assert_eq!(
+            depth.schematic_color,
+            [16.0 / 255.0, 32.0 / 255.0, 48.0 / 255.0]
+        );
+        assert_eq!(depth.schematic_alpha, 0.75);
+        assert_eq!(
+            depth.border_color,
+            [170.0 / 255.0, 187.0 / 255.0, 204.0 / 255.0]
+        );
+        assert_eq!(depth.urgent_color, [1.0, 238.0 / 255.0, 221.0 / 255.0]);
+        assert_eq!(depth.urgent_alpha, 0.84);
+    }
+
+    #[test]
+    fn depth_defaults_match_generated_config() {
+        for config in [
+            Config::from_raw(RawConfig::default()).0,
+            parse_default_config(),
+        ] {
+            let depth = config.depth;
+            assert!(depth.enabled);
+            assert_eq!(depth.sink_after_ms, 30_000);
+            assert_eq!(depth.tier_interval_ms, 30_000);
+            assert_eq!(depth.max_tier, 2);
+            assert_eq!(depth.tier_one_alpha, 0.78);
+            assert_eq!(depth.cool_alpha, 0.24);
+            assert_eq!(depth.schematic_alpha, 0.9);
+            assert_eq!(depth.urgent_alpha, 0.95);
         }
     }
 

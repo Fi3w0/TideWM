@@ -12,7 +12,6 @@ use smithay::{
             EventLoop,
         },
         wayland_protocols::wp::presentation_time::server::wp_presentation_feedback,
-        wayland_server::protocol::wl_surface::WlSurface,
     },
     utils::{Rectangle, Transform},
     wayland::presentation::Refresh,
@@ -157,6 +156,7 @@ pub fn init_winit(
     event_loop
         .handle()
         .insert_source(timer, move |_, _, state| {
+            state.update_window_depths();
             let mut closing = false;
             for entry in &mut outputs {
                 let output = &entry.output;
@@ -302,6 +302,8 @@ pub fn init_winit(
                             &entry.output,
                             &water_glass_surfaces,
                         );
+                        let (depth_elements, depth_surfaces) =
+                            state.depth_frame_elements(renderer, &entry.output);
                         // Only skip from the normal walk what actually got a
                         // replacement element built -- a shader-compile
                         // failure or missing output geometry makes
@@ -309,13 +311,12 @@ pub fn init_winit(
                         // skipping windows the empty result won't draw would
                         // make them vanish from the frame entirely rather
                         // than just losing the effect.
-                        let skip: &[WlSurface] = if water_glass_elements.is_empty() {
-                            &[]
-                        } else {
-                            &water_glass_surfaces
-                        };
+                        let mut skip = depth_surfaces;
+                        if !water_glass_elements.is_empty() {
+                            skip.extend(water_glass_surfaces.iter().cloned());
+                        }
                         let space_elements =
-                            match state.desktop_render_elements(renderer, &entry.output, skip) {
+                            match state.desktop_render_elements(renderer, &entry.output, &skip) {
                                 Some(elements) => elements,
                                 None => {
                                     tracing::warn!("Failed to gather nested output elements");
@@ -349,6 +350,7 @@ pub fn init_winit(
                         );
                         elements.extend(ripple_layers.above_windows);
                         elements.extend(workspace_transition);
+                        elements.extend(depth_elements);
                         elements.extend(water_glass_elements);
                         elements.extend(
                             space_elements

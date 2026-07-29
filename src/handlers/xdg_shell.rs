@@ -845,6 +845,8 @@ impl Smallvil {
         let Some(window) = self.unmapped_toplevels.remove(surface) else {
             return;
         };
+        self.window_depths
+            .insert(surface.clone(), crate::depth::WindowDepth::new());
         let focused = self.intended_window_surface();
         let workspace = rule
             .workspace
@@ -1032,6 +1034,8 @@ impl Smallvil {
         self.urgent.remove(surface);
         self.window_opacity.remove(surface);
         self.backdrop_textures.remove(surface);
+        self.window_depths.remove(surface);
+        self.depth_schematics.remove(surface);
         self.focus_history.retain(|s| s != surface);
         // Closing the foreign-toplevel handle here (rather than only on
         // role destruction) means an xdg unmap also retires it; a later
@@ -1088,6 +1092,8 @@ impl Smallvil {
         if let Some(opacity) = rule.opacity {
             self.window_opacity.insert(entry.surface.clone(), opacity);
         }
+        self.window_depths
+            .insert(entry.surface.clone(), crate::depth::WindowDepth::new());
         self.announce_foreign_toplevel(&entry.surface);
         // Hand focus back to the restored window if the closing child had
         // it, through the normal focus authority -- which requires the

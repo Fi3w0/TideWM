@@ -230,6 +230,17 @@ pub struct Smallvil {
     pub(crate) ripples: Vec<crate::ripple::Ripple>,
     /// Compiled lazily on first use; see `ripple::ripple_program`.
     pub(crate) ripple_program: Option<GlesPixelProgram>,
+    /// Per-mapped-window automatic attention depth. Entries are created on
+    /// map and removed on unmap/destroy, so time-based sinking cannot grow
+    /// state beyond the current mapped toplevel count.
+    pub(crate) window_depths: HashMap<WlSurface, crate::depth::WindowDepth>,
+    /// Cached title-card buffers for tier-two-and-deeper windows. A window
+    /// returning to live content or unmapping evicts its buffer immediately.
+    pub(crate) depth_schematics: HashMap<WlSurface, crate::depth::DepthSchematic>,
+    /// Shared analytical cool-wash/urgent-border shader.
+    pub(crate) depth_overlay_program: Option<GlesPixelProgram>,
+    /// Throttles inactivity scans to 10Hz even when a backend ticks faster.
+    depth_last_tick: Instant,
     /// Requested workspace target awaiting an outgoing-frame capture,
     /// keyed by output name. A HashMap deliberately makes this one slot
     /// per output: repeated switches replace the target instead of
@@ -988,7 +999,10 @@ impl Smallvil {
                 let alpha = surface
                     .and_then(|surface| state.window_opacity.get(surface))
                     .copied()
-                    .unwrap_or(1.0);
+                    .unwrap_or(1.0)
+                    * surface
+                        .map(|surface| state.depth_live_alpha(surface))
+                        .unwrap_or(1.0);
                 let render_location = location - output_geo.loc - window.geometry().loc;
                 result.extend(
                     window
@@ -1056,6 +1070,140 @@ impl Smallvil {
             &mut result,
         );
         Some(result)
+    }
+
+    fn depth_live_alpha(&self, surface: &WlSurface) -> f32 {
+        if !self.config.water_effects || !self.config.depth.enabled {
+            return 1.0;
+        }
+        self.window_depths
+            .get(surface)
+            .filter(|depth| depth.tier() == 1)
+            .map(|_| self.config.depth.tier_one_alpha)
+            .unwrap_or(1.0)
+    }
+
+    /// Records direct attention for a mapped window. The next frame renders
+    /// it at the surface immediately; its inactivity clock restarts from now.
+    pub(crate) fn note_depth_attention(&mut self, surface: &WlSurface) {
+        let Some(depth) = self.window_depths.get_mut(surface) else {
+            return;
+        };
+        if depth.note_attention() {
+            self.depth_schematics.remove(surface);
+            self.request_redraw();
+        }
+    }
+
+    /// Advances every mapped window's analytical inactivity tier. Both
+    /// backends call this from their already-bounded frame timer, so no
+    /// per-window calloop source or unbounded timer registry is needed.
+    pub(crate) fn update_window_depths(&mut self) {
+        if self.depth_last_tick.elapsed() < Duration::from_millis(100) {
+            return;
+        }
+        self.depth_last_tick = Instant::now();
+        let enabled = self.config.water_effects && self.config.depth.enabled;
+        let mut changed = false;
+        for depth in self.window_depths.values_mut() {
+            changed |= if enabled {
+                depth.update(&self.config.depth)
+            } else {
+                depth.reset_disabled()
+            };
+        }
+        if !enabled {
+            self.depth_schematics.clear();
+        }
+        if changed {
+            self.request_redraw();
+        }
+    }
+
+    /// Builds the depth-specific replacement/overlay elements for one output.
+    /// The returned surface list contains only deep windows whose schematic
+    /// replacement was successfully built, so callers can safely omit those
+    /// live surfaces from `desktop_render_elements`.
+    pub(crate) fn depth_frame_elements(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+    ) -> (
+        Vec<crate::backend::udev::OutputRenderElements>,
+        Vec<WlSurface>,
+    ) {
+        if !self.config.water_effects || !self.config.depth.enabled {
+            return (Vec::new(), Vec::new());
+        }
+        let Some(output_geo) = self.space.output_geometry(output) else {
+            return (Vec::new(), Vec::new());
+        };
+        let visible: Vec<(WlSurface, Rectangle<i32, Logical>)> = self
+            .space
+            .elements_for_output(output)
+            .rev()
+            .filter_map(|window| {
+                let surface = window.toplevel()?.wl_surface().clone();
+                let rect = self.space.element_geometry(window)?;
+                Some((
+                    surface,
+                    Rectangle::new(rect.loc - output_geo.loc, rect.size),
+                ))
+            })
+            .collect();
+        let program =
+            crate::depth::depth_overlay_program(&mut self.depth_overlay_program, renderer);
+        let mut elements = Vec::new();
+        let mut replaced = Vec::new();
+
+        for (surface, area) in visible {
+            let Some(depth) = self.window_depths.get(&surface) else {
+                continue;
+            };
+            let tier = depth.tier();
+            let urgent = self.urgent.contains(&surface);
+
+            if let Some(program) = program.as_ref().filter(|_| tier == 1 || urgent) {
+                elements.push(crate::backend::udev::OutputRenderElements::DepthOverlay(
+                    crate::depth::DepthOverlayElement::new(
+                        depth,
+                        area,
+                        program.clone(),
+                        &self.config.depth,
+                        urgent,
+                    ),
+                ));
+            }
+
+            if tier < 2 {
+                self.depth_schematics.remove(&surface);
+                continue;
+            }
+
+            let title = crate::tab_strip::window_title(&surface);
+            let size = (area.size.w.max(1), area.size.h.max(1));
+            let rebuild = self
+                .depth_schematics
+                .get(&surface)
+                .is_none_or(|schematic| !schematic.matches(size, &title, tier, &self.config.depth));
+            if rebuild {
+                self.depth_schematics.insert(
+                    surface.clone(),
+                    crate::depth::DepthSchematic::build(size, title, tier, &self.config.depth),
+                );
+            }
+            let Some(element) = self.depth_schematics.get(&surface).and_then(|schematic| {
+                schematic.render_element(renderer, (area.loc.x as f64, area.loc.y as f64))
+            }) else {
+                continue;
+            };
+            replaced.push(surface);
+            elements.push(crate::backend::udev::OutputRenderElements::Composited(
+                element,
+            ));
+        }
+
+        (elements, replaced)
     }
 
     pub fn new(event_loop: &mut EventLoop<'static, Smallvil>, display: Display<Self>) -> Self {
@@ -1236,6 +1384,10 @@ impl Smallvil {
             water_glass_program: None,
             ripples: Vec::new(),
             ripple_program: None,
+            window_depths: HashMap::new(),
+            depth_schematics: HashMap::new(),
+            depth_overlay_program: None,
+            depth_last_tick: Instant::now(),
             pending_workspace_transitions: HashMap::new(),
             workspace_transitions: HashMap::new(),
             workspace_transition_program: None,
@@ -1680,6 +1832,9 @@ impl Smallvil {
         let previous_focus = self.window_focus.clone();
         self.on_demand_layer_focus = None;
         self.window_focus = surface.filter(|surface| self.window_is_visible(surface));
+        if let Some(surface) = self.window_focus.clone() {
+            self.note_depth_attention(&surface);
+        }
         self.reconcile_keyboard_focus(serial);
 
         // Focus-change ripple: only on a transition between two real
@@ -1786,7 +1941,12 @@ impl Smallvil {
             if let Some(surface) = new_window {
                 activation_changed |= self.set_window_activated(&surface, true);
                 self.refresh_wlr_toplevel_state(&surface);
-                self.urgent.remove(&surface);
+                self.note_depth_attention(&surface);
+                if self.urgent.remove(&surface) {
+                    if let Some(depth) = self.window_depths.get_mut(&surface) {
+                        depth.visual_changed();
+                    }
+                }
                 if !self.cycling_focus {
                     self.focus_history.retain(|s| s != &surface);
                     self.focus_history.insert(0, surface);
@@ -2906,6 +3066,10 @@ impl Smallvil {
             .filter(|(surface, tag)| {
                 tag.output == output.name()
                     && self
+                        .window_depths
+                        .get(*surface)
+                        .is_none_or(|depth| depth.tier() < 2)
+                    && self
                         .window_opacity
                         .get(*surface)
                         .is_some_and(|alpha| *alpha < 1.0)
@@ -2959,7 +3123,8 @@ impl Smallvil {
             let Some(location) = self.space.element_location(&window) else {
                 continue;
             };
-            let alpha = self.window_opacity.get(surface).copied().unwrap_or(1.0);
+            let alpha = self.window_opacity.get(surface).copied().unwrap_or(1.0)
+                * self.depth_live_alpha(surface);
             let render_location = location - output_geo.loc - window.geometry().loc;
 
             result.extend(
@@ -2996,14 +3161,15 @@ impl Smallvil {
         let water_glass_surfaces = self.water_glass_eligible_surfaces(output);
         let water_glass_elements =
             self.water_glass_frame_elements(renderer, output, &water_glass_surfaces);
-        let skip: &[WlSurface] = if water_glass_elements.is_empty() {
-            &[]
-        } else {
-            &water_glass_surfaces
-        };
-        let space_elements = self.desktop_render_elements(renderer, output, skip)?;
-        let elements: Vec<crate::backend::udev::OutputRenderElements> = water_glass_elements
+        let (depth_elements, depth_surfaces) = self.depth_frame_elements(renderer, output);
+        let mut skip = depth_surfaces;
+        if !water_glass_elements.is_empty() {
+            skip.extend(water_glass_surfaces.iter().cloned());
+        }
+        let space_elements = self.desktop_render_elements(renderer, output, &skip)?;
+        let elements: Vec<crate::backend::udev::OutputRenderElements> = depth_elements
             .into_iter()
+            .chain(water_glass_elements)
             .chain(
                 space_elements
                     .into_iter()
@@ -4860,6 +5026,9 @@ impl Smallvil {
             return;
         }
         self.urgent.insert(surface.clone());
+        if let Some(depth) = self.window_depths.get_mut(surface) {
+            depth.visual_changed();
+        }
         // Single-shot for now, same as the map/focus triggers -- a no-op
         // if the window's workspace is hidden, since spawn_ripple needs a
         // real on-screen location. A repeating "pulse until acknowledged"
@@ -5717,6 +5886,9 @@ impl Smallvil {
                     self.welcome_hint = None;
                 }
                 self.config = new_config;
+                self.depth_schematics.clear();
+                self.depth_last_tick = Instant::now() - Duration::from_millis(100);
+                self.update_window_depths();
                 if !self.config.water_effects || !self.config.workspace_transition.enabled {
                     self.workspace_transitions.clear();
                     let pending = std::mem::take(&mut self.pending_workspace_transitions);

@@ -568,16 +568,17 @@ impl Smallvil {
             let water_glass_surfaces = self.water_glass_eligible_surfaces(&output);
             let water_glass_elements =
                 self.water_glass_frame_elements(renderer, &output, &water_glass_surfaces);
-            let skip: &[WlSurface] = if water_glass_elements.is_empty() {
-                &[]
-            } else {
-                &water_glass_surfaces
-            };
-            match self.desktop_render_elements(renderer, &output, skip) {
+            let (depth_elements, depth_surfaces) = self.depth_frame_elements(renderer, &output);
+            let mut skip = depth_surfaces;
+            if !water_glass_elements.is_empty() {
+                skip.extend(water_glass_surfaces.iter().cloned());
+            }
+            match self.desktop_render_elements(renderer, &output, &skip) {
                 Some(space_elements) => {
                     elements.extend(ripple_layers.above_all);
                     elements.extend(ripple_layers.above_windows);
                     elements.extend(workspace_transition);
+                    elements.extend(depth_elements);
                     elements.extend(water_glass_elements);
                     elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
                     elements.extend(ripple_layers.below_windows);

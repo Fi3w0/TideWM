@@ -121,6 +121,8 @@ smithay::backend::renderer::element::render_elements! {
     /// below toast/overview/picker/tab-strip chrome. Same renderer-
     /// concrete-ness reason as `WaterGlass` above.
     Ripple = crate::ripple::RippleElement,
+    /// Cool-depth wash and urgent bioluminescent border (Phase R1).
+    DepthOverlay = crate::depth::DepthOverlayElement,
     /// Captured outgoing workspace peeled away over the live incoming
     /// workspace (Phase R1, see workspace_transition.rs).
     WorkspaceTransition = crate::workspace_transition::WorkspaceTransitionElement,
@@ -729,6 +731,7 @@ pub fn init_udev(
     event_loop
         .handle()
         .insert_source(Timer::immediate(), move |_, _, state: &mut Smallvil| {
+            state.update_window_depths();
             if state.take_needs_redraw() {
                 let mut dev = device_for_timer.borrow_mut();
                 for surface in dev.surfaces.values_mut() {
@@ -1362,10 +1365,15 @@ fn render_surface(
         state.config_error_element(output, renderer)
     };
 
+    let (depth_elements, depth_surfaces) = if locked {
+        (Vec::new(), Vec::new())
+    } else {
+        state.depth_frame_elements(renderer, output)
+    };
     let space_elements = if locked {
         Vec::new()
     } else {
-        state.desktop_render_elements(renderer, output, &[])?
+        state.desktop_render_elements(renderer, output, &depth_surfaces)?
     };
 
     let lock_elements = if locked {
@@ -1413,6 +1421,7 @@ fn render_surface(
     );
     elements.extend(ripple_layers.above_windows);
     elements.extend(workspace_transition);
+    elements.extend(depth_elements);
     elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
     elements.extend(ripple_layers.below_windows);
     elements.extend(wallpaper_element.map(OutputRenderElements::Composited));

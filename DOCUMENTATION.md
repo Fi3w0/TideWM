@@ -60,7 +60,7 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | --- | --- | --- | --- |
 | `terminal` | string | `"kitty"` | Spawned by the default `Super+Return` bind. The shipped default is `$wave(kitty, alacritty, foot, xterm)` — see [`$wave(...)`](#waves-format) above. |
 | `show_welcome_hint` | bool | `true` | Shows a persistent "fake window" card pointing you at `Super+Return` whenever the desktop is otherwise empty. Disappears the instant a real window maps; delete this key (or set it `false`) to stop it coming back. Checked on every reload, not just at startup. |
-| `water_effects` | bool | `true` | Master toggle for TideWM's water/aqua render identity. Disables water-glass, backdrop capture, impulse ripples, and wave workspace transitions when `false`. |
+| `water_effects` | bool | `true` | Master toggle for TideWM's water/aqua render identity. Disables water-glass, backdrop capture, impulse ripples, wave workspace transitions, and automatic depth/buoyancy when `false`. |
 | `cursor_always_visible` | bool | `false` | Forces the udev backend's software cursor to stay visible even when a client asks to hide it (e.g. a terminal hiding its own pointer glyph after inactivity). Off by default — respecting a client's own hide request is correct behavior; this is an opt-in override. |
 | `cursor_hide_after_ms` | integer | `0` | udev backend only: hides the software cursor after this many milliseconds of no real pointer motion (niri's `cursor.hide-after-inactive-ms`). `0` disables it. Independent of `cursor_always_visible` — that overrides a *client's* hide request, this is a compositor-driven idle timer, and the two can be combined. |
 | `workspace_auto_back_and_forth` | bool | `false` | Re-selecting the already-active workspace jumps back to whichever one was active immediately before it, instead of no-opping (niri's own feature of the same name). |
@@ -136,6 +136,44 @@ workspace_transition {
 ```
 
 To retain the earlier boundary-only animation, set `style = glow`; the shared timing, direction, color, and geometry fields continue to apply, while the `wave_alpha`, `glow_size`, and `glow_alpha` fields control that style’s appearance.
+
+### `depth { }`
+
+Configures automatic attention depth and buoyancy. A mapped window starts at the surface. After `sink_after_ms` without focus or keyboard input it moves to tier 1, keeping its live content with reduced opacity and a cool-water wash. Each additional `tier_interval_ms` moves it one tier deeper, capped by `max_tier`; tier 2 and below use a cached box-and-title schematic instead of live client pixels. Focusing, clicking, or typing into the window returns it to tier 0 immediately. Urgent windows retain a bright bioluminescent border at every tier.
+
+Depth state is bounded to one small record per mapped toplevel. Schematic buffers exist only for visible tier-2-or-deeper windows and are evicted when a window resurfaces, unmaps, or is destroyed. The inactivity scan reuses the backend’s bounded timer and is throttled to 10Hz. `water_effects = false` disables the model regardless of this block.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | Disables only automatic depth/buoyancy; other water effects remain active. |
+| `sink_after_ms` | integer, `0`–`86400000` | `30000` | Inactivity before entering tier 1. `delay_ms` is an alias. |
+| `tier_interval_ms` | integer, `1`–`86400000` | `30000` | Additional inactivity per deeper tier. `interval_ms` is an alias. |
+| `max_tier` | integer, `1`–`8` | `2` | Deepest tier a window may reach. `tiers` is an alias. |
+| `tier_one_alpha` | float, `0`–`1` | `0.78` | Live client-content opacity at tier 1. `live_alpha` is an alias. |
+| `cool_color` | color | `2D7096` | Tier-1 water wash. Uses the transition/ripple color formats. |
+| `cool_alpha` | float, `0`–`1` | `0.24` | Tier-1 wash opacity. |
+| `schematic_color` | color | `102330` | Background color for tier-2-and-deeper title cards. |
+| `schematic_alpha` | float, `0`–`1` | `0.9` | Title-card background opacity. |
+| `border_color` | color | `52A6C6` | Normal title-card border. |
+| `urgent_color` | color | `76F1FF` | Bioluminescent urgent border color at any tier. |
+| `urgent_alpha` | float, `0`–`1` | `0.95` | Bioluminescent border opacity. |
+
+```wave
+depth {
+    enabled = true
+    sink_after_ms = 30000
+    tier_interval_ms = 30000
+    max_tier = 2
+    tier_one_alpha = 0.78
+    cool_color = 2D7096
+    cool_alpha = 0.24
+    schematic_color = 102330
+    schematic_alpha = 0.9
+    border_color = 52A6C6
+    urgent_color = 76F1FF
+    urgent_alpha = 0.95
+}
+```
 
 ### `ripple { }`
 

@@ -352,6 +352,11 @@ impl Smallvil {
                 let time = Event::time_msec(&event);
                 let key_state = event.state();
                 tracing::trace!(keycode = ?event.key_code(), ?key_state, "Raw key event");
+                if key_state == KeyState::Pressed {
+                    if let Some(surface) = self.focused_window_surface() {
+                        self.note_depth_attention(&surface);
+                    }
+                }
 
                 // Accessibility keyboard grabs (a screen reader watching or
                 // grabbing keys system-wide, `org.freedesktop.a11y.KeyboardMonitor`)
