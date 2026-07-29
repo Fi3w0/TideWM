@@ -739,6 +739,27 @@ fn lifecycle_transition(tracking: ToplevelTracking, has_buffer: bool) -> Topleve
     }
 }
 
+/// Whether `map_toplevel`'s placement/state conversion below is guaranteed
+/// to send its own protocol configure, making the earlier tiled-size
+/// configure `retile()` sends redundant (and, for a client like a terminal,
+/// a visible one-frame re-flow of its content). `rule.maximize`,
+/// `rule.fullscreen`, and `rule.pseudo_tile` each end in a call that
+/// configures unconditionally (`do_maximize_request`/`do_fullscreen_request`/
+/// `toggle_pseudo_tile`'s own `retile()`); an explicit rule position/size
+/// guarantees `apply_floating_placement`, which also configures
+/// unconditionally. A plain `float`/`pin`/auto-float conversion with no
+/// rule-provided position/size is deliberately excluded: `toggle_floating`'s
+/// tiled-to-floating branch sends no configure of its own, so skipping the
+/// only one that exists would leave the window's stored `FloatingTag::rect`
+/// out of sync with whatever size the client's buffer actually settles at.
+fn skips_first_tile_configure(rule: &crate::config::WindowRule, implicit_float: bool) -> bool {
+    rule.maximize
+        || rule.fullscreen
+        || rule.pseudo_tile
+        || ((rule.float || rule.pin || implicit_float)
+            && (rule.position.is_some() || rule.size.is_some()))
+}
+
 impl Smallvil {
     /// Finds a protocol-mapped toplevel even when its workspace is hidden
     /// and it is therefore absent from `Space`.
@@ -891,8 +912,18 @@ impl Smallvil {
         // render or a present, so applying the rule's placement after it
         // is still invisible to the client: nothing is actually drawn
         // until the backend's own render loop runs, strictly after this
-        // function returns.
-        self.retile();
+        // function returns. But `retile()` also unconditionally sends this
+        // window a tiled-size *protocol* configure -- if a conversion below
+        // is guaranteed to resize it again right after, the client (a
+        // terminal, say) receives both in quick succession and visibly
+        // re-flows its content twice. See `skips_first_tile_configure`'s own
+        // doc comment for which conversions actually guarantee that second
+        // configure.
+        if skips_first_tile_configure(&rule, implicit_float) {
+            self.retile_skip_first_configure(surface);
+        } else {
+            self.retile();
+        }
 
         if let Some(swallower) = swallow_target {
             if let Some(hidden) = self.detach_mapped_toplevel(&swallower) {
@@ -1504,7 +1535,9 @@ fn ancestor_pids(pid: i32) -> Vec<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{lifecycle_transition, ToplevelTracking, ToplevelTransition};
+    use super::{
+        lifecycle_transition, skips_first_tile_configure, ToplevelTracking, ToplevelTransition,
+    };
 
     #[test]
     fn role_without_buffer_stays_unmapped() {
@@ -1540,6 +1573,69 @@ mod tests {
             lifecycle_transition(ToplevelTracking::Unmapped, true),
             ToplevelTransition::Map
         );
+    }
+
+    #[test]
+    fn plain_float_conversion_without_a_size_rule_keeps_the_tile_configure() {
+        // toggle_floating's tiled-to-floating branch sends no configure of
+        // its own for these, so the first (tiled) configure must not be
+        // withheld -- otherwise the client's buffer size and the stored
+        // FloatingTag::rect would disagree forever.
+        let mut rule = crate::config::WindowRule::default();
+        assert!(!skips_first_tile_configure(&rule, false));
+        rule.float = true;
+        assert!(!skips_first_tile_configure(&rule, false));
+        rule.float = false;
+        rule.pin = true;
+        assert!(!skips_first_tile_configure(&rule, false));
+        rule.pin = false;
+        assert!(!skips_first_tile_configure(&rule, true)); // implicit_float alone
+    }
+
+    #[test]
+    fn conversions_with_a_guaranteed_second_configure_skip_the_first() {
+        use crate::config::WindowRule;
+
+        let maximize = WindowRule {
+            maximize: true,
+            ..Default::default()
+        };
+        assert!(skips_first_tile_configure(&maximize, false));
+
+        let fullscreen = WindowRule {
+            fullscreen: true,
+            ..Default::default()
+        };
+        assert!(skips_first_tile_configure(&fullscreen, false));
+
+        let pseudo_tile = WindowRule {
+            pseudo_tile: true,
+            ..Default::default()
+        };
+        assert!(skips_first_tile_configure(&pseudo_tile, false));
+
+        // A plain float/pin/implicit-float conversion only skips once
+        // apply_floating_placement is guaranteed too, i.e. a rule-provided
+        // position or size is set.
+        let sized_float = WindowRule {
+            float: true,
+            size: Some((640, 480)),
+            ..Default::default()
+        };
+        assert!(skips_first_tile_configure(&sized_float, false));
+
+        let positioned_pin = WindowRule {
+            pin: true,
+            position: Some((0, 0)),
+            ..Default::default()
+        };
+        assert!(skips_first_tile_configure(&positioned_pin, false));
+
+        let positioned = WindowRule {
+            position: Some((10, 10)),
+            ..Default::default()
+        };
+        assert!(skips_first_tile_configure(&positioned, true)); // implicit_float + explicit position
     }
 
     #[test]

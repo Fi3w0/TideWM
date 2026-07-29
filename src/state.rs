@@ -4721,17 +4721,32 @@ impl Smallvil {
     /// centered, rather than filling the tile. Fullscreen always wins if a
     /// window is somehow both.
     pub fn retile(&mut self) {
-        self.retile_with_viscosity(false);
+        self.retile_with_viscosity(false, None);
     }
 
     /// Interactive tiled resize/drop path. It shares every layout and
     /// protocol-state operation with `retile`, changing only the short-lived
     /// render follower chosen for geometry that moved under the pointer.
     pub(crate) fn retile_viscous(&mut self) {
-        self.retile_with_viscosity(true);
+        self.retile_with_viscosity(true, None);
     }
 
-    fn retile_with_viscosity(&mut self, interactive: bool) {
+    /// Same as `retile`, but withholds the tiled-size configure for one
+    /// surface. `map_toplevel` calls this instead of `retile` when a
+    /// window rule (float/pin/maximize/pseudo-tile/the auto-float
+    /// heuristic) is about to immediately re-tile it again: without this,
+    /// the client received a tiled-size configure here and a
+    /// differently-sized one moments later from that conversion, and a
+    /// terminal visibly re-flows its text grid between the two. Bookkeeping
+    /// (`space.map_element`, staged pending state) still runs as normal --
+    /// `toggle_floating`/`toggle_pseudo_tile` need the former to find the
+    /// window at all, and the latter is harmless since the conversion's own
+    /// `with_pending_state` call overwrites it before anything is sent.
+    pub(crate) fn retile_skip_first_configure(&mut self, skip: &WlSurface) {
+        self.retile_with_viscosity(false, Some(skip));
+    }
+
+    fn retile_with_viscosity(&mut self, interactive: bool, skip_configure_for: Option<&WlSurface>) {
         let outputs: Vec<Output> = self.space.outputs().cloned().collect();
         for output in &outputs {
             let Some(area) = self.output_tiling_area(output) else {
@@ -4758,7 +4773,9 @@ impl Smallvil {
                     toplevel.with_pending_state(|state| {
                         state.size = Some(rect.size);
                     });
-                    toplevel.send_pending_configure();
+                    if skip_configure_for != Some(toplevel.wl_surface()) {
+                        toplevel.send_pending_configure();
+                    }
                 }
                 if let Some(surface) = window.toplevel().map(|t| t.wl_surface().clone()) {
                     if let Some(old_location) = self.space.element_location(&window) {
