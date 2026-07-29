@@ -40,7 +40,7 @@ TideWM is a solo project. I use AI coding agents (OpenCode, Codex, Claude Code) 
 - XWayland, via [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite)
 - Screenshots, clipboard, session lock
 - PipeWire screencasting behind a feature flag, verified end to end through real OBS and Discord on a standalone session
-- Water-glass refraction, configurable impulse ripples, and adjustable directional wave workspace transitions
+- Water-glass refraction, configurable impulse ripples, and adjustable full-screen water-wave workspace transitions
 - A low-memory built-in Tide wallpaper; layer-shell wallpaper tools replace it normally
 - Hot-reloadable config in Waves, TideWM's own format, split across files, `env`/`$variables`/`$wave(...)`
 - Per-app window rules, including regex matching, initial fullscreen/maximize, capture privacy, and window swallowing

@@ -1070,25 +1070,80 @@ pub enum RippleEase {
 #[derive(Debug, Clone)]
 pub struct WorkspaceTransitionConfig {
     pub enabled: bool,
+    /// `Water` floods the output with animated water, foam, and spray;
+    /// `Glow` retains the original colored boundary wipe.
+    pub style: WorkspaceTransitionStyle,
     pub duration_ms: u32,
+    /// Multiplier over `duration_ms`: 2.0 is twice as fast, 0.5 half.
+    pub speed: f32,
     pub curve: RippleEase,
+    /// Automatic follows workspace-number direction; fixed modes make
+    /// every switch travel the same way.
+    pub direction: WorkspaceTransitionDirectionMode,
     /// Horizontal displacement of the wipe boundary, in physical pixels.
     pub wave_amplitude: f32,
     /// Number of sine cycles from the top of the output to the bottom.
     pub wave_frequency: f32,
     /// Half-width of the soft cross-fade boundary, in physical pixels.
     pub edge_width: f32,
+    /// Main water color, or the colored core tint in `Glow` style.
+    pub color: [f32; 3],
+    pub wave_size: f32,
+    pub wave_alpha: f32,
+    pub glow_size: f32,
+    pub glow_alpha: f32,
+    /// Water-style shading scale and off-screen travel margin, in physical
+    /// pixels.
+    pub water_depth: f32,
+    pub water_alpha: f32,
+    pub foam_color: [f32; 3],
+    pub foam_size: f32,
+    pub foam_alpha: f32,
+    /// Density/opacity multiplier for procedural droplets ahead of the crest.
+    pub spray_amount: f32,
+    /// Strength of secondary wave harmonics and animated body streaks.
+    pub turbulence: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkspaceTransitionStyle {
+    #[default]
+    Water,
+    Glow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkspaceTransitionDirectionMode {
+    #[default]
+    Auto,
+    LeftToRight,
+    RightToLeft,
 }
 
 impl Default for WorkspaceTransitionConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            style: WorkspaceTransitionStyle::Water,
             duration_ms: 520,
+            speed: 1.0,
             curve: RippleEase::CubicInOut,
+            direction: WorkspaceTransitionDirectionMode::Auto,
             wave_amplitude: 34.0,
             wave_frequency: 3.0,
             edge_width: 18.0,
+            color: [142.0 / 255.0, 221.0 / 255.0, 1.0],
+            wave_size: 10.0,
+            wave_alpha: 0.9,
+            glow_size: 46.0,
+            glow_alpha: 0.25,
+            water_depth: 260.0,
+            water_alpha: 0.98,
+            foam_color: [232.0 / 255.0, 252.0 / 255.0, 1.0],
+            foam_size: 18.0,
+            foam_alpha: 0.95,
+            spray_amount: 0.7,
+            turbulence: 0.7,
         }
     }
 }
@@ -1559,6 +1614,14 @@ fn apply_workspace_transition_block(cfg: &mut WorkspaceTransitionConfig, body: &
         };
         match key.as_str() {
             "enabled" => set_bool(&mut cfg.enabled, key, value),
+            "style" => match value.as_str() {
+                "water" => cfg.style = WorkspaceTransitionStyle::Water,
+                "glow" => cfg.style = WorkspaceTransitionStyle::Glow,
+                _ => tracing::warn!(
+                    value,
+                    "Expected workspace_transition.style: water glow, ignoring"
+                ),
+            },
             "duration_ms" | "duration" => match value.parse::<u32>() {
                 Ok(value) if (50..=5000).contains(&value) => cfg.duration_ms = value,
                 _ => tracing::warn!(
@@ -1566,11 +1629,33 @@ fn apply_workspace_transition_block(cfg: &mut WorkspaceTransitionConfig, body: &
                     "Expected workspace_transition.duration_ms from 50 to 5000, ignoring"
                 ),
             },
+            "speed" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() && (0.1..=10.0).contains(&value) => {
+                    cfg.speed = value
+                }
+                _ => tracing::warn!(
+                    value,
+                    "Expected workspace_transition.speed from 0.1 to 10, ignoring"
+                ),
+            },
             "curve" | "ease" => match parse_ease(value) {
                 Some(curve) => cfg.curve = curve,
                 None => tracing::warn!(
                     value,
                     "Expected one of: linear cubic-out cubic-in-out quad-out exp-out, ignoring"
+                ),
+            },
+            "direction" => match value.as_str() {
+                "auto" => cfg.direction = WorkspaceTransitionDirectionMode::Auto,
+                "left-to-right" | "ltr" => {
+                    cfg.direction = WorkspaceTransitionDirectionMode::LeftToRight
+                }
+                "right-to-left" | "rtl" => {
+                    cfg.direction = WorkspaceTransitionDirectionMode::RightToLeft
+                }
+                _ => tracing::warn!(
+                    value,
+                    "Expected workspace_transition.direction: auto left-to-right right-to-left, ignoring"
                 ),
             },
             "wave_amplitude" | "amplitude" => match value.parse::<f32>() {
@@ -1598,6 +1683,110 @@ fn apply_workspace_transition_block(cfg: &mut WorkspaceTransitionConfig, body: &
                 _ => tracing::warn!(
                     value,
                     "Expected workspace_transition.edge_width from 0.5 to 250, ignoring"
+                ),
+            },
+            "color" => match parse_ripple_color(value) {
+                Some(color) => cfg.color = color,
+                None => tracing::warn!(
+                    value,
+                    "Expected a transition hex color (RRGGBB, quoted #RRGGBB, or rgb(...)), ignoring"
+                ),
+            },
+            "wave_size" | "size" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() && (0.0..=250.0).contains(&value) => {
+                    cfg.wave_size = value
+                }
+                _ => tracing::warn!(
+                    value,
+                    "Expected workspace_transition.wave_size from 0 to 250, ignoring"
+                ),
+            },
+            "wave_alpha" | "alpha" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() && (0.0..=1.0).contains(&value) => {
+                    cfg.wave_alpha = value
+                }
+                _ => tracing::warn!(
+                    value,
+                    "Expected workspace_transition.wave_alpha from 0 to 1, ignoring"
+                ),
+            },
+            "glow_size" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() && (0.0..=500.0).contains(&value) => {
+                    cfg.glow_size = value
+                }
+                _ => tracing::warn!(
+                    value,
+                    "Expected workspace_transition.glow_size from 0 to 500, ignoring"
+                ),
+            },
+            "glow_alpha" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() && (0.0..=1.0).contains(&value) => {
+                    cfg.glow_alpha = value
+                }
+                _ => tracing::warn!(
+                    value,
+                    "Expected workspace_transition.glow_alpha from 0 to 1, ignoring"
+                ),
+            },
+            "water_depth" | "depth" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() && (1.0..=2000.0).contains(&value) => {
+                    cfg.water_depth = value
+                }
+                _ => tracing::warn!(
+                    value,
+                    "Expected workspace_transition.water_depth from 1 to 2000, ignoring"
+                ),
+            },
+            "water_alpha" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() && (0.0..=1.0).contains(&value) => {
+                    cfg.water_alpha = value
+                }
+                _ => tracing::warn!(
+                    value,
+                    "Expected workspace_transition.water_alpha from 0 to 1, ignoring"
+                ),
+            },
+            "foam_color" => match parse_ripple_color(value) {
+                Some(color) => cfg.foam_color = color,
+                None => tracing::warn!(
+                    value,
+                    "Expected a foam hex color (RRGGBB, quoted #RRGGBB, or rgb(...)), ignoring"
+                ),
+            },
+            "foam_size" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() && (0.0..=250.0).contains(&value) => {
+                    cfg.foam_size = value
+                }
+                _ => tracing::warn!(
+                    value,
+                    "Expected workspace_transition.foam_size from 0 to 250, ignoring"
+                ),
+            },
+            "foam_alpha" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() && (0.0..=1.0).contains(&value) => {
+                    cfg.foam_alpha = value
+                }
+                _ => tracing::warn!(
+                    value,
+                    "Expected workspace_transition.foam_alpha from 0 to 1, ignoring"
+                ),
+            },
+            "spray_amount" | "spray" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() && (0.0..=1.0).contains(&value) => {
+                    cfg.spray_amount = value
+                }
+                _ => tracing::warn!(
+                    value,
+                    "Expected workspace_transition.spray_amount from 0 to 1, ignoring"
+                ),
+            },
+            "turbulence" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() && (0.0..=2.0).contains(&value) => {
+                    cfg.turbulence = value
+                }
+                _ => tracing::warn!(
+                    value,
+                    "Expected workspace_transition.turbulence from 0 to 2, ignoring"
                 ),
             },
             other => tracing::warn!(
@@ -2471,11 +2660,26 @@ bsp_split_bias = auto
 # geometry. All values below are the defaults.
 # workspace_transition {
 #     enabled = true
+#     style = water                  # water glow
 #     duration_ms = 520
+#     speed = 1.0                  # multiplier; 2.0 twice as fast, 0.5 half
 #     curve = cubic-in-out          # linear cubic-out cubic-in-out quad-out exp-out
+#     direction = auto              # auto left-to-right right-to-left
 #     wave_amplitude = 34           # horizontal displacement, physical pixels
 #     wave_frequency = 3            # sine cycles from top to bottom
 #     edge_width = 18               # soft boundary half-width, physical pixels
+#     color = 8EDDFF                 # wavefront tint
+#     wave_size = 10                # water curl / glow core size, physical pixels
+#     wave_alpha = 0.9              # glow-style colored core opacity
+#     glow_size = 46                # glow-style reach beyond core, physical pixels
+#     glow_alpha = 0.25             # glow-style opacity
+#     water_depth = 260             # water shading/travel scale, physical pixels
+#     water_alpha = 0.98            # opacity while water fills the output
+#     foam_color = E8FCFF
+#     foam_size = 18                # white crest half-width, physical pixels
+#     foam_alpha = 0.95
+#     spray_amount = 0.7            # procedural droplets ahead of crest
+#     turbulence = 0.7              # secondary waves and moving streaks
 # }
 
 # Ripple (Phase R1 water identity). All values are the system defaults --
@@ -3073,11 +3277,26 @@ mod tests {
         let entries = waves::parse(
             "workspace_transition {\n\
              enabled = false\n\
+             style = glow\n\
              duration_ms = 900\n\
+             speed = 1.75\n\
              curve = exp-out\n\
+             direction = left-to-right\n\
              wave_amplitude = 72.5\n\
              wave_frequency = 4.5\n\
              edge_width = 26\n\
+             color = rgb(FF0088)\n\
+             wave_size = 14\n\
+             wave_alpha = 0.8\n\
+             glow_size = 64\n\
+             glow_alpha = 0.35\n\
+             water_depth = 330\n\
+             water_alpha = 0.96\n\
+             foam_color = EEF9FF\n\
+             foam_size = 24\n\
+             foam_alpha = 0.88\n\
+             spray_amount = 0.6\n\
+             turbulence = 1.2\n\
              }\n",
             Path::new("<workspace-transition-test>"),
         )
@@ -3086,11 +3305,29 @@ mod tests {
         let transition = config.workspace_transition;
 
         assert!(!transition.enabled);
+        assert_eq!(transition.style, WorkspaceTransitionStyle::Glow);
         assert_eq!(transition.duration_ms, 900);
+        assert_eq!(transition.speed, 1.75);
         assert_eq!(transition.curve, RippleEase::ExpOut);
+        assert_eq!(
+            transition.direction,
+            WorkspaceTransitionDirectionMode::LeftToRight
+        );
         assert_eq!(transition.wave_amplitude, 72.5);
         assert_eq!(transition.wave_frequency, 4.5);
         assert_eq!(transition.edge_width, 26.0);
+        assert_eq!(transition.color, [1.0, 0.0, 136.0 / 255.0]);
+        assert_eq!(transition.wave_size, 14.0);
+        assert_eq!(transition.wave_alpha, 0.8);
+        assert_eq!(transition.glow_size, 64.0);
+        assert_eq!(transition.glow_alpha, 0.35);
+        assert_eq!(transition.water_depth, 330.0);
+        assert_eq!(transition.water_alpha, 0.96);
+        assert_eq!(transition.foam_color, [238.0 / 255.0, 249.0 / 255.0, 1.0]);
+        assert_eq!(transition.foam_size, 24.0);
+        assert_eq!(transition.foam_alpha, 0.88);
+        assert_eq!(transition.spray_amount, 0.6);
+        assert_eq!(transition.turbulence, 1.2);
     }
 
     #[test]
@@ -3101,11 +3338,26 @@ mod tests {
         ] {
             let transition = config.workspace_transition;
             assert!(transition.enabled);
+            assert_eq!(transition.style, WorkspaceTransitionStyle::Water);
             assert_eq!(transition.duration_ms, 520);
+            assert_eq!(transition.speed, 1.0);
             assert_eq!(transition.curve, RippleEase::CubicInOut);
+            assert_eq!(transition.direction, WorkspaceTransitionDirectionMode::Auto);
             assert_eq!(transition.wave_amplitude, 34.0);
             assert_eq!(transition.wave_frequency, 3.0);
             assert_eq!(transition.edge_width, 18.0);
+            assert_eq!(transition.color, [142.0 / 255.0, 221.0 / 255.0, 1.0]);
+            assert_eq!(transition.wave_size, 10.0);
+            assert_eq!(transition.wave_alpha, 0.9);
+            assert_eq!(transition.glow_size, 46.0);
+            assert_eq!(transition.glow_alpha, 0.25);
+            assert_eq!(transition.water_depth, 260.0);
+            assert_eq!(transition.water_alpha, 0.98);
+            assert_eq!(transition.foam_color, [232.0 / 255.0, 252.0 / 255.0, 1.0]);
+            assert_eq!(transition.foam_size, 18.0);
+            assert_eq!(transition.foam_alpha, 0.95);
+            assert_eq!(transition.spray_amount, 0.7);
+            assert_eq!(transition.turbulence, 0.7);
         }
     }
 

@@ -3014,10 +3014,19 @@ impl Smallvil {
             return;
         }
 
-        let direction = if target > current {
-            crate::workspace_transition::WorkspaceTransitionDirection::Forward
-        } else {
-            crate::workspace_transition::WorkspaceTransitionDirection::Backward
+        let direction = match self.config.workspace_transition.direction {
+            crate::config::WorkspaceTransitionDirectionMode::Auto if target > current => {
+                crate::workspace_transition::WorkspaceTransitionDirection::RightToLeft
+            }
+            crate::config::WorkspaceTransitionDirectionMode::Auto => {
+                crate::workspace_transition::WorkspaceTransitionDirection::LeftToRight
+            }
+            crate::config::WorkspaceTransitionDirectionMode::LeftToRight => {
+                crate::workspace_transition::WorkspaceTransitionDirection::LeftToRight
+            }
+            crate::config::WorkspaceTransitionDirectionMode::RightToLeft => {
+                crate::workspace_transition::WorkspaceTransitionDirection::RightToLeft
+            }
         };
         let geometry = output
             .current_mode()

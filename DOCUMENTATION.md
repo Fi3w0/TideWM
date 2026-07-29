@@ -75,29 +75,63 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 
 ### Workspace transitions
 
-Workspace actions use a directional wave wipe while both `water_effects` and `workspace_transition.enabled` are true. TideWM captures the outgoing desktop after its submitted frame, switches to the live incoming workspace, then peels the capture away; cursor and compositor chrome remain live above it. State is bounded to one pending target and one transient ARGB8888 full-output texture per output (about 7.9MiB at 1080p or 31.6MiB at 4K), with newer switches replacing rather than queueing. The texture is released when the wipe ends. Disabling either toggle makes workspace switching immediate.
+Workspace actions use a directional wave wipe while both `water_effects` and `workspace_transition.enabled` are true. The default `water` style is a full-screen transition: a blue body with moving caustic streaks, a curling foamy crest, and spray floods across the outgoing workspace; once water covers the whole output, it continues across to reveal the incoming workspace. The alternate `glow` style retains the slimmer colored sinusoidal boundary wipe. Cursor and compositor chrome remain live above either style.
 
-The enable/duration/curve split follows niri’s useful per-animation configuration shape; the wave geometry controls are TideWM-specific.
+TideWM captures the outgoing desktop after its submitted frame and keeps the incoming workspace live underneath the effect. State is bounded to one pending target and one transient ARGB8888 full-output texture per output (about 7.9MiB at 1080p or 31.6MiB at 4K), with newer switches replacing rather than queueing. Both procedural styles are shader-only and allocate no extra textures. The capture is released when the transition ends. Disabling either toggle makes workspace switching immediate.
+
+The enable/duration/curve split follows niri’s useful per-animation configuration shape; the direction, speed, wavefront, and geometry controls are TideWM-specific. Values are snapshotted when a transition begins, so hot reload affects the next workspace switch.
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | Disables only workspace transitions; other water effects stay active. |
+| `style` | `water` \| `glow` | `water` | `water` fills the output before revealing the new workspace. `glow` uses the original thin colored boundary. |
 | `duration_ms` | integer, `50`–`5000` | `520` | Transition lifetime in milliseconds. `duration` is an alias. |
+| `speed` | float, `0.1`–`10` | `1.0` | Speed multiplier applied to `duration_ms`: `2.0` is twice as fast and `0.5` is half speed. |
 | `curve` | enum | `cubic-in-out` | Progress easing: `linear`, `cubic-out`, `cubic-in-out`, `quad-out`, or `exp-out`. `ease` is an alias. |
+| `direction` | enum | `auto` | `auto` sweeps right-to-left for a higher-numbered workspace and left-to-right for a lower-numbered one. `left-to-right`/`ltr` and `right-to-left`/`rtl` force one direction. |
 | `wave_amplitude` | float, `0`–`500` | `34` | Maximum horizontal displacement of the moving boundary in physical pixels. `0` produces a straight wipe. `amplitude` is an alias. |
 | `wave_frequency` | float, `0`–`20` | `3` | Sine cycles from the output’s top edge to its bottom edge. `0` removes vertical waviness. `frequency` is an alias. |
 | `edge_width` | float, `0.5`–`250` | `18` | Half-width of the soft cross-fade boundary in physical pixels. Lower is sharper; higher is softer. |
+| `color` | color | `8EDDFF` | Main water color, or the wavefront tint under `glow`. Accepts bare `RRGGBB`, quoted `"#RRGGBB"`, `rgb(RRGGBB)`, or `rgba(RRGGBB, AA)`. |
+| `wave_size` | float, `0`–`250` | `10` | Curl/lobe size under `water`, or colored core half-width under `glow`, in physical pixels. `size` is an alias. |
+| `wave_alpha` | float, `0`–`1` | `0.9` | Colored core opacity under `glow`. `alpha` is an alias. |
+| `glow_size` | float, `0`–`500` | `46` | `glow` style only: reach beyond the colored core in physical pixels. |
+| `glow_alpha` | float, `0`–`1` | `0.25` | `glow` style only: outer glow opacity. |
+| `water_depth` | float, `1`–`2000` | `260` | `water` style only: depth/shading scale and off-screen travel margin in physical pixels. `depth` is an alias. |
+| `water_alpha` | float, `0`–`1` | `0.98` | `water` style only: opacity of the body while it fills the output. |
+| `foam_color` | color | `E8FCFF` | `water` style only: crest, spray, and caustic highlight color. Uses the same color formats as `color`. |
+| `foam_size` | float, `0`–`250` | `18` | `water` style only: foamy crest width in physical pixels. |
+| `foam_alpha` | float, `0`–`1` | `0.95` | `water` style only: crest and spray opacity. |
+| `spray_amount` | float, `0`–`1` | `0.7` | `water` style only: density/opacity of droplets ahead of the entering crest. `spray` is an alias. |
+| `turbulence` | float, `0`–`2` | `0.7` | `water` style only: strength of secondary crest harmonics and moving caustic streaks. |
 
 ```wave
 workspace_transition {
     enabled = true
-    duration_ms = 650
+    style = water
+    duration_ms = 600
+    speed = 1
     curve = cubic-out
-    wave_amplitude = 48
-    wave_frequency = 3.5
-    edge_width = 22
+    direction = auto
+    wave_amplitude = 52
+    wave_frequency = 2.5
+    edge_width = 14
+    color = 159DFF
+    wave_size = 28
+    wave_alpha = 0.9
+    glow_size = 54
+    glow_alpha = 0.3
+    water_depth = 260
+    water_alpha = 0.98
+    foam_color = F2FDFF
+    foam_size = 22
+    foam_alpha = 1
+    spray_amount = 0.8
+    turbulence = 0.9
 }
 ```
+
+To retain the earlier boundary-only animation, set `style = glow`; the shared timing, direction, color, and geometry fields continue to apply, while the `wave_alpha`, `glow_size`, and `glow_alpha` fields control that style’s appearance.
 
 ### `ripple { }`
 
