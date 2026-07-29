@@ -8,7 +8,7 @@ use smithay::{
         MotionEvent, PointerGrab, PointerInnerHandle, RelativeMotionEvent,
     },
     reexports::wayland_server::protocol::wl_surface::WlSurface,
-    utils::{IsAlive, Logical, Point},
+    utils::{IsAlive, Logical, Point, Rectangle},
 };
 
 pub struct MoveSurfaceGrab {
@@ -48,8 +48,13 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
 
         let delta = event.location - self.start_data.location;
         let new_location = self.initial_window_location.to_f64() + delta;
+        let new_location = new_location.to_i32_round();
+        data.retarget_window_viscosity(
+            surface,
+            Rectangle::new(new_location, self.window.geometry().size),
+        );
         data.space
-            .map_element(self.window.clone(), new_location.to_i32_round(), false);
+            .map_element(self.window.clone(), new_location, false);
         data.request_redraw();
     }
 

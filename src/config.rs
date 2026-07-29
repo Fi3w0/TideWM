@@ -217,6 +217,11 @@ pub struct Config {
     /// checked once, at startup (see `main.rs`).
     pub show_welcome_hint: bool,
     pub water_effects: bool,
+    /// Strength of TideWM's render-only interactive move/resize damping.
+    /// `1.0` is the default half-life multiplier, `0.0` disables it, and
+    /// larger values settle more slowly. `water_effects` is the master
+    /// bypass. Matching window rules may override this per app.
+    pub viscosity: f64,
     /// Window lifecycle and layout-motion animation timing. Logical state
     /// changes immediately; this controls only visual settling.
     pub animations: WindowAnimationsConfig,
@@ -453,6 +458,7 @@ impl Config {
             pointer_modifier,
             show_welcome_hint: raw.show_welcome_hint,
             water_effects: raw.water_effects,
+            viscosity: raw.viscosity.clamp(0.0, 4.0),
             animations: raw.animations,
             workspace_transition: raw.workspace_transition,
             depth: raw.depth,
@@ -598,6 +604,9 @@ impl Config {
             if rule.glass.is_some() {
                 effective.glass = rule.glass;
             }
+            if rule.viscosity.is_some() {
+                effective.viscosity = rule.viscosity;
+            }
             if let Some(rule_frost) = &rule.frost {
                 effective.frost = Some(match effective.frost.take() {
                     Some(existing) => existing.merge_over(rule_frost),
@@ -662,6 +671,7 @@ struct RawConfig {
     pointer_modifier: String,
     show_welcome_hint: bool,
     water_effects: bool,
+    viscosity: f64,
     animations: WindowAnimationsConfig,
     workspace_transition: WorkspaceTransitionConfig,
     depth: DepthConfig,
@@ -807,6 +817,7 @@ impl Default for RawConfig {
             // (welcome.rs), that must resolve to off, not back to on.
             show_welcome_hint: false,
             water_effects: true,
+            viscosity: 1.0,
             animations: WindowAnimationsConfig::default(),
             workspace_transition: WorkspaceTransitionConfig::default(),
             depth: DepthConfig::default(),
@@ -1132,6 +1143,9 @@ pub struct WindowRule {
     /// behavior where compositor `opacity` below one implies water;
     /// `Plain` disables backdrop substitution while preserving `opacity`.
     pub glass: Option<GlassMode>,
+    /// Per-window interactive move/resize damping. Last matching rule wins;
+    /// `0.0` disables damping for the matched app.
+    pub viscosity: Option<f64>,
     /// Per-app frost overrides. Unset fields inherit the global
     /// `frost { }` block, and multiple matching rules merge field by field.
     pub frost: Option<FrostOverrides>,
@@ -2607,6 +2621,10 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
         }
         "show_welcome_hint" => set_bool(&mut raw.show_welcome_hint, key, value),
         "water_effects" => set_bool(&mut raw.water_effects, key, value),
+        "viscosity" => match parse_viscosity(value) {
+            Some(value) => raw.viscosity = value,
+            None => tracing::warn!(value, "Expected finite viscosity from 0.0 to 4.0, ignoring"),
+        },
         "cursor_always_visible" => set_bool(&mut raw.cursor_always_visible, key, value),
         "cursor_hide_after_ms" => set_i32(&mut raw.cursor_hide_after_ms, key, value),
         "workspace_auto_back_and_forth" => {
@@ -4261,6 +4279,12 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                         "Expected a rule glass mode: water frost none, ignoring"
                     ),
                 },
+                "viscosity" => match parse_viscosity(value) {
+                    Some(value) => rule.viscosity = Some(value),
+                    None => {
+                        tracing::warn!(value, "Expected rule viscosity from 0.0 to 4.0, ignoring")
+                    }
+                },
                 "shadow" => match value.as_str() {
                     "true" | "on" => {
                         rule.shadow
@@ -4449,6 +4473,14 @@ fn set_f64(field: &mut f64, key: &str, value: &str) {
         Ok(n) => *field = n,
         Err(_) => tracing::warn!(key, value, "Expected a number, ignoring"),
     }
+}
+
+fn parse_viscosity(value: &str) -> Option<f64> {
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .map(|value| value.clamp(0.0, 4.0))
 }
 
 fn set_opt_f64(field: &mut Option<f64>, key: &str, value: &str) {
@@ -4958,6 +4990,7 @@ terminal = $wave(kitty, alacritty, foot, xterm)
 pointer_modifier = $mod             # left-drag moves; right-drag resizes
 show_welcome_hint = true
 water_effects = true
+viscosity = 1.0                    # 0 off; higher = slower drag/resize settling
 cursor_always_visible = false
 cursor_hide_after_ms = 0
 workspace_auto_back_and_forth = false
@@ -5575,6 +5608,7 @@ mod tests {
             },
             show_welcome_hint: false,
             water_effects: true,
+            viscosity: 1.0,
             animations: WindowAnimationsConfig::default(),
             workspace_transition: WorkspaceTransitionConfig::default(),
             depth: DepthConfig::default(),
@@ -5836,6 +5870,34 @@ mod tests {
                 ..Default::default()
             }
         );
+    }
+
+    #[test]
+    fn viscosity_parses_clamps_and_uses_the_last_matching_rule() {
+        let entries = waves::parse(
+            "viscosity = 1.75\n\
+             rule {\n\
+             app_id = kitty\n\
+             viscosity = 0.4\n\
+             }\n\
+             rule {\n\
+             app_id = kitty\n\
+             viscosity = 9\n\
+             }\n",
+            Path::new("<viscosity-test>"),
+        )
+        .unwrap();
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        assert_eq!(config.viscosity, 1.75);
+        assert_eq!(
+            config.resolve_window_rules(Some("kitty"), None).viscosity,
+            Some(4.0)
+        );
+        assert_eq!(
+            config.resolve_window_rules(Some("foot"), None).viscosity,
+            None
+        );
+        assert_eq!(parse_default_config().viscosity, 1.0);
     }
 
     #[test]

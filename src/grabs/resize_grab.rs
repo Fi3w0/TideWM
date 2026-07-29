@@ -146,6 +146,17 @@ impl PointerGrab<Smallvil> for ResizeSurfaceGrab {
         ));
 
         let xdg = self.window.toplevel().unwrap();
+        let mut target_location = self.initial_rect.loc;
+        if self.edges.intersects(ResizeEdge::LEFT) {
+            target_location.x += self.initial_rect.size.w - self.last_window_size.w;
+        }
+        if self.edges.intersects(ResizeEdge::TOP) {
+            target_location.y += self.initial_rect.size.h - self.last_window_size.h;
+        }
+        data.retarget_window_viscosity(
+            xdg.wl_surface(),
+            Rectangle::new(target_location, self.last_window_size),
+        );
         xdg.with_pending_state(|state| {
             state.states.set(xdg_toplevel::State::Resizing);
             state.size = Some(self.last_window_size);

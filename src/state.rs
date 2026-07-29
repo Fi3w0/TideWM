@@ -250,6 +250,10 @@ pub struct Smallvil {
         HashMap<WlSurface, crate::window_animation::WindowVisualAnimation>,
     pub(crate) window_move_animations:
         HashMap<WlSurface, crate::window_animation::WindowVisualAnimation>,
+    /// Short-lived render-only followers for interactive move/resize.
+    /// Logical geometry stays at the pointer target; one entry per active
+    /// mapped window bounds this state without retaining motion history.
+    pub(crate) window_viscosity: HashMap<WlSurface, crate::viscosity::ViscousMotion>,
     /// Last already-imported surface tree for each visible mapped window.
     /// Texture handles are cloned, not framebuffer contents; the entry is
     /// transferred to the bounded close list on unmap.
@@ -993,13 +997,77 @@ impl Smallvil {
             sample.offset += current.offset;
             sample.opacity *= current.opacity;
         }
-        if let Some(movement) = self.window_move_animations.get(surface) {
+        if let Some(viscosity) = self.window_viscosity.get(surface) {
+            if let Some(window) = self.mapped_toplevel_window(surface) {
+                if let Some(location) = self.space.element_location(&window) {
+                    let current = viscosity.sample();
+                    sample.offset += Point::from((
+                        current.loc.x - location.x as f64,
+                        current.loc.y - location.y as f64,
+                    ));
+                    sample.size = Some(current.size);
+                }
+            }
+        } else if let Some(movement) = self.window_move_animations.get(surface) {
             let current = movement.sample();
             sample.offset += current.offset;
             sample.size = current.size;
             sample.opacity *= current.opacity;
         }
         sample
+    }
+
+    fn viscosity_for_surface(&self, surface: &WlSurface) -> f64 {
+        if !self.config.water_effects {
+            return 0.0;
+        }
+        let (app_id, title) = self.toplevel_identity(surface);
+        self.config
+            .resolve_window_rules(app_id.as_deref(), title.as_deref())
+            .viscosity
+            .unwrap_or(self.config.viscosity)
+            .clamp(0.0, 4.0)
+    }
+
+    /// Retargets one mapped window's render-only interactive follower.
+    /// Returns `false` when viscosity is bypassed, allowing a tiled resize
+    /// to fall back to the ordinary layout-movement animation.
+    pub(crate) fn retarget_window_viscosity(
+        &mut self,
+        surface: &WlSurface,
+        target: Rectangle<i32, Logical>,
+    ) -> bool {
+        let viscosity = self.viscosity_for_surface(surface);
+        // Interactive input owns the visual geometry from this point. The
+        // generic movement tween must not remain underneath it even when
+        // viscosity is disabled and the pointer path becomes immediate.
+        self.window_move_animations.remove(surface);
+        if viscosity <= f64::EPSILON {
+            self.window_viscosity.remove(surface);
+            return false;
+        }
+        let Some(window) = self.mapped_toplevel_window(surface) else {
+            return false;
+        };
+        let Some(location) = self.space.element_location(&window) else {
+            return false;
+        };
+        let live = Rectangle::new(location, window.geometry().size).to_f64();
+        let target = target.to_f64();
+        if let Some(motion) = self.window_viscosity.get_mut(surface) {
+            motion.retarget(target, viscosity);
+        } else {
+            self.window_viscosity.insert(
+                surface.clone(),
+                crate::viscosity::ViscousMotion::new(live, target, viscosity),
+            );
+        }
+        // The generic movement tween and the physical follower must never
+        // both offset the same window. Interactive viscosity owns it until
+        // it settles, then a later non-interactive retile may start a fresh
+        // ordinary movement animation.
+        self.request_redraw();
+        true
     }
 
     pub(crate) fn start_window_open_animation(&mut self, surface: &WlSurface) {
@@ -1115,6 +1183,7 @@ impl Smallvil {
         };
         self.window_open_animations.remove(surface);
         self.window_move_animations.remove(surface);
+        self.window_viscosity.remove(surface);
         self.closing_window_animations
             .retain(|closing| closing.surface != *surface);
         self.closing_window_animations
@@ -1681,6 +1750,7 @@ impl Smallvil {
             ripple_program: None,
             window_open_animations: HashMap::new(),
             window_move_animations: HashMap::new(),
+            window_viscosity: HashMap::new(),
             window_frame_snapshots: HashMap::new(),
             closing_window_animations: Vec::new(),
             window_depths: HashMap::new(),
@@ -3091,6 +3161,7 @@ impl Smallvil {
             .retain(|_, animation| !animation.finished());
         self.window_move_animations
             .retain(|_, animation| !animation.finished());
+        self.window_viscosity.retain(|_, motion| !motion.finished());
         self.closing_window_animations
             .retain(|closing| !closing.animation.finished());
         self.toast
@@ -3100,6 +3171,7 @@ impl Smallvil {
             || !self.workspace_transitions.is_empty()
             || !self.window_open_animations.is_empty()
             || !self.window_move_animations.is_empty()
+            || !self.window_viscosity.is_empty()
             || !self.closing_window_animations.is_empty()
             || self.animated_borders_possible()
     }
@@ -4389,6 +4461,17 @@ impl Smallvil {
     /// centered, rather than filling the tile. Fullscreen always wins if a
     /// window is somehow both.
     pub fn retile(&mut self) {
+        self.retile_with_viscosity(false);
+    }
+
+    /// Interactive tiled resize/drop path. It shares every layout and
+    /// protocol-state operation with `retile`, changing only the short-lived
+    /// render follower chosen for geometry that moved under the pointer.
+    pub(crate) fn retile_viscous(&mut self) {
+        self.retile_with_viscosity(true);
+    }
+
+    fn retile_with_viscosity(&mut self, interactive: bool) {
         let outputs: Vec<Output> = self.space.outputs().cloned().collect();
         for output in &outputs {
             let Some(area) = self.output_tiling_area(output) else {
@@ -4421,7 +4504,12 @@ impl Smallvil {
                     if let Some(old_location) = self.space.element_location(&window) {
                         let old_rect = Rectangle::new(old_location, window.geometry().size);
                         if old_rect != rect {
-                            self.start_window_move_animation(&surface, old_rect, rect);
+                            let viscous = (interactive
+                                || self.window_viscosity.contains_key(&surface))
+                                && self.retarget_window_viscosity(&surface, rect);
+                            if !viscous {
+                                self.start_window_move_animation(&surface, old_rect, rect);
+                            }
                         }
                     }
                 }
@@ -6708,6 +6796,15 @@ impl Smallvil {
                 }
                 if !self.config.animations.enabled || !self.config.animations.movement.enabled {
                     self.window_move_animations.clear();
+                }
+                let disabled_viscosity: Vec<WlSurface> = self
+                    .window_viscosity
+                    .keys()
+                    .filter(|surface| self.viscosity_for_surface(surface) <= f64::EPSILON)
+                    .cloned()
+                    .collect();
+                for surface in disabled_viscosity {
+                    self.window_viscosity.remove(&surface);
                 }
                 if !self.config.animations.enabled || !self.config.animations.close.enabled {
                     self.window_frame_snapshots.clear();

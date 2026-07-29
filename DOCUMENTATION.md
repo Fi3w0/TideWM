@@ -61,7 +61,8 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | `terminal` | string | `"kitty"` | Spawned by the default `Super+Return` bind. The shipped default is `$wave(kitty, alacritty, foot, xterm)` — see [`$wave(...)`](#waves-format) above. |
 | `pointer_modifier` | modifier or `+`-joined modifiers | `super` | Modifier physically held for compositor mouse actions: left-drag moves floating windows or drag-swaps tiles; right-drag resizes floating or tiled windows. Accepts `super`/`logo`/`mod4`, `alt`/`mod1`, `ctrl`/`control`, and `shift`. The shipped config sets it to `$mod`, so changing `$mod` can update keyboard and mouse behavior together. `mouse_modifier` and `drag_modifier` are aliases. |
 | `show_welcome_hint` | bool | `true` | Shows a persistent "fake window" card pointing you at `Super+Return` whenever the desktop is otherwise empty. Disappears the instant a real window maps; delete this key (or set it `false`) to stop it coming back. Checked on every reload, not just at startup. |
-| `water_effects` | bool | `true` | Master toggle for TideWM's water/aqua render identity. Disables water-glass, backdrop capture, impulse ripples, wave workspace transitions, and automatic depth/buoyancy when `false`. |
+| `water_effects` | bool | `true` | Master toggle for TideWM's water/aqua render identity. Disables water-glass, backdrop capture, impulse ripples, wave workspace transitions, automatic depth/buoyancy, and interactive viscosity when `false`. |
+| `viscosity` | float, `0`–`4` | `1.0` | Interactive window move/resize damping. `0` follows the pointer immediately; higher values settle more slowly. Render-only: logical geometry and hit-testing stay at the pointer target. Disabled by `water_effects = false`. |
 | `cursor_always_visible` | bool | `false` | Forces the udev backend's software cursor to stay visible even when a client asks to hide it (e.g. a terminal hiding its own pointer glyph after inactivity). Off by default — respecting a client's own hide request is correct behavior; this is an opt-in override. |
 | `cursor_hide_after_ms` | integer | `0` | udev backend only: hides the software cursor after this many milliseconds of no real pointer motion (niri's `cursor.hide-after-inactive-ms`). `0` disables it. Independent of `cursor_always_visible` — that overrides a *client's* hide request, this is a compositor-driven idle timer, and the two can be combined. |
 | `workspace_auto_back_and_forth` | bool | `false` | Re-selecting the already-active workspace jumps back to whichever one was active immediately before it, instead of no-opping (niri's own feature of the same name). |
@@ -222,6 +223,22 @@ animations {
     }
 }
 ```
+
+### Interactive viscosity
+
+`viscosity` controls TideWM's liquid drag and resize feel independently of the
+fixed-duration `animations { movement { } }` transition. Pointer grabs update
+the real window position, resize target, layout ratios, and hit-testing
+immediately. The rendered window rectangle follows with refresh-rate-independent
+exponential damping, including floating move/resize, tiled drag-to-swap, direct
+split-border resize, and modifier-drag tiled resize. Repeated pointer events
+retarget from the current on-screen rectangle, so motion stays continuous.
+
+The state is bounded to one small record per moving window and stores no pointer
+history, textures, or framebuffers. `0` disables it, `1.0` is the default,
+and values up to `4.0` progressively slow settling. `water_effects = false`
+bypasses it globally. A matching `rule { viscosity = ... }` overrides the
+global value for one app.
 
 ### `depth { }`
 
@@ -672,6 +689,7 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 | `inactive_opacity` | float | Extra multiplier while the window is unfocused. `unfocused_opacity` is an alias. |
 | `fullscreen_opacity` | float | Extra multiplier while fullscreen; takes priority over active/inactive state. |
 | `glass` | `water`, `frost`, or `none` | Captured-backdrop treatment for a floating window. Explicit `water`/`frost` works with client-provided alpha; when unset, a TideWM `opacity` below `1.0` implicitly selects `water`. `none` preserves plain transparency. `glass_mode` is an alias. |
+| `viscosity` | float, `0`–`4` | Per-app interactive move/resize damping. Last matching rule wins; `0` disables it for the matched app. |
 | `frost { }` | sub-block | Per-app overrides for every global frost field. Unspecified fields inherit the global block; multiple matching rules merge field by field. |
 | `shadow` | bool / `on`, `off`, `none` | Shorthand to enable or disable compositor shadows for matching windows. |
 | `shadow { }` | sub-block | Per-app overrides for every global shadow field. Unspecified fields inherit the global block; multiple matching rules merge field by field. |

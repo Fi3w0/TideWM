@@ -28,6 +28,7 @@ mod source_picker;
 mod state;
 mod tab_strip;
 mod toast;
+mod viscosity;
 mod wallpaper;
 mod water_glass;
 mod waves;

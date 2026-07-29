@@ -75,7 +75,7 @@ impl PointerGrab<Smallvil> for TileResizeGrab {
             &self.hit.path,
             new_ratio as f32,
         );
-        data.retile();
+        data.retile_viscous();
     }
 
     fn relative_motion(
