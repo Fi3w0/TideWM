@@ -875,12 +875,14 @@ impl Smallvil {
                         .element_under(pointer.current_location())
                         .map(|(w, l)| (w.clone(), l));
 
-                    // Super+drag moves/resizes a floating window, the same
-                    // convention Hyprland and most tiling WMs use so you
-                    // don't need decorations to reposition anything.
+                    // Configured-modifier+drag moves/resizes a floating
+                    // window, the same convention Hyprland and most tiling
+                    // WMs use so you don't need decorations to reposition
+                    // anything. The shipped config points this at `$mod`.
                     //
-                    // Super+Left-drag on a *tiled* window instead picks it up
-                    // for drag-to-swap (TileMoveGrab, grabs/tile_move_grab.rs)
+                    // Modifier+Left-drag on a *tiled* window instead picks it
+                    // up for drag-to-swap (TileMoveGrab,
+                    // grabs/tile_move_grab.rs)
                     // -- dropping it on another tile swaps the two, dropping
                     // anywhere else snaps it back. This shipped once, froze
                     // the entire machine on its first real-hardware test
@@ -901,17 +903,24 @@ impl Smallvil {
                     // compositor the host can additionally leave that state
                     // stale across keyboard-focus changes. Neither case means
                     // the user is physically holding the main modifier now.
-                    // Require an actually pressed Super key so an ordinary
+                    // Require actually pressed modifier keys so an ordinary
                     // drag can never turn into a compositor move/resize.
-                    let super_held = keyboard.with_pressed_keysyms(|keys| {
-                        keys.into_iter().any(|key| {
-                            key.raw_syms()
-                                .into_iter()
-                                .any(|sym| matches!(sym, Keysym::Super_L | Keysym::Super_R))
-                        })
+                    let held_modifiers = keyboard.with_pressed_keysyms(|keys| {
+                        let mut held = crate::config::Mods::default();
+                        for sym in keys.into_iter().flat_map(|key| key.raw_syms().into_iter()) {
+                            match sym {
+                                Keysym::Control_L | Keysym::Control_R => held.ctrl = true,
+                                Keysym::Alt_L | Keysym::Alt_R => held.alt = true,
+                                Keysym::Shift_L | Keysym::Shift_R => held.shift = true,
+                                Keysym::Super_L | Keysym::Super_R => held.logo = true,
+                                _ => {}
+                            }
+                        }
+                        held
                     });
-                    let super_drag = super_held && (button == BTN_LEFT || button == BTN_RIGHT);
-                    if super_drag {
+                    let modifier_drag = self.config.pointer_modifier.is_held_by(held_modifiers)
+                        && (button == BTN_LEFT || button == BTN_RIGHT);
+                    if modifier_drag {
                         if let Some((window, loc)) = under.clone() {
                             let wl_surface = window.toplevel().unwrap().wl_surface().clone();
                             if self.fullscreen.contains_key(&wl_surface)
@@ -969,7 +978,7 @@ impl Smallvil {
                                 // Resize a tiled window by dragging its own
                                 // body, matching Hyprland's own
                                 // `bindm ... resizewindow` -- the tiled
-                                // counterpart to the floating Super+Right-drag
+                                // counterpart to the floating modifier+Right-drag
                                 // resize above, and distinct from
                                 // TileResizeGrab (no modifier, requires
                                 // hitting the shared border pixel-exactly).
@@ -1011,9 +1020,9 @@ impl Smallvil {
                     // floating window's own edge resizes it directly, the
                     // same convention niri and Hyprland both use -- the
                     // floating counterpart to the tiled hit_test_split drag
-                    // just below. Skipped entirely once `super_drag` above
+                    // just below. Skipped entirely once `modifier_drag` above
                     // already claimed the click.
-                    if !super_drag && button == BTN_LEFT {
+                    if !modifier_drag && button == BTN_LEFT {
                         if let Some((window, loc)) = under.clone() {
                             let wl_surface = window.toplevel().unwrap().wl_surface().clone();
                             if !self.layout.contains(&wl_surface)

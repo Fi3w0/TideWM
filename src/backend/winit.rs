@@ -227,6 +227,16 @@ pub fn init_winit(
 
                 let locked = !matches!(state.session_lock, SessionLock::Unlocked);
 
+                // Backdrop capture is FBO-only and must happen outside the
+                // visible bind/submit lifetime. Running it immediately
+                // before `bind()` gives glass the current drag geometry in
+                // this frame instead of a post-submit texture one frame
+                // behind. Same-sized recaptures reuse their window texture.
+                if !locked {
+                    let renderer = entry.backend.renderer();
+                    state.capture_floating_backdrops(renderer, &entry.output);
+                }
+
                 let render_result = {
                     let (renderer, mut framebuffer) = match entry.backend.bind() {
                         Ok(bound) => bound,
@@ -428,12 +438,6 @@ pub fn init_winit(
                 let renderer = entry.backend.renderer();
                 state.render_pending_captures(renderer, &entry.output, false);
                 state.capture_pending_workspace_transition(renderer, &entry.output);
-                // Same FBO-only, post-submit timing as the capture call
-                // just above, for the same reason (see its own comment)
-                // -- Phase R0.5, see AGENT.md's "Render and visual
-                // identity roadmap".
-                state.capture_floating_backdrops(renderer, &entry.output);
-
                 let output = &entry.output;
                 if locked {
                     state.send_lock_frames(output, state.start_time.elapsed());

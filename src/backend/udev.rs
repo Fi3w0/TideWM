@@ -779,12 +779,6 @@ pub fn init_udev(
                     // (see capture.rs).
                     state.render_pending_captures(&mut renderer, &surface.output, true);
                     state.capture_pending_workspace_transition(&mut renderer, &surface.output);
-                    // Same post-visible-render, FBO-only timing as winit.
-                    // Rebuild only after an attempted visible frame rather
-                    // than on every cleanup tick while the output is idle.
-                    if rendered_visible_frame {
-                        state.capture_floating_backdrops(&mut renderer, &surface.output);
-                    }
                 }
             }
             drop(dev);
@@ -1254,6 +1248,14 @@ fn render_surface(
     let locked = !matches!(state.session_lock, SessionLock::Unlocked);
 
     let output = &surface.output;
+    // The renderer has a current EGL context here, but the DRM target has
+    // not been bound by `render_frame` yet. Capture now so glass uses the
+    // current window position in this visible frame; capturing afterward
+    // made interactive moves visibly trail and flicker. Same-sized captures
+    // reuse their existing window texture.
+    if !locked {
+        state.capture_floating_backdrops(renderer, output);
+    }
     let size = output.current_mode().map(|m| m.size).unwrap_or_default();
     let scale = output.current_scale().fractional_scale();
     let output_loc = state

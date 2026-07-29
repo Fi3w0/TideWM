@@ -40,6 +40,16 @@ impl Mods {
             && self.shift == state.shift
             && self.logo == state.logo
     }
+
+    /// Whether every configured modifier is present in a physically-held
+    /// modifier set. Extra held modifiers are deliberately allowed so, for
+    /// example, Alt+Shift+drag still behaves like Alt+drag.
+    pub fn is_held_by(&self, held: Self) -> bool {
+        (!self.ctrl || held.ctrl)
+            && (!self.alt || held.alt)
+            && (!self.shift || held.shift)
+            && (!self.logo || held.logo)
+    }
 }
 
 /// Which tiling geometry a workspace uses (see `layout::Layouts::layout`).
@@ -196,6 +206,11 @@ pub enum Action {
 
 pub struct Config {
     pub terminal: String,
+    /// Physically-held modifier required for compositor mouse move/resize.
+    /// This is separate from keybinds because `$mod` is only a Waves
+    /// variable, not global compositor state; the shipped config points
+    /// both at `$mod`, while existing configs keep the Super default.
+    pub pointer_modifier: Mods,
     /// Shows a one-time startup toast pointing a new user at
     /// `Super+Enter`. True on a freshly-generated config; delete the key
     /// (or set it `false`) to stop seeing it. Not read on reload -- only
@@ -414,11 +429,22 @@ impl Config {
             }
             SplitBias::Auto
         });
+        let pointer_modifier = parse_modifiers(&raw.pointer_modifier).unwrap_or_else(|| {
+            warnings.push(format!(
+                "Invalid pointer_modifier \"{}\"; using Super",
+                raw.pointer_modifier
+            ));
+            Mods {
+                logo: true,
+                ..Default::default()
+            }
+        });
         let workspace_names = parse_workspace_names(&raw.workspace_names);
         let workspace_gaps = parse_workspace_gaps(&raw.workspace_gaps, &workspace_names);
 
         let config = Self {
             terminal: raw.terminal,
+            pointer_modifier,
             show_welcome_hint: raw.show_welcome_hint,
             water_effects: raw.water_effects,
             workspace_transition: raw.workspace_transition,
@@ -565,6 +591,9 @@ impl Config {
 #[derive(Debug)]
 struct RawConfig {
     terminal: String,
+    /// `super`, `alt`, `ctrl`, `shift`, or a `+`-joined combination.
+    /// Resolved after Waves variable substitution in `Config::from_raw`.
+    pointer_modifier: String,
     show_welcome_hint: bool,
     water_effects: bool,
     workspace_transition: WorkspaceTransitionConfig,
@@ -701,6 +730,7 @@ impl Default for RawConfig {
 
         Self {
             terminal: "kitty".to_string(),
+            pointer_modifier: "super".to_string(),
             // Deliberately false, not true: a real config.wave always ships
             // with `show_welcome_hint = true` written explicitly (see
             // DEFAULT_CONFIG_WAVE), so this default is only ever consulted
@@ -2125,6 +2155,9 @@ fn lower_entries(entries: &[waves::Entry]) -> RawConfig {
 fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
     match key {
         "terminal" => raw.terminal = value.to_string(),
+        "pointer_modifier" | "mouse_modifier" | "drag_modifier" => {
+            raw.pointer_modifier = value.to_string()
+        }
         "show_welcome_hint" => set_bool(&mut raw.show_welcome_hint, key, value),
         "water_effects" => set_bool(&mut raw.water_effects, key, value),
         "cursor_always_visible" => set_bool(&mut raw.cursor_always_visible, key, value),
@@ -3706,7 +3739,7 @@ fn is_executable_file(path: &Path) -> bool {
 
 /// Applies `substitute_variables` to every field that plausibly reuses a
 /// variable -- keybind/submap combos and actions, `spawn_at_startup`,
-/// `terminal`, `switch_events` -- deliberately skipping match criteria like
+/// `terminal`, `pointer_modifier`, `switch_events` -- deliberately skipping match criteria like
 /// `[[window_rule]]`'s `app_id`/`title` and `[[output]]`'s connector name,
 /// since those describe something to match against, not a command or bind
 /// where reusing a value makes sense.
@@ -3715,6 +3748,7 @@ fn substitute_variables_in_raw(raw: &mut RawConfig) {
     // built-in `substitute_variables` resolves on its own, not something
     // `[variables]` defines, so it must still run with zero variables set.
     raw.terminal = substitute_variables(&raw.terminal, &raw.variables);
+    raw.pointer_modifier = substitute_variables(&raw.pointer_modifier, &raw.variables);
     raw.spawn_at_startup = raw
         .spawn_at_startup
         .iter()
@@ -3875,6 +3909,27 @@ fn parse_keybind(
         keysym,
         action,
     })
+}
+
+/// Parses the modifier-only side of compositor mouse bindings. An empty
+/// modifier is rejected deliberately: otherwise an ordinary click would
+/// unexpectedly start moving or resizing a window.
+fn parse_modifiers(value: &str) -> Option<Mods> {
+    let mut mods = Mods::default();
+    let mut saw_modifier = false;
+
+    for part in value.split('+') {
+        match part.trim().to_lowercase().as_str() {
+            "super" | "logo" | "mod4" => mods.logo = true,
+            "ctrl" | "control" => mods.ctrl = true,
+            "alt" | "mod1" => mods.alt = true,
+            "shift" => mods.shift = true,
+            _ => return None,
+        }
+        saw_modifier = true;
+    }
+
+    saw_modifier.then_some(mods)
 }
 
 /// Keys almost never meant to be bound bare (no modifier) in the base
@@ -4086,6 +4141,7 @@ const DEFAULT_CONFIG_WAVE: &str = r#"# TideWM configuration.
 $mod = SUPER
 
 terminal = $wave(kitty, alacritty, foot, xterm)
+pointer_modifier = $mod             # left-drag moves; right-drag resizes
 show_welcome_hint = true
 water_effects = true
 cursor_always_visible = false
@@ -4624,6 +4680,10 @@ mod tests {
     fn resolve_window_rules_folds_last_scalar_wins_bools_accumulate() {
         let mut config = Config {
             terminal: String::new(),
+            pointer_modifier: Mods {
+                logo: true,
+                ..Default::default()
+            },
             show_welcome_hint: false,
             water_effects: true,
             workspace_transition: WorkspaceTransitionConfig::default(),
@@ -4853,6 +4913,57 @@ mod tests {
         let mut raw = lower_entries(&entries);
         substitute_variables_in_raw(&mut raw);
         Config::from_raw(raw).0
+    }
+
+    #[test]
+    fn pointer_modifier_defaults_to_super_and_expands_waves_variables() {
+        for config in [
+            Config::from_raw(RawConfig::default()).0,
+            parse_default_config(),
+        ] {
+            assert_eq!(
+                config.pointer_modifier,
+                Mods {
+                    logo: true,
+                    ..Default::default()
+                }
+            );
+        }
+
+        let entries = waves::parse(
+            "$mod = ALT\npointer_modifier = $mod+SHIFT\n",
+            Path::new("<pointer-modifier-test>"),
+        )
+        .unwrap();
+        let mut raw = lower_entries(&entries);
+        substitute_variables_in_raw(&mut raw);
+        assert_eq!(
+            Config::from_raw(raw).0.pointer_modifier,
+            Mods {
+                alt: true,
+                shift: true,
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_pointer_modifier_warns_and_safely_falls_back_to_super() {
+        let raw = RawConfig {
+            pointer_modifier: "none".to_string(),
+            ..Default::default()
+        };
+        let (config, warnings) = Config::from_raw(raw);
+        assert_eq!(
+            config.pointer_modifier,
+            Mods {
+                logo: true,
+                ..Default::default()
+            }
+        );
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("Invalid pointer_modifier")));
     }
 
     #[test]

@@ -213,9 +213,9 @@ pub struct Smallvil {
     /// entries preserve the original behavior: translucent floating windows
     /// use water refraction.
     pub(crate) window_glass_modes: HashMap<WlSurface, crate::config::GlassMode>,
-    /// One frame behind: captured via `backdrop::capture_backdrop` after a
-    /// frame renders, for water/frost glass to sample while building the
-    /// *next* frame's elements. Evicted in
+    /// Captured immediately before a visible frame and sampled by
+    /// water/frost glass while building that same frame's elements. The
+    /// window-sized texture is reused until its dimensions change. Evicted in
     /// `detach_mapped_toplevel` alongside `window_opacity`, or this grows
     /// for the life of the session.
     pub(crate) backdrop_textures: HashMap<WlSurface, crate::backdrop::BackdropCapture>,
@@ -3364,11 +3364,10 @@ impl Smallvil {
     }
 
     /// Captures the backdrop behind every currently-visible floating window
-    /// on `output` into `backdrop_textures`, one frame behind (see
-    /// `backdrop.rs`'s own doc comment for why this can't run inside the
-    /// same frame it's captured for). Gated on `water_effects` -- the
-    /// master toggle for this whole roadmap. Water and frost glass sample
-    /// the stored texture on the next frame.
+    /// on `output` into `backdrop_textures` immediately before the visible
+    /// output bind. Gated on `water_effects`, the master toggle for this
+    /// whole roadmap. Water and frost glass sample the stored texture while
+    /// building that same visible frame.
     ///
     /// Tiled windows are deliberately out of scope here: they tile edge to
     /// edge, so "what's behind" one is either another tile (visually
@@ -3418,8 +3417,12 @@ impl Smallvil {
                 .chain(space_elements)
                 .collect();
 
+            let reusable = self
+                .backdrop_textures
+                .get(&surface)
+                .map(|capture| capture.texture.clone());
             if let Some(texture) =
-                crate::backdrop::capture_backdrop(renderer, physical_rect, behind)
+                crate::backdrop::capture_backdrop(renderer, physical_rect, behind, reusable)
             {
                 let first_capture = !self.backdrop_textures.contains_key(&surface);
                 let (id, mut commit) = match self.backdrop_textures.get(&surface) {
@@ -3667,7 +3670,7 @@ impl Smallvil {
                     .map(crate::backend::udev::OutputRenderElements::Composited),
             )
             .collect();
-        crate::backdrop::capture_backdrop(renderer, geometry, elements)
+        crate::backdrop::capture_backdrop(renderer, geometry, elements, None)
     }
 
     /// Captures the currently-visible desktop for a queued workspace
@@ -6409,8 +6412,8 @@ impl Smallvil {
                     })
                     .collect();
                 // The mode or frost tuning may have changed. Force the
-                // shared one-frame-behind pipeline to rebuild from the next
-                // submitted frame instead of briefly showing a stale capture.
+                // shared pre-frame pipeline to rebuild against the current
+                // window geometry instead of briefly showing stale content.
                 self.backdrop_textures.clear();
                 // A reload that dropped or renamed the currently-active
                 // submap would otherwise leave every key silently
