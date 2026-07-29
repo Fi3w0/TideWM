@@ -376,31 +376,74 @@ Every field can be overridden inside `rule { border { } }`; matching blocks merg
 
 ### `ripple { }`
 
-Configures the Phase R1 impulse ripple shared by window-map, focus-change, and urgent-attention events. `water_effects = false` disables every ripple regardless of this block. The active ripple list is capped at 16 so rapid mapping cannot grow render state without bound.
+Configures the Phase R1 impulse ripple shared by window-map, focus-change, and urgent-attention events. A newly mapped window that automatically receives focus emits only its map ripple; the lifecycle focus step is coalesced so `map_preset` and `focus_preset` do not overlap. Later pointer, keyboard, or command-driven window-to-window focus changes emit the focus ripple normally. `water_effects = false` disables every ripple regardless of this block. The active ripple list is capped at 16 so rapid mapping cannot grow render state without bound.
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | Enables ripples in this scope. |
-| `shapes` | space-separated list | `ring` | Any combination of `ring`, `square`, `droplet`, and `cross`; multiple shapes render together. `shape` and `form` are accepted aliases. |
+| `preset` | enum or name | `water-drop` | Polished analytical appearance: `water-drop`, `jelly`, `bubble`, `splash`, `tide`, `legacy`, or the name of a `ripple_preset <name> { }` block. `jiggle` and `giggle` alias `jelly`; `style` aliases this key. Every polished preset remains one fixed-cost shader element. |
+| `map_preset` | preset | inherited | Appearance used only when a window opens. `map_style` is an alias. |
+| `focus_preset` | preset | inherited | Appearance used only when focus changes. `focus_style` is an alias. |
+| `urgent_preset` | preset | inherited | Appearance used only for an urgent-attention impulse. `urgent_style` is an alias. |
+| `focus_on_map` | bool | `false` | When `true`, automatic focus during map also emits `focus_preset`, deliberately stacking it over the map effect. `stack_focus_on_map` is an alias. Later focus handoffs are unaffected. |
+| `shapes` | space-separated list | `ring` | Compatibility mode: any combination of `ring`, `square`, `droplet`, and `cross`. Assigning this key automatically selects `preset = legacy`. `shape` and `form` are aliases. |
 | `color` | color | `8EDDFF` | RGB tint. Use bare `RRGGBB`, quoted `"#RRGGBB"`, `rgb(RRGGBB)`, or `rgba(RRGGBB, AA)`. A bare leading `#` starts a Waves comment, so it must be quoted. Alpha in the color form is currently ignored; use `peak_alpha`. |
+| `secondary_color` | color | `E8FCFF` | Gradient, membrane, and highlight tint. `accent_color` and `highlight_color` are aliases. |
 | `peak_radius` | positive float | `220` | Maximum radius in logical pixels. `radius` is an alias. |
+| `size_mode` | enum | `fixed` | `fixed` uses `peak_radius`; `window` uses half the diagonal; `width`, `height`, `min`, and `max` use half that window dimension. `radius_mode` and `scale_mode` are aliases. |
+| `size_scale` | float | `1.0` | Multiplies window-derived sizes, clamped to `0.01`–`8.0`. `radius_scale` and `window_scale` are aliases. |
+| `min_radius` | float | `24` | Lower clamp applied after adaptive sizing. |
+| `max_radius` | float | `2048` | Upper clamp applied after adaptive sizing. |
 | `thickness` | positive float | `8` | Outline half-width in logical pixels. |
 | `duration_ms` | positive integer | `650` | Ripple lifetime in milliseconds. `duration` is an alias. |
-| `peak_alpha` | float | `1.0` | Peak opacity, clamped to `0.0`–`1.0`. `alpha` is an alias. |
+| `peak_alpha` | float | `0.88` | Peak opacity, clamped to `0.0`–`1.0`. `alpha` is an alias. |
+| `glow` | float | `0.55` | Soft halo strength, clamped to `0.0`–`2.0`. `glow_strength` is an alias. |
+| `wobble` | float | `0.7` | Organic displacement strength, clamped to `0.0`–`2.0`. `jiggle` and `distortion` are aliases. |
+| `detail` | float | `0.8` | Strength of inner rings, highlights, lobes, and spray, clamped to `0.0`–`2.0`. `complexity` is an alias. |
 | `ease` | enum | `cubic-out` | `linear`, `cubic-out`, `cubic-in-out`, `quad-out`, or `exp-out`. |
-| `anchor` | enum | `center` | `center`, `cursor`, `topleft`, `topright`, `bottomleft`, or `bottomright`, relative to the triggering window. |
+| `anchor` | enum | `center` | `center`, `cursor`, `top`, `bottom`, `left`, `right`, `nearest-edge`, or any corner. `nearest-edge` projects the current pointer onto the closest side. |
+| `edge_position` | float | `0.5` | Position along a fixed side anchor: `0.0` is its left/top end, `1.0` its right/bottom end. |
+| `edge_offset` | float | `0` | Signed distance normal to a side: positive moves outside the window, negative moves inside. |
 | `offset` | `<dx>x<dy>` | `0x0` | Logical-pixel offset added to the selected anchor. |
 | `layer` | enum | `above-windows` | `above-all`, `above-windows`, `below-windows`, or `below-all`. |
 | `triggers` | space-separated list | `map` | Any combination of `map`, `focus`, and `urgent`. |
 
 ```
+ripple_preset edge-jelly {
+    preset = jelly
+    size_mode = min
+    size_scale = 0.8
+    min_radius = 80
+    max_radius = 420
+    anchor = nearest-edge
+    edge_offset = 8
+    color = 89B4FA
+    secondary_color = CBA6F7
+    glow = 0.7
+    wobble = 1.2
+    detail = 0.9
+}
+
 ripple {
-    shapes = ring droplet
-    color = rgb(8EDDFF)
-    duration_ms = 700
+    preset = water-drop
+    map_preset = splash
+    focus_preset = edge-jelly
+    urgent_preset = bubble
+    focus_on_map = false
+    color = 89B4FA
+    secondary_color = CBA6F7
+    duration_ms = 650
+    glow = 0.65
+    wobble = 0.9
     triggers = map focus urgent
 }
 ```
+
+Named presets are reusable sparse bundles. They can select a built-in or
+another named preset, and include any ripple field. Cycles and unknown names
+warn and safely fall back. Selection order is system defaults → named preset
+→ global overrides → per-app named preset → per-app overrides, so a rule can
+reuse a bundle and still change one field locally.
 
 ### `env { }`
 

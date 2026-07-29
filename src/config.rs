@@ -240,9 +240,12 @@ pub struct Config {
     pub border: BorderConfig,
     /// Global ripple defaults (Phase R1, see `ripple.rs`). Per-app
     /// `rule { ripple { } }` overrides merge over these at resolve time
-    /// (`merge_over`). Stays `system_default()` when the user has no
-    /// `ripple { }` block so any new field added later just works.
+    /// (`merge_over`). Kept sparse; `resolve_ripple_config` layers the
+    /// system defaults and any selected named preset underneath.
     pub ripple: RippleConfig,
+    /// Reusable named visual bundles declared with
+    /// `ripple_preset <name> { }`.
+    pub ripple_presets: HashMap<String, RippleConfig>,
     /// Forces the udev backend's software cursor to stay visible even when
     /// a client asks to hide it (`wl_pointer.set_cursor` with a null
     /// buffer, e.g. a terminal hiding its pointer glyph after inactivity --
@@ -454,6 +457,7 @@ impl Config {
             rounding: raw.rounding,
             border: raw.border,
             ripple: raw.ripple,
+            ripple_presets: raw.ripple_presets,
             cursor_always_visible: raw.cursor_always_visible,
             cursor_hide_after_ms: raw.cursor_hide_after_ms,
             workspace_auto_back_and_forth: raw.workspace_auto_back_and_forth,
@@ -476,6 +480,64 @@ impl Config {
             env: raw.env,
         };
         (config, warnings)
+    }
+
+    /// Resolves system defaults, a selected named preset, global tuning, and
+    /// per-app tuning in that order for one concrete trigger. Named presets
+    /// may inherit another named preset; cycles and unknown names safely fall
+    /// back to the configuration accumulated so far.
+    pub(crate) fn resolve_ripple_config(
+        &self,
+        rule: Option<&RippleConfig>,
+        trigger: RippleTrigger,
+    ) -> RippleConfig {
+        let mut stack = Vec::new();
+        let global = self.apply_ripple_scope(
+            RippleConfig::system_default(),
+            &self.ripple,
+            trigger,
+            &mut stack,
+        );
+        match rule {
+            Some(rule) => self.apply_ripple_scope(global, rule, trigger, &mut stack),
+            None => global,
+        }
+    }
+
+    fn apply_ripple_scope(
+        &self,
+        mut base: RippleConfig,
+        scope: &RippleConfig,
+        trigger: RippleTrigger,
+        stack: &mut Vec<String>,
+    ) -> RippleConfig {
+        if let Some(selection) = scope.preset_for(trigger).cloned() {
+            match selection {
+                RipplePresetSelection::BuiltIn(preset) => {
+                    base.preset = Some(RipplePresetSelection::BuiltIn(preset));
+                }
+                RipplePresetSelection::Named(name) => {
+                    if stack.len() >= 16 || stack.contains(&name) {
+                        tracing::warn!(preset = name, "Cyclic ripple preset inheritance, ignoring");
+                    } else if let Some(named) = self.ripple_presets.get(&name) {
+                        stack.push(name);
+                        base = self.apply_ripple_scope(base, named, trigger, stack);
+                        stack.pop();
+                    } else {
+                        tracing::warn!(preset = name, "Unknown named ripple preset, ignoring");
+                    }
+                }
+            }
+        }
+
+        // The selection was expanded above. Merge only the scope's concrete
+        // knobs now so local values override the reusable preset bundle.
+        let mut tuning = scope.clone();
+        tuning.preset = None;
+        tuning.map_preset = None;
+        tuning.focus_preset = None;
+        tuning.urgent_preset = None;
+        base.merge_over(&tuning)
     }
 
     /// Folds every `[[window_rule]]` entry matching `app_id`/`title` into
@@ -602,9 +664,10 @@ struct RawConfig {
     shadow: ShadowConfig,
     rounding: RoundingConfig,
     border: BorderConfig,
-    /// Same shape as `Config::ripple`. Stays `system_default()` if no
-    /// `ripple { }` block exists; mutated in place by `apply_ripple_block`.
+    /// Sparse global overrides, mutated by `apply_ripple_block`. Runtime
+    /// resolution layers these over `RippleConfig::system_default()`.
     ripple: RippleConfig,
+    ripple_presets: HashMap<String, RippleConfig>,
     cursor_always_visible: bool,
     cursor_hide_after_ms: i32,
     workspace_auto_back_and_forth: bool,
@@ -745,7 +808,8 @@ impl Default for RawConfig {
             shadow: ShadowConfig::default(),
             rounding: RoundingConfig::default(),
             border: BorderConfig::default(),
-            ripple: RippleConfig::system_default(),
+            ripple: RippleConfig::default(),
+            ripple_presets: HashMap::new(),
             cursor_always_visible: false,
             cursor_hide_after_ms: 0,
             workspace_auto_back_and_forth: false,
@@ -1650,6 +1714,48 @@ pub enum RippleShape {
     Cross,
 }
 
+/// Polished analytical ripple appearances. `Legacy` preserves the original
+/// independently-stackable geometric shapes; the other presets are one
+/// fixed-cost shader element regardless of their internal visual detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RipplePreset {
+    /// Layered concentric rings, a soft impact crater, and an aqua glow.
+    #[default]
+    WaterDrop,
+    /// Organic oscillating membrane. `jiggle` and `giggle` are aliases.
+    Jelly,
+    /// Double translucent membrane with a moving glossy highlight.
+    Bubble,
+    /// Lobed impact crown with analytical spray peaks.
+    Splash,
+    /// Several offset wave bands flowing through each other.
+    Tide,
+    /// Original `ring`, `square`, `droplet`, and `cross` shape renderer.
+    Legacy,
+}
+
+/// A ripple appearance selector can name a built-in shader style or a
+/// reusable `ripple_preset <name> { }` block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RipplePresetSelection {
+    BuiltIn(RipplePreset),
+    Named(String),
+}
+
+/// How the final ripple radius is derived from the triggering window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RippleSizeMode {
+    /// Use `peak_radius` directly in logical pixels.
+    #[default]
+    Fixed,
+    /// Half the window diagonal; scale 1.0 reaches its corners.
+    Window,
+    Width,
+    Height,
+    MinDimension,
+    MaxDimension,
+}
+
 /// Which Wayland/WM event causes a ripple. Multiple triggers can be
 /// enabled at once (the `triggers = map focus` config syntax); an
 /// empty `triggers` list means "use the global default triggers."
@@ -1676,6 +1782,12 @@ pub enum RippleAnchor {
     /// window-map ripple then appears where the click that spawned it
     /// happened (or wherever the cursor was on focus change).
     Cursor,
+    Top,
+    Bottom,
+    Left,
+    Right,
+    /// Point on the window perimeter closest to the current pointer.
+    NearestEdge,
     TopLeft,
     TopRight,
     BottomLeft,
@@ -1861,28 +1973,41 @@ impl Default for DepthConfig {
     }
 }
 
-/// A complete ripple configuration: every knob a user can set. Lives in
-/// `Config::ripple` as the global defaults; a partial copy lives on
+/// A complete ripple configuration surface: every knob a user can set.
+/// Sparse copies live in `Config::ripple`, named presets, and
 /// each `WindowRule::ripple` with only the fields the user explicitly
-/// set, merged over the globals at resolve time. `None` fields mean
-/// "inherit from the layer below" when this is a per-rule override;
-/// the global config has every field set to `Some(...)` via
-/// `system_default`.
+/// set. `Config::resolve_ripple_config` layers them over `system_default`.
 #[derive(Debug, Clone, Default)]
 pub struct RippleConfig {
     /// Master enable. `None` in a per-rule config means "use the global
     /// value"; `Some(false)` is how a rule disables ripples for a
     /// specific app.
     pub enabled: Option<bool>,
+    /// Base polished appearance. Trigger-specific values below override it.
+    pub preset: Option<RipplePresetSelection>,
+    pub map_preset: Option<RipplePresetSelection>,
+    pub focus_preset: Option<RipplePresetSelection>,
+    pub urgent_preset: Option<RipplePresetSelection>,
+    /// Whether automatic focus during a window's first map should also emit
+    /// the focus preset. Off by default so the map preset is the transaction's
+    /// single visual cue; opt in when deliberate effect stacking is desired.
+    pub focus_on_map: Option<bool>,
     /// Shape(s) to draw. Empty in a per-rule config means "inherit the
-    /// global shapes." Multiple shapes layer concurrently, each as its
-    /// own render element sharing the same center/size/alpha.
+    /// global shapes." Used by `preset = legacy`; assigning `shapes`
+    /// automatically selects that preset for compatibility.
     pub shapes: Vec<RippleShape>,
     /// Tint as linear RGB in `[0.0, 1.0]`. Parsed from CSS-style hex
     /// (`#RRGGBB` / `#RRGGBBAA`, the alpha silently ignored for now --
     /// transparency has its own `peak_alpha` knob).
     pub color: Option<[f32; 3]>,
+    /// Second gradient/highlight color used by polished presets.
+    pub secondary_color: Option<[f32; 3]>,
     pub peak_radius: Option<f32>,
+    pub size_mode: Option<RippleSizeMode>,
+    /// Multiplier applied to a window-derived radius.
+    pub size_scale: Option<f32>,
+    pub min_radius: Option<f32>,
+    pub max_radius: Option<f32>,
     /// Ring/outline half-width in logical pixels.
     pub thickness: Option<f32>,
     pub duration_ms: Option<u32>,
@@ -1890,8 +2015,18 @@ pub struct RippleConfig {
     /// `color`'s alpha channel so a single hex color can be reused
     /// across ripple intensities.
     pub peak_alpha: Option<f32>,
+    /// Soft halo intensity around preset geometry.
+    pub glow: Option<f32>,
+    /// Organic displacement strength. Most visible on `jelly` and `tide`.
+    pub wobble: Option<f32>,
+    /// Amount of inner rings, spray, highlights, or secondary bands.
+    pub detail: Option<f32>,
     pub ease: Option<RippleEase>,
     pub anchor: Option<RippleAnchor>,
+    /// Position along a side anchor, `0` at left/top and `1` at right/bottom.
+    pub edge_position: Option<f32>,
+    /// Signed outward distance from a side/nearest-edge anchor.
+    pub edge_offset: Option<f32>,
     /// Logical-pixel offset from the anchor point, `<dx>x<dy>`. Lets a
     /// rule shift the ripple without redefining the anchor itself.
     pub offset: Option<(i32, i32)>,
@@ -1910,14 +2045,29 @@ impl RippleConfig {
     pub fn system_default() -> Self {
         Self {
             enabled: Some(true),
+            preset: Some(RipplePresetSelection::BuiltIn(RipplePreset::WaterDrop)),
+            map_preset: None,
+            focus_preset: None,
+            urgent_preset: None,
+            focus_on_map: Some(false),
             shapes: vec![RippleShape::Ring],
             color: Some([0.55, 0.85, 1.0]),
+            secondary_color: Some([0.91, 0.98, 1.0]),
             peak_radius: Some(220.0),
+            size_mode: Some(RippleSizeMode::Fixed),
+            size_scale: Some(1.0),
+            min_radius: Some(24.0),
+            max_radius: Some(2048.0),
             thickness: Some(8.0),
             duration_ms: Some(650),
-            peak_alpha: Some(1.0),
+            peak_alpha: Some(0.88),
+            glow: Some(0.55),
+            wobble: Some(0.7),
+            detail: Some(0.8),
             ease: Some(RippleEase::CubicOut),
             anchor: Some(RippleAnchor::Center),
+            edge_position: Some(0.5),
+            edge_offset: Some(0.0),
             offset: Some((0, 0)),
             layer: Some(RippleLayer::AboveWindows),
             triggers: vec![RippleTrigger::Map],
@@ -1932,18 +2082,39 @@ impl RippleConfig {
     pub fn merge_over(&self, other: &RippleConfig) -> RippleConfig {
         RippleConfig {
             enabled: other.enabled.or(self.enabled),
+            preset: other.preset.clone().or_else(|| self.preset.clone()),
+            map_preset: other.map_preset.clone().or_else(|| self.map_preset.clone()),
+            focus_preset: other
+                .focus_preset
+                .clone()
+                .or_else(|| self.focus_preset.clone()),
+            urgent_preset: other
+                .urgent_preset
+                .clone()
+                .or_else(|| self.urgent_preset.clone()),
+            focus_on_map: other.focus_on_map.or(self.focus_on_map),
             shapes: if other.shapes.is_empty() {
                 self.shapes.clone()
             } else {
                 other.shapes.clone()
             },
             color: other.color.or(self.color),
+            secondary_color: other.secondary_color.or(self.secondary_color),
             peak_radius: other.peak_radius.or(self.peak_radius),
+            size_mode: other.size_mode.or(self.size_mode),
+            size_scale: other.size_scale.or(self.size_scale),
+            min_radius: other.min_radius.or(self.min_radius),
+            max_radius: other.max_radius.or(self.max_radius),
             thickness: other.thickness.or(self.thickness),
             duration_ms: other.duration_ms.or(self.duration_ms),
             peak_alpha: other.peak_alpha.or(self.peak_alpha),
+            glow: other.glow.or(self.glow),
+            wobble: other.wobble.or(self.wobble),
+            detail: other.detail.or(self.detail),
             ease: other.ease.or(self.ease),
             anchor: other.anchor.or(self.anchor),
+            edge_position: other.edge_position.or(self.edge_position),
+            edge_offset: other.edge_offset.or(self.edge_offset),
             offset: other.offset.or(self.offset),
             layer: other.layer.or(self.layer),
             triggers: if other.triggers.is_empty() {
@@ -1962,6 +2133,43 @@ impl RippleConfig {
             &self.triggers[..]
         };
         active.contains(&trigger)
+    }
+
+    /// Resolves a trigger-specific appearance over the base preset.
+    pub fn preset_for(&self, trigger: RippleTrigger) -> Option<&RipplePresetSelection> {
+        let specific = match trigger {
+            RippleTrigger::Map => self.map_preset.as_ref(),
+            RippleTrigger::Focus => self.focus_preset.as_ref(),
+            RippleTrigger::Urgent => self.urgent_preset.as_ref(),
+        };
+        specific.or(self.preset.as_ref())
+    }
+
+    /// Built-in style after named-preset resolution. An unresolved name is
+    /// never fatal and falls back to the product default.
+    pub fn built_in_preset(&self) -> RipplePreset {
+        match self.preset.as_ref() {
+            Some(RipplePresetSelection::BuiltIn(preset)) => *preset,
+            _ => RipplePreset::WaterDrop,
+        }
+    }
+
+    /// Resolves the configured sizing mode against one triggering window.
+    pub fn radius_for_window(&self, width: f32, height: f32) -> f32 {
+        let width = width.max(0.0);
+        let height = height.max(0.0);
+        let scale = self.size_scale.unwrap_or(1.0);
+        let radius = match self.size_mode.unwrap_or(RippleSizeMode::Fixed) {
+            RippleSizeMode::Fixed => self.peak_radius.unwrap_or(220.0),
+            RippleSizeMode::Window => width.hypot(height) * 0.5 * scale,
+            RippleSizeMode::Width => width * 0.5 * scale,
+            RippleSizeMode::Height => height * 0.5 * scale,
+            RippleSizeMode::MinDimension => width.min(height) * 0.5 * scale,
+            RippleSizeMode::MaxDimension => width.max(height) * 0.5 * scale,
+        };
+        let min = self.min_radius.unwrap_or(24.0).max(0.0);
+        let max = self.max_radius.unwrap_or(2048.0).max(1.0);
+        radius.clamp(min.min(max), min.max(max))
     }
 }
 
@@ -2193,6 +2401,18 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "rounding" | "corners" => apply_rounding_block(&mut raw.rounding, body),
         "border" => apply_border_block(&mut raw.border, body),
         "ripple" => apply_ripple_block(&mut raw.ripple, body),
+        "ripple_preset" => {
+            let name = header.trim().to_lowercase();
+            if !valid_ripple_preset_name(&name) {
+                tracing::warn!(
+                    header,
+                    "A `ripple_preset` block needs an alphanumeric, dash, or underscore name"
+                );
+                return;
+            }
+            let preset = raw.ripple_presets.entry(name).or_default();
+            apply_ripple_block(preset, body);
+        }
         "output" => raw.outputs.push(lower_output_block(header, body)),
         "rule" => raw.window_rules.push(lower_window_rule_block(body)),
         "layer_rule" => raw.layer_rules.push(lower_layer_rule_block(body)),
@@ -2881,17 +3101,82 @@ fn apply_ripple_block(cfg: &mut RippleConfig, body: &[waves::Entry]) {
                 Some(v) => cfg.enabled = Some(v),
                 None => tracing::warn!(value, "Expected `true` or `false` for ripple.enabled, ignoring"),
             },
+            "preset" | "style" => match parse_ripple_preset_selection(value) {
+                Some(preset) => cfg.preset = Some(preset),
+                None => tracing::warn!(
+                    value,
+                    "Expected a built-in or named ripple preset, ignoring"
+                ),
+            },
+            "map_preset" | "map_style" => match parse_ripple_preset_selection(value) {
+                Some(preset) => cfg.map_preset = Some(preset),
+                None => tracing::warn!(value, "Unknown ripple.map_preset, ignoring"),
+            },
+            "focus_preset" | "focus_style" => match parse_ripple_preset_selection(value) {
+                Some(preset) => cfg.focus_preset = Some(preset),
+                None => tracing::warn!(value, "Unknown ripple.focus_preset, ignoring"),
+            },
+            "urgent_preset" | "urgent_style" => match parse_ripple_preset_selection(value) {
+                Some(preset) => cfg.urgent_preset = Some(preset),
+                None => tracing::warn!(value, "Unknown ripple.urgent_preset, ignoring"),
+            },
+            "focus_on_map" | "stack_focus_on_map" => match parse_bool(value) {
+                Some(v) => cfg.focus_on_map = Some(v),
+                None => tracing::warn!(
+                    value,
+                    "Expected `true` or `false` for ripple.focus_on_map, ignoring"
+                ),
+            },
             "shape" | "shapes" | "form" => match parse_shapes(value) {
-                Some(shapes) if !shapes.is_empty() => cfg.shapes = shapes,
+                Some(shapes) if !shapes.is_empty() => {
+                    cfg.shapes = shapes;
+                    cfg.preset = Some(RipplePresetSelection::BuiltIn(RipplePreset::Legacy));
+                }
                 _ => tracing::warn!(value, "Expected one or more of: ring square droplet cross, ignoring"),
             },
             "color" => match parse_ripple_color(value) {
                 Some(c) => cfg.color = Some(c),
                 None => tracing::warn!(value, "Expected a hex color (#RRGGBB or #RRGGBBAA), ignoring"),
             },
+            "secondary_color" | "accent_color" | "highlight_color" => {
+                match parse_ripple_color(value) {
+                    Some(c) => cfg.secondary_color = Some(c),
+                    None => tracing::warn!(
+                        value,
+                        "Expected a hex color for ripple.secondary_color, ignoring"
+                    ),
+                }
+            }
             "peak_radius" | "radius" => match value.parse::<f32>() {
                 Ok(v) if v.is_finite() && v > 0.0 => cfg.peak_radius = Some(v),
                 _ => tracing::warn!(value, "Expected a positive number for ripple.peak_radius, ignoring"),
+            },
+            "size_mode" | "radius_mode" | "scale_mode" => {
+                match parse_ripple_size_mode(value) {
+                    Some(mode) => cfg.size_mode = Some(mode),
+                    None => tracing::warn!(
+                        value,
+                        "Expected fixed, window, width, height, min, or max for ripple.size_mode, ignoring"
+                    ),
+                }
+            }
+            "size_scale" | "radius_scale" | "window_scale" => match value.parse::<f32>() {
+                Ok(v) if v.is_finite() && v > 0.0 => {
+                    cfg.size_scale = Some(v.clamp(0.01, 8.0))
+                }
+                _ => tracing::warn!(value, "Expected ripple.size_scale from 0.01 to 8, ignoring"),
+            },
+            "min_radius" | "minimum_radius" => match value.parse::<f32>() {
+                Ok(v) if v.is_finite() && v >= 0.0 => {
+                    cfg.min_radius = Some(v.clamp(0.0, 8192.0))
+                }
+                _ => tracing::warn!(value, "Expected ripple.min_radius from 0 to 8192, ignoring"),
+            },
+            "max_radius" | "maximum_radius" => match value.parse::<f32>() {
+                Ok(v) if v.is_finite() && v > 0.0 => {
+                    cfg.max_radius = Some(v.clamp(1.0, 8192.0))
+                }
+                _ => tracing::warn!(value, "Expected ripple.max_radius from 1 to 8192, ignoring"),
             },
             "thickness" => match value.parse::<f32>() {
                 Ok(v) if v.is_finite() && v > 0.0 => cfg.thickness = Some(v),
@@ -2905,13 +3190,35 @@ fn apply_ripple_block(cfg: &mut RippleConfig, body: &[waves::Entry]) {
                 Ok(v) if v.is_finite() => cfg.peak_alpha = Some(v.clamp(0.0, 1.0)),
                 _ => tracing::warn!(value, "Expected a number from 0.0 to 1.0 for ripple.peak_alpha, ignoring"),
             },
+            "glow" | "glow_strength" => match value.parse::<f32>() {
+                Ok(v) if v.is_finite() => cfg.glow = Some(v.clamp(0.0, 2.0)),
+                _ => tracing::warn!(value, "Expected ripple.glow from 0 to 2, ignoring"),
+            },
+            "wobble" | "jiggle" | "distortion" => match value.parse::<f32>() {
+                Ok(v) if v.is_finite() => cfg.wobble = Some(v.clamp(0.0, 2.0)),
+                _ => tracing::warn!(value, "Expected ripple.wobble from 0 to 2, ignoring"),
+            },
+            "detail" | "complexity" => match value.parse::<f32>() {
+                Ok(v) if v.is_finite() => cfg.detail = Some(v.clamp(0.0, 2.0)),
+                _ => tracing::warn!(value, "Expected ripple.detail from 0 to 2, ignoring"),
+            },
             "ease" => match parse_ease(value) {
                 Some(e) => cfg.ease = Some(e),
                 None => tracing::warn!(value, "Expected one of: linear cubic-out cubic-in-out quad-out exp-out, ignoring"),
             },
             "anchor" => match parse_anchor(value) {
                 Some(a) => cfg.anchor = Some(a),
-                None => tracing::warn!(value, "Expected one of: center cursor topleft topright bottomleft bottomright, ignoring"),
+                None => tracing::warn!(value, "Expected center, cursor, a side, nearest-edge, or a corner for ripple.anchor, ignoring"),
+            },
+            "edge_position" | "edge_pos" => match value.parse::<f32>() {
+                Ok(v) if v.is_finite() => cfg.edge_position = Some(v.clamp(0.0, 1.0)),
+                _ => tracing::warn!(value, "Expected ripple.edge_position from 0 to 1, ignoring"),
+            },
+            "edge_offset" | "edge_distance" => match value.parse::<f32>() {
+                Ok(v) if v.is_finite() => {
+                    cfg.edge_offset = Some(v.clamp(-4096.0, 4096.0))
+                }
+                _ => tracing::warn!(value, "Expected a number for ripple.edge_offset, ignoring"),
             },
             "offset" => match parse_position(value) {
                 Some(o) => cfg.offset = Some(o),
@@ -3286,6 +3593,41 @@ fn parse_shapes(value: &str) -> Option<Vec<RippleShape>> {
     Some(out)
 }
 
+fn parse_ripple_preset_selection(value: &str) -> Option<RipplePresetSelection> {
+    let name = value.trim().to_lowercase();
+    let built_in = match name.as_str() {
+        "water-drop" | "waterdrop" | "drop" | "aqua" => Some(RipplePreset::WaterDrop),
+        "jelly" | "jiggle" | "giggle" | "wobble" => Some(RipplePreset::Jelly),
+        "bubble" => Some(RipplePreset::Bubble),
+        "splash" | "crown" => Some(RipplePreset::Splash),
+        "tide" | "waves" | "wave" => Some(RipplePreset::Tide),
+        "legacy" | "shapes" => Some(RipplePreset::Legacy),
+        _ => None,
+    };
+    built_in
+        .map(RipplePresetSelection::BuiltIn)
+        .or_else(|| valid_ripple_preset_name(&name).then_some(RipplePresetSelection::Named(name)))
+}
+
+fn valid_ripple_preset_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+}
+
+fn parse_ripple_size_mode(value: &str) -> Option<RippleSizeMode> {
+    match value.trim().to_lowercase().as_str() {
+        "fixed" | "pixels" | "px" => Some(RippleSizeMode::Fixed),
+        "window" | "diagonal" => Some(RippleSizeMode::Window),
+        "width" => Some(RippleSizeMode::Width),
+        "height" => Some(RippleSizeMode::Height),
+        "min" | "minimum" | "shortest" | "min-dimension" => Some(RippleSizeMode::MinDimension),
+        "max" | "maximum" | "longest" | "max-dimension" => Some(RippleSizeMode::MaxDimension),
+        _ => None,
+    }
+}
+
 fn parse_triggers(value: &str) -> Option<Vec<RippleTrigger>> {
     let mut out = Vec::new();
     for tok in value.split_whitespace() {
@@ -3303,10 +3645,15 @@ fn parse_anchor(value: &str) -> Option<RippleAnchor> {
     match value {
         "center" => Some(RippleAnchor::Center),
         "cursor" => Some(RippleAnchor::Cursor),
-        "topleft" => Some(RippleAnchor::TopLeft),
-        "topright" => Some(RippleAnchor::TopRight),
-        "bottomleft" => Some(RippleAnchor::BottomLeft),
-        "bottomright" => Some(RippleAnchor::BottomRight),
+        "top" | "top-edge" => Some(RippleAnchor::Top),
+        "bottom" | "bottom-edge" => Some(RippleAnchor::Bottom),
+        "left" | "left-edge" => Some(RippleAnchor::Left),
+        "right" | "right-edge" => Some(RippleAnchor::Right),
+        "nearest-edge" | "nearest" | "edge" => Some(RippleAnchor::NearestEdge),
+        "topleft" | "top-left" => Some(RippleAnchor::TopLeft),
+        "topright" | "top-right" => Some(RippleAnchor::TopRight),
+        "bottomleft" | "bottom-left" => Some(RippleAnchor::BottomLeft),
+        "bottomright" | "bottom-right" => Some(RippleAnchor::BottomRight),
         _ => None,
     }
 }
@@ -4287,16 +4634,43 @@ bsp_split_bias = auto
 # Ripple (Phase R1 water identity). All values are the system defaults --
 # copy and uncomment what you want to change. Per-app overrides go in a
 # `rule { ripple { } }` sub-block (see below); the same fields work there.
+# Reusable custom bundles use `ripple_preset my-name { }`, then
+# `preset = my-name`, `map_preset = my-name`, etc.
+# ripple_preset edge-jelly {
+#     preset = jelly
+#     size_mode = min
+#     size_scale = 0.8
+#     anchor = nearest-edge
+#     edge_offset = 8
+#     color = 89B4FA
+#     secondary_color = CBA6F7
+#     wobble = 1.2
+# }
 # ripple {
 #     enabled = true
-#     shapes = ring                # ring square droplet cross (multi = concurrent)
+#     preset = water-drop          # water-drop jelly bubble splash tide legacy
+#     map_preset = water-drop      # optional per-trigger appearance
+#     focus_preset = jelly
+#     urgent_preset = splash
+#     focus_on_map = false         # true deliberately stacks focus over map
+#     shapes = ring                # legacy only: ring square droplet cross
 #     color = 8EDDFF               # bare RRGGBB; quote a leading-hash form
+#     secondary_color = E8FCFF     # gradient/highlight color
 #     peak_radius = 220            # logical pixels
+#     size_mode = fixed            # fixed window width height min max
+#     size_scale = 1.0              # multiplier for window-derived modes
+#     min_radius = 24               # final radius clamp
+#     max_radius = 2048
 #     thickness = 8                # outline half-width, logical pixels
 #     duration_ms = 650
-#     peak_alpha = 1.0             # 0.0 to 1.0
+#     peak_alpha = 0.88            # 0.0 to 1.0
+#     glow = 0.55                  # halo strength, 0.0 to 2.0
+#     wobble = 0.7                 # organic movement, 0.0 to 2.0
+#     detail = 0.8                 # inner rings/highlights/spray, 0.0 to 2.0
 #     ease = cubic-out             # linear cubic-out cubic-in-out quad-out exp-out
-#     anchor = center              # center cursor topleft topright bottomleft bottomright
+#     anchor = center              # center cursor top bottom left right nearest-edge + corners
+#     edge_position = 0.5           # 0.0 to 1.0 along a side
+#     edge_offset = 0               # positive moves outward, negative inward
 #     offset = 0x0                 # <dx>x<dy>, added to anchor
 #     layer = above-windows        # above-all above-windows below-windows below-all
 #     triggers = map               # map focus urgent
@@ -4693,6 +5067,7 @@ mod tests {
             rounding: RoundingConfig::default(),
             border: BorderConfig::default(),
             ripple: RippleConfig::system_default(),
+            ripple_presets: HashMap::new(),
             cursor_always_visible: false,
             cursor_hide_after_ms: 0,
             workspace_auto_back_and_forth: false,
@@ -5543,6 +5918,150 @@ mod tests {
         assert_eq!(parse_ripple_color("rgba(00ffff, 128)"), cyan);
         assert_eq!(parse_ripple_color("not-a-color"), None);
         assert_eq!(parse_ripple_color("#zzzzzz"), None);
+    }
+
+    #[test]
+    fn ripple_presets_parse_with_trigger_specific_styles_and_tuning() {
+        assert_eq!(
+            parse_ripple_preset_selection("water-drop"),
+            Some(RipplePresetSelection::BuiltIn(RipplePreset::WaterDrop))
+        );
+        assert_eq!(
+            parse_ripple_preset_selection("jiggle"),
+            Some(RipplePresetSelection::BuiltIn(RipplePreset::Jelly))
+        );
+        assert_eq!(
+            parse_ripple_preset_selection("giggle"),
+            Some(RipplePresetSelection::BuiltIn(RipplePreset::Jelly))
+        );
+
+        let entries = waves::parse(
+            "ripple {\n\
+             preset = tide\n\
+             map_preset = splash\n\
+             focus_preset = jelly\n\
+             urgent_preset = bubble\n\
+             focus_on_map = true\n\
+             secondary_color = CBA6F7\n\
+             glow = 1.2\n\
+             wobble = 0.9\n\
+             detail = 1.1\n\
+             triggers = map focus urgent\n\
+             }\n",
+            Path::new("<ripple-preset-test>"),
+        )
+        .unwrap();
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        assert_eq!(
+            config.ripple.preset,
+            Some(RipplePresetSelection::BuiltIn(RipplePreset::Tide))
+        );
+        assert_eq!(
+            config.ripple.preset_for(RippleTrigger::Map),
+            Some(&RipplePresetSelection::BuiltIn(RipplePreset::Splash))
+        );
+        assert_eq!(
+            config.ripple.preset_for(RippleTrigger::Focus),
+            Some(&RipplePresetSelection::BuiltIn(RipplePreset::Jelly))
+        );
+        assert_eq!(
+            config.ripple.preset_for(RippleTrigger::Urgent),
+            Some(&RipplePresetSelection::BuiltIn(RipplePreset::Bubble))
+        );
+        assert_eq!(config.ripple.focus_on_map, Some(true));
+        assert_eq!(config.ripple.secondary_color, parse_ripple_color("CBA6F7"));
+        assert_eq!(config.ripple.glow, Some(1.2));
+        assert_eq!(config.ripple.wobble, Some(0.9));
+        assert_eq!(config.ripple.detail, Some(1.1));
+    }
+
+    #[test]
+    fn assigning_legacy_shapes_selects_the_compatibility_preset() {
+        let entries = waves::parse(
+            "ripple {\nshapes = ring square\n}\n",
+            Path::new("<legacy-ripple-test>"),
+        )
+        .unwrap();
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        assert_eq!(
+            config.ripple.preset,
+            Some(RipplePresetSelection::BuiltIn(RipplePreset::Legacy))
+        );
+        assert_eq!(
+            config.ripple.shapes,
+            vec![RippleShape::Ring, RippleShape::Square]
+        );
+    }
+
+    #[test]
+    fn named_ripple_presets_inherit_and_keep_local_adjustments() {
+        let entries = waves::parse(
+            "ripple_preset ocean-base {\n\
+             preset = tide\n\
+             color = 89B4FA\n\
+             size_mode = window\n\
+             size_scale = 0.8\n\
+             min_radius = 90\n\
+             max_radius = 900\n\
+             anchor = right\n\
+             edge_position = 0.25\n\
+             edge_offset = 12\n\
+             }\n\
+             ripple_preset ocean-wide {\n\
+             preset = ocean-base\n\
+             detail = 1.4\n\
+             }\n\
+             ripple_preset ocean-jelly {\n\
+             preset = jelly\n\
+             wobble = 1.4\n\
+             }\n\
+             ripple {\n\
+             map_preset = ocean-wide\n\
+             focus_preset = ocean-jelly\n\
+             color = CBA6F7\n\
+             triggers = map focus\n\
+             }\n",
+            Path::new("<named-ripple-preset-test>"),
+        )
+        .unwrap();
+        let config = Config::from_raw(lower_entries(&entries)).0;
+
+        let map = config.resolve_ripple_config(None, RippleTrigger::Map);
+        assert_eq!(map.built_in_preset(), RipplePreset::Tide);
+        assert_eq!(map.color, parse_ripple_color("CBA6F7"));
+        assert_eq!(map.size_mode, Some(RippleSizeMode::Window));
+        assert_eq!(map.anchor, Some(RippleAnchor::Right));
+        assert_eq!(map.edge_position, Some(0.25));
+        assert_eq!(map.edge_offset, Some(12.0));
+        assert_eq!(map.detail, Some(1.4));
+        assert!((map.radius_for_window(600.0, 800.0) - 400.0).abs() < 0.01);
+
+        let focus = config.resolve_ripple_config(None, RippleTrigger::Focus);
+        assert_eq!(focus.built_in_preset(), RipplePreset::Jelly);
+        assert_eq!(focus.wobble, Some(1.4));
+    }
+
+    #[test]
+    fn ripple_window_size_modes_and_radius_clamps_are_deterministic() {
+        let base = RippleConfig {
+            size_scale: Some(1.0),
+            min_radius: Some(40.0),
+            max_radius: Some(500.0),
+            ..RippleConfig::system_default()
+        };
+        for (mode, expected) in [
+            (RippleSizeMode::Window, 500.0),
+            (RippleSizeMode::Width, 300.0),
+            (RippleSizeMode::Height, 400.0),
+            (RippleSizeMode::MinDimension, 300.0),
+            (RippleSizeMode::MaxDimension, 400.0),
+        ] {
+            let cfg = RippleConfig {
+                size_mode: Some(mode),
+                ..base.clone()
+            };
+            assert!((cfg.radius_for_window(600.0, 800.0) - expected).abs() < 0.01);
+        }
     }
 
     #[test]

@@ -1911,6 +1911,28 @@ impl Smallvil {
         surface: Option<WlSurface>,
         serial: smithay::utils::Serial,
     ) {
+        self.focus_window_with_ripple(surface, serial, true);
+    }
+
+    /// Gives a freshly mapped window focus without also treating that
+    /// lifecycle step as a user-visible focus handoff. The map ripple is the
+    /// single visual cue for this transaction; later pointer/keyboard focus
+    /// changes continue through `focus_window` and animate normally.
+    pub(crate) fn focus_window_on_map(
+        &mut self,
+        surface: Option<WlSurface>,
+        serial: smithay::utils::Serial,
+        animate_handoff: bool,
+    ) {
+        self.focus_window_with_ripple(surface, serial, animate_handoff);
+    }
+
+    fn focus_window_with_ripple(
+        &mut self,
+        surface: Option<WlSurface>,
+        serial: smithay::utils::Serial,
+        animate_handoff: bool,
+    ) {
         let previous_focus = self.window_focus.clone();
         self.on_demand_layer_focus = None;
         self.window_focus = surface.filter(|surface| self.window_is_visible(surface));
@@ -1919,14 +1941,16 @@ impl Smallvil {
         }
         self.reconcile_keyboard_focus(serial);
 
-        // Focus-change ripple: only on a transition between two real
-        // windows, not on the very first focus (from None) or when
-        // focus is being dropped (to None) -- both of those are noisy
-        // events that shouldn't animate anything. The map trigger
-        // already covers a window's first appearance; focus-trigger
-        // fires only on a real handoff.
+        // Focus-change ripple: only on a user-visible transition between two
+        // real windows, not on the very first focus (from None), focus being
+        // dropped (to None), or a map transaction. A freshly mapped window
+        // receives focus and its map ripple in the same transaction; stacking
+        // a focus ripple there makes two presets fight over the same frame.
         if let Some(new_surface) = self.window_focus.clone() {
-            if previous_focus.as_ref() != Some(&new_surface) && previous_focus.is_some() {
+            if animate_handoff
+                && previous_focus.as_ref() != Some(&new_surface)
+                && previous_focus.is_some()
+            {
                 self.spawn_ripple(&new_surface, crate::config::RippleTrigger::Focus);
             }
         }
@@ -3828,10 +3852,9 @@ impl Smallvil {
         let rule = self
             .config
             .resolve_window_rules(app_id.as_deref(), title.as_deref());
-        let cfg = match &rule.ripple {
-            Some(rule_cfg) => self.config.ripple.merge_over(rule_cfg),
-            None => self.config.ripple.clone(),
-        };
+        let mut cfg = self
+            .config
+            .resolve_ripple_config(rule.ripple.as_ref(), trigger);
         if cfg.enabled == Some(false) || !cfg.fires_on(trigger) {
             return;
         }
@@ -3901,46 +3924,27 @@ impl Smallvil {
             return;
         };
         let win = Rectangle::new(win.loc - output_geo.loc, win.size);
+        cfg.peak_radius = Some(cfg.radius_for_window(win.size.w as f32, win.size.h as f32));
         let anchor = cfg.anchor.unwrap_or(RippleAnchor::Center);
         let (dx, dy) = cfg.offset.unwrap_or((0, 0));
-        let base: Point<f64, Logical> = match anchor {
-            RippleAnchor::Center => Point::from((
-                win.loc.x as f64 + win.size.w as f64 / 2.0,
-                win.loc.y as f64 + win.size.h as f64 / 2.0,
-            )),
-            RippleAnchor::Cursor => {
-                // Cursor is in global logical coords; convert to this
-                // output's local space by subtracting its geometry loc.
-                self.seat
-                    .get_pointer()
-                    .map(|p| p.current_location())
-                    .map(|g| {
-                        Point::from((g.x - output_geo.loc.x as f64, g.y - output_geo.loc.y as f64))
-                    })
-                    .unwrap_or_else(|| {
-                        Point::from((
-                            win.loc.x as f64 + win.size.w as f64 / 2.0,
-                            win.loc.y as f64 + win.size.h as f64 / 2.0,
-                        ))
-                    })
-            }
-            RippleAnchor::TopLeft => Point::from((win.loc.x as f64, win.loc.y as f64)),
-            RippleAnchor::TopRight => {
-                Point::from((win.loc.x as f64 + win.size.w as f64, win.loc.y as f64))
-            }
-            RippleAnchor::BottomLeft => {
-                Point::from((win.loc.x as f64, win.loc.y as f64 + win.size.h as f64))
-            }
-            RippleAnchor::BottomRight => Point::from((
-                win.loc.x as f64 + win.size.w as f64,
-                win.loc.y as f64 + win.size.h as f64,
-            )),
-        };
+        let pointer_local = self
+            .seat
+            .get_pointer()
+            .map(|p| p.current_location())
+            .map(|g| Point::from((g.x - output_geo.loc.x as f64, g.y - output_geo.loc.y as f64)));
+        let base = crate::ripple::anchor_point(
+            win,
+            anchor,
+            pointer_local,
+            cfg.edge_position.unwrap_or(0.5),
+            cfg.edge_offset.unwrap_or(0.0),
+        );
         let center = Point::from((base.x + dx as f64, base.y + dy as f64));
         tracing::debug!(
             trigger = ?trigger,
             output = output.name(),
             center = ?center,
+            preset = ?cfg.preset,
             shapes = ?cfg.shapes,
             color = ?cfg.color,
             layer = ?cfg.layer,

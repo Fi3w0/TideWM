@@ -936,7 +936,20 @@ impl Smallvil {
         // whatever was focused before completely untouched, rather than
         // picking some other window to focus instead.
         if !rule.no_focus {
-            self.focus_window(Some(surface.clone()), SERIAL_COUNTER.next_serial());
+            let focus_on_map = self
+                .config
+                .resolve_ripple_config(rule.ripple.as_ref(), crate::config::RippleTrigger::Focus)
+                .focus_on_map
+                .unwrap_or(false);
+            // Mapping and its automatic focus are one lifecycle transaction.
+            // Let the map ripple be its single visual cue; ordinary focus
+            // handoffs after this still animate through `focus_window`.
+            // `focus_on_map = true` deliberately restores effect stacking.
+            self.focus_window_on_map(
+                Some(surface.clone()),
+                SERIAL_COUNTER.next_serial(),
+                focus_on_map,
+            );
         }
 
         // Droplet-impact ripple at the window's center -- Phase R1, see

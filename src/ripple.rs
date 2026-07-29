@@ -34,9 +34,12 @@ use smithay::{
     },
 };
 
-use crate::config::{RippleConfig, RippleEase, RippleLayer, RippleShape};
+use crate::config::{
+    RippleAnchor, RippleConfig, RippleEase, RippleLayer, RipplePreset, RippleShape,
+};
 
-/// Procedural fragment shader for an expanding shape with a soft falloff.
+/// Procedural fragment shader for polished expanding impulse presets and the
+/// original geometric-shape compatibility mode.
 /// `v_coords` is normalized UV in `[0, 1]` from Smithay's vertex shader
 /// (see `build_texture_mat` in `backend/renderer/gles/mod.rs`, which
 /// divides by texture size at the end of building the tex matrix). The
@@ -49,10 +52,10 @@ use crate::config::{RippleConfig, RippleEase, RippleLayer, RippleShape};
 /// The Smithay pixel-shader framework supplies `size` (the element's
 /// buffer size) and `alpha` (the element's own alpha, see
 /// `RippleElement::alpha`) automatically. Additional uniforms:
-/// `u_tint` (RGB), `u_thickness_uv` (half-width of the shape's edge,
-/// in UV units relative to the element's larger side), and `u_shape`
-/// (0.0 ring, 1.0 square, 2.0 droplet, 3.0 cross -- passed as float
-/// because integer uniforms in GLSL ES 100 are unevenly supported).
+/// Presets remain one analytical element each. Their inner rings, glow,
+/// highlights, lobes, and wobble are math inside this shader, not extra
+/// textures or render elements. `Legacy` alone may emit multiple elements
+/// for the old `shapes` list.
 ///
 /// RGB is pre-multiplied by alpha before writing `gl_FragColor`, matching
 /// `water_glass::WATER_GLASS_FRAGMENT_SHADER`'s own alpha handling --
@@ -69,42 +72,130 @@ varying vec2 v_coords;
 uniform vec2 size;
 uniform float alpha;
 uniform vec3 u_tint;
+uniform vec3 u_secondary_tint;
 uniform float u_thickness_uv;
 uniform float u_shape;
+uniform float u_preset;
+uniform float u_progress;
+uniform float u_glow;
+uniform float u_wobble;
+uniform float u_detail;
+
+float band(float value, float center, float width) {
+    return 1.0 - smoothstep(0.0, max(width, 0.001), abs(value - center));
+}
 
 void main() {
     vec2 p = v_coords - vec2(0.5);
-    float a;
-    if (u_shape < 0.5) {
-        // Ring: Euclidean distance from center, edge at 0.5.
-        float d = length(p);
-        a = smoothstep(u_thickness_uv, 0.0, abs(d - 0.5));
-    } else if (u_shape < 1.5) {
-        // Square outline: Chebyshev distance, edge at 0.5.
-        float d = max(abs(p.x), abs(p.y));
-        a = smoothstep(u_thickness_uv, 0.0, abs(d - 0.5));
-    } else if (u_shape < 2.5) {
-        // Droplet: ring at 0.5 plus a small filled disc at the center.
-        // The disc's alpha is the *current* alpha already fading, so the
-        // crater looks like it's already healing as the ring expands.
-        float d = length(p);
-        float ring = smoothstep(u_thickness_uv, 0.0, abs(d - 0.5));
-        float crater = smoothstep(0.18, 0.0, d);
-        a = max(ring, crater * 0.55);
+    float r = length(p);
+    float angle = atan(p.y, p.x);
+    float progress = clamp(u_progress, 0.0, 1.0);
+    float width = max(u_thickness_uv, 0.006);
+    float a = 0.0;
+    float color_mix = smoothstep(0.08, 0.52, r);
+
+    if (u_preset < 0.5) {
+        // Original independently-stackable geometry.
+        if (u_shape < 0.5) {
+            a = band(r, 0.5, width);
+        } else if (u_shape < 1.5) {
+            a = band(max(abs(p.x), abs(p.y)), 0.5, width);
+        } else if (u_shape < 2.5) {
+            float ring = band(r, 0.5, width);
+            float crater = 1.0 - smoothstep(0.0, 0.18, r);
+            a = max(ring, crater * 0.55);
+        } else {
+            float arm = 0.07;
+            float bars = max(
+                1.0 - smoothstep(0.0, arm, abs(p.x)),
+                1.0 - smoothstep(0.0, arm, abs(p.y))
+            );
+            a = bars * band(max(abs(p.x), abs(p.y)), 0.5, width);
+        }
+    } else if (u_preset < 1.5) {
+        // Water drop: three concentric wavefronts and a healing impact
+        // crater. Inner rings soften as the impulse travels outward.
+        float outer = band(r, 0.47, width * 0.85);
+        float middle = band(r, 0.33 - progress * 0.025, width * 0.58)
+            * (0.56 + 0.24 * u_detail);
+        float inner = band(r, 0.19 - progress * 0.018, width * 0.45)
+            * 0.42 * u_detail;
+        float crater = (1.0 - smoothstep(0.0, 0.105, r))
+            * (1.0 - progress) * 0.9;
+        float halo = (1.0 - smoothstep(0.18, 0.52, r))
+            * 0.18 * u_glow;
+        a = max(max(outer, middle), max(inner, crater)) + halo;
+        color_mix = smoothstep(0.12, 0.48, r);
+    } else if (u_preset < 2.5) {
+        // Jelly: an organic membrane that oscillates several times before
+        // settling. This is the lightweight "jiggle/giggle" appearance.
+        float settle = 1.0 - progress * 0.68;
+        float wobble =
+            sin(angle * 5.0 + progress * 20.0) * 0.030 +
+            sin(angle * 3.0 - progress * 14.0) * 0.019 +
+            sin(angle * 8.0 + progress * 9.0) * 0.010 * u_detail;
+        float membrane = 0.43 + wobble * u_wobble * settle;
+        float rim = band(r, membrane, width * 0.95);
+        float gel = (1.0 - smoothstep(membrane - 0.16, membrane, r))
+            * 0.13 * u_glow;
+        float echo = band(r, membrane * 0.70, width * 0.42)
+            * 0.26 * u_detail;
+        a = max(rim, echo) + gel;
+        color_mix = 0.5 + 0.5 * sin(angle * 2.0 + progress * 8.0);
+    } else if (u_preset < 3.5) {
+        // Bubble: two thin membranes with an upper-left moving specular
+        // glint. The body remains mostly transparent.
+        float outer = band(r, 0.455, width * 0.62);
+        float inner = band(r, 0.405, width * 0.34) * (0.42 + 0.2 * u_detail);
+        vec2 glint_center = vec2(-0.17, -0.18)
+            + vec2(progress * 0.055, progress * 0.025);
+        float glint = (1.0 - smoothstep(0.025, 0.085, length(p - glint_center)))
+            * (0.52 + 0.32 * u_detail);
+        float sheen = (1.0 - smoothstep(0.28, 0.46, r))
+            * max(0.0, dot(normalize(p + vec2(0.001)), normalize(vec2(-1.0, -1.0))))
+            * 0.18 * u_glow;
+        a = max(max(outer, inner), glint) + sheen;
+        color_mix = max(glint, smoothstep(0.20, 0.47, r));
+    } else if (u_preset < 4.5) {
+        // Splash: a seven-lobed crown and sharper outer spray peaks.
+        float lobe = pow(0.5 + 0.5 * sin(angle * 7.0 - progress * 8.0), 3.0);
+        float crown_radius = 0.34 + lobe * 0.085 * u_detail;
+        float crown = band(r, crown_radius, width * 0.72);
+        float spray_peaks = pow(
+            max(0.0, sin(angle * 11.0 + progress * 13.0)),
+            10.0
+        );
+        float spray = band(r, 0.475, width * 0.48)
+            * spray_peaks * u_detail;
+        float core = (1.0 - smoothstep(0.04, 0.22, r))
+            * (1.0 - progress) * 0.45;
+        float halo = (1.0 - smoothstep(0.20, 0.48, r))
+            * 0.11 * u_glow;
+        a = max(max(crown, spray), core) + halo;
+        color_mix = max(lobe, smoothstep(0.22, 0.48, r));
     } else {
-        // Cross: two perpendicular bars at the center, fading at the
-        // bounding-square edge. Bar half-width is fixed in UV so the
-        // bars keep their shape as the element grows.
-        float arm = 0.07;
-        float bar_x = smoothstep(arm, 0.0, abs(p.x));
-        float bar_y = smoothstep(arm, 0.0, abs(p.y));
-        float arm_alpha = max(bar_x, bar_y);
-        float edge_d = max(abs(p.x), abs(p.y));
-        float edge = smoothstep(u_thickness_uv, 0.0, abs(edge_d - 0.5));
-        a = arm_alpha * edge;
+        // Tide: several sinusoidal bands travelling in opposite directions,
+        // softly clipped to a circular impulse envelope.
+        float phase = progress * 10.0;
+        float wave1 = 0.12 * sin(p.x * 10.0 + phase);
+        float wave2 = 0.10 * sin(p.x * 8.0 - phase * 0.72);
+        float wave3 = 0.07 * sin(p.x * 13.0 + phase * 0.46);
+        float bands = max(
+            band(p.y, wave1, width * 0.72),
+            max(
+                band(p.y, wave2 + 0.13, width * 0.50),
+                band(p.y, wave3 - 0.14, width * 0.42) * u_detail
+            )
+        );
+        float envelope = 1.0 - smoothstep(0.34, 0.50, r);
+        float rim = band(r, 0.47, width * 0.50) * 0.45;
+        a = max(bands * envelope, rim) + envelope * 0.08 * u_glow;
+        color_mix = 0.5 + 0.5 * sin(p.x * 9.0 + phase);
     }
-    a *= alpha;
-    gl_FragColor = vec4(u_tint * a, a);
+
+    a = clamp(a, 0.0, 1.0) * alpha;
+    vec3 color = mix(u_tint, u_secondary_tint, clamp(color_mix, 0.0, 1.0));
+    gl_FragColor = vec4(color * a, a);
 }
 "#;
 
@@ -125,8 +216,14 @@ pub fn ripple_program(
         RIPPLE_FRAGMENT_SHADER,
         &[
             UniformName::new("u_tint", UniformType::_3f),
+            UniformName::new("u_secondary_tint", UniformType::_3f),
             UniformName::new("u_thickness_uv", UniformType::_1f),
             UniformName::new("u_shape", UniformType::_1f),
+            UniformName::new("u_preset", UniformType::_1f),
+            UniformName::new("u_progress", UniformType::_1f),
+            UniformName::new("u_glow", UniformType::_1f),
+            UniformName::new("u_wobble", UniformType::_1f),
+            UniformName::new("u_detail", UniformType::_1f),
         ],
     ) {
         Ok(program) => {
@@ -160,6 +257,77 @@ pub fn ease_value(ease: RippleEase, t: f32) -> f32 {
         // A simple exp-out: fast initial jump, smooth asymptotic approach
         // to 1. The `1 - exp(-5t)` shape reaches ~0.99 by t = 1.
         RippleEase::ExpOut => 1.0 - (-5.0 * t).exp(),
+    }
+}
+
+/// Resolves an anchor against a window rect. Side anchors use
+/// `edge_position`; `NearestEdge` projects the current pointer onto the
+/// closest side. Positive `edge_offset` moves outward from the window.
+pub fn anchor_point(
+    window: Rectangle<i32, Logical>,
+    anchor: RippleAnchor,
+    pointer: Option<Point<f64, Logical>>,
+    edge_position: f32,
+    edge_offset: f32,
+) -> Point<f64, Logical> {
+    let edge_position = edge_position.clamp(0.0, 1.0) as f64;
+    let edge_offset = edge_offset as f64;
+    let left = window.loc.x as f64;
+    let top = window.loc.y as f64;
+    let right = left + window.size.w as f64;
+    let bottom = top + window.size.h as f64;
+    let center = Point::from(((left + right) / 2.0, (top + bottom) / 2.0));
+
+    match anchor {
+        RippleAnchor::Center => center,
+        RippleAnchor::Cursor => pointer.unwrap_or(center),
+        RippleAnchor::Top => Point::from((
+            left + window.size.w as f64 * edge_position,
+            top - edge_offset,
+        )),
+        RippleAnchor::Bottom => Point::from((
+            left + window.size.w as f64 * edge_position,
+            bottom + edge_offset,
+        )),
+        RippleAnchor::Left => Point::from((
+            left - edge_offset,
+            top + window.size.h as f64 * edge_position,
+        )),
+        RippleAnchor::Right => Point::from((
+            right + edge_offset,
+            top + window.size.h as f64 * edge_position,
+        )),
+        RippleAnchor::NearestEdge => {
+            let pointer = pointer.unwrap_or(center);
+            let distances = [
+                ((pointer.y - top).abs(), RippleAnchor::Top),
+                ((pointer.y - bottom).abs(), RippleAnchor::Bottom),
+                ((pointer.x - left).abs(), RippleAnchor::Left),
+                ((pointer.x - right).abs(), RippleAnchor::Right),
+            ];
+            match distances
+                .into_iter()
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, edge)| edge)
+                .unwrap_or(RippleAnchor::Top)
+            {
+                RippleAnchor::Top => Point::from((pointer.x.clamp(left, right), top - edge_offset)),
+                RippleAnchor::Bottom => {
+                    Point::from((pointer.x.clamp(left, right), bottom + edge_offset))
+                }
+                RippleAnchor::Left => {
+                    Point::from((left - edge_offset, pointer.y.clamp(top, bottom)))
+                }
+                RippleAnchor::Right => {
+                    Point::from((right + edge_offset, pointer.y.clamp(top, bottom)))
+                }
+                _ => unreachable!(),
+            }
+        }
+        RippleAnchor::TopLeft => Point::from((left, top)),
+        RippleAnchor::TopRight => Point::from((right, top)),
+        RippleAnchor::BottomLeft => Point::from((left, bottom)),
+        RippleAnchor::BottomRight => Point::from((right, bottom)),
     }
 }
 
@@ -248,11 +416,14 @@ impl Ripple {
         self.cfg.layer.unwrap_or(RippleLayer::AboveWindows)
     }
 
-    /// The shapes to draw for this ripple, resolving the empty-list
-    /// "inherit" fallback to a single `Ring` so an unset config can't
-    /// produce a ripple with no visual.
-    fn shapes(&self) -> Vec<RippleShape> {
-        if self.cfg.shapes.is_empty() {
+    fn preset(&self) -> RipplePreset {
+        self.cfg.built_in_preset()
+    }
+
+    /// Polished presets render as one fixed-cost element. `Legacy` preserves
+    /// the old one-element-per-shape behavior.
+    fn render_shapes(&self) -> Vec<RippleShape> {
+        if self.preset() != RipplePreset::Legacy || self.cfg.shapes.is_empty() {
             vec![RippleShape::Ring]
         } else {
             self.cfg.shapes.clone()
@@ -285,8 +456,14 @@ pub struct RippleElement {
     program: GlesPixelProgram,
     alpha: f32,
     tint: [f32; 3],
+    secondary_tint: [f32; 3],
     thickness_uv: f32,
     shape: RippleShape,
+    preset: RipplePreset,
+    progress: f32,
+    glow: f32,
+    wobble: f32,
+    detail: f32,
 }
 
 impl RippleElement {
@@ -312,11 +489,17 @@ impl RippleElement {
         let area = ripple.element_rect();
         let alpha = ripple.alpha();
         let tint = ripple.cfg.color.unwrap_or([0.55, 0.85, 1.0]);
+        let secondary_tint = ripple.cfg.secondary_color.unwrap_or([0.91, 0.98, 1.0]);
         let thickness = ripple.cfg.thickness.unwrap_or(8.0);
         let max_side = area.size.w.max(area.size.h).max(1) as f32;
         let thickness_uv = thickness / max_side;
+        let preset = ripple.preset();
+        let progress = ripple.progress();
+        let glow = ripple.cfg.glow.unwrap_or(0.55);
+        let wobble = ripple.cfg.wobble.unwrap_or(0.7);
+        let detail = ripple.cfg.detail.unwrap_or(0.8);
         ripple
-            .shapes()
+            .render_shapes()
             .into_iter()
             .map(|shape| RippleElement {
                 id: id.clone(),
@@ -325,8 +508,14 @@ impl RippleElement {
                 program: program.clone(),
                 alpha,
                 tint,
+                secondary_tint,
                 thickness_uv,
                 shape,
+                preset,
+                progress,
+                glow,
+                wobble,
+                detail,
             })
             .collect()
     }
@@ -380,6 +569,14 @@ impl RenderElement<GlesRenderer> for RippleElement {
             RippleShape::Droplet => 2.0,
             RippleShape::Cross => 3.0,
         };
+        let u_preset = match self.preset {
+            RipplePreset::Legacy => 0.0,
+            RipplePreset::WaterDrop => 1.0,
+            RipplePreset::Jelly => 2.0,
+            RipplePreset::Bubble => 3.0,
+            RipplePreset::Splash => 4.0,
+            RipplePreset::Tide => 5.0,
+        };
         frame.render_pixel_shader_to(
             &self.program,
             src,
@@ -389,8 +586,14 @@ impl RenderElement<GlesRenderer> for RippleElement {
             self.alpha,
             &[
                 Uniform::new("u_tint", self.tint),
+                Uniform::new("u_secondary_tint", self.secondary_tint),
                 Uniform::new("u_thickness_uv", self.thickness_uv),
                 Uniform::new("u_shape", u_shape),
+                Uniform::new("u_preset", u_preset),
+                Uniform::new("u_progress", self.progress),
+                Uniform::new("u_glow", self.glow),
+                Uniform::new("u_wobble", self.wobble),
+                Uniform::new("u_detail", self.detail),
             ],
         )
     }
@@ -412,19 +615,25 @@ mod tests {
         assert!(RIPPLE_FRAGMENT_SHADER.contains("uniform vec2 size"));
         assert!(RIPPLE_FRAGMENT_SHADER.contains("varying vec2 v_coords"));
         assert!(RIPPLE_FRAGMENT_SHADER.contains("uniform vec3 u_tint"));
+        assert!(RIPPLE_FRAGMENT_SHADER.contains("uniform vec3 u_secondary_tint"));
         assert!(RIPPLE_FRAGMENT_SHADER.contains("uniform float u_thickness_uv"));
         assert!(RIPPLE_FRAGMENT_SHADER.contains("uniform float u_shape"));
+        assert!(RIPPLE_FRAGMENT_SHADER.contains("uniform float u_preset"));
+        assert!(RIPPLE_FRAGMENT_SHADER.contains("uniform float u_progress"));
+        assert!(RIPPLE_FRAGMENT_SHADER.contains("uniform float u_glow"));
+        assert!(RIPPLE_FRAGMENT_SHADER.contains("uniform float u_wobble"));
+        assert!(RIPPLE_FRAGMENT_SHADER.contains("uniform float u_detail"));
     }
 
     #[test]
-    fn ripple_starts_at_zero_alpha_one_radius_zero_and_is_not_finished() {
+    fn ripple_starts_at_configured_alpha_radius_zero_and_is_not_finished() {
         let ripple = Ripple::new(
             "eDP-1".to_string(),
             Point::from((100.0, 100.0)),
             RippleConfig::system_default(),
         );
         assert!(ripple.radius() < 1.0);
-        assert!((ripple.alpha() - 1.0).abs() < 0.05);
+        assert!((ripple.alpha() - 0.88).abs() < 0.05);
         assert!(!ripple.finished());
     }
 
@@ -452,6 +661,29 @@ mod tests {
         let cy = rect.loc.y + rect.size.h / 2;
         assert!((cx - 300).abs() <= 1);
         assert!((cy - 200).abs() <= 1);
+    }
+
+    #[test]
+    fn side_and_nearest_edge_anchors_resolve_with_offsets() {
+        let window = Rectangle::new(Point::from((100, 100)), Size::from((200, 100)));
+        assert_eq!(
+            anchor_point(window, RippleAnchor::Top, None, 0.25, 10.0),
+            Point::from((150.0, 90.0))
+        );
+        assert_eq!(
+            anchor_point(window, RippleAnchor::Bottom, None, 0.75, -5.0),
+            Point::from((250.0, 195.0))
+        );
+        assert_eq!(
+            anchor_point(
+                window,
+                RippleAnchor::NearestEdge,
+                Some(Point::from((292.0, 130.0))),
+                0.5,
+                6.0,
+            ),
+            Point::from((306.0, 130.0))
+        );
     }
 
     #[test]
@@ -483,17 +715,17 @@ mod tests {
     }
 
     #[test]
-    fn from_ripple_returns_one_element_per_shape() {
+    fn polished_presets_are_one_element_and_legacy_keeps_shape_multiplicity() {
         let mut cfg = RippleConfig::system_default();
         cfg.shapes = vec![RippleShape::Ring, RippleShape::Square];
-        let ripple = Ripple::new("eDP-1".to_string(), Point::from((100.0, 100.0)), cfg);
-        // A real GlesPixelProgram can't be constructed without an EGL
-        // context, so this test stops at the multiplicity check by
-        // short-circuiting through `finished()` -- which we don't want
-        // to flip. Use the shapes() helper directly to verify the
-        // shape list logic.
+        let mut ripple = Ripple::new("eDP-1".to_string(), Point::from((100.0, 100.0)), cfg);
+        assert_eq!(ripple.render_shapes(), vec![RippleShape::Ring]);
+
+        ripple.cfg.preset = Some(crate::config::RipplePresetSelection::BuiltIn(
+            RipplePreset::Legacy,
+        ));
         assert_eq!(
-            ripple.shapes(),
+            ripple.render_shapes(),
             vec![RippleShape::Ring, RippleShape::Square]
         );
         assert!(!ripple.finished());

@@ -191,7 +191,7 @@ fn parse_block(
 fn block_is_keyed(keyword: &str) -> bool {
     matches!(
         keyword,
-        "input" | "touchpad" | "env" | "switch_events" | "submap"
+        "input" | "touchpad" | "env" | "switch_events" | "submap" | "ripple_preset"
     )
 }
 
@@ -226,7 +226,7 @@ fn assign_is_multi(key: &str) -> bool {
 ///   exception is [`assign_is_multi`]'s keys (`spawn_at_startup`,
 ///   `workspace_name`), which accumulate instead -- see its own doc comment.
 /// - A block whose keyword is in [`block_is_keyed`] (`input`, `touchpad`,
-///   `env`, `switch_events`, `submap`) merges recursively with an
+///   `env`, `switch_events`, `submap`, `ripple_preset`) merges recursively with an
 ///   existing block of the same keyword *and* header (the header is the
 ///   submap name for `submap`, empty for the others) -- these are
 ///   conceptually single named sections, the same as a TOML table
