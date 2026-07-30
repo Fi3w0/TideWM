@@ -27,6 +27,7 @@ mod shadow;
 mod source_picker;
 mod state;
 mod sway;
+mod swim;
 mod tab_strip;
 mod toast;
 mod viscosity;

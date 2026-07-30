@@ -35,7 +35,6 @@ use smithay::{
     },
 };
 
-#[cfg(feature = "accessibility")]
 use std::time::Duration;
 
 use crate::{
@@ -206,6 +205,35 @@ fn workspace_swipe_target(current: u32, delta_x: f64, delta_y: f64, threshold: f
     }
 }
 
+/// Resolves how many of a swim drag's requested whole-spot `advances` can
+/// actually land, applying the same boundary guard `workspace_swipe_target`
+/// above already established for the discrete switch: never step down into
+/// the reserved scratchpad workspace 0, never overflow stepping up. Stops
+/// at the first refused step rather than silently dropping the remainder,
+/// so a fast fling against either edge lands exactly on it. Returns the
+/// landing workspace and how many of the requested steps actually applied
+/// (same sign as `advances`, shorter in magnitude when a boundary was hit)
+/// so the caller can fold any refused remainder back into the camera.
+fn swim_advance_target(current: u32, advances: i32) -> (u32, i32) {
+    let mut workspace = current;
+    let mut applied = 0;
+    for _ in 0..advances.unsigned_abs() {
+        let next = if advances > 0 {
+            workspace.checked_add(1)
+        } else {
+            (workspace > 1).then(|| workspace - 1)
+        };
+        match next {
+            Some(next) => {
+                workspace = next;
+                applied += advances.signum();
+            }
+            None => break,
+        }
+    }
+    (workspace, applied)
+}
+
 fn completed_swipe_direction(delta_x: f64, delta_y: f64, threshold: f64) -> Option<Direction> {
     if delta_x.abs().max(delta_y.abs()) < threshold {
         return None;
@@ -233,6 +261,68 @@ impl Smallvil {
                 self.switch_workspace(&output, target);
             }
         }
+    }
+
+    /// Drives the swim camera for one gesture-update tick: converts the raw
+    /// pixel delta into spot-widths (`workspace_swipe_distance` is one full
+    /// spot, `swim.response` the gain on top), drags the camera, and applies
+    /// any whole-spot advances that fall out to the real discrete workspace
+    /// axis via `switch_workspace_immediate` -- the wave-transition capture
+    /// `switch_workspace` would otherwise queue is redundant here, the
+    /// camera already owns the outgoing/incoming visual. A step the axis
+    /// refuses (the scratchpad boundary) is folded back into the camera
+    /// instead of vanishing, so pressing against the edge reads as
+    /// resistance rather than the pan silently doing nothing.
+    fn run_swim_update(&mut self, delta_x: f64) {
+        let Some(output) = self.primary_output() else {
+            return;
+        };
+        let output_name = output.name();
+        let distance = self
+            .config
+            .input
+            .touchpad
+            .workspace_swipe_distance
+            .unwrap_or(200.0)
+            .max(1.0);
+        let delta_spots = (-delta_x / distance) as f32 * self.config.swim.response;
+        let camera = self.swim_cameras.entry(output_name.clone()).or_default();
+        let advances = camera.drag(delta_spots);
+        if advances != 0 {
+            let current = self.layout.active_workspace(&output_name);
+            let (target, applied) = swim_advance_target(current, advances);
+            if applied != advances {
+                if let Some(camera) = self.swim_cameras.get_mut(&output_name) {
+                    camera.cancel_advance(advances - applied);
+                }
+            }
+            if target != current {
+                self.switch_workspace_immediate(&output, target);
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Ends a swim-driven gesture. `cancelled` (backend-cancelled, or a
+    /// session lock racing in mid-drag) snaps the camera to rest
+    /// immediately rather than running a multi-hundred-ms spring while
+    /// locked; otherwise the residual offset springs back to rest over
+    /// `swim.snap_duration_ms` -- a no-op if the drag already ended on
+    /// (near) a spot boundary. The workspace crossing itself already
+    /// happened live in `run_swim_update`; this only settles the visual.
+    fn run_swim_release(&mut self, cancelled: bool) {
+        let Some(output) = self.primary_output() else {
+            return;
+        };
+        if let Some(camera) = self.swim_cameras.get_mut(&output.name()) {
+            if cancelled {
+                camera.snap_to_rest();
+            } else {
+                let duration = Duration::from_millis(u64::from(self.config.swim.snap_duration_ms));
+                camera.release(duration);
+            }
+        }
+        self.request_redraw();
     }
 
     /// Maps a touch (or any other absolute-position) event's normalized
@@ -1377,8 +1467,13 @@ impl Smallvil {
                     && matches!(self.session_lock, SessionLock::Unlocked)
                     && self.exclusive_layer().is_none();
                 if compositor_swipe {
+                    // Decided once, at Begin: a config change mid-drag must
+                    // not switch which model an already-running gesture
+                    // follows out from under it.
+                    let swim = workspace_fallback && self.swim_enabled();
                     self.compositor_gesture = Some(CompositorGesture::Swipe {
                         workspace_fallback,
+                        swim,
                         delta_x: 0.0,
                         delta_y: 0.0,
                     });
@@ -1395,14 +1490,27 @@ impl Smallvil {
                 );
             }
             InputEvent::GestureSwipeUpdate { event, .. } => {
-                if let Some(CompositorGesture::Swipe {
-                    delta_x, delta_y, ..
+                let delta = BackendGestureSwipeUpdateEvent::delta(&event);
+                let swim = if let Some(CompositorGesture::Swipe {
+                    swim,
+                    delta_x,
+                    delta_y,
+                    ..
                 }) = &mut self.compositor_gesture
                 {
-                    let delta = BackendGestureSwipeUpdateEvent::delta(&event);
                     *delta_x += delta.x;
                     *delta_y += delta.y;
-                    return;
+                    Some(*swim)
+                } else {
+                    None
+                };
+                match swim {
+                    Some(true) => {
+                        self.run_swim_update(delta.x);
+                        return;
+                    }
+                    Some(false) => return,
+                    None => {}
                 }
                 let pointer = self.seat.get_pointer().unwrap();
                 pointer.gesture_swipe_update(
@@ -1416,10 +1524,17 @@ impl Smallvil {
             InputEvent::GestureSwipeEnd { event, .. } => {
                 if let Some(CompositorGesture::Swipe {
                     workspace_fallback,
+                    swim,
                     delta_x,
                     delta_y,
                 }) = self.compositor_gesture.take()
                 {
+                    if swim {
+                        let locked = !matches!(self.session_lock, SessionLock::Unlocked);
+                        let cancelled = GestureEndEvent::cancelled(&event) || locked;
+                        self.run_swim_release(cancelled);
+                        return;
+                    }
                     if !GestureEndEvent::cancelled(&event)
                         && matches!(self.session_lock, SessionLock::Unlocked)
                     {
@@ -1779,6 +1894,33 @@ mod tests {
     fn short_or_vertical_workspace_swipe_is_ignored() {
         assert_eq!(workspace_swipe_target(3, 199.0, 0.0, 200.0), None);
         assert_eq!(workspace_swipe_target(3, 220.0, 300.0, 200.0), None);
+    }
+
+    #[test]
+    fn swim_advance_target_steps_by_one_each_direction() {
+        assert_eq!(swim_advance_target(3, 1), (4, 1));
+        assert_eq!(swim_advance_target(3, -1), (2, -1));
+        assert_eq!(swim_advance_target(3, 0), (3, 0));
+    }
+
+    #[test]
+    fn swim_advance_target_refuses_to_step_down_into_the_scratchpad() {
+        assert_eq!(swim_advance_target(1, -1), (1, 0));
+        // A multi-step fling against the boundary lands exactly on the
+        // edge, applying only the steps that fit.
+        assert_eq!(swim_advance_target(2, -5), (1, -1));
+    }
+
+    #[test]
+    fn swim_advance_target_refuses_to_overflow_stepping_up() {
+        assert_eq!(swim_advance_target(u32::MAX, 1), (u32::MAX, 0));
+        assert_eq!(swim_advance_target(u32::MAX - 1, 3), (u32::MAX, 1));
+    }
+
+    #[test]
+    fn swim_advance_target_applies_multiple_steps_within_bounds() {
+        assert_eq!(swim_advance_target(3, 3), (6, 3));
+        assert_eq!(swim_advance_target(6, -3), (3, -3));
     }
 
     #[test]

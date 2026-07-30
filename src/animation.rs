@@ -17,6 +17,7 @@ use crate::config::WindowAnimationCurve;
 /// `start` -- which does not have to be "now": a delayed-start animation
 /// (e.g. a fade that only begins once an earlier hold period elapses) just
 /// anchors `start` in the past or future relative to construction time.
+#[derive(Debug)]
 pub struct Animation {
     from: f32,
     to: f32,

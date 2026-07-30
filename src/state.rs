@@ -272,6 +272,11 @@ pub struct Smallvil {
     /// closed-form record per mapped window; a settled entry finishes and
     /// is pruned, so idle windows never keep the frame pump alive.
     pub(crate) window_sway: HashMap<WlSurface, crate::sway::FloatingSway>,
+    /// Continuous lateral swim camera, one entry per output that has ever
+    /// swum. The offset is purely visual (the logical workspace identity is
+    /// still `Layouts::active`'s `u32`); at rest it is zero and the entry
+    /// asks for no frames.
+    pub(crate) swim_cameras: HashMap<String, crate::swim::SwimCamera>,
     /// Last already-imported surface tree for each visible mapped window.
     /// Texture handles are cloned, not framebuffer contents; the entry is
     /// transferred to the bounded close list on unmap.
@@ -893,6 +898,12 @@ pub(crate) enum SessionLock {
 pub(crate) enum CompositorGesture {
     Swipe {
         workspace_fallback: bool,
+        /// Whether this gesture is being driven live by the swim camera
+        /// (decided once at Begin: `workspace_fallback` and swim enabled).
+        /// `Update` drags the camera per-event instead of only accumulating
+        /// `delta_x`/`delta_y`, and `End` releases the camera's spring
+        /// instead of resolving a one-shot discrete switch.
+        swim: bool,
         delta_x: f64,
         delta_y: f64,
     },
@@ -1008,7 +1019,11 @@ impl Smallvil {
     /// composition is exactly the kind of off-by-one this project's
     /// front-to-back element-order convention has already been burned by
     /// once (see session-lock's element-order bug, AGENT.md).
-    fn window_visual_sample(&self, surface: &WlSurface) -> crate::window_animation::VisualSample {
+    fn window_visual_sample(
+        &self,
+        surface: &WlSurface,
+        output_name: &str,
+    ) -> crate::window_animation::VisualSample {
         let mut sample = crate::window_animation::VisualSample::default();
         if let Some(open) = self.window_open_animations.get(surface) {
             let current = open.sample();
@@ -1035,7 +1050,32 @@ impl Smallvil {
         if let Some(sway) = self.window_sway.get(surface) {
             sample.offset.x += sway.sample();
         }
+        // The swim camera translates every window on the output by the same
+        // spot-width fraction. Folded through the shared visual aggregator so
+        // surfaces, popups, borders, shadows, glass, depth overlays, and every
+        // capture path all move together -- the lateral pan must read as the
+        // whole desktop sliding, not as window bodies alone.
+        if let Some(camera) = self.swim_cameras.get(output_name) {
+            if self.swim_enabled() {
+                let offset_spots = camera.current_offset();
+                if offset_spots.abs() > 0.0001 {
+                    let width = self
+                        .output_by_name(output_name)
+                        .and_then(|output| self.space.output_geometry(&output))
+                        .map(|geo| geo.size.w as f64)
+                        .unwrap_or(0.0);
+                    sample.offset.x -= offset_spots as f64 * width;
+                }
+            }
+        }
         sample
+    }
+
+    /// Whether continuous lateral swim is active: the master water toggle
+    /// and the swim toggle both on. Off falls back to the ordinary discrete
+    /// workspace switch, and the camera offset collapses to zero.
+    pub(crate) fn swim_enabled(&self) -> bool {
+        self.config.water_effects && self.config.swim.enabled
     }
 
     fn viscosity_for_surface(&self, surface: &WlSurface) -> f64 {
@@ -1369,7 +1409,7 @@ impl Smallvil {
                     continue;
                 };
                 let visual = surface
-                    .map(|surface| state.window_visual_sample(surface))
+                    .map(|surface| state.window_visual_sample(surface, &output.name()))
                     .unwrap_or_default();
                 let alpha = surface
                     .map(|surface| state.window_render_alpha(surface))
@@ -1709,7 +1749,7 @@ impl Smallvil {
             .filter_map(|window| {
                 let surface = window.toplevel()?.wl_surface().clone();
                 let mut rect = self.space.element_geometry(window)?;
-                let visual = self.window_visual_sample(&surface);
+                let visual = self.window_visual_sample(&surface, &output.name());
                 rect.loc += Point::from((
                     visual.offset.x.round() as i32,
                     visual.offset.y.round() as i32,
@@ -1966,6 +2006,7 @@ impl Smallvil {
             window_move_animations: HashMap::new(),
             window_viscosity: HashMap::new(),
             window_sway: HashMap::new(),
+            swim_cameras: HashMap::new(),
             window_frame_snapshots: HashMap::new(),
             closing_window_animations: Vec::new(),
             window_depths: HashMap::new(),
@@ -3423,6 +3464,7 @@ impl Smallvil {
             .retain(|_, animation| !animation.finished());
         self.window_viscosity.retain(|_, motion| !motion.finished());
         self.window_sway.retain(|_, sway| !sway.finished());
+        self.swim_cameras.retain(|_, camera| !camera.at_rest());
         self.closing_window_animations
             .retain(|closing| !closing.animation.finished());
         self.toast
@@ -3434,6 +3476,7 @@ impl Smallvil {
             || !self.window_move_animations.is_empty()
             || !self.window_viscosity.is_empty()
             || !self.window_sway.is_empty()
+            || !self.swim_cameras.is_empty()
             || !self.closing_window_animations.is_empty()
             || self.animated_borders_possible()
     }
@@ -4044,7 +4087,7 @@ impl Smallvil {
                 // capture until it's visible again.
                 continue;
             };
-            let visual = self.window_visual_sample(&surface);
+            let visual = self.window_visual_sample(&surface, &output.name());
             let visual_offset: Point<i32, Logical> = Point::from((
                 visual.offset.x.round() as i32,
                 visual.offset.y.round() as i32,
@@ -4207,7 +4250,7 @@ impl Smallvil {
             let Some(location) = self.space.element_location(&window) else {
                 continue;
             };
-            let visual = self.window_visual_sample(surface);
+            let visual = self.window_visual_sample(surface, &output.name());
             let visual_offset: Point<i32, Logical> = Point::from((
                 visual.offset.x.round() as i32,
                 visual.offset.y.round() as i32,
@@ -4459,10 +4502,14 @@ impl Smallvil {
 
     /// Drops transient render state for a disconnected output. In
     /// particular, this releases a full-output texture immediately instead
-    /// of retaining VRAM under an orphaned connector name.
+    /// of retaining VRAM under an orphaned connector name, and drops that
+    /// output's swim camera rather than leaving a dead entry keyed by a
+    /// connector name that will never come back (or means something else
+    /// entirely if a differently-wired connector reuses the same name).
     pub(crate) fn remove_workspace_transition_output(&mut self, output_name: &str) {
         self.pending_workspace_transitions.remove(output_name);
         self.workspace_transitions.remove(output_name);
+        self.swim_cameras.remove(output_name);
     }
 
     /// Spawns an impulse ripple (`ripple.rs`, Phase R1) on `trigger`,
@@ -5176,8 +5223,12 @@ impl Smallvil {
 
     /// Immediate variant for protocol-driven activation: focus must land
     /// on the newly visible surface in the same dispatch, so this path
-    /// cannot wait for the render loop's outgoing-frame capture.
-    fn switch_workspace_immediate(&mut self, output: &Output, workspace: u32) {
+    /// cannot wait for the render loop's outgoing-frame capture. Also the
+    /// right entry point for a swim crossing: swim already renders the
+    /// outgoing/incoming content itself via the continuous camera offset,
+    /// so a wave-transition capture on top would be redundant work and
+    /// would fight the camera for what the next frame shows.
+    pub(crate) fn switch_workspace_immediate(&mut self, output: &Output, workspace: u32) {
         if self.exclusive_layer().is_some() {
             return;
         }
@@ -7127,6 +7178,11 @@ impl Smallvil {
                         if let Some(output) = self.output_by_name(&output_name) {
                             self.switch_workspace_immediate(&output, workspace);
                         }
+                    }
+                }
+                if !self.swim_enabled() {
+                    for camera in self.swim_cameras.values_mut() {
+                        camera.snap_to_rest();
                     }
                 }
                 self.window_opacity = self
