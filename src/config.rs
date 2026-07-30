@@ -3465,7 +3465,8 @@ fn apply_connected_vessels_block(cfg: &mut ConnectedVesselsConfig, body: &[waves
     }
 }
 
-fn apply_sway_block(cfg: &mut SwayConfig, body: &[waves::Entry]) {    for entry in body {
+fn apply_sway_block(cfg: &mut SwayConfig, body: &[waves::Entry]) {
+    for entry in body {
         let waves::Entry::Assign(key, value) = entry else {
             tracing::warn!("Unexpected entry in `sway` block, ignoring");
             continue;
