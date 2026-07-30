@@ -27,7 +27,7 @@ Full modern tiling on the fundamentals: BSP and master/stack, workspaces, groups
 
 ## About
 
-TideWM is a solo project. I use AI coding agents (OpenCode, Codex, Claude Code) to test and implement ideas quickly, then verify the result myself on real hardware before trusting it. Claude Sonnet 5.0 (xhigh) has done most of the work; GPT-5.2-Sol (xhigh) is the second most used model, with Kimi 3.0 and GLM 5.2 picking up smaller or parallel tasks. Every protocol/backend claim in the docs is marked with its actual verification status rather than "should work".
+TideWM is a solo project. I use AI coding agents (OpenCode, Codex, Claude Code) to test and implement ideas quickly, then verify the result myself on real hardware before trusting it. Claude Sonnet 5.0 (xhigh) has done most of the work; GPT-5.6-Sol (xhigh) is the second most used model, with Kimi 3.0 and GLM 5.2 picking up smaller or parallel tasks. Every protocol/backend claim in the docs is marked with its actual verification status rather than "should work".
 
 ## Features
 
