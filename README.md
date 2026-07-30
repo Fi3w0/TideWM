@@ -31,7 +31,7 @@ TideWM is a solo project. I use AI coding agents (OpenCode, Codex, Claude Code) 
 
 ## Features
 
-- Dynamic BSP tiling (dwindle-style), master/stack, and cascade (fills the output in aspect-ratio-adapting rows), switchable per workspace
+- Dynamic BSP tiling (dwindle-style), master/stack, and cascade (fills the output in aspect-ratio-adapting rows, with drag-to-resize rows/cells), switchable per workspace
 - Workspaces per output, scratchpads (the classic one plus any number of named ones), per-window pinning
 - Window groups: tab several windows into one tile, first-party tab-strip UI
 - Floating, fullscreen, maximize, pseudo-tiling
@@ -70,11 +70,10 @@ Full config reference, every action string, and the protocol matrix: [DOCUMENTAT
 
 ## Roadmap
 
-Foundation before visuals has been the plan from the start, and as of 0.60.0 the foundation part is done: the WM itself — tiling, multi-monitor, workspaces, layer-shell, IPC, XWayland, screencasting — is feature-complete, runs as a daily compositor on AMD hardware, and has passed a full nested test on real Nvidia hardware too. The render/visual-identity roadmap built on top of that is now fully implemented: the animation and backdrop-capture foundation, the water identity slice (ripples, wave transitions, water-glass, depth/buoyancy), full decoration parity (frost, shadows, rounded borders, window animations, viscosity, connected-vessel resize, opt-in sway), and an IPC event-stream for reactive bars/widgets. What's next, in order:
+Foundation before visuals has been the plan from the start, and as of 0.60.0 the foundation part is done: the WM itself — tiling, multi-monitor, workspaces, layer-shell, IPC, XWayland, screencasting — is feature-complete, runs as a daily compositor on AMD hardware, and has passed a full nested test on real Nvidia hardware too. The render/visual-identity roadmap built on top of that is now fully implemented: the animation and backdrop-capture foundation, the water identity slice (ripples, wave transitions, water-glass, depth/buoyancy), full decoration parity (frost, shadows, rounded borders, window animations, viscosity, connected-vessel resize, opt-in sway), cascade layout with drag-to-resize rows/cells, and an IPC event-stream for reactive bars/widgets. What's next, in order:
 
 - **Standalone udev/DRM pass on the render effects.** Everything above is live-verified nested on real AMD hardware; the standalone backend compiles against the same render path but hasn't had its own hardware pass.
-- **Feel-tuning.** Viscosity, sway, depth timings, and the transition/ripple presets ship with working defaults; the actual feel still gets refined against real use.
-- **Cascade layout's manual resize.** The row-fill algorithm (`default_layout = cascade`) landed; per-cell drag resize is next.
+- **Feel-tuning.** Viscosity, sway, depth timings, cascade's drag feel, and the transition/ripple presets ship with working defaults; the actual feel still gets refined against real use.
 - **The infinite ocean.** A design pass toward replacing discrete workspaces with a continuous swim-and-dive spatial model built on the depth system above. Planning stage, nothing coded yet.
 - **Nvidia native run.** The nested (EGL/GLES) stack is verified on a real RTX 3060; the standalone DRM backend and its overlay-plane workaround still need a TTY session on Nvidia.
 - **AUR package.** Not yet, build from source for now.
