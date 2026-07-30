@@ -4758,6 +4758,14 @@ impl Smallvil {
             let workspace = self.layout.active_workspace(&output.name());
 
             let gaps = self.gaps_for(&output.name(), workspace);
+            let window_count = self.layout.window_count(&output.name(), workspace);
+            let target_aspect = area.size.w as f32 / (area.size.h as f32).max(1.0);
+            self.layout.refresh_cascade_state(
+                &output.name(),
+                workspace,
+                window_count,
+                target_aspect,
+            );
             for (window, mut rect) in self.layout.layout(&output.name(), workspace, area, gaps) {
                 if let Some(surface) = window.toplevel().map(|t| t.wl_surface().clone()) {
                     if let (Some(entry), Some(full)) =

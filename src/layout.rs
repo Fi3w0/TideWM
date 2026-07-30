@@ -280,6 +280,14 @@ pub struct Layouts {
     /// key not present. Pruned the same way and for the same reason as
     /// `algorithms`.
     master_ratio: HashMap<(String, u32), f32>,
+    /// Per-(output, workspace) manual resize state for cascade layout
+    /// (cascade mode only; meaningless, and ignored, under BSP/master).
+    /// Populated as a side effect of `layout()`'s cascade branch every time
+    /// it resolves a row/cell partition, so a hit-test or resize can always
+    /// read the partition the *next* frame will actually render rather than
+    /// recomputing it separately and risking drift between the two. Pruned
+    /// the same way and for the same reason as `algorithms`/`master_ratio`.
+    cascade_state: HashMap<(String, u32), CascadeState>,
     /// Which side the master pane sits on under `LayoutAlgorithm::Master`,
     /// global (not per-workspace, unlike `master_ratio` -- a taste setting,
     /// not something interactively adjusted per split). Set from
@@ -445,6 +453,7 @@ impl Layouts {
         let live_keys: HashSet<(String, u32)> = self.trees.keys().cloned().collect();
         prune_orphaned(&mut self.algorithms, &live_keys);
         prune_orphaned(&mut self.master_ratio, &live_keys);
+        prune_orphaned(&mut self.cascade_state, &live_keys);
         if changed {
             self.bump_topology_revision();
         }
@@ -571,7 +580,230 @@ impl Layouts {
                 self.master_ratio(output, workspace),
                 self.master_orientation,
             ),
-            LayoutAlgorithm::Cascade => layout_cascade(tree.windows(), area, gap),
+            LayoutAlgorithm::Cascade => {
+                let windows = tree.windows();
+                let target_aspect = area.size.w as f32 / (area.size.h as f32).max(1.0);
+                let key = (output.to_string(), workspace);
+                let state = resolve_cascade_state(
+                    self.cascade_state.get(&key),
+                    windows.len(),
+                    target_aspect,
+                );
+                layout_cascade(windows, area, gap, &state)
+            }
+        }
+    }
+
+    /// Window count currently tiled in `output`'s `workspace`, regardless
+    /// of algorithm. Used by `retile_with_viscosity` to refresh cascade's
+    /// manual-resize state (`refresh_cascade_state`) before rendering it.
+    pub fn window_count(&self, output: &str, workspace: u32) -> usize {
+        self.trees
+            .get(&(output.to_string(), workspace))
+            .map(|t| t.windows().len())
+            .unwrap_or(0)
+    }
+
+    /// Refreshes and stores the resolved cascade manual-resize state for
+    /// `output`'s `workspace` against `window_count`/`target_aspect`, so
+    /// `cascade_hit_test`/`cascade_resize_splits` (and the next `layout()`
+    /// call) read the same partition. `layout()` itself stays read-only and
+    /// resolves a state fresh each call without storing it, since it's
+    /// called from several read-only query sites (ripple/click-target
+    /// lookups) that shouldn't advance this bookkeeping -- only
+    /// `retile_with_viscosity`, the one authoritative render-driving
+    /// caller, actually needs to. No-op under any other algorithm.
+    pub fn refresh_cascade_state(
+        &mut self,
+        output: &str,
+        workspace: u32,
+        window_count: usize,
+        target_aspect: f32,
+    ) {
+        if self.algorithm(output, workspace) != LayoutAlgorithm::Cascade {
+            return;
+        }
+        let key = (output.to_string(), workspace);
+        let state =
+            resolve_cascade_state(self.cascade_state.get(&key), window_count, target_aspect);
+        self.cascade_state.insert(key, state);
+    }
+
+    /// Finds the cascade grid boundary nearest `point`, mirroring
+    /// `hit_test_split`'s shape but walking the last-resolved row/cell
+    /// partition (`cascade_state`, populated by `layout()`) instead of a
+    /// tree, since cascade has none. `None` under any other algorithm, or
+    /// if `layout()` hasn't resolved a partition for this workspace yet.
+    pub fn cascade_hit_test(
+        &self,
+        output: &str,
+        workspace: u32,
+        area: Rectangle<i32, Logical>,
+        gap: i32,
+        point: Point<f64, Logical>,
+    ) -> Option<CascadeHit> {
+        if self.algorithm(output, workspace) != LayoutAlgorithm::Cascade {
+            return None;
+        }
+        let state = self.cascade_state.get(&(output.to_string(), workspace))?;
+        let rects = cascade_rects_from_state(state, area);
+        let threshold = (gap as f64).max(4.0);
+
+        let mut index = 0;
+        for (i, &cols) in state.row_counts.iter().enumerate() {
+            let row_rect = rects[index];
+            if i + 1 < state.row_counts.len() {
+                let boundary = (row_rect.loc.y + row_rect.size.h) as f64;
+                if (point.y - boundary).abs() <= threshold
+                    && point.x >= area.loc.x as f64
+                    && point.x <= (area.loc.x + area.size.w) as f64
+                {
+                    return Some(CascadeHit {
+                        output: output.to_string(),
+                        workspace,
+                        axis: Axis::Vertical,
+                        row: i,
+                        col: None,
+                        area,
+                        start_ratio: state.row_ratios[i],
+                        topology_revision: self.topology_revision,
+                    });
+                }
+            }
+            for j in 0..cols {
+                if j + 1 < cols {
+                    let cell_rect = rects[index + j];
+                    let boundary = (cell_rect.loc.x + cell_rect.size.w) as f64;
+                    if (point.x - boundary).abs() <= threshold
+                        && point.y >= row_rect.loc.y as f64
+                        && point.y <= (row_rect.loc.y + row_rect.size.h) as f64
+                    {
+                        return Some(CascadeHit {
+                            output: output.to_string(),
+                            workspace,
+                            axis: Axis::Horizontal,
+                            row: i,
+                            col: Some(j),
+                            area,
+                            start_ratio: state.cell_ratios[i][j],
+                            topology_revision: self.topology_revision,
+                        });
+                    }
+                }
+            }
+            index += cols;
+        }
+        None
+    }
+
+    /// The cascade boundaries adjacent to `surface`'s own cell: its right
+    /// edge (if it isn't the last column in its row) and its bottom edge
+    /// (if its row isn't the last one), each independently draggable --
+    /// cascade's counterpart to `resize_splits`, minus BSP's
+    /// connected-vessel propagation, since a cascade boundary only ever
+    /// touches its two immediate neighbors.
+    pub fn cascade_resize_splits(
+        &self,
+        output: &str,
+        workspace: u32,
+        area: Rectangle<i32, Logical>,
+        surface: &WlSurface,
+    ) -> Vec<CascadeHit> {
+        if self.algorithm(output, workspace) != LayoutAlgorithm::Cascade {
+            return Vec::new();
+        }
+        let key = (output.to_string(), workspace);
+        let Some(state) = self.cascade_state.get(&key) else {
+            return Vec::new();
+        };
+        let Some(tree) = self.trees.get(&key) else {
+            return Vec::new();
+        };
+        let windows = tree.windows();
+        let Some(mut index) = windows.iter().position(|w| is_window(w, surface)) else {
+            return Vec::new();
+        };
+
+        let mut row = 0;
+        for (r, &cols) in state.row_counts.iter().enumerate() {
+            if index < cols {
+                row = r;
+                break;
+            }
+            index -= cols;
+        }
+        let col = index;
+
+        let mut hits = Vec::new();
+        if col + 1 < state.row_counts[row] {
+            hits.push(CascadeHit {
+                output: output.to_string(),
+                workspace,
+                axis: Axis::Horizontal,
+                row,
+                col: Some(col),
+                area,
+                start_ratio: state.cell_ratios[row][col],
+                topology_revision: self.topology_revision,
+            });
+        }
+        if row + 1 < state.row_counts.len() {
+            hits.push(CascadeHit {
+                output: output.to_string(),
+                workspace,
+                axis: Axis::Vertical,
+                row,
+                col: None,
+                area,
+                start_ratio: state.row_ratios[row],
+                topology_revision: self.topology_revision,
+            });
+        }
+        hits
+    }
+
+    /// Whether a cascade boundary captured by an active pointer grab still
+    /// names a live one -- the cascade counterpart to `split_is_current`.
+    /// Ratio updates deliberately do not change the revision, so the grab
+    /// can keep driving its own boundary.
+    pub fn cascade_hit_is_current(&self, hit: &CascadeHit) -> bool {
+        self.active_workspace(&hit.output) == hit.workspace
+            && self.topology_revision == hit.topology_revision
+            && self
+                .cascade_state
+                .get(&(hit.output.clone(), hit.workspace))
+                .is_some_and(|state| match hit.col {
+                    Some(col) => state.row_counts.get(hit.row).is_some_and(|&c| col + 1 < c),
+                    None => hit.row + 1 < state.row_counts.len(),
+                })
+    }
+
+    /// Applies `new_ratio` to `hit`'s boundary, redistributing its paired
+    /// neighbor (`apply_paired_ratio`) to keep their combined share
+    /// constant. No-op if `hit` no longer names a live boundary.
+    pub fn set_cascade_ratio(&mut self, hit: &CascadeHit, new_ratio: f32) {
+        let Some(state) = self
+            .cascade_state
+            .get_mut(&(hit.output.clone(), hit.workspace))
+        else {
+            return;
+        };
+        match hit.col {
+            Some(col) => {
+                let Some(cells) = state.cell_ratios.get_mut(hit.row) else {
+                    return;
+                };
+                if col + 1 >= cells.len() {
+                    return;
+                }
+                apply_paired_ratio(cells, col, new_ratio);
+            }
+            None => {
+                if hit.row + 1 >= state.row_ratios.len() {
+                    return;
+                }
+                apply_paired_ratio(&mut state.row_ratios, hit.row, new_ratio);
+            }
         }
     }
 
@@ -1302,20 +1534,68 @@ fn layout_master_rects(
     out
 }
 
+/// Manual per-row/per-cell resize state for one workspace under cascade
+/// layout (`Layouts::cascade_state`). `row_ratios` (one per row) and each
+/// row's `cell_ratios` are absolute fractions of the tiling area's full
+/// height/width, each summing to `1.0` -- not fractions of a combined pair,
+/// which is why a boundary drag (`apply_paired_ratio`) redistributes only
+/// the two neighbors it touches and leaves every other entry alone.
+/// `row_counts` records the item count each row had when these ratios were
+/// last resolved, so `resolve_cascade_state` can tell which rows survived a
+/// reflow unchanged (row-scoped persistence, agreed with the maintainer
+/// before this was built -- see AGENT.md's render roadmap).
+#[derive(Debug, Clone, Default)]
+struct CascadeState {
+    row_counts: Vec<usize>,
+    row_ratios: Vec<f32>,
+    cell_ratios: Vec<Vec<f32>>,
+}
+
+/// A cascade grid boundary: either a row divider (`col: None`, between
+/// `row` and `row + 1`, dragged vertically) or a cell divider within `row`
+/// (`col: Some(j)`, between `j` and `j + 1`, dragged horizontally). Plays
+/// the same role `SplitHit` does for BSP, but addresses a grid position
+/// instead of a tree path since cascade has no tree, and -- unlike
+/// `SplitHit`, which is fanned out into several weighted
+/// `SplitResizeHandle`s for connected-vessel propagation -- carries its own
+/// `start_ratio` directly: a cascade drag only ever touches the two
+/// neighbors either side of the dragged boundary, so there is no second
+/// type to fan out into.
+#[derive(Debug, Clone)]
+pub struct CascadeHit {
+    pub output: String,
+    pub workspace: u32,
+    pub axis: Axis,
+    row: usize,
+    col: Option<usize>,
+    /// Pre-gap tiling area at hit-test time, fixed for the whole drag so
+    /// ratio math stays stable -- same reasoning as `SplitHit::area`.
+    area: Rectangle<i32, Logical>,
+    start_ratio: f32,
+    topology_revision: u64,
+}
+
+impl CascadeHit {
+    pub(crate) fn ratio_for_delta(&self, delta_pixels: f64) -> Option<f32> {
+        let span = match self.axis {
+            Axis::Horizontal => self.area.size.w,
+            Axis::Vertical => self.area.size.h,
+        };
+        (span > 0).then(|| self.start_ratio + (delta_pixels as f32) / span as f32)
+    }
+}
+
 /// Cascade geometry: TideWM's own "fills the basin" tiling mode. Windows
 /// wrap into rows left to right, top to bottom -- `BspLayout::windows`'s own
 /// traversal order, same convention `layout_master` reads -- instead of
-/// BSP's recursive bisection or master's fixed master+stack split. No
-/// manual resize yet: `hit_test_split`/`resize_splits` above already treat
-/// this the same as master mode, and cascade's own row/column drag-resize
-/// is later scope (row-scoped ratio persistence across a reflow, agreed
-/// with the maintainer but not yet built).
+/// BSP's recursive bisection or master's fixed master+stack split.
 fn layout_cascade(
     windows: Vec<Window>,
     area: Rectangle<i32, Logical>,
     gap: i32,
+    state: &CascadeState,
 ) -> Vec<(Window, Rectangle<i32, Logical>)> {
-    let rects = layout_cascade_rects(windows.len(), area);
+    let rects = cascade_rects_from_state(state, area);
     let mut out: Vec<(Window, Rectangle<i32, Logical>)> = windows.into_iter().zip(rects).collect();
     for (_, rect) in &mut out {
         *rect = inset(*rect, gap);
@@ -1323,15 +1603,134 @@ fn layout_cascade(
     out
 }
 
-/// The pure geometry behind `layout_cascade`, split out so it's testable
-/// without real `Window`/Wayland fixtures (same reasoning as
-/// `layout_master_rects`). Picks the row count whose resulting grid shape
-/// lands closest to the output's own aspect ratio (`best_cascade_row_count`),
-/// distributes `count` windows across that many rows as evenly as possible
-/// (the first `count % rows` rows getting one extra window), then computes
-/// each row's height and each cell's width from whatever space remains --
-/// `layout_master_rects`'s own rounding-gap-free pattern, applied on both
-/// axes here instead of one.
+/// Resolves the manual-resize state for `count` windows against
+/// `target_aspect`, the pure logic behind `Layouts::layout`'s cascade
+/// branch (split out so it's testable without real `Window`/Wayland
+/// fixtures, same reasoning as `layout_master_rects`). Picks the row count
+/// whose resulting grid shape lands closest to `target_aspect`
+/// (`best_cascade_row_count`), distributes `count` windows across that many
+/// rows as evenly as possible (`cascade_row_item_counts`), then keeps
+/// `existing`'s ratios for any row whose item count didn't change,
+/// resetting only the rows that did to an equal share. Ratios are
+/// renormalized afterward since a mix of kept and reset entries won't
+/// generally already sum to `1.0`.
+fn resolve_cascade_state(
+    existing: Option<&CascadeState>,
+    count: usize,
+    target_aspect: f32,
+) -> CascadeState {
+    if count == 0 {
+        return CascadeState::default();
+    }
+
+    let rows = best_cascade_row_count(count, target_aspect);
+    let row_counts = cascade_row_item_counts(count, rows);
+
+    let mut row_ratios = vec![1.0 / rows as f32; rows];
+    let mut cell_ratios: Vec<Vec<f32>> = row_counts
+        .iter()
+        .map(|&c| vec![1.0 / c as f32; c])
+        .collect();
+
+    if let Some(existing) = existing {
+        for i in 0..rows {
+            if existing.row_counts.get(i) != Some(&row_counts[i]) {
+                continue;
+            }
+            if let Some(&ratio) = existing.row_ratios.get(i) {
+                row_ratios[i] = ratio;
+            }
+            if let Some(cells) = existing.cell_ratios.get(i) {
+                if cells.len() == row_counts[i] {
+                    cell_ratios[i] = cells.clone();
+                }
+            }
+        }
+    }
+
+    normalize_ratios(&mut row_ratios);
+    for cells in &mut cell_ratios {
+        normalize_ratios(cells);
+    }
+
+    CascadeState {
+        row_counts,
+        row_ratios,
+        cell_ratios,
+    }
+}
+
+fn normalize_ratios(ratios: &mut [f32]) {
+    let sum: f32 = ratios.iter().sum();
+    if sum > f32::EPSILON {
+        for r in ratios.iter_mut() {
+            *r /= sum;
+        }
+    }
+}
+
+/// Rects (row-major, matching `BspLayout::windows`'s traversal order) for
+/// `state`'s ratios against `area`. Rounds every row/cell but the last on
+/// its axis and gives the last whatever space remains, generalizing
+/// `layout_master_rects`'s rounding-gap-free remaining-space division from
+/// equal shares to `state`'s (possibly manually resized) ratios.
+fn cascade_rects_from_state(
+    state: &CascadeState,
+    area: Rectangle<i32, Logical>,
+) -> Vec<Rectangle<i32, Logical>> {
+    let rows = state.row_counts.len();
+    if rows == 0 {
+        return Vec::new();
+    }
+    if rows == 1 && state.row_counts[0] == 1 {
+        return vec![area];
+    }
+
+    let mut out = Vec::new();
+    let mut y = area.loc.y;
+    let mut remaining_h = area.size.h;
+    for i in 0..rows {
+        let row_h = if i + 1 == rows {
+            remaining_h
+        } else {
+            ((state.row_ratios[i] * area.size.h as f32).round() as i32).clamp(1, remaining_h)
+        };
+        let cols = state.row_counts[i];
+        let mut x = area.loc.x;
+        let mut remaining_w = area.size.w;
+        for j in 0..cols {
+            let cell_w = if j + 1 == cols {
+                remaining_w
+            } else {
+                ((state.cell_ratios[i][j] * area.size.w as f32).round() as i32)
+                    .clamp(1, remaining_w)
+            };
+            out.push(Rectangle::new((x, y).into(), (cell_w, row_h).into()));
+            x += cell_w;
+            remaining_w -= cell_w;
+        }
+        y += row_h;
+        remaining_h -= row_h;
+    }
+    out
+}
+
+/// The two-way version of `set_ratio`'s single BSP split: redistributes
+/// `ratios[i]`/`ratios[i + 1]`'s combined share so `ratios[i]` becomes
+/// `new_ratio`, clamped to keep at least 5% of their *combined* share (not
+/// the whole axis) on each side, since other rows/cells may hold the rest.
+fn apply_paired_ratio(ratios: &mut [f32], i: usize, new_ratio: f32) {
+    let combined = ratios[i] + ratios[i + 1];
+    if combined <= f32::EPSILON {
+        return;
+    }
+    let min = combined * 0.05;
+    let clamped = new_ratio.clamp(min, combined - min);
+    ratios[i + 1] = combined - clamped;
+    ratios[i] = clamped;
+}
+
+#[cfg(test)]
 fn layout_cascade_rects(
     count: usize,
     area: Rectangle<i32, Logical>,
@@ -1339,35 +1738,9 @@ fn layout_cascade_rects(
     if count == 0 {
         return Vec::new();
     }
-    if count == 1 {
-        return vec![area];
-    }
-
     let target_aspect = area.size.w as f32 / (area.size.h as f32).max(1.0);
-    let rows = best_cascade_row_count(count, target_aspect);
-    let row_counts = cascade_row_item_counts(count, rows);
-
-    let mut out = Vec::with_capacity(count);
-    let mut y = area.loc.y;
-    let mut remaining_h = area.size.h;
-    let mut remaining_rows = rows as i32;
-    for row_count in row_counts {
-        let row_h = remaining_h / remaining_rows;
-        let mut x = area.loc.x;
-        let mut remaining_w = area.size.w;
-        let mut remaining_cols = row_count as i32;
-        for _ in 0..row_count {
-            let cell_w = remaining_w / remaining_cols;
-            out.push(Rectangle::new((x, y).into(), (cell_w, row_h).into()));
-            x += cell_w;
-            remaining_w -= cell_w;
-            remaining_cols -= 1;
-        }
-        y += row_h;
-        remaining_h -= row_h;
-        remaining_rows -= 1;
-    }
-    out
+    let state = resolve_cascade_state(None, count, target_aspect);
+    cascade_rects_from_state(&state, area)
 }
 
 /// Distributes `count` windows across `rows` rows as evenly as possible;
@@ -1610,6 +1983,71 @@ mod tests {
         assert_eq!(cascade_row_item_counts(5, 2), vec![3, 2]);
         assert_eq!(cascade_row_item_counts(6, 2), vec![3, 3]);
         assert_eq!(cascade_row_item_counts(7, 3), vec![3, 2, 2]);
+    }
+
+    #[test]
+    fn resolve_cascade_state_keeps_unchanged_rows_and_resets_changed_ones() {
+        let a = area(1920, 1080);
+        let target = a.size.w as f32 / a.size.h as f32;
+        let mut existing = resolve_cascade_state(None, 5, target);
+        assert_eq!(existing.row_counts, vec![3, 2]);
+
+        // Manual resize: row 0 keeps 70% of the height, its three cells
+        // split 50/30/20 instead of evenly.
+        existing.row_ratios = vec![0.7, 0.3];
+        existing.cell_ratios[0] = vec![0.5, 0.3, 0.2];
+
+        // A sixth window changes the partition to two rows of three: row
+        // 0's count (3) is unchanged, row 1's (2 -> 3) is not.
+        let resolved = resolve_cascade_state(Some(&existing), 6, target);
+        assert_eq!(resolved.row_counts, vec![3, 3]);
+
+        // Row 0's *relative* share against row 1 still reflects the manual
+        // 0.7:0.3-then-reset ratio -- normalization changes both values'
+        // absolute size, but not their proportion to each other.
+        let expected_ratio = 0.7 / 0.5;
+        let actual_ratio = resolved.row_ratios[0] / resolved.row_ratios[1];
+        assert!((actual_ratio - expected_ratio).abs() < 1e-4);
+
+        // Row 0's cells were fully kept (already summed to 1.0, so
+        // normalizing is a no-op); row 1 reset to equal thirds.
+        assert_eq!(resolved.cell_ratios[0], vec![0.5, 0.3, 0.2]);
+        assert_eq!(resolved.cell_ratios[1], vec![1.0 / 3.0; 3]);
+    }
+
+    #[test]
+    fn apply_paired_ratio_clamps_within_the_pairs_combined_share() {
+        let mut ratios = vec![0.2, 0.5, 0.3];
+        // Pair (1, 2) has combined share 0.8. Push ratios[1] far past it.
+        apply_paired_ratio(&mut ratios, 1, 10.0);
+        assert_eq!(ratios[0], 0.2); // untouched, not part of this pair
+        let combined = 0.5 + 0.3;
+        assert!((ratios[1] - (combined - combined * 0.05)).abs() < 1e-5);
+        // The pair's combined share is preserved, just redistributed.
+        assert!((ratios[1] + ratios[2] - combined).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cascade_rects_from_state_honors_manual_ratios_and_still_tiles_exactly() {
+        let a = area(1000, 1000);
+        let mut state = resolve_cascade_state(None, 4, a.size.w as f32 / a.size.h as f32);
+        // Force a known 2x2 partition regardless of what the scorer picked,
+        // then apply an asymmetric manual split.
+        state.row_counts = vec![2, 2];
+        state.row_ratios = vec![0.75, 0.25];
+        state.cell_ratios = vec![vec![0.5, 0.5], vec![0.5, 0.5]];
+
+        let rects = cascade_rects_from_state(&state, a);
+        assert_eq!(rects.len(), 4);
+        assert_eq!(rects[0].size.h, 750); // top row gets 75% of height
+        assert_eq!(rects[2].loc.y, 750); // bottom row starts right after
+        assert_eq!(rects[2].size.h, 250); // remainder, no rounding gap
+
+        let total: i64 = rects
+            .iter()
+            .map(|r| (r.size.w as i64) * (r.size.h as i64))
+            .sum();
+        assert_eq!(total, 1000 * 1000);
     }
 
     #[test]

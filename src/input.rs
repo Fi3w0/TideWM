@@ -41,8 +41,8 @@ use std::time::Duration;
 use crate::{
     config::{Action, Direction, Keybind, TouchpadConfig},
     grabs::{
-        resize_grab::ResizeEdge, MoveSurfaceGrab, ResizeSurfaceGrab, TileMoveGrab, TileResizeGrab,
-        TileWindowResizeGrab,
+        resize_grab::ResizeEdge, CascadeResizeGrab, MoveSurfaceGrab, ResizeSurfaceGrab,
+        TileMoveGrab, TileResizeGrab, TileWindowResizeGrab,
     },
     state::{CompositorGesture, SessionLock, Smallvil},
     toast::{Toast, ToastKind},
@@ -1004,6 +1004,29 @@ impl Smallvil {
                                         pointer.set_grab(self, grab, serial, Focus::Clear);
                                         return;
                                     }
+
+                                    // BSP found no adjacent split (not a
+                                    // BSP-tiled window) -- try cascade's own
+                                    // grid boundaries next.
+                                    let cascade_hits = self.layout.cascade_resize_splits(
+                                        &output.name(),
+                                        workspace,
+                                        area,
+                                        &wl_surface,
+                                    );
+                                    if !cascade_hits.is_empty() {
+                                        self.focus_window(Some(wl_surface.clone()), serial);
+
+                                        let start_data = PointerGrabStartData {
+                                            focus: Some((wl_surface, loc.to_f64())),
+                                            button,
+                                            location: pointer.current_location(),
+                                        };
+                                        let grab =
+                                            CascadeResizeGrab::start(start_data, cascade_hits);
+                                        pointer.set_grab(self, grab, serial, Focus::Clear);
+                                        return;
+                                    }
                                 }
                             }
                         }
@@ -1055,31 +1078,54 @@ impl Smallvil {
                     // won't be within hit_test_split's threshold of any
                     // split boundary.
                     if under.is_none() && button == BTN_LEFT {
-                        let hit =
-                            self.output_for_point(pointer.current_location())
-                                .and_then(|output| {
-                                    let output_geo = self.space.output_geometry(&output)?;
-                                    let mut area =
-                                        layer_map_for_output(&output).non_exclusive_zone();
-                                    area.loc += output_geo.loc;
-                                    let workspace = self.layout.active_workspace(&output.name());
-                                    self.layout.hit_test_split(
-                                        &output.name(),
-                                        workspace,
-                                        area,
-                                        self.gaps_for(&output.name(), workspace),
-                                        pointer.current_location(),
-                                    )
-                                });
-                        if let Some(hit) = hit {
-                            let handles = self.connected_resize_handles(&hit);
-                            if !handles.is_empty() {
+                        let output_area = self
+                            .output_for_point(pointer.current_location())
+                            .and_then(|output| {
+                                let output_geo = self.space.output_geometry(&output)?;
+                                let mut area = layer_map_for_output(&output).non_exclusive_zone();
+                                area.loc += output_geo.loc;
+                                Some((output, area))
+                            });
+                        if let Some((output, area)) = output_area {
+                            let workspace = self.layout.active_workspace(&output.name());
+                            let gap = self.gaps_for(&output.name(), workspace);
+                            let hit = self.layout.hit_test_split(
+                                &output.name(),
+                                workspace,
+                                area,
+                                gap,
+                                pointer.current_location(),
+                            );
+                            if let Some(hit) = hit {
+                                let handles = self.connected_resize_handles(&hit);
+                                if !handles.is_empty() {
+                                    let start_data = PointerGrabStartData {
+                                        focus: None,
+                                        button,
+                                        location: pointer.current_location(),
+                                    };
+                                    let grab = TileResizeGrab::start(start_data, handles);
+                                    pointer.set_grab(self, grab, serial, Focus::Clear);
+                                    return;
+                                }
+                            }
+
+                            // BSP found no split boundary here -- try
+                            // cascade's own grid boundaries next.
+                            let cascade_hit = self.layout.cascade_hit_test(
+                                &output.name(),
+                                workspace,
+                                area,
+                                gap,
+                                pointer.current_location(),
+                            );
+                            if let Some(hit) = cascade_hit {
                                 let start_data = PointerGrabStartData {
                                     focus: None,
                                     button,
                                     location: pointer.current_location(),
                                 };
-                                let grab = TileResizeGrab::start(start_data, handles);
+                                let grab = CascadeResizeGrab::start(start_data, vec![hit]);
                                 pointer.set_grab(self, grab, serial, Focus::Clear);
                                 return;
                             }

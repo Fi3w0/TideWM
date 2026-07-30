@@ -12,3 +12,6 @@ pub use tile_move_grab::TileMoveGrab;
 
 pub mod tile_window_resize_grab;
 pub use tile_window_resize_grab::TileWindowResizeGrab;
+
+pub mod cascade_resize_grab;
+pub use cascade_resize_grab::CascadeResizeGrab;
