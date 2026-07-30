@@ -21,7 +21,7 @@ A water-styled Wayland compositor, built in Rust on Smithay.
 </div>
 
 > [!NOTE]
-> TideWM already works as a real Wayland compositor: tiling, multi-monitor, workspaces, IPC, and most of the protocol surface a daily driver needs are all in. The first water/aqua identity slice is built, and Phase R2 now has selectable frosted glass, compositor shadows, rounded clipping, gradient borders, window animations, and viscosity-driven liquid drag/resize. Screen sharing (PipeWire/xdg-desktop-portal) works end to end on a real standalone session now, verified through both OBS and Discord. This is exactly the stage where testing on hardware I don't own is most useful, jump into [Discord](https://discord.gg/ZhkxA83cKk) if something breaks.
+> TideWM already works as a real Wayland compositor: tiling, multi-monitor, workspaces, IPC, and most of the protocol surface a daily driver needs are all in. The full water/aqua identity is built now too: impulse ripples, wave workspace transitions, water-glass and per-app frosted glass, analytical shadows, rounded borders, configurable window animations, liquid move/resize viscosity, connected-vessel BSP resizing, opt-in floating sway, and automatic window depth/buoyancy. An IPC event-stream lets bars and widgets subscribe to live state instead of polling. Screen sharing (PipeWire/xdg-desktop-portal) works end to end on a real standalone session, verified through both OBS and Discord. All of the render work above is live-verified nested on real AMD hardware; the standalone udev/DRM pass on it is next. This is exactly the stage where testing on hardware I don't own is most useful, jump into [Discord](https://discord.gg/ZhkxA83cKk) if something breaks.
 
 Full modern tiling on the fundamentals: BSP and master/stack, workspaces, groups, multi-monitor, layer-shell, IPC, with the water identity now taking shape on top. Built for low-end hardware first, 1.5GB is the target ceiling in normal use, 3GB is the line where it gets actively optimized.
 
@@ -40,14 +40,14 @@ TideWM is a solo project. I use AI coding agents (OpenCode, Codex, Claude Code) 
 - XWayland, via [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite)
 - Screenshots, clipboard, session lock
 - PipeWire screencasting behind a feature flag, verified end to end through real OBS and Discord on a standalone session
-- Selectable water-glass refraction or per-app adjustable frosted glass, rounded client clipping, animated active/inactive/urgent gradient borders, analytical drop shadows, liquid move/resize viscosity, connected-vessel BSP resizing, configurable impulse ripples, full-screen water-wave workspace transitions, and automatic window depth/buoyancy
+- Selectable water-glass refraction or per-app adjustable frosted glass, rounded client clipping, animated active/inactive/urgent gradient borders, analytical drop shadows, configurable open/close/move window animations, liquid move/resize viscosity, connected-vessel BSP resizing, opt-in floating-window sway, configurable impulse ripples, full-screen water-wave workspace transitions, and automatic window depth/buoyancy with a per-window override rule
 - A low-memory built-in Tide wallpaper; layer-shell wallpaper tools replace it normally
 - Hot-reloadable config in Waves, TideWM's own format, split across files, `env`/`$variables`/`$wave(...)`
 - Per-app window rules, including regex matching, initial fullscreen/maximize, capture privacy, and window swallowing
 - Submaps: temporary keybind layers (sway/Hyprland's "mode")
 - Workspace overview (`Super+O`)
 - Keyboard layout and touchpad (libinput) config
-- JSON IPC socket, plus a `tidectl` CLI over it
+- JSON IPC socket with a subscribe/event-stream mode for bars and widgets, plus a `tidectl` CLI over it
 - Server-side decorations enforced
 - First-boot hint on an empty desktop, gone once you open a window or edit config
 - Persistent, workspace-reserving config-error panel plus the existing reload/debug toasts
@@ -65,14 +65,17 @@ Full config reference, every action string, and the protocol matrix: [DOCUMENTAT
 - **Touchpad config**: built (tap, natural-scroll, accel, click-method, ...), not yet verified on real hardware.
 - **Touchpad gestures**: swipe/pinch can trigger any compositor action, plus a relative-workspace-swipe shortcut. Verified live on two real trackpads (an external USB Apple Magic Trackpad and a ThinkPad's built-in touchpad): all four swipe directions and pinch-in confirmed, pinch-out not yet confirmed.
 - **Screencasting**: built behind `--features screencast` with a real `xdg-desktop-portal` backend. The SHM/MemFd path delivers real frames, verified on a standalone TTY (udev/DRM) session end to end through both real OBS and real Discord. DMA-BUF still fails on real hardware and stays disabled; MemFd/SHM is the supported transport.
+- **Water/decoration effects**: the full identity and decoration set (ripples, wave transitions, water-glass, frost, shadows, borders, window animations, viscosity, connected-vessel resize, sway, depth/buoyancy) is live-verified nested on real AMD hardware. The standalone udev/DRM backend compiles against the same render path but hasn't had its own hardware pass yet.
 - **AUR package**: not yet, build from source below.
 
 ## Roadmap
 
-Foundation before visuals has been the plan from the start, and as of 0.60.0 the foundation part is done: the WM itself — tiling, multi-monitor, workspaces, layer-shell, IPC, XWayland, screencasting — is feature-complete, runs as a daily compositor on AMD hardware, and has now passed a full nested test on real Nvidia hardware too. What's next, in order:
+Foundation before visuals has been the plan from the start, and as of 0.60.0 the foundation part is done: the WM itself — tiling, multi-monitor, workspaces, layer-shell, IPC, XWayland, screencasting — is feature-complete, runs as a daily compositor on AMD hardware, and has passed a full nested test on real Nvidia hardware too. The render/visual-identity roadmap built on top of that is now fully implemented: the animation and backdrop-capture foundation, the water identity slice (ripples, wave transitions, water-glass, depth/buoyancy), full decoration parity (frost, shadows, rounded borders, window animations, viscosity, connected-vessel resize, opt-in sway), and an IPC event-stream for reactive bars/widgets. What's next, in order:
 
-- **Finish R2's mechanical layer.** Selectable frost, analytical shadows, rounded clipping, animated gradient borders, Tide-native window animation presets, smooth position-plus-size layout motion, liquid move/resize viscosity, and connected-vessel BSP resize redistribution are built. The opt-in floating-window sway pass follows.
-- **Polish the R1 identity slice.** Water-glass, impulse ripples, wave-based workspace transitions, and the first automatic depth/buoyancy model are built; nested and real-hardware tuning can still refine them.
+- **Standalone udev/DRM pass on the render effects.** Everything above is live-verified nested on real AMD hardware; the standalone backend compiles against the same render path but hasn't had its own hardware pass.
+- **Feel-tuning.** Viscosity, sway, depth timings, and the transition/ripple presets ship with working defaults; the actual feel still gets refined against real use.
+- **Basin-fill layout.** The one identity feature not started yet: a third tiling mode that fills the output's aspect ratio instead of binary-splitting.
+- **The infinite ocean.** A design pass toward replacing discrete workspaces with a continuous swim-and-dive spatial model built on the depth system above. Planning stage, nothing coded yet.
 - **Nvidia native run.** The nested (EGL/GLES) stack is verified on a real RTX 3060; the standalone DRM backend and its overlay-plane workaround still need a TTY session on Nvidia.
 - **AUR package.** Not yet, build from source for now.
 
