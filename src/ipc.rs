@@ -87,13 +87,19 @@ enum Request {
     Windows,
     FocusedWindow,
     ActiveSubmap,
-    Action { action: String },
-    Batch { actions: Vec<String> },
+    Action {
+        action: String,
+    },
+    Batch {
+        actions: Vec<String>,
+    },
     /// Long-lived subscribe mode -- see the module docs. `events: None`
     /// means "all event kinds"; an explicit list filters server-side so a
     /// bar that only cares about workspace changes doesn't pay for
     /// per-window snapshot serialization at all.
-    Subscribe { events: Option<Vec<EventKind>> },
+    Subscribe {
+        events: Option<Vec<EventKind>>,
+    },
 }
 
 const MAX_BATCH_ACTIONS: usize = 128;
@@ -165,7 +171,9 @@ pub(crate) fn event_matches(filter: &HashSet<EventKind>, event: &IpcEvent) -> bo
 /// letting it do the single shared-borrow snapshot avoids a clumsy
 /// split borrow at every call site.
 pub(crate) enum IpcEvent {
-    WindowOpened { surface: WlSurface },
+    WindowOpened {
+        surface: WlSurface,
+    },
     /// Identity captured at the call site *before* the per-window tracking
     /// maps are drained -- by the time the close event fires, the window
     /// has already been detached from `space` and its foreign-toplevel /
@@ -176,15 +184,25 @@ pub(crate) enum IpcEvent {
         app_id: Option<String>,
         title: Option<String>,
     },
-    WindowChanged { surface: WlSurface },
+    WindowChanged {
+        surface: WlSurface,
+    },
     WorkspaceChanged {
         output: String,
         from: u32,
         to: u32,
     },
-    FocusChanged { surface: Option<WlSurface> },
-    UrgentChanged { surface: WlSurface, urgent: bool },
-    DepthChanged { surface: WlSurface, tier: u8 },
+    FocusChanged {
+        surface: Option<WlSurface>,
+    },
+    UrgentChanged {
+        surface: WlSurface,
+        urgent: bool,
+    },
+    DepthChanged {
+        surface: WlSurface,
+        tier: u8,
+    },
     ConfigReloaded,
 }
 
@@ -223,10 +241,9 @@ impl IpcEvent {
 
     /// Build the complete JSON line for this event (including the trailing
     /// newline) using `state` for any window/workspace snapshotting.
-    pub(crate)     fn to_json_line(&self, state: &Smallvil) -> Vec<u8> {
+    pub(crate) fn to_json_line(&self, state: &Smallvil) -> Vec<u8> {
         let data: serde_json::Value = match self {
-            IpcEvent::WindowOpened { surface }
-            | IpcEvent::WindowChanged { surface } => {
+            IpcEvent::WindowOpened { surface } | IpcEvent::WindowChanged { surface } => {
                 snapshot_window(state, surface).unwrap_or(serde_json::Value::Null)
             }
             IpcEvent::WindowClosed {
@@ -1089,8 +1106,7 @@ mod tests {
     fn subscribe_with_no_events_field_means_all() {
         // The wire format documented in the module docs: omitting `events`
         // is the same as listing all six channels.
-        let parsed: Request =
-            serde_json::from_str(r#"{"request":"subscribe"}"#).unwrap();
+        let parsed: Request = serde_json::from_str(r#"{"request":"subscribe"}"#).unwrap();
         match parsed {
             Request::Subscribe { events: None } => {}
             other => panic!("expected Subscribe with no events, got {other:?}"),
@@ -1099,15 +1115,12 @@ mod tests {
 
     #[test]
     fn subscribe_with_explicit_filter_round_trips() {
-        let parsed: Request = serde_json::from_str(
-            r#"{"request":"subscribe","events":["workspace","focus"]}"#,
-        )
-        .unwrap();
+        let parsed: Request =
+            serde_json::from_str(r#"{"request":"subscribe","events":["workspace","focus"]}"#)
+                .unwrap();
         match parsed {
-            Request::Subscribe {
-                events: Some(list),
-            } => {
-                    assert_eq!(list, vec![EventKind::Workspace, EventKind::Focus]);
+            Request::Subscribe { events: Some(list) } => {
+                assert_eq!(list, vec![EventKind::Workspace, EventKind::Focus]);
             }
             other => panic!("expected Subscribe with events, got {other:?}"),
         }
@@ -1122,7 +1135,9 @@ mod tests {
         // otherwise.
         let cases: Vec<(IpcEvent, EventKind, &'static str)> = vec![
             (
-                IpcEvent::WindowOpened { surface: surface.clone() },
+                IpcEvent::WindowOpened {
+                    surface: surface.clone(),
+                },
                 EventKind::Window,
                 "window-opened",
             ),
@@ -1136,7 +1151,9 @@ mod tests {
                 "window-closed",
             ),
             (
-                IpcEvent::WindowChanged { surface: surface.clone() },
+                IpcEvent::WindowChanged {
+                    surface: surface.clone(),
+                },
                 EventKind::Window,
                 "window-changed",
             ),
@@ -1172,7 +1189,11 @@ mod tests {
                 EventKind::Depth,
                 "depth-changed",
             ),
-            (IpcEvent::ConfigReloaded, EventKind::Config, "config-reloaded"),
+            (
+                IpcEvent::ConfigReloaded,
+                EventKind::Config,
+                "config-reloaded",
+            ),
         ];
         for (event, kind, name) in cases {
             assert_eq!(event.kind(), kind, "mismatch for {name}");
@@ -1194,10 +1215,7 @@ mod tests {
                 to: 1,
             }
         ));
-        assert!(event_matches(
-            &filter,
-            &IpcEvent::ConfigReloaded
-        ));
+        assert!(event_matches(&filter, &IpcEvent::ConfigReloaded));
         assert!(event_matches(
             &filter,
             &IpcEvent::FocusChanged { surface: None }
@@ -1241,10 +1259,7 @@ mod tests {
                 urgent: true,
             }
         ));
-        assert!(!event_matches(
-            &filter,
-            &IpcEvent::ConfigReloaded
-        ));
+        assert!(!event_matches(&filter, &IpcEvent::ConfigReloaded));
     }
 
     #[test]
@@ -1265,7 +1280,10 @@ mod tests {
         };
 
         assert!(sub.try_flush());
-        assert!(sub.pending.is_empty(), "fast-path drain should empty pending");
+        assert!(
+            sub.pending.is_empty(),
+            "fast-path drain should empty pending"
+        );
 
         let mut got = [0u8; 8];
         let n = peer_end.read(&mut got).unwrap();

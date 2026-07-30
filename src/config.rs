@@ -532,9 +532,9 @@ impl Config {
                 .keybinds
                 .keys()
                 .filter(|combo| {
-                    combo
-                        .split('+')
-                        .any(|part| matches!(part.to_lowercase().as_str(), "super" | "logo" | "mod4"))
+                    combo.split('+').any(|part| {
+                        matches!(part.to_lowercase().as_str(), "super" | "logo" | "mod4")
+                    })
                 })
                 .map(String::as_str)
                 .collect();

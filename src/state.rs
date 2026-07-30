@@ -67,7 +67,9 @@ use smithay::{
         input_method::InputMethodManagerState,
         keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitState,
         output::OutputManagerState,
-        pointer_constraints::{with_pointer_constraint, PointerConstraint, PointerConstraintsState},
+        pointer_constraints::{
+            with_pointer_constraint, PointerConstraint, PointerConstraintsState,
+        },
         pointer_gestures::PointerGesturesState,
         presentation::PresentationState,
         relative_pointer::RelativePointerManagerState,
