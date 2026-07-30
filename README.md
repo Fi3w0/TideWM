@@ -32,7 +32,7 @@ TideWM is a solo project. I use AI coding agents (OpenCode, Codex, Claude Code) 
 ## Features
 
 - Dynamic BSP tiling (dwindle-style), master/stack, and cascade (fills the output in aspect-ratio-adapting rows, with drag-to-resize rows/cells), switchable per workspace
-- Workspaces per output, scratchpads (the classic one plus any number of named ones), per-window pinning
+- Workspaces per output, scratchpads (the classic one plus any number of named ones), per-window pinning, opt-in continuous trackpad-swipe navigation between them (`swim { }`)
 - Window groups: tab several windows into one tile, first-party tab-strip UI
 - Floating, fullscreen, maximize, pseudo-tiling
 - Multi-monitor with hotplug, independent tiling tree per output, mixed-DPI
@@ -64,6 +64,7 @@ Full config reference, every action string, and the protocol matrix: [DOCUMENTAT
 - **DPMS / gamma**: protocol-complete and verified on AMD hardware; lid/tablet switches still need broader hardware coverage.
 - **Touchpad config**: built (tap, natural-scroll, accel, click-method, ...), not yet verified on real hardware.
 - **Touchpad gestures**: swipe/pinch can trigger any compositor action, plus a relative-workspace-swipe shortcut. Verified live on two real trackpads (an external USB Apple Magic Trackpad and a ThinkPad's built-in touchpad): all four swipe directions and pinch-in confirmed, pinch-out not yet confirmed.
+- **Continuous swim navigation** (`swim { }`): built and unit-tested, off by default. Same real-touchpad-only limitation as the gestures above means the drag-driven pan itself hasn't been live-verified yet; only the non-gesture paths (config reload, default-off rendering) have.
 - **Screencasting**: built behind `--features screencast` with a real `xdg-desktop-portal` backend. The SHM/MemFd path delivers real frames, verified on a standalone TTY (udev/DRM) session end to end through both real OBS and real Discord. DMA-BUF still fails on real hardware and stays disabled; MemFd/SHM is the supported transport.
 - **Water/decoration effects**: the full identity and decoration set (ripples, wave transitions, water-glass, frost, shadows, borders, window animations, viscosity, connected-vessel resize, sway, depth/buoyancy) is live-verified nested on real AMD hardware. The standalone udev/DRM backend compiles against the same render path but hasn't had its own hardware pass yet.
 - **AUR package**: not yet, build from source below.
@@ -74,7 +75,7 @@ Foundation before visuals has been the plan from the start, and as of 0.60.0 the
 
 - **Standalone udev/DRM pass on the render effects.** Everything above is live-verified nested on real AMD hardware; the standalone backend compiles against the same render path but hasn't had its own hardware pass.
 - **Feel-tuning.** Viscosity, sway, depth timings, cascade's drag feel, and the transition/ripple presets ship with working defaults; the actual feel still gets refined against real use.
-- **The infinite ocean.** A design pass toward replacing discrete workspaces with a continuous swim-and-dive spatial model built on the depth system above. Planning stage, nothing coded yet.
+- **The infinite ocean.** A design pass toward replacing discrete workspaces with a continuous swim-and-dive spatial model built on the depth system above. A first minimal slice landed: a trackpad swipe pans between today's ordinary discrete workspaces with a continuous camera instead of an instant switch (`swim { }`, off by default, real-touchpad/udev-only). Workspace identity itself is unchanged; the bigger continuous-axis data model and vertical dive through depth tiers are still planning stage.
 - **Nvidia native run.** The nested (EGL/GLES) stack is verified on a real RTX 3060; the standalone DRM backend and its overlay-plane workaround still need a TTY session on Nvidia.
 - **AUR package.** Not yet, build from source for now.
 

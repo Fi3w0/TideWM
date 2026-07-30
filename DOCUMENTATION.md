@@ -307,6 +307,46 @@ sway {
 }
 ```
 
+### `swim { }`
+
+Continuous lateral navigation between workspaces: a horizontal trackpad swipe
+pans the viewport continuously instead of the ordinary one-shot discrete
+switch. Workspace identity is unchanged -- still the ordinary `u32` number --
+only the visual camera offset while dragging is continuous. A drag past the
+half-spot mark advances the real workspace live; releasing springs the
+residual offset back to zero over `snap_duration_ms`. Pressing against either
+end of the workspace axis (workspace 1, or `u32` overflow) resists rather than
+wrapping into nothing.
+
+Driven by the same `wp-pointer-gestures` compositor-consumed swipe path
+`[input.touchpad] workspace_swipe_fingers`/`workspace_swipe_distance` already
+use, so those two settings still apply: `workspace_swipe_distance` is one full
+spot-width of swipe travel, and `workspace_swipe_fingers` picks which
+finger-count swipe drives it. `neighbors` is parsed and clamped but not yet
+consumed by anything -- adjacent spots do not yet slide into view mid-pan;
+panning reveals blank/wallpaper on the entering side until the crossing snaps
+the view over. Gesture events are real-libinput-touchpad-only (the udev
+backend), never emitted under the nested winit backend used for day-to-day
+development, so this feature cannot be exercised in a nested session.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Master switch. `false` falls back to the ordinary discrete workspace switch (and its wave transition, if enabled). |
+| `neighbors` | integer, `1`–`4` | `1` | Adjacent spots kept mapped each side of the anchor. Parsed only; not yet consumed. `window` is an alias. |
+| `response` | float, `0.1`–`4` | `1.0` | Swipe-to-offset gain. `1.0` maps one `workspace_swipe_distance` of travel to one spot-width of camera motion. `gain` is an alias. |
+| `snap_duration_ms` | integer, `0`–`2000` | `220` | Spring-to-rest animation length after the fingers lift. `snap_ms` is an alias. |
+
+```wave
+swim {
+    enabled = false
+    neighbors = 1
+    response = 1.0
+    snap_duration_ms = 220
+}
+```
+
+`water_effects = false` is the master bypass, same as `sway`/`viscosity`.
+
 ### `depth { }`
 
 Configures automatic attention depth and buoyancy. A mapped window starts at the surface. After `sink_after_ms` without focus or keyboard input it moves to tier 1, keeping its live content with reduced opacity and a cool-water wash. Each additional `tier_interval_ms` moves it one tier deeper, capped by `max_tier`; tier 2 and below use a cached box-and-title schematic instead of live client pixels. Focusing, clicking, or typing into the window returns it to tier 0 immediately. Urgent windows retain a bright bioluminescent border at every tier.
