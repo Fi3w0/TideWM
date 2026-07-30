@@ -72,6 +72,13 @@ pub enum LayoutAlgorithm {
     /// output's aspect ratio -- that fixed orientation is the actual
     /// visual point of choosing this over the adaptive BSP/dwindle one.
     Master,
+    /// TideWM's own "fills the basin" mode (`layout::layout_cascade`):
+    /// windows wrap into rows left to right, top to bottom, instead of
+    /// BSP's recursive bisection or master's fixed master+stack split. The
+    /// row count is chosen so the resulting grid shape (columns per row
+    /// over row count) best matches the output's own aspect ratio, so a
+    /// wide monitor gets wider rows and a tall one gets more of them.
+    Cascade,
 }
 
 /// Which side the master pane sits on under `LayoutAlgorithm::Master`
@@ -5083,7 +5090,7 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
     }
 }
 
-/// Parses `"bsp"`/`"master"` into a `LayoutAlgorithm`. Shared by
+/// Parses `"bsp"`/`"master"`/`"cascade"` into a `LayoutAlgorithm`. Shared by
 /// `"layout:<name>"` keybind actions and the top-level `default_layout`
 /// config key; callers differ in what they do with an unrecognized name
 /// (a keybind drops the whole bind, same as any other bad action string;
@@ -5094,6 +5101,7 @@ fn parse_layout_algorithm(s: &str) -> Option<LayoutAlgorithm> {
     match s {
         "bsp" => Some(LayoutAlgorithm::Bsp),
         "master" => Some(LayoutAlgorithm::Master),
+        "cascade" => Some(LayoutAlgorithm::Cascade),
         _ => None,
     }
 }

@@ -571,14 +571,16 @@ impl Layouts {
                 self.master_ratio(output, workspace),
                 self.master_orientation,
             ),
+            LayoutAlgorithm::Cascade => layout_cascade(tree.windows(), area, gap),
         }
     }
 
     /// Finds the split boundary nearest `point` within `output`'s `workspace`
-    /// tree; see `BspLayout::hit_test_split`. Always `None` under master
-    /// mode: master's geometry (`layout_master`) ignores the tree's own
-    /// shape entirely, so a BSP split boundary found here wouldn't
-    /// correspond to any actual border on screen to drag.
+    /// tree; see `BspLayout::hit_test_split`. Always `None` under master or
+    /// cascade mode: neither's geometry (`layout_master`/`layout_cascade`)
+    /// follows the tree's own shape, so a BSP split boundary found here
+    /// wouldn't correspond to any actual border on screen to drag. Cascade's
+    /// own row/column resize is unbuilt scope, not an oversight here.
     pub fn hit_test_split(
         &self,
         output: &str,
@@ -602,7 +604,7 @@ impl Layouts {
 
     /// The nearest enclosing split per axis for `surface` within `output`'s
     /// `workspace` tree; see `BspLayout::resize_splits`. Always empty under
-    /// master mode, same reasoning as `hit_test_split`.
+    /// master or cascade mode, same reasoning as `hit_test_split`.
     pub fn resize_splits(
         &self,
         output: &str,
@@ -1300,6 +1302,112 @@ fn layout_master_rects(
     out
 }
 
+/// Cascade geometry: TideWM's own "fills the basin" tiling mode. Windows
+/// wrap into rows left to right, top to bottom -- `BspLayout::windows`'s own
+/// traversal order, same convention `layout_master` reads -- instead of
+/// BSP's recursive bisection or master's fixed master+stack split. No
+/// manual resize yet: `hit_test_split`/`resize_splits` above already treat
+/// this the same as master mode, and cascade's own row/column drag-resize
+/// is later scope (row-scoped ratio persistence across a reflow, agreed
+/// with the maintainer but not yet built).
+fn layout_cascade(
+    windows: Vec<Window>,
+    area: Rectangle<i32, Logical>,
+    gap: i32,
+) -> Vec<(Window, Rectangle<i32, Logical>)> {
+    let rects = layout_cascade_rects(windows.len(), area);
+    let mut out: Vec<(Window, Rectangle<i32, Logical>)> = windows.into_iter().zip(rects).collect();
+    for (_, rect) in &mut out {
+        *rect = inset(*rect, gap);
+    }
+    out
+}
+
+/// The pure geometry behind `layout_cascade`, split out so it's testable
+/// without real `Window`/Wayland fixtures (same reasoning as
+/// `layout_master_rects`). Picks the row count whose resulting grid shape
+/// lands closest to the output's own aspect ratio (`best_cascade_row_count`),
+/// distributes `count` windows across that many rows as evenly as possible
+/// (the first `count % rows` rows getting one extra window), then computes
+/// each row's height and each cell's width from whatever space remains --
+/// `layout_master_rects`'s own rounding-gap-free pattern, applied on both
+/// axes here instead of one.
+fn layout_cascade_rects(
+    count: usize,
+    area: Rectangle<i32, Logical>,
+) -> Vec<Rectangle<i32, Logical>> {
+    if count == 0 {
+        return Vec::new();
+    }
+    if count == 1 {
+        return vec![area];
+    }
+
+    let target_aspect = area.size.w as f32 / (area.size.h as f32).max(1.0);
+    let rows = best_cascade_row_count(count, target_aspect);
+    let row_counts = cascade_row_item_counts(count, rows);
+
+    let mut out = Vec::with_capacity(count);
+    let mut y = area.loc.y;
+    let mut remaining_h = area.size.h;
+    let mut remaining_rows = rows as i32;
+    for row_count in row_counts {
+        let row_h = remaining_h / remaining_rows;
+        let mut x = area.loc.x;
+        let mut remaining_w = area.size.w;
+        let mut remaining_cols = row_count as i32;
+        for _ in 0..row_count {
+            let cell_w = remaining_w / remaining_cols;
+            out.push(Rectangle::new((x, y).into(), (cell_w, row_h).into()));
+            x += cell_w;
+            remaining_w -= cell_w;
+            remaining_cols -= 1;
+        }
+        y += row_h;
+        remaining_h -= row_h;
+        remaining_rows -= 1;
+    }
+    out
+}
+
+/// Distributes `count` windows across `rows` rows as evenly as possible;
+/// the first `count % rows` rows get one extra window (five windows across
+/// two rows becomes `[3, 2]`, not `[2, 3]`).
+fn cascade_row_item_counts(count: usize, rows: usize) -> Vec<usize> {
+    let base = count / rows;
+    let extra = count % rows;
+    (0..rows)
+        .map(|i| if i < extra { base + 1 } else { base })
+        .collect()
+}
+
+/// Picks the row count (from 1 to `count`) whose resulting grid shape --
+/// columns in its widest row, over row count -- lands closest to
+/// `target_aspect` in log space, so a grid twice as wide as the target and
+/// one twice as tall score equally against it. This compares the *grid's*
+/// shape to the target, not each individual cell's aspect ratio to it: the
+/// two sound equivalent but aren't -- comparing per-cell aspect against the
+/// output's own aspect ratio algebraically cancels the output's real shape
+/// out of the comparison and always settles on the same row count
+/// regardless of monitor shape (verified numerically before writing this),
+/// while comparing the grid's column/row ratio actually adapts: a wide
+/// monitor prefers fewer, wider rows, a tall one prefers more, narrower ones.
+fn best_cascade_row_count(count: usize, target_aspect: f32) -> usize {
+    (1..=count)
+        .min_by(|&a, &b| {
+            cascade_row_count_score(count, a, target_aspect)
+                .partial_cmp(&cascade_row_count_score(count, b, target_aspect))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap_or(1)
+}
+
+fn cascade_row_count_score(count: usize, rows: usize, target_aspect: f32) -> f32 {
+    let cols = count.div_ceil(rows);
+    let grid_aspect = cols as f32 / rows as f32;
+    (grid_aspect / target_aspect).ln().powi(2)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1442,6 +1550,66 @@ mod tests {
         );
         // Lone stack window fills the remaining strip on top.
         assert_eq!(bottom[1], Rectangle::new((0, 0).into(), (1000, 600).into()));
+    }
+
+    #[test]
+    fn layout_cascade_rects_handles_zero_and_one_window() {
+        assert_eq!(layout_cascade_rects(0, area(1000, 1000)), Vec::new());
+        assert_eq!(
+            layout_cascade_rects(1, area(1000, 1000)),
+            vec![area(1000, 1000)]
+        );
+    }
+
+    #[test]
+    fn layout_cascade_rects_puts_the_extra_window_in_the_first_row() {
+        // Five windows on a 16:9-ish output should land on two rows, three
+        // on top and two below -- the row with the "extra" leftover window
+        // comes first, not last.
+        let rects = layout_cascade_rects(5, area(1920, 1080));
+        assert_eq!(rects.len(), 5);
+        let top: Vec<_> = rects[..3].to_vec();
+        let bottom: Vec<_> = rects[3..].to_vec();
+        assert!(top.iter().all(|r| r.loc.y == 0));
+        assert!(bottom.iter().all(|r| r.loc.y == top[0].size.h));
+        assert_eq!(bottom.len(), 2);
+    }
+
+    #[test]
+    fn layout_cascade_rects_tiles_exactly_with_no_gap_or_overlap() {
+        // Every rect's area must sum to the whole output, for every window
+        // count from one to a double-digit count, regardless of whether
+        // divisions are exact.
+        for count in 1..=13usize {
+            let a = area(1917, 1073); // deliberately not evenly divisible
+            let rects = layout_cascade_rects(count, a);
+            assert_eq!(rects.len(), count);
+            let total: i64 = rects
+                .iter()
+                .map(|r| (r.size.w as i64) * (r.size.h as i64))
+                .sum();
+            assert_eq!(total, (a.size.w as i64) * (a.size.h as i64));
+        }
+    }
+
+    #[test]
+    fn best_cascade_row_count_adapts_to_output_shape() {
+        // A wide monitor prefers fewer, wider rows for the same five
+        // windows that a narrow/portrait monitor spreads across more rows.
+        // This is the property that comparing per-cell aspect to the
+        // target would NOT give -- see `best_cascade_row_count`'s doc.
+        let wide = best_cascade_row_count(5, 1920.0 / 1080.0);
+        let ultrawide = best_cascade_row_count(5, 3440.0 / 1080.0);
+        let portrait = best_cascade_row_count(5, 1080.0 / 1920.0);
+        assert!(ultrawide <= wide);
+        assert!(portrait >= wide);
+    }
+
+    #[test]
+    fn cascade_row_item_counts_front_loads_the_remainder() {
+        assert_eq!(cascade_row_item_counts(5, 2), vec![3, 2]);
+        assert_eq!(cascade_row_item_counts(6, 2), vec![3, 3]);
+        assert_eq!(cascade_row_item_counts(7, 3), vec![3, 2, 2]);
     }
 
     #[test]
