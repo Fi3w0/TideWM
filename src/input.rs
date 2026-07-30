@@ -1469,8 +1469,14 @@ impl Smallvil {
                 if compositor_swipe {
                     // Decided once, at Begin: a config change mid-drag must
                     // not switch which model an already-running gesture
-                    // follows out from under it.
-                    let swim = workspace_fallback && self.swim_enabled();
+                    // follows out from under it. `!action_match` mirrors
+                    // End's own bound-action-wins-over-workspace-fallback
+                    // precedence -- direction isn't known yet at Begin, so
+                    // this can't do better than gating on finger count, but
+                    // it means swim never silently swallows a configured
+                    // swipe_up/down/left/right bound at the same finger
+                    // count `workspace_swipe_fingers` uses.
+                    let swim = workspace_fallback && !action_match && self.swim_enabled();
                     self.compositor_gesture = Some(CompositorGesture::Swipe {
                         workspace_fallback,
                         swim,
