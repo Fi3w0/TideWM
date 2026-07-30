@@ -2714,6 +2714,7 @@ fn load_raw_config(path: &Path) -> Result<RawConfig, String> {
 /// shouldn't take down a working session).
 fn lower_entries(entries: &[waves::Entry]) -> RawConfig {
     let mut raw = RawConfig::default();
+    let default_keybinds = raw.keybinds.clone();
     for entry in entries {
         match entry {
             waves::Entry::VarDef(name, value) => {
@@ -2727,6 +2728,32 @@ fn lower_entries(entries: &[waves::Entry]) -> RawConfig {
             waves::Entry::Assign(key, value) => apply_top_level_assign(&mut raw, key, value),
             waves::Entry::Block(keyword, header, body) => {
                 apply_top_level_block(&mut raw, keyword, header, body)
+            }
+        }
+    }
+    // `$mod = ALT` alone never frees Super: `RawConfig::default()`'s own
+    // keybinds are spelled out literally as `Super+...`, a different combo
+    // string than `$mod+...`, so both stay bound side by side (see the
+    // `$mod`-freed warning in `Config::from_raw`). When the user has
+    // actually rebound a key under `$mod` themselves, that's a clear signal
+    // they mean to move it off Super, so drop the literal-Super default for
+    // that same key -- but only when it's still exactly what
+    // `RawConfig::default()` shipped; a `Super+X` the user wrote out
+    // themselves is a deliberate dual-bind and is left alone.
+    if raw
+        .variables
+        .get("mod")
+        .and_then(|value| parse_modifiers(value))
+        .is_some_and(|mods| !mods.logo)
+    {
+        for entry in entries {
+            if let waves::Entry::Bind(combo, _) = entry {
+                if let Some(suffix) = combo.strip_prefix("$mod+") {
+                    let super_combo = format!("Super+{suffix}");
+                    if raw.keybinds.get(&super_combo) == default_keybinds.get(&super_combo) {
+                        raw.keybinds.remove(&super_combo);
+                    }
+                }
             }
         }
     }
@@ -5919,6 +5946,38 @@ mod tests {
             Some("spawn:kitty")
         );
         assert!(!raw.keybinds.contains_key("$mainMod+Return"));
+    }
+
+    #[test]
+    fn load_raw_config_drops_untouched_default_super_bind_when_user_rebinds_it_via_mod() {
+        let dir = TestDir::new("mod-frees-super");
+        let main = dir.write(
+            "config.wave",
+            "$mod = ALT\n\
+             bind $mod+Q = close-window\n\
+             bind Super+F = toggle-fullscreen\n",
+        );
+
+        let raw = load_raw_config(&main).expect("should parse");
+        // Rebound via $mod -- the untouched literal-Super default for the
+        // same key is gone, so Super+Q no longer does anything.
+        assert!(!raw.keybinds.contains_key("Super+Q"));
+        assert_eq!(
+            raw.keybinds.get("ALT+Q").map(String::as_str),
+            Some("close-window")
+        );
+        // A Super+X the user wrote out themselves is a deliberate dual-bind
+        // and must survive even though $mod is off Super.
+        assert_eq!(
+            raw.keybinds.get("Super+F").map(String::as_str),
+            Some("toggle-fullscreen")
+        );
+        // Never touched via $mod at all -- default stays, since nothing
+        // signaled intent to move it.
+        assert_eq!(
+            raw.keybinds.get("Super+Tab").map(String::as_str),
+            Some("cycle-focus")
+        );
     }
 
     #[test]
