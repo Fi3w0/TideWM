@@ -163,6 +163,43 @@ impl Default for SwayConfig {
     }
 }
 
+/// Continuous lateral "swim" between workspaces (spatial roadmap S0).
+/// Instead of the discrete one-shot switch (and its wave transition), a
+/// horizontal trackpad swipe pans the viewport continuously: neighboring
+/// spots slide in from the side, the logical anchor advances once the pan
+/// crosses the halfway mark, and the camera springs back to rest on
+/// release. The lateral axis stays a sequence of discrete tiling spots --
+/// each spot is an ordinary `BspLayout`/master/cascade tree -- so logical
+/// identity is still the `u32` workspace number; only the *visual* camera
+/// offset is continuous. `water_effects` remains the master bypass: off
+/// falls back to the ordinary discrete switch regardless of `enabled`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SwimConfig {
+    pub enabled: bool,
+    /// How many neighboring spots are kept mapped on each side of the
+    /// anchor so they can slide into view during a pan. 1 keeps the
+    /// immediate neighbors only (cheapest); higher values let a fast pan
+    /// reveal further spots before the mapped window shifts.
+    pub neighbors: u8,
+    /// Swipe-to-offset gain. `1.0` maps one `workspace_swipe_distance` of
+    /// trackpad travel to one spot-width of camera motion; higher travels
+    /// further per unit swipe.
+    pub response: f32,
+    /// Snap-back-to-rest animation length after the fingers lift, millis.
+    pub snap_duration_ms: u32,
+}
+
+impl Default for SwimConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            neighbors: 1,
+            response: 1.0,
+            snap_duration_ms: 220,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Left,
@@ -285,6 +322,10 @@ pub struct Config {
     /// Optional lateral sway for dragged floating windows. Opt-in and
     /// bypassed by the `water_effects` master toggle like viscosity.
     pub sway: SwayConfig,
+    /// Continuous lateral "swim" between workspaces (spatial roadmap S0).
+    /// Bypassed by the `water_effects` master toggle; when off, workspace
+    /// navigation is the ordinary discrete switch.
+    pub swim: SwimConfig,
     /// Window lifecycle and layout-motion animation timing. Logical state
     /// changes immediately; this controls only visual settling.
     pub animations: WindowAnimationsConfig,
@@ -565,6 +606,7 @@ impl Config {
             viscosity: raw.viscosity.clamp(0.0, 4.0),
             connected_vessels: raw.connected_vessels,
             sway: raw.sway,
+            swim: raw.swim,
             animations: raw.animations,
             workspace_transition: raw.workspace_transition,
             depth: raw.depth,
@@ -786,6 +828,7 @@ struct RawConfig {
     viscosity: f64,
     connected_vessels: ConnectedVesselsConfig,
     sway: SwayConfig,
+    swim: SwimConfig,
     animations: WindowAnimationsConfig,
     workspace_transition: WorkspaceTransitionConfig,
     depth: DepthConfig,
@@ -934,6 +977,7 @@ impl Default for RawConfig {
             viscosity: 1.0,
             connected_vessels: ConnectedVesselsConfig::default(),
             sway: SwayConfig::default(),
+            swim: SwimConfig::default(),
             animations: WindowAnimationsConfig::default(),
             workspace_transition: WorkspaceTransitionConfig::default(),
             depth: DepthConfig::default(),
@@ -2810,6 +2854,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
             apply_connected_vessels_block(&mut raw.connected_vessels, body)
         }
         "sway" => apply_sway_block(&mut raw.sway, body),
+        "swim" => apply_swim_block(&mut raw.swim, body),
         "animations" | "window_animations" => apply_animations_block(&mut raw.animations, body),
         "depth" => apply_depth_block(&mut raw.depth, body),
         "frost" => apply_frost_block(&mut raw.frost, body),
@@ -3420,8 +3465,7 @@ fn apply_connected_vessels_block(cfg: &mut ConnectedVesselsConfig, body: &[waves
     }
 }
 
-fn apply_sway_block(cfg: &mut SwayConfig, body: &[waves::Entry]) {
-    for entry in body {
+fn apply_sway_block(cfg: &mut SwayConfig, body: &[waves::Entry]) {    for entry in body {
         let waves::Entry::Assign(key, value) = entry else {
             tracing::warn!("Unexpected entry in `sway` block, ignoring");
             continue;
@@ -3445,6 +3489,34 @@ fn apply_sway_block(cfg: &mut SwayConfig, body: &[waves::Entry]) {
                 _ => tracing::warn!(value, "Expected sway.damping from 0.1 to 20, ignoring"),
             },
             other => tracing::warn!(key = %other, "Unknown key in `sway` block, ignoring"),
+        }
+    }
+}
+
+fn apply_swim_block(cfg: &mut SwimConfig, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `swim` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "enabled" => set_bool(&mut cfg.enabled, key, value),
+            "neighbors" | "window" => match value.parse::<u8>() {
+                Ok(value) => cfg.neighbors = value.clamp(1, 4),
+                _ => tracing::warn!(value, "Expected swim.neighbors from 1 to 4, ignoring"),
+            },
+            "response" | "gain" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.response = value.clamp(0.1, 4.0),
+                _ => tracing::warn!(value, "Expected swim.response from 0.1 to 4, ignoring"),
+            },
+            "snap_duration_ms" | "snap_ms" => match value.parse::<u32>() {
+                Ok(value) => cfg.snap_duration_ms = value.min(2000),
+                _ => tracing::warn!(
+                    value,
+                    "Expected swim.snap_duration_ms from 0 to 2000, ignoring"
+                ),
+            },
+            other => tracing::warn!(key = %other, "Unknown key in `swim` block, ignoring"),
         }
     }
 }
@@ -5225,6 +5297,18 @@ connected_vessels {
 #     frequency = 1.6              # oscillations per second
 #     damping = 3.0                # higher settles back sooner
 # }
+
+# Continuous lateral "swim" between workspaces (the infinite ocean's
+# lateral axis). A horizontal trackpad swipe pans the viewport: neighbor
+# spots slide in, the anchor advances past the halfway mark, and the
+# camera springs to rest on release. Off here falls back to the ordinary
+# discrete workspace switch. water_effects = false also bypasses it.
+# swim {
+#     enabled = false                # flip to true for continuous navigation
+#     neighbors = 1                  # spots kept mapped each side of the anchor
+#     response = 1.0                 # swipe travel per spot (1.0 = one swipe = one spot)
+#     snap_duration_ms = 220         # spring-to-rest after finger lift
+# }
 cursor_always_visible = false
 cursor_hide_after_ms = 0
 workspace_auto_back_and_forth = false
@@ -5845,6 +5929,7 @@ mod tests {
             viscosity: 1.0,
             connected_vessels: ConnectedVesselsConfig::default(),
             sway: SwayConfig::default(),
+            swim: SwimConfig::default(),
             animations: WindowAnimationsConfig::default(),
             workspace_transition: WorkspaceTransitionConfig::default(),
             depth: DepthConfig::default(),
@@ -6188,6 +6273,31 @@ mod tests {
         assert!(defaults.enabled);
         assert_eq!(defaults.falloff, 0.5);
         assert_eq!(defaults.max_splits, 4);
+    }
+
+    #[test]
+    fn swim_block_parses_clamps_and_matches_generated_defaults() {
+        let entries = waves::parse(
+            "swim {\n\
+             enabled = true\n\
+             neighbors = 9\n\
+             response = 12.0\n\
+             snap_duration_ms = 99999\n\
+             }\n",
+            Path::new("<swim-test>"),
+        )
+        .unwrap();
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        assert!(config.swim.enabled);
+        assert_eq!(config.swim.neighbors, 4);
+        assert_eq!(config.swim.response, 4.0);
+        assert_eq!(config.swim.snap_duration_ms, 2000);
+
+        let defaults = parse_default_config().swim;
+        assert!(!defaults.enabled);
+        assert_eq!(defaults.neighbors, 1);
+        assert_eq!(defaults.response, 1.0);
+        assert_eq!(defaults.snap_duration_ms, 220);
     }
 
     #[test]
