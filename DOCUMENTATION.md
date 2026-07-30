@@ -69,7 +69,7 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | `workspace_name` | repeatable key | none | Names a workspace number for use in `workspace:<name>`/`move-to-workspace:<name>` (niri's `set-workspace-name`, Hyprland's `workspace name:foo`) — `workspace_name = 3 web`, repeat the key once per name. Purely an addressing convenience: the workspace's real identity is still its number. An unknown name at action time warns and no-ops rather than switching. |
 | `gaps` | integer | `8` | Pixel gap the tiling engine applies around and between tiles, both layout algorithms. |
 | `workspace_gaps` | repeatable key | none | Per-workspace gap override — `workspace_gaps = 3 0` (workspace 3, no gaps), repeat the key once per workspace. Accepts a `workspace_name` alias in place of the number. Beats both the output-level `gaps` override and the global `gaps`. |
-| `default_layout` | `bsp` \| `master` | `bsp` | Starting tiling algorithm for a workspace with no runtime override (see `layout:bsp`/`layout:master` actions below). `bsp` is dwindle-style: split orientation follows each window's own aspect ratio. `master` is one master pane plus an evenly-split stack. |
+| `default_layout` | `bsp` \| `master` \| `cascade` | `bsp` | Starting tiling algorithm for a workspace with no runtime override (see `layout:bsp`/`layout:master`/`layout:cascade` actions below). `bsp` is dwindle-style: split orientation follows each window's own aspect ratio. `master` is one master pane plus an evenly-split stack. `cascade` wraps windows into rows left to right, top to bottom, choosing the row count so the grid's shape best matches the output's own aspect ratio -- TideWM's own "fills the basin" mode. No manual per-cell resize yet (same as master); dragging a split isn't available under cascade. |
 | `master_orientation` | `left` \| `right` \| `top` \| `bottom` | `left` | Which side the master pane sits on under `default_layout = master`. `left`/`right` stack the other windows vertically in the remaining strip; `top`/`bottom` stack them horizontally instead. One global setting, not per-workspace. |
 | `bsp_split_bias` | `auto` \| `horizontal` \| `vertical` | `auto` | Manual override for `default_layout = bsp`'s per-split axis choice. `auto` is the existing aspect-ratio-driven behavior, unchanged. `horizontal`/`vertical` force every split one way regardless of window/output shape (Hyprland dwindle's `force_split` idea). One global setting, not per-workspace. |
 | `pseudo_tile_scale` | float, `0.05`–`1.0` | `0.7` | Fraction of its tile a pseudo-tiled window keeps, centered within it. Out-of-range values are clamped, not rejected. |
@@ -868,7 +868,7 @@ The same set of strings works after `bind ... =` at the top level or inside a `s
 - `focus-left` / `focus-right` / `focus-up` / `focus-down`
 - `swap-left` / `swap-right` / `swap-up` / `swap-down`
 - `resize-left` / `resize-right` / `resize-up` / `resize-down` — shrink/grow the focused floating window by 24 logical pixels, or resize its nearest BSP split and connected parallel ancestors
-- `layout:bsp` / `layout:master` — switch the current workspace's tiling algorithm
+- `layout:bsp` / `layout:master` / `layout:cascade` — switch the current workspace's tiling algorithm
 - `master-grow` / `master-shrink` — nudge the master/stack ratio (master layout only, no-op under BSP)
 
 **Groups (window tabbing)**

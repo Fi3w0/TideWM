@@ -31,7 +31,7 @@ TideWM is a solo project. I use AI coding agents (OpenCode, Codex, Claude Code) 
 
 ## Features
 
-- Dynamic BSP tiling (dwindle-style) plus master/stack, switchable per workspace
+- Dynamic BSP tiling (dwindle-style), master/stack, and cascade (fills the output in aspect-ratio-adapting rows), switchable per workspace
 - Workspaces per output, scratchpads (the classic one plus any number of named ones), per-window pinning
 - Window groups: tab several windows into one tile, first-party tab-strip UI
 - Floating, fullscreen, maximize, pseudo-tiling
@@ -74,7 +74,7 @@ Foundation before visuals has been the plan from the start, and as of 0.60.0 the
 
 - **Standalone udev/DRM pass on the render effects.** Everything above is live-verified nested on real AMD hardware; the standalone backend compiles against the same render path but hasn't had its own hardware pass.
 - **Feel-tuning.** Viscosity, sway, depth timings, and the transition/ripple presets ship with working defaults; the actual feel still gets refined against real use.
-- **Basin-fill layout.** The one identity feature not started yet: a third tiling mode that fills the output's aspect ratio instead of binary-splitting.
+- **Cascade layout's manual resize.** The row-fill algorithm (`default_layout = cascade`) landed; per-cell drag resize is next.
 - **The infinite ocean.** A design pass toward replacing discrete workspaces with a continuous swim-and-dive spatial model built on the depth system above. Planning stage, nothing coded yet.
 - **Nvidia native run.** The nested (EGL/GLES) stack is verified on a real RTX 3060; the standalone DRM backend and its overlay-plane workaround still need a TTY session on Nvidia.
 - **AUR package.** Not yet, build from source for now.
