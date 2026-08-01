@@ -21,9 +21,23 @@ A water-styled Wayland compositor, built in Rust on Smithay.
 </div>
 
 > [!NOTE]
-> TideWM already works as a real Wayland compositor: tiling, multi-monitor, workspaces, IPC, and most of the protocol surface a daily driver needs are all in. The full water/aqua identity is built now too: impulse ripples, wave workspace transitions, water-glass and per-app frosted glass, analytical shadows, rounded borders, configurable window animations, liquid move/resize viscosity, connected-vessel BSP resizing, opt-in floating sway, and automatic window depth/buoyancy. An IPC event-stream lets bars and widgets subscribe to live state instead of polling. Screen sharing (PipeWire/xdg-desktop-portal) works end to end on a real standalone session, verified through both OBS and Discord. All of the render work above is live-verified nested on real AMD hardware; the standalone udev/DRM pass on it is next. This is exactly the stage where testing on hardware I don't own is most useful, jump into [Discord](https://discord.gg/ZhkxA83cKk) if something breaks.
+> TideWM already works as a real Wayland compositor: tiling, multi-monitor, workspaces, IPC, and most of the protocol surface a daily driver needs are all in. The full water/aqua identity is built now too: impulse ripples, wave workspace transitions, water-glass and per-app frosted glass, analytical shadows, rounded borders, configurable window animations, liquid move/resize viscosity, connected-vessel BSP resizing, opt-in floating sway, and automatic window depth/buoyancy. Ocean, the second spatial engine (a zoomable continuous 2D canvas instead of workspaces), is live-verified on real AMD hardware, standalone udev/DRM session, not just nested. An IPC event-stream lets bars and widgets subscribe to live state instead of polling. Screen sharing (PipeWire/xdg-desktop-portal) works end to end on a real standalone session, verified through both OBS and Discord. This is exactly the stage where testing on hardware I don't own is most useful, jump into [Discord](https://discord.gg/ZhkxA83cKk) if something breaks.
 
-Full modern tiling on the fundamentals: BSP and master/stack, workspaces, groups, multi-monitor, layer-shell, IPC, with the water identity now taking shape on top. Built for low-end hardware first, 1.5GB is the target ceiling in normal use, 3GB is the line where it gets actively optimized.
+Full modern tiling on the fundamentals: BSP and master/stack, workspaces, groups, multi-monitor, layer-shell, IPC, with the water identity now taking shape on top. Built for low-end hardware first: the RAM budget scales with what you turn on, from ~600MB PSS for a plain tiling setup up to a 2GB ceiling for a full ocean/rice config with every effect enabled.
+
+## Screenshots
+
+<div align="center">
+<img src="share/media/screenshot-classic-tiling.png" width="49%" alt="Classic BSP tiling, real AMD hardware">
+<img src="share/media/screenshot-ocean-canvas.png" width="49%" alt="Ocean spatial engine: reef tiling on the continuous canvas">
+<br>
+<img src="share/media/screenshot-ocean-zoom.png" width="49%" alt="Ocean camera zoomed in, adaptive guide grid and center marker">
+<img src="share/media/screenshot-window-grouping.png" width="49%" alt="Window grouping with the first-party tab strip">
+<br>
+<img src="share/media/screenshot-themed-toast.png" width="49%" alt="Compositor toast, automatically themed from the border palette">
+</div>
+
+A short screen recording (no audio) of real interactive use is at `share/media/demo.mp4` in this repo.
 
 ## About
 
@@ -33,6 +47,7 @@ TideWM is a solo project. I use AI coding agents (OpenCode, Codex, Claude Code) 
 
 - Dynamic BSP tiling (dwindle-style), master/stack, and cascade (fills the output in aspect-ratio-adapting rows, with drag-to-resize rows/cells), switchable per workspace
 - Workspaces per output, scratchpads (the classic one plus any number of named ones), per-window pinning, opt-in continuous trackpad-swipe navigation between them (`swim { }`)
+- Two spatial engines, chosen at startup with `spatial_engine = classic|ocean`: Classic keeps real numbered workspaces; Ocean drops workspaces for one continuous zoomable 2D canvas with local tiling reefs, independent per-output pan/zoom cameras, physical sink/dredge/surface depth, and named/numeric bookmarks. Ocean windows can also detach straight out of a reef into a free zoom-aware drag (`freeform_windows`), and dragging empty canvas pans the camera directly. [Full design in SPATIAL_MODEL.md](SPATIAL_MODEL.md).
 - Window groups: tab several windows into one tile, first-party tab-strip UI
 - Floating, fullscreen, maximize, pseudo-tiling
 - Multi-monitor with hotplug, independent tiling tree per output, mixed-DPI
@@ -63,6 +78,7 @@ see the changelog milestone note for why 1.0 remains intentionally reserved.
 - **XWayland**: yes, via xwayland-satellite. X11 apps tile like any other window.
 - **Nested (dev/testing)**: yes, `cargo run` opens TideWM as a window inside any existing session.
 - **Real hardware**: verified on AMD, backend, tiling, pointer-constraints (tested against real Minecraft), interactive drag/resize.
+- **Ocean spatial engine**: live-verified on real AMD hardware, standalone udev/DRM session — reef tiling, camera pan/zoom, the adaptive guide grid and center marker, sink/dredge/surface depth, bookmarks, and deterministic floating-window stacking. `freeform_windows` (drag a reef tile straight into a free-floating drag) hit a real deadlock on release during that same hardware pass: releasing the drag called into a pointer-grab teardown path that re-entered the already-locked pointer handle. Root-caused with a live nested repro and a symbol-resolved backtrace, fixed by resolving the window's output from its own geometry instead of the pointer (see [CHANGELOG](CHANGELOG.md)), and re-verified with repeated drag/release cycles. `canvas_pan_button` (dragging empty canvas) is code-reviewed but not yet live-tested.
 - **Nvidia**: nested backend verified on a real RTX 3060 (proprietary driver 610.43): clean EGL/GLES context, correct rendering, no crashes. The standalone DRM backend and its overlay-plane workaround still need a native (TTY) Nvidia run.
 - **DPMS / gamma**: protocol-complete and verified on AMD hardware; lid/tablet switches still need broader hardware coverage.
 - **Touchpad config**: built (tap, natural-scroll, accel, click-method, ...), not yet verified on real hardware.
@@ -76,9 +92,9 @@ see the changelog milestone note for why 1.0 remains intentionally reserved.
 
 Foundation before visuals has been the plan from the start, and as of 0.60.0 the foundation part is done: the WM itself — tiling, multi-monitor, workspaces, layer-shell, IPC, XWayland, screencasting — is feature-complete, runs as a daily compositor on AMD hardware, and has passed a full nested test on real Nvidia hardware too. The render/visual-identity roadmap built on top of that is now fully implemented: the animation and backdrop-capture foundation, the water identity slice (ripples, wave transitions, water-glass, depth/buoyancy), full decoration parity (frost, shadows, rounded borders, window animations, viscosity, connected-vessel resize, opt-in sway), cascade layout with drag-to-resize rows/cells, and an IPC event-stream for reactive bars/widgets. What's next, in order:
 
-- **Standalone udev/DRM pass on the render effects.** Everything above is live-verified nested on real AMD hardware; the standalone backend compiles against the same render path but hasn't had its own hardware pass.
+- **Standalone udev/DRM pass on the water/decoration effects.** Ripples, wave transitions, water-glass, frost, shadows, and window animations are live-verified nested on real AMD hardware; the standalone backend compiles against the same render path but hasn't had its own hardware pass yet. The base WM, the compositor's own toast/diagnostic UI, and the Ocean spatial engine all have their own real udev/DRM pass already (see Status above).
 - **Feel-tuning.** Viscosity, sway, depth timings, cascade's drag feel, and the transition/ripple presets ship with working defaults; the actual feel still gets refined against real use.
-- **Two spatial engines.** [Classic and Ocean now have a fixed design](SPATIAL_MODEL.md). `spatial_engine = classic|ocean` selects the startup ownership model. Classic keeps real workspaces and its optional per-workspace Depth Deck. Ocean is a zoomable continuous 2D canvas: output-sized-or-explicit local tiling reefs, independent per-output pan/zoom cameras, a world-anchored reference field, physical sink/dredge/surface actions, and named/numeric bookmarks. It does not stack workspaces vertically, and camera motion does not move windows. Every Ocean layer is independently optional; both engines share the same renderer, captures, glass/depth effects, and decoration pipeline.
+- **Ocean compass and overview.** Off-screen urgent/deep glows, direction/distance cues, and a whole-world minimap for the parts of the canvas outside the current viewport.
 - **Nvidia native run.** The nested (EGL/GLES) stack is verified on a real RTX 3060; the standalone DRM backend and its overlay-plane workaround still need a TTY session on Nvidia.
 - **AUR package.** Not yet, build from source for now.
 
@@ -124,9 +140,10 @@ Mouse:
 | `Alt` + left-drag            | Move floating window                  |
 | `Alt` + right-drag           | Resize floating window                |
 | Left-drag a floating window's own edge | Resize it, no modifier needed |
-| `Alt` + left-drag (tiled)    | Pick up and drop into a new tile slot |
+| `Alt` + left-drag (tiled)    | Pick up and drop into a new tile slot (Classic); detaches into a free zoom-aware drag (Ocean) |
 | `Alt` + right-drag (tiled)   | Resize the tile from an edge          |
 | Click on a split gap         | Drag to adjust the split ratio        |
+| Left-drag empty canvas (Ocean) | Pan the camera directly, any zoom   |
 
 Full set, plus every action string and IPC/`tidectl` command, in [DOCUMENTATION.md](DOCUMENTATION.md). Rebind anything with `bind` in `config.wave`.
 
