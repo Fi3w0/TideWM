@@ -62,6 +62,7 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | `spatial_engine` | `classic` \| `ocean` | `classic` | Selects one of TideWM's two WM ownership models at startup. Classic keeps numbered workspaces. Ocean has no workspaces: outputs are cameras into one continuous 2D world. `engine` and `wm_mode` are aliases. Requires a restart because live windows cannot safely change spatial owner. |
 | `pointer_modifier` | modifier or `+`-joined modifiers | `super` fallback; generated config uses `alt` | Modifier physically held for compositor mouse actions: left-drag moves floating windows or drag-swaps tiles; right-drag resizes floating or tiled windows. Accepts `super`/`logo`/`mod4`, `alt`/`mod1`, `ctrl`/`control`, and `shift`. The shipped config sets it to `$mod`. `mouse_modifier` and `drag_modifier` are aliases. |
 | `show_welcome_hint` | bool | `true` | Shows a persistent empty-desktop card reminding you to use your configured terminal bind. Disappears when a real window maps; delete this key (or set it `false`) to stop it returning. |
+| `show_config_reload_toast` | bool | `true` | Shows the short compositor card after a successful hot reload. `false` hides that confirmation only; parse errors and configuration warnings remain visible so a bad config cannot silently lock itself in. `config_reload_toast` is an alias. |
 | `water_effects` | bool | `true` | Master toggle for TideWM's water/aqua render identity. Disables water-glass, backdrop capture, impulse ripples, wave workspace transitions, automatic depth/buoyancy, interactive viscosity, connected-vessel resize, and floating sway when `false`. |
 | `viscosity` | float, `0`–`4` | `1.0` | Interactive window move/resize damping. `0` follows the pointer immediately; higher values settle more slowly. Render-only: logical geometry and hit-testing stay at the pointer target. Disabled by `water_effects = false`. |
 | `cursor_always_visible` | bool | `false` | Forces the udev backend's software cursor to stay visible even when a client asks to hide it (e.g. a terminal hiding its own pointer glyph after inactivity). Off by default — respecting a client's own hide request is correct behavior; this is an opt-in override. |
@@ -375,6 +376,9 @@ zoom, guide, and depth toggles/tuning hot-reload.
 ```wave
 spatial_engine = ocean
 ocean {
+    freeform_windows = true
+    canvas_pan_button = left
+    canvas_pan_requires_modifier = false
     camera_step = 480
     camera_animation_ms = 260
     camera_sway = 18
@@ -409,6 +413,9 @@ ocean {
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
+| `freeform_windows` | boolean | `true` | In Ocean, beginning the configured move/resize gesture on a reef tile detaches it at the same world rectangle and continues as a free zoom-aware drag. `toggle-floating` can tile it into a reef again. `false` retains tile swap/split resize behavior. |
+| `canvas_pan_button` | `left` \| `middle` \| `right` \| `none` | `left` | Button that directly drags genuinely empty Ocean canvas. `none` disables mouse camera grabbing and reserves no button. Layer surfaces and windows keep their clicks. |
+| `canvas_pan_requires_modifier` | boolean | `false` | When true, empty-canvas dragging also requires the currently configured `pointer_modifier`; false gives direct Drift-style canvas movement. |
 | `camera_step` | integer, `32`–`8192` | `480` | Logical pixels moved by an `ocean-pan-*` keyboard action. Hot-reloadable. |
 | `camera_animation_ms` | integer, `0`–`5000` | `260` | Smooth pan/zoom/bookmark travel duration. `0` makes camera actions immediate. |
 | `camera_sway` | float, `0`–`256` | `18` | Small perpendicular arc, in screen pixels, during keyboard camera travel. `0` keeps a straight path. |

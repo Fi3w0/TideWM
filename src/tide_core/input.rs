@@ -42,8 +42,8 @@ use std::{collections::HashSet, time::Duration};
 use crate::{
     config::{Action, Direction, Keybind, TouchpadConfig},
     grabs::{
-        resize_grab::ResizeEdge, CascadeResizeGrab, MoveSurfaceGrab, ResizeSurfaceGrab,
-        TileMoveGrab, TileResizeGrab, TileWindowResizeGrab,
+        resize_grab::ResizeEdge, CascadeResizeGrab, MoveSurfaceGrab, OceanPanGrab,
+        ResizeSurfaceGrab, TileMoveGrab, TileResizeGrab, TileWindowResizeGrab,
     },
     state::{CompositorGesture, SessionLock, Smallvil},
     toast::{Toast, ToastKind},
@@ -649,6 +649,7 @@ impl Smallvil {
                             data.toast = Some(Toast::new(
                                 "Rescue keybinds active until config reload",
                                 ToastKind::Info,
+                                crate::ui_theme::UiTheme::from_config(&data.config),
                             ));
                             data.request_redraw();
                             return FilterResult::Intercept(());
@@ -1082,9 +1083,63 @@ impl Smallvil {
                                 // Fullscreen/maximized are output-owned placements;
                                 // a compositor drag must not move/resize it
                                 // behind the protocol state's back.
+                            } else if self.config.spatial_engine
+                                == crate::config::SpatialEngine::Ocean
+                                && self.config.ocean.freeform_windows
+                                && self.ocean.is_tiled(&wl_surface)
+                            {
+                                // In Ocean a reef is a useful local tiling
+                                // tool, not a cage. Beginning either ordinary
+                                // compositor drag detaches this tile at its
+                                // exact world rectangle and continues as a
+                                // zoom-aware free move/resize.
+                                self.toggle_floating(&wl_surface);
+                                let Some(model_rect) = self.ocean.floating_rect(&wl_surface) else {
+                                    return;
+                                };
+                                self.ocean.raise_floating(&wl_surface);
+                                self.space.raise_element(&window, false);
+                                self.focus_window(Some(wl_surface.clone()), serial);
+                                let start_data = PointerGrabStartData {
+                                    focus: Some((wl_surface.clone(), loc.to_f64())),
+                                    button,
+                                    location: pointer.current_location(),
+                                };
+                                let view_scale = self
+                                    .output_for_point(pointer.current_location())
+                                    .map(|output| self.ocean.camera(&output.name()).zoom)
+                                    .unwrap_or(1.0);
+                                if button == BTN_LEFT {
+                                    pointer.set_grab(
+                                        self,
+                                        MoveSurfaceGrab {
+                                            start_data,
+                                            window,
+                                            initial_window_location: model_rect.loc,
+                                            view_scale,
+                                        },
+                                        serial,
+                                        Focus::Clear,
+                                    );
+                                } else {
+                                    pointer.set_grab(
+                                        self,
+                                        ResizeSurfaceGrab::start(
+                                            start_data,
+                                            window,
+                                            ResizeEdge::BOTTOM_RIGHT,
+                                            model_rect,
+                                            view_scale,
+                                        ),
+                                        serial,
+                                        Focus::Clear,
+                                    );
+                                }
+                                return;
                             } else if !self.layout.contains(&wl_surface)
                                 && !self.ocean.is_tiled(&wl_surface)
                             {
+                                self.ocean.raise_floating(&wl_surface);
                                 self.space.raise_element(&window, false);
                                 self.focus_window(Some(wl_surface.clone()), serial);
 
@@ -1199,6 +1254,29 @@ impl Smallvil {
                         }
                     }
 
+                    let canvas_pan = self.config.spatial_engine
+                        == crate::config::SpatialEngine::Ocean
+                        && under.is_none()
+                        && self.config.ocean.canvas_pan_button.matches(button)
+                        && (!self.config.ocean.canvas_pan_requires_modifier
+                            || self.config.pointer_modifier.is_held_by(held_modifiers));
+                    if canvas_pan {
+                        if let Some(output) = self.output_for_point(pointer.current_location()) {
+                            let start_data = PointerGrabStartData {
+                                focus: None,
+                                button,
+                                location: pointer.current_location(),
+                            };
+                            pointer.set_grab(
+                                self,
+                                OceanPanGrab::start(start_data, output.name()),
+                                serial,
+                                Focus::Clear,
+                            );
+                            return;
+                        }
+                    }
+
                     // A plain (no-modifier) left click landing on a
                     // floating window's own edge resizes it directly, the
                     // same convention niri and Hyprland both use -- the
@@ -1236,6 +1314,7 @@ impl Smallvil {
                                     pointer.current_location(),
                                     threshold,
                                 ) {
+                                    self.ocean.raise_floating(&wl_surface);
                                     self.space.raise_element(&window, false);
                                     self.focus_window(Some(wl_surface.clone()), serial);
 
@@ -1323,6 +1402,7 @@ impl Smallvil {
                         let wl_surface = window.toplevel().unwrap().wl_surface().clone();
 
                         if !self.layout.contains(&wl_surface) {
+                            self.ocean.raise_floating(&wl_surface);
                             self.space.raise_element(&window, false);
                         }
                         self.focus_window(Some(wl_surface), serial);
@@ -1822,6 +1902,7 @@ impl Smallvil {
                     self.toast = Some(Toast::new(
                         &format!("Failed to spawn: {cmd}"),
                         ToastKind::Error,
+                        crate::ui_theme::UiTheme::from_config(&self.config),
                     ));
                     self.request_redraw();
                 }

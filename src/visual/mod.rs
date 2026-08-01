@@ -22,6 +22,7 @@ pub(crate) mod sway;
 pub(crate) mod swim;
 pub(crate) mod tab_strip;
 pub(crate) mod toast;
+pub(crate) mod ui_theme;
 pub(crate) mod viscosity;
 pub(crate) mod wallpaper;
 pub(crate) mod water_glass;

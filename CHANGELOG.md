@@ -4,6 +4,16 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 
 ## [Unreleased]
 
+### Added
+- Ocean now supports direct freeform canvas work rather than requiring every window to stay inside a reef layout. Starting the configured modifier+move or modifier+resize gesture on a reef tile detaches it at the exact same world rectangle and continues as a zoom-aware free drag; `toggle-floating` returns it to local tiling. Dragging genuinely empty canvas pans the camera directly at any zoom. The canvas button is configurable as `left`, `middle`, `right`, or `none`, and may optionally require `pointer_modifier`, so the interaction is a removable preset rather than a reserved hard-coded mouse action.
+- `show_config_reload_toast = false` disables successful config-reload confirmations while deliberately retaining parse-error and warning diagnostics.
+
+### Changed
+- TideWM-owned toast and configuration-warning UI is now modern rounded compositor chrome with a compact status mark, hierarchy, soft shadow, and themed border instead of a flat pill/full-width alert strip. Its panel, accent, urgent, and text colors derive automatically from the configured inactive/active/urgent border gradients; text switches light/dark from computed luminance, and corner radius follows configured window rounding. Theme reloads therefore recolor subsequent compositor UI without a separate fixed popup palette. A parse failure uses the persistent diagnostic alone rather than stacking a duplicate timed toast over its corner.
+
+### Fixed
+- Ocean floating-window stacking is now an explicit deterministic front-to-back list. This makes freely overlapping windows raise on click/drag reliably instead of exposing `HashMap` iteration order as accidental z-order.
+
 ## [0.90.0] - 2026-08-01
 
 Second major pre-release. `0.60.0` marked the feature-complete WM foundation

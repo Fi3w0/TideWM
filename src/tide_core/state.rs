@@ -2033,6 +2033,7 @@ impl Smallvil {
         let default_layout = config.default_layout;
         let master_orientation = config.master_orientation;
         let bsp_split_bias = config.bsp_split_bias;
+        let ui_theme = crate::ui_theme::UiTheme::from_config(&config);
         let ocean = if config.spatial_engine == crate::config::SpatialEngine::Ocean {
             crate::ocean::OceanSpace::from_config(&config.ocean)
         } else {
@@ -2173,6 +2174,7 @@ impl Smallvil {
                     crate::error_overlay::ConfigErrorOverlay::new(
                         message,
                         crate::error_overlay::OverlaySeverity::Error,
+                        ui_theme,
                     )
                 })
                 .or_else(|| {
@@ -2180,6 +2182,7 @@ impl Smallvil {
                         crate::error_overlay::ConfigErrorOverlay::new(
                             startup_config_warnings.join("; "),
                             crate::error_overlay::OverlaySeverity::Warning,
+                            ui_theme,
                         )
                     })
                 }),
@@ -8183,8 +8186,15 @@ impl Smallvil {
                 for device in self.known_touchpads.iter_mut() {
                     crate::input::apply_touchpad_config(&self.config.input.touchpad, device);
                 }
-                tracing::info!("Config reloaded");
-                self.toast = Some(Toast::new("Config reloaded", ToastKind::Info));
+                tracing::info!(
+                    reload_toast = self.config.show_config_reload_toast,
+                    "Config reloaded"
+                );
+                let ui_theme = crate::ui_theme::UiTheme::from_config(&self.config);
+                self.toast = self
+                    .config
+                    .show_config_reload_toast
+                    .then(|| Toast::new("Configuration reloaded", ToastKind::Info, ui_theme));
                 // Unlike a hard parse failure, these diagnostics don't mean
                 // the reload was rejected -- `new_config` above is already
                 // in effect. Still worth a persistent nudge instead of a
@@ -8196,6 +8206,7 @@ impl Smallvil {
                         Some(crate::error_overlay::ConfigErrorOverlay::new(
                             warnings.join("; "),
                             crate::error_overlay::OverlaySeverity::Warning,
+                            ui_theme,
                         ));
                 }
                 self.retile();
@@ -8211,14 +8222,16 @@ impl Smallvil {
                 // error phrasing ("config error in file <path> at line
                 // <N>: <message>") rather than inventing our own shape.
                 let message = format!("Config error {err}");
+                let ui_theme = crate::ui_theme::UiTheme::from_config(&self.config);
                 self.config_error_overlay = Some(crate::error_overlay::ConfigErrorOverlay::new(
                     &message,
                     crate::error_overlay::OverlaySeverity::Error,
+                    ui_theme,
                 ));
-                // Keep the established notification path for immediate
-                // visual feedback/debugging; the reserved panel is the
-                // persistent, readable diagnostic.
-                self.toast = Some(Toast::new("Config reload failed", ToastKind::Error));
+                // The persistent panel is itself immediate feedback. A
+                // second timed failure toast would duplicate the message and
+                // overlap the panel's top-right edge.
+                self.toast = None;
                 self.retile();
                 self.request_redraw();
             }

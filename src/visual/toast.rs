@@ -14,24 +14,27 @@ use smithay::{
         Kind,
     },
     backend::renderer::gles::GlesRenderer,
-    utils::{Physical, Size, Transform},
+    utils::{Logical, Physical, Point, Size, Transform},
 };
 
 use crate::animation::Animation;
 
 const FONT_BYTES: &[u8] = include_bytes!("../../assets/fonts/AdwaitaSans-Regular.ttf");
 const FONT_SIZE: f32 = 15.0;
+const LABEL_SIZE: f32 = 9.5;
 // Errors carry a lot more text (a file path plus a parser message) than the
 // one-line "Config reloaded" confirmation -- a smaller size keeps a long
 // error legible without the pill ballooning to an unreasonable width at the
 // same size ordinary short toasts use.
 const ERROR_FONT_SIZE: f32 = 12.0;
-const PADDING_X: i32 = 18;
-const PADDING_Y: i32 = 12;
 const MARGIN: i32 = 24;
-const CORNER_RADIUS: f32 = 12.0;
+const CARD_HEIGHT: i32 = 70;
+const CARD_INSET: i32 = 6;
+const ICON_WIDTH: i32 = 46;
+const TEXT_RIGHT_PAD: i32 = 22;
+const MIN_WIDTH: i32 = 270;
 
-const VISIBLE_FOR: Duration = Duration::from_millis(1800);
+const VISIBLE_FOR: Duration = Duration::from_millis(2400);
 const FADE_FOR: Duration = Duration::from_millis(450);
 
 /// Shared with `tab_strip.rs`, which composites text the same way.
@@ -57,15 +60,6 @@ impl ToastKind {
             ToastKind::Error => ERROR_FONT_SIZE,
         }
     }
-
-    /// Background tint, RGB. Kept in the water/aqua palette for info; a warm
-    /// tone for errors so a broken config is obviously not the happy path.
-    fn rgb(self) -> (u8, u8, u8) {
-        match self {
-            ToastKind::Info => (28, 94, 116),
-            ToastKind::Error => (140, 58, 58),
-        }
-    }
 }
 
 pub struct Toast {
@@ -81,8 +75,8 @@ pub struct Toast {
 }
 
 impl Toast {
-    pub fn new(message: &str, kind: ToastKind) -> Self {
-        Self::with_duration(message, kind, Some(VISIBLE_FOR))
+    pub fn new(message: &str, kind: ToastKind, theme: crate::ui_theme::UiTheme) -> Self {
+        Self::with_duration(message, kind, theme, Some(VISIBLE_FOR))
     }
 
     /// Never fades or times out -- stays exactly as shown until its owner
@@ -91,12 +85,17 @@ impl Toast {
     /// natural "you're done with this" signal is the *next* reload attempt
     /// replacing it, not a fixed timer someone may not finish reading
     /// before it's gone.
-    pub fn persistent(message: &str, kind: ToastKind) -> Self {
-        Self::with_duration(message, kind, None)
+    pub fn persistent(message: &str, kind: ToastKind, theme: crate::ui_theme::UiTheme) -> Self {
+        Self::with_duration(message, kind, theme, None)
     }
 
-    fn with_duration(message: &str, kind: ToastKind, visible_for: Option<Duration>) -> Self {
-        let (pixels, width, height) = rasterize_toast(message, kind);
+    fn with_duration(
+        message: &str,
+        kind: ToastKind,
+        theme: crate::ui_theme::UiTheme,
+        visible_for: Option<Duration>,
+    ) -> Self {
+        let (pixels, width, height) = rasterize_toast(message, kind, theme);
         let buffer = MemoryRenderBuffer::from_slice(
             &pixels,
             Fourcc::Argb8888,
@@ -166,28 +165,36 @@ impl Toast {
             }
         };
 
-        let location = ((output_size.w - self.size.0 - MARGIN) as f64, MARGIN as f64);
+        let location: Point<f64, Physical> =
+            ((output_size.w - self.size.0 - MARGIN) as f64, MARGIN as f64).into();
 
-        MemoryRenderBufferRenderElement::from_buffer(
+        match MemoryRenderBufferRenderElement::from_buffer(
             renderer,
             location,
             &self.buffer,
             Some(alpha),
             None,
-            None,
+            Some(Size::<i32, Logical>::from(self.size)),
             Kind::Unspecified,
-        )
-        .ok()
+        ) {
+            Ok(element) => Some(element),
+            Err(err) => {
+                tracing::warn!(?err, "Failed to import TideWM toast texture");
+                None
+            }
+        }
     }
 }
 
 /// Composites the toast into a straight-alpha ARGB8888 buffer: a rounded-rect
 /// background with a 1px antialiased edge, then the message text on top.
-fn rasterize_toast(message: &str, kind: ToastKind) -> (Vec<u8>, i32, i32) {
+fn rasterize_toast(
+    message: &str,
+    kind: ToastKind,
+    theme: crate::ui_theme::UiTheme,
+) -> (Vec<u8>, i32, i32) {
     let font = font();
     let font_size = kind.font_size();
-    let line_height = font_size * 1.3;
-
     let mut glyphs = Vec::with_capacity(message.len());
     let mut text_width = 0.0f32;
     for ch in message.chars() {
@@ -196,28 +203,91 @@ fn rasterize_toast(message: &str, kind: ToastKind) -> (Vec<u8>, i32, i32) {
         glyphs.push((metrics, bitmap));
     }
 
-    let width = (text_width.ceil() as i32 + PADDING_X * 2).max(PADDING_X * 2 + 1);
-    let height = (line_height.ceil() as i32) + PADDING_Y * 2;
+    let width =
+        (text_width.ceil() as i32 + ICON_WIDTH + TEXT_RIGHT_PAD + CARD_INSET * 2).max(MIN_WIDTH);
+    let height = CARD_HEIGHT + CARD_INSET * 2;
     let mut pixels = vec![0u8; (width * height * 4) as usize];
 
-    let (bg_r, bg_g, bg_b) = kind.rgb();
-    let bg_alpha = 235u8;
-
+    let card_x = CARD_INSET;
+    let card_y = CARD_INSET;
+    let card_w = width - CARD_INSET * 2;
+    let radius = theme.radius.min(CARD_HEIGHT / 2) as f32;
     for y in 0..height {
         for x in 0..width {
-            let edge_alpha = rounded_rect_coverage(x, y, width, height, CORNER_RADIUS);
-            if edge_alpha <= 0.0 {
+            let shadow = rounded_rect_coverage_local(
+                x,
+                y,
+                card_x - 3,
+                card_y + 3,
+                card_w + 6,
+                CARD_HEIGHT,
+                radius + 3.0,
+            );
+            if shadow > 0.0 {
+                put_pixel(&mut pixels, width, x, y, (0, 0, 0, (70.0 * shadow) as u8));
+            }
+            let coverage =
+                rounded_rect_coverage_local(x, y, card_x, card_y, card_w, CARD_HEIGHT, radius);
+            if coverage <= 0.0 {
                 continue;
             }
-            let alpha = (bg_alpha as f32 * edge_alpha) as u8;
-            put_pixel(&mut pixels, width, x, y, (bg_r, bg_g, bg_b, alpha));
+            let t = ((y - card_y) as f32 / CARD_HEIGHT as f32).clamp(0.0, 1.0);
+            let bg = crate::ui_theme::mix(theme.panel_from, theme.panel_to, t);
+            put_pixel(
+                &mut pixels,
+                width,
+                x,
+                y,
+                (bg[0], bg[1], bg[2], (242.0 * coverage) as u8),
+            );
+            let border = coverage
+                - rounded_rect_coverage_local(
+                    x,
+                    y,
+                    card_x + 1,
+                    card_y + 1,
+                    card_w - 2,
+                    CARD_HEIGHT - 2,
+                    (radius - 1.0).max(1.0),
+                );
+            if border > 0.0 {
+                let accent = theme.accent(kind == ToastKind::Error, x as f32 / width as f32);
+                blend_color_pixel(&mut pixels, width, x, y, accent, (border * 210.0) as u8);
+            }
         }
     }
 
-    // Baseline sits one line-height down from the top padding, leaving a small
-    // ascent/descent margin either side rather than kissing the pill's edge.
-    let baseline = PADDING_Y + (line_height * 0.8) as i32;
-    let mut pen_x = PADDING_X;
+    // Small themed current/orb: recognizable Tide chrome without baking a
+    // logo bitmap into every notification texture.
+    let accent = theme.accent(kind == ToastKind::Error, 0.35);
+    let center = (card_x + 23, card_y + CARD_HEIGHT / 2);
+    for y in center.1 - 11..=center.1 + 11 {
+        for x in center.0 - 11..=center.0 + 11 {
+            let distance = (((x - center.0).pow(2) + (y - center.1).pow(2)) as f32).sqrt();
+            let coverage = (11.5 - distance).clamp(0.0, 1.0);
+            if coverage > 0.0 {
+                blend_color_pixel(&mut pixels, width, x, y, accent, (coverage * 225.0) as u8);
+            }
+        }
+    }
+    for x in center.0 - 7..=center.0 + 7 {
+        let phase = (x - (center.0 - 7)) as f32 / 14.0 * std::f32::consts::TAU;
+        let y = center.1 + (phase.sin() * 2.0).round() as i32;
+        blend_color_pixel(&mut pixels, width, x, y, theme.text, 220);
+    }
+
+    draw_text(
+        &mut pixels,
+        (width, height),
+        "TIDEWM",
+        card_x + ICON_WIDTH,
+        card_y + 22,
+        LABEL_SIZE,
+        theme.muted_text,
+    );
+
+    let baseline = card_y + 48;
+    let mut pen_x = card_x + ICON_WIDTH;
 
     for (metrics, bitmap) in &glyphs {
         let glyph_x0 = pen_x + metrics.xmin;
@@ -234,7 +304,7 @@ fn rasterize_toast(message: &str, kind: ToastKind) -> (Vec<u8>, i32, i32) {
                 if x < 0 || y < 0 || x >= width || y >= height {
                     continue;
                 }
-                blend_text_pixel(&mut pixels, width, x, y, coverage);
+                blend_color_pixel(&mut pixels, width, x, y, theme.text, coverage);
             }
         }
 
@@ -249,8 +319,16 @@ fn rasterize_toast(message: &str, kind: ToastKind) -> (Vec<u8>, i32, i32) {
 
 /// 1.0 fully inside, 0.0 fully outside, feathered over ~1px at the rounded
 /// corners so the pill doesn't look jagged.
-fn rounded_rect_coverage(x: i32, y: i32, width: i32, height: i32, radius: f32) -> f32 {
-    let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+fn rounded_rect_coverage_local(
+    x: i32,
+    y: i32,
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+    radius: f32,
+) -> f32 {
+    let (fx, fy) = ((x - left) as f32 + 0.5, (y - top) as f32 + 0.5);
     let (fw, fh) = (width as f32, height as f32);
 
     let dx = (fx - fw / 2.0).abs() - (fw / 2.0 - radius);
@@ -273,14 +351,44 @@ fn put_pixel(pixels: &mut [u8], width: i32, x: i32, y: i32, (r, g, b, a): (u8, u
     pixels[i + 3] = a;
 }
 
-fn blend_text_pixel(pixels: &mut [u8], width: i32, x: i32, y: i32, coverage: u8) {
+fn blend_color_pixel(pixels: &mut [u8], width: i32, x: i32, y: i32, rgb: [u8; 3], coverage: u8) {
     let i = ((y * width + x) * 4) as usize;
     let t = coverage as f32 / 255.0;
-    for channel in 0..3 {
+    let [r, g, b] = rgb;
+    for (channel, target) in [b, g, r].into_iter().enumerate() {
         let bg = pixels[i + channel] as f32;
-        pixels[i + channel] = (bg + (255.0 - bg) * t) as u8;
+        pixels[i + channel] = (bg + (target as f32 - bg) * t) as u8;
     }
     pixels[i + 3] = pixels[i + 3].max(coverage);
+}
+
+fn draw_text(
+    pixels: &mut [u8],
+    canvas: (i32, i32),
+    text: &str,
+    x0: i32,
+    baseline: i32,
+    size: f32,
+    rgb: [u8; 3],
+) {
+    let (width, height) = canvas;
+    let mut pen_x = x0;
+    for ch in text.chars() {
+        let (metrics, bitmap) = font().rasterize(ch, size);
+        let glyph_x = pen_x + metrics.xmin;
+        let glyph_y = baseline - metrics.ymin - metrics.height as i32;
+        for gy in 0..metrics.height {
+            for gx in 0..metrics.width {
+                let coverage = bitmap[gy * metrics.width + gx];
+                let x = glyph_x + gx as i32;
+                let y = glyph_y + gy as i32;
+                if coverage > 0 && x >= 0 && y >= 0 && x < width && y < height {
+                    blend_color_pixel(pixels, width, x, y, rgb, coverage);
+                }
+            }
+        }
+        pen_x += metrics.advance_width.round().max(1.0) as i32;
+    }
 }
 
 #[cfg(test)]
@@ -289,7 +397,21 @@ mod tests {
 
     #[test]
     fn only_timed_toasts_request_animation_frames() {
-        assert!(Toast::new("ok", ToastKind::Info).needs_continued_redraw());
-        assert!(!Toast::persistent("error", ToastKind::Error).needs_continued_redraw());
+        let theme = crate::ui_theme::UiTheme::for_test();
+        assert!(Toast::new("ok", ToastKind::Info, theme).needs_continued_redraw());
+        assert!(!Toast::persistent("error", ToastKind::Error, theme).needs_continued_redraw());
+    }
+
+    #[test]
+    fn themed_card_raster_has_visible_panel_border_and_text() {
+        let (pixels, width, height) = rasterize_toast(
+            "Configuration reloaded",
+            ToastKind::Info,
+            crate::ui_theme::UiTheme::for_test(),
+        );
+        assert!(width >= MIN_WIDTH);
+        assert_eq!(height, CARD_HEIGHT + CARD_INSET * 2);
+        let visible = pixels.chunks_exact(4).filter(|pixel| pixel[3] > 0).count();
+        assert!(visible > (width * CARD_HEIGHT / 2) as usize);
     }
 }

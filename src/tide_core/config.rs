@@ -264,6 +264,28 @@ pub struct OceanBookmarkConfig {
     pub y: f64,
 }
 
+/// Pointer button used to grab otherwise-empty Ocean canvas. It is explicit
+/// config state rather than compositor policy so Ocean does not permanently
+/// reserve a mouse button the user cannot reclaim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OceanPanButton {
+    Disabled,
+    Left,
+    Middle,
+    Right,
+}
+
+impl OceanPanButton {
+    pub(crate) fn matches(self, button: u32) -> bool {
+        match self {
+            Self::Disabled => false,
+            Self::Left => button == 0x110,
+            Self::Right => button == 0x111,
+            Self::Middle => button == 0x112,
+        }
+    }
+}
+
 /// Startup shape and keyboard travel scale for the Ocean engine. Empty reef
 /// and bookmark lists intentionally produce an output-sized `main` reef and
 /// a `home` bookmark at the world origin, so selecting Ocean is sufficient
@@ -271,6 +293,15 @@ pub struct OceanBookmarkConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct OceanConfig {
     pub camera_step: i32,
+    /// Dragging a reef tile with the normal move/resize gesture detaches it
+    /// into a freely placed world rectangle. Reefs remain available as local
+    /// tiling zones through the ordinary toggle-floating action.
+    pub freeform_windows: bool,
+    /// Empty-canvas camera grab. `Disabled` leaves every button untouched.
+    pub canvas_pan_button: OceanPanButton,
+    /// When true, the configured `pointer_modifier` must accompany the canvas
+    /// button. False gives the Drift-style direct empty-canvas drag.
+    pub canvas_pan_requires_modifier: bool,
     /// Structural depth actions can be disabled without giving up the
     /// continuous 2D canvas itself.
     pub depth_enabled: bool,
@@ -301,6 +332,9 @@ impl Default for OceanConfig {
     fn default() -> Self {
         Self {
             camera_step: 480,
+            freeform_windows: true,
+            canvas_pan_button: OceanPanButton::Left,
+            canvas_pan_requires_modifier: false,
             depth_enabled: true,
             zoom_enabled: true,
             modifier_zoom: true,
@@ -493,6 +527,10 @@ pub struct Config {
     /// (or set it `false`) to stop seeing it. Not read on reload -- only
     /// checked once, at startup (see `main.rs`).
     pub show_welcome_hint: bool,
+    /// Shows the short success card after a hot reload. Parse failures and
+    /// warnings remain visible regardless: hiding diagnostics would make a
+    /// broken configuration harder to repair.
+    pub show_config_reload_toast: bool,
     pub water_effects: bool,
     /// Strength of TideWM's render-only interactive move/resize damping.
     /// `1.0` is the default half-life multiplier, `0.0` disables it, and
@@ -795,6 +833,7 @@ impl Config {
             ocean: raw.ocean,
             pointer_modifier,
             show_welcome_hint: raw.show_welcome_hint,
+            show_config_reload_toast: raw.show_config_reload_toast,
             water_effects: raw.water_effects,
             viscosity: raw.viscosity.clamp(0.0, 4.0),
             connected_vessels: raw.connected_vessels,
@@ -1021,6 +1060,7 @@ struct RawConfig {
     /// Resolved after Waves variable substitution in `Config::from_raw`.
     pointer_modifier: String,
     show_welcome_hint: bool,
+    show_config_reload_toast: bool,
     water_effects: bool,
     viscosity: f64,
     connected_vessels: ConnectedVesselsConfig,
@@ -1173,6 +1213,7 @@ impl Default for RawConfig {
             // the on-screen hint's own "delete this to dismiss" advice
             // (welcome.rs), that must resolve to off, not back to on.
             show_welcome_hint: false,
+            show_config_reload_toast: true,
             water_effects: true,
             viscosity: 1.0,
             connected_vessels: ConnectedVesselsConfig::default(),
@@ -3026,6 +3067,9 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
             raw.pointer_modifier = value.to_string()
         }
         "show_welcome_hint" => set_bool(&mut raw.show_welcome_hint, key, value),
+        "show_config_reload_toast" | "config_reload_toast" => {
+            set_bool(&mut raw.show_config_reload_toast, key, value)
+        }
         "water_effects" => set_bool(&mut raw.water_effects, key, value),
         "viscosity" => match parse_viscosity(value) {
             Some(value) => raw.viscosity = value,
@@ -3848,6 +3892,29 @@ fn apply_classic_depth_block(cfg: &mut ClassicDepthConfig, body: &[waves::Entry]
 fn apply_ocean_block(cfg: &mut OceanConfig, body: &[waves::Entry]) {
     for entry in body {
         match entry {
+            waves::Entry::Assign(key, value) if key == "freeform_windows" => {
+                set_bool(&mut cfg.freeform_windows, "ocean.freeform_windows", value)
+            }
+            waves::Entry::Assign(key, value) if key == "canvas_pan_button" => {
+                cfg.canvas_pan_button = match value.trim().to_ascii_lowercase().as_str() {
+                    "none" | "disabled" | "off" => OceanPanButton::Disabled,
+                    "left" | "primary" => OceanPanButton::Left,
+                    "middle" => OceanPanButton::Middle,
+                    "right" | "secondary" => OceanPanButton::Right,
+                    _ => {
+                        tracing::warn!(
+                            value,
+                            "Expected ocean.canvas_pan_button left, middle, right, or none; ignoring"
+                        );
+                        cfg.canvas_pan_button
+                    }
+                }
+            }
+            waves::Entry::Assign(key, value) if key == "canvas_pan_requires_modifier" => set_bool(
+                &mut cfg.canvas_pan_requires_modifier,
+                "ocean.canvas_pan_requires_modifier",
+                value,
+            ),
             waves::Entry::Assign(key, value) if key == "camera_step" => {
                 match value.parse::<i32>() {
                     Ok(value) if (32..=8192).contains(&value) => cfg.camera_step = value,
@@ -5774,6 +5841,7 @@ terminal = $wave(kitty, alacritty, foot, xterm)
 pointer_modifier = $mod             # left-drag moves; right-drag resizes
 spatial_engine = classic            # classic or ocean; takes effect on launch
 show_welcome_hint = true
+show_config_reload_toast = true     # false hides successful reload cards only
 water_effects = true
 viscosity = 1.0                    # 0 off; higher = slower drag/resize settling
 connected_vessels {
@@ -5809,6 +5877,9 @@ connected_vessels {
 # tiling zones; bookmarks are named camera return points. With no explicit
 # reefs, Ocean creates one output-sized `main` reef at the world origin.
 # ocean {
+#     freeform_windows = true       # move/resize drag detaches a reef tile
+#     canvas_pan_button = left      # left middle right none
+#     canvas_pan_requires_modifier = false # true requires pointer_modifier
 #     camera_step = 480
 #     camera_animation_ms = 260     # 0 makes camera actions immediate
 #     camera_sway = 18              # curved canvas glide; 0 = straight
@@ -6492,6 +6563,7 @@ mod tests {
                 ..Default::default()
             },
             show_welcome_hint: false,
+            show_config_reload_toast: true,
             water_effects: true,
             viscosity: 1.0,
             connected_vessels: ConnectedVesselsConfig::default(),
@@ -6874,6 +6946,31 @@ mod tests {
                 ..Default::default()
             }
         );
+    }
+
+    #[test]
+    fn ocean_direct_manipulation_and_reload_card_are_user_configurable() {
+        let entries = waves::parse(
+            "show_config_reload_toast = false\n\
+             ocean {\n\
+                 freeform_windows = false\n\
+                 canvas_pan_button = middle\n\
+                 canvas_pan_requires_modifier = true\n\
+             }\n",
+            Path::new("<ocean-pointer-test>"),
+        )
+        .unwrap();
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        assert!(!config.show_config_reload_toast);
+        assert!(!config.ocean.freeform_windows);
+        assert_eq!(config.ocean.canvas_pan_button, OceanPanButton::Middle);
+        assert!(config.ocean.canvas_pan_requires_modifier);
+
+        let defaults = parse_default_config();
+        assert!(defaults.show_config_reload_toast);
+        assert!(defaults.ocean.freeform_windows);
+        assert_eq!(defaults.ocean.canvas_pan_button, OceanPanButton::Left);
+        assert!(!defaults.ocean.canvas_pan_requires_modifier);
     }
 
     #[test]

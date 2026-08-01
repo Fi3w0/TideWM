@@ -153,6 +153,10 @@ pub struct OceanSpace {
     /// not spatial ownership; every output can render the same window.
     entry_outputs: HashMap<WlSurface, String>,
     floating: HashMap<WlSurface, (Window, Rectangle<i32, Logical>)>,
+    /// Front-to-back order for freely placed windows. A HashMap's iteration
+    /// order is deliberately unstable and must never become visible stacking
+    /// policy once Ocean windows are allowed to overlap arbitrarily.
+    floating_stack: Vec<WlSurface>,
     screen_pins: HashMap<WlSurface, OceanScreenPin>,
 }
 
@@ -211,6 +215,7 @@ impl OceanSpace {
             runtime_bookmarks: HashSet::new(),
             entry_outputs: HashMap::new(),
             floating: HashMap::new(),
+            floating_stack: Vec::new(),
             screen_pins: HashMap::new(),
         }
     }
@@ -549,6 +554,7 @@ impl OceanSpace {
         }
         self.entry_outputs.remove(surface);
         self.floating.remove(surface);
+        self.floating_stack.retain(|candidate| candidate != surface);
         self.screen_pins.remove(surface);
     }
 
@@ -606,6 +612,7 @@ impl OceanSpace {
             reef.layout.remove(surface);
         }
         self.floating.insert(surface.clone(), (window, rect));
+        self.raise_floating(surface);
         true
     }
 
@@ -619,8 +626,18 @@ impl OceanSpace {
         let Some((window, _)) = self.floating.remove(surface) else {
             return false;
         };
+        self.floating_stack.retain(|candidate| candidate != surface);
         self.screen_pins.remove(surface);
         self.insert(output, viewport, window, target);
+        true
+    }
+
+    pub fn raise_floating(&mut self, surface: &WlSurface) -> bool {
+        if !self.floating.contains_key(surface) {
+            return false;
+        }
+        self.floating_stack.retain(|candidate| candidate != surface);
+        self.floating_stack.insert(0, surface.clone());
         true
     }
 
@@ -789,8 +806,9 @@ impl OceanSpace {
         gap: i32,
         split_bias: SplitBias,
     ) -> Vec<(Window, Rectangle<i32, Logical>, PlacementKind)> {
-        self.floating
-            .values()
+        self.floating_stack
+            .iter()
+            .filter_map(|surface| self.floating.get(surface))
             .map(|(window, rect)| (window.clone(), *rect, PlacementKind::Floating))
             .chain(
                 self.tiled_layouts(gap, split_bias)

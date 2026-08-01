@@ -39,6 +39,10 @@ independently panning and zooming per-output cameras:
 - **Y** is physical window depth/position, not a row of disguised workspaces.
 - Reefs provide local BSP/master/cascade organization without dividing the
   world into workspace pages.
+- Reefs are optional organization, not a movement restriction: the configured
+  move or resize drag detaches a tile into a freely placed world rectangle,
+  while dragging empty canvas pans the camera at the current zoom. Overlapping
+  floaters keep an explicit front-to-back stack and clicks raise predictably.
 - Bookmarks provide named return points and a compatibility surface for tools
   that expect workspace-like destinations.
 - An optional camera-anchored adaptive guide field provides scale and motion
@@ -74,10 +78,12 @@ content-size policy, plus tiled/floating and normal/fullscreen presentation
 flags. Classic and Ocean now both produce this contract from their own
 authoritative state.
 
-Waves owns every keyboard and pointer binding. Selecting an engine or enabling
-Depth never inserts hidden chords; the generated Alt/Super/Ctrl/P layers are
-editable examples. `Ctrl+Alt+Escape` is the separate temporary recovery path
-for a self-locked config.
+Waves owns every keyboard binding, and pointer gestures are explicit config
+(`pointer_modifier` plus Ocean's selectable/disableable canvas button).
+Selecting an engine or enabling Depth never inserts hidden keyboard chords;
+the generated Alt/Super/Ctrl/P layers are editable examples.
+`Ctrl+Alt+Escape` is the separate temporary recovery path for a self-locked
+config.
 
 ## Delivery order
 

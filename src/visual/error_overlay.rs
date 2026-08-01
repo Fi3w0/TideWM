@@ -19,10 +19,13 @@ use smithay::{
     utils::{Logical, Physical, Point, Size, Transform},
 };
 
-pub const PANEL_HEIGHT: i32 = 96;
+pub const PANEL_HEIGHT: i32 = 116;
 const TITLE_SIZE: f32 = 16.0;
 const BODY_SIZE: f32 = 13.0;
-const PAD_X: i32 = 22;
+const LABEL_SIZE: f32 = 9.5;
+const CARD_MARGIN_X: i32 = 18;
+const CARD_MARGIN_Y: i32 = 9;
+const PAD_X: i32 = 58;
 const MAX_CACHED_WIDTHS: usize = 4;
 
 /// `Error` means the file failed to parse and the previous config is still
@@ -38,14 +41,20 @@ pub enum OverlaySeverity {
 pub struct ConfigErrorOverlay {
     message: String,
     severity: OverlaySeverity,
+    theme: crate::ui_theme::UiTheme,
     buffers: HashMap<i32, MemoryRenderBuffer>,
 }
 
 impl ConfigErrorOverlay {
-    pub fn new(message: impl Into<String>, severity: OverlaySeverity) -> Self {
+    pub fn new(
+        message: impl Into<String>,
+        severity: OverlaySeverity,
+        theme: crate::ui_theme::UiTheme,
+    ) -> Self {
         Self {
             message: message.into(),
             severity,
+            theme,
             buffers: HashMap::new(),
         }
     }
@@ -70,8 +79,10 @@ impl ConfigErrorOverlay {
             if self.buffers.len() >= MAX_CACHED_WIDTHS {
                 self.buffers.clear();
             }
-            self.buffers
-                .insert(width, build_buffer(&self.message, self.severity, width));
+            self.buffers.insert(
+                width,
+                build_buffer(&self.message, self.severity, self.theme, width),
+            );
         }
         let buffer = self.buffers.get(&width)?;
         let location: Point<f64, Physical> = (0.0, logical_y as f64 * scale).into();
@@ -88,53 +99,108 @@ impl ConfigErrorOverlay {
     }
 }
 
-fn build_buffer(message: &str, severity: OverlaySeverity, width: i32) -> MemoryRenderBuffer {
+fn build_buffer(
+    message: &str,
+    severity: OverlaySeverity,
+    theme: crate::ui_theme::UiTheme,
+    width: i32,
+) -> MemoryRenderBuffer {
     let mut pixels = vec![0u8; (width * PANEL_HEIGHT * 4) as usize];
+    let left = CARD_MARGIN_X;
+    let top = CARD_MARGIN_Y;
+    let card_width = (width - CARD_MARGIN_X * 2).max(1);
+    let card_height = PANEL_HEIGHT - CARD_MARGIN_Y * 2;
+    let radius = theme.radius.min(card_height / 2) as f32;
     for y in 0..PANEL_HEIGHT {
         for x in 0..width {
-            let t = x as f32 / width as f32;
+            let shadow = rounded_rect_coverage(
+                x,
+                y,
+                left - 3,
+                top + 4,
+                card_width + 6,
+                card_height,
+                radius + 3.0,
+            );
+            if shadow > 0.0 {
+                put_pixel(&mut pixels, width, x, y, (0, 0, 0, (72.0 * shadow) as u8));
+            }
+            let coverage = rounded_rect_coverage(x, y, left, top, card_width, card_height, radius);
+            if coverage <= 0.0 {
+                continue;
+            }
+            let t = ((x - left) as f32 / card_width as f32).clamp(0.0, 1.0);
+            let bg = crate::ui_theme::mix(theme.panel_from, theme.panel_to, t);
             put_pixel(
                 &mut pixels,
                 width,
                 x,
                 y,
-                (111 + (18.0 * t) as u8, 35, 43, 248),
+                (bg[0], bg[1], bg[2], (244.0 * coverage) as u8),
             );
+            let inner = rounded_rect_coverage(
+                x,
+                y,
+                left + 1,
+                top + 1,
+                card_width - 2,
+                card_height - 2,
+                (radius - 1.0).max(1.0),
+            );
+            let border = (coverage - inner).max(0.0);
+            if border > 0.0 {
+                let accent = theme.accent(severity == OverlaySeverity::Error, t);
+                blend_text_pixel(&mut pixels, width, x, y, accent, (border * 220.0) as u8);
+            }
         }
     }
-    // Aqua edge ties the diagnostic panel to Tide's palette while the warm
-    // body remains unmistakably an error.
-    for y in PANEL_HEIGHT - 3..PANEL_HEIGHT {
-        for x in 0..width {
-            put_pixel(&mut pixels, width, x, y, (61, 188, 215, 255));
+
+    let accent = theme.accent(severity == OverlaySeverity::Error, 0.25);
+    let center = (left + 25, top + card_height / 2);
+    for y in center.1 - 13..=center.1 + 13 {
+        for x in center.0 - 13..=center.0 + 13 {
+            let distance = (((x - center.0).pow(2) + (y - center.1).pow(2)) as f32).sqrt();
+            let coverage = (13.5 - distance).clamp(0.0, 1.0);
+            if coverage > 0.0 {
+                blend_text_pixel(&mut pixels, width, x, y, accent, (coverage * 220.0) as u8);
+            }
         }
     }
 
     let font = crate::toast::font();
     let title = match severity {
-        OverlaySeverity::Error => "TideWM configuration error",
-        OverlaySeverity::Warning => "TideWM configuration warning",
+        OverlaySeverity::Error => "Configuration needs attention",
+        OverlaySeverity::Warning => "Configuration note",
     };
     draw_line(
         &mut pixels,
         (width, PANEL_HEIGHT),
         font,
-        title,
-        PAD_X,
-        25,
-        (TITLE_SIZE, (255, 244, 244)),
+        "TIDEWM",
+        left + PAD_X,
+        top + 19,
+        (LABEL_SIZE, theme.muted_text),
     );
-    let available = (width - PAD_X * 2).max(1);
-    let lines = wrap_text(font, message, BODY_SIZE, available, 3);
+    draw_line(
+        &mut pixels,
+        (width, PANEL_HEIGHT),
+        font,
+        title,
+        left + PAD_X,
+        top + 42,
+        (TITLE_SIZE, theme.text),
+    );
+    let available = (width - left - PAD_X - CARD_MARGIN_X - 18).max(1);
+    let lines = wrap_text(font, message, BODY_SIZE, available, 2);
     for (index, line) in lines.iter().enumerate() {
         draw_line(
             &mut pixels,
             (width, PANEL_HEIGHT),
             font,
             line,
-            PAD_X,
-            48 + index as i32 * 17,
-            (BODY_SIZE, (255, 224, 226)),
+            left + PAD_X,
+            top + 66 + index as i32 * 17,
+            (BODY_SIZE, theme.muted_text),
         );
     }
 
@@ -191,7 +257,7 @@ fn draw_line(
     text: &str,
     x0: i32,
     baseline: i32,
-    style: (f32, (u8, u8, u8)),
+    style: (f32, [u8; 3]),
 ) {
     let (size, rgb) = style;
     let (width, height) = canvas;
@@ -225,21 +291,36 @@ fn put_pixel(pixels: &mut [u8], width: i32, x: i32, y: i32, (r, g, b, a): (u8, u
     pixels[i + 3] = a;
 }
 
-fn blend_text_pixel(
-    pixels: &mut [u8],
-    width: i32,
-    x: i32,
-    y: i32,
-    rgb: (u8, u8, u8),
-    coverage: u8,
-) {
+fn blend_text_pixel(pixels: &mut [u8], width: i32, x: i32, y: i32, rgb: [u8; 3], coverage: u8) {
     let i = ((y * width + x) * 4) as usize;
     let t = coverage as f32 / 255.0;
-    let (r, g, b) = rgb;
+    let [r, g, b] = rgb;
     pixels[i] = (pixels[i] as f32 + (b as f32 - pixels[i] as f32) * t) as u8;
     pixels[i + 1] = (pixels[i + 1] as f32 + (g as f32 - pixels[i + 1] as f32) * t) as u8;
     pixels[i + 2] = (pixels[i + 2] as f32 + (r as f32 - pixels[i + 2] as f32) * t) as u8;
     pixels[i + 3] = pixels[i + 3].max(coverage);
+}
+
+fn rounded_rect_coverage(
+    x: i32,
+    y: i32,
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+    radius: f32,
+) -> f32 {
+    let fx = (x - left) as f32 + 0.5;
+    let fy = (y - top) as f32 + 0.5;
+    let fw = width as f32;
+    let fh = height as f32;
+    let dx = (fx - fw / 2.0).abs() - (fw / 2.0 - radius);
+    let dy = (fy - fh / 2.0).abs() - (fh / 2.0 - radius);
+    if dx <= 0.0 || dy <= 0.0 {
+        return 1.0;
+    }
+    let distance = (dx * dx + dy * dy).sqrt();
+    (radius - distance + 0.5).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
