@@ -47,8 +47,13 @@ independently panning and zooming per-output cameras:
   reattach a floater released near a tile, preserving a custom attached size
   while the reef tree remains the ownership authority; the tree itself stays
   frozen for the gesture, so the dragged window's render placement is
-  overridden separately to lift it out and follow the pointer, with the
-  current swap target picking up a magnet-style border highlight.
+  overridden separately to lift it out and follow the pointer (it renders as
+  `PlacementKind::Floating` for the drag's duration, so a `floating_only`
+  border/shadow/rounding rule applies to it only while dragging), with the
+  current swap target picking up a magnet-style border highlight. Drag feel
+  itself is reasoned from the render pipeline, not live-verified -- nested
+  winit has no pointer-drag injection, the same gap viscosity and the other
+  interactive grabs carry.
 - Bookmarks provide named return points and a compatibility surface for tools
   that expect workspace-like destinations.
 - An optional camera-anchored adaptive guide field provides scale and motion
