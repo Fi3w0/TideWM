@@ -1917,8 +1917,17 @@ impl Smallvil {
                 // an overlapping finger-count config still favors bound
                 // swipe actions/workspace navigation, matching how those
                 // already take priority over everything below them.
+                // `!is_grabbed()` mirrors the same guard every mouse-driven
+                // `set_grab` call in the button handler above uses: without
+                // it, an unrelated concurrent mouse drag could be
+                // superseded by this gesture starting mid-flight, and
+                // `set_grab` unconditionally calls the superseded grab's
+                // own `unset()` -- which now commits a tile swap/reattach
+                // (see `OceanTileMoveGrab`/`TileMoveGrab`'s `commit`) based
+                // on whatever position it last saw, not a real release.
                 let modifier_pan = matches!(self.session_lock, SessionLock::Unlocked)
                     && self.exclusive_layer().is_none()
+                    && !self.seat.get_pointer().unwrap().is_grabbed()
                     && self
                         .config
                         .input
