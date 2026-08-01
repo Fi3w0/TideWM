@@ -25,19 +25,11 @@ A water-styled Wayland compositor, built in Rust on Smithay.
 
 Full modern tiling on the fundamentals: BSP and master/stack, workspaces, groups, multi-monitor, layer-shell, IPC, with the water identity now taking shape on top. Built for low-end hardware first: the RAM budget scales with what you turn on, from ~600MB PSS for a plain tiling setup up to a 2GB ceiling for a full ocean/rice config with every effect enabled.
 
-## Screenshots
+## Showcase
 
-<div align="center">
-<img src="share/media/screenshot-classic-tiling.png" width="49%" alt="Classic BSP tiling, real AMD hardware">
-<img src="share/media/screenshot-ocean-canvas.png" width="49%" alt="Ocean spatial engine: reef tiling on the continuous canvas">
-<br>
-<img src="share/media/screenshot-ocean-zoom.png" width="49%" alt="Ocean camera zoomed in, adaptive guide grid and center marker">
-<img src="share/media/screenshot-window-grouping.png" width="49%" alt="Window grouping with the first-party tab strip">
-<br>
-<img src="share/media/screenshot-themed-toast.png" width="49%" alt="Compositor toast, automatically themed from the border palette">
-</div>
-
-A short screen recording (no audio) of real interactive use is at `share/media/demo.mp4` in this repo.
+<video src="share/media/demo-clasic.mp4" controls width="960">
+  Your browser does not support embedded video. [Download the demo](share/media/demo-clasic.mp4).
+</video>
 
 ## About
 
