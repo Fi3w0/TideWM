@@ -870,27 +870,40 @@ fn run_ipc_action(state: &mut Smallvil, action: config::Action) -> Result<(), St
 }
 
 fn outputs_json(state: &Smallvil) -> serde_json::Value {
+    let ocean_engine = state.config.spatial_engine == crate::config::SpatialEngine::Ocean;
     let outputs: Vec<_> = state
         .space
         .outputs()
         .map(|output| {
             let loc = output.current_location();
             let mode = output.current_mode();
-            json!({
+            let mut entry = json!({
                 "name": output.name(),
                 "position": [loc.x, loc.y],
                 "size": mode.map(|m| [m.size.w, m.size.h]),
                 "refresh_mhz": mode.map(|m| m.refresh),
                 "scale": output.current_scale().fractional_scale(),
                 "transform": format!("{:?}", output.current_transform()),
-                "active_workspace": state.layout.active_workspace(&output.name()),
-            })
+                "active_workspace": if ocean_engine {
+                    serde_json::Value::Null
+                } else {
+                    json!(state.layout.active_workspace(&output.name()))
+                },
+            });
+            if ocean_engine {
+                let camera = state.ocean.camera(&output.name()).origin;
+                entry["camera_origin"] = json!([camera.x, camera.y]);
+            }
+            entry
         })
         .collect();
     json!(outputs)
 }
 
 fn workspaces_json(state: &Smallvil) -> serde_json::Value {
+    if state.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+        return json!([]);
+    }
     let mut keys: HashSet<(String, u32)> =
         state.layout.populated_workspaces().into_iter().collect();
     for output in state.space.outputs() {
@@ -968,19 +981,30 @@ fn window_json(
     let surface = toplevel.wl_surface();
     let (app_id, title) = state.toplevel_identity(surface);
 
-    let is_floating = state.floating_workspace.contains_key(surface);
-    let output = state
-        .layout
-        .output_of(surface)
-        .map(str::to_string)
-        .or_else(|| {
-            state
-                .floating_workspace
-                .get(surface)
-                .map(|tag| tag.output.clone())
-        })
-        .or_else(|| state.output_for_window(window).map(|o| o.name()));
-    let workspace = if is_floating {
+    let ocean_engine = state.config.spatial_engine == crate::config::SpatialEngine::Ocean;
+    let is_floating = if ocean_engine {
+        state.ocean.floating_rect(surface).is_some()
+    } else {
+        state.floating_workspace.contains_key(surface)
+    };
+    let output = if ocean_engine {
+        None
+    } else {
+        state
+            .layout
+            .output_of(surface)
+            .map(str::to_string)
+            .or_else(|| {
+                state
+                    .floating_workspace
+                    .get(surface)
+                    .map(|tag| tag.output.clone())
+            })
+            .or_else(|| state.output_for_window(window).map(|o| o.name()))
+    };
+    let workspace = if ocean_engine {
+        None
+    } else if is_floating {
         state.floating_workspace.get(surface).map(|t| t.workspace)
     } else {
         state.layout.workspace_of(surface)
@@ -1004,6 +1028,9 @@ fn window_json(
             && !state.fullscreen.contains_key(surface),
         "focused": focused == Some(surface),
     });
+    if ocean_engine {
+        entry["entry_output"] = json!(state.ocean.entry_output(surface));
+    }
     if let Some(workspace) = workspace {
         if crate::state::is_scratchpad_workspace(workspace) {
             entry["scratchpad"] = json!(state.scratchpad_name_of(workspace).unwrap_or(""));

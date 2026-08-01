@@ -1051,6 +1051,11 @@ The same set of strings works after `bind ... =` at the top level or inside a `s
 `$XDG_RUNTIME_DIR/tidewm-<pid>.sock`: one JSON request line in, one JSON response line out, per connection. Read queries return structured data; `{"request": "action", "action": "<any string above>"}` runs any action string. `{"request":"batch","actions":["workspace:2","spawn:kitty"]}` validates the complete list first, then executes up to 128 actions in order, so an invalid later item cannot leave a half-run batch. This is genuinely the same path a keybind press uses (`config::parse_action` → `Smallvil::run_action`).
 
 Queries: `outputs`, `workspaces`, `windows`, `focused-window`, `active-submap`.
+In Ocean, `outputs` reports `active_workspace: null` and the current
+two-axis `camera_origin`; `workspaces` returns an empty list because bookmarks
+are navigation targets rather than real workspaces. Ocean window entries use
+`workspace: null` and `output: null` (the same world can be visible through
+multiple outputs), plus `entry_output` as a non-owning input/focus hint.
 
 **Subscribe (event stream).** The same socket also supports a long-lived mode for reactive widgets (a waybar module, an eww `deflisten`, a QuickShell socket reader) that shouldn't have to poll the queries above. Send `{"request": "subscribe", "events": ["window", "workspace", "focus", "urgent", "depth", "config"]}` as the first and only request on a fresh connection; omitting `events` (or sending an empty array) subscribes to all six channels. The server replies with one ack line (`{"ok": true, "data": {"subscription_id": <n>, "events": [...]}}` — the resolved channel list, so a typo'd filter is visible at handshake time instead of silently matching nothing), then keeps the connection open and writes one `{"event": "<kind>", "data": ...}` line per matching change until the client disconnects. The connection's lifetime is the subscription's lifetime.
 
