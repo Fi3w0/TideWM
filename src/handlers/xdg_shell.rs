@@ -135,6 +135,7 @@ impl XdgShellHandler for Smallvil {
                 return;
             };
 
+            let last_location = start_data.location;
             let grab = MoveSurfaceGrab {
                 start_data,
                 window,
@@ -144,6 +145,10 @@ impl XdgShellHandler for Smallvil {
                     .entry_output(wl_surface)
                     .map(|output| self.ocean.camera(output).zoom)
                     .unwrap_or(1.0),
+                smart_attach_ocean: self.config.spatial_engine
+                    == crate::config::SpatialEngine::Ocean
+                    && self.config.ocean.smart_tiling,
+                last_location,
             };
 
             pointer.set_grab(self, grab, serial, Focus::Clear);

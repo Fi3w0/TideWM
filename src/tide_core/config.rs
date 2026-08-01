@@ -297,6 +297,13 @@ pub struct OceanConfig {
     /// into a freely placed world rectangle. Reefs remain available as local
     /// tiling zones through the ordinary toggle-floating action.
     pub freeform_windows: bool,
+    /// Keeps tiled Ocean move drags inside the reef and reattaches floating
+    /// windows released near an existing tile.
+    pub smart_tiling: bool,
+    /// Maximum screen-pixel distance for floating-to-tiled attachment.
+    pub smart_tiling_snap_distance: i32,
+    /// Preserve a floating window's current size when it is reattached.
+    pub smart_tiling_preserve_size: bool,
     /// Empty-canvas camera grab. `Disabled` leaves every button untouched.
     pub canvas_pan_button: OceanPanButton,
     /// When true, the configured `pointer_modifier` must accompany the canvas
@@ -333,6 +340,9 @@ impl Default for OceanConfig {
         Self {
             camera_step: 480,
             freeform_windows: true,
+            smart_tiling: true,
+            smart_tiling_snap_distance: 64,
+            smart_tiling_preserve_size: true,
             canvas_pan_button: OceanPanButton::Left,
             canvas_pan_requires_modifier: false,
             depth_enabled: true,
@@ -3895,6 +3905,25 @@ fn apply_ocean_block(cfg: &mut OceanConfig, body: &[waves::Entry]) {
             waves::Entry::Assign(key, value) if key == "freeform_windows" => {
                 set_bool(&mut cfg.freeform_windows, "ocean.freeform_windows", value)
             }
+            waves::Entry::Assign(key, value) if key == "smart_tiling" => {
+                set_bool(&mut cfg.smart_tiling, "ocean.smart_tiling", value)
+            }
+            waves::Entry::Assign(key, value) if key == "smart_tiling_snap_distance" => {
+                match value.parse::<i32>() {
+                    Ok(value) if (0..=512).contains(&value) => {
+                        cfg.smart_tiling_snap_distance = value
+                    }
+                    _ => tracing::warn!(
+                        value,
+                        "Expected ocean.smart_tiling_snap_distance from 0 to 512, ignoring"
+                    ),
+                }
+            }
+            waves::Entry::Assign(key, value) if key == "smart_tiling_preserve_size" => set_bool(
+                &mut cfg.smart_tiling_preserve_size,
+                "ocean.smart_tiling_preserve_size",
+                value,
+            ),
             waves::Entry::Assign(key, value) if key == "canvas_pan_button" => {
                 cfg.canvas_pan_button = match value.trim().to_ascii_lowercase().as_str() {
                     "none" | "disabled" | "off" => OceanPanButton::Disabled,
@@ -5878,6 +5907,9 @@ connected_vessels {
 # reefs, Ocean creates one output-sized `main` reef at the world origin.
 # ocean {
 #     freeform_windows = true       # move/resize drag detaches a reef tile
+#     smart_tiling = true            # tiled drags swap; floaters can snap back
+#     smart_tiling_snap_distance = 64 # screen pixels for floating reattachment
+#     smart_tiling_preserve_size = true # keep a floater's size when attached
 #     canvas_pan_button = left      # left middle right none
 #     canvas_pan_requires_modifier = false # true requires pointer_modifier
 #     camera_step = 480
@@ -6954,6 +6986,9 @@ mod tests {
             "show_config_reload_toast = false\n\
              ocean {\n\
                  freeform_windows = false\n\
+                 smart_tiling = true\n\
+                 smart_tiling_snap_distance = 96\n\
+                 smart_tiling_preserve_size = false\n\
                  canvas_pan_button = middle\n\
                  canvas_pan_requires_modifier = true\n\
              }\n",
@@ -6963,12 +6998,18 @@ mod tests {
         let config = Config::from_raw(lower_entries(&entries)).0;
         assert!(!config.show_config_reload_toast);
         assert!(!config.ocean.freeform_windows);
+        assert!(config.ocean.smart_tiling);
+        assert_eq!(config.ocean.smart_tiling_snap_distance, 96);
+        assert!(!config.ocean.smart_tiling_preserve_size);
         assert_eq!(config.ocean.canvas_pan_button, OceanPanButton::Middle);
         assert!(config.ocean.canvas_pan_requires_modifier);
 
         let defaults = parse_default_config();
         assert!(defaults.show_config_reload_toast);
         assert!(defaults.ocean.freeform_windows);
+        assert!(defaults.ocean.smart_tiling);
+        assert_eq!(defaults.ocean.smart_tiling_snap_distance, 64);
+        assert!(defaults.ocean.smart_tiling_preserve_size);
         assert_eq!(defaults.ocean.canvas_pan_button, OceanPanButton::Left);
         assert!(!defaults.ocean.canvas_pan_requires_modifier);
     }

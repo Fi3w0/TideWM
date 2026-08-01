@@ -4,6 +4,9 @@ pub use move_grab::MoveSurfaceGrab;
 pub mod ocean_pan_grab;
 pub use ocean_pan_grab::OceanPanGrab;
 
+pub mod ocean_tile_move_grab;
+pub use ocean_tile_move_grab::OceanTileMoveGrab;
+
 pub mod resize_grab;
 pub use resize_grab::ResizeSurfaceGrab;
 

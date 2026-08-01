@@ -43,6 +43,12 @@ independently panning and zooming per-output cameras:
   move or resize drag detaches a tile into a freely placed world rectangle,
   while dragging empty canvas pans the camera at the current zoom. Overlapping
   floaters keep an explicit front-to-back stack and clicks raise predictably.
+- Smart tiling can keep a tiled drag inside its reef for tile-to-tile swaps and
+  reattach a floater released near a tile, preserving a custom attached size
+  while the reef tree remains the ownership authority; the tree itself stays
+  frozen for the gesture, so the dragged window's render placement is
+  overridden separately to lift it out and follow the pointer, with the
+  current swap target picking up a magnet-style border highlight.
 - Bookmarks provide named return points and a compatibility surface for tools
   that expect workspace-like destinations.
 - An optional camera-anchored adaptive guide field provides scale and motion

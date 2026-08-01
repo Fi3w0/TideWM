@@ -414,6 +414,9 @@ ocean {
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `freeform_windows` | boolean | `true` | In Ocean, beginning the configured move/resize gesture on a reef tile detaches it at the same world rectangle and continues as a free zoom-aware drag. `toggle-floating` can tile it into a reef again. `false` retains tile swap/split resize behavior. |
+| `smart_tiling` | boolean | `true` | Keeps modifier-left drags of tiled Ocean windows in the reef for tile-to-tile swaps, and reattaches a floating window released close to an existing tile. The dragged window lifts out and follows the pointer, and the tile it would swap into on release gets an active-border magnet highlight. |
+| `smart_tiling_snap_distance` | integer, `0`–`512` | `64` | Screen-pixel distance at which a floating Ocean window attaches to a nearby tiled window on release. `0` requires overlap. |
+| `smart_tiling_preserve_size` | boolean | `true` | Keeps the floating window's current size after smart reattachment. The window remains a member of the reef tiling tree while its custom size is rendered around its tile slot. |
 | `canvas_pan_button` | `left` \| `middle` \| `right` \| `none` | `left` | Button that directly drags genuinely empty Ocean canvas. `none` disables mouse camera grabbing and reserves no button. Layer surfaces and windows keep their clicks. |
 | `canvas_pan_requires_modifier` | boolean | `false` | When true, empty-canvas dragging also requires the currently configured `pointer_modifier`; false gives direct Drift-style canvas movement. |
 | `camera_step` | integer, `32`–`8192` | `480` | Logical pixels moved by an `ocean-pan-*` keyboard action. Hot-reloadable. |

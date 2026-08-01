@@ -113,6 +113,9 @@ pub struct OceanReef {
     pub rect: Rectangle<i32, Logical>,
     auto_width: bool,
     auto_height: bool,
+    /// The implicit starting reef follows the camera until its first window
+    /// is inserted. Configured reefs remain fixed world landmarks.
+    anchor_empty_layout_to_camera: bool,
     layout: BspLayout,
 }
 
@@ -129,12 +132,14 @@ impl OceanReef {
         rect: Rectangle<i32, Logical>,
         auto_width: bool,
         auto_height: bool,
+        anchor_empty_layout_to_camera: bool,
     ) -> Self {
         Self {
             _name: name,
             rect,
             auto_width,
             auto_height,
+            anchor_empty_layout_to_camera,
             layout: BspLayout::default(),
         }
     }
@@ -153,11 +158,24 @@ pub struct OceanSpace {
     /// not spatial ownership; every output can render the same window.
     entry_outputs: HashMap<WlSurface, String>,
     floating: HashMap<WlSurface, (Window, Rectangle<i32, Logical>)>,
+    /// Optional client-sized rectangles for windows that remain in a reef
+    /// tree after smart reattachment. The tree still owns their slot; the
+    /// override only changes the rendered/configured size around that slot.
+    attached_sizes: HashMap<WlSurface, Size<i32, Logical>>,
     /// Front-to-back order for freely placed windows. A HashMap's iteration
     /// order is deliberately unstable and must never become visible stacking
     /// policy once Ocean windows are allowed to overlap arbitrarily.
     floating_stack: Vec<WlSurface>,
     screen_pins: HashMap<WlSurface, OceanScreenPin>,
+    /// Live world-space rectangle for a tiled window mid `OceanTileMoveGrab`
+    /// drag, plus the surface it would swap into on release. The reef tree
+    /// itself stays frozen during the gesture (see that grab's own doc
+    /// comment); without this override `placements()` would keep rendering
+    /// the window at its frozen slot; `Space` reflects the drag position
+    /// too, but only rendering fed from `Space` reads it, and Ocean's does
+    /// not. Both fields are `None` outside an active drag.
+    drag_override: Option<(WlSurface, Rectangle<i32, Logical>)>,
+    drag_hint: Option<WlSurface>,
 }
 
 impl OceanSpace {
@@ -174,6 +192,7 @@ impl OceanSpace {
                     ),
                     reef.width.is_none(),
                     reef.height.is_none(),
+                    false,
                 )
             })
             .collect();
@@ -215,19 +234,27 @@ impl OceanSpace {
             runtime_bookmarks: HashSet::new(),
             entry_outputs: HashMap::new(),
             floating: HashMap::new(),
+            attached_sizes: HashMap::new(),
             floating_stack: Vec::new(),
             screen_pins: HashMap::new(),
+            drag_override: None,
+            drag_hint: None,
         }
     }
 
-    /// Materializes Ocean's implicit first reef using the real viewport size.
-    /// This is called only when Ocean is active and its config has no reefs.
+    /// Materializes Ocean's implicit starting reef using the real viewport
+    /// size. A configured `home` bookmark is also a valid starting location:
+    /// when it does not fall inside any configured reef, create an implicit
+    /// reef there so the first mapped window is visible instead of being
+    /// inserted into a distant configured reef while the camera remains at
+    /// the empty bookmark location.
     pub fn ensure_default_reef(&mut self, viewport: Size<i32, Logical>) -> bool {
         let mut changed = false;
         if self.reefs.is_empty() {
             self.reefs.push(OceanReef::new(
                 "main".to_string(),
                 Rectangle::new(Point::from((0, 0)), viewport),
+                true,
                 true,
                 true,
             ));
@@ -244,6 +271,29 @@ impl OceanSpace {
                 let height = reef.rect.size.h.max(viewport.h);
                 changed |= height != reef.rect.size.h;
                 reef.rect.size.h = height;
+            }
+        }
+        if let Some(home) = self.bookmarks.get("home").copied() {
+            let home_is_covered = self
+                .reefs
+                .iter()
+                .any(|reef| rectangle_contains_point(reef.rect, home));
+            let implicit_start_exists = self
+                .reefs
+                .iter()
+                .any(|reef| reef.anchor_empty_layout_to_camera);
+            if !home_is_covered && !implicit_start_exists {
+                self.reefs.push(OceanReef::new(
+                    "main".to_string(),
+                    Rectangle::new(
+                        Point::from((home.x.round() as i32, home.y.round() as i32)),
+                        viewport,
+                    ),
+                    true,
+                    true,
+                    true,
+                ));
+                changed = true;
             }
         }
         changed
@@ -540,12 +590,32 @@ impl OceanSpace {
             x: camera.origin.x + viewport.w as f64 / 2.0,
             y: camera.origin.y + viewport.h as f64 / 2.0,
         };
-        let reef_index = nearest_reef(&self.reefs, center).unwrap_or(0);
+        let reef_index = target
+            .and_then(|target| {
+                self.reefs
+                    .iter()
+                    .position(|reef| reef.layout.contains(target))
+            })
+            .or_else(|| nearest_reef(&self.reefs, center))
+            .unwrap_or(0);
+        self.anchor_empty_reef_to_camera(reef_index, camera);
         if let Some(surface) = window.toplevel().map(|toplevel| toplevel.wl_surface()) {
             self.entry_outputs
                 .insert(surface.clone(), output.to_string());
         }
         self.reefs[reef_index].layout.insert(window, target);
+    }
+
+    fn anchor_empty_reef_to_camera(&mut self, reef_index: usize, camera: OceanCamera) -> bool {
+        let reef = &mut self.reefs[reef_index];
+        if !reef.anchor_empty_layout_to_camera || !reef.layout.windows().is_empty() {
+            return false;
+        }
+        reef.rect.loc = Point::from((
+            camera.origin.x.round() as i32,
+            camera.origin.y.round() as i32,
+        ));
+        true
     }
 
     pub fn remove(&mut self, surface: &WlSurface) {
@@ -554,8 +624,19 @@ impl OceanSpace {
         }
         self.entry_outputs.remove(surface);
         self.floating.remove(surface);
+        self.attached_sizes.remove(surface);
         self.floating_stack.retain(|candidate| candidate != surface);
         self.screen_pins.remove(surface);
+        if self
+            .drag_override
+            .as_ref()
+            .is_some_and(|(dragged, _)| dragged == surface)
+        {
+            self.drag_override = None;
+        }
+        if self.drag_hint.as_ref() == Some(surface) {
+            self.drag_hint = None;
+        }
     }
 
     pub fn contains(&self, surface: &WlSurface) -> bool {
@@ -593,6 +674,14 @@ impl OceanSpace {
         self.reefs
             .iter()
             .flat_map(|reef| reef.layout.layout(reef.rect, gap, split_bias))
+            .map(|(window, rect)| {
+                let surface = window.toplevel().map(|toplevel| toplevel.wl_surface());
+                let rect = surface
+                    .and_then(|surface| self.attached_sizes.get(surface))
+                    .map(|size| centered_attached_rect(rect, *size))
+                    .unwrap_or(rect);
+                (window, rect)
+            })
             .collect()
     }
 
@@ -611,6 +700,7 @@ impl OceanSpace {
         for reef in &mut self.reefs {
             reef.layout.remove(surface);
         }
+        self.attached_sizes.remove(surface);
         self.floating.insert(surface.clone(), (window, rect));
         self.raise_floating(surface);
         true
@@ -623,13 +713,144 @@ impl OceanSpace {
         viewport: Size<i32, Logical>,
         target: Option<&WlSurface>,
     ) -> bool {
-        let Some((window, _)) = self.floating.remove(surface) else {
+        self.make_tiled_with_size(surface, output, viewport, target, false)
+    }
+
+    pub fn make_tiled_with_size(
+        &mut self,
+        surface: &WlSurface,
+        output: &str,
+        viewport: Size<i32, Logical>,
+        target: Option<&WlSurface>,
+        preserve_size: bool,
+    ) -> bool {
+        let Some((window, rect)) = self.floating.remove(surface) else {
             return false;
         };
+        let attached_size = rect.size;
         self.floating_stack.retain(|candidate| candidate != surface);
         self.screen_pins.remove(surface);
         self.insert(output, viewport, window, target);
+        if preserve_size {
+            self.attached_sizes.insert(surface.clone(), attached_size);
+        }
         true
+    }
+
+    pub fn smart_tiling_target(
+        &self,
+        surface: &WlSurface,
+        output: &str,
+        pointer_view: Point<f64, Logical>,
+        snap_distance: i32,
+        gap: i32,
+        split_bias: SplitBias,
+    ) -> Option<WlSurface> {
+        let moving = self.floating_rect(surface)?;
+        let camera = self.camera(output);
+        let zoom = camera.zoom.max(0.05);
+        let pointer_world = OceanPoint {
+            x: camera.origin.x + pointer_view.x / zoom,
+            y: camera.origin.y + pointer_view.y / zoom,
+        };
+        let max_gap = snap_distance.max(0) as f64 / zoom;
+        self.tiled_layouts(gap, split_bias)
+            .into_iter()
+            .filter_map(|(window, rect)| {
+                let target = window.toplevel()?.wl_surface().clone();
+                (target != *surface).then_some((target, rect))
+            })
+            .filter_map(|(target, rect)| {
+                let gap = rectangle_gap_distance(moving, rect);
+                // `distance_to_rect` returns a squared distance (fine for
+                // its other callers, which only ever rank candidates
+                // against each other); this compares it against a real
+                // screen-pixel threshold, so it needs the actual distance.
+                let pointer_distance = distance_to_rect(rect, pointer_world).sqrt();
+                (gap <= max_gap
+                    && pointer_distance <= max_gap + moving.size.w.max(moving.size.h) as f64)
+                    .then_some((target, gap))
+            })
+            .min_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(target, _)| target)
+    }
+
+    pub fn tiled_target_at_view(
+        &self,
+        surface: &WlSurface,
+        output: &str,
+        pointer_view: Point<f64, Logical>,
+        gap: i32,
+        split_bias: SplitBias,
+    ) -> Option<WlSurface> {
+        let camera = self.camera(output);
+        let zoom = camera.zoom.max(0.05);
+        let world = OceanPoint {
+            x: camera.origin.x + pointer_view.x / zoom,
+            y: camera.origin.y + pointer_view.y / zoom,
+        };
+        self.tiled_layouts(gap, split_bias)
+            .into_iter()
+            .filter_map(|(window, rect)| {
+                let target = window.toplevel()?.wl_surface().clone();
+                (target != *surface && rectangle_contains_point(rect, world)).then_some(target)
+            })
+            .next()
+    }
+
+    pub fn swap_tiled(&mut self, first: &WlSurface, second: &WlSurface) -> bool {
+        if first == second {
+            return false;
+        }
+        let Some(first_reef) = self
+            .reefs
+            .iter()
+            .position(|reef| reef.layout.contains(first))
+        else {
+            return false;
+        };
+        let Some(second_reef) = self
+            .reefs
+            .iter()
+            .position(|reef| reef.layout.contains(second))
+        else {
+            return false;
+        };
+        if first_reef != second_reef {
+            return false;
+        }
+        self.reefs[first_reef].layout.swap(first, second);
+        true
+    }
+
+    /// Records `OceanTileMoveGrab`'s live drag position and current swap
+    /// target for `placements()`/the border highlight to pick up, without
+    /// touching the frozen reef tree. `hint` is the surface a release would
+    /// swap into right now, or `None` when the pointer isn't over a valid
+    /// target.
+    pub fn set_tile_drag(
+        &mut self,
+        surface: WlSurface,
+        rect: Rectangle<i32, Logical>,
+        hint: Option<WlSurface>,
+    ) {
+        self.drag_override = Some((surface, rect));
+        self.drag_hint = hint;
+    }
+
+    /// Ends a smart-tiling drag. Must run whenever `OceanTileMoveGrab` ends,
+    /// however it ends -- a stale override otherwise pins a window at a
+    /// phantom rectangle forever.
+    pub fn clear_tile_drag(&mut self) {
+        self.drag_override = None;
+        self.drag_hint = None;
+    }
+
+    /// The surface a smart-tiling drag would swap into on release, for the
+    /// magnet-highlight border. `None` outside an active drag or when the
+    /// pointer isn't over a valid target.
+    pub fn drag_hint(&self) -> Option<&WlSurface> {
+        self.drag_hint.as_ref()
     }
 
     pub fn raise_floating(&mut self, surface: &WlSurface) -> bool {
@@ -834,6 +1055,20 @@ impl OceanSpace {
         // Classic's front-to-back renderer contract.
         let floating_count = self.floating.len();
         layouts[floating_count..].reverse();
+        // A tiled window mid `OceanTileMoveGrab` drag renders at its live
+        // dragged rectangle instead of its frozen reef slot, lifted to the
+        // front like a floating window -- the tree itself stays untouched
+        // until the gesture ends, see `set_tile_drag`'s doc comment.
+        if let Some((surface, rect)) = &self.drag_override {
+            if let Some(pos) = layouts.iter().position(|(window, _, _)| {
+                window
+                    .toplevel()
+                    .is_some_and(|toplevel| toplevel.wl_surface() == surface)
+            }) {
+                let (window, _, _) = layouts.remove(pos);
+                layouts.insert(0, (window, *rect, PlacementKind::Floating));
+            }
+        }
         layouts
             .into_iter()
             .filter_map(|(window, rect, kind)| {
@@ -918,6 +1153,48 @@ fn distance_to_rect(rect: Rectangle<i32, Logical>, point: OceanPoint) -> f64 {
         0.0
     };
     dx * dx + dy * dy
+}
+
+fn centered_attached_rect(
+    slot: Rectangle<i32, Logical>,
+    size: Size<i32, Logical>,
+) -> Rectangle<i32, Logical> {
+    Rectangle::new(
+        Point::from((
+            slot.loc.x + (slot.size.w - size.w) / 2,
+            slot.loc.y + (slot.size.h - size.h) / 2,
+        )),
+        size,
+    )
+}
+
+fn rectangle_gap_distance(first: Rectangle<i32, Logical>, second: Rectangle<i32, Logical>) -> f64 {
+    let first_right = first.loc.x + first.size.w;
+    let first_bottom = first.loc.y + first.size.h;
+    let second_right = second.loc.x + second.size.w;
+    let second_bottom = second.loc.y + second.size.h;
+    let dx = if first_right < second.loc.x {
+        (second.loc.x - first_right) as f64
+    } else if second_right < first.loc.x {
+        (first.loc.x - second_right) as f64
+    } else {
+        0.0
+    };
+    let dy = if first_bottom < second.loc.y {
+        (second.loc.y - first_bottom) as f64
+    } else if second_bottom < first.loc.y {
+        (first.loc.y - second_bottom) as f64
+    } else {
+        0.0
+    };
+    dx.hypot(dy)
+}
+
+fn rectangle_contains_point(rect: Rectangle<i32, Logical>, point: OceanPoint) -> bool {
+    point.x >= rect.loc.x as f64
+        && point.y >= rect.loc.y as f64
+        && point.x < (rect.loc.x + rect.size.w) as f64
+        && point.y < (rect.loc.y + rect.size.h) as f64
 }
 
 fn visible_through_camera(
@@ -1034,6 +1311,57 @@ mod tests {
         assert!(ocean.ensure_default_reef(Size::from((3440, 1440))));
         assert_eq!(ocean.reefs[0].rect.size, Size::from((3440, 1200)));
         assert!(!ocean.ensure_default_reef(Size::from((2560, 1080))));
+    }
+
+    #[test]
+    fn home_bookmark_gets_an_implicit_reef_when_configured_reefs_start_elsewhere() {
+        let mut ocean = OceanSpace::from_config(&OceanConfig {
+            reefs: vec![OceanReefConfig {
+                name: "code".to_string(),
+                x: 4000,
+                y: 0,
+                width: None,
+                height: None,
+            }],
+            bookmarks: vec![OceanBookmarkConfig {
+                name: "home".to_string(),
+                x: 0.0,
+                y: 0.0,
+            }],
+            ..OceanConfig::default()
+        });
+
+        assert!(ocean.ensure_default_reef(Size::from((1000, 800))));
+        assert_eq!(ocean.reefs.len(), 2);
+        assert_eq!(ocean.reefs[1].rect.loc, Point::from((0, 0)));
+        assert_eq!(ocean.ensure_camera("winit-0").origin, OceanPoint::default());
+
+        ocean.pan("winit-0", 640.0, 320.0);
+        let camera = ocean.camera("winit-0");
+        assert!(ocean.anchor_empty_reef_to_camera(1, camera));
+        assert!(!ocean.ensure_default_reef(Size::from((1000, 800))));
+        assert_eq!(ocean.reefs.len(), 2);
+    }
+
+    #[test]
+    fn empty_implicit_reef_follows_the_camera_for_its_first_window() {
+        let mut ocean = OceanSpace::from_config(&OceanConfig::default());
+        ocean.ensure_default_reef(Size::from((1000, 800)));
+        ocean.pan("main", 640.0, 320.0);
+
+        let camera = ocean.camera("main");
+        assert!(ocean.anchor_empty_reef_to_camera(0, camera));
+        assert_eq!(ocean.reefs[0].rect.loc, Point::from((640, 320)));
+    }
+
+    #[test]
+    fn attached_size_stays_centered_even_when_larger_than_the_slot() {
+        let slot = Rectangle::new(Point::from((100, 80)), Size::from((400, 300)));
+        let attached = centered_attached_rect(slot, Size::from((600, 500)));
+
+        assert_eq!(attached.loc, Point::from((0, -20)));
+        assert_eq!(attached.size, Size::from((600, 500)));
+        assert_eq!(rectangle_gap_distance(attached, slot), 0.0);
     }
 
     #[test]

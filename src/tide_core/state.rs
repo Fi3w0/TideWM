@@ -1084,6 +1084,34 @@ impl Smallvil {
         placement: &crate::placement::PlacedWindow,
     ) -> crate::window_animation::VisualSample {
         let mut sample = self.base_window_visual_sample(placement.surface());
+        // Ocean's interactive viscosity is sampled in world coordinates,
+        // while this shared renderer consumes view pixels. The ordinary
+        // placement already applies the camera transform to `rect`; apply
+        // the same transform to the temporary viscosity correction or a
+        // zoomed-out drag makes the window grow and a zoomed-in drag makes it
+        // shrink for the duration of the grab.
+        if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+            if let Some(surface) = placement.surface() {
+                if let Some(viscosity) = self.window_viscosity.get(surface) {
+                    if let Some(window) = self.mapped_toplevel_window(surface) {
+                        if let Some(location) = self.space.element_location(&window) {
+                            let current = viscosity.sample();
+                            let scale = placement.view_scale.max(0.05);
+                            let world_offset: Point<f64, Logical> = Point::from((
+                                current.loc.x - location.x as f64,
+                                current.loc.y - location.y as f64,
+                            ));
+                            sample.offset += Point::from((
+                                world_offset.x * (scale - 1.0),
+                                world_offset.y * (scale - 1.0),
+                            ));
+                            sample.size =
+                                Some(Size::from((current.size.w * scale, current.size.h * scale)));
+                        }
+                    }
+                }
+            }
+        }
         sample.offset += placement.view_offset;
         if placement.fits_content_to_placement() && sample.size.is_none() {
             sample.size = Some(placement.rect.size.to_f64());
@@ -3325,6 +3353,60 @@ impl Smallvil {
         }
     }
 
+    /// Reattaches an Ocean floater when its final world rectangle is close to
+    /// an existing reef tile. The pointer position is supplied by the grab's
+    /// last motion event so release handling never re-enters the pointer
+    /// handle while Smithay is dispatching the button callback.
+    pub(crate) fn smart_attach_ocean_floating(
+        &mut self,
+        surface: &WlSurface,
+        pointer_location: Point<f64, Logical>,
+    ) -> bool {
+        if self.config.spatial_engine != crate::config::SpatialEngine::Ocean
+            || !self.config.ocean.smart_tiling
+            || !self.ocean.floating_rect(surface).is_some()
+        {
+            return false;
+        }
+        let Some(output_name) = self.ocean.entry_output(surface).map(str::to_string) else {
+            return false;
+        };
+        let Some(output) = self.output_by_name(&output_name) else {
+            return false;
+        };
+        let Some(output_geo) = self.space.output_geometry(&output) else {
+            return false;
+        };
+        let pointer_view = pointer_location - output_geo.loc.to_f64();
+        let Some(target) = self.ocean.smart_tiling_target(
+            surface,
+            &output_name,
+            pointer_view,
+            self.config.ocean.smart_tiling_snap_distance,
+            self.config.gaps,
+            self.config.bsp_split_bias,
+        ) else {
+            return false;
+        };
+        let Some(viewport) = self.space.output_geometry(&output).map(|geo| geo.size) else {
+            return false;
+        };
+        if !self.ocean.make_tiled_with_size(
+            surface,
+            &output_name,
+            viewport,
+            Some(&target),
+            self.config.ocean.smart_tiling_preserve_size,
+        ) {
+            return false;
+        }
+        self.retile();
+        self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
+            surface: surface.clone(),
+        });
+        true
+    }
+
     /// Translates every floating window tagged to `output_name` by `delta`
     /// -- called when wlr-output-management (kanshi, wdisplays, ...) moves
     /// an output's logical position. `retile()` already repositions tiled
@@ -4342,10 +4424,14 @@ impl Smallvil {
         border.opacity *= visual.opacity;
         border.inactive_opacity *= visual.opacity;
         border.urgent_opacity *= visual.opacity;
+        // A smart-tiling drag's current swap target borrows the active
+        // border as a magnet-style highlight -- no real focus change, no
+        // new render element, just the existing per-window border reused
+        // for a different reason while the drag hint names this surface.
         let focused = matches!(
             &self.keyboard_focus,
             KeyboardFocusTarget::Window(focused) if focused == surface
-        );
+        ) || self.ocean.drag_hint() == Some(surface);
         let urgent = self.urgent.contains(surface);
         if !border.enabled
             || border.width <= 0.0

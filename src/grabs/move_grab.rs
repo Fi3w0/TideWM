@@ -16,6 +16,8 @@ pub struct MoveSurfaceGrab {
     pub window: Window,
     pub initial_window_location: Point<i32, Logical>,
     pub view_scale: f64,
+    pub smart_attach_ocean: bool,
+    pub(crate) last_location: Point<f64, Logical>,
 }
 
 impl PointerGrab<Smallvil> for MoveSurfaceGrab {
@@ -32,6 +34,7 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
         if !self.window.alive() {
             return;
         }
+        self.last_location = event.location;
         let Some(surface) = self.window.toplevel().map(|toplevel| toplevel.wl_surface()) else {
             return;
         };
@@ -193,6 +196,11 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
     }
 
     fn unset(&mut self, data: &mut Smallvil) {
+        if self.smart_attach_ocean {
+            if let Some(surface) = self.window.toplevel().map(|toplevel| toplevel.wl_surface()) {
+                data.smart_attach_ocean_floating(surface, self.last_location);
+            }
+        }
         data.sync_visible_floating_window(&self.window);
     }
 }

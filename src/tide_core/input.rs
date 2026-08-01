@@ -43,7 +43,7 @@ use crate::{
     config::{Action, Direction, Keybind, TouchpadConfig},
     grabs::{
         resize_grab::ResizeEdge, CascadeResizeGrab, MoveSurfaceGrab, OceanPanGrab,
-        ResizeSurfaceGrab, TileMoveGrab, TileResizeGrab, TileWindowResizeGrab,
+        OceanTileMoveGrab, ResizeSurfaceGrab, TileMoveGrab, TileResizeGrab, TileWindowResizeGrab,
     },
     state::{CompositorGesture, SessionLock, Smallvil},
     toast::{Toast, ToastKind},
@@ -1085,6 +1085,46 @@ impl Smallvil {
                                 // behind the protocol state's back.
                             } else if self.config.spatial_engine
                                 == crate::config::SpatialEngine::Ocean
+                                && self.config.ocean.smart_tiling
+                                && button == BTN_LEFT
+                                && self.ocean.is_tiled(&wl_surface)
+                            {
+                                let Some(output) = self
+                                    .ocean
+                                    .entry_output(&wl_surface)
+                                    .map(str::to_string)
+                                    .or_else(|| {
+                                        self.output_for_window(&window).map(|output| output.name())
+                                    })
+                                else {
+                                    return;
+                                };
+                                let Some(initial_rect) = self.ocean.world_rect(
+                                    &wl_surface,
+                                    self.config.gaps,
+                                    self.config.bsp_split_bias,
+                                ) else {
+                                    return;
+                                };
+                                let view_scale = self.ocean.camera(&output).zoom;
+                                self.focus_window(Some(wl_surface.clone()), serial);
+                                let start_data = PointerGrabStartData {
+                                    focus: Some((wl_surface.clone(), loc.to_f64())),
+                                    button,
+                                    location: pointer.current_location(),
+                                };
+                                let grab = OceanTileMoveGrab::start(
+                                    start_data,
+                                    window,
+                                    wl_surface,
+                                    output,
+                                    initial_rect.loc,
+                                    view_scale,
+                                );
+                                pointer.set_grab(self, grab, serial, Focus::Clear);
+                                return;
+                            } else if self.config.spatial_engine
+                                == crate::config::SpatialEngine::Ocean
                                 && self.config.ocean.freeform_windows
                                 && self.ocean.is_tiled(&wl_surface)
                             {
@@ -1109,6 +1149,7 @@ impl Smallvil {
                                     .output_for_point(pointer.current_location())
                                     .map(|output| self.ocean.camera(&output.name()).zoom)
                                     .unwrap_or(1.0);
+                                let last_location = start_data.location;
                                 if button == BTN_LEFT {
                                     pointer.set_grab(
                                         self,
@@ -1117,6 +1158,8 @@ impl Smallvil {
                                             window,
                                             initial_window_location: model_rect.loc,
                                             view_scale,
+                                            smart_attach_ocean: self.config.ocean.smart_tiling,
+                                            last_location,
                                         },
                                         serial,
                                         Focus::Clear,
@@ -1159,11 +1202,16 @@ impl Smallvil {
                                     .unwrap_or(1.0);
 
                                 if button == BTN_LEFT {
+                                    let last_location = start_data.location;
                                     let grab = MoveSurfaceGrab {
                                         start_data,
                                         window,
                                         initial_window_location: model_loc,
                                         view_scale,
+                                        smart_attach_ocean: self.config.spatial_engine
+                                            == crate::config::SpatialEngine::Ocean
+                                            && self.config.ocean.smart_tiling,
+                                        last_location,
                                     };
                                     pointer.set_grab(self, grab, serial, Focus::Clear);
                                 } else {

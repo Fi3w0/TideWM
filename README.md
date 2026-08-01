@@ -39,7 +39,7 @@ TideWM is a solo project. I use AI coding agents (OpenCode, Codex, Claude Code) 
 
 - Dynamic BSP tiling (dwindle-style), master/stack, and cascade (fills the output in aspect-ratio-adapting rows, with drag-to-resize rows/cells), switchable per workspace
 - Workspaces per output, scratchpads (the classic one plus any number of named ones), per-window pinning, opt-in continuous trackpad-swipe navigation between them (`swim { }`)
-- Two spatial engines, chosen at startup with `spatial_engine = classic|ocean`: Classic keeps real numbered workspaces; Ocean drops workspaces for one continuous zoomable 2D canvas with local tiling reefs, independent per-output pan/zoom cameras, physical sink/dredge/surface depth, and named/numeric bookmarks. Ocean windows can also detach straight out of a reef into a free zoom-aware drag (`freeform_windows`), and dragging empty canvas pans the camera directly. [Full design in SPATIAL_MODEL.md](SPATIAL_MODEL.md).
+- Two spatial engines, chosen at startup with `spatial_engine = classic|ocean`: Classic keeps real numbered workspaces; Ocean drops workspaces for one continuous zoomable 2D canvas with local tiling reefs, independent per-output pan/zoom cameras, physical sink/dredge/surface depth, and named/numeric bookmarks. Ocean windows can also detach straight out of a reef into a free zoom-aware drag (`freeform_windows`), while smart tiling can swap tiled windows and reattach floaters with their own sizes. Dragging empty canvas pans the camera directly. [Full design in SPATIAL_MODEL.md](SPATIAL_MODEL.md).
 - Window groups: tab several windows into one tile, first-party tab-strip UI
 - Floating, fullscreen, maximize, pseudo-tiling
 - Multi-monitor with hotplug, independent tiling tree per output, mixed-DPI
@@ -132,7 +132,7 @@ Mouse:
 | `Alt` + left-drag            | Move floating window                  |
 | `Alt` + right-drag           | Resize floating window                |
 | Left-drag a floating window's own edge | Resize it, no modifier needed |
-| `Alt` + left-drag (tiled)    | Pick up and drop into a new tile slot (Classic); detaches into a free zoom-aware drag (Ocean) |
+| `Alt` + left-drag (tiled)    | Pick up and drop into a new tile slot (Classic); Ocean smart tiling lifts the window out and shows a magnet highlight over the slot it will swap into, or detaches when disabled |
 | `Alt` + right-drag (tiled)   | Resize the tile from an edge          |
 | Click on a split gap         | Drag to adjust the split ratio        |
 | Left-drag empty canvas (Ocean) | Pan the camera directly, any zoom   |
