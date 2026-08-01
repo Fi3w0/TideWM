@@ -8197,16 +8197,16 @@ impl Smallvil {
                     "Config reloaded"
                 );
                 let ui_theme = crate::ui_theme::UiTheme::from_config(&self.config);
-                self.toast = self
-                    .config
-                    .show_config_reload_toast
-                    .then(|| Toast::new("Configuration reloaded", ToastKind::Info, ui_theme));
                 // Unlike a hard parse failure, these diagnostics don't mean
                 // the reload was rejected -- `new_config` above is already
                 // in effect. Still worth a persistent nudge instead of a
                 // toast that scrolls away, since a footgun lint is exactly
-                // the kind of thing you want to notice before it bites,
-                // not after.
+                // the kind of thing you want to notice before it bites, not
+                // after -- so warnings suppress the reload toast the same
+                // way a hard failure already does, instead of stacking a
+                // duplicate timed toast over the persistent panel's corner.
+                self.toast = (self.config.show_config_reload_toast && warnings.is_empty())
+                    .then(|| Toast::new("Configuration reloaded", ToastKind::Info, ui_theme));
                 if !warnings.is_empty() {
                     self.config_error_overlay =
                         Some(crate::error_overlay::ConfigErrorOverlay::new(
