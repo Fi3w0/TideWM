@@ -143,6 +143,8 @@ smithay::backend::renderer::element::render_elements! {
     Ripple = crate::ripple::RippleElement,
     /// Cool-depth wash and urgent bioluminescent border (Phase R1).
     DepthOverlay = crate::depth::DepthOverlayElement,
+    /// Allocation-free vertical pressure wave for direct Classic depth moves.
+    DepthTransition = crate::depth_transition::DepthTransitionElement,
     /// Captured outgoing workspace peeled away over the live incoming
     /// workspace (Phase R1, see workspace_transition.rs).
     WorkspaceTransition = crate::workspace_transition::WorkspaceTransitionElement,
@@ -1388,6 +1390,15 @@ fn render_surface(
             .filter(|overview| overview.output_name() == output.name())
             .and_then(|overview| overview.render_element(renderer))
     };
+    let depth_deck_element = if locked {
+        None
+    } else {
+        state
+            .depth_deck_overlay
+            .as_ref()
+            .filter(|deck| deck.output_name() == output.name())
+            .and_then(|deck| deck.render_element(renderer))
+    };
     let picker_element = if locked {
         None
     } else {
@@ -1450,11 +1461,13 @@ fn render_surface(
 
     let ripple_layers = state.ripple_frame_elements(renderer, output);
     let workspace_transition = state.workspace_transition_frame_element(renderer, output);
+    let depth_transition = state.depth_transition_frame_element(renderer, output);
     let closing_windows = state.closing_window_frame_elements(renderer, output);
     let mut elements: Vec<OutputRenderElements> = ripple_layers.above_all;
     elements.extend(
         picker_element
             .into_iter()
+            .chain(depth_deck_element)
             .chain(overview_element)
             .chain(toast_element)
             .chain(error_element)
@@ -1468,6 +1481,7 @@ fn render_surface(
             .into_iter()
             .map(OutputRenderElements::Cursor),
     );
+    elements.extend(depth_transition);
     elements.extend(ripple_layers.above_windows);
     elements.extend(workspace_transition);
     elements.extend(closing_windows);

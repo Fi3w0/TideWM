@@ -295,7 +295,34 @@ pub enum Action {
     /// grid of every workspace on the current output. See `overview.rs`,
     /// `Smallvil::toggle_overview`.
     ToggleOverview,
+    /// Parks the focused ordinary tiled window in its Classic workspace's
+    /// Depth Deck. No-op unless `classic_depth.enabled` is true.
+    SinkWindow,
+    /// Opens the current Classic workspace's Depth Deck.
+    Dive,
+    DepthNext,
+    DepthPrevious,
+    DepthSelect,
+    DepthCancel,
+    /// Direct workspace-like rotation through the focused tile's Classic
+    /// deck, without opening the picker.
+    DepthDown,
+    DepthUp,
     Quit,
+}
+
+fn is_classic_depth_action(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::SinkWindow
+            | Action::Dive
+            | Action::DepthNext
+            | Action::DepthPrevious
+            | Action::DepthSelect
+            | Action::DepthCancel
+            | Action::DepthDown
+            | Action::DepthUp
+    )
 }
 
 pub struct Config {
@@ -338,6 +365,9 @@ pub struct Config {
     /// `water_effects` remains the master toggle; this block controls the
     /// depth model without disabling ripples, water-glass, or transitions.
     pub depth: DepthConfig,
+    /// Structural per-workspace parking for the Classic spatial engine.
+    /// Independent of automatic visual depth and opt-in by default.
+    pub classic_depth: ClassicDepthConfig,
     /// Shared frosted-glass appearance. A window opts into this shader with
     /// `glass = frost` in its rule; water remains the compatibility default
     /// for translucent floating windows with no explicit glass choice.
@@ -506,12 +536,30 @@ impl Config {
     /// Returns the parsed config plus any diagnostics worth showing on the
     /// compositor-owned panel (dropped keybind entries, footgun lints) --
     /// see `parse_keybind`. Empty when nothing needs a second look.
-    fn from_raw(raw: RawConfig) -> (Self, Vec<String>) {
+    fn from_raw(mut raw: RawConfig) -> (Self, Vec<String>) {
         let mut warnings = Vec::new();
+        if raw.classic_depth.enabled {
+            let modifier = raw
+                .variables
+                .get("mod")
+                .cloned()
+                .unwrap_or_else(|| "Super".to_string());
+            for (combo, action) in [
+                (format!("{modifier}+D"), "depth-down"),
+                (format!("{modifier}+Shift+D"), "depth-up"),
+                (format!("{modifier}+Ctrl+D"), "dive"),
+            ] {
+                raw.keybinds
+                    .entry(combo)
+                    .or_insert_with(|| action.to_string());
+            }
+        }
+        let classic_depth_enabled = raw.classic_depth.enabled;
         let keybinds = raw
             .keybinds
             .iter()
             .filter_map(|(combo, action)| parse_keybind(combo, action, true, &mut warnings))
+            .filter(|bind| classic_depth_enabled || !is_classic_depth_action(&bind.action))
             .collect();
         let submaps = raw
             .submaps
@@ -522,6 +570,7 @@ impl Config {
                     .filter_map(|(combo, action)| {
                         parse_keybind(combo, action, false, &mut warnings)
                     })
+                    .filter(|bind| classic_depth_enabled || !is_classic_depth_action(&bind.action))
                     .collect();
                 (name.clone(), parsed)
             })
@@ -611,6 +660,7 @@ impl Config {
             animations: raw.animations,
             workspace_transition: raw.workspace_transition,
             depth: raw.depth,
+            classic_depth: raw.classic_depth,
             frost: raw.frost,
             shadow: raw.shadow,
             rounding: raw.rounding,
@@ -833,6 +883,7 @@ struct RawConfig {
     animations: WindowAnimationsConfig,
     workspace_transition: WorkspaceTransitionConfig,
     depth: DepthConfig,
+    classic_depth: ClassicDepthConfig,
     frost: FrostConfig,
     shadow: ShadowConfig,
     rounding: RoundingConfig,
@@ -982,6 +1033,7 @@ impl Default for RawConfig {
             animations: WindowAnimationsConfig::default(),
             workspace_transition: WorkspaceTransitionConfig::default(),
             depth: DepthConfig::default(),
+            classic_depth: ClassicDepthConfig::default(),
             frost: FrostConfig::default(),
             shadow: ShadowConfig::default(),
             rounding: RoundingConfig::default(),
@@ -2398,6 +2450,30 @@ impl Default for DepthConfig {
     }
 }
 
+/// Explicit structural depth for the Classic spatial engine. This stays a
+/// separate switch from [`DepthConfig`]: users may want visual cooling with
+/// no parked windows, a deck with plain rendering, both, or neither.
+#[derive(Debug, Clone)]
+pub struct ClassicDepthConfig {
+    pub enabled: bool,
+    pub animation: bool,
+    pub animation_duration_ms: u32,
+    pub wave_color: [f32; 3],
+    pub wave_alpha: f32,
+}
+
+impl Default for ClassicDepthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            animation: true,
+            animation_duration_ms: 420,
+            wave_color: [62.0 / 255.0, 196.0 / 255.0, 224.0 / 255.0],
+            wave_alpha: 0.72,
+        }
+    }
+}
+
 /// A complete ripple configuration surface: every knob a user can set.
 /// Sparse copies live in `Config::ripple`, named presets, and
 /// each `WindowRule::ripple` with only the fields the user explicitly
@@ -2858,6 +2934,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "swim" => apply_swim_block(&mut raw.swim, body),
         "animations" | "window_animations" => apply_animations_block(&mut raw.animations, body),
         "depth" => apply_depth_block(&mut raw.depth, body),
+        "classic_depth" | "depth_deck" => apply_classic_depth_block(&mut raw.classic_depth, body),
         "frost" => apply_frost_block(&mut raw.frost, body),
         "shadow" => apply_shadow_block(&mut raw.shadow, body),
         "rounding" | "corners" => apply_rounding_block(&mut raw.rounding, body),
@@ -3596,6 +3673,41 @@ fn apply_depth_block(cfg: &mut DepthConfig, body: &[waves::Entry]) {
                 _ => tracing::warn!(value, "Expected depth.urgent_alpha from 0 to 1, ignoring"),
             },
             other => tracing::warn!(key = %other, "Unknown key in `depth` block, ignoring"),
+        }
+    }
+}
+
+fn apply_classic_depth_block(cfg: &mut ClassicDepthConfig, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `classic_depth` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "enabled" => set_bool(&mut cfg.enabled, key, value),
+            "animation" | "animate" => set_bool(&mut cfg.animation, key, value),
+            "animation_duration_ms" | "duration_ms" => match value.parse::<u32>() {
+                Ok(value) if value <= 3000 => cfg.animation_duration_ms = value,
+                _ => tracing::warn!(
+                    value,
+                    "Expected classic_depth.animation_duration_ms from 0 to 3000, ignoring"
+                ),
+            },
+            "wave_color" | "color" => match parse_ripple_color(value) {
+                Some(value) => cfg.wave_color = value,
+                None => tracing::warn!(
+                    value,
+                    "Expected a hex color for classic_depth.wave_color, ignoring"
+                ),
+            },
+            "wave_alpha" | "alpha" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.wave_alpha = value.clamp(0.0, 1.0),
+                _ => tracing::warn!(
+                    value,
+                    "Expected classic_depth.wave_alpha from 0 to 1, ignoring"
+                ),
+            },
+            other => tracing::warn!(key = %other, "Unknown key in `classic_depth` block, ignoring"),
         }
     }
 }
@@ -5125,6 +5237,14 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "master-grow" => Some(Action::GrowMaster),
         "master-shrink" => Some(Action::ShrinkMaster),
         "toggle-overview" => Some(Action::ToggleOverview),
+        "sink-window" => Some(Action::SinkWindow),
+        "dive" => Some(Action::Dive),
+        "depth-next" => Some(Action::DepthNext),
+        "depth-prev" | "depth-previous" => Some(Action::DepthPrevious),
+        "depth-select" => Some(Action::DepthSelect),
+        "depth-cancel" => Some(Action::DepthCancel),
+        "depth-down" => Some(Action::DepthDown),
+        "depth-up" => Some(Action::DepthUp),
         "close-window" => Some(Action::CloseWindow),
         "toggle-floating" => Some(Action::ToggleFloating),
         "toggle-fullscreen" => Some(Action::ToggleFullscreen),
@@ -5395,6 +5515,17 @@ bsp_split_bias = auto
 #         wave_decay = 2.4
 #     }
 # }
+
+# Classic's structural per-workspace Depth Deck is independent of the visual
+# depth block below and off by default. Enabling it activates easy defaults:
+# Super+D goes down, Super+Shift+D goes up, Super+Ctrl+D opens the deck.
+classic_depth {
+    enabled = false
+    animation = true
+    animation_duration_ms = 420
+    wave_color = 3EC4E0
+    wave_alpha = 0.72
+}
 
 # Automatic attention depth / buoyancy. Inactive windows keep their live
 # content at tier 1, then become lightweight title cards at tier 2+.
@@ -5935,6 +6066,7 @@ mod tests {
             animations: WindowAnimationsConfig::default(),
             workspace_transition: WorkspaceTransitionConfig::default(),
             depth: DepthConfig::default(),
+            classic_depth: ClassicDepthConfig::default(),
             frost: FrostConfig::default(),
             shadow: ShadowConfig::default(),
             rounding: RoundingConfig::default(),
@@ -6904,6 +7036,45 @@ mod tests {
             assert_eq!(depth.schematic_alpha, 0.9);
             assert_eq!(depth.urgent_alpha, 0.95);
         }
+    }
+
+    #[test]
+    fn classic_depth_is_independently_opt_in() {
+        let entries = waves::parse(
+            "classic_depth {\n\
+             enabled = true\n\
+             animation = false\n\
+             animation_duration_ms = 610\n\
+             wave_color = 123456\n\
+             wave_alpha = 0.44\n\
+             }\n",
+            Path::new("<classic-depth-test>"),
+        )
+        .unwrap();
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        assert!(config.classic_depth.enabled);
+        assert!(!config.classic_depth.animation);
+        assert_eq!(config.classic_depth.animation_duration_ms, 610);
+        assert_eq!(
+            config.classic_depth.wave_color,
+            [18.0 / 255.0, 52.0 / 255.0, 86.0 / 255.0]
+        );
+        assert_eq!(config.classic_depth.wave_alpha, 0.44);
+        assert!(config
+            .keybinds
+            .iter()
+            .any(|bind| matches!(bind.action, Action::DepthDown)));
+        assert!(config
+            .keybinds
+            .iter()
+            .any(|bind| matches!(bind.action, Action::DepthUp)));
+        assert!(!RawConfig::default().classic_depth.enabled);
+        let default = parse_default_config();
+        assert!(!default.classic_depth.enabled);
+        assert!(default
+            .keybinds
+            .iter()
+            .all(|bind| !is_classic_depth_action(&bind.action)));
     }
 
     #[test]

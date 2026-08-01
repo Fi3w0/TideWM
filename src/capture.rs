@@ -422,6 +422,14 @@ impl Smallvil {
             // -- a screenshot taken while the overview is open shows it,
             // same as it shows a toast or a tab strip; this matches how
             // both of those are already captured rather than excluded.
+            if let Some(depth_deck_element) = self
+                .depth_deck_overlay
+                .as_ref()
+                .filter(|deck| deck.output_name() == output.name())
+                .and_then(|deck| deck.render_element(renderer))
+            {
+                elements.push(OutputRenderElements::Composited(depth_deck_element));
+            }
             if let Some(overview_element) = self
                 .overview
                 .as_ref()
@@ -569,6 +577,7 @@ impl Smallvil {
             // then windows, then BelowWindows/wallpaper, then BelowAll.
             let ripple_layers = self.ripple_frame_elements(renderer, &output);
             let workspace_transition = self.workspace_transition_frame_element(renderer, &output);
+            let depth_transition = self.depth_transition_frame_element(renderer, &output);
             let closing_windows = self.closing_window_frame_elements(renderer, &output);
             let glass_surfaces = self.glass_eligible_surfaces(&output);
             let glass_elements = self.glass_frame_elements(renderer, &output, &glass_surfaces);
@@ -580,6 +589,7 @@ impl Smallvil {
             match self.desktop_render_elements(renderer, &output, &skip) {
                 Some(space_elements) => {
                     elements.extend(ripple_layers.above_all);
+                    elements.extend(depth_transition);
                     elements.extend(ripple_layers.above_windows);
                     elements.extend(workspace_transition);
                     elements.extend(closing_windows);

@@ -15,13 +15,20 @@ algorithms. Depth is a per-workspace **Depth Deck**, not another workspace:
 - **Deep Deck:** windows explicitly parked out of the active layout while the
   client stays alive and remains owned by that workspace.
 
-The primary interaction is fast and reversible: park the focused tiled window,
+The opt-in `classic_depth { enabled = true }` block enables the feature; it is
+off by default and independent of automatic visual depth. The primary
+interaction is fast and reversible: park the focused tiled window,
 dive into the current workspace's deck, select a window, and recall it. When a
 surface tile is focused, recall swaps the selected deep window into that exact
 tile and parks the displaced window in the same deck slot. Empty-surface recall
 restores the selected window as a normal tile. Automatic structural parking is
 off by default and will not be considered until the manual workflow proves
 useful.
+
+The fast path is direct rather than modal: Depth Down/Up rotates the focused
+tile through the workspace's deck in opposite directions, with a vertical
+pressure wave showing direction. The full deck remains the overview for random
+access.
 
 ## Ocean
 
@@ -55,7 +62,7 @@ Both eventually produce the same model-neutral placed-window render input.
 
 ## Delivery order
 
-1. Manual Classic Depth Deck: park, navigate, swap-recall, cancel.
+1. **Done:** manual Classic Depth Deck: park, navigate, swap-recall, cancel.
 2. Optional Classic auto-park policy, only after real-use validation.
 3. Model-neutral placement boundary for the shared renderer.
 4. Ocean world coordinates, cameras, reefs, and bookmarks.

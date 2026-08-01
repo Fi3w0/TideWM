@@ -176,6 +176,11 @@ pub struct Smallvil {
     /// otherwise. Built once when toggled on, not rebuilt every frame --
     /// see `toggle_overview`.
     pub overview: Option<crate::overview::Overview>,
+    /// Structural parked-window state for Classic workspaces. This remains
+    /// empty unless the opt-in `classic_depth` feature is used.
+    pub classic_depth: crate::classic_depth::ClassicDepthDeck,
+    /// Static title-card overlay for the currently open Classic deck.
+    pub depth_deck_overlay: Option<crate::depth_deck::DepthDeckOverlay>,
     #[cfg(feature = "screencast")]
     pub(crate) screencast_picker: Option<crate::source_picker::SourcePicker>,
     /// `Some` when `show_welcome_hint` was still on at startup (`main.rs`).
@@ -310,6 +315,9 @@ pub struct Smallvil {
     /// Lazily compiled custom texture shader shared by every output's
     /// transition element.
     pub(crate) workspace_transition_program: Option<GlesTexProgram>,
+    /// At most one analytical Classic depth switch per output.
+    pub(crate) depth_transitions: HashMap<String, crate::depth_transition::DepthTransition>,
+    pub(crate) depth_transition_program: Option<GlesPixelProgram>,
     pub loop_handle: LoopHandle<'static, Smallvil>,
     pub loop_signal: LoopSignal,
 
@@ -2118,6 +2126,8 @@ impl Smallvil {
                 }),
             builtin_wallpaper: crate::wallpaper::BuiltinWallpaper::build(),
             overview: None,
+            classic_depth: crate::classic_depth::ClassicDepthDeck::default(),
+            depth_deck_overlay: None,
             #[cfg(feature = "screencast")]
             screencast_picker: None,
             welcome_hint: None,
@@ -2163,6 +2173,8 @@ impl Smallvil {
             pending_workspace_transitions: HashMap::new(),
             workspace_transitions: HashMap::new(),
             workspace_transition_program: None,
+            depth_transitions: HashMap::new(),
+            depth_transition_program: None,
             loop_handle,
             loop_signal,
             socket_name,
@@ -3378,6 +3390,7 @@ impl Smallvil {
         // before the fail-closed lock render path can begin.
         self.pending_workspace_transitions.clear();
         self.workspace_transitions.clear();
+        self.depth_transitions.clear();
         self.locked_outputs.clear();
 
         let serial = SERIAL_COUNTER.next_serial();
@@ -3605,6 +3618,8 @@ impl Smallvil {
         // on the event-loop tick that notices the animation ended.
         self.workspace_transitions
             .retain(|_, transition| !transition.finished());
+        self.depth_transitions
+            .retain(|_, transition| !transition.finished());
         self.window_open_animations
             .retain(|_, animation| !animation.finished());
         self.window_move_animations
@@ -3619,6 +3634,7 @@ impl Smallvil {
             .is_some_and(|toast| toast.needs_continued_redraw())
             || self.ripples.iter().any(|r| !r.finished())
             || !self.workspace_transitions.is_empty()
+            || !self.depth_transitions.is_empty()
             || !self.window_open_animations.is_empty()
             || !self.window_move_animations.is_empty()
             || !self.window_viscosity.is_empty()
@@ -4659,6 +4675,37 @@ impl Smallvil {
             })
     }
 
+    pub(crate) fn depth_transition_frame_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+    ) -> Option<crate::backend::udev::OutputRenderElements> {
+        if !matches!(self.session_lock, SessionLock::Unlocked) {
+            return None;
+        }
+        let output_name = output.name();
+        if self
+            .depth_transitions
+            .get(&output_name)
+            .is_some_and(|transition| transition.finished())
+        {
+            self.depth_transitions.remove(&output_name);
+            return None;
+        }
+        let area = Rectangle::from_size(self.space.output_geometry(output)?.size);
+        let program = crate::depth_transition::depth_transition_program(
+            &mut self.depth_transition_program,
+            renderer,
+        )?;
+        self.depth_transitions
+            .get_mut(&output_name)
+            .map(|transition| {
+                crate::backend::udev::OutputRenderElements::DepthTransition(
+                    transition.frame_element(program, area),
+                )
+            })
+    }
+
     /// Drops transient render state for a disconnected output. In
     /// particular, this releases a full-output texture immediately instead
     /// of retaining VRAM under an orphaned connector name, and drops that
@@ -4668,6 +4715,7 @@ impl Smallvil {
     pub(crate) fn remove_workspace_transition_output(&mut self, output_name: &str) {
         self.pending_workspace_transitions.remove(output_name);
         self.workspace_transitions.remove(output_name);
+        self.depth_transitions.remove(output_name);
         self.swim_cameras.remove(output_name);
     }
 
@@ -5402,6 +5450,7 @@ impl Smallvil {
     }
 
     fn apply_workspace_switch(&mut self, output: &Output, current: u32, workspace: u32) {
+        self.close_depth_deck();
         let output_name = output.name();
         self.workspace_previous.insert(output_name.clone(), current);
 
@@ -7199,6 +7248,7 @@ impl Smallvil {
     /// with changes made while it's open, so there's nothing to cache
     /// across frames the way `tab_strip_elements` caches per group.
     pub fn toggle_overview(&mut self) {
+        self.close_depth_deck();
         if self.overview.take().is_some() {
             self.request_redraw();
             return;
@@ -7269,6 +7319,274 @@ impl Smallvil {
             (mode.size.w, mode.size.h),
         ));
         self.request_redraw();
+    }
+
+    /// Parks the focused ordinary tiled window below its current Classic
+    /// workspace. Grouped and rect-override windows are deliberately excluded
+    /// from v1 so parking cannot silently break another ownership model.
+    pub fn sink_window(&mut self) {
+        if !self.config.classic_depth.enabled {
+            return;
+        }
+        let Some(surface) = self.focused_window_surface() else {
+            return;
+        };
+        if !self.layout.contains(&surface)
+            || self.group_of(&surface).is_some()
+            || self.fullscreen.contains_key(&surface)
+            || self.maximized.contains_key(&surface)
+            || self.pseudo_tiled.contains(&surface)
+            || self.pinned.contains(&surface)
+        {
+            return;
+        }
+        let (Some(output), Some(workspace), Some(window)) = (
+            self.layout.output_of(&surface).map(str::to_string),
+            self.layout.workspace_of(&surface),
+            self.layout.window_of(&surface),
+        ) else {
+            return;
+        };
+
+        self.layout.remove(&surface);
+        self.space.unmap_elem(&window);
+        self.classic_depth
+            .park(crate::classic_depth::DepthDeckEntry {
+                surface: surface.clone(),
+                window,
+                output: output.clone(),
+                workspace,
+            });
+        self.close_depth_deck();
+        self.retile();
+        self.refocus_after_hide(&output);
+        self.refresh_wlr_toplevel_state(&surface);
+        self.start_depth_transition(&output, true);
+        self.request_redraw();
+    }
+
+    /// Opens (or closes) the current Classic workspace's deck. It is a static
+    /// compositor overlay and does not steal keyboard focus from the tile that
+    /// will be used as the default swap target.
+    pub fn dive(&mut self) {
+        if !self.config.classic_depth.enabled {
+            return;
+        }
+        if self.classic_depth.view().is_some() {
+            self.close_depth_deck();
+            return;
+        }
+        self.overview = None;
+        let Some(output) = self.primary_output() else {
+            return;
+        };
+        let output_name = output.name();
+        let workspace = self.layout.active_workspace(&output_name);
+        if self.classic_depth.open(output_name, workspace) {
+            self.rebuild_depth_deck_overlay();
+            self.request_redraw();
+        }
+    }
+
+    pub fn cycle_depth_deck(&mut self, delta: isize) {
+        if !self.config.classic_depth.enabled || !self.classic_depth.cycle(delta) {
+            return;
+        }
+        self.rebuild_depth_deck_overlay();
+        self.request_redraw();
+    }
+
+    pub fn close_depth_deck(&mut self) {
+        let changed = self.classic_depth.close() | self.depth_deck_overlay.take().is_some();
+        if changed {
+            self.request_redraw();
+        }
+    }
+
+    /// Direct, workspace-like depth movement. Repeated Down walks newest to
+    /// oldest through the current workspace's deck; Up walks the same ring in
+    /// reverse. The focused tile stays geometrically fixed throughout.
+    pub fn switch_depth(&mut self, down: bool) {
+        if !self.config.classic_depth.enabled {
+            return;
+        }
+        let Some(surface) = self.focused_window_surface() else {
+            return;
+        };
+        if !self.layout.contains(&surface)
+            || self.group_of(&surface).is_some()
+            || self.fullscreen.contains_key(&surface)
+            || self.maximized.contains_key(&surface)
+            || self.pseudo_tiled.contains(&surface)
+            || self.pinned.contains(&surface)
+        {
+            return;
+        }
+        let (Some(output), Some(workspace), Some(old_window)) = (
+            self.layout.output_of(&surface).map(str::to_string),
+            self.layout.workspace_of(&surface),
+            self.layout.window_of(&surface),
+        ) else {
+            return;
+        };
+
+        if self
+            .classic_depth
+            .entries_for(&output, workspace)
+            .is_empty()
+        {
+            if down && self.layout.window_count(&output, workspace) > 1 {
+                self.sink_window();
+            }
+            return;
+        }
+
+        let Some(selected) = self.classic_depth.rotate(
+            &output,
+            workspace,
+            crate::classic_depth::DepthDeckEntry {
+                surface: surface.clone(),
+                window: old_window.clone(),
+                output: output.clone(),
+                workspace,
+            },
+            down,
+        ) else {
+            return;
+        };
+        self.close_depth_deck();
+        self.layout.replace_leaf(&surface, &selected.window);
+        self.space.unmap_elem(&old_window);
+        self.retile();
+        self.note_depth_attention(&selected.surface);
+        self.focus_window(Some(selected.surface.clone()), SERIAL_COUNTER.next_serial());
+        self.refresh_wlr_toplevel_state(&surface);
+        self.refresh_wlr_toplevel_state(&selected.surface);
+        self.start_depth_transition(&output, down);
+        self.request_redraw();
+    }
+
+    /// Recalls the selected deep window. A compatible focused tile is replaced
+    /// exactly and becomes the new occupant of that same deck slot; otherwise
+    /// the selected window is inserted as an ordinary tile.
+    pub fn select_depth_deck(&mut self) {
+        if !self.config.classic_depth.enabled {
+            return;
+        }
+        let Some(view) = self.classic_depth.view().cloned() else {
+            return;
+        };
+        let swap_surface = self.focused_window_surface().filter(|surface| {
+            self.layout.output_of(surface) == Some(view.output.as_str())
+                && self.layout.workspace_of(surface) == Some(view.workspace)
+                && self.group_of(surface).is_none()
+                && !self.fullscreen.contains_key(surface)
+                && !self.maximized.contains_key(surface)
+                && !self.pseudo_tiled.contains(surface)
+                && !self.pinned.contains(surface)
+        });
+
+        let selected = if let Some(surface) = swap_surface {
+            let Some(old_window) = self.layout.window_of(&surface) else {
+                return;
+            };
+            let Some(selected) =
+                self.classic_depth
+                    .swap_selected(crate::classic_depth::DepthDeckEntry {
+                        surface: surface.clone(),
+                        window: old_window.clone(),
+                        output: view.output.clone(),
+                        workspace: view.workspace,
+                    })
+            else {
+                return;
+            };
+            self.layout.replace_leaf(&surface, &selected.window);
+            self.space.unmap_elem(&old_window);
+            self.refresh_wlr_toplevel_state(&surface);
+            selected
+        } else {
+            let Some(selected) = self.classic_depth.take_selected() else {
+                return;
+            };
+            self.layout.insert(
+                &selected.output,
+                selected.workspace,
+                selected.window.clone(),
+                None,
+            );
+            selected
+        };
+
+        self.classic_depth.close();
+        self.depth_deck_overlay = None;
+        self.retile();
+        self.note_depth_attention(&selected.surface);
+        self.focus_window(Some(selected.surface.clone()), SERIAL_COUNTER.next_serial());
+        self.refresh_wlr_toplevel_state(&selected.surface);
+        self.start_depth_transition(&selected.output, false);
+        self.request_redraw();
+    }
+
+    fn rebuild_depth_deck_overlay(&mut self) {
+        let Some(view) = self.classic_depth.view().cloned() else {
+            self.depth_deck_overlay = None;
+            return;
+        };
+        let Some(output) = self.output_by_name(&view.output) else {
+            self.close_depth_deck();
+            return;
+        };
+        let Some(mode) = output.current_mode() else {
+            self.close_depth_deck();
+            return;
+        };
+        let titles: Vec<String> = self
+            .classic_depth
+            .entries_for(&view.output, view.workspace)
+            .into_iter()
+            .map(|entry| crate::tab_strip::window_title(&entry.surface))
+            .collect();
+        self.depth_deck_overlay = Some(crate::depth_deck::DepthDeckOverlay::build(
+            view.output,
+            view.workspace,
+            &titles,
+            view.selected,
+            (mode.size.w, mode.size.h),
+        ));
+    }
+
+    /// Hot-disabling Classic depth must never strand clients in hidden
+    /// structural state. Restore every parked window to its owning tree; only
+    /// active workspaces are remapped by the normal `retile()` pass.
+    fn restore_all_depth_deck_windows(&mut self) {
+        let entries = self.classic_depth.drain();
+        self.depth_deck_overlay = None;
+        for entry in entries {
+            self.layout
+                .insert(&entry.output, entry.workspace, entry.window, None);
+        }
+        self.retile();
+    }
+
+    fn start_depth_transition(&mut self, output: &str, down: bool) {
+        let config = &self.config.classic_depth;
+        if !config.enabled || !config.animation || config.animation_duration_ms == 0 {
+            return;
+        }
+        self.depth_transitions.insert(
+            output.to_string(),
+            crate::depth_transition::DepthTransition::new(
+                if down {
+                    crate::depth_transition::DepthTransitionDirection::Down
+                } else {
+                    crate::depth_transition::DepthTransitionDirection::Up
+                },
+                Duration::from_millis(config.animation_duration_ms as u64),
+                config.wave_color,
+                config.wave_alpha,
+            ),
+        );
     }
 
     /// Finds the mapped window whose center lies nearest `from`'s center in
@@ -7361,6 +7679,12 @@ impl Smallvil {
                     self.welcome_hint = None;
                 }
                 self.config = new_config;
+                if !self.config.classic_depth.enabled {
+                    self.restore_all_depth_deck_windows();
+                }
+                if !self.config.classic_depth.enabled || !self.config.classic_depth.animation {
+                    self.depth_transitions.clear();
+                }
                 if !self.config.animations.enabled || !self.config.animations.open.enabled {
                     self.window_open_animations.clear();
                 }

@@ -40,7 +40,7 @@ TideWM is a solo project. I use AI coding agents (OpenCode, Codex, Claude Code) 
 - XWayland, via [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite)
 - Screenshots, clipboard, session lock
 - PipeWire screencasting behind a feature flag, verified end to end through real OBS and Discord on a standalone session
-- Selectable water-glass refraction or per-app adjustable frosted glass, rounded client clipping, animated active/inactive/urgent gradient borders, analytical drop shadows, configurable open/close/move window animations, liquid move/resize viscosity, connected-vessel BSP resizing, opt-in floating-window sway, configurable impulse ripples, full-screen water-wave workspace transitions, and automatic window depth/buoyancy with a per-window override rule
+- Selectable water-glass refraction or per-app adjustable frosted glass, rounded client clipping, animated active/inactive/urgent gradient borders, analytical drop shadows, configurable open/close/move window animations, liquid move/resize viscosity, connected-vessel BSP resizing, opt-in floating-window sway, configurable impulse ripples, full-screen water-wave workspace transitions, automatic visual depth/buoyancy, and an independent opt-in Classic Depth Deck for tiled-window park/swap recall
 - A low-memory built-in Tide wallpaper; layer-shell wallpaper tools replace it normally
 - Hot-reloadable config in Waves, TideWM's own format, split across files, `env`/`$variables`/`$wave(...)`
 - Per-app window rules, including regex matching, initial fullscreen/maximize, capture privacy, and window swallowing
@@ -75,7 +75,7 @@ Foundation before visuals has been the plan from the start, and as of 0.60.0 the
 
 - **Standalone udev/DRM pass on the render effects.** Everything above is live-verified nested on real AMD hardware; the standalone backend compiles against the same render path but hasn't had its own hardware pass.
 - **Feel-tuning.** Viscosity, sway, depth timings, cascade's drag feel, and the transition/ripple presets ship with working defaults; the actual feel still gets refined against real use.
-- **Two spatial engines.** [Classic and Ocean now have a fixed design](SPATIAL_MODEL.md). Classic keeps real workspaces and gains a per-workspace Depth Deck for fast park/swap recall. Ocean is the later workspace-free infinite 2D canvas where X is travel and Y is physical depth. S0's continuous workspace swim is complete as a useful Classic bridge; the manual Classic Depth Deck is next.
+- **Two spatial engines.** [Classic and Ocean now have a fixed design](SPATIAL_MODEL.md). Classic keeps real workspaces; its opt-in per-workspace Depth Deck supports direct workspace-like Down/Up switching, manual park, full-deck navigation, exact-slot swap recall, a distinct vertical pressure-wave cue, and safe hot-disable restore. Ocean is the later workspace-free infinite 2D canvas where X is travel and Y is physical depth. The next structural step is the model-neutral placement boundary shared by both engines.
 - **Nvidia native run.** The nested (EGL/GLES) stack is verified on a real RTX 3060; the standalone DRM backend and its overlay-plane workaround still need a TTY session on Nvidia.
 - **AUR package.** Not yet, build from source for now.
 

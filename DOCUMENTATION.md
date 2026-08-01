@@ -350,6 +350,56 @@ swim {
 
 `water_effects = false` is the master bypass, same as `sway`/`viscosity`.
 
+### `classic_depth { }`
+
+Enables the Classic spatial engine's per-workspace Depth Deck. This is
+structural parking, separate from the automatic visual cooling in `depth { }`,
+and defaults off. `depth-down`/`depth-up` are the main workspace-like path:
+they rotate the focused tile forward/backward through that workspace's deck
+without opening a modal UI. The first Down on an empty deck parks the focused
+window and reveals the next surface tile. `sink-window` performs that park
+explicitly. It removes the focused ordinary tiled window from
+the active layout while keeping its client alive and owned by the same real
+workspace. `dive` opens a title-card deck for that workspace. Selecting a card
+replaces the focused surface tile exactly and parks the displaced window in the
+same slot; with no compatible focused tile, it restores the selected window as
+an ordinary tile.
+
+Grouped, fullscreen, maximized, pinned, pseudo-tiled, and floating windows are
+left unchanged in this first version. Disabling the block on hot reload restores
+every parked window to its owning workspace tree, so opting out cannot strand a
+client. This switch is independent of both `water_effects` and `depth.enabled`:
+plain deck, visual-only depth, both, and neither are all supported.
+
+Direct switches use a distinct analytical pressure wave: Down travels from the
+top of the output to the bottom; Up reverses it. Unlike the workspace water
+wipe, this is a narrow undulating crest with wake bands and bubbles, does not
+capture either workspace/window into a texture, and adds no retained framebuffer.
+Set `animation = false` (or duration `0`) for an immediate switch.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Master switch. When false, deck actions are removed from keyboard matching and remain inert over IPC. |
+| `animation` | bool | `true` | Enables the vertical pressure-wave switch cue. |
+| `animation_duration_ms` | integer, `0`–`3000` | `420` | Sweep duration; `0` is immediate. `duration_ms` is an alias. |
+| `wave_color` | color | `3EC4E0` | Pressure crest/wake tint. `color` is an alias. |
+| `wave_alpha` | float, `0`–`1` | `0.72` | Transition strength. `alpha` is an alias. |
+
+```wave
+classic_depth {
+    enabled = true
+    animation = true
+    animation_duration_ms = 420
+    wave_color = 3EC4E0
+    wave_alpha = 0.72
+}
+
+# Added automatically while enabled unless those combos are already used:
+# $mod+D       = depth-down
+# $mod+Shift+D = depth-up
+# $mod+Ctrl+D  = dive
+```
+
 ### `depth { }`
 
 Configures automatic attention depth and buoyancy. A mapped window starts at the surface. After `sink_after_ms` without focus or keyboard input it moves to tier 1, keeping its live content with reduced opacity and a cool-water wash. Each additional `tier_interval_ms` moves it one tier deeper, capped by `max_tier`; tier 2 and below use a cached box-and-title schematic instead of live client pixels. Focusing, clicking, or typing into the window returns it to tier 0 immediately. Urgent windows retain a bright bioluminescent border at every tier.
@@ -929,6 +979,14 @@ The same set of strings works after `bind ... =` at the top level or inside a `s
 - `submap:<name>` — enter a `submap <name> { }` block
 - `exit-submap`
 - `toggle-overview` — schematic grid of every workspace on the current output (see README's Features list; not live thumbnails)
+
+**Classic Depth Deck** (all no-op while `classic_depth.enabled = false`)
+- `depth-down` / `depth-up` — rotate the focused tile through its workspace's deck directly; Down on an empty deck parks the focused window first
+- `sink-window` — park the focused ordinary tiled window in this workspace's deck
+- `dive` — toggle the current workspace's deck overlay
+- `depth-next` / `depth-prev` — move the selected deck card, wrapping
+- `depth-select` — exact-slot swap recall, or ordinary tiled restore with no compatible focus target
+- `depth-cancel` — close the deck without changing windows
 
 **Outputs**
 - `toggle-dpms` — toggle every output's power together (all on, or all off)

@@ -785,6 +785,13 @@ impl Smallvil {
                         .and_then(|m| m.parked_window.clone())
                 })
             })
+            // Classic Depth Deck entries are protocol-mapped but absent
+            // from both Layouts and Space until recalled.
+            .or_else(|| {
+                self.classic_depth
+                    .entry(surface)
+                    .map(|entry| entry.window.clone())
+            })
             // Keep cleanup robust if older state or an interrupted
             // transition left a visible floating window without its tag.
             .or_else(|| {
@@ -1108,6 +1115,10 @@ impl Smallvil {
         // any leaf either way, making that call a no-op for it specifically
         // (find-nothing, same as any other surface that isn't tiled).
         self.leave_group_on_close(surface);
+        if self.classic_depth.remove(surface).is_some() {
+            self.depth_deck_overlay = None;
+            self.classic_depth.close();
+        }
         self.layout.remove(surface);
         self.fullscreen.remove(surface);
         self.maximized.remove(surface);
@@ -1259,6 +1270,11 @@ impl Smallvil {
                 self.floating_workspace
                     .get(surface)
                     .map(|tag| tag.output.clone())
+            })
+            .or_else(|| {
+                self.classic_depth
+                    .entry(surface)
+                    .map(|entry| entry.output.clone())
             })
             .or_else(|| {
                 self.mapped_toplevel_window(surface)

@@ -1834,6 +1834,30 @@ impl Smallvil {
             Action::ToggleOverview => {
                 self.toggle_overview();
             }
+            Action::SinkWindow => {
+                self.sink_window();
+            }
+            Action::Dive => {
+                self.dive();
+            }
+            Action::DepthNext => {
+                self.cycle_depth_deck(1);
+            }
+            Action::DepthPrevious => {
+                self.cycle_depth_deck(-1);
+            }
+            Action::DepthSelect => {
+                self.select_depth_deck();
+            }
+            Action::DepthCancel => {
+                self.close_depth_deck();
+            }
+            Action::DepthDown => {
+                self.switch_depth(true);
+            }
+            Action::DepthUp => {
+                self.switch_depth(false);
+            }
             Action::Quit => {
                 self.loop_signal.stop();
             }
