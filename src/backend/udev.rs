@@ -1374,7 +1374,7 @@ fn render_surface(
     let tab_strip_elements = if locked {
         Vec::new()
     } else {
-        state.tab_strip_elements(renderer)
+        state.tab_strip_elements(renderer, output)
     };
 
     // The overview shows window titles too -- same lock-gating as the tab

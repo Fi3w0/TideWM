@@ -441,7 +441,7 @@ impl Smallvil {
                 elements.push(OutputRenderElements::Composited(error_element));
             }
             elements.extend(
-                self.tab_strip_elements(renderer)
+                self.tab_strip_elements(renderer, &output)
                     .into_iter()
                     .map(OutputRenderElements::Composited),
             );

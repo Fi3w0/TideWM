@@ -322,17 +322,20 @@ Driven by the same `wp-pointer-gestures` compositor-consumed swipe path
 `[input.touchpad] workspace_swipe_fingers`/`workspace_swipe_distance` already
 use, so those two settings still apply: `workspace_swipe_distance` is one full
 spot-width of swipe travel, and `workspace_swipe_fingers` picks which
-finger-count swipe drives it. `neighbors` is parsed and clamped but not yet
-consumed by anything -- adjacent spots do not yet slide into view mid-pan;
-panning reveals blank/wallpaper on the entering side until the crossing snaps
-the view over. Gesture events are real-libinput-touchpad-only (the udev
-backend), never emitted under the nested winit backend used for day-to-day
-development, so this feature cannot be exercised in a nested session.
+finger-count swipe drives it. Adjacent tiled, floating, fullscreen, maximized,
+pseudo-tiled, and grouped-window content slides into view during the pan.
+Those windows are rendered directly from their retained workspace ownership;
+they are not mapped into the active `Space`, so focus, hit testing, IPC
+visibility, and the discrete workspace authority do not change before the
+half-spot crossing. Only strips intersecting the viewport are assembled, and
+none are assembled at rest. Gesture events are real-libinput-touchpad-only
+(the udev backend), never emitted under the nested winit backend used for
+day-to-day development, so the drag-driven path requires a real touchpad pass.
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `enabled` | bool | `false` | Master switch. `false` falls back to the ordinary discrete workspace switch (and its wave transition, if enabled). |
-| `neighbors` | integer, `1`–`4` | `1` | Adjacent spots kept mapped each side of the anchor. Parsed only; not yet consumed. `window` is an alias. |
+| `neighbors` | integer, `1`–`4` | `1` | Maximum adjacent workspace distance available to the render-only preview on each side. Only viewport-intersecting strips are assembled; `1` covers ordinary pans. `window` is an alias. |
 | `response` | float, `0.1`–`4` | `1.0` | Swipe-to-offset gain. `1.0` maps one `workspace_swipe_distance` of travel to one spot-width of camera motion. `gain` is an alias. |
 | `snap_duration_ms` | integer, `0`–`2000` | `220` | Spring-to-rest animation length after the fingers lift. `snap_ms` is an alias. |
 

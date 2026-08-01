@@ -18,6 +18,50 @@ use std::time::{Duration, Instant};
 
 use crate::animation::Animation;
 
+/// One neighboring workspace strip which intersects the output viewport.
+/// `delta` is relative to the current logical anchor: `1` is the workspace
+/// to the right, `-1` the workspace to the left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisibleNeighbor {
+    pub workspace: u32,
+    pub delta: i32,
+}
+
+/// Finds the bounded set of neighboring workspace strips which currently
+/// intersect the viewport. A strip at relative `delta` begins at
+/// `delta - camera_offset` spot-widths, so it is visible exactly while that
+/// interval overlaps `(-1, 1)`. Workspace zero remains the scratchpad edge,
+/// matching the input path's refusal to swim down from workspace one.
+///
+/// This stays pure so selection, edge handling, and the configured bound can
+/// be tested without constructing a compositor or renderer.
+pub fn visible_neighbors(
+    anchor: u32,
+    camera_offset: f32,
+    max_neighbors: u8,
+) -> Vec<VisibleNeighbor> {
+    if max_neighbors == 0 || camera_offset.abs() < 0.0001 {
+        return Vec::new();
+    }
+
+    let limit = i32::from(max_neighbors);
+    (-limit..=limit)
+        .filter(|delta| *delta != 0)
+        .filter(|delta| {
+            let strip_offset = *delta as f32 - camera_offset;
+            strip_offset > -1.0 && strip_offset < 1.0
+        })
+        .filter_map(|delta| {
+            let workspace = if delta > 0 {
+                anchor.checked_add(delta as u32)
+            } else {
+                anchor.checked_sub(delta.unsigned_abs())
+            }?;
+            (workspace > 0).then_some(VisibleNeighbor { workspace, delta })
+        })
+        .collect()
+}
+
 /// Per-output swim camera state.
 #[derive(Debug)]
 pub struct SwimCamera {
@@ -249,5 +293,62 @@ mod tests {
         // landing back on the pre-wrap offset.
         cam.cancel_advance(advances);
         assert!((cam.current_offset() - 0.6).abs() < 0.001);
+    }
+
+    #[test]
+    fn positive_offset_reveals_the_right_neighbor() {
+        assert_eq!(
+            visible_neighbors(3, 0.3, 1),
+            vec![VisibleNeighbor {
+                workspace: 4,
+                delta: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn negative_offset_reveals_the_left_neighbor() {
+        assert_eq!(
+            visible_neighbors(3, -0.3, 1),
+            vec![VisibleNeighbor {
+                workspace: 2,
+                delta: -1,
+            }]
+        );
+    }
+
+    #[test]
+    fn idle_camera_selects_no_neighbor_work() {
+        assert!(visible_neighbors(3, 0.0, 4).is_empty());
+    }
+
+    #[test]
+    fn configured_neighbor_bound_limits_wide_offsets() {
+        assert_eq!(
+            visible_neighbors(3, 1.4, 1),
+            vec![VisibleNeighbor {
+                workspace: 4,
+                delta: 1,
+            }]
+        );
+        assert_eq!(
+            visible_neighbors(3, 1.4, 2),
+            vec![
+                VisibleNeighbor {
+                    workspace: 4,
+                    delta: 1,
+                },
+                VisibleNeighbor {
+                    workspace: 5,
+                    delta: 2,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn workspace_edges_never_select_scratchpad_or_overflow() {
+        assert!(visible_neighbors(1, -0.4, 4).is_empty());
+        assert!(visible_neighbors(u32::MAX, 0.4, 4).is_empty());
     }
 }

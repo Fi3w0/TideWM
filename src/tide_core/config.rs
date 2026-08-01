@@ -178,10 +178,9 @@ impl Default for SwayConfig {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SwimConfig {
     pub enabled: bool,
-    /// How many neighboring spots are kept mapped on each side of the
-    /// anchor so they can slide into view during a pan. 1 keeps the
-    /// immediate neighbors only (cheapest); higher values let a fast pan
-    /// reveal further spots before the mapped window shifts.
+    /// Maximum neighboring workspace distance available to the render-only
+    /// preview on each side of the anchor. Only strips which intersect the
+    /// viewport are assembled; the windows remain logically hidden.
     pub neighbors: u8,
     /// Swipe-to-offset gain. `1.0` maps one `workspace_swipe_distance` of
     /// trackpad travel to one spot-width of camera motion; higher travels
