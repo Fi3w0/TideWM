@@ -75,7 +75,7 @@ Foundation before visuals has been the plan from the start, and as of 0.60.0 the
 
 - **Standalone udev/DRM pass on the render effects.** Everything above is live-verified nested on real AMD hardware; the standalone backend compiles against the same render path but hasn't had its own hardware pass.
 - **Feel-tuning.** Viscosity, sway, depth timings, cascade's drag feel, and the transition/ripple presets ship with working defaults; the actual feel still gets refined against real use.
-- **The infinite ocean.** S0's scoped bridge is complete: a trackpad swipe pans continuously across today's ordinary discrete workspaces and reveals adjacent content in motion (`swim { }`, off by default, real-touchpad/udev-only). Workspace identity itself is unchanged; the true infinite-axis data model, vertical dive through depth tiers, compass, and ocean overview remain future design/work.
+- **Two spatial engines.** [Classic and Ocean now have a fixed design](SPATIAL_MODEL.md). Classic keeps real workspaces and gains a per-workspace Depth Deck for fast park/swap recall. Ocean is the later workspace-free infinite 2D canvas where X is travel and Y is physical depth. S0's continuous workspace swim is complete as a useful Classic bridge; the manual Classic Depth Deck is next.
 - **Nvidia native run.** The nested (EGL/GLES) stack is verified on a real RTX 3060; the standalone DRM backend and its overlay-plane workaround still need a TTY session on Nvidia.
 - **AUR package.** Not yet, build from source for now.
 
