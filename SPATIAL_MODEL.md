@@ -54,6 +54,10 @@ independently panning and zooming per-output cameras:
   itself is reasoned from the render pipeline, not live-verified -- nested
   winit has no pointer-drag injection, the same gap viscosity and the other
   interactive grabs carry.
+- All of the above is also reachable from a touchpad with no button press at
+  all: `modifier_pan_fingers` starts the identical grab a mouse drag would
+  from a configured-finger-count swipe held together with `pointer_modifier`,
+  driven by synthetic pointer motion built from the gesture's own delta.
 - Bookmarks provide named return points and a compatibility surface for tools
   that expect workspace-like destinations.
 - An optional camera-anchored adaptive guide field provides scale and motion

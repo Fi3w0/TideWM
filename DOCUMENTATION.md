@@ -843,6 +843,7 @@ udev backend only — winit's nested host input never reaches a real libinput de
 | `swipe_left`, `swipe_right`, `swipe_up`, `swipe_down` | action | Runs any ordinary TideWM action after a dominant-axis swipe crosses `workspace_swipe_distance` (default 200). |
 | `gesture_pinch_fingers` | integer | Finger count for `pinch_in` / `pinch_out`. |
 | `pinch_in`, `pinch_out` | action | Runs after the completed pinch reaches scale 0.8 / 1.2 respectively. |
+| `modifier_pan_fingers` | integer, unset by default | A swipe with this many fingers, held together with `pointer_modifier`, moves/pans the same way `pointer_modifier`+left-drag does -- the touch itself is the "grab," no button needed. Over a window it picks the window up (tiled or floating, same decision the mouse path makes, including Ocean smart-tiling swap and reattachment); over empty Ocean canvas it pans the camera. |
 
 ```
 input {

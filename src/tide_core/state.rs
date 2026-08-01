@@ -933,6 +933,14 @@ pub(crate) enum CompositorGesture {
     Pinch {
         scale: f64,
     },
+    /// `pointer_modifier` + `modifier_pan_fingers` touchpad swipe: a real
+    /// `PointerGrab` (the same types the mouse move/pan path uses) is
+    /// already active by the time this is stored, driven by synthetic
+    /// `MotionEvent`s and ended by `unset_grab` -- never a real button
+    /// release. See `Smallvil::start_gesture_modifier_move`.
+    ModifierMove {
+        last_location: Point<f64, Logical>,
+    },
 }
 
 pub(crate) struct PopupGrabState {

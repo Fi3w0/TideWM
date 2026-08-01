@@ -74,7 +74,7 @@ see the changelog milestone note for why 1.0 remains intentionally reserved.
 - **Nvidia**: nested backend verified on a real RTX 3060 (proprietary driver 610.43): clean EGL/GLES context, correct rendering, no crashes. The standalone DRM backend and its overlay-plane workaround still need a native (TTY) Nvidia run.
 - **DPMS / gamma**: protocol-complete and verified on AMD hardware; lid/tablet switches still need broader hardware coverage.
 - **Touchpad config**: built (tap, natural-scroll, accel, click-method, ...), not yet verified on real hardware.
-- **Touchpad gestures**: swipe/pinch can trigger any compositor action, plus a relative-workspace-swipe shortcut. Verified live on two real trackpads (an external USB Apple Magic Trackpad and a ThinkPad's built-in touchpad): all four swipe directions and pinch-in confirmed, pinch-out not yet confirmed.
+- **Touchpad gestures**: swipe/pinch can trigger any compositor action, plus a relative-workspace-swipe shortcut. Verified live on two real trackpads (an external USB Apple Magic Trackpad and a ThinkPad's built-in touchpad): all four swipe directions and pinch-in confirmed, pinch-out not yet confirmed. `modifier_pan_fingers` (`pointer_modifier`+configured-finger swipe moves/pans with no button press at all, reusing the same grabs the mouse path uses) is new and not yet live-tested.
 - **Continuous swim navigation** (`swim { }`): built and unit-tested, off by default. Adjacent workspace content is revealed continuously without making hidden windows focusable or IPC-visible. The real-touchpad-only drag path still needs its first live hardware pass; nested winit cannot emit the required gesture events.
 - **Screencasting**: built behind `--features screencast` with a real `xdg-desktop-portal` backend. The SHM/MemFd path delivers real frames, verified on a standalone TTY (udev/DRM) session end to end through both real OBS and real Discord. DMA-BUF still fails on real hardware and stays disabled; MemFd/SHM is the supported transport.
 - **Water/decoration effects**: the full identity and decoration set (ripples, wave transitions, water-glass, frost, shadows, borders, window animations, viscosity, connected-vessel resize, sway, depth/buoyancy) is live-verified nested on real AMD hardware. The standalone udev/DRM backend compiles against the same render path but hasn't had its own hardware pass yet.
@@ -136,6 +136,7 @@ Mouse:
 | `Alt` + right-drag (tiled)   | Resize the tile from an edge          |
 | Click on a split gap         | Drag to adjust the split ratio        |
 | Left-drag empty canvas (Ocean) | Pan the camera directly, any zoom   |
+| `Alt` + N-finger touchpad swipe (`modifier_pan_fingers`) | Same as `Alt`+left-drag above, but the touch itself is the grab -- no button press needed |
 
 Full set, plus every action string and IPC/`tidectl` command, in [DOCUMENTATION.md](DOCUMENTATION.md). Rebind anything with `bind` in `config.wave`.
 

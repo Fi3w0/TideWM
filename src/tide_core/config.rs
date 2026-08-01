@@ -1373,6 +1373,13 @@ pub struct TouchpadConfig {
     pub gesture_pinch_fingers: Option<u32>,
     pub pinch_in: Option<Action>,
     pub pinch_out: Option<Action>,
+    /// When set, a swipe with this many fingers held together with
+    /// `pointer_modifier` moves/pans the same way `pointer_modifier`+
+    /// left-drag does, with the touch itself standing in for the button
+    /// press: over a window it's picked up (tiled or floating, same
+    /// decision the mouse path makes), over empty Ocean canvas it pans the
+    /// camera. Unset (the default) leaves the gesture unclaimed.
+    pub modifier_pan_fingers: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -3241,6 +3248,9 @@ fn apply_touchpad_block(touchpad: &mut TouchpadConfig, body: &[waves::Entry]) {
             }
             "pinch_in" => touchpad.pinch_in = parse_action(value),
             "pinch_out" => touchpad.pinch_out = parse_action(value),
+            "modifier_pan_fingers" => {
+                set_gesture_fingers(&mut touchpad.modifier_pan_fingers, key, value)
+            }
             other => tracing::warn!(key = %other, "Unknown key in `touchpad` block, ignoring"),
         }
     }
@@ -6309,6 +6319,7 @@ input {
         # swipe_right = workspace:1
         # gesture_pinch_fingers = 4
         # pinch_in = toggle-overview
+        # modifier_pan_fingers = 2      # $mod+2-finger swipe moves/pans
     }
 }
 
@@ -6542,12 +6553,27 @@ mod tests {
                 waves::Entry::Assign("swipe_left".into(), "toggle-overview".into()),
                 waves::Entry::Assign("gesture_pinch_fingers".into(), "4".into()),
                 waves::Entry::Assign("pinch_out".into(), "close-window".into()),
+                waves::Entry::Assign("modifier_pan_fingers".into(), "2".into()),
             ],
         );
         assert_eq!(touchpad.gesture_swipe_fingers, Some(3));
         assert!(matches!(touchpad.swipe_left, Some(Action::ToggleOverview)));
         assert_eq!(touchpad.gesture_pinch_fingers, Some(4));
         assert!(matches!(touchpad.pinch_out, Some(Action::CloseWindow)));
+        assert_eq!(touchpad.modifier_pan_fingers, Some(2));
+
+        apply_touchpad_block(
+            &mut touchpad,
+            &[waves::Entry::Assign(
+                "modifier_pan_fingers".into(),
+                "1".into(),
+            )],
+        );
+        assert_eq!(
+            touchpad.modifier_pan_fingers,
+            Some(2),
+            "below the 2-finger minimum is ignored, not silently accepted"
+        );
     }
 
     #[test]

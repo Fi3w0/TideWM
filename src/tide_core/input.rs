@@ -349,6 +349,182 @@ impl Smallvil {
         self.request_redraw();
     }
 
+    /// Physically-pressed Ctrl/Alt/Shift/Super, ignoring XKB's *effective*
+    /// latched/locked state (which a nested host can also leave stale
+    /// across keyboard-focus changes) -- see the modifier-drag button
+    /// handling below for why a compositor drag/move must never trigger
+    /// off anything but keys actually held down right now.
+    fn held_modifiers(&self) -> crate::config::Mods {
+        let Some(keyboard) = self.seat.get_keyboard() else {
+            return crate::config::Mods::default();
+        };
+        keyboard.with_pressed_keysyms(|keys| {
+            let mut held = crate::config::Mods::default();
+            for sym in keys.into_iter().flat_map(|key| key.raw_syms().into_iter()) {
+                match sym {
+                    Keysym::Control_L | Keysym::Control_R => held.ctrl = true,
+                    Keysym::Alt_L | Keysym::Alt_R => held.alt = true,
+                    Keysym::Shift_L | Keysym::Shift_R => held.shift = true,
+                    Keysym::Super_L | Keysym::Super_R => held.logo = true,
+                    _ => {}
+                }
+            }
+            held
+        })
+    }
+
+    /// `pointer_modifier` + a configured-finger-count touchpad swipe: the
+    /// gesture counterpart of `pointer_modifier`+left-drag, needing no
+    /// button press at all -- the two-finger touch itself is the "grab".
+    /// Starts the exact same grab types the mouse path uses (so drag feel,
+    /// tile-swap, and floating reattachment logic live in one place only),
+    /// then `InputEvent::GestureSwipeUpdate`/`GestureSwipeEnd` drive it with
+    /// synthetic `MotionEvent`s and a direct `unset_grab` instead of a real
+    /// button release. Returns `false` when there's nothing to grab (a
+    /// fullscreen/maximized window, or empty canvas outside Ocean), leaving
+    /// the gesture free to forward to the focused client as usual.
+    fn start_gesture_modifier_move(&mut self) -> bool {
+        let pointer = self.seat.get_pointer().unwrap();
+        let location = pointer.current_location();
+        let serial = SERIAL_COUNTER.next_serial();
+
+        let Some((window, loc)) = self.window_under(location) else {
+            if self.config.spatial_engine != crate::config::SpatialEngine::Ocean {
+                return false;
+            }
+            let Some(output) = self.output_for_point(location) else {
+                return false;
+            };
+            let start_data = PointerGrabStartData {
+                focus: None,
+                button: BTN_LEFT,
+                location,
+            };
+            pointer.set_grab(
+                self,
+                OceanPanGrab::start(start_data, output.name()),
+                serial,
+                Focus::Clear,
+            );
+            return true;
+        };
+
+        let wl_surface = window.toplevel().unwrap().wl_surface().clone();
+        if self.fullscreen.contains_key(&wl_surface) || self.maximized.contains_key(&wl_surface) {
+            // Output-owned placements; same exclusion the mouse path uses.
+            return false;
+        }
+
+        self.focus_window(Some(wl_surface.clone()), serial);
+        let start_data = PointerGrabStartData {
+            focus: Some((wl_surface.clone(), loc.to_f64())),
+            button: BTN_LEFT,
+            location,
+        };
+
+        if self.config.spatial_engine == crate::config::SpatialEngine::Ocean
+            && self.config.ocean.smart_tiling
+            && self.ocean.is_tiled(&wl_surface)
+        {
+            let Some(output) = self
+                .ocean
+                .entry_output(&wl_surface)
+                .map(str::to_string)
+                .or_else(|| self.output_for_window(&window).map(|output| output.name()))
+            else {
+                return false;
+            };
+            let Some(initial_rect) =
+                self.ocean
+                    .world_rect(&wl_surface, self.config.gaps, self.config.bsp_split_bias)
+            else {
+                return false;
+            };
+            let view_scale = self.ocean.camera(&output).zoom;
+            let grab = OceanTileMoveGrab::start(
+                start_data,
+                window,
+                wl_surface,
+                output,
+                initial_rect.loc,
+                view_scale,
+            );
+            pointer.set_grab(self, grab, serial, Focus::Clear);
+            return true;
+        }
+
+        if self.config.spatial_engine == crate::config::SpatialEngine::Ocean
+            && self.config.ocean.freeform_windows
+            && self.ocean.is_tiled(&wl_surface)
+        {
+            self.toggle_floating(&wl_surface);
+            let Some(model_rect) = self.ocean.floating_rect(&wl_surface) else {
+                return false;
+            };
+            self.ocean.raise_floating(&wl_surface);
+            self.space.raise_element(&window, false);
+            let view_scale = self
+                .output_for_point(location)
+                .map(|output| self.ocean.camera(&output.name()).zoom)
+                .unwrap_or(1.0);
+            let last_location = start_data.location;
+            pointer.set_grab(
+                self,
+                MoveSurfaceGrab {
+                    start_data,
+                    window,
+                    initial_window_location: model_rect.loc,
+                    view_scale,
+                    smart_attach_ocean: self.config.ocean.smart_tiling,
+                    last_location,
+                },
+                serial,
+                Focus::Clear,
+            );
+            return true;
+        }
+
+        if !self.layout.contains(&wl_surface) && !self.ocean.is_tiled(&wl_surface) {
+            self.ocean.raise_floating(&wl_surface);
+            self.space.raise_element(&window, false);
+            let model_loc = self
+                .ocean
+                .floating_rect(&wl_surface)
+                .map(|rect| rect.loc)
+                .unwrap_or(loc);
+            let view_scale = self
+                .output_for_point(location)
+                .map(|output| self.ocean.camera(&output.name()).zoom)
+                .unwrap_or(1.0);
+            let last_location = start_data.location;
+            pointer.set_grab(
+                self,
+                MoveSurfaceGrab {
+                    start_data,
+                    window,
+                    initial_window_location: model_loc,
+                    view_scale,
+                    smart_attach_ocean: self.config.spatial_engine
+                        == crate::config::SpatialEngine::Ocean
+                        && self.config.ocean.smart_tiling,
+                    last_location,
+                },
+                serial,
+                Focus::Clear,
+            );
+            return true;
+        }
+
+        let output = self.layout.output_of(&wl_surface).map(str::to_string);
+        let workspace = self.layout.workspace_of(&wl_surface);
+        let (Some(output), Some(workspace)) = (output, workspace) else {
+            return false;
+        };
+        let grab = TileMoveGrab::start(start_data, window, wl_surface, output, workspace, loc);
+        pointer.set_grab(self, grab, serial, Focus::Clear);
+        true
+    }
+
     /// Maps a touch (or any other absolute-position) event's normalized
     /// coordinates onto logical space, the same way `PointerMotionAbsolute`
     /// already does just below -- first output, no per-device output
@@ -924,7 +1100,6 @@ impl Smallvil {
             }
             InputEvent::PointerButton { event, .. } => {
                 let pointer = self.seat.get_pointer().unwrap();
-                let keyboard = self.seat.get_keyboard().unwrap();
 
                 let serial = SERIAL_COUNTER.next_serial();
 
@@ -1059,20 +1234,10 @@ impl Smallvil {
                     // the user is physically holding the main modifier now.
                     // Require actually pressed modifier keys so an ordinary
                     // drag can never turn into a compositor move/resize.
-                    let held_modifiers = keyboard.with_pressed_keysyms(|keys| {
-                        let mut held = crate::config::Mods::default();
-                        for sym in keys.into_iter().flat_map(|key| key.raw_syms().into_iter()) {
-                            match sym {
-                                Keysym::Control_L | Keysym::Control_R => held.ctrl = true,
-                                Keysym::Alt_L | Keysym::Alt_R => held.alt = true,
-                                Keysym::Shift_L | Keysym::Shift_R => held.shift = true,
-                                Keysym::Super_L | Keysym::Super_R => held.logo = true,
-                                _ => {}
-                            }
-                        }
-                        held
-                    });
-                    let modifier_drag = self.config.pointer_modifier.is_held_by(held_modifiers)
+                    let modifier_drag = self
+                        .config
+                        .pointer_modifier
+                        .is_held_by(self.held_modifiers())
                         && (button == BTN_LEFT || button == BTN_RIGHT);
                     if modifier_drag {
                         if let Some((window, loc)) = under.clone() {
@@ -1307,7 +1472,10 @@ impl Smallvil {
                         && under.is_none()
                         && self.config.ocean.canvas_pan_button.matches(button)
                         && (!self.config.ocean.canvas_pan_requires_modifier
-                            || self.config.pointer_modifier.is_held_by(held_modifiers));
+                            || self
+                                .config
+                                .pointer_modifier
+                                .is_held_by(self.held_modifiers()));
                     if canvas_pan {
                         if let Some(output) = self.output_for_point(pointer.current_location()) {
                             let start_data = PointerGrabStartData {
@@ -1573,43 +1741,31 @@ impl Smallvil {
                     && self.config.ocean.zoom_enabled
                     && self.config.ocean.modifier_zoom
                     && vertical_amount != 0.0
+                    && self
+                        .config
+                        .pointer_modifier
+                        .is_held_by(self.held_modifiers())
                 {
-                    let keyboard = self.seat.get_keyboard().unwrap();
-                    let held_modifiers = keyboard.with_pressed_keysyms(|keys| {
-                        let mut held = crate::config::Mods::default();
-                        for sym in keys.into_iter().flat_map(|key| key.raw_syms().into_iter()) {
-                            match sym {
-                                Keysym::Control_L | Keysym::Control_R => held.ctrl = true,
-                                Keysym::Alt_L | Keysym::Alt_R => held.alt = true,
-                                Keysym::Shift_L | Keysym::Shift_R => held.shift = true,
-                                Keysym::Super_L | Keysym::Super_R => held.logo = true,
-                                _ => {}
-                            }
-                        }
-                        held
-                    });
-                    if self.config.pointer_modifier.is_held_by(held_modifiers) {
-                        let pointer = self.seat.get_pointer().unwrap();
-                        let location = pointer.current_location();
-                        if let Some(output) = self.output_for_point(location) {
-                            if let Some(output_geo) = self.space.output_geometry(&output) {
-                                let steps = vertical_amount_discrete
-                                    .map(|value| value / 120.0)
-                                    .unwrap_or(vertical_amount / 15.0);
-                                let current = self.ocean.camera(&output.name()).zoom;
-                                let target = (current / self.config.ocean.zoom_step.powf(steps))
-                                    .clamp(self.config.ocean.min_zoom, self.config.ocean.max_zoom);
-                                self.ocean.zoom_at(
-                                    &output.name(),
-                                    location - output_geo.loc.to_f64(),
-                                    target,
-                                    Duration::from_millis(
-                                        self.config.ocean.camera_animation_ms.min(120),
-                                    ),
-                                );
-                                self.request_redraw();
-                                return;
-                            }
+                    let pointer = self.seat.get_pointer().unwrap();
+                    let location = pointer.current_location();
+                    if let Some(output) = self.output_for_point(location) {
+                        if let Some(output_geo) = self.space.output_geometry(&output) {
+                            let steps = vertical_amount_discrete
+                                .map(|value| value / 120.0)
+                                .unwrap_or(vertical_amount / 15.0);
+                            let current = self.ocean.camera(&output.name()).zoom;
+                            let target = (current / self.config.ocean.zoom_step.powf(steps))
+                                .clamp(self.config.ocean.min_zoom, self.config.ocean.max_zoom);
+                            self.ocean.zoom_at(
+                                &output.name(),
+                                location - output_geo.loc.to_f64(),
+                                target,
+                                Duration::from_millis(
+                                    self.config.ocean.camera_animation_ms.min(120),
+                                ),
+                            );
+                            self.request_redraw();
+                            return;
                         }
                     }
                 }
@@ -1754,6 +1910,31 @@ impl Smallvil {
                     });
                     return;
                 }
+                // `pointer_modifier` + a configured finger count: the
+                // touchpad counterpart of `pointer_modifier`+left-drag,
+                // with the two-finger touch itself standing in for the
+                // button press. Checked after the plain-swipe path above so
+                // an overlapping finger-count config still favors bound
+                // swipe actions/workspace navigation, matching how those
+                // already take priority over everything below them.
+                let modifier_pan = matches!(self.session_lock, SessionLock::Unlocked)
+                    && self.exclusive_layer().is_none()
+                    && self
+                        .config
+                        .input
+                        .touchpad
+                        .modifier_pan_fingers
+                        .is_some_and(|configured| configured == fingers)
+                    && self
+                        .config
+                        .pointer_modifier
+                        .is_held_by(self.held_modifiers());
+                if modifier_pan && self.start_gesture_modifier_move() {
+                    self.compositor_gesture = Some(CompositorGesture::ModifierMove {
+                        last_location: self.seat.get_pointer().unwrap().current_location(),
+                    });
+                    return;
+                }
                 let pointer = self.seat.get_pointer().unwrap();
                 pointer.gesture_swipe_begin(
                     self,
@@ -1766,6 +1947,28 @@ impl Smallvil {
             }
             InputEvent::GestureSwipeUpdate { event, .. } => {
                 let delta = BackendGestureSwipeUpdateEvent::delta(&event);
+                let modifier_move_from = match &self.compositor_gesture {
+                    Some(CompositorGesture::ModifierMove { last_location }) => Some(*last_location),
+                    _ => None,
+                };
+                if let Some(last_location) = modifier_move_from {
+                    let new_location = self.clamp_to_outputs(last_location + delta);
+                    self.compositor_gesture = Some(CompositorGesture::ModifierMove {
+                        last_location: new_location,
+                    });
+                    let pointer = self.seat.get_pointer().unwrap();
+                    pointer.motion(
+                        self,
+                        None,
+                        &MotionEvent {
+                            location: new_location,
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: Event::time_msec(&event),
+                        },
+                    );
+                    pointer.frame(self);
+                    return;
+                }
                 let swim = if let Some(CompositorGesture::Swipe {
                     swim,
                     delta_x,
@@ -1797,6 +2000,25 @@ impl Smallvil {
                 );
             }
             InputEvent::GestureSwipeEnd { event, .. } => {
+                // Checked (and cleared) before the `.take()` below: that
+                // call unconditionally clears `compositor_gesture` as a
+                // side effect of evaluating its scrutinee, so a `ModifierMove`
+                // left unhandled here would still get silently cleared,
+                // leaking the grab it started forever (nothing else would
+                // ever call `unset_grab` on it).
+                if matches!(
+                    &self.compositor_gesture,
+                    Some(CompositorGesture::ModifierMove { .. })
+                ) {
+                    self.compositor_gesture = None;
+                    let pointer = self.seat.get_pointer().unwrap();
+                    pointer.unset_grab(
+                        self,
+                        SERIAL_COUNTER.next_serial(),
+                        Event::time_msec(&event),
+                    );
+                    return;
+                }
                 if let Some(CompositorGesture::Swipe {
                     workspace_fallback,
                     swim,

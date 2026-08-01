@@ -84,7 +84,14 @@ impl TileMoveGrab {
     /// different output or workspace than it started on doesn't relocate
     /// it there, just snaps it back; that's a deliberate first-pass scope
     /// limit (see `AGENT.md`), not an oversight.
-    fn drop(&self, data: &mut Smallvil) {
+    ///
+    /// Runs from `unset()`, not `button()`'s release detection, so it
+    /// fires exactly once whenever this grab ends -- a real button
+    /// release, a gesture-driven `unset_grab` (see
+    /// `Smallvil::start_gesture_modifier_move`), or any other teardown
+    /// path -- rather than only the one Smithay happens to reach it
+    /// through.
+    fn commit(&self, data: &mut Smallvil) {
         if !data.window_is_visible(&self.surface)
             || !data.layout.contains(&self.surface)
             || data.fullscreen.contains_key(&self.surface)
@@ -171,7 +178,6 @@ impl PointerGrab<Smallvil> for TileMoveGrab {
 
         if !handle.current_pressed().contains(&self.start_data.button) {
             handle.unset_grab(self, data, event.serial, event.time, true);
-            self.drop(data);
         }
     }
 
@@ -264,5 +270,9 @@ impl PointerGrab<Smallvil> for TileMoveGrab {
         &self.start_data
     }
 
-    fn unset(&mut self, _data: &mut Smallvil) {}
+    fn unset(&mut self, data: &mut Smallvil) {
+        // Runs whenever this grab ends, however it ends -- see `commit`'s
+        // own doc comment.
+        self.commit(data);
+    }
 }

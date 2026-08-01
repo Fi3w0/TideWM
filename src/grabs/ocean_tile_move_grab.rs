@@ -55,7 +55,15 @@ impl OceanTileMoveGrab {
         }
     }
 
-    fn drop(&self, data: &mut Smallvil) {
+    /// Commits the drag: a drop over another tile swaps the two, any other
+    /// drop just retiles with no swap, snapping back to the original slot
+    /// since tree membership never changed. Runs from `unset()`, not
+    /// `button()`'s release detection, so it fires exactly once whenever
+    /// this grab ends -- a real button release, a gesture-driven
+    /// `unset_grab` (see `Smallvil::start_gesture_modifier_move`), or any
+    /// other teardown path -- rather than only the one Smithay happens to
+    /// reach it through.
+    fn commit(&self, data: &mut Smallvil) {
         if !data.window_is_visible(&self.surface)
             || !data.ocean.is_tiled(&self.surface)
             || data.fullscreen.contains_key(&self.surface)
@@ -154,7 +162,6 @@ impl PointerGrab<Smallvil> for OceanTileMoveGrab {
         handle.button(data, event);
         if !handle.current_pressed().contains(&self.start_data.button) {
             handle.unset_grab(self, data, event.serial, event.time, true);
-            self.drop(data);
         }
     }
 
@@ -248,12 +255,12 @@ impl PointerGrab<Smallvil> for OceanTileMoveGrab {
     }
 
     fn unset(&mut self, data: &mut Smallvil) {
-        // Always runs before `drop()` (Smithay calls it from
-        // `unset_grab` first), and also covers every other way this grab
-        // can end -- window death, a competing `set_grab` elsewhere -- that
-        // never reaches `drop()` at all. Without this, a drag that ends any
-        // way other than a plain button release leaves the window pinned
-        // to a phantom rectangle forever.
+        // Runs whenever this grab ends, however it ends -- a real button
+        // release, `unset_grab` called directly (the gesture-driven path),
+        // window death, or a competing `set_grab` elsewhere -- so `commit`
+        // always fires exactly once and the drag override never outlives
+        // the gesture it was created for.
+        self.commit(data);
         data.ocean.clear_tile_drag();
     }
 }
