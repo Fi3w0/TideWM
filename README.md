@@ -27,7 +27,7 @@ Full modern tiling on the fundamentals: BSP and master/stack, workspaces, groups
 
 ## Showcase
 
-<video src="share/media/demo-clasic.mp4" controls width="960">
+<video src="https://github.com/Fi3w0/TideWM/raw/master/share/media/demo-clasic.mp4" controls width="960">
   Your browser does not support embedded video. [Download the demo](share/media/demo-clasic.mp4).
 </video>
 
