@@ -18,7 +18,7 @@ use smithay::{
             Resource,
         },
     },
-    utils::{Rectangle, Serial, SERIAL_COUNTER},
+    utils::{Rectangle, Serial, Size, SERIAL_COUNTER},
     wayland::shell::xdg::{
         PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
     },
@@ -100,6 +100,7 @@ impl XdgShellHandler for Smallvil {
         // drag would just be overwritten by the next retile. Revisit once
         // floating windows exist: this check will then only block tiled ones.
         if self.layout.contains(surface.wl_surface())
+            || self.ocean.is_tiled(surface.wl_surface())
             || self.fullscreen.contains_key(surface.wl_surface())
             || self.maximized.contains_key(surface.wl_surface())
         {
@@ -153,6 +154,7 @@ impl XdgShellHandler for Smallvil {
     ) {
         // See move_request: tiled windows don't free-resize yet.
         if self.layout.contains(surface.wl_surface())
+            || self.ocean.is_tiled(surface.wl_surface())
             || self.fullscreen.contains_key(surface.wl_surface())
             || self.maximized.contains_key(surface.wl_surface())
         {
@@ -412,6 +414,7 @@ impl Smallvil {
             .or_else(|| {
                 if !self.unmapped_toplevels.contains_key(&wl_surface)
                     && !self.layout.contains(&wl_surface)
+                    && !self.ocean.is_tiled(&wl_surface)
                 {
                     self.space.element_geometry(&window)
                 } else {
@@ -454,7 +457,7 @@ impl Smallvil {
         let wl_surface = surface.wl_surface();
         // Only meaningful for a floating window -- a tiled one already
         // fills its slot. The protocol still requires a reply either way.
-        if self.layout.contains(wl_surface) {
+        if self.layout.contains(wl_surface) || self.ocean.is_tiled(wl_surface) {
             self.maximized.remove(wl_surface);
             // No `state.size` write here: it's a documented no-op for a
             // tiled window, which already has the correct size from
@@ -764,8 +767,9 @@ impl Smallvil {
     /// Finds a protocol-mapped toplevel even when its workspace is hidden
     /// and it is therefore absent from `Space`.
     pub(crate) fn mapped_toplevel_window(&self, surface: &WlSurface) -> Option<Window> {
-        self.layout
-            .window_of(surface)
+        self.ocean
+            .window(surface)
+            .or_else(|| self.layout.window_of(surface))
             .or_else(|| {
                 self.floating_workspace
                     .get(surface)
@@ -891,6 +895,7 @@ impl Smallvil {
         self.window_depths
             .insert(surface.clone(), crate::depth::WindowDepth::new());
         let focused = self.intended_window_surface();
+        let ocean_engine = self.config.spatial_engine == crate::config::SpatialEngine::Ocean;
         let workspace = rule
             .workspace
             .unwrap_or_else(|| self.layout.active_workspace(&output.name()));
@@ -901,17 +906,27 @@ impl Smallvil {
         // exactly in its place. Skipped when the new window is about to
         // float -- hiding the terminal under a floating child would leave
         // an empty tile behind.
-        let swallow_target = if rule.float || rule.pin || implicit_float {
+        let swallow_target = if ocean_engine || rule.float || rule.pin || implicit_float {
             None
         } else {
             self.swallow_candidate(surface, &output.name(), workspace)
         };
-        self.layout.insert(
-            &output.name(),
-            workspace,
-            window,
-            swallow_target.as_ref().or(focused.as_ref()),
-        );
+        if ocean_engine {
+            let viewport = self
+                .space
+                .output_geometry(&output)
+                .map(|geometry| geometry.size)
+                .unwrap_or_else(|| Size::from((1, 1)));
+            self.ocean
+                .insert(&output.name(), viewport, window, focused.as_ref());
+        } else {
+            self.layout.insert(
+                &output.name(),
+                workspace,
+                window,
+                swallow_target.as_ref().or(focused.as_ref()),
+            );
+        }
         // `toggle_floating`/`toggle_pseudo_tile` below look the window up
         // via `self.space.elements()`, which `layout.insert` alone does not
         // populate -- only `retile()`'s own `space.map_element` call does.
@@ -952,10 +967,17 @@ impl Smallvil {
         if rule.float || rule.pin || rule.maximize || implicit_float {
             self.toggle_floating(surface);
             if rule.pin {
+                if ocean_engine {
+                    self.ocean.pin_to_screen(surface, &output.name());
+                }
                 self.pinned.insert(surface.clone());
             }
             if rule.position.is_some() || rule.size.is_some() {
                 self.apply_floating_placement(surface, rule.position, rule.size);
+                if rule.pin && ocean_engine {
+                    self.ocean.unpin_from_screen(surface);
+                    self.ocean.pin_to_screen(surface, &output.name());
+                }
             }
         } else if rule.pseudo_tile {
             self.toggle_pseudo_tile(surface);
@@ -1120,6 +1142,7 @@ impl Smallvil {
             self.classic_depth.close();
         }
         self.layout.remove(surface);
+        self.ocean.remove(surface);
         self.fullscreen.remove(surface);
         self.maximized.remove(surface);
         self.floating_workspace.remove(surface);
@@ -1263,9 +1286,10 @@ impl Smallvil {
     }
 
     pub(crate) fn preferred_output_for_toplevel(&self, surface: &WlSurface) -> Option<String> {
-        self.layout
-            .output_of(surface)
+        self.ocean
+            .entry_output(surface)
             .map(str::to_string)
+            .or_else(|| self.layout.output_of(surface).map(str::to_string))
             .or_else(|| {
                 self.floating_workspace
                     .get(surface)
@@ -1382,7 +1406,8 @@ impl Smallvil {
 
         let restore_rect = entry
             .restore_rect
-            .or_else(|| self.floating_workspace.get(wl_surface).map(|tag| tag.rect));
+            .or_else(|| self.floating_workspace.get(wl_surface).map(|tag| tag.rect))
+            .or_else(|| self.ocean.floating_rect(wl_surface));
         let maximized_rect = self.maximized.get(wl_surface).and_then(|maximized| {
             let output = self.output_by_name(&maximized.output)?;
             let area = self.output_tiling_area(&output)?;
@@ -1392,7 +1417,7 @@ impl Smallvil {
                 self.gaps_for(&maximized.output, workspace),
             ))
         });
-        let is_floating = !self.layout.contains(wl_surface);
+        let is_floating = !self.layout.contains(wl_surface) && !self.ocean.is_tiled(wl_surface);
         if !is_floating {
             self.maximized.remove(wl_surface);
             surface.with_pending_state(|state| {
@@ -1416,6 +1441,9 @@ impl Smallvil {
                 (self.floating_workspace.get_mut(wl_surface), restore_rect)
             {
                 tag.rect = rect;
+            }
+            if let Some(rect) = restore_rect {
+                self.ocean.set_floating_rect(wl_surface, rect);
             }
         }
 
@@ -1443,6 +1471,7 @@ impl Smallvil {
             }
             if entry.was_pinned {
                 self.pinned.insert(wl_surface.clone());
+                self.ocean.pin_to_screen(wl_surface, &entry.output);
             }
         }
 

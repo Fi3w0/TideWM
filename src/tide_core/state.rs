@@ -179,6 +179,9 @@ pub struct Smallvil {
     /// Structural parked-window state for Classic workspaces. This remains
     /// empty unless the opt-in `classic_depth` feature is used.
     pub classic_depth: crate::classic_depth::ClassicDepthDeck,
+    /// Continuous world ownership, cameras, reefs, and bookmarks for the
+    /// Ocean engine. Dormant while Classic is selected.
+    pub ocean: crate::ocean::OceanSpace,
     /// Static title-card overlay for the currently open Classic deck.
     pub depth_deck_overlay: Option<crate::depth_deck::DepthDeckOverlay>,
     #[cfg(feature = "screencast")]
@@ -1500,14 +1503,49 @@ impl Smallvil {
         Some(result)
     }
 
-    /// Spatial-engine boundary consumed by the shared renderer. S2 has one
-    /// producer (Classic); S3 will dispatch this to Classic or Ocean without
-    /// changing any renderer call site.
+    /// Spatial-engine boundary consumed by the shared renderer. Classic and
+    /// Ocean own different spatial state but produce the same scene contract.
     pub(crate) fn render_placements(
         &self,
         output: &Output,
     ) -> Option<Vec<crate::placement::PlacedWindow>> {
-        self.classic_render_placements(output)
+        match self.config.spatial_engine {
+            crate::config::SpatialEngine::Classic => self.classic_render_placements(output),
+            crate::config::SpatialEngine::Ocean => {
+                let output_geo = self.space.output_geometry(output)?;
+                let mut placements = self.ocean.placements(
+                    &output.name(),
+                    output_geo,
+                    self.config.gaps,
+                    self.config.bsp_split_bias,
+                );
+                placements.retain_mut(|placement| {
+                    let Some(surface) = placement.surface() else {
+                        return true;
+                    };
+                    if let Some(fullscreen) = self.fullscreen.get(surface) {
+                        if fullscreen.output != output.name() {
+                            return false;
+                        }
+                        placement.rect = output_geo;
+                        placement.view_offset = Point::from((0.0, 0.0));
+                        placement.stack = crate::placement::PlacementStack::Fullscreen;
+                        return true;
+                    }
+                    if self
+                        .maximized
+                        .get(surface)
+                        .is_some_and(|entry| entry.output == output.name())
+                    {
+                        let area = self.output_tiling_area(output).unwrap_or(output_geo);
+                        placement.rect = crate::layout::inset(area, self.config.gaps);
+                        placement.view_offset = Point::from((0.0, 0.0));
+                    }
+                    true
+                });
+                Some(placements)
+            }
+        }
     }
 
     pub(crate) fn desktop_render_elements(
@@ -1983,6 +2021,11 @@ impl Smallvil {
         let default_layout = config.default_layout;
         let master_orientation = config.master_orientation;
         let bsp_split_bias = config.bsp_split_bias;
+        let ocean = if config.spatial_engine == crate::config::SpatialEngine::Ocean {
+            crate::ocean::OceanSpace::from_config(&config.ocean)
+        } else {
+            crate::ocean::OceanSpace::default()
+        };
 
         let dh = display.handle();
 
@@ -2131,6 +2174,7 @@ impl Smallvil {
             builtin_wallpaper: crate::wallpaper::BuiltinWallpaper::build(),
             overview: None,
             classic_depth: crate::classic_depth::ClassicDepthDeck::default(),
+            ocean,
             depth_deck_overlay: None,
             #[cfg(feature = "screencast")]
             screencast_picker: None,
@@ -2446,13 +2490,38 @@ impl Smallvil {
                 )
             })
             .or_else(|| {
-                self.space
-                    .element_under(pos)
-                    .and_then(|(window, location)| {
-                        window
-                            .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
-                            .map(|(s, p)| (s, (p + location).to_f64()))
+                if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+                    self.render_placements(output).and_then(|placements| {
+                        placements.into_iter().find_map(|placement| {
+                            let rect = crate::placement::translated_rect(
+                                placement.rect,
+                                placement.view_offset,
+                            );
+                            let local = pos - rect.loc.to_f64();
+                            if local.x < 0.0
+                                || local.y < 0.0
+                                || local.x >= rect.size.w as f64
+                                || local.y >= rect.size.h as f64
+                            {
+                                return None;
+                            }
+                            placement
+                                .window
+                                .surface_under(local, WindowSurfaceType::ALL)
+                                .map(|(surface, point)| {
+                                    (surface, point.to_f64() + rect.loc.to_f64())
+                                })
+                        })
                     })
+                } else {
+                    self.space
+                        .element_under(pos)
+                        .and_then(|(window, location)| {
+                            window
+                                .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
+                                .map(|(s, p)| (s, (p + location).to_f64()))
+                        })
+                }
             })
             .or_else(|| {
                 self.layer_surface_under(
@@ -2464,11 +2533,63 @@ impl Smallvil {
             })
     }
 
+    /// Topmost ordinary window and its current presentation location. Ocean
+    /// resolves this through the same camera placement used by rendering;
+    /// Classic keeps Smithay Space as the direct source.
+    pub(crate) fn window_under(
+        &self,
+        pos: Point<f64, Logical>,
+    ) -> Option<(Window, Point<i32, Logical>)> {
+        if self.config.spatial_engine == crate::config::SpatialEngine::Classic {
+            return self
+                .space
+                .element_under(pos)
+                .map(|(window, location)| (window.clone(), location));
+        }
+        let output = self.space.output_under(pos).next()?;
+        self.render_placements(output)?
+            .into_iter()
+            .find_map(|placement| {
+                let rect = crate::placement::translated_rect(placement.rect, placement.view_offset);
+                let local = pos - rect.loc.to_f64();
+                (local.x >= 0.0
+                    && local.y >= 0.0
+                    && local.x < rect.size.w as f64
+                    && local.y < rect.size.h as f64)
+                    .then_some((placement.window, rect.loc))
+            })
+    }
+
     fn fullscreen_surface_under(
         &self,
         output: &Output,
         pos: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+            return self.render_placements(output).and_then(|placements| {
+                placements
+                    .into_iter()
+                    .filter(crate::placement::PlacedWindow::is_fullscreen)
+                    .find_map(|placement| {
+                        let rect = crate::placement::translated_rect(
+                            placement.rect,
+                            placement.view_offset,
+                        );
+                        let local = pos - rect.loc.to_f64();
+                        if local.x < 0.0
+                            || local.y < 0.0
+                            || local.x >= rect.size.w as f64
+                            || local.y >= rect.size.h as f64
+                        {
+                            return None;
+                        }
+                        placement
+                            .window
+                            .surface_under(local, WindowSurfaceType::ALL)
+                            .map(|(surface, point)| (surface, point.to_f64() + rect.loc.to_f64()))
+                    })
+            });
+        }
         self.space
             .elements_for_output(output)
             .rev()
@@ -2590,9 +2711,14 @@ impl Smallvil {
     /// output, fill in the remaining fallbacks.
     pub(crate) fn primary_output(&self) -> Option<Output> {
         let intended_output = self.window_focus.as_ref().and_then(|surface| {
-            self.layout
-                .output_of(surface)
+            self.ocean
+                .entry_output(surface)
                 .and_then(|name| self.output_by_name(name))
+                .or_else(|| {
+                    self.layout
+                        .output_of(surface)
+                        .and_then(|name| self.output_by_name(name))
+                })
                 .or_else(|| {
                     self.mapped_toplevel_window(surface)
                         .and_then(|window| self.output_for_window(&window))
@@ -3081,6 +3207,24 @@ impl Smallvil {
         else {
             return;
         };
+        if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+            if self.fullscreen.contains_key(&surface)
+                || self.maximized.contains_key(&surface)
+                || self.ocean.floating_rect(&surface).is_none()
+                || !self.window_is_visible(&surface)
+            {
+                return;
+            }
+            let Some(rect) = self.space.element_geometry(window) else {
+                return;
+            };
+            self.ocean.set_floating_rect(&surface, rect);
+            if let Some(output) = self.primary_output() {
+                self.set_window_fractional_scale(window, &output);
+                self.ocean.set_entry_output(&surface, output.name());
+            }
+            return;
+        }
         if self.fullscreen.contains_key(&surface)
             || self.maximized.contains_key(&surface)
             || !self.floating_workspace.contains_key(&surface)
@@ -3263,6 +3407,13 @@ impl Smallvil {
     }
 
     fn window_at_layout_position(&self, pos: Point<f64, Logical>) -> Option<WlSurface> {
+        if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+            return self.window_under(pos).and_then(|(window, _)| {
+                window
+                    .toplevel()
+                    .map(|toplevel| toplevel.wl_surface().clone())
+            });
+        }
         let live = self.space.element_under(pos).and_then(|(window, _)| {
             window
                 .toplevel()
@@ -5023,7 +5174,64 @@ impl Smallvil {
         self.retile_with_viscosity(false, Some(skip));
     }
 
+    fn retile_ocean(&mut self, skip_configure_for: Option<&WlSurface>) {
+        let outputs: Vec<Output> = self.space.outputs().cloned().collect();
+        let Some(seed_output) = outputs.first() else {
+            return;
+        };
+        let Some(seed_geo) = self.space.output_geometry(seed_output) else {
+            return;
+        };
+        self.ocean.ensure_default_reef(seed_geo.size);
+        for output in outputs.iter().skip(1) {
+            if let Some(geometry) = self.space.output_geometry(output) {
+                self.ocean.ensure_default_reef(geometry.size);
+            }
+        }
+
+        let tiled = self
+            .ocean
+            .tiled_layouts(self.config.gaps, self.config.bsp_split_bias);
+        for (window, rect) in &tiled {
+            if let Some(toplevel) = window.toplevel() {
+                let target_size = self
+                    .fullscreen
+                    .get(toplevel.wl_surface())
+                    .and_then(|entry| self.output_by_name(&entry.output))
+                    .and_then(|output| self.space.output_geometry(&output))
+                    .map(|geometry| geometry.size)
+                    .unwrap_or(rect.size);
+                toplevel.with_pending_state(|state| state.size = Some(target_size));
+                if skip_configure_for != Some(toplevel.wl_surface()) {
+                    toplevel.send_pending_configure();
+                }
+            }
+        }
+
+        for (window, rect, _) in self
+            .ocean
+            .world_layouts(self.config.gaps, self.config.bsp_split_bias)
+        {
+            let output = window
+                .toplevel()
+                .and_then(|toplevel| self.ocean.entry_output(toplevel.wl_surface()))
+                .and_then(|name| outputs.iter().find(|output| output.name() == name))
+                .unwrap_or(seed_output);
+            self.set_window_fractional_scale(&window, output);
+            // Space remains a protocol/input cache in Ocean. The shared
+            // renderer uses world rect + camera translation, never this
+            // presentation coordinate as spatial ownership.
+            self.space.map_element(window, rect.loc, false);
+        }
+
+        self.request_redraw();
+    }
+
     fn retile_with_viscosity(&mut self, interactive: bool, skip_configure_for: Option<&WlSurface>) {
+        if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+            self.retile_ocean(skip_configure_for);
+            return;
+        }
         let outputs: Vec<Output> = self.space.outputs().cloned().collect();
         for output in &outputs {
             let Some(area) = self.output_tiling_area(output) else {
@@ -5250,6 +5458,29 @@ impl Smallvil {
     /// snaps it into whatever slot the layout gives it, same as any other
     /// tiled window.
     pub fn toggle_floating(&mut self, surface: &WlSurface) {
+        if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+            let changed = if self.ocean.is_tiled(surface) {
+                self.ocean
+                    .make_floating(surface, self.config.gaps, self.config.bsp_split_bias)
+            } else {
+                let Some(output) = self.primary_output() else {
+                    return;
+                };
+                let Some(viewport) = self.space.output_geometry(&output).map(|geo| geo.size) else {
+                    return;
+                };
+                let focused = self.focused_window_surface();
+                self.ocean
+                    .make_tiled(surface, &output.name(), viewport, focused.as_ref())
+            };
+            if changed {
+                self.retile();
+                self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
+                    surface: surface.clone(),
+                });
+            }
+            return;
+        }
         let Some(window) = self
             .space
             .elements()
@@ -5791,7 +6022,7 @@ impl Smallvil {
             // authoritative at once.
             let wants_pinned = !was_pinned;
             if wants_pinned {
-                if self.layout.contains(surface) {
+                if self.layout.contains(surface) || self.ocean.is_tiled(surface) {
                     self.toggle_floating(surface);
                     if let Some(entry) = self.fullscreen.get_mut(surface) {
                         entry.pin_floated_it = true;
@@ -5819,11 +6050,50 @@ impl Smallvil {
                 // pinned is left alone, same as the normal case.
                 self.toggle_floating(surface);
             }
+            if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+                if wants_pinned {
+                    if let Some(output) = self
+                        .fullscreen
+                        .get(surface)
+                        .map(|entry| entry.output.clone())
+                    {
+                        self.ocean.pin_to_screen(surface, &output);
+                    }
+                } else {
+                    self.ocean.unpin_from_screen(surface);
+                }
+            }
             if let Some(entry) = self.fullscreen.get_mut(surface) {
                 entry.was_pinned = wants_pinned;
                 if !wants_pinned {
                     entry.pin_floated_it = false;
                 }
+            }
+            self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
+                surface: surface.clone(),
+            });
+            self.request_redraw();
+            return;
+        }
+        if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+            if self.pinned.remove(surface) {
+                self.ocean.unpin_from_screen(surface);
+            } else {
+                if self.ocean.is_tiled(surface) {
+                    self.toggle_floating(surface);
+                }
+                let output = self
+                    .ocean
+                    .entry_output(surface)
+                    .and_then(|name| self.output_by_name(name))
+                    .or_else(|| self.primary_output());
+                let Some(output) = output else {
+                    return;
+                };
+                if !self.ocean.pin_to_screen(surface, &output.name()) {
+                    return;
+                }
+                self.pinned.insert(surface.clone());
             }
             self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
                 surface: surface.clone(),
@@ -6086,6 +6356,23 @@ impl Smallvil {
         let Some(window) = self.mapped_toplevel_window(surface) else {
             return;
         };
+        if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+            let Some(current) = self.ocean.floating_rect(surface) else {
+                return;
+            };
+            let rect = Rectangle::new(
+                position.map(Point::from).unwrap_or(current.loc),
+                size.map(Size::from).unwrap_or(current.size),
+            );
+            if let Some(toplevel) = window.toplevel() {
+                toplevel.with_pending_state(|state| state.size = Some(rect.size));
+                toplevel.send_pending_configure();
+            }
+            self.ocean.set_floating_rect(surface, rect);
+            self.space.map_element(window, rect.loc, false);
+            self.request_redraw();
+            return;
+        }
         if !self.floating_workspace.contains_key(surface) {
             return;
         }
@@ -7625,8 +7912,24 @@ impl Smallvil {
     /// is never silent, success or failure.
     pub fn reload_config(&mut self) {
         match Config::reload() {
-            Ok((new_config, warnings)) => {
+            Ok((mut new_config, mut warnings)) => {
                 let had_error_overlay = self.config_error_overlay.take().is_some();
+                if new_config.spatial_engine != self.config.spatial_engine {
+                    warnings.push(
+                        "spatial_engine is startup-only; restart TideWM to change it".to_string(),
+                    );
+                    new_config.spatial_engine = self.config.spatial_engine;
+                }
+                if new_config.ocean.reefs != self.config.ocean.reefs
+                    || new_config.ocean.bookmarks != self.config.ocean.bookmarks
+                {
+                    warnings.push(
+                        "Ocean reefs/bookmarks are startup-owned; restart TideWM to reshape the world"
+                            .to_string(),
+                    );
+                    new_config.ocean.reefs = self.config.ocean.reefs.clone();
+                    new_config.ocean.bookmarks = self.config.ocean.bookmarks.clone();
+                }
                 if let Some(keyboard) = self.seat.get_keyboard() {
                     keyboard.change_repeat_info(
                         new_config.input.repeat_rate,

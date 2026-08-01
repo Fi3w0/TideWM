@@ -1113,6 +1113,9 @@ fn handle_connector_change(
                         .outputs()
                         .find(|o| o.name() != disconnected_name)
                         .map(|o| o.name());
+                    state
+                        .ocean
+                        .remove_output(&disconnected_name, fallback.as_deref());
                     if let Some(fallback) = fallback.as_deref() {
                         state.migrate_output_windows(&disconnected_name, fallback);
                     }

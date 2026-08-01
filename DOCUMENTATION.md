@@ -21,7 +21,7 @@ Full reference for configuring and controlling TideWM: every config key, every a
 
 ## Config file
 
-`$XDG_CONFIG_HOME/tidewm/config.wave`, or `~/.config/tidewm/config.wave` if `XDG_CONFIG_HOME` isn't set (or the path given to `--config`, see above). Written out with working defaults on first run. Almost every change hot-reloads on save — no restart needed — and a bad edit is shown in a persistent compositor-owned panel that reserves space above tiled windows (with file/line detail) while the previous config keeps running. Fixing the file clears the panel; the existing short reload/debug toast remains separate. The main exception is `xwayland { enabled }` (spawning/tearing down `xwayland-satellite` isn't done live). Everything else, including keyboard layout and already-connected touchpads, applies immediately.
+`$XDG_CONFIG_HOME/tidewm/config.wave`, or `~/.config/tidewm/config.wave` if `XDG_CONFIG_HOME` isn't set (or the path given to `--config`, see above). Written out with working defaults on first run. Almost every change hot-reloads on save — no restart needed — and a bad edit is shown in a persistent compositor-owned panel that reserves space above tiled windows (with file/line detail) while the previous config keeps running. Fixing the file clears the panel; the existing short reload/debug toast remains separate. Startup-owned exceptions are `xwayland { enabled }`, `spatial_engine`, and Ocean reef/bookmark declarations; changing one shows a restart-required warning rather than moving live windows between ownership models. Ocean's `camera_step` remains hot-reloadable. Keyboard layout and already-connected touchpads also apply immediately.
 
 ### Waves format
 
@@ -59,6 +59,7 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `terminal` | string | `"kitty"` | Spawned by the default `Super+Return` bind. The shipped default is `$wave(kitty, alacritty, foot, xterm)` — see [`$wave(...)`](#waves-format) above. |
+| `spatial_engine` | `classic` \| `ocean` | `classic` | Selects one of TideWM's two WM ownership models at startup. Classic keeps numbered workspaces. Ocean has no workspaces: outputs are cameras into one continuous 2D world. `engine` and `wm_mode` are aliases. Requires a restart because live windows cannot safely change spatial owner. |
 | `pointer_modifier` | modifier or `+`-joined modifiers | `super` | Modifier physically held for compositor mouse actions: left-drag moves floating windows or drag-swaps tiles; right-drag resizes floating or tiled windows. Accepts `super`/`logo`/`mod4`, `alt`/`mod1`, `ctrl`/`control`, and `shift`. The shipped config sets it to `$mod`, so changing `$mod` can update keyboard and mouse behavior together. `mouse_modifier` and `drag_modifier` are aliases. |
 | `show_welcome_hint` | bool | `true` | Shows a persistent "fake window" card pointing you at `Super+Return` whenever the desktop is otherwise empty. Disappears the instant a real window maps; delete this key (or set it `false`) to stop it coming back. Checked on every reload, not just at startup. |
 | `water_effects` | bool | `true` | Master toggle for TideWM's water/aqua render identity. Disables water-glass, backdrop capture, impulse ripples, wave workspace transitions, automatic depth/buoyancy, interactive viscosity, connected-vessel resize, and floating sway when `false`. |
@@ -349,6 +350,51 @@ swim {
 ```
 
 `water_effects = false` is the master bypass, same as `sway`/`viscosity`.
+
+### `ocean { }`
+
+Configures the workspace-free Ocean engine selected with
+`spatial_engine = ocean`. Windows have stable world rectangles on both X and
+Y. Each output stores an independent continuous camera into that same world;
+moving a camera never moves or resizes a window. Reefs are named local BSP
+tiling zones, not pages, and bookmarks are named camera return points.
+
+With no `reef` declaration TideWM creates `main` at `0x0`. Its dimensions come
+from the real logical output viewport—there is no 1080p resolution constant.
+An explicitly declared reef may omit either dimension to inherit and expand
+to the largest real viewport that uses Ocean, or set a positive dimension to
+make that world zone intentionally fixed/larger. Numbered `workspace:N`
+actions become compatibility jumps to reef/bookmark `N`; they do not create
+workspaces. Reef and configured-bookmark declarations are startup-owned;
+runtime saved bookmarks last for the session.
+
+```wave
+spatial_engine = ocean
+ocean {
+    camera_step = 480
+    reef main {
+        x = 0
+        y = 0
+        # width/height omitted: use real output geometry
+    }
+    reef code {
+        x = 4000
+        y = 0
+        width = 3440
+        height = 1440
+    }
+    bookmark home {
+        x = 0
+        y = 0
+    }
+}
+```
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `camera_step` | integer, `32`–`8192` | `480` | Logical pixels moved by an `ocean-pan-*` keyboard action. Hot-reloadable. |
+| `reef <name> { x, y, width?, height? }` | nested block | implicit `main` | Local tiling zone in world coordinates. Omitted dimensions follow actual output geometry. |
+| `bookmark <name> { x, y }` | nested block | `home = 0x0` | Named camera top-left position. Reefs also synthesize numeric bookmarks in declaration order for `workspace:N` compatibility. |
 
 ### `classic_depth { }`
 
@@ -970,10 +1016,15 @@ The same set of strings works after `bind ... =` at the top level or inside a `s
 - `cycle-tab-next` / `cycle-tab-prev`
 
 **Workspaces**
-- `workspace:<N>` — switch to workspace `N`
+- `workspace:<N>` — Classic switches to workspace `N`; Ocean jumps to numeric bookmark/reef `N` without creating a workspace
 - `move-to-workspace:<N>` — move the focused window to workspace `N`
 - `swap-workspaces:<output-name>` — swap this output's and the named output's active-workspace content
 - `workspace:<name>` / `move-to-workspace:<name>` — same two actions, addressed by a `workspace_name` alias instead of a number (see below) — a workspace's real identity is always its number, this is just another way to spell it
+
+**Ocean camera** (removed from keyboard matching while Classic is selected)
+- `ocean-pan-left` / `ocean-pan-right` / `ocean-pan-up` / `ocean-pan-down` — move only the current output camera by `ocean.camera_step`
+- `ocean-bookmark:<name>` — jump the current output camera to a configured or runtime bookmark
+- `ocean-save-bookmark:<name>` — store the current camera position for this session without rewriting config
 
 **Modes**
 - `submap:<name>` — enter a `submap <name> { }` block

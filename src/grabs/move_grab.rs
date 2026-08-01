@@ -39,7 +39,8 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
         // only checks the resource, so mapping here without this ownership
         // guard would resurrect a hidden/unmapped window into Space.
         if !data.window_is_visible(surface)
-            || !data.floating_workspace.contains_key(surface)
+            || (!data.floating_workspace.contains_key(surface)
+                && data.ocean.floating_rect(surface).is_none())
             || data.fullscreen.contains_key(surface)
             || data.maximized.contains_key(surface)
         {
@@ -59,6 +60,16 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
         );
         data.space
             .map_element(self.window.clone(), new_location, false);
+        if let Some(mut rect) = data.ocean.floating_rect(surface) {
+            rect.loc = new_location;
+            data.ocean.set_floating_rect(surface, rect);
+            if data.pinned.contains(surface) {
+                if let Some(output) = data.ocean.entry_output(surface).map(str::to_string) {
+                    data.ocean.unpin_from_screen(surface);
+                    data.ocean.pin_to_screen(surface, &output);
+                }
+            }
+        }
         if let Some(previous_x) = previous_x {
             data.sway_kick(surface, (new_location.x - previous_x) as f64);
         }

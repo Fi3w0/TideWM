@@ -223,6 +223,55 @@ pub enum WorkspaceRef {
     Name(String),
 }
 
+/// Spatial ownership model selected once when TideWM starts. Classic keeps
+/// numbered per-output workspaces; Ocean owns one continuous world viewed by
+/// per-output cameras. A reload never swaps this underneath live windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SpatialEngine {
+    #[default]
+    Classic,
+    Ocean,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OceanReefConfig {
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    /// Omitted dimensions follow the largest real output viewport that uses
+    /// Ocean; they are never guessed from a 1080p-style constant.
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OceanBookmarkConfig {
+    pub name: String,
+    pub x: f64,
+    pub y: f64,
+}
+
+/// Startup shape and keyboard travel scale for the Ocean engine. Empty reef
+/// and bookmark lists intentionally produce an output-sized `main` reef and
+/// a `home` bookmark at the world origin, so selecting Ocean is sufficient
+/// for a usable first launch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OceanConfig {
+    pub camera_step: i32,
+    pub reefs: Vec<OceanReefConfig>,
+    pub bookmarks: Vec<OceanBookmarkConfig>,
+}
+
+impl Default for OceanConfig {
+    fn default() -> Self {
+        Self {
+            camera_step: 480,
+            reefs: Vec::new(),
+            bookmarks: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Action {
     Spawn(String),
@@ -308,6 +357,14 @@ pub enum Action {
     /// deck, without opening the picker.
     DepthDown,
     DepthUp,
+    /// Moves one output's Ocean camera without moving any window. These are
+    /// harmless no-ops under Classic.
+    OceanPan(Direction),
+    /// Jumps the current output camera to a named world point.
+    OceanBookmark(String),
+    /// Stores the current output camera as a runtime bookmark. Configured
+    /// bookmarks remain the startup baseline; this does not rewrite config.
+    OceanSaveBookmark(String),
     Quit,
 }
 
@@ -325,8 +382,19 @@ fn is_classic_depth_action(action: &Action) -> bool {
     )
 }
 
+pub(crate) fn is_ocean_action(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::OceanPan(_) | Action::OceanBookmark(_) | Action::OceanSaveBookmark(_)
+    )
+}
+
 pub struct Config {
     pub terminal: String,
+    /// Startup-only spatial ownership model. Hot reload keeps the old value
+    /// until the next TideWM launch so live windows never change owners.
+    pub spatial_engine: SpatialEngine,
+    pub ocean: OceanConfig,
     /// Physically-held modifier required for compositor mouse move/resize.
     /// This is separate from keybinds because `$mod` is only a Waves
     /// variable, not global compositor state; the shipped config points
@@ -604,6 +672,14 @@ impl Config {
                 ..Default::default()
             }
         });
+        let spatial_engine = match raw.spatial_engine.trim().to_ascii_lowercase().as_str() {
+            "classic" | "workspace" | "workspaces" => SpatialEngine::Classic,
+            "ocean" | "canvas" => SpatialEngine::Ocean,
+            other => {
+                warnings.push(format!("Invalid spatial_engine \"{other}\"; using classic"));
+                SpatialEngine::Classic
+            }
+        };
         // `$mod` is only a Waves variable, not real compositor state (see
         // `Config::pointer_modifier`'s doc comment) -- so a user who points
         // it at Alt to free up Super for clients gets no structural
@@ -650,6 +726,8 @@ impl Config {
 
         let config = Self {
             terminal: raw.terminal,
+            spatial_engine,
+            ocean: raw.ocean,
             pointer_modifier,
             show_welcome_hint: raw.show_welcome_hint,
             water_effects: raw.water_effects,
@@ -871,6 +949,8 @@ impl Config {
 #[derive(Debug)]
 struct RawConfig {
     terminal: String,
+    spatial_engine: String,
+    ocean: OceanConfig,
     /// `super`, `alt`, `ctrl`, `shift`, or a `+`-joined combination.
     /// Resolved after Waves variable substitution in `Config::from_raw`.
     pointer_modifier: String,
@@ -1017,6 +1097,8 @@ impl Default for RawConfig {
 
         Self {
             terminal: "kitty".to_string(),
+            spatial_engine: "classic".to_string(),
+            ocean: OceanConfig::default(),
             pointer_modifier: "super".to_string(),
             // Deliberately false, not true: a real config.wave always ships
             // with `show_welcome_hint = true` written explicitly (see
@@ -2891,6 +2973,7 @@ fn lower_entries(entries: &[waves::Entry]) -> RawConfig {
 fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
     match key {
         "terminal" => raw.terminal = value.to_string(),
+        "spatial_engine" | "engine" | "wm_mode" => raw.spatial_engine = value.to_string(),
         "pointer_modifier" | "mouse_modifier" | "drag_modifier" => {
             raw.pointer_modifier = value.to_string()
         }
@@ -2932,6 +3015,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         }
         "sway" => apply_sway_block(&mut raw.sway, body),
         "swim" => apply_swim_block(&mut raw.swim, body),
+        "ocean" => apply_ocean_block(&mut raw.ocean, body),
         "animations" | "window_animations" => apply_animations_block(&mut raw.animations, body),
         "depth" => apply_depth_block(&mut raw.depth, body),
         "classic_depth" | "depth_deck" => apply_classic_depth_block(&mut raw.classic_depth, body),
@@ -3710,6 +3794,126 @@ fn apply_classic_depth_block(cfg: &mut ClassicDepthConfig, body: &[waves::Entry]
             other => tracing::warn!(key = %other, "Unknown key in `classic_depth` block, ignoring"),
         }
     }
+}
+
+fn apply_ocean_block(cfg: &mut OceanConfig, body: &[waves::Entry]) {
+    for entry in body {
+        match entry {
+            waves::Entry::Assign(key, value) if key == "camera_step" => {
+                match value.parse::<i32>() {
+                    Ok(value) if (32..=8192).contains(&value) => cfg.camera_step = value,
+                    _ => tracing::warn!(
+                        value,
+                        "Expected ocean.camera_step from 32 to 8192, ignoring"
+                    ),
+                }
+            }
+            waves::Entry::Block(keyword, header, entries) if keyword == "reef" => {
+                if let Some(reef) = lower_ocean_reef(header, entries) {
+                    if let Some(existing) = cfg.reefs.iter_mut().find(|item| item.name == reef.name)
+                    {
+                        *existing = reef;
+                    } else {
+                        cfg.reefs.push(reef);
+                    }
+                }
+            }
+            waves::Entry::Block(keyword, header, entries) if keyword == "bookmark" => {
+                if let Some(bookmark) = lower_ocean_bookmark(header, entries) {
+                    if let Some(existing) = cfg
+                        .bookmarks
+                        .iter_mut()
+                        .find(|item| item.name == bookmark.name)
+                    {
+                        *existing = bookmark;
+                    } else {
+                        cfg.bookmarks.push(bookmark);
+                    }
+                }
+            }
+            _ => tracing::warn!("Unexpected entry in `ocean` block, ignoring"),
+        }
+    }
+}
+
+fn lower_ocean_reef(header: &str, body: &[waves::Entry]) -> Option<OceanReefConfig> {
+    let name = header.trim();
+    if name.is_empty() {
+        tracing::warn!("An ocean reef needs a name, ignoring");
+        return None;
+    }
+    let mut reef = OceanReefConfig {
+        name: name.to_string(),
+        x: 0,
+        y: 0,
+        width: None,
+        height: None,
+    };
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!(reef = name, "Unexpected reef entry, ignoring");
+            continue;
+        };
+        match (key.as_str(), value.parse::<i32>()) {
+            ("x", Ok(parsed)) => reef.x = parsed,
+            ("y", Ok(parsed)) => reef.y = parsed,
+            ("width", Ok(parsed)) if parsed > 0 => reef.width = Some(parsed),
+            ("height", Ok(parsed)) if parsed > 0 => reef.height = Some(parsed),
+            ("x" | "y" | "width" | "height", _) => {
+                tracing::warn!(
+                    key,
+                    value,
+                    reef = name,
+                    "Expected a valid integer reef value"
+                )
+            }
+            (other, _) => {
+                tracing::warn!(key = other, reef = name, "Unknown reef key, ignoring")
+            }
+        }
+    }
+    Some(reef)
+}
+
+fn lower_ocean_bookmark(header: &str, body: &[waves::Entry]) -> Option<OceanBookmarkConfig> {
+    let name = header.trim();
+    if name.is_empty() {
+        tracing::warn!("An ocean bookmark needs a name, ignoring");
+        return None;
+    }
+    let mut bookmark = OceanBookmarkConfig {
+        name: name.to_string(),
+        x: 0.0,
+        y: 0.0,
+    };
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!(bookmark = name, "Unexpected bookmark entry, ignoring");
+            continue;
+        };
+        let target = match key.as_str() {
+            "x" => &mut bookmark.x,
+            "y" => &mut bookmark.y,
+            other => {
+                tracing::warn!(
+                    key = other,
+                    bookmark = name,
+                    "Unknown bookmark key, ignoring"
+                );
+                continue;
+            }
+        };
+        match value.parse::<f64>() {
+            Ok(parsed) if parsed.is_finite() => *target = parsed,
+            _ => tracing::warn!(
+                key,
+                value,
+                bookmark = name,
+                "Expected finite bookmark value"
+            ),
+        }
+    }
+    Some(bookmark)
 }
 
 fn apply_frost_block(cfg: &mut FrostConfig, body: &[waves::Entry]) {
@@ -5232,6 +5436,13 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
             }
         };
     }
+    if let Some(name) = action.strip_prefix("ocean-bookmark:") {
+        return (!name.trim().is_empty()).then(|| Action::OceanBookmark(name.trim().to_string()));
+    }
+    if let Some(name) = action.strip_prefix("ocean-save-bookmark:") {
+        return (!name.trim().is_empty())
+            .then(|| Action::OceanSaveBookmark(name.trim().to_string()));
+    }
     match action {
         "exit-submap" => Some(Action::ExitSubmap),
         "master-grow" => Some(Action::GrowMaster),
@@ -5245,6 +5456,10 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "depth-cancel" => Some(Action::DepthCancel),
         "depth-down" => Some(Action::DepthDown),
         "depth-up" => Some(Action::DepthUp),
+        "ocean-pan-left" => Some(Action::OceanPan(Direction::Left)),
+        "ocean-pan-right" => Some(Action::OceanPan(Direction::Right)),
+        "ocean-pan-up" => Some(Action::OceanPan(Direction::Up)),
+        "ocean-pan-down" => Some(Action::OceanPan(Direction::Down)),
         "close-window" => Some(Action::CloseWindow),
         "toggle-floating" => Some(Action::ToggleFloating),
         "toggle-fullscreen" => Some(Action::ToggleFullscreen),
@@ -5401,6 +5616,7 @@ $mod = SUPER
 
 terminal = $wave(kitty, alacritty, foot, xterm)
 pointer_modifier = $mod             # left-drag moves; right-drag resizes
+spatial_engine = classic            # classic or ocean; takes effect on launch
 show_welcome_hint = true
 water_effects = true
 viscosity = 1.0                    # 0 off; higher = slower drag/resize settling
@@ -5430,6 +5646,28 @@ connected_vessels {
 #     neighbors = 1                  # spots kept mapped each side of the anchor
 #     response = 1.0                 # swipe travel per spot (1.0 = one swipe = one spot)
 #     snap_duration_ms = 220         # spring-to-rest after finger lift
+# }
+
+# Ocean is a separate WM engine, not a vertical workspace arrangement.
+# Every output is a camera into one continuous 2D world. Reefs are local
+# tiling zones; bookmarks are named camera return points. With no explicit
+# reefs, Ocean creates one output-sized `main` reef at the world origin.
+# ocean {
+#     camera_step = 480
+#     reef main {
+#         x = 0
+#         y = 0
+#         # omitted width/height fit the real output; set them only when
+#         # you deliberately want a reef larger or smaller than its viewport
+#     }
+#     reef code {
+#         x = 4000
+#         y = 0
+#     }
+#     bookmark home {              # blocks must still span real lines
+#         x = 0
+#         y = 0
+#     }
 # }
 cursor_always_visible = false
 cursor_hide_after_ms = 0
@@ -5708,6 +5946,13 @@ bind $mod+Shift+W = layout:master
 bind $mod+Ctrl+Minus = master-shrink
 bind $mod+Ctrl+Equal = master-grow
 bind $mod+O = toggle-overview
+
+# Ocean camera travel. These binds are activated only when
+# spatial_engine = ocean, so Classic does not swallow the arrow chords.
+bind $mod+Ctrl+Left = ocean-pan-left
+bind $mod+Ctrl+Right = ocean-pan-right
+bind $mod+Ctrl+Up = ocean-pan-up
+bind $mod+Ctrl+Down = ocean-pan-down
 
 # Groups (tabbing)
 bind $mod+Ctrl+H = group-left
@@ -6053,6 +6298,8 @@ mod tests {
     fn resolve_window_rules_folds_last_scalar_wins_bools_accumulate() {
         let mut config = Config {
             terminal: String::new(),
+            spatial_engine: SpatialEngine::Classic,
+            ocean: OceanConfig::default(),
             pointer_modifier: Mods {
                 logo: true,
                 ..Default::default()
@@ -6153,6 +6400,53 @@ mod tests {
             substitute_variables("$mainMod+Q", &HashMap::new()),
             "$mainMod+Q"
         );
+    }
+
+    #[test]
+    fn ocean_selector_reefs_bookmarks_and_actions_parse_without_resolution_defaults() {
+        let entries = waves::parse(
+            "spatial_engine = ocean\n\
+             ocean {\n\
+                 camera_step = 720\n\
+                 reef main {\n\
+                     x = -400\n\
+                     y = 250\n\
+                 }\n\
+                 reef deep {\n\
+                     x = 0\n\
+                     y = 4000\n\
+                     width = 3440\n\
+                     height = 1440\n\
+                 }\n\
+                 bookmark code {\n\
+                     x = 1234.5\n\
+                     y = -80\n\
+                 }\n\
+             }\n\
+             bind Super+Ctrl+H = ocean-pan-left\n\
+             bind Super+1 = ocean-bookmark:code\n",
+            Path::new("<ocean-test>"),
+        )
+        .expect("Ocean config should parse");
+        let config = Config::from_raw(lower_entries(&entries)).0;
+
+        assert_eq!(config.spatial_engine, SpatialEngine::Ocean);
+        assert_eq!(config.ocean.camera_step, 720);
+        assert_eq!(config.ocean.reefs.len(), 2);
+        assert_eq!(config.ocean.reefs[0].width, None);
+        assert_eq!(config.ocean.reefs[0].height, None);
+        assert_eq!(config.ocean.reefs[1].width, Some(3440));
+        assert_eq!(config.ocean.reefs[1].height, Some(1440));
+        assert_eq!(config.ocean.bookmarks[0].name, "code");
+        assert_eq!(config.ocean.bookmarks[0].x, 1234.5);
+        assert!(config
+            .keybinds
+            .iter()
+            .any(|bind| { matches!(bind.action, Action::OceanPan(Direction::Left)) }));
+        assert!(config
+            .keybinds
+            .iter()
+            .any(|bind| { matches!(&bind.action, Action::OceanBookmark(name) if name == "code") }));
     }
 
     #[test]

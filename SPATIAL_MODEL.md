@@ -55,22 +55,23 @@ infrastructure. They do not share spatial ownership:
 
 - `ClassicSpace` owns `(output, workspace)`, layout leaves, deck membership,
   and restore slots.
-- `OceanSpace` owns world rectangles, reefs, cameras, bookmarks, and physical
-  depth.
+- `OceanSpace` now owns reef-local BSP trees, world rectangles, independent
+  per-output camera origins, floating world rectangles, entry-output hints,
+  and configured/runtime bookmarks. Physical depth actions remain S4.
 
 Both produce the same model-neutral placed-window render input. S2 established
 that boundary in `src/tide_core/placement.rs`: rendering receives a window,
 logical rectangle, fractional view transform, authoritative/preview role, and
 content-size policy, plus tiled/floating and normal/fullscreen presentation
-flags. Classic is the current producer; Ocean will implement the same contract
-from world rectangles and cameras.
+flags. Classic and Ocean now both produce this contract from their own
+authoritative state.
 
 ## Delivery order
 
 1. **Done:** manual Classic Depth Deck: park, navigate, swap-recall, cancel.
 2. Optional Classic auto-park policy, only after real-use validation.
 3. **Done:** model-neutral placement boundary for the shared renderer.
-4. Ocean world coordinates, cameras, reefs, and bookmarks.
+4. **Done:** Ocean world coordinates, cameras, reefs, and bookmarks.
 5. Ocean physical-depth actions, compass, and overview.
 
 The existing continuous workspace swim is an S0 Classic navigation bridge. It

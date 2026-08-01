@@ -91,7 +91,8 @@ impl PointerGrab<Smallvil> for ResizeSurfaceGrab {
         }
         let surface = self.window.toplevel().unwrap().wl_surface();
         if !data.window_is_visible(surface)
-            || !data.floating_workspace.contains_key(surface)
+            || (!data.floating_workspace.contains_key(surface)
+                && data.ocean.floating_rect(surface).is_none())
             || data.fullscreen.contains_key(surface)
             || data.maximized.contains_key(surface)
         {
@@ -157,6 +158,12 @@ impl PointerGrab<Smallvil> for ResizeSurfaceGrab {
             xdg.wl_surface(),
             Rectangle::new(target_location, self.last_window_size),
         );
+        if data.ocean.floating_rect(xdg.wl_surface()).is_some() {
+            data.ocean.set_floating_rect(
+                xdg.wl_surface(),
+                Rectangle::new(target_location, self.last_window_size),
+            );
+        }
         xdg.with_pending_state(|state| {
             state.states.set(xdg_toplevel::State::Resizing);
             state.size = Some(self.last_window_size);
@@ -194,7 +201,8 @@ impl PointerGrab<Smallvil> for ResizeSurfaceGrab {
 
             let surface = self.window.toplevel().unwrap().wl_surface();
             if !data.window_is_visible(surface)
-                || !data.floating_workspace.contains_key(surface)
+                || (!data.floating_workspace.contains_key(surface)
+                    && data.ocean.floating_rect(surface).is_none())
                 || data.fullscreen.contains_key(surface)
                 || data.maximized.contains_key(surface)
             {

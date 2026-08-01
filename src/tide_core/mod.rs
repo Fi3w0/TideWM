@@ -9,6 +9,7 @@ pub(crate) mod config;
 pub(crate) mod input;
 pub(crate) mod ipc;
 pub(crate) mod layout;
+pub(crate) mod ocean;
 pub(crate) mod placement;
 pub(crate) mod state;
 pub(crate) mod waves;

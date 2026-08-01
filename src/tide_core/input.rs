@@ -653,7 +653,13 @@ impl Smallvil {
                         };
                         let action = table
                             .iter()
-                            .find(|bind| bind.keysym == keysym && bind.mods.matches(modifiers))
+                            .find(|bind| {
+                                bind.keysym == keysym
+                                    && bind.mods.matches(modifiers)
+                                    && (data.config.spatial_engine
+                                        == crate::config::SpatialEngine::Ocean
+                                        || !crate::config::is_ocean_action(&bind.action))
+                            })
                             .map(|bind| bind.action.clone());
 
                         match action {
@@ -904,8 +910,7 @@ impl Smallvil {
                             self.focus_layer(layer.wl_surface().clone(), serial);
                         }
                     } else if self.exclusive_layer().is_none() {
-                        if let Some((window, _)) = self.space.element_under(pos) {
-                            let window = window.clone();
+                        if let Some((window, _)) = self.window_under(pos) {
                             let surface = window.toplevel().unwrap().wl_surface().clone();
                             if !self.layout.contains(&surface) {
                                 self.space.raise_element(&window, false);
@@ -962,10 +967,7 @@ impl Smallvil {
                         return;
                     }
 
-                    let under = self
-                        .space
-                        .element_under(pointer.current_location())
-                        .map(|(w, l)| (w.clone(), l));
+                    let under = self.window_under(pointer.current_location());
 
                     // Configured-modifier+drag moves/resizes a floating
                     // window, the same convention Hyprland and most tiling
@@ -1021,25 +1023,33 @@ impl Smallvil {
                                 // Fullscreen/maximized are output-owned placements;
                                 // a compositor drag must not move/resize it
                                 // behind the protocol state's back.
-                            } else if !self.layout.contains(&wl_surface) {
+                            } else if !self.layout.contains(&wl_surface)
+                                && !self.ocean.is_tiled(&wl_surface)
+                            {
                                 self.space.raise_element(&window, false);
                                 self.focus_window(Some(wl_surface.clone()), serial);
 
                                 let start_data = PointerGrabStartData {
-                                    focus: Some((wl_surface, loc.to_f64())),
+                                    focus: Some((wl_surface.clone(), loc.to_f64())),
                                     button,
                                     location: pointer.current_location(),
                                 };
+                                let model_loc = self
+                                    .ocean
+                                    .floating_rect(&wl_surface)
+                                    .map(|rect| rect.loc)
+                                    .unwrap_or(loc);
 
                                 if button == BTN_LEFT {
                                     let grab = MoveSurfaceGrab {
                                         start_data,
                                         window,
-                                        initial_window_location: loc,
+                                        initial_window_location: model_loc,
                                     };
                                     pointer.set_grab(self, grab, serial, Focus::Clear);
                                 } else {
-                                    let initial_rect = Rectangle::new(loc, window.geometry().size);
+                                    let initial_rect =
+                                        Rectangle::new(model_loc, window.geometry().size);
                                     let grab = ResizeSurfaceGrab::start(
                                         start_data,
                                         window,
@@ -1134,6 +1144,7 @@ impl Smallvil {
                         if let Some((window, loc)) = under.clone() {
                             let wl_surface = window.toplevel().unwrap().wl_surface().clone();
                             if !self.layout.contains(&wl_surface)
+                                && !self.ocean.is_tiled(&wl_surface)
                                 && !self.fullscreen.contains_key(&wl_surface)
                                 && !self.maximized.contains_key(&wl_surface)
                             {
@@ -1148,12 +1159,15 @@ impl Smallvil {
                                     self.focus_window(Some(wl_surface.clone()), serial);
 
                                     let start_data = PointerGrabStartData {
-                                        focus: Some((wl_surface, loc.to_f64())),
+                                        focus: Some((wl_surface.clone(), loc.to_f64())),
                                         button,
                                         location: pointer.current_location(),
                                     };
-                                    let grab =
-                                        ResizeSurfaceGrab::start(start_data, window, edge, rect);
+                                    let model_rect =
+                                        self.ocean.floating_rect(&wl_surface).unwrap_or(rect);
+                                    let grab = ResizeSurfaceGrab::start(
+                                        start_data, window, edge, model_rect,
+                                    );
                                     pointer.set_grab(self, grab, serial, Focus::Clear);
                                     return;
                                 }
@@ -1280,8 +1294,7 @@ impl Smallvil {
                             self.focus_layer(layer.wl_surface().clone(), serial);
                         }
                     } else if self.exclusive_layer().is_none() {
-                        if let Some((window, _)) = self.space.element_under(location) {
-                            let window = window.clone();
+                        if let Some((window, _)) = self.window_under(location) {
                             let surface = window.toplevel().unwrap().wl_surface().clone();
                             if !self.layout.contains(&surface) {
                                 self.space.raise_element(&window, false);
@@ -1782,6 +1795,21 @@ impl Smallvil {
                 self.cycle_tab(false);
             }
             Action::SwitchWorkspace(workspace) => {
+                if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+                    let name = match workspace {
+                        crate::config::WorkspaceRef::Number(number) => number.to_string(),
+                        crate::config::WorkspaceRef::Name(name) => name,
+                    };
+                    let Some(output) = self.primary_output() else {
+                        return;
+                    };
+                    if self.ocean.jump_to_bookmark(&output.name(), &name) {
+                        self.request_redraw();
+                    } else {
+                        tracing::warn!(bookmark = %name, "Ocean bookmark not found");
+                    }
+                    return;
+                }
                 let Some(workspace) = self.resolve_workspace_ref(&workspace) else {
                     return;
                 };
@@ -1794,6 +1822,13 @@ impl Smallvil {
                 }
             }
             Action::MoveToWorkspace(workspace) => {
+                if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+                    tracing::warn!(
+                        ?workspace,
+                        "move-to-workspace has no Ocean meaning; window dredge belongs to S4"
+                    );
+                    return;
+                }
                 let Some(workspace) = self.resolve_workspace_ref(&workspace) else {
                     return;
                 };
@@ -1857,6 +1892,55 @@ impl Smallvil {
             }
             Action::DepthUp => {
                 self.switch_depth(false);
+            }
+            Action::OceanPan(direction) => {
+                if self.config.spatial_engine != crate::config::SpatialEngine::Ocean {
+                    return;
+                }
+                let Some(output) = self.primary_output() else {
+                    return;
+                };
+                let Some(output_geo) = self.space.output_geometry(&output) else {
+                    return;
+                };
+                let reef_resized = self.ocean.ensure_default_reef(output_geo.size);
+                let step = self.config.ocean.camera_step as f64;
+                let (dx, dy) = match direction {
+                    Direction::Left => (-step, 0.0),
+                    Direction::Right => (step, 0.0),
+                    Direction::Up => (0.0, -step),
+                    Direction::Down => (0.0, step),
+                };
+                self.ocean.pan(&output.name(), dx, dy);
+                if reef_resized {
+                    self.retile();
+                } else {
+                    self.request_redraw();
+                }
+            }
+            Action::OceanBookmark(name) => {
+                if self.config.spatial_engine != crate::config::SpatialEngine::Ocean {
+                    return;
+                }
+                let Some(output) = self.primary_output() else {
+                    return;
+                };
+                if self.ocean.jump_to_bookmark(&output.name(), &name) {
+                    self.request_redraw();
+                } else {
+                    tracing::warn!(bookmark = %name, "Ocean bookmark not found");
+                }
+            }
+            Action::OceanSaveBookmark(name) => {
+                if self.config.spatial_engine != crate::config::SpatialEngine::Ocean {
+                    return;
+                }
+                let Some(output) = self.primary_output() else {
+                    return;
+                };
+                if !self.ocean.save_bookmark(&output.name(), name.clone()) {
+                    tracing::warn!(bookmark = %name, "Ocean runtime bookmark cap reached");
+                }
             }
             Action::Quit => {
                 self.loop_signal.stop();
