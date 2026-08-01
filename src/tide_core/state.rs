@@ -3274,7 +3274,13 @@ impl Smallvil {
                 return;
             };
             self.ocean.set_floating_rect(&surface, rect);
-            if let Some(output) = self.primary_output() {
+            // `primary_output()` touches `pointer.current_location()`, which
+            // deadlocks here: this runs from a pointer grab's own `unset()`,
+            // called synchronously from inside `PointerHandle::button()`
+            // while it already holds the pointer's internal borrow. The
+            // window's own geometry (`rect`, just above) gives the same
+            // answer without touching the pointer at all.
+            if let Some(output) = self.output_for_window(window) {
                 self.set_window_fractional_scale(window, &output);
                 self.ocean.set_entry_output(&surface, output.name());
             }
