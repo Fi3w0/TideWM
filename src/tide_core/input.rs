@@ -1,3 +1,5 @@
+//! Input dispatch and compositor action handling.
+
 use smithay::{
     backend::{
         input::{

@@ -1,4 +1,4 @@
-//! Optional lateral sway for dragged floating windows (Phase R2).
+//! Optional lateral sway for dragged floating windows in Phase R2.
 //!
 //! Pointer grabs keep logical geometry and hit-testing immediate. Each
 //! horizontal drag delta kicks a closed-form damped oscillation that

@@ -1,4 +1,4 @@
-//! A small first-party on-screen toast, used right now to confirm a config
+//! TideWM's small first-party on-screen toast, used right now to confirm a config
 //! hot-reload. CPU-composited once into an RGBA buffer (background pill +
 //! rasterized text), then handed to the renderer as a single texture. No
 //! layer-shell/notification-daemon dependency: this is TideWM's own UI.
@@ -19,7 +19,7 @@ use smithay::{
 
 use crate::animation::Animation;
 
-const FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/AdwaitaSans-Regular.ttf");
+const FONT_BYTES: &[u8] = include_bytes!("../../assets/fonts/AdwaitaSans-Regular.ttf");
 const FONT_SIZE: f32 = 15.0;
 // Errors carry a lot more text (a file path plus a parser message) than the
 // one-line "Config reloaded" confirmation -- a smaller size keeps a long

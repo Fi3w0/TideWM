@@ -1,4 +1,4 @@
-//! Render-only damping for interactive window move and resize (Phase R2).
+//! Render-only damping for interactive window move and resize from Phase R2.
 //!
 //! Pointer grabs keep logical geometry and hit-testing immediate. This
 //! state retains only the short-lived visual rectangle that follows that

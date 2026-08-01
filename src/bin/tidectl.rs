@@ -1,4 +1,4 @@
-//! tidectl: a small CLI for TideWM's IPC socket (see `src/ipc.rs` for the
+//! tidectl: a small CLI for TideWM's IPC socket (see `src/tide_core/ipc.rs` for the
 //! wire protocol this speaks -- one JSON request line in, one JSON
 //! response line out, then the connection closes).
 //!

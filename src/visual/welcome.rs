@@ -1,4 +1,4 @@
-//! A persistent "fake window" placeholder shown on an otherwise-empty
+//! TideWM's persistent "fake window" placeholder shown on an otherwise-empty
 //! desktop, pointing a first-time user at how to open a terminal --
 //! Hyprland's own default-config hint, adapted to this project's existing
 //! CPU-composited-texture pattern (same approach as `toast.rs`/

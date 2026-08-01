@@ -1,4 +1,4 @@
-//! Workspace overview: a schematic grid (rects + titles, not live window
+//! Workspace overview: TideWM's schematic grid (rects + titles, not live window
 //! content) of every workspace on one output, toggled with a single
 //! keybind (`"toggle-overview"`). Same CPU-composited-texture approach as
 //! `toast.rs`/`tab_strip.rs` -- built once when toggled on

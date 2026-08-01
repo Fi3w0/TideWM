@@ -1,4 +1,4 @@
-//! Impulse ripple: the second piece of Phase R1's identity slice (see
+//! Impulse ripple, the second piece of Phase R1's identity slice (see
 //! AGENT.md's "Render and visual identity roadmap"). One shared primitive
 //! for a radial disturbance from a point, decaying over time -- intended
 //! to be triggered by different window-manager events (a window mapping

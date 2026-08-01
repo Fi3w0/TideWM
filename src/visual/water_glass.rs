@@ -1,4 +1,4 @@
-//! Water-glass: the render roadmap's first actually-visible effect (Phase
+//! Water-glass, the render roadmap's first actually-visible effect (Phase
 //! R1, see AGENT.md's "Render and visual identity roadmap"). Renders a
 //! captured backdrop (`backdrop.rs`, Phase R0.5) through a custom GLES
 //! fragment shader that perturbs the sample coordinate, giving a wavy,

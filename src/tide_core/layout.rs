@@ -1,4 +1,6 @@
-//! A dynamic BSP (binary space partitioning) tiling layout, in the spirit of
+//! TideWM's dynamic BSP, master, and cascade tiling layouts.
+//!
+//! The BSP layout follows the spirit of
 //! Hyprland's "dwindle": each new window splits the target leaf in two, and
 //! split orientation is decided by the leaf's own aspect ratio at layout
 //! time (wide leaf -> side-by-side, tall leaf -> stacked), not baked into

@@ -1,4 +1,4 @@
-//! Frosted-glass mode for the shared captured-backdrop pipeline.
+//! Frosted-glass mode for TideWM's shared captured-backdrop pipeline.
 //!
 //! Unlike water glass, which offsets one sharp sample, frost diffuses the
 //! captured backdrop with a bounded 25-tap Gaussian kernel and then applies

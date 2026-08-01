@@ -1,4 +1,4 @@
-//! Waves: TideWM's own config file format (`.wave`), replacing TOML.
+//! Waves: TideWM's own config file format (`.wave`).
 //!
 //! Line-based on purpose, not a general expression grammar -- this is
 //! genuinely how Hyprland's own parser works too (split on the first `=`,

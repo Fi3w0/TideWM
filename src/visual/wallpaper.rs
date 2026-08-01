@@ -1,4 +1,4 @@
-//! TideWM's deliberately small built-in wallpaper.
+//! TideWM's deliberately small built-in fallback wallpaper.
 //!
 //! Fi3w0's canonical 4K artwork is embedded so installs do not depend on a
 //! loose runtime file and decoded once at startup at its native resolution.
@@ -19,7 +19,7 @@ use smithay::{
 
 const WIDTH: i32 = 3840;
 const HEIGHT: i32 = 2160;
-const WALLPAPER_PNG: &[u8] = include_bytes!("../assets/tide-aqua-4k.png");
+const WALLPAPER_PNG: &[u8] = include_bytes!("../../assets/tide-aqua-4k.png");
 
 pub struct BuiltinWallpaper {
     buffer: MemoryRenderBuffer,

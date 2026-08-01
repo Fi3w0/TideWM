@@ -1,3 +1,5 @@
+//! Central compositor state and cross-subsystem coordination.
+
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},

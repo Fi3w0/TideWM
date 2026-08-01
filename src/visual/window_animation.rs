@@ -1,4 +1,4 @@
-//! Window lifecycle and layout-motion animation state (render roadmap R2).
+//! Window lifecycle and layout-motion animation state from render roadmap R2.
 //!
 //! Logical placement, focus, and input change immediately. These objects
 //! retain only the short-lived visual offset/opacity needed to interpolate

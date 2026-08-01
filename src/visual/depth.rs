@@ -1,4 +1,4 @@
-//! R1 attention depth and buoyancy. Mapped windows begin at tier zero,
+//! R1 attention depth and buoyancy for TideWM. Mapped windows begin at tier zero,
 //! sink one bounded tier at a time after configurable inactivity, and float
 //! straight back to the surface on focus/input. Tier one keeps live client
 //! content with a cool translucent wash; tier two and deeper replace live

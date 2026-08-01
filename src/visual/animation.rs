@@ -1,4 +1,4 @@
-//! Shared animation primitive -- the foundation piece of the render/visual
+//! Shared animation primitive, the foundation piece of the render/visual
 //! identity roadmap (AGENT.md's "Render and visual identity roadmap", Phase
 //! R0). Before this, nothing in the codebase interpolated a value over time;
 //! every state change (opacity, toast fade, resize) was either instant or,

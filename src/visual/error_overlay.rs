@@ -1,4 +1,4 @@
-//! Persistent compositor-owned configuration error panel.
+//! Persistent compositor-owned configuration error panel for TideWM.
 //!
 //! Like Hyprland's error overlay, this is not a notification popup: while a
 //! config error exists it occupies a fixed strip at the top of each output

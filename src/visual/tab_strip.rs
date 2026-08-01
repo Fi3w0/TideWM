@@ -1,4 +1,4 @@
-//! Tab-strip UI for a window group: a thin bar along the top of a grouped
+//! TideWM's tab-strip UI for a window group: a thin bar along the top of a grouped
 //! leaf's rect, one segment per member, the active one visually distinct.
 //! Same CPU-composited-texture approach as `toast.rs` (rasterize once into
 //! an RGBA buffer, hand it to the renderer as a texture) rather than every

@@ -1,3 +1,5 @@
+//! TideWM configuration loading, lowering, validation, and hot reload.
+
 use std::{
     collections::HashMap,
     fs,

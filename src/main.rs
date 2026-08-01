@@ -4,40 +4,24 @@ mod handlers;
 
 #[cfg(feature = "accessibility")]
 mod accessibility;
-mod animation;
-mod backdrop;
 mod backend;
 mod capture;
-mod config;
 mod cursor;
-mod decoration;
-mod depth;
-mod error_overlay;
-mod frost_glass;
 mod grabs;
-mod input;
-mod ipc;
-mod layout;
-mod overview;
-mod ripple;
 #[cfg(feature = "screencast")]
 mod screencast;
-mod shadow;
-#[cfg(feature = "screencast")]
-mod source_picker;
-mod state;
-mod sway;
-mod swim;
-mod tab_strip;
-mod toast;
-mod viscosity;
-mod wallpaper;
-mod water_glass;
-mod waves;
-mod welcome;
-mod window_animation;
-mod workspace_transition;
+mod tide_core;
+mod visual;
 mod xwayland;
+
+pub(crate) use tide_core::{config, input, ipc, layout, state, waves};
+#[cfg(feature = "screencast")]
+pub(crate) use visual::source_picker;
+pub(crate) use visual::{
+    animation, backdrop, decoration, depth, error_overlay, frost_glass, overview, ripple, shadow,
+    sway, swim, tab_strip, toast, viscosity, wallpaper, water_glass, welcome, window_animation,
+    workspace_transition,
+};
 
 use std::{process::Child, sync::Mutex};
 
@@ -49,7 +33,7 @@ use smithay::reexports::{
     },
     wayland_server::Display,
 };
-pub use state::Smallvil;
+pub use tide_core::state::Smallvil;
 
 /// Children started by TideWM and not synchronously waited by their call
 /// site. Keeping the `Child` handles lets the SIGCHLD event source below reap

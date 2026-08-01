@@ -1,4 +1,4 @@
-//! Configurable analytical window shadows.
+//! Configurable analytical window shadows for TideWM.
 //!
 //! The useful parts of niri's CSS-like shadow model (softness, spread,
 //! offset, draw-behind-window, active/inactive colors) and Hyprland's

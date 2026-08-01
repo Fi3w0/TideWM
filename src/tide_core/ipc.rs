@@ -1,4 +1,4 @@
-//! JSON-over-Unix-socket control interface. Two modes share one socket:
+//! TideWM's JSON-over-Unix-socket control interface. Two modes share one socket:
 //!
 //! * **Request-response** (Phase A item 3 of the WM feature-parity roadmap):
 //!   one connection, one request line in, one response line out, then the

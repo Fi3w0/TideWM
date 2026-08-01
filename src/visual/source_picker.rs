@@ -1,4 +1,4 @@
-//! Compositor-owned screen-share source picker.
+//! TideWM's compositor-owned screen-share source picker.
 //!
 //! The portal method runs on the D-Bus thread, while this UI and all window
 //! inspection stay on the compositor thread. A bounded response channel is

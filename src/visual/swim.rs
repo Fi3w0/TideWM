@@ -1,4 +1,4 @@
-//! Continuous lateral "swim" camera (spatial roadmap S0).
+//! Continuous lateral "swim" camera from spatial roadmap S0.
 //!
 //! The lateral axis stays a sequence of discrete tiling spots, each an
 //! ordinary BSP/master/cascade tree, so logical workspace identity is still

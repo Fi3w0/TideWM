@@ -1,4 +1,4 @@
-//! Backdrop capture: renders whatever sits behind a window's rect into an
+//! Backdrop capture renders whatever sits behind a window's rect into an
 //! offscreen texture -- the shared plumbing every future water/decoration
 //! effect that samples "what's behind this window" (water-glass refraction,
 //! frost-glass blur) needs before it can run its own shader against that

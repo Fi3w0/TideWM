@@ -1,4 +1,4 @@
-//! Full-output workspace transition (render-roadmap Phase R1).
+//! Full-output workspace transition from render-roadmap Phase R1.
 //!
 //! The outgoing desktop is captured after its visible frame has been
 //! submitted, then drawn over the already-live incoming workspace. The

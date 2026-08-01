@@ -1,4 +1,4 @@
-//! Rounded client clipping and analytical gradient borders.
+//! Rounded client clipping and analytical gradient borders for TideWM.
 //!
 //! The surface wrapper follows niri's proven shape: temporarily override
 //! Smithay's default texture program while drawing each toplevel surface
