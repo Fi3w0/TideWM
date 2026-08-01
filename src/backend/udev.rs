@@ -1411,16 +1411,21 @@ fn render_surface(
         state.config_error_element(output, renderer)
     };
 
+    let placements = if locked {
+        Vec::new()
+    } else {
+        state.render_placements(output)?
+    };
     let (depth_elements, depth_surfaces) = if locked {
         (Vec::new(), Vec::new())
     } else {
-        state.depth_frame_elements(renderer, output)
+        state.depth_frame_elements(renderer, output, &placements)
     };
     let (glass_elements, glass_surfaces) = if locked {
         (Vec::new(), Vec::new())
     } else {
-        let surfaces = state.glass_eligible_surfaces(output);
-        let elements = state.glass_frame_elements(renderer, output, &surfaces);
+        let surfaces = state.glass_eligible_surfaces(&placements);
+        let elements = state.glass_frame_elements(renderer, output, &placements, &surfaces);
         (elements, surfaces)
     };
     let mut replaced_surfaces = depth_surfaces;
@@ -1432,7 +1437,7 @@ fn render_surface(
     let space_elements = if locked {
         Vec::new()
     } else {
-        state.desktop_render_elements(renderer, output, &replaced_surfaces)?
+        state.desktop_render_elements(renderer, output, &placements, &replaced_surfaces)?
     };
 
     let lock_elements = if locked {

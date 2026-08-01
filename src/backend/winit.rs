@@ -310,11 +310,23 @@ pub fn init_winit(
                         // space_elements -- see glass_frame_elements'
                         // own doc comment for why this means "topmost
                         // among windows," not real multi-window z-order.
-                        let glass_surfaces = state.glass_eligible_surfaces(&entry.output);
-                        let glass_elements =
-                            state.glass_frame_elements(renderer, &entry.output, &glass_surfaces);
+                        let placements = match state.render_placements(&entry.output) {
+                            Some(placements) => placements,
+                            None => {
+                                tracing::warn!("Failed to gather nested output placements");
+                                entry.dirty = true;
+                                continue;
+                            }
+                        };
+                        let glass_surfaces = state.glass_eligible_surfaces(&placements);
+                        let glass_elements = state.glass_frame_elements(
+                            renderer,
+                            &entry.output,
+                            &placements,
+                            &glass_surfaces,
+                        );
                         let (depth_elements, depth_surfaces) =
-                            state.depth_frame_elements(renderer, &entry.output);
+                            state.depth_frame_elements(renderer, &entry.output, &placements);
                         // Only skip from the normal walk what actually got a
                         // replacement element built -- a shader-compile
                         // failure or missing output geometry makes
@@ -326,15 +338,19 @@ pub fn init_winit(
                         if !glass_elements.is_empty() {
                             skip.extend(glass_surfaces.iter().cloned());
                         }
-                        let space_elements =
-                            match state.desktop_render_elements(renderer, &entry.output, &skip) {
-                                Some(elements) => elements,
-                                None => {
-                                    tracing::warn!("Failed to gather nested output elements");
-                                    entry.dirty = true;
-                                    continue;
-                                }
-                            };
+                        let space_elements = match state.desktop_render_elements(
+                            renderer,
+                            &entry.output,
+                            &placements,
+                            &skip,
+                        ) {
+                            Some(elements) => elements,
+                            None => {
+                                tracing::warn!("Failed to gather nested output elements");
+                                entry.dirty = true;
+                                continue;
+                            }
+                        };
                         // Ripple layers are grouped by `RippleLayer` so
                         // each backend can splice them at the right z
                         // position in the front-to-back list: AboveAll

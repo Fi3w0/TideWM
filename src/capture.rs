@@ -579,14 +579,20 @@ impl Smallvil {
             let workspace_transition = self.workspace_transition_frame_element(renderer, &output);
             let depth_transition = self.depth_transition_frame_element(renderer, &output);
             let closing_windows = self.closing_window_frame_elements(renderer, &output);
-            let glass_surfaces = self.glass_eligible_surfaces(&output);
-            let glass_elements = self.glass_frame_elements(renderer, &output, &glass_surfaces);
-            let (depth_elements, depth_surfaces) = self.depth_frame_elements(renderer, &output);
+            let Some(placements) = self.render_placements(&output) else {
+                fail!(completion, CaptureFailureReason::Unknown);
+                return;
+            };
+            let glass_surfaces = self.glass_eligible_surfaces(&placements);
+            let glass_elements =
+                self.glass_frame_elements(renderer, &output, &placements, &glass_surfaces);
+            let (depth_elements, depth_surfaces) =
+                self.depth_frame_elements(renderer, &output, &placements);
             let mut skip = depth_surfaces;
             if !glass_elements.is_empty() {
                 skip.extend(glass_surfaces.iter().cloned());
             }
-            match self.desktop_render_elements(renderer, &output, &skip) {
+            match self.desktop_render_elements(renderer, &output, &placements, &skip) {
                 Some(space_elements) => {
                     elements.extend(ripple_layers.above_all);
                     elements.extend(depth_transition);

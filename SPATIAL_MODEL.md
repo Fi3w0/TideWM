@@ -58,13 +58,18 @@ infrastructure. They do not share spatial ownership:
 - `OceanSpace` owns world rectangles, reefs, cameras, bookmarks, and physical
   depth.
 
-Both eventually produce the same model-neutral placed-window render input.
+Both produce the same model-neutral placed-window render input. S2 established
+that boundary in `src/tide_core/placement.rs`: rendering receives a window,
+logical rectangle, fractional view transform, authoritative/preview role, and
+content-size policy, plus tiled/floating and normal/fullscreen presentation
+flags. Classic is the current producer; Ocean will implement the same contract
+from world rectangles and cameras.
 
 ## Delivery order
 
 1. **Done:** manual Classic Depth Deck: park, navigate, swap-recall, cancel.
 2. Optional Classic auto-park policy, only after real-use validation.
-3. Model-neutral placement boundary for the shared renderer.
+3. **Done:** model-neutral placement boundary for the shared renderer.
 4. Ocean world coordinates, cameras, reefs, and bookmarks.
 5. Ocean physical-depth actions, compass, and overview.
 

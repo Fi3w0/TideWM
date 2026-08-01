@@ -853,16 +853,6 @@ pub struct FloatingTag {
     pub rect: Rectangle<i32, Logical>,
 }
 
-/// Render-only placement for a window on a neighboring swim workspace.
-/// The window deliberately remains absent from `Space`: mapping it just to
-/// draw it would also make it focusable and visible to IPC/input queries.
-#[derive(Clone)]
-struct SwimNeighborWindow {
-    window: Window,
-    rect: Rectangle<i32, Logical>,
-    workspace_delta: i32,
-}
-
 pub struct FullscreenEntry {
     /// Output name (matching `Layouts`' own convention of a stable `String`
     /// rather than holding the `Output` type itself).
@@ -1039,11 +1029,9 @@ impl Smallvil {
     /// composition is exactly the kind of off-by-one this project's
     /// front-to-back element-order convention has already been burned by
     /// once (see session-lock's element-order bug, AGENT.md).
-    fn window_visual_sample_at(
+    fn base_window_visual_sample(
         &self,
         surface: Option<&WlSurface>,
-        output_name: &str,
-        workspace_delta: i32,
     ) -> crate::window_animation::VisualSample {
         let mut sample = crate::window_animation::VisualSample::default();
         if let Some(surface) = surface {
@@ -1073,34 +1061,21 @@ impl Smallvil {
                 sample.offset.x += sway.sample();
             }
         }
-        // Every workspace is a one-output-width strip. The camera subtracts
-        // its continuous position while `workspace_delta` places a render-only
-        // neighboring strip on the appropriate side of the current anchor.
-        // Folded through the shared visual aggregator so surfaces, popups,
-        // borders, shadows, glass, depth overlays, and capture paths agree.
-        if let Some(camera) = self.swim_cameras.get(output_name) {
-            if self.swim_enabled() {
-                let offset_spots = camera.current_offset();
-                let visual_spots = workspace_delta as f32 - offset_spots;
-                if visual_spots.abs() > 0.0001 {
-                    let width = self
-                        .output_by_name(output_name)
-                        .and_then(|output| self.space.output_geometry(&output))
-                        .map(|geo| geo.size.w as f64)
-                        .unwrap_or(0.0);
-                    sample.offset.x += visual_spots as f64 * width;
-                }
-            }
-        }
         sample
     }
 
-    fn window_visual_sample(
+    /// Combines lifecycle/mechanical animation with the spatial engine's
+    /// model-neutral camera transform for one render placement.
+    fn placement_visual_sample(
         &self,
-        surface: &WlSurface,
-        output_name: &str,
+        placement: &crate::placement::PlacedWindow,
     ) -> crate::window_animation::VisualSample {
-        self.window_visual_sample_at(Some(surface), output_name, 0)
+        let mut sample = self.base_window_visual_sample(placement.surface());
+        sample.offset += placement.view_offset;
+        if placement.fits_content_to_placement() && sample.size.is_none() {
+            sample.size = Some(placement.rect.size.to_f64());
+        }
+        sample
     }
 
     /// Whether continuous lateral swim is active: the master water toggle
@@ -1379,33 +1354,75 @@ impl Smallvil {
         result
     }
 
-    /// Builds placements for only the neighboring workspace strips which
-    /// intersect `output` during a swim. They remain render-only: mapping
-    /// these windows into `Space` would incorrectly make hidden workspaces
-    /// focusable and visible to input and IPC queries.
-    fn swim_neighbor_windows(&self, output: &Output) -> Vec<SwimNeighborWindow> {
-        if !self.swim_enabled() {
-            return Vec::new();
-        }
+    /// Produces Classic's complete front-to-back window scene through the
+    /// model-neutral placement boundary. Active `Space` windows are
+    /// authoritative; bounded swim neighbors are previews and remain absent
+    /// from input/IPC ownership.
+    fn classic_render_placements(
+        &self,
+        output: &Output,
+    ) -> Option<Vec<crate::placement::PlacedWindow>> {
         let output_name = output.name();
-        let Some(camera) = self.swim_cameras.get(&output_name) else {
-            return Vec::new();
-        };
+        let output_geo = self.space.output_geometry(output)?;
+        let camera_offset = self
+            .swim_cameras
+            .get(&output_name)
+            .filter(|_| self.swim_enabled())
+            .map(|camera| camera.current_offset())
+            .unwrap_or(0.0);
+        let output_width = output_geo.size.w as f64;
+        let active_view_offset = Point::from((-(camera_offset as f64) * output_width, 0.0));
+        let mut result: Vec<crate::placement::PlacedWindow> = self
+            .space
+            .elements_for_output(output)
+            .rev()
+            .filter_map(|window| {
+                let location = self.space.element_location(window)?;
+                let surface = window.toplevel().map(|toplevel| toplevel.wl_surface());
+                let kind = if surface
+                    .is_some_and(|surface| self.floating_workspace.contains_key(surface))
+                {
+                    crate::placement::PlacementKind::Floating
+                } else {
+                    crate::placement::PlacementKind::Tiled
+                };
+                let stack = if surface.is_some_and(|surface| self.fullscreen.contains_key(surface))
+                {
+                    crate::placement::PlacementStack::Fullscreen
+                } else {
+                    crate::placement::PlacementStack::Normal
+                };
+                Some(
+                    crate::placement::PlacedWindow::authoritative(
+                        window.clone(),
+                        Rectangle::new(location, window.geometry().size),
+                    )
+                    .with_view_offset(active_view_offset)
+                    .with_kind(kind)
+                    .with_stack(stack),
+                )
+            })
+            .collect();
+
+        if !self.swim_enabled() {
+            return Some(result);
+        }
         let neighbors = crate::swim::visible_neighbors(
             self.layout.active_workspace(&output_name),
-            camera.current_offset(),
+            camera_offset,
             self.config.swim.neighbors,
         );
         if neighbors.is_empty() {
-            return Vec::new();
+            return Some(result);
         }
         let Some(area) = self.output_tiling_area(output) else {
-            return Vec::new();
+            return Some(result);
         };
-        let full_output = self.space.output_geometry(output);
-        let mut result = Vec::new();
-
         for neighbor in neighbors {
+            let view_offset = Point::from((
+                (neighbor.delta as f64 - camera_offset as f64) * output_width,
+                0.0,
+            ));
             // Floating windows are frontmost among ordinary windows. Their
             // relative order is already not retained while hidden (the
             // workspace-switch map pass reads this same bounded tag map),
@@ -1425,9 +1442,7 @@ impl Smallvil {
                             .get(surface)
                             .is_some_and(|entry| entry.output == output_name)
                         {
-                            if let Some(full) = full_output {
-                                rect = full;
-                            }
+                            rect = output_geo;
                         } else if self
                             .maximized
                             .get(surface)
@@ -1438,11 +1453,19 @@ impl Smallvil {
                                 self.gaps_for(&output_name, neighbor.workspace),
                             );
                         }
-                        SwimNeighborWindow {
-                            window: tag.window.clone(),
-                            rect,
-                            workspace_delta: neighbor.delta,
-                        }
+                        let stack = if self
+                            .fullscreen
+                            .get(surface)
+                            .is_some_and(|entry| entry.output == output_name)
+                        {
+                            crate::placement::PlacementStack::Fullscreen
+                        } else {
+                            crate::placement::PlacementStack::Normal
+                        };
+                        crate::placement::PlacedWindow::preview(tag.window.clone(), rect)
+                            .with_view_offset(view_offset)
+                            .with_kind(crate::placement::PlacementKind::Floating)
+                            .with_stack(stack)
                     }),
             );
 
@@ -1456,33 +1479,42 @@ impl Smallvil {
             // Tiled windows usually do not overlap, but cascade does.
             tiled.reverse();
             result.extend(tiled.into_iter().map(|(window, mut rect)| {
+                let mut stack = crate::placement::PlacementStack::Normal;
                 if let Some(surface) = window.toplevel().map(|toplevel| toplevel.wl_surface()) {
                     if self
                         .fullscreen
                         .get(surface)
                         .is_some_and(|entry| entry.output == output_name)
                     {
-                        if let Some(full) = full_output {
-                            rect = full;
-                        }
+                        rect = output_geo;
+                        stack = crate::placement::PlacementStack::Fullscreen;
                     } else if self.pseudo_tiled.contains(surface) {
                         rect = crate::layout::scale_centered(rect, self.config.pseudo_tile_scale);
                     }
                 }
-                SwimNeighborWindow {
-                    window,
-                    rect,
-                    workspace_delta: neighbor.delta,
-                }
+                crate::placement::PlacedWindow::preview(window, rect)
+                    .with_view_offset(view_offset)
+                    .with_stack(stack)
             }));
         }
-        result
+        Some(result)
+    }
+
+    /// Spatial-engine boundary consumed by the shared renderer. S2 has one
+    /// producer (Classic); S3 will dispatch this to Classic or Ocean without
+    /// changing any renderer call site.
+    pub(crate) fn render_placements(
+        &self,
+        output: &Output,
+    ) -> Option<Vec<crate::placement::PlacedWindow>> {
+        self.classic_render_placements(output)
     }
 
     pub(crate) fn desktop_render_elements(
         &mut self,
         renderer: &mut GlesRenderer,
         output: &Output,
+        placements: &[crate::placement::PlacedWindow],
         skip: &[WlSurface],
     ) -> Option<Vec<crate::backend::udev::OutputRenderElements>> {
         self.space.output_geometry(output)?;
@@ -1504,7 +1536,6 @@ impl Smallvil {
             .borders_possible()
             .then(|| crate::decoration::border_program(&mut self.border_program, renderer))
             .flatten();
-        let swim_neighbors = self.swim_neighbor_windows(output);
         #[allow(clippy::too_many_arguments)]
         fn append_windows(
             state: &mut Smallvil,
@@ -1515,7 +1546,7 @@ impl Smallvil {
             shadow_program: Option<&GlesPixelProgram>,
             rounded_program: Option<&GlesTexProgram>,
             border_program: Option<&GlesPixelProgram>,
-            swim_neighbors: &[SwimNeighborWindow],
+            placements: &[crate::placement::PlacedWindow],
             result: &mut Vec<crate::backend::udev::OutputRenderElements>,
         ) {
             let Some(output_geo) = state.space.output_geometry(output) else {
@@ -1523,47 +1554,24 @@ impl Smallvil {
             };
             let output_scale = output.current_scale().fractional_scale();
             let scale = Scale::from(output_scale);
-            let mut windows: Vec<SwimNeighborWindow> = state
-                .space
-                .elements_for_output(output)
-                .rev()
-                .filter_map(|window| {
-                    let location = state.space.element_location(window)?;
-                    Some(SwimNeighborWindow {
-                        rect: Rectangle::new(location, window.geometry().size),
-                        window: window.clone(),
-                        workspace_delta: 0,
-                    })
-                })
-                .collect();
-            windows.extend_from_slice(swim_neighbors);
-            for entry in &windows {
+            for entry in placements {
                 let window = &entry.window;
-                let surface = window.toplevel().map(|toplevel| toplevel.wl_surface());
-                if surface.is_some_and(|surface| state.fullscreen.contains_key(surface))
-                    != fullscreen
-                {
+                let surface = entry.surface();
+                if entry.is_fullscreen() != fullscreen {
                     continue;
                 }
                 // `skip` contains active-space surfaces rebuilt by depth or
                 // glass passes. Neighbor previews have no replacement pass;
                 // a stale cached glass surface can still appear in that list,
                 // so never suppress a render-only neighbor with it.
-                if entry.workspace_delta == 0
+                if entry.replacement_eligible()
                     && surface.is_some_and(|surface| skip.contains(surface))
                 {
                     continue;
                 }
-                let mut visual =
-                    state.window_visual_sample_at(surface, &output.name(), entry.workspace_delta);
-                // Hidden workspaces are not configured on every output or
-                // layout change. Scale their last committed buffer to the
-                // current target slot during the preview.
-                if entry.workspace_delta != 0 && visual.size.is_none() {
-                    visual.size = Some(entry.rect.size.to_f64());
-                }
+                let visual = state.placement_visual_sample(entry);
                 let alpha = surface
-                    .map(|surface| state.window_render_alpha(surface))
+                    .map(|surface| state.window_render_alpha_for(surface, entry.is_fullscreen()))
                     .unwrap_or(1.0)
                     * surface
                         .map(|surface| state.depth_live_alpha(surface))
@@ -1586,14 +1594,15 @@ impl Smallvil {
                         visual_size,
                         alpha,
                         rounded_program.cloned(),
+                        entry.is_floating(),
+                        entry.is_fullscreen(),
                     );
                     result.extend(popups);
                     if let Some(program) = border_program {
                         if let Some(border) = state.window_border_element(
                             output,
-                            window,
+                            entry,
                             surface,
-                            entry.rect.loc,
                             program.clone(),
                             visual,
                         ) {
@@ -1616,14 +1625,9 @@ impl Smallvil {
                     );
                 }
                 if let (Some(surface), Some(program)) = (surface, shadow_program) {
-                    if let Some(shadow) = state.window_shadow_element(
-                        output,
-                        window,
-                        surface,
-                        entry.rect.loc,
-                        program.clone(),
-                        visual,
-                    ) {
+                    if let Some(shadow) =
+                        state.window_shadow_element(output, entry, surface, program.clone(), visual)
+                    {
                         result.push(crate::backend::udev::OutputRenderElements::Shadow(shadow));
                     }
                 }
@@ -1673,7 +1677,7 @@ impl Smallvil {
             shadow_program.as_ref(),
             rounded_program.as_ref(),
             border_program.as_ref(),
-            &swim_neighbors,
+            placements,
             &mut result,
         );
         append_layers(
@@ -1692,7 +1696,7 @@ impl Smallvil {
             shadow_program.as_ref(),
             rounded_program.as_ref(),
             border_program.as_ref(),
-            &swim_neighbors,
+            placements,
             &mut result,
         );
         append_layers(
@@ -1887,6 +1891,7 @@ impl Smallvil {
         &mut self,
         renderer: &mut GlesRenderer,
         output: &Output,
+        placements: &[crate::placement::PlacedWindow],
     ) -> (
         Vec<crate::backend::udev::OutputRenderElements>,
         Vec<WlSurface>,
@@ -1897,19 +1902,18 @@ impl Smallvil {
         let Some(output_geo) = self.space.output_geometry(output) else {
             return (Vec::new(), Vec::new());
         };
-        let visible: Vec<(WlSurface, Rectangle<i32, Logical>)> = self
-            .space
-            .elements_for_output(output)
-            .rev()
-            .filter_map(|window| {
-                let surface = window.toplevel()?.wl_surface().clone();
-                let mut rect = self.space.element_geometry(window)?;
-                let visual = self.window_visual_sample(&surface, &output.name());
+        let visible: Vec<(WlSurface, Rectangle<i32, Logical>)> = placements
+            .iter()
+            .filter(|placement| placement.replacement_eligible())
+            .filter_map(|placement| {
+                let surface = placement.surface()?.clone();
+                let mut rect = placement.rect;
+                let visual = self.placement_visual_sample(placement);
                 rect.loc += Point::from((
                     visual.offset.x.round() as i32,
                     visual.offset.y.round() as i32,
                 ));
-                rect.size = visual.rounded_size_or(rect.size);
+                rect.size = visual.rounded_size_or(placement.window.geometry().size);
                 Some((
                     surface,
                     Rectangle::new(rect.loc - output_geo.loc, rect.size),
@@ -3826,29 +3830,35 @@ impl Smallvil {
         )
     }
 
-    /// The physical-space rect a floating `surface` currently occupies on
-    /// `output`, or `None` if it's not visible there right now (hidden on
-    /// a different workspace -- a hidden window isn't in `space.elements()`
-    /// at all). Shared by backdrop capture and water-glass element
-    /// placement so both agree on exactly the same rect the window itself
-    /// renders at.
-    pub(crate) fn floating_window_physical_rect(
+    /// The output-local physical rectangle produced by the shared placement
+    /// and visual-animation contract. Backdrop capture and glass rendering
+    /// use this same helper so they cannot drift from the window itself when
+    /// the active spatial engine applies a camera transform.
+    fn placement_physical_rect(
         &self,
-        surface: &WlSurface,
+        placement: &crate::placement::PlacedWindow,
         output: &Output,
     ) -> Option<Rectangle<i32, Physical>> {
         let output_geo = self.space.output_geometry(output)?;
         let output_scale = output.current_scale().fractional_scale();
-        let window = self.floating_workspace.get(surface)?.window.clone();
-        let location = self.space.element_location(&window)?;
-        let size = window.geometry().size;
-        let logical_rect = Rectangle::new(location - output_geo.loc, size);
+        let visual = self.placement_visual_sample(placement);
+        let visual_offset: Point<i32, Logical> = Point::from((
+            visual.offset.x.round() as i32,
+            visual.offset.y.round() as i32,
+        ));
+        let size = visual.rounded_size_or(placement.window.geometry().size);
+        let logical_rect =
+            Rectangle::new(placement.rect.loc - output_geo.loc + visual_offset, size);
         Some(logical_rect.to_physical_precise_round(output_scale))
     }
 
-    fn glass_mode_for_surface(&self, surface: &WlSurface) -> Option<crate::config::GlassMode> {
+    fn glass_mode_for_surface(
+        &self,
+        surface: &WlSurface,
+        fullscreen: bool,
+    ) -> Option<crate::config::GlassMode> {
         let frost = self.frost_config_for_surface(surface);
-        let opacity = self.window_render_alpha(surface);
+        let opacity = self.window_render_alpha_for(surface, fullscreen);
         selected_glass_mode(
             self.window_glass_modes.get(surface).copied(),
             (opacity < 1.0).then_some(opacity),
@@ -3857,8 +3867,11 @@ impl Smallvil {
     }
 
     pub(crate) fn window_render_alpha(&self, surface: &WlSurface) -> f32 {
+        self.window_render_alpha_for(surface, self.fullscreen.contains_key(surface))
+    }
+
+    fn window_render_alpha_for(&self, surface: &WlSurface, fullscreen: bool) -> f32 {
         let focused = matches!(&self.keyboard_focus, KeyboardFocusTarget::Window(focused) if focused == surface);
-        let fullscreen = self.fullscreen.contains_key(surface);
         self.window_opacity
             .get(surface)
             .copied()
@@ -3912,13 +3925,14 @@ impl Smallvil {
 
     fn rounding_applies(
         &self,
-        surface: &WlSurface,
         config: &crate::config::RoundingConfig,
+        floating: bool,
+        fullscreen: bool,
     ) -> bool {
         config.enabled
             && config.clip
-            && (!config.floating_only || self.floating_workspace.contains_key(surface))
-            && (!self.fullscreen.contains_key(surface) || config.fullscreen)
+            && (!config.floating_only || floating)
+            && (!fullscreen || config.fullscreen)
             && config.radii.iter().any(|radius| *radius > 0.0)
     }
 
@@ -3982,6 +3996,8 @@ impl Smallvil {
         visual_size: Size<i32, Logical>,
         alpha: f32,
         rounded_program: Option<GlesTexProgram>,
+        floating: bool,
+        fullscreen: bool,
     ) -> (
         Vec<crate::backend::udev::OutputRenderElements>,
         Vec<crate::backend::udev::OutputRenderElements>,
@@ -4023,7 +4039,7 @@ impl Smallvil {
         }
 
         let rounding = self.rounding_config_for_surface(surface);
-        let clip = self.rounding_applies(surface, &rounding);
+        let clip = self.rounding_applies(&rounding, floating, fullscreen);
         let physical_rect = Some(
             Rectangle::new(render_location + window.geometry().loc, natural_size)
                 .to_physical_precise_round(output_scale),
@@ -4094,17 +4110,18 @@ impl Smallvil {
     fn window_border_element(
         &self,
         output: &Output,
-        window: &Window,
+        placement: &crate::placement::PlacedWindow,
         surface: &WlSurface,
-        base_location: Point<i32, Logical>,
         program: GlesPixelProgram,
         visual: crate::window_animation::VisualSample,
     ) -> Option<crate::decoration::BorderElement> {
+        let window = &placement.window;
+        let floating = placement.is_floating();
+        let fullscreen = placement.is_fullscreen();
         let mut border = self.border_config_for_surface(surface);
         border.opacity *= visual.opacity;
         border.inactive_opacity *= visual.opacity;
         border.urgent_opacity *= visual.opacity;
-        let fullscreen = self.fullscreen.contains_key(surface);
         let focused = matches!(
             &self.keyboard_focus,
             KeyboardFocusTarget::Window(focused) if focused == surface
@@ -4113,7 +4130,7 @@ impl Smallvil {
         if !border.enabled
             || border.width <= 0.0
             || (!focused && !urgent && !border.inactive_enabled)
-            || (border.floating_only && !self.floating_workspace.contains_key(surface))
+            || (border.floating_only && !floating)
             || (fullscreen && !border.fullscreen)
         {
             return None;
@@ -4125,8 +4142,10 @@ impl Smallvil {
             visual.offset.y.round() as i32,
         ));
         let visual_size = visual.rounded_size_or(window.geometry().size);
-        let logical_rect =
-            Rectangle::new(base_location - output_geo.loc + visual_offset, visual_size);
+        let logical_rect = Rectangle::new(
+            placement.rect.loc - output_geo.loc + visual_offset,
+            visual_size,
+        );
         let physical_rect = logical_rect.to_physical_precise_round(output_scale);
         let mut rounding = self.rounding_config_for_surface(surface);
         if !rounding.enabled {
@@ -4159,12 +4178,14 @@ impl Smallvil {
     fn window_shadow_element(
         &self,
         output: &Output,
-        window: &Window,
+        placement: &crate::placement::PlacedWindow,
         surface: &WlSurface,
-        base_location: Point<i32, Logical>,
         program: GlesPixelProgram,
         visual: crate::window_animation::VisualSample,
     ) -> Option<crate::shadow::ShadowElement> {
+        let window = &placement.window;
+        let floating = placement.is_floating();
+        let fullscreen = placement.is_fullscreen();
         let mut config = self.shadow_config_for_surface(surface);
         config.opacity *= visual.opacity;
         config.inactive_opacity *= visual.opacity;
@@ -4175,9 +4196,8 @@ impl Smallvil {
                 config.corner_radius = rounding.radii[0];
             }
         }
-        let fullscreen = self.fullscreen.contains_key(surface);
         if !config.enabled
-            || (config.floating_only && !self.floating_workspace.contains_key(surface))
+            || (config.floating_only && !floating)
             || (fullscreen && !config.fullscreen)
         {
             return None;
@@ -4190,8 +4210,10 @@ impl Smallvil {
             visual.offset.y.round() as i32,
         ));
         let visual_size = visual.rounded_size_or(window.geometry().size);
-        let logical_rect =
-            Rectangle::new(base_location - output_geo.loc + visual_offset, visual_size);
+        let logical_rect = Rectangle::new(
+            placement.rect.loc - output_geo.loc + visual_offset,
+            visual_size,
+        );
         let physical_rect = logical_rect.to_physical_precise_round(output_scale);
         let focused = matches!(
             &self.keyboard_focus,
@@ -4230,44 +4252,43 @@ impl Smallvil {
             return;
         }
 
-        let surfaces: Vec<WlSurface> = self
-            .floating_workspace
+        let Some(placements) = self.render_placements(output) else {
+            return;
+        };
+        let surfaces: Vec<WlSurface> = placements
             .iter()
-            .filter(|(surface, tag)| {
-                tag.output == output.name()
+            .filter(|placement| placement.replacement_eligible() && placement.is_floating())
+            .filter_map(|placement| {
+                let surface = placement.surface()?;
+                (self
+                    .window_depths
+                    .get(surface)
+                    .is_none_or(|depth| depth.tier() < 2)
                     && self
-                        .window_depths
-                        .get(*surface)
-                        .is_none_or(|depth| depth.tier() < 2)
-                    && self.glass_mode_for_surface(surface).is_some()
+                        .glass_mode_for_surface(surface, placement.is_fullscreen())
+                        .is_some())
+                .then(|| surface.clone())
             })
-            .map(|(surface, _)| surface.clone())
             .collect();
 
         let mut captured_first_backdrop = false;
         for surface in surfaces {
-            let Some(mut physical_rect) = self.floating_window_physical_rect(&surface, output)
-            else {
-                // Hidden (different workspace) right now -- nothing to
-                // capture until it's visible again.
+            let Some(placement) = placements.iter().find(|placement| {
+                placement.replacement_eligible()
+                    && placement.surface().is_some_and(|placed| placed == &surface)
+            }) else {
                 continue;
             };
-            let visual = self.window_visual_sample(&surface, &output.name());
-            let visual_offset: Point<i32, Logical> = Point::from((
-                visual.offset.x.round() as i32,
-                visual.offset.y.round() as i32,
-            ));
-            if let Some(window) = self.mapped_toplevel_window(&surface) {
-                let visual_size = visual.rounded_size_or(window.geometry().size);
-                physical_rect.size = visual_size
-                    .to_physical_precise_round(output.current_scale().fractional_scale());
-            }
-            physical_rect.loc +=
-                visual_offset.to_physical_precise_round(output.current_scale().fractional_scale());
+            let Some(physical_rect) = self.placement_physical_rect(placement, output) else {
+                continue;
+            };
 
-            let Some(space_elements) =
-                self.desktop_render_elements(renderer, output, std::slice::from_ref(&surface))
-            else {
+            let Some(space_elements) = self.desktop_render_elements(
+                renderer,
+                output,
+                &placements,
+                std::slice::from_ref(&surface),
+            ) else {
                 continue;
             };
             let behind: Vec<crate::backend::udev::OutputRenderElements> = self
@@ -4320,22 +4341,28 @@ impl Smallvil {
     /// list to `desktop_render_elements`'s `skip`
     /// so these windows are pulled out of their normal z-slot, then use
     /// `glass_frame_elements` to build what replaces them.
-    pub(crate) fn glass_eligible_surfaces(&self, output: &Output) -> Vec<WlSurface> {
+    pub(crate) fn glass_eligible_surfaces(
+        &self,
+        placements: &[crate::placement::PlacedWindow],
+    ) -> Vec<WlSurface> {
         if !self.config.water_effects {
             return Vec::new();
         }
-        self.floating_workspace
+        placements
             .iter()
-            .filter(|(surface, tag)| {
-                tag.output == output.name()
+            .filter(|placement| placement.replacement_eligible() && placement.is_floating())
+            .filter_map(|placement| {
+                let surface = placement.surface()?;
+                (self
+                    .window_depths
+                    .get(surface)
+                    .is_none_or(|depth| depth.tier() < 2)
                     && self
-                        .window_depths
-                        .get(*surface)
-                        .is_none_or(|depth| depth.tier() < 2)
-                    && self.glass_mode_for_surface(surface).is_some()
-                    && self.backdrop_textures.contains_key(*surface)
+                        .glass_mode_for_surface(surface, placement.is_fullscreen())
+                        .is_some()
+                    && self.backdrop_textures.contains_key(surface))
+                .then(|| surface.clone())
             })
-            .map(|(surface, _)| surface.clone())
             .collect()
     }
 
@@ -4353,6 +4380,7 @@ impl Smallvil {
         &mut self,
         renderer: &mut GlesRenderer,
         output: &Output,
+        placements: &[crate::placement::PlacedWindow],
         surfaces: &[WlSurface],
     ) -> Vec<crate::backend::udev::OutputRenderElements> {
         let mut result = Vec::new();
@@ -4405,28 +4433,26 @@ impl Smallvil {
             else {
                 continue;
             };
-            let Some(mut physical_rect) = self.floating_window_physical_rect(surface, output)
-            else {
+            let Some(placement) = placements.iter().find(|placement| {
+                placement.replacement_eligible()
+                    && placement.surface().is_some_and(|placed| placed == surface)
+            }) else {
                 continue;
             };
-            let Some(window) = self.mapped_toplevel_window(surface) else {
+            let Some(physical_rect) = self.placement_physical_rect(placement, output) else {
                 continue;
             };
-            let Some(location) = self.space.element_location(&window) else {
-                continue;
-            };
-            let visual = self.window_visual_sample(surface, &output.name());
+            let window = placement.window.clone();
+            let location = placement.rect.loc;
+            let visual = self.placement_visual_sample(placement);
             let visual_offset: Point<i32, Logical> = Point::from((
                 visual.offset.x.round() as i32,
                 visual.offset.y.round() as i32,
             ));
             let visual_size = visual.rounded_size_or(window.geometry().size);
-            physical_rect.size =
-                visual_size.to_physical_precise_round(output.current_scale().fractional_scale());
-            physical_rect.loc +=
-                visual_offset.to_physical_precise_round(output.current_scale().fractional_scale());
-            let alpha =
-                self.window_render_alpha(surface) * self.depth_live_alpha(surface) * visual.opacity;
+            let alpha = self.window_render_alpha_for(surface, placement.is_fullscreen())
+                * self.depth_live_alpha(surface)
+                * visual.opacity;
             let render_location = location - output_geo.loc - window.geometry().loc + visual_offset;
 
             let (popups, main) = self.window_surface_elements(
@@ -4438,17 +4464,14 @@ impl Smallvil {
                 visual_size,
                 alpha,
                 rounded_program.clone(),
+                placement.is_floating(),
+                placement.is_fullscreen(),
             );
             result.extend(popups);
             if let Some(program) = &border_program {
-                if let Some(border) = self.window_border_element(
-                    output,
-                    &window,
-                    surface,
-                    location,
-                    program.clone(),
-                    visual,
-                ) {
+                if let Some(border) =
+                    self.window_border_element(output, placement, surface, program.clone(), visual)
+                {
                     result.push(crate::backend::udev::OutputRenderElements::Border(border));
                 }
             }
@@ -4521,14 +4544,9 @@ impl Smallvil {
             // behind both. This keeps translucent text/content above the
             // glass and prevents the shadow from becoming a full-window tint.
             if let Some(program) = &shadow_program {
-                if let Some(shadow) = self.window_shadow_element(
-                    output,
-                    &window,
-                    surface,
-                    location,
-                    program.clone(),
-                    visual,
-                ) {
+                if let Some(shadow) =
+                    self.window_shadow_element(output, placement, surface, program.clone(), visual)
+                {
                     result.push(crate::backend::udev::OutputRenderElements::Shadow(shadow));
                 }
             }
@@ -4542,14 +4560,17 @@ impl Smallvil {
         output: &Output,
         geometry: Rectangle<i32, Physical>,
     ) -> Option<GlesTexture> {
-        let glass_surfaces = self.glass_eligible_surfaces(output);
-        let glass_elements = self.glass_frame_elements(renderer, output, &glass_surfaces);
-        let (depth_elements, depth_surfaces) = self.depth_frame_elements(renderer, output);
+        let placements = self.render_placements(output)?;
+        let glass_surfaces = self.glass_eligible_surfaces(&placements);
+        let glass_elements =
+            self.glass_frame_elements(renderer, output, &placements, &glass_surfaces);
+        let (depth_elements, depth_surfaces) =
+            self.depth_frame_elements(renderer, output, &placements);
         let mut skip = depth_surfaces;
         if !glass_elements.is_empty() {
             skip.extend(glass_surfaces.iter().cloned());
         }
-        let space_elements = self.desktop_render_elements(renderer, output, &skip)?;
+        let space_elements = self.desktop_render_elements(renderer, output, &placements, &skip)?;
         let closing_windows = self.closing_window_frame_elements(renderer, output);
         let elements: Vec<crate::backend::udev::OutputRenderElements> = closing_windows
             .into_iter()
@@ -6606,66 +6627,19 @@ impl Smallvil {
         output: &Output,
     ) -> Vec<MemoryRenderBufferRenderElement<GlesRenderer>> {
         let output_name = output.name();
-        let active_workspace = self.layout.active_workspace(&output_name);
-        let mut workspaces = vec![(active_workspace, 0)];
-        if self.swim_enabled() {
-            if let Some(camera) = self.swim_cameras.get(&output_name) {
-                workspaces.extend(
-                    crate::swim::visible_neighbors(
-                        active_workspace,
-                        camera.current_offset(),
-                        self.config.swim.neighbors,
-                    )
-                    .into_iter()
-                    .map(|neighbor| (neighbor.workspace, neighbor.delta)),
-                );
-            }
-        }
-
-        let Some(area) = self.output_tiling_area(output) else {
+        let Some(scene) = self.render_placements(output) else {
             return Vec::new();
         };
-        let full_output = self.space.output_geometry(output);
-        let camera_offset = self
-            .swim_cameras
-            .get(&output_name)
-            .filter(|_| self.swim_enabled())
-            .map(|camera| camera.current_offset())
-            .unwrap_or(0.0);
-        let output_width = full_output.map(|rect| rect.size.w).unwrap_or(0);
         // Groups are few; a flat vector avoids using Wayland objects (whose
         // liveness flag is interior-mutable) as hash keys for transient
         // per-frame placement data.
         let mut placements: Vec<(WlSurface, Rectangle<i32, Logical>)> = Vec::new();
-        for (workspace, workspace_delta) in workspaces {
-            for (window, mut rect) in self.layout.layout(
-                &output_name,
-                workspace,
-                area,
-                self.gaps_for(&output_name, workspace),
-            ) {
-                let Some(surface) = window.toplevel().map(|toplevel| toplevel.wl_surface()) else {
-                    continue;
-                };
-                if workspace == active_workspace {
-                    if let Some(mapped) = self.space.element_geometry(&window) {
-                        rect = mapped;
-                    }
-                } else if self
-                    .fullscreen
-                    .get(surface)
-                    .is_some_and(|entry| entry.output == output_name)
-                {
-                    if let Some(full) = full_output {
-                        rect = full;
-                    }
-                } else if self.pseudo_tiled.contains(surface) {
-                    rect = crate::layout::scale_centered(rect, self.config.pseudo_tile_scale);
-                }
-                rect.loc.x +=
-                    ((workspace_delta as f32 - camera_offset) * output_width as f32).round() as i32;
-                placements.push((surface.clone(), rect));
-            }
+        for placement in scene {
+            let Some(surface) = placement.surface().cloned() else {
+                continue;
+            };
+            let rect = crate::placement::translated_rect(placement.rect, placement.view_offset);
+            placements.push((surface, rect));
         }
 
         let mut elements = Vec::new();
