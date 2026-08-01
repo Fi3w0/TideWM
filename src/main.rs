@@ -14,13 +14,13 @@ mod tide_core;
 mod visual;
 mod xwayland;
 
-pub(crate) use tide_core::{config, input, ipc, layout, state, waves};
+pub(crate) use tide_core::{classic_depth, config, input, ipc, layout, state, waves};
 #[cfg(feature = "screencast")]
 pub(crate) use visual::source_picker;
 pub(crate) use visual::{
-    animation, backdrop, decoration, depth, error_overlay, frost_glass, overview, ripple, shadow,
-    sway, swim, tab_strip, toast, viscosity, wallpaper, water_glass, welcome, window_animation,
-    workspace_transition,
+    animation, backdrop, decoration, depth, depth_deck, depth_transition, error_overlay,
+    frost_glass, overview, ripple, shadow, sway, swim, tab_strip, toast, viscosity, wallpaper,
+    water_glass, welcome, window_animation, workspace_transition,
 };
 
 use std::{process::Child, sync::Mutex};

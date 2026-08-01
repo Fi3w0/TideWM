@@ -4,6 +4,7 @@
 //! the Waves parser. They are re-exported at the crate root so existing module
 //! paths stay stable while the source tree remains grouped by responsibility.
 
+pub(crate) mod classic_depth;
 pub(crate) mod config;
 pub(crate) mod input;
 pub(crate) mod ipc;
