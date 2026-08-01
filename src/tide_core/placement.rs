@@ -66,6 +66,9 @@ pub(crate) struct PlacedWindow {
     pub(crate) window: Window,
     pub(crate) rect: Rectangle<i32, Logical>,
     pub(crate) view_offset: Point<f64, Logical>,
+    /// View pixels per model pixel. Ocean uses this to invert pointer input
+    /// after producing an already camera-transformed rectangle.
+    pub(crate) view_scale: f64,
     pub(crate) role: PlacementRole,
     pub(crate) content_sizing: ContentSizing,
     pub(crate) kind: PlacementKind,
@@ -78,6 +81,7 @@ impl PlacedWindow {
             window,
             rect,
             view_offset: Point::from((0.0, 0.0)),
+            view_scale: 1.0,
             role: PlacementRole::Authoritative,
             content_sizing: ContentSizing::Committed,
             kind: PlacementKind::Tiled,
@@ -90,6 +94,7 @@ impl PlacedWindow {
             window,
             rect,
             view_offset: Point::from((0.0, 0.0)),
+            view_scale: 1.0,
             role: PlacementRole::Preview,
             content_sizing: ContentSizing::FitPlacement,
             kind: PlacementKind::Tiled,
@@ -99,6 +104,16 @@ impl PlacedWindow {
 
     pub(crate) fn with_view_offset(mut self, view_offset: Point<f64, Logical>) -> Self {
         self.view_offset = view_offset;
+        self
+    }
+
+    pub(crate) fn with_view_scale(mut self, view_scale: f64) -> Self {
+        self.view_scale = view_scale.max(0.05);
+        self
+    }
+
+    pub(crate) fn fit_content_to_placement(mut self) -> Self {
+        self.content_sizing = ContentSizing::FitPlacement;
         self
     }
 

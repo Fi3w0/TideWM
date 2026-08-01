@@ -58,10 +58,10 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `terminal` | string | `"kitty"` | Spawned by the default `Super+Return` bind. The shipped default is `$wave(kitty, alacritty, foot, xterm)` — see [`$wave(...)`](#waves-format) above. |
+| `terminal` | string | `"kitty"` | Spawned by the shipped `$mod+Return` bind (`$mod = ALT` in the generated file). The terminal fallback is `$wave(kitty, alacritty, foot, xterm)` — see [`$wave(...)`](#waves-format) above. |
 | `spatial_engine` | `classic` \| `ocean` | `classic` | Selects one of TideWM's two WM ownership models at startup. Classic keeps numbered workspaces. Ocean has no workspaces: outputs are cameras into one continuous 2D world. `engine` and `wm_mode` are aliases. Requires a restart because live windows cannot safely change spatial owner. |
-| `pointer_modifier` | modifier or `+`-joined modifiers | `super` | Modifier physically held for compositor mouse actions: left-drag moves floating windows or drag-swaps tiles; right-drag resizes floating or tiled windows. Accepts `super`/`logo`/`mod4`, `alt`/`mod1`, `ctrl`/`control`, and `shift`. The shipped config sets it to `$mod`, so changing `$mod` can update keyboard and mouse behavior together. `mouse_modifier` and `drag_modifier` are aliases. |
-| `show_welcome_hint` | bool | `true` | Shows a persistent "fake window" card pointing you at `Super+Return` whenever the desktop is otherwise empty. Disappears the instant a real window maps; delete this key (or set it `false`) to stop it coming back. Checked on every reload, not just at startup. |
+| `pointer_modifier` | modifier or `+`-joined modifiers | `super` fallback; generated config uses `alt` | Modifier physically held for compositor mouse actions: left-drag moves floating windows or drag-swaps tiles; right-drag resizes floating or tiled windows. Accepts `super`/`logo`/`mod4`, `alt`/`mod1`, `ctrl`/`control`, and `shift`. The shipped config sets it to `$mod`. `mouse_modifier` and `drag_modifier` are aliases. |
+| `show_welcome_hint` | bool | `true` | Shows a persistent empty-desktop card reminding you to use your configured terminal bind. Disappears when a real window maps; delete this key (or set it `false`) to stop it returning. |
 | `water_effects` | bool | `true` | Master toggle for TideWM's water/aqua render identity. Disables water-glass, backdrop capture, impulse ripples, wave workspace transitions, automatic depth/buoyancy, interactive viscosity, connected-vessel resize, and floating sway when `false`. |
 | `viscosity` | float, `0`–`4` | `1.0` | Interactive window move/resize damping. `0` follows the pointer immediately; higher values settle more slowly. Render-only: logical geometry and hit-testing stay at the pointer target. Disabled by `water_effects = false`. |
 | `cursor_always_visible` | bool | `false` | Forces the udev backend's software cursor to stay visible even when a client asks to hide it (e.g. a terminal hiding its own pointer glyph after inactivity). Off by default — respecting a client's own hide request is correct behavior; this is an opt-in override. |
@@ -357,7 +357,10 @@ Configures the workspace-free Ocean engine selected with
 `spatial_engine = ocean`. Windows have stable world rectangles on both X and
 Y. Each output stores an independent continuous camera into that same world;
 moving a camera never moves or resizes a window. Reefs are named local BSP
-tiling zones, not pages, and bookmarks are named camera return points.
+tiling zones, not pages, and bookmarks are named camera return points. The
+optional camera-anchored guide field moves and scales with the world, so empty
+travel remains legible instead of looking like windows sliding over a fixed
+wallpaper.
 
 With no `reef` declaration TideWM creates `main` at `0x0`. Its dimensions come
 from the real logical output viewport—there is no 1080p resolution constant.
@@ -366,12 +369,26 @@ to the largest real viewport that uses Ocean, or set a positive dimension to
 make that world zone intentionally fixed/larger. Numbered `workspace:N`
 actions become compatibility jumps to reef/bookmark `N`; they do not create
 workspaces. Reef and configured-bookmark declarations are startup-owned;
-runtime saved bookmarks last for the session.
+runtime saved bookmarks last for the session. The remaining Ocean camera,
+zoom, guide, and depth toggles/tuning hot-reload.
 
 ```wave
 spatial_engine = ocean
 ocean {
     camera_step = 480
+    camera_animation_ms = 260
+    camera_sway = 18
+    canvas_guides = true
+    canvas_grid_size = 240
+    canvas_grid_alpha = 0.10
+    canvas_marker = true
+    canvas_marker_fade_ms = 4200
+    zoom_enabled = true
+    modifier_zoom = true
+    min_zoom = 0.25
+    max_zoom = 2.0
+    zoom_step = 1.2
+    depth_enabled = true
     reef main {
         x = 0
         y = 0
@@ -393,6 +410,18 @@ ocean {
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `camera_step` | integer, `32`–`8192` | `480` | Logical pixels moved by an `ocean-pan-*` keyboard action. Hot-reloadable. |
+| `camera_animation_ms` | integer, `0`–`5000` | `260` | Smooth pan/zoom/bookmark travel duration. `0` makes camera actions immediate. |
+| `camera_sway` | float, `0`–`256` | `18` | Small perpendicular arc, in screen pixels, during keyboard camera travel. `0` keeps a straight path. |
+| `canvas_guides` | boolean | `true` | Draw the world-anchored adaptive reference grid behind windows. Independent from water effects and depth. |
+| `canvas_grid_size` | integer, `32`–`8192` | `240` | Logical world units between guide lines; density adapts as the camera zooms out. |
+| `canvas_grid_alpha` | float, `0`–`1` | `0.10` | Guide visibility. `0` is also a complete visual bypass. |
+| `canvas_marker` | boolean | `true` | Show a small point at the viewport center only after the Ocean camera moves. Independent from the grid. |
+| `canvas_marker_fade_ms` | integer, `0`–`30000` | `4200` | Inactivity fade duration for the center point. `0` disables it. |
+| `zoom_enabled` | boolean | `true` | Enables all Ocean zoom actions and the modifier-wheel gesture. When disabled the live camera is held at `1.0`. |
+| `modifier_zoom` | boolean | `true` | With zoom enabled, physically holding `pointer_modifier` while scrolling zooms around the pointer. |
+| `min_zoom` / `max_zoom` | float, `0.05`–`8` | `0.25` / `2.0` | Camera scale limits. |
+| `zoom_step` | float, `1.01`–`3` | `1.2` | Multiplicative keyboard/wheel zoom step. |
+| `depth_enabled` | boolean | `true` | Enables Ocean sink/dredge/surface and Depth Up/Down. Does not affect the 2D camera or zoom. |
 | `reef <name> { x, y, width?, height? }` | nested block | implicit `main` | Local tiling zone in world coordinates. Omitted dimensions follow actual output geometry. |
 | `bookmark <name> { x, y }` | nested block | `home = 0x0` | Named camera top-left position. Reefs also synthesize numeric bookmarks in declaration order for `workspace:N` compatibility. |
 
@@ -775,6 +804,7 @@ env {
 | `repeat_delay` | integer (ms) | `200` | Delay before a held key starts repeating. |
 | `repeat_rate` | integer (Hz) | `25` | Repeat rate once it starts. |
 | `focus_follows_mouse` | bool | `true` | Moving the pointer over a window focuses it. |
+| `unfocus_on_empty` | bool | `false` | With hover focus enabled, moving onto empty desktop/Ocean canvas clears keyboard focus instead of retaining the last window. |
 | `xkb_layout` | string | unset | xkbcommon layout(s), comma-separated for a switchable multi-layout setup (e.g. `us,de`). Unset falls back to the `XKB_DEFAULT_*` env vars. Hot-reloaded; an invalid value is logged and ignored, keeping the previous keymap. |
 | `xkb_variant` | string | unset | xkbcommon variant(s), one per layout. |
 | `xkb_options` | string | unset | xkbcommon options, e.g. `grp:alt_shift_toggle` to cycle multiple layouts. |
@@ -968,7 +998,25 @@ layer_rule {
 
 ### `bind`
 
-`bind <Modifier+Key> = <action-string>`. Modifiers: `Super`/`Logo`/`Mod4`, `Ctrl`/`Control`, `Alt`, `Shift`, combined with `+`. Key names are matched against the *unshifted* keysym, so it doesn't matter whether you write the letter upper or lowercase. See [Action strings](#action-strings) for every value a bind can take, and the generated `config.wave` for the shipped defaults (also summarized in README's Quick Start table). A later `bind` on the same combo overrides an earlier one.
+`bind <chord> = <action-string>`. XKB modifiers (`Super`/`Logo`/`Mod4`,
+`Ctrl`/`Control`, `Alt`, `Shift`) can be combined freely. Ordinary keys can
+also be held as user-defined helpers: `bind P+H = focus-left` suppresses P
+while held and runs the action when H is pressed; `P+R+H` and combinations
+such as `P+Ctrl+H` work too. P has no reserved meaning—it is a normal key
+unless a bind uses it. A completely bare action such as
+`bind F = toggle-fullscreen` is valid and intentionally captures F from
+clients. Key names match the unshifted keysym, case-insensitively.
+
+Variables are reusable chord pieces, so one file may use independent layers
+such as `$mod = ALT`, `$helper = SUPER`, `$move = CTRL`, and `$sub = P`.
+Parsed Waves bindings are authoritative: no built-in table or feature-specific
+bindings are invisibly merged underneath them. The one mechanism outside the
+normal table is the recovery chord `Ctrl+Alt+Escape`; it temporarily activates
+a known-safe fallback table without rewriting the file. The fallback clears
+on the next successful config reload or TideWM restart.
+
+See [Action strings](#action-strings) for every value a bind can take. A later
+`bind` on the same chord overrides an earlier one.
 
 ### `submap <name> { }`
 
@@ -1022,9 +1070,21 @@ The same set of strings works after `bind ... =` at the top level or inside a `s
 - `workspace:<name>` / `move-to-workspace:<name>` — same two actions, addressed by a `workspace_name` alias instead of a number (see below) — a workspace's real identity is always its number, this is just another way to spell it
 
 **Ocean camera** (removed from keyboard matching while Classic is selected)
-- `ocean-pan-left` / `ocean-pan-right` / `ocean-pan-up` / `ocean-pan-down` — move only the current output camera by `ocean.camera_step`
-- `ocean-bookmark:<name>` — jump the current output camera to a configured or runtime bookmark
+- `ocean-pan-left` / `ocean-pan-right` / `ocean-pan-up` / `ocean-pan-down` — glide only the current output camera by `ocean.camera_step` screen pixels
+- `ocean-zoom-in` / `ocean-zoom-out` / `ocean-zoom-reset` — scale the continuous world around the output center
+- `ocean-center-focused` — center the camera on the focused window without moving that window in world space
+- `ocean-bookmark:<name>` — glide the current output camera to a configured or runtime bookmark
 - `ocean-save-bookmark:<name>` — store the current camera position for this session without rewriting config
+- `depth-down` / `depth-up` — travel to the next/previous meaningful world Y: a reef origin or explicitly floating/sunk window, never a local tile row
+- `sink-window` — make the focused window a world floater and place it immediately below the current viewport
+- `ocean-dredge-window` — pull the nearest floating window below the viewport into its center
+- `ocean-surface-window` — place the focused window at world Y=0 and center the camera on it
+
+The generated example uses `$move = CTRL` for camera arrows and keyboard zoom,
+while pointer-anchored wheel zoom uses `pointer_modifier`. Depth examples use
+the main `$mod` layer. These are ordinary explicit `bind` lines: TideWM never
+synthesizes Ocean or Depth bindings behind the config, and deleting or
+rewriting a line removes or changes it completely.
 
 **Modes**
 - `submap:<name>` — enter a `submap <name> { }` block
@@ -1051,8 +1111,8 @@ The same set of strings works after `bind ... =` at the top level or inside a `s
 `$XDG_RUNTIME_DIR/tidewm-<pid>.sock`: one JSON request line in, one JSON response line out, per connection. Read queries return structured data; `{"request": "action", "action": "<any string above>"}` runs any action string. `{"request":"batch","actions":["workspace:2","spawn:kitty"]}` validates the complete list first, then executes up to 128 actions in order, so an invalid later item cannot leave a half-run batch. This is genuinely the same path a keybind press uses (`config::parse_action` → `Smallvil::run_action`).
 
 Queries: `outputs`, `workspaces`, `windows`, `focused-window`, `active-submap`.
-In Ocean, `outputs` reports `active_workspace: null` and the current
-two-axis `camera_origin`; `workspaces` returns an empty list because bookmarks
+In Ocean, `outputs` reports `active_workspace: null`, the current two-axis
+`camera_origin`, and `camera_zoom`; `workspaces` returns an empty list because bookmarks
 are navigation targets rather than real workspaces. Ocean window entries use
 `workspace: null` and `output: null` (the same world can be visible through
 multiple outputs), plus `entry_output` as a non-owning input/focus hint.

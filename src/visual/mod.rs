@@ -12,6 +12,7 @@ pub(crate) mod depth_deck;
 pub(crate) mod depth_transition;
 pub(crate) mod error_overlay;
 pub(crate) mod frost_glass;
+pub(crate) mod ocean_canvas;
 pub(crate) mod overview;
 pub(crate) mod ripple;
 pub(crate) mod shadow;

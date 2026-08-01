@@ -47,6 +47,7 @@ pub struct ResizeSurfaceGrab {
 
     initial_rect: Rectangle<i32, Logical>,
     last_window_size: Size<i32, Logical>,
+    view_scale: f64,
 }
 
 impl ResizeSurfaceGrab {
@@ -55,6 +56,7 @@ impl ResizeSurfaceGrab {
         window: Window,
         edges: ResizeEdge,
         initial_window_rect: Rectangle<i32, Logical>,
+        view_scale: f64,
     ) -> Self {
         let initial_rect = initial_window_rect;
 
@@ -71,6 +73,7 @@ impl ResizeSurfaceGrab {
             edges,
             initial_rect,
             last_window_size: initial_rect.size,
+            view_scale: view_scale.max(0.05),
         }
     }
 }
@@ -99,7 +102,11 @@ impl PointerGrab<Smallvil> for ResizeSurfaceGrab {
             return;
         }
 
-        let mut delta = event.location - self.start_data.location;
+        let view_delta = event.location - self.start_data.location;
+        let mut delta: Point<f64, Logical> = Point::from((
+            view_delta.x / self.view_scale,
+            view_delta.y / self.view_scale,
+        ));
 
         let mut new_window_width = self.initial_rect.size.w;
         let mut new_window_height = self.initial_rect.size.h;

@@ -15,6 +15,7 @@ pub struct MoveSurfaceGrab {
     pub start_data: PointerGrabStartData<Smallvil>,
     pub window: Window,
     pub initial_window_location: Point<i32, Logical>,
+    pub view_scale: f64,
 }
 
 impl PointerGrab<Smallvil> for MoveSurfaceGrab {
@@ -47,7 +48,9 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
             return;
         }
 
-        let delta = event.location - self.start_data.location;
+        let view_delta = event.location - self.start_data.location;
+        let scale = self.view_scale.max(0.05);
+        let delta = Point::from((view_delta.x / scale, view_delta.y / scale));
         let new_location = self.initial_window_location.to_f64() + delta;
         let new_location = new_location.to_i32_round();
         let previous_x = data

@@ -365,6 +365,8 @@ pub fn init_winit(
                             state.workspace_transition_frame_element(renderer, &entry.output);
                         let depth_transition =
                             state.depth_transition_frame_element(renderer, &entry.output);
+                        let ocean_canvas =
+                            state.ocean_canvas_frame_element(renderer, &entry.output);
                         let closing_windows =
                             state.closing_window_frame_elements(renderer, &entry.output);
                         let mut elements: Vec<crate::backend::udev::OutputRenderElements> =
@@ -388,6 +390,7 @@ pub fn init_winit(
                         elements.extend(glass_elements);
                         elements.extend(space_elements);
                         elements.extend(ripple_layers.below_windows);
+                        elements.extend(ocean_canvas);
                         elements.extend(
                             wallpaper_element
                                 .map(crate::backend::udev::OutputRenderElements::Composited),

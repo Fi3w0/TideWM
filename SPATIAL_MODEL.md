@@ -33,7 +33,7 @@ access.
 ## Ocean
 
 Ocean has no real numbered workspaces. It owns one continuous 2D world with
-per-output cameras:
+independently panning and zooming per-output cameras:
 
 - **X** is continuous lateral travel between working regions.
 - **Y** is physical window depth/position, not a row of disguised workspaces.
@@ -41,11 +41,19 @@ per-output cameras:
   world into workspace pages.
 - Bookmarks provide named return points and a compatibility surface for tools
   that expect workspace-like destinations.
+- An optional camera-anchored adaptive guide field provides scale and motion
+  cues through empty world space; it is not a workspace boundary.
+- A small viewport-center marker appears only after camera movement and fades
+  away after 4.2 seconds by default, keeping orientation without permanent UI.
 - Attention/buoyancy and render LOD are separate from physical Y, so focusing a
   deep window does not teleport it to the surface.
 
-The bioluminescent compass and overview make distant or urgent windows
-discoverable. Sinking, dredging, and surfacing are explicit spatial actions.
+Depth Down/Up visits only reef origins and explicitly world-placed floating or
+sunk windows. Local tile rows are deliberately excluded, because treating
+them as navigation stops recreates vertical workspaces. Sinking, dredging, and
+surfacing are explicit actions; focusing a deep window alone never changes its
+world Y. The later bioluminescent compass and overview will make distant or
+urgent windows discoverable.
 
 ## Shared and separate state
 
@@ -56,8 +64,8 @@ infrastructure. They do not share spatial ownership:
 - `ClassicSpace` owns `(output, workspace)`, layout leaves, deck membership,
   and restore slots.
 - `OceanSpace` now owns reef-local BSP trees, world rectangles, independent
-  per-output camera origins, floating world rectangles, entry-output hints,
-  and configured/runtime bookmarks. Physical depth actions remain S4.
+  per-output pan/zoom cameras, floating world rectangles, entry-output hints,
+  configured/runtime bookmarks, and physical depth travel/actions.
 
 Both produce the same model-neutral placed-window render input. S2 established
 that boundary in `src/tide_core/placement.rs`: rendering receives a window,
@@ -66,13 +74,19 @@ content-size policy, plus tiled/floating and normal/fullscreen presentation
 flags. Classic and Ocean now both produce this contract from their own
 authoritative state.
 
+Waves owns every keyboard and pointer binding. Selecting an engine or enabling
+Depth never inserts hidden chords; the generated Alt/Super/Ctrl/P layers are
+editable examples. `Ctrl+Alt+Escape` is the separate temporary recovery path
+for a self-locked config.
+
 ## Delivery order
 
 1. **Done:** manual Classic Depth Deck: park, navigate, swap-recall, cancel.
 2. Optional Classic auto-park policy, only after real-use validation.
 3. **Done:** model-neutral placement boundary for the shared renderer.
 4. **Done:** Ocean world coordinates, cameras, reefs, and bookmarks.
-5. Ocean physical-depth actions, compass, and overview.
+5. **Done:** Ocean pan/zoom canvas feel and physical sink/dredge/surface travel.
+6. Ocean compass and whole-world overview.
 
 The existing continuous workspace swim is an S0 Classic navigation bridge. It
 is useful on its own, but it is not the Ocean data model.

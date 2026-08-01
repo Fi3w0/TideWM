@@ -86,7 +86,7 @@ impl WelcomeHint {
             &mut pixels,
             canvas,
             font,
-            &format!("Super+Enter opens a terminal ({terminal})"),
+            &format!("Use your configured spawn bind for a terminal ({terminal})"),
             PAD,
             y,
             BODY_SIZE,

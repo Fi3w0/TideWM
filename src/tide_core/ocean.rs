@@ -6,7 +6,10 @@
 //! into that shared world. Rendering converts the resulting world rectangles
 //! into the shared [`PlacedWindow`](crate::placement::PlacedWindow) boundary.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant},
+};
 
 use smithay::{
     desktop::Window,
@@ -35,10 +38,74 @@ impl OceanPoint {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OceanCamera {
     /// World point shown at the output viewport's top-left corner.
     pub origin: OceanPoint,
+    /// View pixels per world logical pixel.
+    pub zoom: f64,
+}
+
+impl Default for OceanCamera {
+    fn default() -> Self {
+        Self {
+            origin: OceanPoint::default(),
+            zoom: 1.0,
+        }
+    }
+}
+
+struct OceanCameraMotion {
+    from: OceanCamera,
+    to: OceanCamera,
+    started: Instant,
+    duration: Duration,
+    sway_screen: f64,
+}
+
+impl OceanCameraMotion {
+    fn sample(&self) -> OceanCamera {
+        if self.duration.is_zero() {
+            return self.to;
+        }
+        let linear =
+            (self.started.elapsed().as_secs_f64() / self.duration.as_secs_f64()).clamp(0.0, 1.0);
+        let eased = linear * linear * (3.0 - 2.0 * linear);
+        let zoom = if self.from.zoom > 0.0 && self.to.zoom > 0.0 {
+            self.from.zoom * (self.to.zoom / self.from.zoom).powf(eased)
+        } else {
+            self.to.zoom
+        };
+        let dx = self.to.origin.x - self.from.origin.x;
+        let dy = self.to.origin.y - self.from.origin.y;
+        let distance = dx.hypot(dy);
+        let arc = if distance > f64::EPSILON {
+            (std::f64::consts::PI * linear).sin() * self.sway_screen / zoom.max(0.05)
+        } else {
+            0.0
+        };
+        let normal_x = if distance > f64::EPSILON {
+            -dy / distance
+        } else {
+            0.0
+        };
+        let normal_y = if distance > f64::EPSILON {
+            dx / distance
+        } else {
+            0.0
+        };
+        OceanCamera {
+            origin: OceanPoint {
+                x: self.from.origin.x + dx * eased + normal_x * arc,
+                y: self.from.origin.y + dy * eased + normal_y * arc,
+            },
+            zoom,
+        }
+    }
+
+    fn active(&self) -> bool {
+        self.started.elapsed() < self.duration
+    }
 }
 
 pub struct OceanReef {
@@ -53,6 +120,7 @@ struct OceanScreenPin {
     output: String,
     viewport_loc: Point<f64, Logical>,
     size: Size<i32, Logical>,
+    view_scale: f64,
 }
 
 impl OceanReef {
@@ -78,6 +146,7 @@ impl OceanReef {
 pub struct OceanSpace {
     reefs: Vec<OceanReef>,
     cameras: HashMap<String, OceanCamera>,
+    camera_motions: HashMap<String, OceanCameraMotion>,
     bookmarks: HashMap<String, OceanPoint>,
     runtime_bookmarks: HashSet<String>,
     /// Output where a window entered the world. This is an input/focus hint,
@@ -137,6 +206,7 @@ impl OceanSpace {
         Self {
             reefs,
             cameras: HashMap::new(),
+            camera_motions: HashMap::new(),
             bookmarks,
             runtime_bookmarks: HashSet::new(),
             entry_outputs: HashMap::new(),
@@ -186,26 +256,90 @@ impl OceanSpace {
                 })
             })
             .unwrap_or_default();
-        *self
-            .cameras
-            .entry(output.to_string())
-            .or_insert(OceanCamera { origin: initial })
+        let fallback = OceanCamera {
+            origin: initial,
+            zoom: 1.0,
+        };
+        self.cameras.entry(output.to_string()).or_insert(fallback);
+        self.camera(output)
     }
 
     pub fn camera(&self, output: &str) -> OceanCamera {
+        if let Some(motion) = self.camera_motions.get(output) {
+            return motion.sample();
+        }
         self.cameras.get(output).copied().unwrap_or_else(|| {
             let origin = self.bookmarks.get("home").copied().unwrap_or_default();
-            OceanCamera { origin }
+            OceanCamera { origin, zoom: 1.0 }
         })
+    }
+
+    fn set_camera(
+        &mut self,
+        output: &str,
+        target: OceanCamera,
+        duration: Duration,
+        sway_screen: f64,
+    ) {
+        let current = self.ensure_camera(output);
+        self.cameras.insert(output.to_string(), target);
+        if duration.is_zero() || current == target {
+            self.camera_motions.remove(output);
+        } else {
+            self.camera_motions.insert(
+                output.to_string(),
+                OceanCameraMotion {
+                    from: current,
+                    to: target,
+                    started: Instant::now(),
+                    duration,
+                    sway_screen,
+                },
+            );
+        }
+    }
+
+    pub fn has_active_camera_motion(&self) -> bool {
+        self.camera_motions.values().any(OceanCameraMotion::active)
+    }
+
+    pub fn clamp_zooms(&mut self, min_zoom: f64, max_zoom: f64) {
+        for camera in self.cameras.values_mut() {
+            camera.zoom = camera.zoom.clamp(min_zoom, max_zoom);
+        }
+        self.camera_motions.clear();
     }
 
     pub fn pan(&mut self, output: &str, dx: f64, dy: f64) {
         let current = self.ensure_camera(output);
-        self.cameras.insert(
-            output.to_string(),
+        self.set_camera(
+            output,
             OceanCamera {
                 origin: current.origin.translated(dx, dy),
+                zoom: current.zoom,
             },
+            Duration::ZERO,
+            0.0,
+        );
+    }
+
+    pub fn animate_pan(
+        &mut self,
+        output: &str,
+        dx: f64,
+        dy: f64,
+        duration: Duration,
+        sway_screen: f64,
+    ) {
+        let current = self.ensure_camera(output);
+        self.set_camera(
+            output,
+            OceanCamera {
+                origin: current.origin.translated(dx, dy),
+                zoom: current.zoom,
+            },
+            duration,
+            sway_screen,
         );
     }
 
@@ -213,8 +347,143 @@ impl OceanSpace {
         let Some(origin) = self.bookmarks.get(name).copied() else {
             return false;
         };
-        self.cameras
-            .insert(output.to_string(), OceanCamera { origin });
+        self.cameras.insert(
+            output.to_string(),
+            OceanCamera {
+                origin,
+                zoom: self.camera(output).zoom,
+            },
+        );
+        self.camera_motions.remove(output);
+        true
+    }
+
+    pub fn animate_to_bookmark(
+        &mut self,
+        output: &str,
+        name: &str,
+        duration: Duration,
+        sway_screen: f64,
+    ) -> bool {
+        let Some(origin) = self.bookmarks.get(name).copied() else {
+            return false;
+        };
+        let current = self.ensure_camera(output);
+        self.set_camera(
+            output,
+            OceanCamera {
+                origin,
+                zoom: current.zoom,
+            },
+            duration,
+            sway_screen,
+        );
+        true
+    }
+
+    pub fn zoom_at(
+        &mut self,
+        output: &str,
+        viewport_anchor: Point<f64, Logical>,
+        target_zoom: f64,
+        duration: Duration,
+    ) {
+        let current = self.ensure_camera(output);
+        let target_zoom = target_zoom.max(0.05);
+        let world_anchor = OceanPoint {
+            x: current.origin.x + viewport_anchor.x / current.zoom,
+            y: current.origin.y + viewport_anchor.y / current.zoom,
+        };
+        self.set_camera(
+            output,
+            OceanCamera {
+                origin: OceanPoint {
+                    x: world_anchor.x - viewport_anchor.x / target_zoom,
+                    y: world_anchor.y - viewport_anchor.y / target_zoom,
+                },
+                zoom: target_zoom,
+            },
+            duration,
+            0.0,
+        );
+    }
+
+    pub fn center_on_rect(
+        &mut self,
+        output: &str,
+        viewport: Size<i32, Logical>,
+        rect: Rectangle<i32, Logical>,
+        duration: Duration,
+        sway_screen: f64,
+    ) {
+        let current = self.ensure_camera(output);
+        let visible_world_w = viewport.w as f64 / current.zoom;
+        let visible_world_h = viewport.h as f64 / current.zoom;
+        let center: Point<f64, Logical> = Point::from((
+            rect.loc.x as f64 + rect.size.w as f64 / 2.0,
+            rect.loc.y as f64 + rect.size.h as f64 / 2.0,
+        ));
+        self.set_camera(
+            output,
+            OceanCamera {
+                origin: OceanPoint {
+                    x: center.x - visible_world_w / 2.0,
+                    y: center.y - visible_world_h / 2.0,
+                },
+                zoom: current.zoom,
+            },
+            duration,
+            sway_screen,
+        );
+    }
+
+    pub fn navigate_depth(
+        &mut self,
+        output: &str,
+        viewport: Size<i32, Logical>,
+        down: bool,
+        motion: (Duration, f64),
+    ) -> bool {
+        let current = self.ensure_camera(output);
+        let half_view = viewport.h as f64 / current.zoom.max(0.05) * 0.5;
+        let mut anchors: Vec<f64> = self
+            .reefs
+            .iter()
+            .map(|reef| reef.rect.loc.y as f64)
+            // A tiled window's Y position is only its local slot inside a
+            // reef. Treating every tile row as a navigation stop makes
+            // depth feel like vertically stacked workspaces. Floating
+            // rectangles are explicit world placements, so sunk/manual
+            // windows remain meaningful content-driven destinations.
+            .chain(self.floating.values().map(|(_, rect)| rect.loc.y as f64))
+            .collect();
+        anchors.sort_by(f64::total_cmp);
+        anchors.dedup_by(|a, b| (*a - *b).abs() < 1.0);
+        let target_y = if down {
+            anchors
+                .into_iter()
+                .find(|anchor| *anchor > current.origin.y + half_view)
+        } else {
+            anchors
+                .into_iter()
+                .rev()
+                .find(|anchor| *anchor < current.origin.y - half_view)
+        };
+        let Some(target_y) = target_y else {
+            return false;
+        };
+        self.set_camera(
+            output,
+            OceanCamera {
+                origin: OceanPoint {
+                    x: current.origin.x,
+                    y: target_y,
+                },
+                zoom: current.zoom,
+            },
+            motion.0,
+            motion.1,
+        );
         true
     }
 
@@ -232,6 +501,7 @@ impl OceanSpace {
 
     pub fn remove_output(&mut self, output: &str, fallback: Option<&str>) {
         self.cameras.remove(output);
+        self.camera_motions.remove(output);
         match fallback {
             Some(fallback) => {
                 for entry_output in self.entry_outputs.values_mut() {
@@ -354,6 +624,83 @@ impl OceanSpace {
         true
     }
 
+    fn ensure_floating(&mut self, surface: &WlSurface, gap: i32, split_bias: SplitBias) -> bool {
+        self.floating.contains_key(surface) || self.make_floating(surface, gap, split_bias)
+    }
+
+    pub fn sink_window(
+        &mut self,
+        surface: &WlSurface,
+        output: &str,
+        viewport: Size<i32, Logical>,
+        gap: i32,
+        split_bias: SplitBias,
+    ) -> bool {
+        if !self.ensure_floating(surface, gap, split_bias) {
+            return false;
+        }
+        let camera = self.camera(output);
+        let Some((_, rect)) = self.floating.get_mut(surface) else {
+            return false;
+        };
+        rect.loc.y =
+            (camera.origin.y + viewport.h as f64 / camera.zoom.max(0.05) + gap.max(24) as f64)
+                .round() as i32;
+        self.screen_pins.remove(surface);
+        true
+    }
+
+    pub fn surface_window(
+        &mut self,
+        surface: &WlSurface,
+        gap: i32,
+        split_bias: SplitBias,
+    ) -> Option<Rectangle<i32, Logical>> {
+        if !self.ensure_floating(surface, gap, split_bias) {
+            return None;
+        }
+        let (_, rect) = self.floating.get_mut(surface)?;
+        rect.loc.y = 0;
+        self.screen_pins.remove(surface);
+        Some(*rect)
+    }
+
+    pub fn dredge_nearest(
+        &mut self,
+        output: &str,
+        viewport: Size<i32, Logical>,
+        gap: i32,
+        split_bias: SplitBias,
+    ) -> Option<WlSurface> {
+        let camera = self.camera(output);
+        let visible_bottom = camera.origin.y + viewport.h as f64 / camera.zoom.max(0.05);
+        let view_center_x = camera.origin.x + viewport.w as f64 / camera.zoom.max(0.05) / 2.0;
+        let candidate = self
+            .world_layouts(gap, split_bias)
+            .into_iter()
+            .filter_map(|(window, rect, _)| {
+                let surface = window.toplevel()?.wl_surface().clone();
+                let dy = rect.loc.y as f64 - visible_bottom;
+                (dy >= 0.0).then_some((
+                    surface,
+                    rect,
+                    dy,
+                    (rect.loc.x as f64 - view_center_x).abs(),
+                ))
+            })
+            .min_by(|a, b| a.2.total_cmp(&b.2).then_with(|| a.3.total_cmp(&b.3)))?;
+        if !self.ensure_floating(&candidate.0, gap, split_bias) {
+            return None;
+        }
+        let (_, rect) = self.floating.get_mut(&candidate.0)?;
+        let world_view_w = viewport.w as f64 / camera.zoom.max(0.05);
+        let world_view_h = viewport.h as f64 / camera.zoom.max(0.05);
+        rect.loc.x = (camera.origin.x + (world_view_w - rect.size.w as f64) / 2.0).round() as i32;
+        rect.loc.y = (camera.origin.y + (world_view_h - rect.size.h as f64) / 2.0).round() as i32;
+        self.screen_pins.remove(&candidate.0);
+        Some(candidate.0)
+    }
+
     pub fn set_floating_rect(
         &mut self,
         surface: &WlSurface,
@@ -370,6 +717,33 @@ impl OceanSpace {
         self.floating.get(surface).map(|(_, rect)| *rect)
     }
 
+    pub fn world_rect(
+        &self,
+        surface: &WlSurface,
+        gap: i32,
+        split_bias: SplitBias,
+    ) -> Option<Rectangle<i32, Logical>> {
+        self.floating_rect(surface).or_else(|| {
+            self.tiled_layouts(gap, split_bias)
+                .into_iter()
+                .find_map(|(window, rect)| {
+                    window
+                        .toplevel()
+                        .is_some_and(|toplevel| toplevel.wl_surface() == surface)
+                        .then_some(rect)
+                })
+        })
+    }
+
+    pub fn view_delta_to_world(
+        &self,
+        output: &str,
+        delta: Point<f64, Logical>,
+    ) -> Point<f64, Logical> {
+        let zoom = self.camera(output).zoom.max(0.05);
+        Point::from((delta.x / zoom, delta.y / zoom))
+    }
+
     pub fn pin_to_screen(&mut self, surface: &WlSurface, output: &str) -> bool {
         if self.screen_pins.contains_key(surface) {
             return true;
@@ -383,17 +757,31 @@ impl OceanSpace {
             OceanScreenPin {
                 output: output.to_string(),
                 viewport_loc: Point::from((
-                    rect.loc.x as f64 - camera.origin.x,
-                    rect.loc.y as f64 - camera.origin.y,
+                    (rect.loc.x as f64 - camera.origin.x) * camera.zoom,
+                    (rect.loc.y as f64 - camera.origin.y) * camera.zoom,
                 )),
-                size: rect.size,
+                size: Size::from((
+                    (rect.size.w as f64 * camera.zoom).round().max(1.0) as i32,
+                    (rect.size.h as f64 * camera.zoom).round().max(1.0) as i32,
+                )),
+                view_scale: camera.zoom,
             },
         );
         true
     }
 
     pub fn unpin_from_screen(&mut self, surface: &WlSurface) -> bool {
-        self.screen_pins.remove(surface).is_some()
+        let Some(pin) = self.screen_pins.remove(surface) else {
+            return false;
+        };
+        let camera = self.camera(&pin.output);
+        if let Some((_, rect)) = self.floating.get_mut(surface) {
+            rect.loc = Point::from((
+                (camera.origin.x + pin.viewport_loc.x / camera.zoom.max(0.05)).round() as i32,
+                (camera.origin.y + pin.viewport_loc.y / camera.zoom.max(0.05)).round() as i32,
+            ));
+        }
+        true
     }
 
     pub(crate) fn world_layouts(
@@ -422,10 +810,6 @@ impl OceanSpace {
         split_bias: SplitBias,
     ) -> Vec<PlacedWindow> {
         let camera = self.camera(output);
-        let view_offset = Point::from((
-            output_geo.loc.x as f64 - camera.origin.x,
-            output_geo.loc.y as f64 - camera.origin.y,
-        ));
         let mut layouts = self.world_layouts(gap, split_bias);
         // Floating entries were collected first and are already frontmost.
         // Reverse only the tiled suffix so cascade/BSP tree order mirrors
@@ -450,16 +834,40 @@ impl OceanSpace {
                             )),
                         pin.size,
                     );
-                    return Some(PlacedWindow::authoritative(window, rect).with_kind(kind));
+                    return Some(
+                        PlacedWindow::authoritative(window, rect)
+                            .with_view_scale(pin.view_scale)
+                            .fit_content_to_placement()
+                            .with_kind(kind),
+                    );
                 }
                 visible_through_camera(rect, camera, output_geo.size).then(|| {
-                    PlacedWindow::authoritative(window, rect)
-                        .with_view_offset(view_offset)
+                    let view_rect = world_to_view_rect(rect, camera, output_geo.loc);
+                    PlacedWindow::authoritative(window, view_rect)
+                        .with_view_scale(camera.zoom)
+                        .fit_content_to_placement()
                         .with_kind(kind)
                 })
             })
             .collect()
     }
+}
+
+fn world_to_view_rect(
+    rect: Rectangle<i32, Logical>,
+    camera: OceanCamera,
+    output_loc: Point<i32, Logical>,
+) -> Rectangle<i32, Logical> {
+    Rectangle::new(
+        Point::from((
+            output_loc.x + ((rect.loc.x as f64 - camera.origin.x) * camera.zoom).round() as i32,
+            output_loc.y + ((rect.loc.y as f64 - camera.origin.y) * camera.zoom).round() as i32,
+        )),
+        Size::from((
+            (rect.size.w as f64 * camera.zoom).round().max(1.0) as i32,
+            (rect.size.h as f64 * camera.zoom).round().max(1.0) as i32,
+        )),
+    )
 }
 
 fn nearest_reef(reefs: &[OceanReef], point: OceanPoint) -> Option<usize> {
@@ -499,10 +907,10 @@ fn visible_through_camera(
     camera: OceanCamera,
     viewport: Size<i32, Logical>,
 ) -> bool {
-    let left = rect.loc.x as f64 - camera.origin.x;
-    let top = rect.loc.y as f64 - camera.origin.y;
-    let right = left + rect.size.w as f64;
-    let bottom = top + rect.size.h as f64;
+    let left = (rect.loc.x as f64 - camera.origin.x) * camera.zoom;
+    let top = (rect.loc.y as f64 - camera.origin.y) * camera.zoom;
+    let right = left + rect.size.w as f64 * camera.zoom;
+    let bottom = top + rect.size.h as f64 * camera.zoom;
     right > 0.0 && bottom > 0.0 && left < viewport.w as f64 && top < viewport.h as f64
 }
 
@@ -531,13 +939,13 @@ mod tests {
     #[test]
     fn named_bookmarks_return_a_camera_without_moving_another() {
         let config = OceanConfig {
-            camera_step: 480,
             reefs: Vec::new(),
             bookmarks: vec![OceanBookmarkConfig {
                 name: "code".to_string(),
                 x: 2200.5,
                 y: -40.0,
             }],
+            ..OceanConfig::default()
         };
         let mut ocean = OceanSpace::from_config(&config);
         ocean.pan("other", 8.0, 9.0);
@@ -557,7 +965,6 @@ mod tests {
     #[test]
     fn nearest_reef_uses_world_distance_not_list_order() {
         let ocean = OceanSpace::from_config(&OceanConfig {
-            camera_step: 480,
             reefs: vec![
                 OceanReefConfig {
                     name: "home".to_string(),
@@ -575,6 +982,7 @@ mod tests {
                 },
             ],
             bookmarks: Vec::new(),
+            ..OceanConfig::default()
         });
 
         assert_eq!(
@@ -592,7 +1000,6 @@ mod tests {
     #[test]
     fn auto_dimensions_follow_larger_real_viewports_while_fixed_ones_stay_fixed() {
         let mut ocean = OceanSpace::from_config(&OceanConfig {
-            camera_step: 480,
             reefs: vec![OceanReefConfig {
                 name: "wide".to_string(),
                 x: 0,
@@ -601,6 +1008,7 @@ mod tests {
                 height: Some(1200),
             }],
             bookmarks: Vec::new(),
+            ..OceanConfig::default()
         });
 
         assert!(ocean.ensure_default_reef(Size::from((1920, 1080))));
@@ -625,9 +1033,74 @@ mod tests {
                 origin: OceanPoint {
                     x: 1700.0,
                     y: 1800.0
-                }
+                },
+                zoom: 1.0,
             },
             viewport
         ));
+    }
+
+    #[test]
+    fn zoom_keeps_the_world_point_under_the_anchor_stable() {
+        let mut ocean = OceanSpace::from_config(&OceanConfig::default());
+        ocean.pan("main", 100.0, 200.0);
+        let anchor = Point::from((400.0, 300.0));
+        ocean.zoom_at("main", anchor, 2.0, Duration::ZERO);
+
+        let camera = ocean.camera("main");
+        assert_eq!(camera.zoom, 2.0);
+        assert_eq!(camera.origin, OceanPoint { x: 300.0, y: 350.0 });
+    }
+
+    #[test]
+    fn world_rects_scale_around_the_camera_origin() {
+        let rect = Rectangle::new(Point::from((1200, 900)), Size::from((600, 400)));
+        let view = world_to_view_rect(
+            rect,
+            OceanCamera {
+                origin: OceanPoint {
+                    x: 1000.0,
+                    y: 800.0,
+                },
+                zoom: 0.5,
+            },
+            Point::from((40, 20)),
+        );
+        assert_eq!(
+            view,
+            Rectangle::new(Point::from((140, 70)), Size::from((300, 200)))
+        );
+    }
+
+    #[test]
+    fn depth_navigation_uses_real_reef_coordinates() {
+        let mut ocean = OceanSpace::from_config(&OceanConfig {
+            reefs: vec![
+                OceanReefConfig {
+                    name: "surface".to_string(),
+                    x: 0,
+                    y: 0,
+                    width: Some(1000),
+                    height: Some(800),
+                },
+                OceanReefConfig {
+                    name: "deep".to_string(),
+                    x: 300,
+                    y: 2400,
+                    width: Some(1000),
+                    height: Some(800),
+                },
+            ],
+            ..OceanConfig::default()
+        });
+        assert!(ocean.navigate_depth("main", Size::from((1000, 800)), true, (Duration::ZERO, 0.0),));
+        assert_eq!(ocean.camera("main").origin.y, 2400.0);
+        assert!(ocean.navigate_depth(
+            "main",
+            Size::from((1000, 800)),
+            false,
+            (Duration::ZERO, 0.0),
+        ));
+        assert_eq!(ocean.camera("main").origin.y, 0.0);
     }
 }

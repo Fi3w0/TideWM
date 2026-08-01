@@ -35,7 +35,7 @@ use smithay::{
         PopupGrab, PopupManager, PopupUngrabStrategy, Space, Window, WindowSurfaceType,
     },
     input::{
-        keyboard::XkbConfig,
+        keyboard::{Keysym, XkbConfig},
         pointer::{CursorImageStatus, MotionEvent, PointerHandle},
         Seat, SeatState,
     },
@@ -216,6 +216,12 @@ pub struct Smallvil {
     /// `exit-submap` bind clears it, matching sway/Hyprland's own "mode"
     /// behavior.
     pub active_submap: Option<String>,
+    /// Emergency table is separate from Waves and starts only after the
+    /// deliberate Ctrl+Alt+Escape rescue chord. A successful config reload
+    /// clears it. Ordinary non-XKB helper keys held for arbitrary chords are
+    /// tracked here so their press/release never leaks into clients.
+    pub(crate) rescue_keybinds_active: bool,
+    pub(crate) helper_keys_down: HashSet<Keysym>,
 
     /// Long-lived IPC subscribe connections, keyed by a process-unique id
     /// assigned at subscribe time. Empty in the steady state where no
@@ -321,6 +327,10 @@ pub struct Smallvil {
     /// At most one analytical Classic depth switch per output.
     pub(crate) depth_transitions: HashMap<String, crate::depth_transition::DepthTransition>,
     pub(crate) depth_transition_program: Option<GlesPixelProgram>,
+    /// One stable analytical canvas element per live Ocean output. No
+    /// texture/framebuffer; the record only preserves damage identity.
+    pub(crate) ocean_canvases: HashMap<String, crate::ocean_canvas::OceanCanvas>,
+    pub(crate) ocean_canvas_program: Option<GlesPixelProgram>,
     pub loop_handle: LoopHandle<'static, Smallvil>,
     pub loop_signal: LoopSignal,
 
@@ -1529,6 +1539,7 @@ impl Smallvil {
                         }
                         placement.rect = output_geo;
                         placement.view_offset = Point::from((0.0, 0.0));
+                        placement.view_scale = 1.0;
                         placement.stack = crate::placement::PlacementStack::Fullscreen;
                         return true;
                     }
@@ -1540,6 +1551,7 @@ impl Smallvil {
                         let area = self.output_tiling_area(output).unwrap_or(output_geo);
                         placement.rect = crate::layout::inset(area, self.config.gaps);
                         placement.view_offset = Point::from((0.0, 0.0));
+                        placement.view_scale = 1.0;
                     }
                     true
                 });
@@ -2185,6 +2197,8 @@ impl Smallvil {
             cursor_idle_timer_armed: false,
             needs_redraw: true,
             active_submap: None,
+            rescue_keybinds_active: false,
+            helper_keys_down: HashSet::new(),
 
             ipc_subscribers: HashMap::new(),
             next_ipc_subscriber_id: 1,
@@ -2223,6 +2237,8 @@ impl Smallvil {
             workspace_transition_program: None,
             depth_transitions: HashMap::new(),
             depth_transition_program: None,
+            ocean_canvases: HashMap::new(),
+            ocean_canvas_program: None,
             loop_handle,
             loop_signal,
             socket_name,
@@ -2497,19 +2513,42 @@ impl Smallvil {
                                 placement.rect,
                                 placement.view_offset,
                             );
-                            let local = pos - rect.loc.to_f64();
-                            if local.x < 0.0
-                                || local.y < 0.0
-                                || local.x >= rect.size.w as f64
-                                || local.y >= rect.size.h as f64
+                            let view_local = pos - rect.loc.to_f64();
+                            if view_local.x < 0.0
+                                || view_local.y < 0.0
+                                || view_local.x >= rect.size.w as f64
+                                || view_local.y >= rect.size.h as f64
                             {
                                 return None;
                             }
+                            let local = Point::from((
+                                view_local.x / placement.view_scale,
+                                view_local.y / placement.view_scale,
+                            ));
                             placement
                                 .window
                                 .surface_under(local, WindowSurfaceType::ALL)
                                 .map(|(surface, point)| {
-                                    (surface, point.to_f64() + rect.loc.to_f64())
+                                    (
+                                        surface,
+                                        rect.loc.to_f64()
+                                            + Point::from((
+                                                point.x as f64 * placement.view_scale,
+                                                point.y as f64 * placement.view_scale,
+                                            )),
+                                    )
+                                })
+                                // FitPlacement can temporarily draw a
+                                // committed client buffer at a different
+                                // compositor-owned size. The visual rect is
+                                // still authoritative for stacking: if the
+                                // client's stale surface tree misses here,
+                                // focus the topmost root instead of clicking
+                                // through a floating window into a tile.
+                                .or_else(|| {
+                                    placement.window.toplevel().map(|toplevel| {
+                                        (toplevel.wl_surface().clone(), rect.loc.to_f64())
+                                    })
                                 })
                         })
                     })
@@ -2575,18 +2614,31 @@ impl Smallvil {
                             placement.rect,
                             placement.view_offset,
                         );
-                        let local = pos - rect.loc.to_f64();
-                        if local.x < 0.0
-                            || local.y < 0.0
-                            || local.x >= rect.size.w as f64
-                            || local.y >= rect.size.h as f64
+                        let view_local = pos - rect.loc.to_f64();
+                        if view_local.x < 0.0
+                            || view_local.y < 0.0
+                            || view_local.x >= rect.size.w as f64
+                            || view_local.y >= rect.size.h as f64
                         {
                             return None;
                         }
+                        let local = Point::from((
+                            view_local.x / placement.view_scale,
+                            view_local.y / placement.view_scale,
+                        ));
                         placement
                             .window
                             .surface_under(local, WindowSurfaceType::ALL)
-                            .map(|(surface, point)| (surface, point.to_f64() + rect.loc.to_f64()))
+                            .map(|(surface, point)| {
+                                (
+                                    surface,
+                                    rect.loc.to_f64()
+                                        + Point::from((
+                                            point.x as f64 * placement.view_scale,
+                                            point.y as f64 * placement.view_scale,
+                                        )),
+                                )
+                            })
                     })
             });
         }
@@ -3795,6 +3847,14 @@ impl Smallvil {
             || !self.window_viscosity.is_empty()
             || !self.window_sway.is_empty()
             || !self.swim_cameras.is_empty()
+            || self.ocean.has_active_camera_motion()
+            || (self.config.spatial_engine == crate::config::SpatialEngine::Ocean
+                && self.config.ocean.canvas_marker
+                && self.ocean_canvases.values().any(|canvas| {
+                    canvas.marker_active(Duration::from_millis(
+                        self.config.ocean.canvas_marker_fade_ms,
+                    ))
+                }))
             || !self.closing_window_animations.is_empty()
             || self.animated_borders_possible()
     }
@@ -4878,6 +4938,59 @@ impl Smallvil {
             })
     }
 
+    pub(crate) fn ocean_canvas_frame_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+    ) -> Option<crate::backend::udev::OutputRenderElements> {
+        if !matches!(self.session_lock, SessionLock::Unlocked)
+            || self.config.spatial_engine != crate::config::SpatialEngine::Ocean
+        {
+            return None;
+        }
+        let output_name = output.name();
+        let area = Rectangle::from_size(self.space.output_geometry(output)?.size);
+        let camera = self.ocean.camera(&output_name);
+        let origin = [camera.origin.x as f32, camera.origin.y as f32];
+        let zoom = camera.zoom as f32;
+        let grid_size = self.config.ocean.canvas_grid_size as f32;
+        let opacity = if self.config.ocean.canvas_guides {
+            self.config.ocean.canvas_grid_alpha
+        } else {
+            0.0
+        };
+        let marker_fade = Duration::from_millis(self.config.ocean.canvas_marker_fade_ms);
+        let marker_alpha = self
+            .ocean_canvases
+            .entry(output_name.clone())
+            .or_default()
+            .note_camera(origin, zoom, self.config.ocean.canvas_marker, marker_fade);
+        if opacity <= 0.0 && marker_alpha <= 0.0 {
+            return None;
+        }
+        let program =
+            crate::ocean_canvas::ocean_canvas_program(&mut self.ocean_canvas_program, renderer)?;
+        let element = self
+            .ocean_canvases
+            .entry(output_name)
+            .or_default()
+            .frame_element(
+                program,
+                area,
+                crate::ocean_canvas::OceanCanvasSample {
+                    origin,
+                    zoom,
+                    grid_size,
+                    color: [0.25, 0.78, 0.92],
+                    opacity,
+                    marker_alpha,
+                },
+            );
+        Some(crate::backend::udev::OutputRenderElements::OceanCanvas(
+            element,
+        ))
+    }
+
     /// Drops transient render state for a disconnected output. In
     /// particular, this releases a full-output texture immediately instead
     /// of retaining VRAM under an orphaned connector name, and drops that
@@ -4888,6 +5001,7 @@ impl Smallvil {
         self.pending_workspace_transitions.remove(output_name);
         self.workspace_transitions.remove(output_name);
         self.depth_transitions.remove(output_name);
+        self.ocean_canvases.remove(output_name);
         self.swim_cameras.remove(output_name);
     }
 
@@ -7255,10 +7369,12 @@ impl Smallvil {
             return;
         }
         let surface = self
-            .space
-            .element_under(pos)
+            .window_under(pos)
             .and_then(|(window, _)| window.toplevel().map(|t| t.wl_surface().clone()));
         let Some(surface) = surface else {
+            if self.config.input.unfocus_on_empty && self.focused_window_surface().is_some() {
+                self.focus_window(None, SERIAL_COUNTER.next_serial());
+            }
             return;
         };
         let current = self.focused_window_surface();
@@ -7956,6 +8072,16 @@ impl Smallvil {
                     self.welcome_hint = None;
                 }
                 self.config = new_config;
+                self.rescue_keybinds_active = false;
+                self.helper_keys_down.clear();
+                if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+                    if self.config.ocean.zoom_enabled {
+                        self.ocean
+                            .clamp_zooms(self.config.ocean.min_zoom, self.config.ocean.max_zoom);
+                    } else {
+                        self.ocean.clamp_zooms(1.0, 1.0);
+                    }
+                }
                 if !self.config.classic_depth.enabled {
                     self.restore_all_depth_deck_windows();
                 }

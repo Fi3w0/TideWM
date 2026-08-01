@@ -893,6 +893,7 @@ fn outputs_json(state: &Smallvil) -> serde_json::Value {
             if ocean_engine {
                 let camera = state.ocean.camera(&output.name()).origin;
                 entry["camera_origin"] = json!([camera.x, camera.y]);
+                entry["camera_zoom"] = json!(state.ocean.camera(&output.name()).zoom);
             }
             entry
         })

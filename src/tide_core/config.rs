@@ -1,7 +1,7 @@
 //! TideWM configuration loading, lowering, validation, and hot reload.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -21,8 +21,21 @@ use crate::waves;
 #[derive(Debug, Clone)]
 pub struct Keybind {
     pub mods: Mods,
+    /// Ordinary non-XKB keys held as user-defined helper modifiers. In
+    /// `P+Ctrl+H`, P is here, Ctrl is in `mods`, and H is `keysym`.
+    pub held_keysyms: Vec<Keysym>,
     pub keysym: Keysym,
     pub action: Action,
+}
+
+impl Keybind {
+    pub fn held_keys_match(&self, held: &HashSet<Keysym>) -> bool {
+        self.held_keysyms.iter().all(|keysym| held.contains(keysym))
+    }
+
+    pub fn uses_helper_key(&self, keysym: Keysym) -> bool {
+        self.held_keysyms.contains(&keysym)
+    }
 }
 
 /// Modifier state a keybind requires. Matched against `ModifiersState` ignoring
@@ -258,6 +271,28 @@ pub struct OceanBookmarkConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct OceanConfig {
     pub camera_step: i32,
+    /// Structural depth actions can be disabled without giving up the
+    /// continuous 2D canvas itself.
+    pub depth_enabled: bool,
+    /// Camera zoom is independent of decorative water effects.
+    pub zoom_enabled: bool,
+    pub modifier_zoom: bool,
+    pub min_zoom: f64,
+    pub max_zoom: f64,
+    pub zoom_step: f64,
+    /// Zero makes keyboard/bookmark camera movement immediate.
+    pub camera_animation_ms: u64,
+    /// Screen-pixel arc applied perpendicular to an animated camera move.
+    /// Zero keeps a straight path.
+    pub camera_sway: f64,
+    /// World-anchored reference field behind windows. This can be disabled
+    /// independently from camera movement, zoom, depth, and water effects.
+    pub canvas_guides: bool,
+    pub canvas_grid_size: i32,
+    pub canvas_grid_alpha: f32,
+    /// Center navigation point shown only after camera movement.
+    pub canvas_marker: bool,
+    pub canvas_marker_fade_ms: u64,
     pub reefs: Vec<OceanReefConfig>,
     pub bookmarks: Vec<OceanBookmarkConfig>,
 }
@@ -266,6 +301,19 @@ impl Default for OceanConfig {
     fn default() -> Self {
         Self {
             camera_step: 480,
+            depth_enabled: true,
+            zoom_enabled: true,
+            modifier_zoom: true,
+            min_zoom: 0.25,
+            max_zoom: 2.0,
+            zoom_step: 1.2,
+            camera_animation_ms: 260,
+            camera_sway: 18.0,
+            canvas_guides: true,
+            canvas_grid_size: 240,
+            canvas_grid_alpha: 0.10,
+            canvas_marker: true,
+            canvas_marker_fade_ms: 4200,
             reefs: Vec::new(),
             bookmarks: Vec::new(),
         }
@@ -360,6 +408,12 @@ pub enum Action {
     /// Moves one output's Ocean camera without moving any window. These are
     /// harmless no-ops under Classic.
     OceanPan(Direction),
+    OceanZoomIn,
+    OceanZoomOut,
+    OceanZoomReset,
+    OceanCenterFocused,
+    OceanDredgeWindow,
+    OceanSurfaceWindow,
     /// Jumps the current output camera to a named world point.
     OceanBookmark(String),
     /// Stores the current output camera as a runtime bookmark. Configured
@@ -368,7 +422,7 @@ pub enum Action {
     Quit,
 }
 
-fn is_classic_depth_action(action: &Action) -> bool {
+fn is_depth_action(action: &Action) -> bool {
     matches!(
         action,
         Action::SinkWindow
@@ -379,13 +433,47 @@ fn is_classic_depth_action(action: &Action) -> bool {
             | Action::DepthCancel
             | Action::DepthDown
             | Action::DepthUp
+            | Action::OceanDredgeWindow
+            | Action::OceanSurfaceWindow
     )
+}
+
+fn depth_action_enabled(
+    action: &Action,
+    ocean_selected: bool,
+    classic_enabled: bool,
+    ocean_enabled: bool,
+) -> bool {
+    if !is_depth_action(action) {
+        return true;
+    }
+    if ocean_selected {
+        ocean_enabled
+            && matches!(
+                action,
+                Action::SinkWindow
+                    | Action::DepthDown
+                    | Action::DepthUp
+                    | Action::OceanDredgeWindow
+                    | Action::OceanSurfaceWindow
+            )
+    } else {
+        classic_enabled
+    }
 }
 
 pub(crate) fn is_ocean_action(action: &Action) -> bool {
     matches!(
         action,
-        Action::OceanPan(_) | Action::OceanBookmark(_) | Action::OceanSaveBookmark(_)
+        Action::OceanPan(_)
+            | Action::OceanZoomIn
+            | Action::OceanZoomOut
+            | Action::OceanZoomReset
+            | Action::OceanCenterFocused
+            | Action::OceanDredgeWindow
+            | Action::OceanSurfaceWindow
+            | Action::OceanBookmark(_)
+            | Action::OceanSaveBookmark(_)
     )
 }
 
@@ -512,6 +600,9 @@ pub struct Config {
     /// so a bad value can't collapse or invert a window's size.
     pub pseudo_tile_scale: f64,
     pub keybinds: Vec<Keybind>,
+    /// Known-safe temporary table activated only by the compositor rescue
+    /// chord. It never merges into normal Waves bindings.
+    pub rescue_keybinds: Vec<Keybind>,
     pub input: InputConfig,
     pub xwayland: XwaylandConfig,
     pub spawn_at_startup: Vec<String>,
@@ -571,7 +662,16 @@ impl Config {
                 }
             }
         } else {
-            let default = RawConfig::default();
+            let default = waves::parse(DEFAULT_CONFIG_WAVE, &path)
+                .map(|entries| {
+                    let mut raw = lower_entries(&entries);
+                    substitute_variables_in_raw(&mut raw);
+                    raw
+                })
+                .unwrap_or_else(|err| {
+                    tracing::error!(%err, "Built-in default Waves config failed to parse");
+                    RawConfig::default()
+                });
             if let Some(parent) = path.parent() {
                 let _ = fs::create_dir_all(parent);
             }
@@ -604,30 +704,23 @@ impl Config {
     /// Returns the parsed config plus any diagnostics worth showing on the
     /// compositor-owned panel (dropped keybind entries, footgun lints) --
     /// see `parse_keybind`. Empty when nothing needs a second look.
-    fn from_raw(mut raw: RawConfig) -> (Self, Vec<String>) {
+    fn from_raw(raw: RawConfig) -> (Self, Vec<String>) {
         let mut warnings = Vec::new();
-        if raw.classic_depth.enabled {
-            let modifier = raw
-                .variables
-                .get("mod")
-                .cloned()
-                .unwrap_or_else(|| "Super".to_string());
-            for (combo, action) in [
-                (format!("{modifier}+D"), "depth-down"),
-                (format!("{modifier}+Shift+D"), "depth-up"),
-                (format!("{modifier}+Ctrl+D"), "dive"),
-            ] {
-                raw.keybinds
-                    .entry(combo)
-                    .or_insert_with(|| action.to_string());
-            }
-        }
+        let ocean_selected = raw.spatial_engine.trim().eq_ignore_ascii_case("ocean");
         let classic_depth_enabled = raw.classic_depth.enabled;
+        let ocean_depth_enabled = raw.ocean.depth_enabled;
         let keybinds = raw
             .keybinds
             .iter()
             .filter_map(|(combo, action)| parse_keybind(combo, action, true, &mut warnings))
-            .filter(|bind| classic_depth_enabled || !is_classic_depth_action(&bind.action))
+            .filter(|bind| {
+                depth_action_enabled(
+                    &bind.action,
+                    ocean_selected,
+                    classic_depth_enabled,
+                    ocean_depth_enabled,
+                )
+            })
             .collect();
         let submaps = raw
             .submaps
@@ -638,7 +731,14 @@ impl Config {
                     .filter_map(|(combo, action)| {
                         parse_keybind(combo, action, false, &mut warnings)
                     })
-                    .filter(|bind| classic_depth_enabled || !is_classic_depth_action(&bind.action))
+                    .filter(|bind| {
+                        depth_action_enabled(
+                            &bind.action,
+                            ocean_selected,
+                            classic_depth_enabled,
+                            ocean_depth_enabled,
+                        )
+                    })
                     .collect();
                 (name.clone(), parsed)
             })
@@ -680,49 +780,14 @@ impl Config {
                 SpatialEngine::Classic
             }
         };
-        // `$mod` is only a Waves variable, not real compositor state (see
-        // `Config::pointer_modifier`'s doc comment) -- so a user who points
-        // it at Alt to free up Super for clients gets no structural
-        // guarantee Super is actually free. It stays live wherever a bind
-        // still spells it out literally: an un-updated `pointer_modifier`,
-        // or any `[keybinds]` entry the user didn't rewrite with `$mod`
-        // (including ones RawConfig::default() fills in for combos the
-        // user's own file never mentions at all). Warn rather than silently
-        // leaving Super still swallowed.
-        if raw
-            .variables
-            .get("mod")
-            .and_then(|value| parse_modifiers(value))
-            .is_some_and(|mods| !mods.logo)
-        {
-            if pointer_modifier.logo {
-                warnings.push(
-                    "$mod is set away from Super, but pointer_modifier still resolves to Super \
-                     -- set pointer_modifier = $mod"
-                        .to_string(),
-                );
-            }
-            let mut stuck: Vec<&str> = raw
-                .keybinds
-                .keys()
-                .filter(|combo| {
-                    combo.split('+').any(|part| {
-                        matches!(part.to_lowercase().as_str(), "super" | "logo" | "mod4")
-                    })
-                })
-                .map(String::as_str)
-                .collect();
-            if !stuck.is_empty() {
-                stuck.sort_unstable();
-                warnings.push(format!(
-                    "$mod is set away from Super, but these keybinds still use Super: {}",
-                    stuck.join(", ")
-                ));
-            }
-        }
-
         let workspace_names = parse_workspace_names(&raw.workspace_names);
         let workspace_gaps = parse_workspace_gaps(&raw.workspace_gaps, &workspace_names);
+        let rescue_keybinds = RawConfig::default()
+            .keybinds
+            .iter()
+            .filter_map(|(combo, action)| parse_keybind(combo, action, false, &mut Vec::new()))
+            .filter(|bind| !matches!(bind.action, Action::EnterSubmap(_)))
+            .collect();
 
         let config = Self {
             terminal: raw.terminal,
@@ -756,6 +821,7 @@ impl Config {
             bsp_split_bias,
             pseudo_tile_scale: raw.pseudo_tile_scale.clamp(0.05, 1.0),
             keybinds,
+            rescue_keybinds,
             input: raw.input,
             xwayland: raw.xwayland,
             spawn_at_startup: raw.spawn_at_startup,
@@ -1152,6 +1218,9 @@ pub struct InputConfig {
     pub repeat_delay: i32,
     pub repeat_rate: i32,
     pub focus_follows_mouse: bool,
+    /// Clear keyboard focus when hover focus reaches empty desktop/canvas.
+    /// False preserves the last focused window while crossing gaps.
+    pub unfocus_on_empty: bool,
     /// xkbcommon rules/model/layout/variant/options. Empty string / `None`
     /// (the default for each) means "let xkbcommon fall back to the
     /// `XKB_DEFAULT_*` env vars," same as `XkbConfig::default()` -- so an
@@ -1170,6 +1239,7 @@ impl Default for InputConfig {
             repeat_delay: 200,
             repeat_rate: 25,
             focus_follows_mouse: true,
+            unfocus_on_empty: false,
             xkb_rules: String::new(),
             xkb_model: String::new(),
             xkb_layout: String::new(),
@@ -2924,7 +2994,11 @@ fn load_raw_config(path: &Path) -> Result<RawConfig, String> {
 /// shouldn't take down a working session).
 fn lower_entries(entries: &[waves::Entry]) -> RawConfig {
     let mut raw = RawConfig::default();
-    let default_keybinds = raw.keybinds.clone();
+    // A parsed Waves file is authoritative. Defaults belong in the
+    // generated default file and the explicit rescue layer, never merged
+    // invisibly underneath a user's bindings.
+    raw.keybinds.clear();
+    raw.submaps.clear();
     for entry in entries {
         match entry {
             waves::Entry::VarDef(name, value) => {
@@ -2938,32 +3012,6 @@ fn lower_entries(entries: &[waves::Entry]) -> RawConfig {
             waves::Entry::Assign(key, value) => apply_top_level_assign(&mut raw, key, value),
             waves::Entry::Block(keyword, header, body) => {
                 apply_top_level_block(&mut raw, keyword, header, body)
-            }
-        }
-    }
-    // `$mod = ALT` alone never frees Super: `RawConfig::default()`'s own
-    // keybinds are spelled out literally as `Super+...`, a different combo
-    // string than `$mod+...`, so both stay bound side by side (see the
-    // `$mod`-freed warning in `Config::from_raw`). When the user has
-    // actually rebound a key under `$mod` themselves, that's a clear signal
-    // they mean to move it off Super, so drop the literal-Super default for
-    // that same key -- but only when it's still exactly what
-    // `RawConfig::default()` shipped; a `Super+X` the user wrote out
-    // themselves is a deliberate dual-bind and is left alone.
-    if raw
-        .variables
-        .get("mod")
-        .and_then(|value| parse_modifiers(value))
-        .is_some_and(|mods| !mods.logo)
-    {
-        for entry in entries {
-            if let waves::Entry::Bind(combo, _) = entry {
-                if let Some(suffix) = combo.strip_prefix("$mod+") {
-                    let super_combo = format!("Super+{suffix}");
-                    if raw.keybinds.get(&super_combo) == default_keybinds.get(&super_combo) {
-                        raw.keybinds.remove(&super_combo);
-                    }
-                }
             }
         }
     }
@@ -3080,6 +3128,7 @@ fn apply_input_block(input: &mut InputConfig, body: &[waves::Entry]) {
                 "repeat_delay" => set_i32(&mut input.repeat_delay, key, value),
                 "repeat_rate" => set_i32(&mut input.repeat_rate, key, value),
                 "focus_follows_mouse" => set_bool(&mut input.focus_follows_mouse, key, value),
+                "unfocus_on_empty" => set_bool(&mut input.unfocus_on_empty, key, value),
                 "xkb_rules" => input.xkb_rules = value.clone(),
                 "xkb_model" => input.xkb_model = value.clone(),
                 "xkb_layout" => input.xkb_layout = value.clone(),
@@ -3808,6 +3857,87 @@ fn apply_ocean_block(cfg: &mut OceanConfig, body: &[waves::Entry]) {
                     ),
                 }
             }
+            waves::Entry::Assign(key, value) if key == "depth_enabled" => {
+                set_bool(&mut cfg.depth_enabled, "ocean.depth_enabled", value)
+            }
+            waves::Entry::Assign(key, value) if key == "zoom_enabled" => {
+                set_bool(&mut cfg.zoom_enabled, "ocean.zoom_enabled", value)
+            }
+            waves::Entry::Assign(key, value) if key == "modifier_zoom" => {
+                set_bool(&mut cfg.modifier_zoom, "ocean.modifier_zoom", value)
+            }
+            waves::Entry::Assign(key, value) if key == "min_zoom" => match value.parse::<f64>() {
+                Ok(value) if value.is_finite() && (0.05..=8.0).contains(&value) => {
+                    cfg.min_zoom = value
+                }
+                _ => tracing::warn!(value, "Expected ocean.min_zoom from 0.05 to 8.0, ignoring"),
+            },
+            waves::Entry::Assign(key, value) if key == "max_zoom" => match value.parse::<f64>() {
+                Ok(value) if value.is_finite() && (0.05..=8.0).contains(&value) => {
+                    cfg.max_zoom = value
+                }
+                _ => tracing::warn!(value, "Expected ocean.max_zoom from 0.05 to 8.0, ignoring"),
+            },
+            waves::Entry::Assign(key, value) if key == "zoom_step" => match value.parse::<f64>() {
+                Ok(value) if value.is_finite() && (1.01..=3.0).contains(&value) => {
+                    cfg.zoom_step = value
+                }
+                _ => tracing::warn!(value, "Expected ocean.zoom_step from 1.01 to 3.0, ignoring"),
+            },
+            waves::Entry::Assign(key, value) if key == "camera_animation_ms" => {
+                match value.parse::<u64>() {
+                    Ok(value) if value <= 5000 => cfg.camera_animation_ms = value,
+                    _ => tracing::warn!(
+                        value,
+                        "Expected ocean.camera_animation_ms from 0 to 5000, ignoring"
+                    ),
+                }
+            }
+            waves::Entry::Assign(key, value) if key == "camera_sway" => {
+                match value.parse::<f64>() {
+                    Ok(value) if value.is_finite() && (0.0..=256.0).contains(&value) => {
+                        cfg.camera_sway = value
+                    }
+                    _ => {
+                        tracing::warn!(value, "Expected ocean.camera_sway from 0 to 256, ignoring")
+                    }
+                }
+            }
+            waves::Entry::Assign(key, value) if key == "canvas_guides" => {
+                set_bool(&mut cfg.canvas_guides, "ocean.canvas_guides", value)
+            }
+            waves::Entry::Assign(key, value) if key == "canvas_grid_size" => {
+                match value.parse::<i32>() {
+                    Ok(value) if (32..=8192).contains(&value) => cfg.canvas_grid_size = value,
+                    _ => tracing::warn!(
+                        value,
+                        "Expected ocean.canvas_grid_size from 32 to 8192, ignoring"
+                    ),
+                }
+            }
+            waves::Entry::Assign(key, value) if key == "canvas_grid_alpha" => {
+                match value.parse::<f32>() {
+                    Ok(value) if value.is_finite() && (0.0..=1.0).contains(&value) => {
+                        cfg.canvas_grid_alpha = value
+                    }
+                    _ => tracing::warn!(
+                        value,
+                        "Expected ocean.canvas_grid_alpha from 0 to 1, ignoring"
+                    ),
+                }
+            }
+            waves::Entry::Assign(key, value) if key == "canvas_marker" => {
+                set_bool(&mut cfg.canvas_marker, "ocean.canvas_marker", value)
+            }
+            waves::Entry::Assign(key, value) if key == "canvas_marker_fade_ms" => {
+                match value.parse::<u64>() {
+                    Ok(value) if value <= 30_000 => cfg.canvas_marker_fade_ms = value,
+                    _ => tracing::warn!(
+                        value,
+                        "Expected ocean.canvas_marker_fade_ms from 0 to 30000, ignoring"
+                    ),
+                }
+            }
             waves::Entry::Block(keyword, header, entries) if keyword == "reef" => {
                 if let Some(reef) = lower_ocean_reef(header, entries) {
                     if let Some(existing) = cfg.reefs.iter_mut().find(|item| item.name == reef.name)
@@ -3833,6 +3963,9 @@ fn apply_ocean_block(cfg: &mut OceanConfig, body: &[waves::Entry]) {
             }
             _ => tracing::warn!("Unexpected entry in `ocean` block, ignoring"),
         }
+    }
+    if cfg.min_zoom > cfg.max_zoom {
+        std::mem::swap(&mut cfg.min_zoom, &mut cfg.max_zoom);
     }
 }
 
@@ -5314,7 +5447,7 @@ fn parse_keybind(
     warnings: &mut Vec<String>,
 ) -> Option<Keybind> {
     let mut mods = Mods::default();
-    let mut key_name = None;
+    let mut ordinary_keys = Vec::new();
 
     for part in combo.split('+') {
         match part.to_lowercase().as_str() {
@@ -5322,11 +5455,11 @@ fn parse_keybind(
             "ctrl" | "control" => mods.ctrl = true,
             "alt" => mods.alt = true,
             "shift" => mods.shift = true,
-            other => key_name = Some(other.to_string()),
+            other => ordinary_keys.push(other.to_string()),
         }
     }
 
-    let Some(key_name) = key_name else {
+    let Some(key_name) = ordinary_keys.pop() else {
         warnings.push(format!("Keybind \"{combo}\" has no key, skipped"));
         return None;
     };
@@ -5337,6 +5470,17 @@ fn parse_keybind(
             "Unknown key \"{key_name}\" in keybind \"{combo}\", skipped"
         ));
         return None;
+    }
+    let mut held_keysyms = Vec::with_capacity(ordinary_keys.len());
+    for held_name in ordinary_keys {
+        let held = xkb::keysym_from_name(&held_name, xkb::KEYSYM_CASE_INSENSITIVE);
+        if held.raw() == 0 {
+            warnings.push(format!(
+                "Unknown helper key \"{held_name}\" in keybind \"{combo}\", skipped"
+            ));
+            return None;
+        }
+        held_keysyms.push(held);
     }
 
     let Some(action) = parse_action(action) else {
@@ -5351,15 +5495,18 @@ fn parse_keybind(
         && !mods.alt
         && !mods.shift
         && !mods.logo
+        && held_keysyms.is_empty()
         && is_typing_key(&key_name)
     {
-        warnings.push(format!(
-            "\"{combo}\" has no modifier -- it will capture that key everywhere, including text fields"
-        ));
+        tracing::debug!(
+            combo,
+            "Bare global keybind intentionally captures this key from clients"
+        );
     }
 
     Some(Keybind {
         mods,
+        held_keysyms,
         keysym,
         action,
     })
@@ -5460,6 +5607,12 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "ocean-pan-right" => Some(Action::OceanPan(Direction::Right)),
         "ocean-pan-up" => Some(Action::OceanPan(Direction::Up)),
         "ocean-pan-down" => Some(Action::OceanPan(Direction::Down)),
+        "ocean-zoom-in" => Some(Action::OceanZoomIn),
+        "ocean-zoom-out" => Some(Action::OceanZoomOut),
+        "ocean-zoom-reset" => Some(Action::OceanZoomReset),
+        "ocean-center-focused" => Some(Action::OceanCenterFocused),
+        "ocean-dredge-window" | "dredge-window" => Some(Action::OceanDredgeWindow),
+        "ocean-surface-window" | "surface-window" => Some(Action::OceanSurfaceWindow),
         "close-window" => Some(Action::CloseWindow),
         "toggle-floating" => Some(Action::ToggleFloating),
         "toggle-fullscreen" => Some(Action::ToggleFullscreen),
@@ -5612,7 +5765,10 @@ const DEFAULT_CONFIG_WAVE: &str = r#"# TideWM configuration.
 # include "monitors.wave"
 # include "keybinds.wave"
 
-$mod = SUPER
+$mod = ALT                       # primary window-management modifier
+$helper = SUPER                  # workspace/helper layer
+$move = CTRL                     # Ocean camera movement
+$sub = P                         # ordinary keys can be held as helper modifiers
 
 terminal = $wave(kitty, alacritty, foot, xterm)
 pointer_modifier = $mod             # left-drag moves; right-drag resizes
@@ -5654,6 +5810,19 @@ connected_vessels {
 # reefs, Ocean creates one output-sized `main` reef at the world origin.
 # ocean {
 #     camera_step = 480
+#     camera_animation_ms = 260     # 0 makes camera actions immediate
+#     camera_sway = 18              # curved canvas glide; 0 = straight
+#     canvas_guides = true          # moving world grid; independent toggle
+#     canvas_grid_size = 240        # logical world units between guide lines
+#     canvas_grid_alpha = 0.10      # 0 also makes the guide invisible
+#     canvas_marker = true          # center point appears only after movement
+#     canvas_marker_fade_ms = 4200  # fades away across 4.2 idle seconds
+#     zoom_enabled = true
+#     modifier_zoom = true          # $mod + wheel zooms around the pointer
+#     min_zoom = 0.25
+#     max_zoom = 2.0
+#     zoom_step = 1.2
+#     depth_enabled = true          # sink/dredge/surface + depth navigation
 #     reef main {
 #         x = 0
 #         y = 0
@@ -5755,8 +5924,8 @@ bsp_split_bias = auto
 # }
 
 # Classic's structural per-workspace Depth Deck is independent of the visual
-# depth block below and off by default. Enabling it activates easy defaults:
-# Super+D goes down, Super+Shift+D goes up, Super+Ctrl+D opens the deck.
+# depth block below and off by default. Enabling it never creates bindings;
+# use any explicit bind lines you want from the examples near the end.
 classic_depth {
     enabled = false
     animation = true
@@ -5949,10 +6118,20 @@ bind $mod+O = toggle-overview
 
 # Ocean camera travel. These binds are activated only when
 # spatial_engine = ocean, so Classic does not swallow the arrow chords.
-bind $mod+Ctrl+Left = ocean-pan-left
-bind $mod+Ctrl+Right = ocean-pan-right
-bind $mod+Ctrl+Up = ocean-pan-up
-bind $mod+Ctrl+Down = ocean-pan-down
+bind $move+Left = ocean-pan-left
+bind $move+Right = ocean-pan-right
+bind $move+Up = ocean-pan-up
+bind $move+Down = ocean-pan-down
+# Keyboard zoom fallback; pointer_modifier+wheel is the direct canvas gesture.
+bind $move+I = ocean-zoom-in
+bind $move+O = ocean-zoom-out
+bind $move+0 = ocean-zoom-reset
+bind $move+Space = ocean-center-focused
+# Ocean depth: sink into the canvas, pull the nearest lower window up,
+# or return the focused window to the surface. Active only in Ocean mode.
+bind $mod+Ctrl+D = sink-window
+bind $mod+Ctrl+Shift+D = ocean-dredge-window
+bind $mod+Ctrl+Shift+U = ocean-surface-window
 
 # Groups (tabbing)
 bind $mod+Ctrl+H = group-left
@@ -5967,30 +6146,37 @@ bind $mod+BracketLeft = cycle-tab-prev
 bind $mod+Minus = toggle-scratchpad
 bind $mod+Shift+Minus = move-to-scratchpad
 
-# Workspaces
-bind $mod+1 = workspace:1
-bind $mod+2 = workspace:2
-bind $mod+3 = workspace:3
-bind $mod+4 = workspace:4
-bind $mod+5 = workspace:5
-bind $mod+6 = workspace:6
-bind $mod+7 = workspace:7
-bind $mod+8 = workspace:8
-bind $mod+9 = workspace:9
-bind $mod+0 = workspace:10
-bind $mod+Shift+1 = move-to-workspace:1
-bind $mod+Shift+2 = move-to-workspace:2
-bind $mod+Shift+3 = move-to-workspace:3
-bind $mod+Shift+4 = move-to-workspace:4
-bind $mod+Shift+5 = move-to-workspace:5
-bind $mod+Shift+6 = move-to-workspace:6
-bind $mod+Shift+7 = move-to-workspace:7
-bind $mod+Shift+8 = move-to-workspace:8
-bind $mod+Shift+9 = move-to-workspace:9
-bind $mod+Shift+0 = move-to-workspace:10
+# Workspaces (the helper key is independent from the main Alt layer)
+bind $helper+1 = workspace:1
+bind $helper+2 = workspace:2
+bind $helper+3 = workspace:3
+bind $helper+4 = workspace:4
+bind $helper+5 = workspace:5
+bind $helper+6 = workspace:6
+bind $helper+7 = workspace:7
+bind $helper+8 = workspace:8
+bind $helper+9 = workspace:9
+bind $helper+0 = workspace:10
+bind $helper+Shift+1 = move-to-workspace:1
+bind $helper+Shift+2 = move-to-workspace:2
+bind $helper+Shift+3 = move-to-workspace:3
+bind $helper+Shift+4 = move-to-workspace:4
+bind $helper+Shift+5 = move-to-workspace:5
+bind $helper+Shift+6 = move-to-workspace:6
+bind $helper+Shift+7 = move-to-workspace:7
+bind $helper+Shift+8 = move-to-workspace:8
+bind $helper+Shift+9 = move-to-workspace:9
+bind $helper+Shift+0 = move-to-workspace:10
 # bind $mod+Shift+O = swap-workspaces:DP-2
 
 bind $mod+N = submap:nav
+
+# P is not an XKB modifier; TideWM still treats it as a held helper for
+# these chords and suppresses its press/release from focused clients.
+bind $sub+H = focus-left
+bind $sub+L = focus-right
+bind $sub+K = focus-up
+bind $sub+J = focus-down
 
 submap nav {
     bind h = focus-left
@@ -6004,6 +6190,7 @@ input {
     repeat_delay = 200
     repeat_rate = 25
     focus_follows_mouse = true
+    unfocus_on_empty = false       # true: empty Ocean/desktop clears focus
 
     # xkb_layout = us
     # xkb_options = grp:alt_shift_toggle
@@ -6331,6 +6518,7 @@ mod tests {
             bsp_split_bias: SplitBias::Auto,
             pseudo_tile_scale: 0.7,
             keybinds: Vec::new(),
+            rescue_keybinds: Vec::new(),
             input: InputConfig::default(),
             xwayland: XwaylandConfig::default(),
             spawn_at_startup: Vec::new(),
@@ -6408,6 +6596,19 @@ mod tests {
             "spatial_engine = ocean\n\
              ocean {\n\
                  camera_step = 720\n\
+                 depth_enabled = false\n\
+                 zoom_enabled = true\n\
+                 modifier_zoom = false\n\
+                 min_zoom = 0.4\n\
+                 max_zoom = 2.5\n\
+                 zoom_step = 1.3\n\
+                 camera_animation_ms = 340\n\
+                 camera_sway = 24\n\
+                 canvas_guides = false\n\
+                 canvas_grid_size = 320\n\
+                 canvas_grid_alpha = 0.18\n\
+                 canvas_marker = false\n\
+                 canvas_marker_fade_ms = 5100\n\
                  reef main {\n\
                      x = -400\n\
                      y = 250\n\
@@ -6424,6 +6625,10 @@ mod tests {
                  }\n\
              }\n\
              bind Super+Ctrl+H = ocean-pan-left\n\
+             bind Super+Ctrl+I = ocean-zoom-in\n\
+             bind Super+Ctrl+D = sink-window\n\
+             bind Super+Ctrl+Shift+D = ocean-dredge-window\n\
+             bind Super+Ctrl+Shift+U = ocean-surface-window\n\
              bind Super+1 = ocean-bookmark:code\n",
             Path::new("<ocean-test>"),
         )
@@ -6432,6 +6637,19 @@ mod tests {
 
         assert_eq!(config.spatial_engine, SpatialEngine::Ocean);
         assert_eq!(config.ocean.camera_step, 720);
+        assert!(!config.ocean.depth_enabled);
+        assert!(config.ocean.zoom_enabled);
+        assert!(!config.ocean.modifier_zoom);
+        assert_eq!(config.ocean.min_zoom, 0.4);
+        assert_eq!(config.ocean.max_zoom, 2.5);
+        assert_eq!(config.ocean.zoom_step, 1.3);
+        assert_eq!(config.ocean.camera_animation_ms, 340);
+        assert_eq!(config.ocean.camera_sway, 24.0);
+        assert!(!config.ocean.canvas_guides);
+        assert_eq!(config.ocean.canvas_grid_size, 320);
+        assert_eq!(config.ocean.canvas_grid_alpha, 0.18);
+        assert!(!config.ocean.canvas_marker);
+        assert_eq!(config.ocean.canvas_marker_fade_ms, 5100);
         assert_eq!(config.ocean.reefs.len(), 2);
         assert_eq!(config.ocean.reefs[0].width, None);
         assert_eq!(config.ocean.reefs[0].height, None);
@@ -6443,6 +6661,14 @@ mod tests {
             .keybinds
             .iter()
             .any(|bind| { matches!(bind.action, Action::OceanPan(Direction::Left)) }));
+        assert!(config
+            .keybinds
+            .iter()
+            .any(|bind| matches!(bind.action, Action::OceanZoomIn)));
+        assert!(config.keybinds.iter().all(|bind| !matches!(
+            bind.action,
+            Action::SinkWindow | Action::OceanDredgeWindow | Action::OceanSurfaceWindow
+        )));
         assert!(config
             .keybinds
             .iter()
@@ -6470,7 +6696,7 @@ mod tests {
     }
 
     #[test]
-    fn load_raw_config_drops_untouched_default_super_bind_when_user_rebinds_it_via_mod() {
+    fn parsed_keybinds_are_authoritative_and_never_merge_hidden_defaults() {
         let dir = TestDir::new("mod-frees-super");
         let main = dir.write(
             "config.wave",
@@ -6480,8 +6706,8 @@ mod tests {
         );
 
         let raw = load_raw_config(&main).expect("should parse");
-        // Rebound via $mod -- the untouched literal-Super default for the
-        // same key is gone, so Super+Q no longer does anything.
+        // Only what the file declared exists. No default table is merged
+        // underneath it, regardless of which modifier variables it uses.
         assert!(!raw.keybinds.contains_key("Super+Q"));
         assert_eq!(
             raw.keybinds.get("ALT+Q").map(String::as_str),
@@ -6493,12 +6719,7 @@ mod tests {
             raw.keybinds.get("Super+F").map(String::as_str),
             Some("toggle-fullscreen")
         );
-        // Never touched via $mod at all -- default stays, since nothing
-        // signaled intent to move it.
-        assert_eq!(
-            raw.keybinds.get("Super+Tab").map(String::as_str),
-            Some("cycle-focus")
-        );
+        assert!(!raw.keybinds.contains_key("Super+Tab"));
     }
 
     #[test]
@@ -6622,19 +6843,21 @@ mod tests {
     }
 
     #[test]
-    fn pointer_modifier_defaults_to_super_and_expands_waves_variables() {
-        for config in [
-            Config::from_raw(RawConfig::default()).0,
-            parse_default_config(),
-        ] {
-            assert_eq!(
-                config.pointer_modifier,
-                Mods {
-                    logo: true,
-                    ..Default::default()
-                }
-            );
-        }
+    fn pointer_modifier_fallback_is_super_and_generated_default_is_alt() {
+        assert_eq!(
+            Config::from_raw(RawConfig::default()).0.pointer_modifier,
+            Mods {
+                logo: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            parse_default_config().pointer_modifier,
+            Mods {
+                alt: true,
+                ..Default::default()
+            }
+        );
 
         let entries = waves::parse(
             "$mod = ALT\npointer_modifier = $mod+SHIFT\n",
@@ -6806,11 +7029,7 @@ mod tests {
     }
 
     #[test]
-    fn mod_freed_from_super_warns_about_leftover_super_pointer_modifier_and_keybinds() {
-        // The shipped default config's own convention: `$mod = ALT` at the
-        // top, everything else still spelled with literal Super because the
-        // user's file (or RawConfig::default()'s own fallback binds) never
-        // got updated to match.
+    fn modifier_variables_never_police_deliberate_mixed_modifier_bindings() {
         let mut variables = HashMap::new();
         variables.insert("mod".to_string(), "ALT".to_string());
         let raw = RawConfig {
@@ -6819,14 +7038,8 @@ mod tests {
         };
         let (_, warnings) = Config::from_raw(raw);
         assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains("pointer_modifier still resolves to Super")),
-            "expected a pointer_modifier warning, got: {warnings:?}"
-        );
-        assert!(
-            warnings.iter().any(|w| w.contains("Super+Return")),
-            "expected the stuck default keybinds to be named, got: {warnings:?}"
+            warnings.is_empty(),
+            "unexpected modifier policy: {warnings:?}"
         );
     }
 
@@ -7341,7 +7554,9 @@ mod tests {
              animation_duration_ms = 610\n\
              wave_color = 123456\n\
              wave_alpha = 0.44\n\
-             }\n",
+             }\n\
+             bind Super+D = depth-down\n\
+             bind Super+Shift+D = depth-up\n",
             Path::new("<classic-depth-test>"),
         )
         .unwrap();
@@ -7368,7 +7583,7 @@ mod tests {
         assert!(default
             .keybinds
             .iter()
-            .all(|bind| !is_classic_depth_action(&bind.action)));
+            .all(|bind| !is_depth_action(&bind.action)));
     }
 
     #[test]
@@ -7429,9 +7644,21 @@ mod tests {
         // (last one silently wins there, unlike a literal duplicate TOML
         // key, which used to fail the parse loudly -- worth a second look
         // at the template by eye if this test ever breaks unexpectedly).
-        for config in [
-            Config::from_raw(RawConfig::default()).0,
-            parse_default_config(),
+        for (config, main) in [
+            (
+                Config::from_raw(RawConfig::default()).0,
+                Mods {
+                    logo: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                parse_default_config(),
+                Mods {
+                    alt: true,
+                    ..Default::default()
+                },
+            ),
         ] {
             let find = |key: &str, mods: Mods| {
                 config.keybinds.iter().find(|b| {
@@ -7439,35 +7666,33 @@ mod tests {
                         && b.mods == mods
                 })
             };
-            let logo = Mods {
-                logo: true,
-                ..Default::default()
-            };
-            let logo_shift = Mods {
-                logo: true,
+            let main_shift = Mods {
+                alt: main.alt,
+                logo: main.logo,
                 shift: true,
                 ..Default::default()
             };
-            let logo_ctrl = Mods {
-                logo: true,
+            let main_ctrl = Mods {
+                alt: main.alt,
+                logo: main.logo,
                 ctrl: true,
                 ..Default::default()
             };
 
             assert!(matches!(
-                find("w", logo).map(|b| &b.action),
+                find("w", main).map(|b| &b.action),
                 Some(Action::SetLayout(LayoutAlgorithm::Bsp))
             ));
             assert!(matches!(
-                find("w", logo_shift).map(|b| &b.action),
+                find("w", main_shift).map(|b| &b.action),
                 Some(Action::SetLayout(LayoutAlgorithm::Master))
             ));
             assert!(matches!(
-                find("minus", logo_ctrl).map(|b| &b.action),
+                find("minus", main_ctrl).map(|b| &b.action),
                 Some(Action::ShrinkMaster)
             ));
             assert!(matches!(
-                find("equal", logo_ctrl).map(|b| &b.action),
+                find("equal", main_ctrl).map(|b| &b.action),
                 Some(Action::GrowMaster)
             ));
         }
@@ -7485,23 +7710,22 @@ mod tests {
     }
 
     #[test]
-    fn bare_typing_key_in_base_keybinds_is_flagged_but_still_bound() {
+    fn bare_typing_key_in_base_keybinds_is_allowed_without_policy_warning() {
         let mut raw = RawConfig::default();
         raw.keybinds
             .insert("Return".to_string(), "spawn:kitty".to_string());
         let (config, warnings) = Config::from_raw(raw);
 
-        // Matches the real incident this lint exists for: applying the
-        // bind is still correct (it's valid config, just risky), the lint
-        // only flags it.
+        // Waves describes exactly what the user requested, even when that
+        // deliberately captures a typing key globally.
         let bound = config.keybinds.iter().any(|b| {
             b.keysym == xkb::keysym_from_name("Return", xkb::KEYSYM_CASE_INSENSITIVE)
                 && b.mods == Mods::default()
         });
         assert!(bound, "the bare bind should still be applied");
         assert!(
-            warnings.iter().any(|w| w.contains("Return")),
-            "expected a footgun warning for bare Return, got: {warnings:?}"
+            warnings.is_empty(),
+            "unexpected bare-key policy: {warnings:?}"
         );
     }
 
@@ -7519,6 +7743,42 @@ mod tests {
             !warnings.iter().any(|w| w.contains('a')),
             "submap binds must not trigger the base-table footgun lint: {warnings:?}"
         );
+    }
+
+    #[test]
+    fn ordinary_keys_can_be_held_as_user_defined_helpers() {
+        let entries = waves::parse(
+            "$sub = P\n\
+             bind $sub+Ctrl+H = focus-left\n\
+             bind F = toggle-fullscreen\n",
+            Path::new("<helper-key-test>"),
+        )
+        .unwrap();
+        let mut raw = lower_entries(&entries);
+        substitute_variables_in_raw(&mut raw);
+        let (config, warnings) = Config::from_raw(raw);
+        assert!(warnings.is_empty());
+
+        let helper = config
+            .keybinds
+            .iter()
+            .find(|bind| matches!(bind.action, Action::FocusDirection(Direction::Left)))
+            .unwrap();
+        assert_eq!(
+            helper.keysym,
+            xkb::keysym_from_name("h", xkb::KEYSYM_CASE_INSENSITIVE)
+        );
+        assert_eq!(
+            helper.held_keysyms,
+            vec![xkb::keysym_from_name("p", xkb::KEYSYM_CASE_INSENSITIVE)]
+        );
+        assert!(helper.mods.ctrl);
+        assert!(config.keybinds.iter().any(|bind| {
+            bind.keysym == xkb::keysym_from_name("f", xkb::KEYSYM_CASE_INSENSITIVE)
+                && bind.held_keysyms.is_empty()
+                && bind.mods == Mods::default()
+                && matches!(bind.action, Action::ToggleFullscreen)
+        }));
     }
 
     #[test]

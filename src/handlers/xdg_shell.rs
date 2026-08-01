@@ -139,6 +139,11 @@ impl XdgShellHandler for Smallvil {
                 start_data,
                 window,
                 initial_window_location,
+                view_scale: self
+                    .ocean
+                    .entry_output(wl_surface)
+                    .map(|output| self.ocean.camera(output).zoom)
+                    .unwrap_or(1.0),
             };
 
             pointer.set_grab(self, grab, serial, Focus::Clear);
@@ -198,6 +203,10 @@ impl XdgShellHandler for Smallvil {
                 window,
                 edges.into(),
                 Rectangle::new(initial_window_location, initial_window_size),
+                self.ocean
+                    .entry_output(wl_surface)
+                    .map(|output| self.ocean.camera(output).zoom)
+                    .unwrap_or(1.0),
             );
 
             pointer.set_grab(self, grab, serial, Focus::Clear);

@@ -45,7 +45,7 @@ TideWM is a solo project. I use AI coding agents (OpenCode, Codex, Claude Code) 
 - Hot-reloadable config in Waves, TideWM's own format, split across files, `env`/`$variables`/`$wave(...)`
 - Per-app window rules, including regex matching, initial fullscreen/maximize, capture privacy, and window swallowing
 - Submaps: temporary keybind layers (sway/Hyprland's "mode")
-- Workspace overview (`Super+O`)
+- Workspace overview (shipped as `Alt+O`, fully rebindable)
 - Keyboard layout and touchpad (libinput) config
 - JSON IPC socket with a subscribe/event-stream mode for bars and widgets, plus a `tidectl` CLI over it
 - Server-side decorations enforced
@@ -55,6 +55,9 @@ TideWM is a solo project. I use AI coding agents (OpenCode, Codex, Claude Code) 
 Full config reference, every action string, and the protocol matrix: [DOCUMENTATION.md](DOCUMENTATION.md).
 
 ## Status
+
+Current development release: **0.90.0**. This is the second major pre-release;
+see the changelog milestone note for why 1.0 remains intentionally reserved.
 
 - **Multi-monitor**: yes, core to the design from the start. Mixed-DPI via `wp-fractional-scale-v1`.
 - **XWayland**: yes, via xwayland-satellite. X11 apps tile like any other window.
@@ -75,7 +78,7 @@ Foundation before visuals has been the plan from the start, and as of 0.60.0 the
 
 - **Standalone udev/DRM pass on the render effects.** Everything above is live-verified nested on real AMD hardware; the standalone backend compiles against the same render path but hasn't had its own hardware pass.
 - **Feel-tuning.** Viscosity, sway, depth timings, cascade's drag feel, and the transition/ripple presets ship with working defaults; the actual feel still gets refined against real use.
-- **Two spatial engines.** [Classic and Ocean now have a fixed design](SPATIAL_MODEL.md). `spatial_engine = classic|ocean` selects the startup ownership model. Classic keeps real workspaces and its optional per-workspace Depth Deck. Ocean is now a real second placement producer: one continuous 2D world, output-sized-or-explicit local tiling reefs, independent per-output cameras, and named/numeric bookmarks. It does not stack workspaces vertically, and camera motion does not move windows. Both engines share the same renderer, captures, glass/depth effects, and decoration pipeline.
+- **Two spatial engines.** [Classic and Ocean now have a fixed design](SPATIAL_MODEL.md). `spatial_engine = classic|ocean` selects the startup ownership model. Classic keeps real workspaces and its optional per-workspace Depth Deck. Ocean is a zoomable continuous 2D canvas: output-sized-or-explicit local tiling reefs, independent per-output pan/zoom cameras, a world-anchored reference field, physical sink/dredge/surface actions, and named/numeric bookmarks. It does not stack workspaces vertically, and camera motion does not move windows. Every Ocean layer is independently optional; both engines share the same renderer, captures, glass/depth effects, and decoration pipeline.
 - **Nvidia native run.** The nested (EGL/GLES) stack is verified on a real RTX 3060; the standalone DRM backend and its overlay-plane workaround still need a TTY session on Nvidia.
 - **AUR package.** Not yet, build from source for now.
 
@@ -85,37 +88,44 @@ Bug reports are genuinely welcome, especially hardware/driver reports — real-h
 
 ## Quick Start
 
-`Super` is the default modifier. Default terminal is `kitty`; override in config.
+The generated config demonstrates independent layers: Alt for primary window
+management, Super for workspace/helper actions, Ctrl for Ocean camera travel,
+and ordinary P as a held helper key. These are examples, not compositor rules;
+every bind is authoritative Waves config. Default terminal is `kitty`.
 
 | Shortcut                    | Action                               |
 | ---------------------------- | ------------------------------------ |
-| `Super+Enter`               | Spawn terminal                       |
-| `Super+Q`                   | Close window                         |
-| `Super+Shift+Q`             | Quit TideWM                          |
+| `Alt+Enter`                 | Spawn terminal                       |
+| `Alt+Q`                     | Close window                         |
+| `Alt+Shift+Q`               | Quit TideWM                          |
 | `Super+1`..`Super+9,0`      | Switch workspace (1..10)             |
 | `Super+Shift+<N>`           | Move window to workspace N           |
-| `Super+H/J/K/L`             | Focus left/down/up/right             |
-| `Super+Shift+H/J/K/L`       | Swap with neighbor in direction      |
-| `Super+V`                   | Toggle floating                      |
-| `Super+F`                   | Toggle fullscreen                    |
-| `Super+Shift+P`             | Toggle pseudo-tile                   |
-| `Super+P`                   | Toggle pin (floats above workspaces) |
-| `Super+Tab`                 | Cycle focus                          |
-| `Super+Minus`               | Toggle scratchpad                    |
-| `Super+Ctrl+H/J/K/L`        | Group window with neighbor           |
-| `Super+[/]`                 | Cycle tab in a group                 |
-| `Super+W` / `Super+Shift+W` | Layout: BSP / master-stack           |
-| `Super+O`                   | Toggle workspace overview            |
+| `Alt+H/J/K/L`               | Focus left/down/up/right             |
+| `P+H/J/K/L`                 | Same focus actions via an ordinary held helper key |
+| `Alt+Shift+H/J/K/L`         | Swap with neighbor in direction      |
+| `Alt+V`                     | Toggle floating                      |
+| `Alt+F`                     | Toggle fullscreen                    |
+| `Alt+Shift+P`               | Toggle pseudo-tile                   |
+| `Alt+P`                     | Toggle pin (floats above workspaces) |
+| `Alt+Tab`                   | Cycle focus                          |
+| `Alt+Minus`                 | Toggle scratchpad                    |
+| `Alt+Ctrl+H/J/K/L`          | Group window with neighbor           |
+| `Alt+[/]`                   | Cycle tab in a group                 |
+| `Alt+W` / `Alt+Shift+W`     | Layout: BSP / master-stack           |
+| `Alt+O`                     | Toggle workspace overview            |
+| `Ctrl+Arrow`                | Pan the Ocean camera                 |
+| `Ctrl+I/O/0`                | Ocean zoom in/out/reset              |
+| `Ctrl+Alt+Escape`           | Temporary rescue bindings until reload/restart |
 
 Mouse:
 
 | Input                        | Action                                |
 | ---------------------------- | -------------------------------------- |
-| `Super` + left-drag          | Move floating window                  |
-| `Super` + right-drag         | Resize floating window                |
+| `Alt` + left-drag            | Move floating window                  |
+| `Alt` + right-drag           | Resize floating window                |
 | Left-drag a floating window's own edge | Resize it, no modifier needed |
-| `Super` + left-drag (tiled)  | Pick up and drop into a new tile slot |
-| `Super` + right-drag (tiled) | Resize the tile from an edge          |
+| `Alt` + left-drag (tiled)    | Pick up and drop into a new tile slot |
+| `Alt` + right-drag (tiled)   | Resize the tile from an edge          |
 | Click on a split gap         | Drag to adjust the split ratio        |
 
 Full set, plus every action string and IPC/`tidectl` command, in [DOCUMENTATION.md](DOCUMENTATION.md). Rebind anything with `bind` in `config.wave`.

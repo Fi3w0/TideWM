@@ -13,7 +13,7 @@ use smithay::{
     },
     desktop::layer_map_for_output,
     input::{
-        keyboard::{keysyms, FilterResult, Keysym},
+        keyboard::{keysyms, FilterResult, Keysym, ModifiersState},
         pointer::{
             AxisFrame, ButtonEvent, Focus, GestureHoldBeginEvent, GestureHoldEndEvent,
             GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
@@ -28,7 +28,7 @@ use smithay::{
         AccelProfile, ClickMethod, Device as InputDevice, DeviceConfigResult, DragLockState,
         ScrollMethod,
     },
-    utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
+    utils::{Logical, Point, Rectangle, Size, SERIAL_COUNTER},
     wayland::{
         compositor::RegionAttributes,
         keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitorSeat,
@@ -37,7 +37,7 @@ use smithay::{
     },
 };
 
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use crate::{
     config::{Action, Direction, Keybind, TouchpadConfig},
@@ -51,6 +51,28 @@ use crate::{
 
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
+
+/// Resolve one key press from an authoritative Waves table. When a user has
+/// both `H` and `P+H`, holding P must pick the more specific chord regardless
+/// of the HashMap iteration order the config was lowered from. Additional held
+/// helpers therefore select the matching bind with the largest helper set.
+fn matching_keybind<'a>(
+    table: &'a [Keybind],
+    keysym: Keysym,
+    modifiers: &ModifiersState,
+    helpers: &HashSet<Keysym>,
+    ocean_selected: bool,
+) -> Option<&'a Keybind> {
+    table
+        .iter()
+        .filter(|bind| {
+            bind.keysym == keysym
+                && bind.mods.matches(modifiers)
+                && bind.held_keys_match(helpers)
+                && (ocean_selected || !crate::config::is_ocean_action(&bind.action))
+        })
+        .max_by_key(|bind| bind.held_keysyms.len())
+}
 
 /// Applies `[input.touchpad]` to a libinput device libinput just reported
 /// (device-add at startup enumeration, or hotplug), if it's touchpad-class
@@ -581,6 +603,11 @@ impl Smallvil {
                         }
 
                         if key_state != KeyState::Pressed {
+                            let released = handle.raw_syms().first().cloned();
+                            if released.is_some_and(|keysym| data.helper_keys_down.remove(&keysym))
+                            {
+                                return FilterResult::Intercept(());
+                            }
                             return FilterResult::Forward;
                         }
 
@@ -595,6 +622,36 @@ impl Smallvil {
                         // surface, or nothing yet).
                         if !matches!(data.session_lock, SessionLock::Unlocked) {
                             return FilterResult::Forward;
+                        }
+
+                        let keysym = match handle.raw_syms().first().cloned() {
+                            Some(keysym) => keysym,
+                            None => return FilterResult::Forward,
+                        };
+
+                        // Deliberately outside Waves: this is the one escape
+                        // hatch for a valid but unusable config (for example,
+                        // every normal bind was removed). It activates a
+                        // temporary known-safe table without rewriting the
+                        // file; the next successful reload/restart restores
+                        // the user's table. It is checked before shortcut
+                        // inhibition because a captured client must not be
+                        // able to prevent recovery from compositor config.
+                        if modifiers.ctrl
+                            && modifiers.alt
+                            && !modifiers.shift
+                            && !modifiers.logo
+                            && keysym == Keysym::Escape
+                        {
+                            data.rescue_keybinds_active = true;
+                            data.active_submap = None;
+                            data.helper_keys_down.clear();
+                            data.toast = Some(Toast::new(
+                                "Rescue keybinds active until config reload",
+                                ToastKind::Info,
+                            ));
+                            data.request_redraw();
+                            return FilterResult::Intercept(());
                         }
 
                         // wp-keyboard-shortcuts-inhibit: the focused client
@@ -616,10 +673,6 @@ impl Smallvil {
                             return FilterResult::Forward;
                         }
 
-                        let keysym = match handle.raw_syms().first().cloned() {
-                            Some(keysym) => keysym,
-                            None => return FilterResult::Forward,
-                        };
                         tracing::trace!(?keysym, ?modifiers, "Key pressed");
 
                         // The portal picker is compositor-owned modal UI.
@@ -642,30 +695,36 @@ impl Smallvil {
                         // (reload_config clears it if the name vanishes),
                         // but degrades safely to "nothing matches,
                         // everything forwards" rather than panicking.
-                        let table: &[Keybind] = match &data.active_submap {
-                            Some(name) => data
-                                .config
-                                .submaps
-                                .get(name)
-                                .map(Vec::as_slice)
-                                .unwrap_or(&[]),
-                            None => &data.config.keybinds,
+                        let table: &[Keybind] = if data.rescue_keybinds_active {
+                            &data.config.rescue_keybinds
+                        } else {
+                            match &data.active_submap {
+                                Some(name) => data
+                                    .config
+                                    .submaps
+                                    .get(name)
+                                    .map(Vec::as_slice)
+                                    .unwrap_or(&[]),
+                                None => &data.config.keybinds,
+                            }
                         };
-                        let action = table
-                            .iter()
-                            .find(|bind| {
-                                bind.keysym == keysym
-                                    && bind.mods.matches(modifiers)
-                                    && (data.config.spatial_engine
-                                        == crate::config::SpatialEngine::Ocean
-                                        || !crate::config::is_ocean_action(&bind.action))
-                            })
-                            .map(|bind| bind.action.clone());
+                        let action = matching_keybind(
+                            table,
+                            keysym,
+                            modifiers,
+                            &data.helper_keys_down,
+                            data.config.spatial_engine == crate::config::SpatialEngine::Ocean,
+                        )
+                        .map(|bind| bind.action.clone());
 
                         match action {
                             Some(action) => {
                                 tracing::trace!("Matched keybind action");
                                 data.run_action(action);
+                                FilterResult::Intercept(())
+                            }
+                            None if table.iter().any(|bind| bind.uses_helper_key(keysym)) => {
+                                data.helper_keys_down.insert(keysym);
                                 FilterResult::Intercept(())
                             }
                             None => FilterResult::Forward,
@@ -1039,12 +1098,17 @@ impl Smallvil {
                                     .floating_rect(&wl_surface)
                                     .map(|rect| rect.loc)
                                     .unwrap_or(loc);
+                                let view_scale = self
+                                    .output_for_point(pointer.current_location())
+                                    .map(|output| self.ocean.camera(&output.name()).zoom)
+                                    .unwrap_or(1.0);
 
                                 if button == BTN_LEFT {
                                     let grab = MoveSurfaceGrab {
                                         start_data,
                                         window,
                                         initial_window_location: model_loc,
+                                        view_scale,
                                     };
                                     pointer.set_grab(self, grab, serial, Focus::Clear);
                                 } else {
@@ -1055,6 +1119,7 @@ impl Smallvil {
                                         window,
                                         ResizeEdge::BOTTOM_RIGHT,
                                         initial_rect,
+                                        view_scale,
                                     );
                                     pointer.set_grab(self, grab, serial, Focus::Clear);
                                 }
@@ -1148,7 +1213,23 @@ impl Smallvil {
                                 && !self.fullscreen.contains_key(&wl_surface)
                                 && !self.maximized.contains_key(&wl_surface)
                             {
-                                let rect = Rectangle::new(loc, window.geometry().size);
+                                let view_scale = self
+                                    .output_for_point(pointer.current_location())
+                                    .map(|output| self.ocean.camera(&output.name()).zoom)
+                                    .unwrap_or(1.0);
+                                let rect = Rectangle::new(
+                                    loc,
+                                    Size::from((
+                                        (window.geometry().size.w as f64 * view_scale)
+                                            .round()
+                                            .max(1.0)
+                                            as i32,
+                                        (window.geometry().size.h as f64 * view_scale)
+                                            .round()
+                                            .max(1.0)
+                                            as i32,
+                                    )),
+                                );
                                 let threshold = (self.config.gaps as f64).max(4.0);
                                 if let Some(edge) = floating_resize_edge(
                                     rect,
@@ -1166,7 +1247,7 @@ impl Smallvil {
                                     let model_rect =
                                         self.ocean.floating_rect(&wl_surface).unwrap_or(rect);
                                     let grab = ResizeSurfaceGrab::start(
-                                        start_data, window, edge, model_rect,
+                                        start_data, window, edge, model_rect, view_scale,
                                     );
                                     pointer.set_grab(self, grab, serial, Focus::Clear);
                                     return;
@@ -1359,6 +1440,51 @@ impl Smallvil {
                 });
                 let horizontal_amount_discrete = event.amount_v120(Axis::Horizontal);
                 let vertical_amount_discrete = event.amount_v120(Axis::Vertical);
+
+                if self.config.spatial_engine == crate::config::SpatialEngine::Ocean
+                    && self.config.ocean.zoom_enabled
+                    && self.config.ocean.modifier_zoom
+                    && vertical_amount != 0.0
+                {
+                    let keyboard = self.seat.get_keyboard().unwrap();
+                    let held_modifiers = keyboard.with_pressed_keysyms(|keys| {
+                        let mut held = crate::config::Mods::default();
+                        for sym in keys.into_iter().flat_map(|key| key.raw_syms().into_iter()) {
+                            match sym {
+                                Keysym::Control_L | Keysym::Control_R => held.ctrl = true,
+                                Keysym::Alt_L | Keysym::Alt_R => held.alt = true,
+                                Keysym::Shift_L | Keysym::Shift_R => held.shift = true,
+                                Keysym::Super_L | Keysym::Super_R => held.logo = true,
+                                _ => {}
+                            }
+                        }
+                        held
+                    });
+                    if self.config.pointer_modifier.is_held_by(held_modifiers) {
+                        let pointer = self.seat.get_pointer().unwrap();
+                        let location = pointer.current_location();
+                        if let Some(output) = self.output_for_point(location) {
+                            if let Some(output_geo) = self.space.output_geometry(&output) {
+                                let steps = vertical_amount_discrete
+                                    .map(|value| value / 120.0)
+                                    .unwrap_or(vertical_amount / 15.0);
+                                let current = self.ocean.camera(&output.name()).zoom;
+                                let target = (current / self.config.ocean.zoom_step.powf(steps))
+                                    .clamp(self.config.ocean.min_zoom, self.config.ocean.max_zoom);
+                                self.ocean.zoom_at(
+                                    &output.name(),
+                                    location - output_geo.loc.to_f64(),
+                                    target,
+                                    Duration::from_millis(
+                                        self.config.ocean.camera_animation_ms.min(120),
+                                    ),
+                                );
+                                self.request_redraw();
+                                return;
+                            }
+                        }
+                    }
+                }
 
                 let mut frame = AxisFrame::new(event.time_msec()).source(source);
                 if horizontal_amount != 0.0 {
@@ -1803,7 +1929,12 @@ impl Smallvil {
                     let Some(output) = self.primary_output() else {
                         return;
                     };
-                    if self.ocean.jump_to_bookmark(&output.name(), &name) {
+                    if self.ocean.animate_to_bookmark(
+                        &output.name(),
+                        &name,
+                        Duration::from_millis(self.config.ocean.camera_animation_ms),
+                        self.config.ocean.camera_sway,
+                    ) {
                         self.request_redraw();
                     } else {
                         tracing::warn!(bookmark = %name, "Ocean bookmark not found");
@@ -1870,7 +2001,33 @@ impl Smallvil {
                 self.toggle_overview();
             }
             Action::SinkWindow => {
-                self.sink_window();
+                if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+                    if !self.config.ocean.depth_enabled {
+                        return;
+                    }
+                    let Some(surface) = self.focused_window_surface() else {
+                        return;
+                    };
+                    let Some(output) = self.primary_output() else {
+                        return;
+                    };
+                    let Some(viewport) = self.space.output_geometry(&output).map(|geo| geo.size)
+                    else {
+                        return;
+                    };
+                    if self.ocean.sink_window(
+                        &surface,
+                        &output.name(),
+                        viewport,
+                        self.config.gaps,
+                        self.config.bsp_split_bias,
+                    ) {
+                        self.retile();
+                        self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged { surface });
+                    }
+                } else {
+                    self.sink_window();
+                }
             }
             Action::Dive => {
                 self.dive();
@@ -1888,10 +2045,58 @@ impl Smallvil {
                 self.close_depth_deck();
             }
             Action::DepthDown => {
-                self.switch_depth(true);
+                if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+                    if !self.config.ocean.depth_enabled {
+                        return;
+                    }
+                    let Some(output) = self.primary_output() else {
+                        return;
+                    };
+                    let Some(viewport) = self.space.output_geometry(&output).map(|geo| geo.size)
+                    else {
+                        return;
+                    };
+                    if self.ocean.navigate_depth(
+                        &output.name(),
+                        viewport,
+                        true,
+                        (
+                            Duration::from_millis(self.config.ocean.camera_animation_ms),
+                            self.config.ocean.camera_sway,
+                        ),
+                    ) {
+                        self.request_redraw();
+                    }
+                } else {
+                    self.switch_depth(true);
+                }
             }
             Action::DepthUp => {
-                self.switch_depth(false);
+                if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+                    if !self.config.ocean.depth_enabled {
+                        return;
+                    }
+                    let Some(output) = self.primary_output() else {
+                        return;
+                    };
+                    let Some(viewport) = self.space.output_geometry(&output).map(|geo| geo.size)
+                    else {
+                        return;
+                    };
+                    if self.ocean.navigate_depth(
+                        &output.name(),
+                        viewport,
+                        false,
+                        (
+                            Duration::from_millis(self.config.ocean.camera_animation_ms),
+                            -self.config.ocean.camera_sway,
+                        ),
+                    ) {
+                        self.request_redraw();
+                    }
+                } else {
+                    self.switch_depth(false);
+                }
             }
             Action::OceanPan(direction) => {
                 if self.config.spatial_engine != crate::config::SpatialEngine::Ocean {
@@ -1904,17 +2109,135 @@ impl Smallvil {
                     return;
                 };
                 let reef_resized = self.ocean.ensure_default_reef(output_geo.size);
-                let step = self.config.ocean.camera_step as f64;
+                let camera = self.ocean.camera(&output.name());
+                let step = self.config.ocean.camera_step as f64 / camera.zoom.max(0.05);
                 let (dx, dy) = match direction {
                     Direction::Left => (-step, 0.0),
                     Direction::Right => (step, 0.0),
                     Direction::Up => (0.0, -step),
                     Direction::Down => (0.0, step),
                 };
-                self.ocean.pan(&output.name(), dx, dy);
+                self.ocean.animate_pan(
+                    &output.name(),
+                    dx,
+                    dy,
+                    Duration::from_millis(self.config.ocean.camera_animation_ms),
+                    self.config.ocean.camera_sway,
+                );
                 if reef_resized {
                     self.retile();
                 } else {
+                    self.request_redraw();
+                }
+            }
+            Action::OceanZoomIn | Action::OceanZoomOut | Action::OceanZoomReset => {
+                if self.config.spatial_engine != crate::config::SpatialEngine::Ocean
+                    || !self.config.ocean.zoom_enabled
+                {
+                    return;
+                }
+                let Some(output) = self.primary_output() else {
+                    return;
+                };
+                let Some(viewport) = self.space.output_geometry(&output).map(|geo| geo.size) else {
+                    return;
+                };
+                let current = self.ocean.camera(&output.name()).zoom;
+                let target = match action {
+                    Action::OceanZoomIn => current * self.config.ocean.zoom_step,
+                    Action::OceanZoomOut => current / self.config.ocean.zoom_step,
+                    Action::OceanZoomReset => 1.0,
+                    _ => unreachable!(),
+                }
+                .clamp(self.config.ocean.min_zoom, self.config.ocean.max_zoom);
+                self.ocean.zoom_at(
+                    &output.name(),
+                    Point::from((viewport.w as f64 / 2.0, viewport.h as f64 / 2.0)),
+                    target,
+                    Duration::from_millis(self.config.ocean.camera_animation_ms),
+                );
+                self.request_redraw();
+            }
+            Action::OceanCenterFocused => {
+                if self.config.spatial_engine != crate::config::SpatialEngine::Ocean {
+                    return;
+                }
+                let Some(surface) = self.focused_window_surface() else {
+                    return;
+                };
+                let Some(output) = self.primary_output() else {
+                    return;
+                };
+                let Some(viewport) = self.space.output_geometry(&output).map(|geo| geo.size) else {
+                    return;
+                };
+                let Some(rect) =
+                    self.ocean
+                        .world_rect(&surface, self.config.gaps, self.config.bsp_split_bias)
+                else {
+                    return;
+                };
+                self.ocean.center_on_rect(
+                    &output.name(),
+                    viewport,
+                    rect,
+                    Duration::from_millis(self.config.ocean.camera_animation_ms),
+                    self.config.ocean.camera_sway,
+                );
+                self.request_redraw();
+            }
+            Action::OceanDredgeWindow => {
+                if self.config.spatial_engine != crate::config::SpatialEngine::Ocean
+                    || !self.config.ocean.depth_enabled
+                {
+                    return;
+                }
+                let Some(output) = self.primary_output() else {
+                    return;
+                };
+                let Some(viewport) = self.space.output_geometry(&output).map(|geo| geo.size) else {
+                    return;
+                };
+                if let Some(surface) = self.ocean.dredge_nearest(
+                    &output.name(),
+                    viewport,
+                    self.config.gaps,
+                    self.config.bsp_split_bias,
+                ) {
+                    self.retile();
+                    self.focus_window(Some(surface.clone()), SERIAL_COUNTER.next_serial());
+                    self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged { surface });
+                }
+            }
+            Action::OceanSurfaceWindow => {
+                if self.config.spatial_engine != crate::config::SpatialEngine::Ocean
+                    || !self.config.ocean.depth_enabled
+                {
+                    return;
+                }
+                let Some(surface) = self.focused_window_surface() else {
+                    return;
+                };
+                let Some(output) = self.primary_output() else {
+                    return;
+                };
+                let Some(viewport) = self.space.output_geometry(&output).map(|geo| geo.size) else {
+                    return;
+                };
+                if let Some(rect) = self.ocean.surface_window(
+                    &surface,
+                    self.config.gaps,
+                    self.config.bsp_split_bias,
+                ) {
+                    self.retile();
+                    self.ocean.center_on_rect(
+                        &output.name(),
+                        viewport,
+                        rect,
+                        Duration::from_millis(self.config.ocean.camera_animation_ms),
+                        -self.config.ocean.camera_sway,
+                    );
+                    self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged { surface });
                     self.request_redraw();
                 }
             }
@@ -1925,7 +2248,12 @@ impl Smallvil {
                 let Some(output) = self.primary_output() else {
                     return;
                 };
-                if self.ocean.jump_to_bookmark(&output.name(), &name) {
+                if self.ocean.animate_to_bookmark(
+                    &output.name(),
+                    &name,
+                    Duration::from_millis(self.config.ocean.camera_animation_ms),
+                    self.config.ocean.camera_sway,
+                ) {
                     self.request_redraw();
                 } else {
                     tracing::warn!(bookmark = %name, "Ocean bookmark not found");
@@ -1952,10 +2280,59 @@ impl Smallvil {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smithay::input::keyboard::xkb;
     use smithay::utils::{Point, Size};
 
     fn rect() -> Rectangle<i32, Logical> {
         Rectangle::new(Point::from((100, 100)), Size::from((200, 200)))
+    }
+
+    #[test]
+    fn held_helpers_choose_the_most_specific_matching_chord() {
+        let h = xkb::keysym_from_name("h", xkb::KEYSYM_CASE_INSENSITIVE);
+        let p = xkb::keysym_from_name("p", xkb::KEYSYM_CASE_INSENSITIVE);
+        let r = xkb::keysym_from_name("r", xkb::KEYSYM_CASE_INSENSITIVE);
+        let table = [
+            Keybind {
+                mods: Default::default(),
+                held_keysyms: Vec::new(),
+                keysym: h,
+                action: Action::ToggleFullscreen,
+            },
+            Keybind {
+                mods: Default::default(),
+                held_keysyms: vec![p],
+                keysym: h,
+                action: Action::CloseWindow,
+            },
+            Keybind {
+                mods: Default::default(),
+                held_keysyms: vec![p, r],
+                keysym: h,
+                action: Action::ToggleFloating,
+            },
+        ];
+
+        let none = HashSet::new();
+        assert!(matches!(
+            matching_keybind(&table, h, &ModifiersState::default(), &none, true,)
+                .map(|bind| &bind.action),
+            Some(Action::ToggleFullscreen)
+        ));
+
+        let one = HashSet::from([p]);
+        assert!(matches!(
+            matching_keybind(&table, h, &ModifiersState::default(), &one, true)
+                .map(|bind| &bind.action),
+            Some(Action::CloseWindow)
+        ));
+
+        let two = HashSet::from([p, r]);
+        assert!(matches!(
+            matching_keybind(&table, h, &ModifiersState::default(), &two, true)
+                .map(|bind| &bind.action),
+            Some(Action::ToggleFloating)
+        ));
     }
 
     #[test]
