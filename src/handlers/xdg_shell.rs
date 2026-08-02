@@ -1563,6 +1563,36 @@ impl Smallvil {
         }
         self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged { surface });
     }
+
+    /// Keybind path to the same maximize/restore geometry a client's own
+    /// xdg-shell request or a window rule already produces -- see
+    /// `do_maximize_request`'s own doc comment for why it's a no-op for an
+    /// already-tiled window. Meant for Ocean, where a floating window has
+    /// no output bounds to snap back against otherwise.
+    pub(crate) fn toggle_maximize(&mut self) {
+        if self.exclusive_layer().is_some() {
+            return;
+        }
+        let Some(surface) = self.focused_window_surface() else {
+            return;
+        };
+        let window = self
+            .space
+            .elements()
+            .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == &surface))
+            .cloned();
+        let Some(window) = window else { return };
+        let Some(toplevel) = window.toplevel().cloned() else {
+            return;
+        };
+
+        if self.maximized.contains_key(&surface) {
+            self.do_unmaximize_request(toplevel);
+        } else {
+            self.do_maximize_request(toplevel);
+        }
+        self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged { surface });
+    }
 }
 
 /// `pid`'s ancestor process chain (nearest first) from `/proc`, stopping

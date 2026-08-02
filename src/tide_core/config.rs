@@ -370,6 +370,13 @@ pub enum Action {
     CloseWindow,
     ToggleFloating,
     ToggleFullscreen,
+    /// Resets a floating window to the output's tiling area (its full
+    /// usable size minus gaps) -- the same geometry the xdg-shell maximize
+    /// request already produces, just reachable from a keybind instead of
+    /// only a client's own request or a window rule. Meant for Ocean, where
+    /// a floating window's size is otherwise whatever it was last dragged
+    /// or resized to, with no output bounds to snap back against.
+    ToggleMaximize,
     TogglePin,
     /// `None` is the classic single scratchpad; `Some(name)` a named one
     /// (Hyprland's named special workspaces) -- see
@@ -1142,6 +1149,7 @@ impl Default for RawConfig {
         keybinds.insert("Super+Q".to_string(), "close-window".to_string());
         keybinds.insert("Super+V".to_string(), "toggle-floating".to_string());
         keybinds.insert("Super+F".to_string(), "toggle-fullscreen".to_string());
+        keybinds.insert("Super+M".to_string(), "toggle-maximize".to_string());
         keybinds.insert("Super+Tab".to_string(), "cycle-focus".to_string());
         keybinds.insert("Super+H".to_string(), "focus-left".to_string());
         keybinds.insert("Super+L".to_string(), "focus-right".to_string());
@@ -5722,6 +5730,7 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "close-window" => Some(Action::CloseWindow),
         "toggle-floating" => Some(Action::ToggleFloating),
         "toggle-fullscreen" => Some(Action::ToggleFullscreen),
+        "toggle-maximize" => Some(Action::ToggleMaximize),
         "toggle-pin" => Some(Action::TogglePin),
         "toggle-scratchpad" => Some(Action::ToggleScratchpad(None)),
         "move-to-scratchpad" => Some(Action::MoveToScratchpad(None)),
@@ -6209,6 +6218,7 @@ bind $mod+Return = spawn:kitty
 bind $mod+Q = close-window
 bind $mod+V = toggle-floating
 bind $mod+F = toggle-fullscreen
+bind $mod+M = toggle-maximize
 bind $mod+P = toggle-pin
 bind $mod+Shift+P = toggle-pseudo-tile
 bind $mod+Shift+Q = quit

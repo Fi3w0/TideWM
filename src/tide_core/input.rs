@@ -2212,6 +2212,9 @@ impl Smallvil {
             Action::ToggleFullscreen => {
                 self.toggle_fullscreen();
             }
+            Action::ToggleMaximize => {
+                self.toggle_maximize();
+            }
             Action::TogglePin => {
                 let focused = self.focused_window_surface();
                 if let Some(surface) = focused {
