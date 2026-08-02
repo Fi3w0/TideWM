@@ -75,10 +75,14 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
                     data.ocean.pin_to_screen(surface, &output);
                 }
             }
-            // Magnet-style live feedback for a floating Ocean drag, mirroring
-            // `OceanTileMoveGrab::motion`'s own hint computation: close to a
-            // tile highlights it (a drop would reattach there), far away
-            // shows nothing (a drop stays floating). Reuses the same
+            // Live feedback for a floating Ocean drag, mirroring
+            // `OceanTileMoveGrab::motion`'s own hint computation: hovering
+            // directly over a tile highlights it (a drop would reattach
+            // there); everywhere else shows nothing (a drop stays
+            // floating). Precise point-containment, matching
+            // `smart_attach_ocean_floating`'s own drop decision -- see that
+            // function's comment for why the proximity-radius
+            // `smart_tiling_target` isn't used here either. Reuses the same
             // `drag_hint` the tile-swap grab already draws through
             // `window_border_element` -- no new visual code, just feeding it
             // from a second grab.
@@ -94,11 +98,10 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
                     })
                     .and_then(|(output, output_geo)| {
                         let pointer_view = self.last_location - output_geo.loc.to_f64();
-                        data.ocean.smart_tiling_target(
+                        data.ocean.tiled_target_at_view(
                             surface,
                             &output,
                             pointer_view,
-                            data.config.ocean.smart_tiling_snap_distance,
                             data.config.gaps,
                             data.config.bsp_split_bias,
                         )

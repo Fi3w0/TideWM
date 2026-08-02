@@ -55,14 +55,17 @@ impl OceanTileMoveGrab {
         }
     }
 
-    /// Commits the drag: a drop over another tile swaps the two, any other
-    /// drop just retiles with no swap, snapping back to the original slot
-    /// since tree membership never changed. Runs from `unset()`, not
-    /// `button()`'s release detection, so it fires exactly once whenever
-    /// this grab ends -- a real button release, a gesture-driven
-    /// `unset_grab` (see `Smallvil::start_gesture_modifier_move`), or any
-    /// other teardown path -- rather than only the one Smithay happens to
-    /// reach it through.
+    /// Commits the drag: a drop over another tile swaps the two; a drop
+    /// anywhere else leaves the reef entirely and becomes floating at the
+    /// drop position -- the same point-containment rule
+    /// `smart_attach_ocean_floating` uses in the opposite direction, so
+    /// moving a window out of the tiling area is how you float it and
+    /// moving one in is how you tile it, with no separate keybind needed
+    /// for either. Runs from `unset()`, not `button()`'s release detection,
+    /// so it fires exactly once whenever this grab ends -- a real button
+    /// release, a gesture-driven `unset_grab` (see
+    /// `Smallvil::start_gesture_modifier_move`), or any other teardown path
+    /// -- rather than only the one Smithay happens to reach it through.
     fn commit(&self, data: &mut Smallvil) {
         if !data.window_is_visible(&self.surface)
             || !data.ocean.is_tiled(&self.surface)
@@ -77,16 +80,40 @@ impl OceanTileMoveGrab {
             return;
         };
         let pointer_view = self.last_location - output_geo.loc.to_f64();
-        if let Some(target) = data.ocean.tiled_target_at_view(
+        match data.ocean.tiled_target_at_view(
             &self.surface,
             &self.output,
             pointer_view,
             data.config.gaps,
             data.config.bsp_split_bias,
         ) {
-            data.ocean.swap_tiled(&self.surface, &target);
+            Some(target) => {
+                data.ocean.swap_tiled(&self.surface, &target);
+            }
+            None => {
+                let world_rect = self.current_world_rect(data);
+                data.ocean
+                    .make_floating(&self.surface, data.config.gaps, data.config.bsp_split_bias);
+                data.ocean.set_floating_rect(&self.surface, world_rect);
+            }
         }
         data.retile_viscous();
+    }
+
+    /// The window's live dragged rectangle in world space, shared by
+    /// `motion` (to render/hit-test mid-drag) and `commit` (to know where
+    /// to place it if the drop floats it instead of swapping).
+    fn current_world_rect(&self, data: &Smallvil) -> Rectangle<i32, Logical> {
+        let delta = self.last_location - self.start_data.location;
+        let new_location = (self.initial_location.to_f64()
+            + Point::from((delta.x / self.view_scale, delta.y / self.view_scale)))
+        .to_i32_round();
+        let size = data
+            .ocean
+            .world_rect(&self.surface, data.config.gaps, data.config.bsp_split_bias)
+            .map(|rect| rect.size)
+            .unwrap_or_else(|| self.window.geometry().size);
+        Rectangle::new(new_location, size)
     }
 }
 
@@ -107,16 +134,7 @@ impl PointerGrab<Smallvil> for OceanTileMoveGrab {
         {
             return;
         }
-        let delta = event.location - self.start_data.location;
-        let new_location = (self.initial_location.to_f64()
-            + Point::from((delta.x / self.view_scale, delta.y / self.view_scale)))
-        .to_i32_round();
-        let size = data
-            .ocean
-            .world_rect(&self.surface, data.config.gaps, data.config.bsp_split_bias)
-            .map(|rect| rect.size)
-            .unwrap_or_else(|| self.window.geometry().size);
-        let world_rect = Rectangle::new(new_location, size);
+        let world_rect = self.current_world_rect(data);
         data.retarget_window_viscosity(&self.surface, world_rect);
         // Lifts the window out of its frozen reef slot for rendering (the
         // tree itself stays untouched until release) and picks the current
@@ -139,7 +157,7 @@ impl PointerGrab<Smallvil> for OceanTileMoveGrab {
         data.ocean
             .set_tile_drag(self.surface.clone(), world_rect, hint);
         data.space
-            .map_element(self.window.clone(), new_location, false);
+            .map_element(self.window.clone(), world_rect.loc, false);
         data.request_redraw();
     }
 

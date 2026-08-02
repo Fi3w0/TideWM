@@ -3386,11 +3386,18 @@ impl Smallvil {
             return false;
         };
         let pointer_view = pointer_location - output_geo.loc.to_f64();
-        let Some(target) = self.ocean.smart_tiling_target(
+        // Precise point-containment (the same check the tiled-to-tiled swap
+        // grab already uses), not the proximity-radius `smart_tiling_target`
+        // -- that one's threshold scaled with the *moving* window's own
+        // size, so a floater someone had resized large enough would count
+        // as "near" nearly any tile it overlapped, attaching on effectively
+        // every drop instead of only an intentional one. Parked, not
+        // deleted: revisit smart_tiling_target if a magnet-radius feel is
+        // wanted again later.
+        let Some(target) = self.ocean.tiled_target_at_view(
             surface,
             &output_name,
             pointer_view,
-            self.config.ocean.smart_tiling_snap_distance,
             self.config.gaps,
             self.config.bsp_split_bias,
         ) else {
