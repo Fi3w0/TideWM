@@ -933,6 +933,11 @@ impl Smallvil {
                 .unwrap_or_else(|| Size::from((1, 1)));
             self.ocean
                 .insert(&output.name(), viewport, window, focused.as_ref());
+            // Once per window's lifetime, here rather than inside
+            // `OceanSpace::insert` itself -- that's also called on every
+            // floating<->tiled reattach, which must never reorder or
+            // duplicate an app-slot entry for a window that isn't new.
+            self.ocean.record_app_opened(surface.clone());
         } else {
             self.layout.insert(
                 &output.name(),

@@ -427,6 +427,12 @@ pub enum Action {
     /// `Smallvil::cycle_tab`.
     CycleTabForward,
     CycleTabBackward,
+    /// Classic: switches the output's active numbered/named workspace.
+    /// Ocean has no workspace concept -- a numbered ref instead jumps to
+    /// that app-slot (see `Smallvil::jump_to_app_slot`, `OceanSpace::
+    /// app_slot`); a named ref keeps the older camera-bookmark-jump
+    /// behavior (`OceanSpace::animate_to_bookmark`), since app-slots are
+    /// inherently numbered.
     SwitchWorkspace(WorkspaceRef),
     MoveToWorkspace(WorkspaceRef),
     /// Swaps the current output's active workspace content with the named

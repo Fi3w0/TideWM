@@ -176,6 +176,15 @@ pub struct OceanSpace {
     /// not. Both fields are `None` outside an active drag.
     drag_override: Option<(WlSurface, Rectangle<i32, Logical>)>,
     drag_hint: Option<WlSurface>,
+    /// Insertion-order record of every window Ocean has ever mapped, for
+    /// numbered app-slot switching (`Action::SwitchWorkspace`'s Ocean
+    /// branch: `$mod+1` jumps to slot 1, etc.) -- "slot N" is the Nth
+    /// surface here, 1-based. Appended to only by `record_app_opened`
+    /// (called once per window from `map_toplevel`, not from `insert`
+    /// itself, so a floating<->tiled reattach never reorders or re-adds an
+    /// entry) and pruned by `remove`, which shifts every later slot down
+    /// to fill the gap rather than leaving a hole.
+    app_order: Vec<WlSurface>,
 }
 
 impl OceanSpace {
@@ -239,6 +248,7 @@ impl OceanSpace {
             screen_pins: HashMap::new(),
             drag_override: None,
             drag_hint: None,
+            app_order: Vec::new(),
         }
     }
 
@@ -436,6 +446,29 @@ impl OceanSpace {
         true
     }
 
+    /// Same as `animate_to_bookmark`, but for a literal world point instead
+    /// of a named one -- used by app-slot switching's "no apps open" case,
+    /// which means the world origin specifically, not whatever a user's
+    /// `home` bookmark happens to be configured to.
+    pub fn animate_to_point(
+        &mut self,
+        output: &str,
+        origin: OceanPoint,
+        duration: Duration,
+        sway_screen: f64,
+    ) {
+        let current = self.ensure_camera(output);
+        self.set_camera(
+            output,
+            OceanCamera {
+                origin,
+                zoom: current.zoom,
+            },
+            duration,
+            sway_screen,
+        );
+    }
+
     pub fn zoom_at(
         &mut self,
         output: &str,
@@ -627,6 +660,7 @@ impl OceanSpace {
         self.attached_sizes.remove(surface);
         self.floating_stack.retain(|candidate| candidate != surface);
         self.screen_pins.remove(surface);
+        self.app_order.retain(|candidate| candidate != surface);
         if self
             .drag_override
             .as_ref()
@@ -637,6 +671,28 @@ impl OceanSpace {
         if self.drag_hint.as_ref() == Some(surface) {
             self.drag_hint = None;
         }
+    }
+
+    /// Records a newly mapped window at the end of the app-slot order. A
+    /// no-op if `surface` is already recorded (defensive; `map_toplevel`
+    /// only calls this once per window's lifetime, but a duplicate here
+    /// would otherwise silently reorder every later slot).
+    pub fn record_app_opened(&mut self, surface: WlSurface) {
+        if !self.app_order.contains(&surface) {
+            self.app_order.push(surface);
+        }
+    }
+
+    /// The `index`-th (1-based) window in app-opened order, if that slot
+    /// exists -- `app_slot(1)` is the first window still open, not
+    /// necessarily the first ever opened, since `remove` shifts later
+    /// slots down when an earlier one closes.
+    pub fn app_slot(&self, index: usize) -> Option<&WlSurface> {
+        index.checked_sub(1).and_then(|i| self.app_order.get(i))
+    }
+
+    pub fn has_open_apps(&self) -> bool {
+        !self.app_order.is_empty()
     }
 
     pub fn contains(&self, surface: &WlSurface) -> bool {

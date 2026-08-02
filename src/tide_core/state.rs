@@ -3470,6 +3470,50 @@ impl Smallvil {
         });
     }
 
+    /// `Action::SwitchWorkspace`'s Ocean branch for a numbered ref: centers
+    /// the camera on and focuses `index`'s (1-based) app-slot window --
+    /// "like focus but faster" than panning manually. No apps open at all
+    /// jumps to the world origin specifically, not any particular reef or
+    /// bookmark. A slot number past however many apps are actually open is
+    /// a no-op, the same way focusing an empty workspace wouldn't do
+    /// anything either.
+    pub(crate) fn jump_to_app_slot(&mut self, output: &Output, index: usize) {
+        let Some(viewport) = self.space.output_geometry(output).map(|geo| geo.size) else {
+            return;
+        };
+        let animation = Duration::from_millis(self.config.ocean.camera_animation_ms);
+        match self.ocean.app_slot(index).cloned() {
+            Some(surface) => {
+                if let Some(rect) = self.ocean.world_rect(
+                    &surface,
+                    self.config.gaps,
+                    self.config.bsp_split_bias,
+                ) {
+                    self.ocean.center_on_rect(
+                        &output.name(),
+                        viewport,
+                        rect,
+                        animation,
+                        self.config.ocean.camera_sway,
+                    );
+                }
+                self.focus_window(Some(surface.clone()), SERIAL_COUNTER.next_serial());
+                self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged { surface });
+                self.request_redraw();
+            }
+            None if !self.ocean.has_open_apps() => {
+                self.ocean.animate_to_point(
+                    &output.name(),
+                    crate::ocean::OceanPoint::default(),
+                    animation,
+                    self.config.ocean.camera_sway,
+                );
+                self.request_redraw();
+            }
+            None => {}
+        }
+    }
+
     /// Translates every floating window tagged to `output_name` by `delta`
     /// -- called when wlr-output-management (kanshi, wdisplays, ...) moves
     /// an output's logical position. `retile()` already repositions tiled

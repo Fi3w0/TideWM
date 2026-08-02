@@ -2288,22 +2288,31 @@ impl Smallvil {
             }
             Action::SwitchWorkspace(workspace) => {
                 if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
-                    let name = match workspace {
-                        crate::config::WorkspaceRef::Number(number) => number.to_string(),
-                        crate::config::WorkspaceRef::Name(name) => name,
-                    };
                     let Some(output) = self.primary_output() else {
                         return;
                     };
-                    if self.ocean.animate_to_bookmark(
-                        &output.name(),
-                        &name,
-                        Duration::from_millis(self.config.ocean.camera_animation_ms),
-                        self.config.ocean.camera_sway,
-                    ) {
-                        self.request_redraw();
-                    } else {
-                        tracing::warn!(bookmark = %name, "Ocean bookmark not found");
+                    match workspace {
+                        // Numbered keys are app-slots ("like focus but
+                        // faster"), not bookmark jumps -- see
+                        // `jump_to_app_slot`. A named ref (nothing binds
+                        // one by default, but nothing stops a custom
+                        // config from doing so) keeps the old bookmark
+                        // behavior, since app-slots are inherently numbered.
+                        crate::config::WorkspaceRef::Number(number) => {
+                            self.jump_to_app_slot(&output, number as usize);
+                        }
+                        crate::config::WorkspaceRef::Name(name) => {
+                            if self.ocean.animate_to_bookmark(
+                                &output.name(),
+                                &name,
+                                Duration::from_millis(self.config.ocean.camera_animation_ms),
+                                self.config.ocean.camera_sway,
+                            ) {
+                                self.request_redraw();
+                            } else {
+                                tracing::warn!(bookmark = %name, "Ocean bookmark not found");
+                            }
+                        }
                     }
                     return;
                 }
