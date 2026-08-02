@@ -370,13 +370,25 @@ pub enum Action {
     CloseWindow,
     ToggleFloating,
     ToggleFullscreen,
-    /// Resets a floating window to the output's tiling area (its full
-    /// usable size minus gaps) -- the same geometry the xdg-shell maximize
-    /// request already produces, just reachable from a keybind instead of
-    /// only a client's own request or a window rule. Meant for Ocean, where
-    /// a floating window's size is otherwise whatever it was last dragged
-    /// or resized to, with no output bounds to snap back against.
-    ToggleMaximize,
+    /// "Border fullscreen": fills the output and is pinned to the visible
+    /// viewport regardless of the Ocean camera (via `space.map_element`,
+    /// bypassing world/camera tracking entirely, same as Classic's
+    /// maximize) -- but keeps window borders/decoration, unlike
+    /// `ToggleFullscreen`. The same xdg-shell maximize geometry a client's
+    /// own request or a window rule already produces, just reachable from
+    /// a keybind. Distinct from a plain zoom-independent resize -- see
+    /// `Action::ResizeToMonitor` for that.
+    ToggleBorderFullscreen,
+    /// Ocean only: sets a floating window's world-space size to its
+    /// output's raw resolution -- ignoring the camera's current zoom
+    /// entirely, not compensating for it -- while keeping it an ordinary
+    /// floating window in the ordinary world/camera pipeline (no viewport
+    /// pinning, no fullscreen/maximize state). For games/apps that want to
+    /// be configured at native monitor resolution regardless of how
+    /// zoomed in or out the canvas happens to be. See
+    /// `ToggleBorderFullscreen` for the "pinned to the screen" alternative
+    /// this is deliberately not.
+    ResizeToMonitor,
     TogglePin,
     /// `None` is the classic single scratchpad; `Some(name)` a named one
     /// (Hyprland's named special workspaces) -- see
@@ -1149,7 +1161,14 @@ impl Default for RawConfig {
         keybinds.insert("Super+Q".to_string(), "close-window".to_string());
         keybinds.insert("Super+V".to_string(), "toggle-floating".to_string());
         keybinds.insert("Super+F".to_string(), "toggle-fullscreen".to_string());
-        keybinds.insert("Super+M".to_string(), "toggle-maximize".to_string());
+        keybinds.insert(
+            "Super+M".to_string(),
+            "toggle-border-fullscreen".to_string(),
+        );
+        keybinds.insert(
+            "Super+Shift+M".to_string(),
+            "resize-to-monitor".to_string(),
+        );
         keybinds.insert("Super+Tab".to_string(), "cycle-focus".to_string());
         keybinds.insert("Super+H".to_string(), "focus-left".to_string());
         keybinds.insert("Super+L".to_string(), "focus-right".to_string());
@@ -5730,7 +5749,8 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "close-window" => Some(Action::CloseWindow),
         "toggle-floating" => Some(Action::ToggleFloating),
         "toggle-fullscreen" => Some(Action::ToggleFullscreen),
-        "toggle-maximize" => Some(Action::ToggleMaximize),
+        "toggle-border-fullscreen" | "toggle-maximize" => Some(Action::ToggleBorderFullscreen),
+        "resize-to-monitor" => Some(Action::ResizeToMonitor),
         "toggle-pin" => Some(Action::TogglePin),
         "toggle-scratchpad" => Some(Action::ToggleScratchpad(None)),
         "move-to-scratchpad" => Some(Action::MoveToScratchpad(None)),
@@ -6218,7 +6238,8 @@ bind $mod+Return = spawn:kitty
 bind $mod+Q = close-window
 bind $mod+V = toggle-floating
 bind $mod+F = toggle-fullscreen
-bind $mod+M = toggle-maximize
+bind $mod+M = toggle-border-fullscreen
+bind $mod+Shift+M = resize-to-monitor
 bind $mod+P = toggle-pin
 bind $mod+Shift+P = toggle-pseudo-tile
 bind $mod+Shift+Q = quit

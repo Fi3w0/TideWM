@@ -2212,8 +2212,11 @@ impl Smallvil {
             Action::ToggleFullscreen => {
                 self.toggle_fullscreen();
             }
-            Action::ToggleMaximize => {
+            Action::ToggleBorderFullscreen => {
                 self.toggle_maximize();
+            }
+            Action::ResizeToMonitor => {
+                self.resize_to_monitor();
             }
             Action::TogglePin => {
                 let focused = self.focused_window_surface();

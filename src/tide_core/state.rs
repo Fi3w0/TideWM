@@ -3424,6 +3424,52 @@ impl Smallvil {
         true
     }
 
+    /// `Action::ResizeToMonitor`: sets the focused Ocean floating window's
+    /// world-space size to its output's raw resolution, centered on its
+    /// current center point. No-op for a tiled window (`floating_rect`
+    /// returns `None`) or outside Ocean.
+    ///
+    /// Sends the client's configure directly rather than relying on
+    /// `retile()` -- unlike a tiled window (sized every call from
+    /// `tiled_layouts`), `retile_ocean` only ever repositions a floating
+    /// window via `space.map_element`, never resizes one, so nothing else
+    /// would deliver this size to the client.
+    pub(crate) fn resize_to_monitor(&mut self) {
+        if self.config.spatial_engine != crate::config::SpatialEngine::Ocean {
+            return;
+        }
+        let Some(surface) = self.focused_window_surface() else {
+            return;
+        };
+        let Some(current) = self.ocean.floating_rect(&surface) else {
+            return;
+        };
+        let Some(output_name) = self.ocean.entry_output(&surface).map(str::to_string) else {
+            return;
+        };
+        let Some(output) = self.output_by_name(&output_name) else {
+            return;
+        };
+        let Some(output_geo) = self.space.output_geometry(&output) else {
+            return;
+        };
+        let size = output_geo.size;
+        let center: Point<i32, Logical> = Point::from((
+            current.loc.x + current.size.w / 2,
+            current.loc.y + current.size.h / 2,
+        ));
+        let rect = Rectangle::new(Point::from((center.x - size.w / 2, center.y - size.h / 2)), size);
+        self.ocean.set_floating_rect(&surface, rect);
+        if let Some(toplevel) = self.ocean.window(&surface).and_then(|w| w.toplevel().cloned()) {
+            toplevel.with_pending_state(|state| state.size = Some(size));
+            toplevel.send_pending_configure();
+        }
+        self.retile();
+        self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
+            surface: surface.clone(),
+        });
+    }
+
     /// Translates every floating window tagged to `output_name` by `delta`
     /// -- called when wlr-output-management (kanshi, wdisplays, ...) moves
     /// an output's logical position. `retile()` already repositions tiled
