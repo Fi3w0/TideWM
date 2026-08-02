@@ -1155,10 +1155,15 @@ fn distance_to_rect(rect: Rectangle<i32, Logical>, point: OceanPoint) -> f64 {
     dx * dx + dy * dy
 }
 
+/// Clamped to `slot`'s own bounds: a preserved floating size larger than the
+/// slot it reattached into must never bleed into a neighboring tile's area,
+/// even though centering alone would happily do that. Smaller than the slot
+/// still centers at its natural size instead of stretching to fill it.
 fn centered_attached_rect(
     slot: Rectangle<i32, Logical>,
     size: Size<i32, Logical>,
 ) -> Rectangle<i32, Logical> {
+    let size = Size::from((size.w.min(slot.size.w), size.h.min(slot.size.h)));
     Rectangle::new(
         Point::from((
             slot.loc.x + (slot.size.w - size.w) / 2,
@@ -1355,13 +1360,24 @@ mod tests {
     }
 
     #[test]
-    fn attached_size_stays_centered_even_when_larger_than_the_slot() {
+    fn attached_size_clamps_to_the_slot_instead_of_overlapping_neighbors() {
         let slot = Rectangle::new(Point::from((100, 80)), Size::from((400, 300)));
         let attached = centered_attached_rect(slot, Size::from((600, 500)));
 
-        assert_eq!(attached.loc, Point::from((0, -20)));
-        assert_eq!(attached.size, Size::from((600, 500)));
+        // Clamped to the slot's own size, not the larger preserved size --
+        // a bigger rect here would overlap whatever tile sits next door.
+        assert_eq!(attached.size, Size::from((400, 300)));
+        assert_eq!(attached.loc, slot.loc);
         assert_eq!(rectangle_gap_distance(attached, slot), 0.0);
+    }
+
+    #[test]
+    fn attached_size_stays_centered_when_smaller_than_the_slot() {
+        let slot = Rectangle::new(Point::from((100, 80)), Size::from((400, 300)));
+        let attached = centered_attached_rect(slot, Size::from((200, 100)));
+
+        assert_eq!(attached.loc, Point::from((200, 180)));
+        assert_eq!(attached.size, Size::from((200, 100)));
     }
 
     #[test]
