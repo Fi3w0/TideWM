@@ -75,6 +75,36 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
                     data.ocean.pin_to_screen(surface, &output);
                 }
             }
+            // Magnet-style live feedback for a floating Ocean drag, mirroring
+            // `OceanTileMoveGrab::motion`'s own hint computation: close to a
+            // tile highlights it (a drop would reattach there), far away
+            // shows nothing (a drop stays floating). Reuses the same
+            // `drag_hint` the tile-swap grab already draws through
+            // `window_border_element` -- no new visual code, just feeding it
+            // from a second grab.
+            if self.smart_attach_ocean {
+                let hint = data
+                    .ocean
+                    .entry_output(surface)
+                    .map(str::to_string)
+                    .and_then(|output| {
+                        data.output_by_name(&output)
+                            .and_then(|o| data.space.output_geometry(&o))
+                            .map(|output_geo| (output, output_geo))
+                    })
+                    .and_then(|(output, output_geo)| {
+                        let pointer_view = self.last_location - output_geo.loc.to_f64();
+                        data.ocean.smart_tiling_target(
+                            surface,
+                            &output,
+                            pointer_view,
+                            data.config.ocean.smart_tiling_snap_distance,
+                            data.config.gaps,
+                            data.config.bsp_split_bias,
+                        )
+                    });
+                data.ocean.set_tile_drag(surface.clone(), rect, hint);
+            }
         }
         if let Some(previous_x) = previous_x {
             data.sway_kick(surface, (new_location.x - previous_x) as f64);
@@ -200,6 +230,7 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
             if let Some(surface) = self.window.toplevel().map(|toplevel| toplevel.wl_surface()) {
                 data.smart_attach_ocean_floating(surface, self.last_location);
             }
+            data.ocean.clear_tile_drag();
         }
         data.sync_visible_floating_window(&self.window);
     }
