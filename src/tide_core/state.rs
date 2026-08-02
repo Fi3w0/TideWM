@@ -3405,6 +3405,8 @@ impl Smallvil {
             viewport,
             Some(&target),
             self.config.ocean.smart_tiling_preserve_size,
+            self.config.gaps,
+            self.config.bsp_split_bias,
         ) {
             return false;
         }
@@ -5687,8 +5689,14 @@ impl Smallvil {
                     return;
                 };
                 let focused = self.focused_window_surface();
-                self.ocean
-                    .make_tiled(surface, &output.name(), viewport, focused.as_ref())
+                self.ocean.make_tiled(
+                    surface,
+                    &output.name(),
+                    viewport,
+                    focused.as_ref(),
+                    self.config.gaps,
+                    self.config.bsp_split_bias,
+                )
             };
             if changed {
                 self.retile();

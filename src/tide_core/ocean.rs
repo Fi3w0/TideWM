@@ -712,10 +712,13 @@ impl OceanSpace {
         output: &str,
         viewport: Size<i32, Logical>,
         target: Option<&WlSurface>,
+        gap: i32,
+        split_bias: SplitBias,
     ) -> bool {
-        self.make_tiled_with_size(surface, output, viewport, target, false)
+        self.make_tiled_with_size(surface, output, viewport, target, false, gap, split_bias)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn make_tiled_with_size(
         &mut self,
         surface: &WlSurface,
@@ -723,6 +726,8 @@ impl OceanSpace {
         viewport: Size<i32, Logical>,
         target: Option<&WlSurface>,
         preserve_size: bool,
+        gap: i32,
+        split_bias: SplitBias,
     ) -> bool {
         let Some((window, rect)) = self.floating.remove(surface) else {
             return false;
@@ -733,8 +738,112 @@ impl OceanSpace {
         self.insert(output, viewport, window, target);
         if preserve_size {
             self.attached_sizes.insert(surface.clone(), attached_size);
+            // Grow the reef to fit the preserved size instead of leaving
+            // `centered_attached_rect` to clamp it down -- Ocean's whole
+            // premise is a world that isn't bound to a fixed screen
+            // rectangle, so a reattached window keeping its size should
+            // push the reef outward, not get squeezed into whatever slot
+            // a viewport-sized tree happened to leave. Classic's BspLayout
+            // always divides a fixed output rect and never reaches this.
+            self.grow_reef_to_fit(surface, attached_size, gap, split_bias);
         }
         true
+    }
+
+    /// Grows the reef containing `surface` -- within its own `auto_width`/
+    /// `auto_height` flags -- until `surface`'s own slot is at least
+    /// `needed`. Capped at the nearest other reef's edge so one reef's
+    /// growth can never reach into another and reintroduce the exact
+    /// overlap this path exists to avoid. If growth is disabled or capped
+    /// before the slot is big enough, `centered_attached_rect`'s own clamp
+    /// is still the backstop that keeps the render rect inside its slot.
+    fn grow_reef_to_fit(
+        &mut self,
+        surface: &WlSurface,
+        needed: Size<i32, Logical>,
+        gap: i32,
+        split_bias: SplitBias,
+    ) {
+        let Some(reef_index) = self.reefs.iter().position(|reef| reef.layout.contains(surface))
+        else {
+            return;
+        };
+        let (max_w, max_h) = self.growth_ceiling(reef_index);
+        // ponytail: fixed 8-round measure-and-grow rather than solving the
+        // dwindle tree's split math for an exact minimum rect -- each round
+        // measures the real slot through the same `layout()` the renderer
+        // itself calls, so it can never drift from what's actually on
+        // screen. Upgrade to a closed-form solve if 8 rounds ever visibly
+        // fails to converge for a real tree depth.
+        for _ in 0..8 {
+            let reef = &self.reefs[reef_index];
+            if !reef.auto_width && !reef.auto_height {
+                return;
+            }
+            let Some(slot_size) = reef
+                .layout
+                .layout(reef.rect, gap, split_bias)
+                .into_iter()
+                .find(|(window, _)| {
+                    window
+                        .toplevel()
+                        .is_some_and(|toplevel| toplevel.wl_surface() == surface)
+                })
+                .map(|(_, rect)| rect.size)
+            else {
+                return;
+            };
+            let deficit_w = if reef.auto_width {
+                (needed.w - slot_size.w).max(0)
+            } else {
+                0
+            };
+            let deficit_h = if reef.auto_height {
+                (needed.h - slot_size.h).max(0)
+            } else {
+                0
+            };
+            if deficit_w == 0 && deficit_h == 0 {
+                return;
+            }
+            let reef = &mut self.reefs[reef_index];
+            let new_w = (reef.rect.size.w + deficit_w).min(max_w);
+            let new_h = (reef.rect.size.h + deficit_h).min(max_h);
+            if new_w == reef.rect.size.w && new_h == reef.rect.size.h {
+                return; // Capped by a neighboring reef; can't grow further.
+            }
+            reef.rect.size.w = new_w;
+            reef.rect.size.h = new_h;
+        }
+    }
+
+    /// The largest (width, height) `reefs[index]` could grow to, keeping its
+    /// `rect.loc` fixed, without reaching another reef that currently spans
+    /// its row/column. Deliberately axis-aligned rather than full 2D
+    /// expansion math: reefs are user-configured landmarks meant to be laid
+    /// out in a simple row or column (this project's own config included),
+    /// and solving exact diagonal-neighbor clearance isn't worth it before
+    /// that layout is something anyone actually uses.
+    fn growth_ceiling(&self, index: usize) -> (i32, i32) {
+        let rect = self.reefs[index].rect;
+        let mut max_w = i32::MAX;
+        let mut max_h = i32::MAX;
+        for (other_index, other) in self.reefs.iter().enumerate() {
+            if other_index == index {
+                continue;
+            }
+            let y_overlap = rect.loc.y < other.rect.loc.y + other.rect.size.h
+                && other.rect.loc.y < rect.loc.y + rect.size.h;
+            if y_overlap && other.rect.loc.x >= rect.loc.x + rect.size.w {
+                max_w = max_w.min(other.rect.loc.x - rect.loc.x);
+            }
+            let x_overlap = rect.loc.x < other.rect.loc.x + other.rect.size.w
+                && other.rect.loc.x < rect.loc.x + rect.size.w;
+            if x_overlap && other.rect.loc.y >= rect.loc.y + rect.size.h {
+                max_h = max_h.min(other.rect.loc.y - rect.loc.y);
+            }
+        }
+        (max_w.max(rect.size.w), max_h.max(rect.size.h))
     }
 
     pub fn smart_tiling_target(
@@ -1295,6 +1404,61 @@ mod tests {
             ),
             Some(1)
         );
+    }
+
+    #[test]
+    fn growth_ceiling_stops_at_a_neighboring_reef_sharing_its_row() {
+        let ocean = OceanSpace::from_config(&OceanConfig {
+            reefs: vec![
+                OceanReefConfig {
+                    name: "home".to_string(),
+                    x: 0,
+                    y: 0,
+                    width: Some(1000),
+                    height: Some(800),
+                },
+                // Same row (y-ranges overlap): caps rightward growth.
+                OceanReefConfig {
+                    name: "code".to_string(),
+                    x: 4000,
+                    y: 0,
+                    width: Some(1000),
+                    height: Some(800),
+                },
+                // Neither row nor column shared with "home": must not
+                // constrain its growth in either axis.
+                OceanReefConfig {
+                    name: "deep".to_string(),
+                    x: 2000,
+                    y: 5000,
+                    width: Some(1000),
+                    height: Some(800),
+                },
+            ],
+            bookmarks: Vec::new(),
+            ..OceanConfig::default()
+        });
+
+        let (max_w, max_h) = ocean.growth_ceiling(0);
+        assert_eq!(max_w, 4000); // stops right at "code"'s left edge
+        assert_eq!(max_h, i32::MAX); // "deep" doesn't share home's row
+    }
+
+    #[test]
+    fn growth_ceiling_is_unbounded_with_no_neighbors() {
+        let ocean = OceanSpace::from_config(&OceanConfig {
+            reefs: vec![OceanReefConfig {
+                name: "home".to_string(),
+                x: 0,
+                y: 0,
+                width: Some(1000),
+                height: Some(800),
+            }],
+            bookmarks: Vec::new(),
+            ..OceanConfig::default()
+        });
+
+        assert_eq!(ocean.growth_ceiling(0), (i32::MAX, i32::MAX));
     }
 
     #[test]
