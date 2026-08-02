@@ -214,6 +214,42 @@ impl Default for SwimConfig {
     }
 }
 
+/// Bioluminescent edge-glow compass for the Ocean engine (spatial roadmap
+/// S5). A window outside the output camera's viewport leaves a soft glow
+/// at the viewport edge in its direction: urgent windows glow in any
+/// direction, physically deep windows glow below. Nearer is brighter, and
+/// the cue fades to nothing at `max_distance`. Ambient render-only cues --
+/// travel stays on the existing pan/zoom/bookmark/depth actions.
+/// Ocean-only; `water_effects` remains the master bypass.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompassConfig {
+    pub enabled: bool,
+    /// Glow color for off-screen urgent windows, any direction.
+    pub urgent_color: [f32; 3],
+    /// Glow color for windows below the viewport (sunk or lower reef).
+    pub deep_color: [f32; 3],
+    /// World-logical distance beyond the viewport edge at which a cue
+    /// fades to nothing.
+    pub max_distance: f32,
+    /// Glow rect side, logical pixels.
+    pub size: f32,
+    /// Glow alpha at zero distance, fading linearly to `max_distance`.
+    pub alpha: f32,
+}
+
+impl Default for CompassConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            urgent_color: [0.463, 0.945, 1.0],
+            deep_color: [0.176, 0.439, 0.588],
+            max_distance: 3000.0,
+            size: 96.0,
+            alpha: 0.85,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Left,
@@ -380,11 +416,13 @@ pub enum Action {
     /// `Action::ResizeToMonitor` for that.
     ToggleBorderFullscreen,
     /// Ocean only: sets a floating window's world-space size to its
-    /// output's raw resolution -- ignoring the camera's current zoom
-    /// entirely, not compensating for it -- while keeping it an ordinary
-    /// floating window in the ordinary world/camera pipeline (no viewport
-    /// pinning, no fullscreen/maximize state). For games/apps that want to
-    /// be configured at native monitor resolution regardless of how
+    /// output's resolution (inset by the configured gap, so its border
+    /// stays inside the visible screen -- see `Smallvil::resize_to_monitor`)
+    /// -- ignoring the camera's current zoom entirely, not compensating
+    /// for it -- while keeping it an ordinary floating window in the
+    /// ordinary world/camera pipeline (no viewport pinning, no
+    /// fullscreen/maximize state). For games/apps that want to be
+    /// configured at close to native monitor resolution regardless of how
     /// zoomed in or out the canvas happens to be. See
     /// `ToggleBorderFullscreen` for the "pinned to the screen" alternative
     /// this is deliberately not.
@@ -583,6 +621,10 @@ pub struct Config {
     /// Bypassed by the `water_effects` master toggle; when off, workspace
     /// navigation is the ordinary discrete switch.
     pub swim: SwimConfig,
+    /// Bioluminescent edge-glow compass for off-screen urgent/deep windows
+    /// (spatial roadmap S5). Ocean-only; `water_effects` is the master
+    /// bypass.
+    pub compass: CompassConfig,
     /// Window lifecycle and layout-motion animation timing. Logical state
     /// changes immediately; this controls only visual settling.
     pub animations: WindowAnimationsConfig,
@@ -874,6 +916,7 @@ impl Config {
             connected_vessels: raw.connected_vessels,
             sway: raw.sway,
             swim: raw.swim,
+            compass: raw.compass,
             animations: raw.animations,
             workspace_transition: raw.workspace_transition,
             depth: raw.depth,
@@ -1101,6 +1144,7 @@ struct RawConfig {
     connected_vessels: ConnectedVesselsConfig,
     sway: SwayConfig,
     swim: SwimConfig,
+    compass: CompassConfig,
     animations: WindowAnimationsConfig,
     workspace_transition: WorkspaceTransitionConfig,
     depth: DepthConfig,
@@ -1262,6 +1306,7 @@ impl Default for RawConfig {
             connected_vessels: ConnectedVesselsConfig::default(),
             sway: SwayConfig::default(),
             swim: SwimConfig::default(),
+            compass: CompassConfig::default(),
             animations: WindowAnimationsConfig::default(),
             workspace_transition: WorkspaceTransitionConfig::default(),
             depth: DepthConfig::default(),
@@ -3157,6 +3202,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         }
         "sway" => apply_sway_block(&mut raw.sway, body),
         "swim" => apply_swim_block(&mut raw.swim, body),
+        "compass" => apply_compass_block(&mut raw.compass, body),
         "ocean" => apply_ocean_block(&mut raw.ocean, body),
         "animations" | "window_animations" => apply_animations_block(&mut raw.animations, body),
         "depth" => apply_depth_block(&mut raw.depth, body),
@@ -3826,6 +3872,45 @@ fn apply_swim_block(cfg: &mut SwimConfig, body: &[waves::Entry]) {
                 ),
             },
             other => tracing::warn!(key = %other, "Unknown key in `swim` block, ignoring"),
+        }
+    }
+}
+
+fn apply_compass_block(cfg: &mut CompassConfig, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `compass` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "enabled" => set_bool(&mut cfg.enabled, key, value),
+            "urgent_color" | "urgent" => {
+                if let Some(color) = parse_ripple_color(value) {
+                    cfg.urgent_color = color;
+                } else {
+                    tracing::warn!(value, "Expected compass.urgent_color as #RRGGBB/rgb(...), ignoring");
+                }
+            }
+            "deep_color" | "deep" => {
+                if let Some(color) = parse_ripple_color(value) {
+                    cfg.deep_color = color;
+                } else {
+                    tracing::warn!(value, "Expected compass.deep_color as #RRGGBB/rgb(...), ignoring");
+                }
+            }
+            "max_distance" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() && value > 0.0 => cfg.max_distance = value.min(50_000.0),
+                _ => tracing::warn!(value, "Expected compass.max_distance > 0, ignoring"),
+            },
+            "size" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() && value > 0.0 => cfg.size = value.clamp(8.0, 1024.0),
+                _ => tracing::warn!(value, "Expected compass.size from 8 to 1024, ignoring"),
+            },
+            "alpha" | "peak_alpha" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.alpha = value.clamp(0.0, 1.0),
+                _ => tracing::warn!(value, "Expected compass.alpha from 0 to 1, ignoring"),
+            },
+            other => tracing::warn!(key = %other, "Unknown key in `compass` block, ignoring"),
         }
     }
 }
@@ -6664,6 +6749,7 @@ mod tests {
             connected_vessels: ConnectedVesselsConfig::default(),
             sway: SwayConfig::default(),
             swim: SwimConfig::default(),
+            compass: CompassConfig::default(),
             animations: WindowAnimationsConfig::default(),
             workspace_transition: WorkspaceTransitionConfig::default(),
             depth: DepthConfig::default(),

@@ -147,6 +147,9 @@ smithay::backend::renderer::element::render_elements! {
     DepthTransition = crate::depth_transition::DepthTransitionElement,
     /// World-anchored Ocean reference grid behind windows and above wallpaper.
     OceanCanvas = crate::ocean_canvas::OceanCanvasElement,
+    /// Bioluminescent edge-glow cue for an off-screen urgent/deep Ocean
+    /// window (spatial roadmap S5). Above windows, below chrome.
+    Compass = crate::compass::CompassElement,
     /// Captured outgoing workspace peeled away over the live incoming
     /// workspace (Phase R1, see workspace_transition.rs).
     WorkspaceTransition = crate::workspace_transition::WorkspaceTransitionElement,
@@ -1473,6 +1476,7 @@ fn render_surface(
     let workspace_transition = state.workspace_transition_frame_element(renderer, output);
     let depth_transition = state.depth_transition_frame_element(renderer, output);
     let ocean_canvas = state.ocean_canvas_frame_element(renderer, output);
+    let compass_elements = state.compass_frame_elements(renderer, output);
     let closing_windows = state.closing_window_frame_elements(renderer, output);
     let mut elements: Vec<OutputRenderElements> = ripple_layers.above_all;
     elements.extend(
@@ -1494,6 +1498,7 @@ fn render_surface(
     );
     elements.extend(depth_transition);
     elements.extend(ripple_layers.above_windows);
+    elements.extend(compass_elements);
     elements.extend(workspace_transition);
     elements.extend(closing_windows);
     elements.extend(depth_elements);

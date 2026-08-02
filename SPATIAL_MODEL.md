@@ -71,8 +71,10 @@ Depth Down/Up visits only reef origins and explicitly world-placed floating or
 sunk windows. Local tile rows are deliberately excluded, because treating
 them as navigation stops recreates vertical workspaces. Sinking, dredging, and
 surfacing are explicit actions; focusing a deep window alone never changes its
-world Y. The later bioluminescent compass and overview will make distant or
-urgent windows discoverable.
+world Y. The bioluminescent compass makes distant or urgent windows discoverable: a
+soft glow at the viewport edge points toward each off-screen urgent window
+(in any direction) and each deep window (below the viewport). Travel stays
+explicit.
 
 ## Shared and separate state
 
@@ -107,7 +109,7 @@ config.
 3. **Done:** model-neutral placement boundary for the shared renderer.
 4. **Done:** Ocean world coordinates, cameras, reefs, and bookmarks.
 5. **Done:** Ocean pan/zoom canvas feel and physical sink/dredge/surface travel.
-6. Ocean compass and whole-world overview.
+6. Ocean compass and whole-world overview. Compass done (edge-glow cues for off-screen urgent/deep windows); the whole-world overview minimap is the remaining slice.
 
 The existing continuous workspace swim is an S0 Classic navigation bridge. It
 is useful on its own, but it is not the Ocean data model.

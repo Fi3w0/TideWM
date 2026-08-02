@@ -331,6 +331,11 @@ pub struct Smallvil {
     /// texture/framebuffer; the record only preserves damage identity.
     pub(crate) ocean_canvases: HashMap<String, crate::ocean_canvas::OceanCanvas>,
     pub(crate) ocean_canvas_program: Option<GlesPixelProgram>,
+    /// Per-output compass state and one shared compiled shader (spatial
+    /// roadmap S5). Ocean-only and gated by `water_effects`; no element is
+    /// produced when nothing sits off-screen.
+    pub(crate) compasses: HashMap<String, crate::compass::Compass>,
+    pub(crate) compass_program: Option<GlesPixelProgram>,
     pub loop_handle: LoopHandle<'static, Smallvil>,
     pub loop_signal: LoopSignal,
 
@@ -2278,6 +2283,8 @@ impl Smallvil {
             depth_transition_program: None,
             ocean_canvases: HashMap::new(),
             ocean_canvas_program: None,
+            compasses: HashMap::new(),
+            compass_program: None,
             loop_handle,
             loop_signal,
             socket_name,
@@ -5193,6 +5200,84 @@ impl Smallvil {
         ))
     }
 
+    /// Off-screen urgent/deep compass cues for the Ocean engine (spatial
+    /// roadmap S5). Each off-viewport urgent window, plus each window
+    /// physically below the viewport, leaves a soft bioluminescent glow at
+    /// the viewport edge in its direction; nearer is brighter. Ambient and
+    /// render-only -- travel stays on the existing pan/zoom/bookmark/depth
+    /// actions. No element is produced while nothing is off-screen, so the
+    /// common idle desktop ticks no frames for the compass.
+    pub(crate) fn compass_frame_elements(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+    ) -> Vec<crate::backend::udev::OutputRenderElements> {
+        if !matches!(self.session_lock, SessionLock::Unlocked)
+            || self.config.spatial_engine != crate::config::SpatialEngine::Ocean
+            || !self.config.water_effects
+            || !self.config.compass.enabled
+        {
+            return Vec::new();
+        }
+        let Some(output_geo) = self.space.output_geometry(output) else {
+            return Vec::new();
+        };
+        let output_name = output.name();
+        let camera = self.ocean.camera(&output_name);
+        let zoom = camera.zoom.max(0.05);
+        let viewport = Rectangle::new(
+            Point::from((camera.origin.x, camera.origin.y)),
+            Size::from((
+                output_geo.size.w as f64 / zoom,
+                output_geo.size.h as f64 / zoom,
+            )),
+        );
+        let cfg = self.config.compass;
+        let windows: Vec<(Point<f64, Logical>, crate::compass::CueKind)> = self
+            .ocean
+            .world_layouts(self.config.gaps, self.config.bsp_split_bias)
+            .into_iter()
+            .filter_map(|(window, rect, _)| {
+                let surface = window.toplevel()?.wl_surface().clone();
+                let kind = if self.urgent.contains(&surface) {
+                    crate::compass::CueKind::Urgent
+                } else {
+                    crate::compass::CueKind::Deep
+                };
+                Some((
+                    Point::from((
+                        rect.loc.x as f64 + rect.size.w as f64 / 2.0,
+                        rect.loc.y as f64 + rect.size.h as f64 / 2.0,
+                    )),
+                    kind,
+                ))
+            })
+            .collect();
+        let cues = crate::compass::compute_cues(
+            viewport,
+            zoom,
+            &windows,
+            &crate::compass::CompassParams {
+                urgent_color: cfg.urgent_color,
+                deep_color: cfg.deep_color,
+                max_distance: cfg.max_distance,
+                peak_alpha: cfg.alpha,
+                size: cfg.size,
+            },
+        );
+        let Some(program) =
+            crate::compass::compass_program(&mut self.compass_program, renderer)
+        else {
+            return Vec::new();
+        };
+        let compass = self.compasses.entry(output_name).or_default();
+        compass
+            .frame_elements(program, cues)
+            .into_iter()
+            .map(crate::backend::udev::OutputRenderElements::Compass)
+            .collect()
+    }
+
     /// Drops transient render state for a disconnected output. In
     /// particular, this releases a full-output texture immediately instead
     /// of retaining VRAM under an orphaned connector name, and drops that
@@ -5204,6 +5289,7 @@ impl Smallvil {
         self.workspace_transitions.remove(output_name);
         self.depth_transitions.remove(output_name);
         self.ocean_canvases.remove(output_name);
+        self.compasses.remove(output_name);
         self.swim_cameras.remove(output_name);
     }
 

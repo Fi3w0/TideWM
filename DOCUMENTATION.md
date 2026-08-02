@@ -435,6 +435,49 @@ ocean {
 | `reef <name> { x, y, width?, height? }` | nested block | implicit `main` | Local tiling zone in world coordinates. Omitted dimensions follow actual output geometry. |
 | `bookmark <name> { x, y }` | nested block | `home = 0x0` | Named camera top-left position. Reefs also synthesize numeric bookmarks in declaration order for `workspace:N` compatibility. |
 
+### `compass { }`
+
+Bioluminescent edge-glow compass for the Ocean engine (spatial roadmap S5).
+When a window sits outside the output camera's viewport, a soft glow appears
+at the viewport edge in that window's direction, keeping off-screen windows
+discoverable without navigating to them:
+
+- **Urgent** windows glow bright cyan in any direction (left, right, up,
+  down, or diagonally toward a corner).
+- **Deep** windows (sunk via `sink-window`, or sitting in a lower reef)
+  glow cool blue at the bottom edge only -- lateral off-screen travel is
+  ordinary panning, not depth, so it produces no cue.
+
+Nearer windows glow brighter; the cue fades linearly to nothing at
+`max_distance`. The cues are ambient and render-only: they do not respond
+to clicks, and camera travel stays on the existing pan/zoom/bookmark/depth
+actions. No element is produced at all when nothing is off-screen, so an
+idle desktop ticks zero frames. One analytical shader, no texture or
+framebuffer, and a 16-cue cap (urgent first, then nearest).
+
+Ocean-only; `water_effects = false` disables the compass regardless of this
+block. Has no effect under the Classic engine.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | Master switch for the compass under Ocean. |
+| `urgent_color` | color | `76F1FF` | Glow color for off-screen urgent windows. `urgent` is an alias. |
+| `deep_color` | color | `2D7096` | Glow color for windows below the viewport. `deep` is an alias. |
+| `max_distance` | float, `> 0` | `3000` | World-logical pixels beyond the viewport edge at which a cue fades to zero. |
+| `size` | float, `8`–`1024` | `96` | Glow rect side, logical pixels. |
+| `alpha` | float, `0`–`1` | `0.85` | Peak glow alpha at zero distance. `peak_alpha` is an alias. |
+
+```wave
+compass {
+    enabled = true
+    urgent_color = 76F1FF
+    deep_color = 2D7096
+    max_distance = 3000
+    size = 96
+    alpha = 0.85
+}
+```
+
 ### `classic_depth { }`
 
 Enables the Classic spatial engine's per-workspace Depth Deck. This is
