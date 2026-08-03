@@ -337,10 +337,10 @@ pub fn init_winit(
                         // skipping windows the empty result won't draw would
                         // make them vanish from the frame entirely rather
                         // than just losing the effect.
-                        let mut skip = depth_surfaces;
-                        if !glass_layers.is_empty() {
-                            skip.extend(glass_surfaces.iter().cloned());
-                        }
+                        // Glass windows render in their normal z-slot (the
+                        // walk inserts each glass layer behind its own
+                        // surface); only depth-replaced windows are skipped.
+                        let skip = depth_surfaces;
                         // Ripple layers are grouped by `RippleLayer` so
                         // each backend can splice them at the right z
                         // position in the front-to-back list: AboveAll

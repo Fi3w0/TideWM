@@ -5177,10 +5177,9 @@ impl Smallvil {
             self.glass_layer_elements(renderer, output, &placements, &glass_surfaces);
         let (depth_elements, depth_surfaces) =
             self.depth_frame_elements(renderer, output, &placements);
-        let mut skip = depth_surfaces;
-        if !glass_layers.is_empty() {
-            skip.extend(glass_surfaces.iter().cloned());
-        }
+        // Glass windows render in their normal z-slot; only depth-replaced
+        // windows are skipped.
+        let skip = depth_surfaces;
         // The canvas grid, caustics, and BelowWindows ripples ride inside
         // the walk so a layer-shell wallpaper engine can't cover them.
         let ocean_canvas = self.ocean_canvas_frame_element(renderer, output);
