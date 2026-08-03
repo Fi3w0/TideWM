@@ -318,8 +318,10 @@ fn rasterize_toast(
 }
 
 /// 1.0 fully inside, 0.0 fully outside, feathered over ~1px at the rounded
-/// corners so the pill doesn't look jagged.
-fn rounded_rect_coverage_local(
+/// corners so the pill doesn't look jagged. `pub(crate)`: also reused by
+/// `crate::minimap`'s decorated presets for rounded window/viewport boxes
+/// and their soft glow/shadow rims.
+pub(crate) fn rounded_rect_coverage_local(
     x: i32,
     y: i32,
     left: i32,

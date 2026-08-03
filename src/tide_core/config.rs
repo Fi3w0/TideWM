@@ -269,6 +269,12 @@ pub struct MinimapConfig {
     /// The trigger key itself. Held together with `mods`; releasing either
     /// closes the peek.
     pub keysym: Keysym,
+    /// Visual baseline; individual colors below can still override it.
+    pub preset: crate::minimap::MinimapPreset,
+    /// `None` uses the preset's own default for each field.
+    pub background_color: Option<[f32; 3]>,
+    pub window_color: Option<[f32; 3]>,
+    pub accent_color: Option<[f32; 3]>,
 }
 
 impl Default for MinimapConfig {
@@ -285,6 +291,10 @@ impl Default for MinimapConfig {
             enabled: true,
             mods,
             keysym,
+            preset: crate::minimap::MinimapPreset::default(),
+            background_color: None,
+            window_color: None,
+            accent_color: None,
         }
     }
 }
@@ -3984,6 +3994,34 @@ fn apply_minimap_block(cfg: &mut MinimapConfig, body: &[waves::Entry]) {
                 None => tracing::warn!(
                     value,
                     "Expected minimap.key as a single modifier+key chord (e.g. \"Super+Space\"), ignoring"
+                ),
+            },
+            "preset" => match crate::minimap::MinimapPreset::parse(value) {
+                Some(preset) => cfg.preset = preset,
+                None => tracing::warn!(
+                    value,
+                    "Expected minimap.preset as plain/bioluminescent/glass, ignoring"
+                ),
+            },
+            "background_color" | "background" => match parse_ripple_color(value) {
+                Some(color) => cfg.background_color = Some(color),
+                None => tracing::warn!(
+                    value,
+                    "Expected minimap.background_color as #RRGGBB/rgb(...), ignoring"
+                ),
+            },
+            "window_color" | "window" => match parse_ripple_color(value) {
+                Some(color) => cfg.window_color = Some(color),
+                None => tracing::warn!(
+                    value,
+                    "Expected minimap.window_color as #RRGGBB/rgb(...), ignoring"
+                ),
+            },
+            "accent_color" | "accent" => match parse_ripple_color(value) {
+                Some(color) => cfg.accent_color = Some(color),
+                None => tracing::warn!(
+                    value,
+                    "Expected minimap.accent_color as #RRGGBB/rgb(...), ignoring"
                 ),
             },
             other => tracing::warn!(key = %other, "Unknown key in `minimap` block, ignoring"),

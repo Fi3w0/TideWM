@@ -5365,13 +5365,14 @@ impl Smallvil {
             .map(|pointer| pointer.current_location())
             .unwrap_or_default();
 
-        let windows: Vec<(Rectangle<i32, Logical>, String)> = self
+        let windows: Vec<(Rectangle<i32, Logical>, String, bool)> = self
             .ocean
             .world_layouts(self.config.gaps, self.config.bsp_split_bias)
             .into_iter()
             .filter_map(|(window, rect, _kind)| {
                 let surface = window.toplevel()?.wl_surface().clone();
-                Some((rect, crate::tab_strip::window_title(&surface)))
+                let urgent = self.urgent.contains(&surface);
+                Some((rect, crate::tab_strip::window_title(&surface), urgent))
             })
             .collect();
         let reef_rects: Vec<Rectangle<i32, Logical>> =
@@ -5395,10 +5396,17 @@ impl Smallvil {
             })
             .collect();
 
+        let style = crate::minimap::MinimapStyle::resolve(
+            self.config.minimap.preset,
+            self.config.minimap.background_color,
+            self.config.minimap.window_color,
+            self.config.minimap.accent_color,
+        );
         self.minimap_peek = Some(crate::minimap::MinimapPeek::build(
             output_name,
             (mode.size.w, mode.size.h),
             pointer_location,
+            style,
             &windows,
             &reef_rects,
             &viewports,

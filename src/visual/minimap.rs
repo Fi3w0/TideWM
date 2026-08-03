@@ -8,11 +8,19 @@
 //! `MinimapConfig`'s own doc for why.
 //!
 //! Same CPU-composited-texture approach as `overview.rs` (built once per
-//! peek via `MinimapPeek::build`, not rebuilt every frame) and literally
-//! reuses its rasterization primitives (`fill_rect`, `stroke_rect`,
-//! `draw_label`) for an identical dark-panel/labeled-box visual language --
-//! this is Ocean's equivalent of Classic's schematic workspace grid, not a
-//! new visual vocabulary.
+//! peek via `MinimapPeek::build`, not rebuilt every frame). Box/label
+//! placement still reuses `overview.rs`'s `fill_rect`/`stroke_rect`/
+//! `draw_label` directly for the flat `Plain` preset; the two decorated
+//! presets (`Bioluminescent`, `Glass`) layer rounded corners, a gradient
+//! backdrop, and a soft colored rim on top, reusing `toast.rs`'s
+//! `rounded_rect_coverage_local` and `ui_theme::mix` -- the same
+//! rounded-box-with-soft-shadow technique the toast card already uses,
+//! just with the shadow's color parameterized instead of fixed black.
+//!
+//! **Presets pick a baseline look; `background_color`/`window_color`/
+//! `accent_color` still override individual colors on top of it** -- the
+//! same shape `compass`'s `shape` + `urgent_color`/`deep_color` already
+//! established, not a second config pattern to learn.
 //!
 //! **Known-lossy, same spirit as `overview.rs`'s own admitted gaps:**
 //! screen-pinned windows (`Smallvil::screen_pins`) aren't drawn -- a pin is
@@ -47,17 +55,9 @@ use smithay::{
 };
 
 use crate::overview::{draw_label, fill_rect, rgba, stroke_rect};
+use crate::toast::rounded_rect_coverage_local;
+use crate::ui_theme::mix;
 
-const BG_RGBA: (u8, u8, u8, u8) = (10, 10, 12, 220);
-const WINDOW_BG: (u8, u8, u8) = (52, 52, 58);
-const WINDOW_BORDER: (u8, u8, u8) = (100, 100, 108);
-const WINDOW_BORDER_PX: i32 = 1;
-/// Same water-palette accent `overview.rs` uses for its own active-cell
-/// border -- the triggering output's own viewport gets this; every other
-/// output's viewport gets the plainer `VIEWPORT_BORDER` instead.
-const VIEWPORT_ACTIVE_BORDER: (u8, u8, u8) = (60, 170, 200);
-const VIEWPORT_BORDER: (u8, u8, u8) = (150, 150, 158);
-const VIEWPORT_BORDER_PX: i32 = 2;
 /// Padding around the world content's bounding box, as a fraction of its
 /// own size, so nothing sits flush against the canvas edge.
 const MARGIN_FRACTION: f64 = 0.1;
@@ -65,6 +65,131 @@ const MARGIN_FRACTION: f64 = 0.1;
 /// `scale` (canvas px / world px) finite for a near-empty world or a
 /// single tight viewport instead of it blowing up toward infinity.
 const MIN_EXTENT: f64 = 256.0;
+/// How far the soft rim/glow expands beyond a box's own edge, canvas px.
+const RIM_SPREAD: i32 = 9;
+
+/// Named visual baseline for the minimap, selected by `minimap.preset`.
+/// Each preset resolves to a concrete `MinimapStyle`; `background_color`/
+/// `window_color`/`accent_color` in config override individual fields of
+/// whichever preset is active.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum MinimapPreset {
+    /// The original flat schematic: sharp corners, no glow, identical to
+    /// `overview.rs`'s own Classic grid. Kept for anyone who wants the
+    /// minimal look back.
+    Plain,
+    /// Default. Deep-water gradient backdrop, rounded glassy window boxes,
+    /// and a cyan/teal bioluminescent rim -- the same water-identity
+    /// palette the compass's own urgent glow uses, so the two S5 halves
+    /// read as one family rather than two different UIs.
+    #[default]
+    Bioluminescent,
+    /// Frosted, low-contrast rounded panels with a neutral drop shadow
+    /// instead of a colored glow -- for a subtler, less neon look.
+    Glass,
+}
+
+impl MinimapPreset {
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value.trim().to_ascii_lowercase().as_str() {
+            "plain" | "schematic" | "flat" => MinimapPreset::Plain,
+            "bioluminescent" | "glow" | "reef" => MinimapPreset::Bioluminescent,
+            "glass" | "frost" | "frosted" => MinimapPreset::Glass,
+            _ => return None,
+        })
+    }
+
+    fn base_style(self) -> MinimapStyle {
+        match self {
+            MinimapPreset::Plain => MinimapStyle {
+                background_top: [10, 10, 12],
+                background_bottom: [10, 10, 12],
+                background_alpha: 220,
+                window_fill: [52, 52, 58],
+                window_border: [100, 100, 108],
+                accent: [60, 170, 200],
+                radius: 0.0,
+                soft_rim: None,
+            },
+            MinimapPreset::Bioluminescent => MinimapStyle {
+                background_top: [8, 22, 30],
+                background_bottom: [18, 46, 56],
+                background_alpha: 240,
+                window_fill: [26, 64, 76],
+                window_border: [90, 210, 225],
+                accent: [118, 241, 255],
+                radius: 10.0,
+                soft_rim: Some([90, 225, 240]),
+            },
+            MinimapPreset::Glass => MinimapStyle {
+                background_top: [19, 19, 25],
+                background_bottom: [28, 28, 36],
+                background_alpha: 206,
+                window_fill: [58, 58, 68],
+                window_border: [190, 190, 200],
+                accent: [190, 205, 255],
+                radius: 12.0,
+                soft_rim: Some([0, 0, 0]),
+            },
+        }
+    }
+}
+
+/// Resolved colors/shape for one peek's render, either a preset's plain
+/// defaults or those defaults with config's own color overrides applied.
+#[derive(Clone, Copy, Debug)]
+pub struct MinimapStyle {
+    pub background_top: [u8; 3],
+    pub background_bottom: [u8; 3],
+    pub background_alpha: u8,
+    pub window_fill: [u8; 3],
+    pub window_border: [u8; 3],
+    /// Drives both the triggering output's viewport "you are here" glow
+    /// and an urgent window's highlight -- one color for "pay attention
+    /// here," matching the compass's own single-urgent-color language
+    /// rather than a second independent knob.
+    pub accent: [u8; 3],
+    pub radius: f32,
+    /// Soft colored rim drawn just outside a box's own edge. `None` (only
+    /// `Plain`) skips the pass entirely rather than drawing at zero alpha.
+    pub soft_rim: Option<[u8; 3]>,
+}
+
+impl MinimapStyle {
+    pub fn resolve(
+        preset: MinimapPreset,
+        background: Option<[f32; 3]>,
+        window: Option<[f32; 3]>,
+        accent: Option<[f32; 3]>,
+    ) -> Self {
+        let mut style = preset.base_style();
+        if let Some(color) = background {
+            let color = to_u8(color);
+            style.background_top = color;
+            style.background_bottom = color;
+        }
+        if let Some(color) = window {
+            style.window_fill = to_u8(color);
+        }
+        if let Some(color) = accent {
+            let color = to_u8(color);
+            style.accent = color;
+            style.window_border = color;
+            if style.soft_rim.is_some() {
+                style.soft_rim = Some(color);
+            }
+        }
+        style
+    }
+}
+
+fn to_u8(c: [f32; 3]) -> [u8; 3] {
+    [
+        (c[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+        (c[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+        (c[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+    ]
+}
 
 /// One peek's built state: the cached world-map texture plus the transform
 /// needed to invert a click back to a world point. Held by
@@ -90,19 +215,21 @@ pub struct MinimapPeek {
 }
 
 impl MinimapPeek {
-    /// `windows` and `viewports` are world-space rects paired with the
-    /// label drawn on them (a window's title, or an output's own name) --
-    /// the exact `(Rectangle, String)` shape `overview.rs`'s
-    /// `OverviewCell::windows` already uses, so `draw_label` needs no
-    /// window/toplevel type at all. `reef_rects` only widens the framed
-    /// extent (an empty reef is still a landmark worth keeping in view);
-    /// nothing is drawn for it, matching the plain "boxes only" visual
-    /// language `overview.rs` already established.
+    /// `windows` are world-space rects paired with a title and whether
+    /// that window is currently urgent (drawn with the style's `accent`
+    /// instead of its plain border, same "urgent glows" language the
+    /// compass already uses). `reef_rects` only widens the framed extent
+    /// (an empty reef is still a landmark worth keeping in view); nothing
+    /// is drawn for it. `viewports` pairs an output's name with its
+    /// current camera rect; the entry matching `output_name` is drawn with
+    /// the style's accent as a "you are here" beacon, every other output's
+    /// plainer.
     pub fn build(
         output_name: String,
         output_size: (i32, i32),
         pointer_location: Point<f64, Logical>,
-        windows: &[(Rectangle<i32, Logical>, String)],
+        style: MinimapStyle,
+        windows: &[(Rectangle<i32, Logical>, String, bool)],
         reef_rects: &[Rectangle<i32, Logical>],
         viewports: &[(String, Rectangle<i32, Logical>)],
     ) -> Self {
@@ -116,7 +243,7 @@ impl MinimapPeek {
                 None => rect,
             });
         };
-        for (rect, _) in windows {
+        for (rect, _, _) in windows {
             grow(*rect);
         }
         for rect in reef_rects {
@@ -154,13 +281,24 @@ impl MinimapPeek {
         ));
 
         let mut pixels = vec![0u8; (width * height * 4) as usize];
-        fill_rect(
-            &mut pixels,
-            width,
-            height,
-            Rectangle::new(Point::from((0, 0)), Size::from((width, height))),
-            BG_RGBA,
-        );
+        if style.background_top == style.background_bottom {
+            fill_rect(
+                &mut pixels,
+                width,
+                height,
+                Rectangle::new(Point::from((0, 0)), Size::from((width, height))),
+                rgba_a(style.background_top, style.background_alpha),
+            );
+        } else {
+            fill_gradient(
+                &mut pixels,
+                width,
+                height,
+                style.background_top,
+                style.background_bottom,
+                style.background_alpha,
+            );
+        }
 
         let world_to_canvas = |rect: Rectangle<i32, Logical>| -> Rectangle<i32, Logical> {
             let rect = rect.to_f64();
@@ -176,27 +314,71 @@ impl MinimapPeek {
         };
 
         let font = crate::toast::font();
-        for (rect, title) in windows {
+        for (rect, title, urgent) in windows {
             let canvas_rect = world_to_canvas(*rect);
-            fill_rect(&mut pixels, width, height, canvas_rect, rgba(WINDOW_BG));
-            stroke_rect(
-                &mut pixels,
-                width,
-                height,
-                canvas_rect,
-                WINDOW_BORDER,
-                WINDOW_BORDER_PX,
-            );
+            let border = if *urgent {
+                style.accent
+            } else {
+                style.window_border
+            };
+            let rim = if *urgent {
+                Some(style.accent)
+            } else {
+                style.soft_rim
+            };
+            if style.radius > 0.0 || style.soft_rim.is_some() {
+                draw_rounded_box(
+                    &mut pixels,
+                    width,
+                    height,
+                    canvas_rect,
+                    Some((style.window_fill, 235)),
+                    (border, 235),
+                    style.radius,
+                    rim.map(|color| (color, 130)),
+                );
+            } else {
+                fill_rect(
+                    &mut pixels,
+                    width,
+                    height,
+                    canvas_rect,
+                    rgba(as_tuple(style.window_fill)),
+                );
+                stroke_rect(&mut pixels, width, height, canvas_rect, as_tuple(border), 1);
+            }
             draw_label(&mut pixels, width, height, font, title, canvas_rect);
         }
         for (name, rect) in viewports {
             let canvas_rect = world_to_canvas(*rect);
-            let (border, thickness) = if name == &output_name {
-                (VIEWPORT_ACTIVE_BORDER, VIEWPORT_BORDER_PX + 1)
+            let active = name == &output_name;
+            let border = if active {
+                style.accent
             } else {
-                (VIEWPORT_BORDER, VIEWPORT_BORDER_PX)
+                style.window_border
             };
-            stroke_rect(&mut pixels, width, height, canvas_rect, border, thickness);
+            let thickness = if active { 2 } else { 1 };
+            if style.radius > 0.0 {
+                draw_rounded_box(
+                    &mut pixels,
+                    width,
+                    height,
+                    canvas_rect,
+                    None,
+                    (border, 255),
+                    style.radius,
+                    active.then_some((style.accent, 170)),
+                );
+            } else {
+                stroke_rect(
+                    &mut pixels,
+                    width,
+                    height,
+                    canvas_rect,
+                    as_tuple(border),
+                    thickness,
+                );
+            }
             draw_label(&mut pixels, width, height, font, name, canvas_rect);
         }
 
@@ -252,12 +434,163 @@ impl MinimapPeek {
     }
 }
 
+fn as_tuple([r, g, b]: [u8; 3]) -> (u8, u8, u8) {
+    (r, g, b)
+}
+
+fn rgba_a([r, g, b]: [u8; 3], a: u8) -> (u8, u8, u8, u8) {
+    (r, g, b, a)
+}
+
+fn fill_gradient(
+    pixels: &mut [u8],
+    width: i32,
+    height: i32,
+    top: [u8; 3],
+    bottom: [u8; 3],
+    alpha: u8,
+) {
+    for y in 0..height {
+        let t = y as f32 / (height - 1).max(1) as f32;
+        let color = mix(top, bottom, t);
+        for x in 0..width {
+            put_pixel(pixels, width, x, y, rgba_a(color, alpha));
+        }
+    }
+}
+
+/// Rounded box with an optional fill, a rounded border ring, and an
+/// optional soft colored rim spread `RIM_SPREAD` px beyond its own edge --
+/// the same "coverage of an expanded rounded rect, fading a few px out"
+/// technique `toast.rs`'s card shadow uses, just tinted instead of black.
+/// `fill: None` draws the border/rim only (used for viewport outlines,
+/// which frame a screen region rather than represent a discrete object).
+#[allow(clippy::too_many_arguments)]
+fn draw_rounded_box(
+    pixels: &mut [u8],
+    canvas_w: i32,
+    canvas_h: i32,
+    rect: Rectangle<i32, Logical>,
+    fill: Option<([u8; 3], u8)>,
+    border: ([u8; 3], u8),
+    radius: f32,
+    rim: Option<([u8; 3], u8)>,
+) {
+    let (left, top, w, h) = (rect.loc.x, rect.loc.y, rect.size.w, rect.size.h);
+    let radius = radius.min(w as f32 / 2.0).min(h as f32 / 2.0).max(0.0);
+
+    if let Some((rim_color, rim_alpha)) = rim {
+        let x0 = (left - RIM_SPREAD).max(0);
+        let y0 = (top - RIM_SPREAD).max(0);
+        let x1 = (left + w + RIM_SPREAD).min(canvas_w);
+        let y1 = (top + h + RIM_SPREAD).min(canvas_h);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                // Inside the original box: the fill/border pass below
+                // covers it, so the rim contributes nothing there. This
+                // can't be "outer minus inner" coverage from the same
+                // corner-only SDF `rounded_rect_coverage_local` computes --
+                // along a *straight* edge (away from either rect's own
+                // corners) that function returns "fully inside" for both
+                // the inner and outer test, so the difference cancels to
+                // zero and the glow would only ever show up at corners.
+                let inside_original = x >= left && x < left + w && y >= top && y < top + h;
+                if inside_original {
+                    continue;
+                }
+                let outer = rounded_rect_coverage_local(
+                    x,
+                    y,
+                    left - RIM_SPREAD,
+                    top - RIM_SPREAD,
+                    w + RIM_SPREAD * 2,
+                    h + RIM_SPREAD * 2,
+                    radius + RIM_SPREAD as f32,
+                );
+                if outer > 0.0 {
+                    blend_pixel(
+                        pixels,
+                        canvas_w,
+                        x,
+                        y,
+                        rim_color,
+                        (outer * rim_alpha as f32) as u8,
+                    );
+                }
+            }
+        }
+    }
+
+    let x0 = left.max(0);
+    let y0 = top.max(0);
+    let x1 = (left + w).min(canvas_w);
+    let y1 = (top + h).min(canvas_h);
+    let (border_color, border_alpha) = border;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let coverage = rounded_rect_coverage_local(x, y, left, top, w, h, radius);
+            if coverage <= 0.0 {
+                continue;
+            }
+            if let Some((fill_color, fill_alpha)) = fill {
+                blend_pixel(
+                    pixels,
+                    canvas_w,
+                    x,
+                    y,
+                    fill_color,
+                    (coverage * fill_alpha as f32) as u8,
+                );
+            }
+            let inset = rounded_rect_coverage_local(
+                x,
+                y,
+                left + 1,
+                top + 1,
+                (w - 2).max(0),
+                (h - 2).max(0),
+                (radius - 1.0).max(0.0),
+            );
+            let ring = (coverage - inset).clamp(0.0, 1.0);
+            if ring > 0.0 {
+                blend_pixel(
+                    pixels,
+                    canvas_w,
+                    x,
+                    y,
+                    border_color,
+                    (ring * border_alpha as f32) as u8,
+                );
+            }
+        }
+    }
+}
+
+fn put_pixel(pixels: &mut [u8], width: i32, x: i32, y: i32, (r, g, b, a): (u8, u8, u8, u8)) {
+    let i = ((y * width + x) * 4) as usize;
+    // Fourcc::Argb8888 in memory (little-endian) is byte order B, G, R, A.
+    pixels[i] = b;
+    pixels[i + 1] = g;
+    pixels[i + 2] = r;
+    pixels[i + 3] = a;
+}
+
+fn blend_pixel(pixels: &mut [u8], width: i32, x: i32, y: i32, [r, g, b]: [u8; 3], a: u8) {
+    let i = ((y * width + x) * 4) as usize;
+    let t = a as f32 / 255.0;
+    for (channel, target) in [b, g, r].into_iter().enumerate() {
+        let bg = pixels[i + channel] as f32;
+        pixels[i + channel] = (bg + (target as f32 - bg) * t) as u8;
+    }
+    pixels[i + 3] = pixels[i + 3].max(a);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn build(
-        windows: &[(Rectangle<i32, Logical>, String)],
+        windows: &[(Rectangle<i32, Logical>, String, bool)],
         viewports: &[(String, Rectangle<i32, Logical>)],
         pointer: Point<f64, Logical>,
     ) -> MinimapPeek {
@@ -265,26 +598,25 @@ mod tests {
             "output-1".to_string(),
             (1920, 1080),
             pointer,
+            MinimapPreset::Bioluminescent.base_style(),
             windows,
             &[],
             viewports,
         )
     }
 
-    /// The core transform-correctness check: build a world with one known
-    /// window, click its drawn box's exact center, and the resolved world
-    /// point must land inside that window's real world rect. A scale or
-    /// offset mixup (forgetting padding, forgetting the letterbox term)
-    /// fails this immediately instead of only showing up as "clicks feel
-    /// slightly off" during manual testing.
     /// Click squarely on a single window with nothing else in the world:
     /// the resolved world point must fall inside that window's own rect.
+    /// This is the core transform-correctness check -- a scale or offset
+    /// mixup (forgetting padding, forgetting the letterbox term) fails it
+    /// immediately instead of only showing up as "clicks feel slightly
+    /// off" during manual testing.
     #[test]
     fn click_on_the_only_window_resolves_inside_it() {
         let window_rect =
             Rectangle::<i32, Logical>::new(Point::from((5000, -3000)), Size::from((1200, 800)));
         let mut peek = build(
-            &[(window_rect, "code".to_string())],
+            &[(window_rect, "code".to_string(), false)],
             &[],
             Point::from((0.0, 0.0)),
         );
@@ -339,5 +671,38 @@ mod tests {
         let peek = build(&[], &[], Point::from((0.0, 0.0)));
         assert!(peek.scale.is_finite() && peek.scale > 0.0);
         assert!(peek.world_origin.x.is_finite() && peek.world_origin.y.is_finite());
+    }
+
+    #[test]
+    fn preset_parses_known_names_and_rejects_unknown() {
+        assert_eq!(MinimapPreset::parse("plain"), Some(MinimapPreset::Plain));
+        assert_eq!(MinimapPreset::parse("flat"), Some(MinimapPreset::Plain));
+        assert_eq!(
+            MinimapPreset::parse("bioluminescent"),
+            Some(MinimapPreset::Bioluminescent)
+        );
+        assert_eq!(
+            MinimapPreset::parse("glow"),
+            Some(MinimapPreset::Bioluminescent)
+        );
+        assert_eq!(MinimapPreset::parse("glass"), Some(MinimapPreset::Glass));
+        assert_eq!(MinimapPreset::parse("frost"), Some(MinimapPreset::Glass));
+        assert_eq!(MinimapPreset::parse("nautical"), None);
+    }
+
+    #[test]
+    fn color_overrides_replace_only_their_own_fields() {
+        let base = MinimapPreset::Bioluminescent.base_style();
+        let overridden = MinimapStyle::resolve(
+            MinimapPreset::Bioluminescent,
+            None,
+            Some([1.0, 0.0, 0.0]),
+            None,
+        );
+        assert_eq!(overridden.window_fill, [255, 0, 0]);
+        // Everything else stays exactly as the preset's own default.
+        assert_eq!(overridden.background_top, base.background_top);
+        assert_eq!(overridden.accent, base.accent);
+        assert_eq!(overridden.radius, base.radius);
     }
 }

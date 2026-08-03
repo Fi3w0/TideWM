@@ -490,24 +490,43 @@ scaled to fit the screen. Click a window or region while still holding to
 travel that output's camera there and dismiss the peek; release without
 clicking just dismisses it, same place you started.
 
-Same dark-panel/labeled-box visual language as `toggle-overview`'s Classic
-schematic, built once per peek rather than every frame. Screen-pinned
-windows aren't drawn (a pin is glued to one output's screen space, not a
-world location, so it has nothing to show on a world map).
+Built once per peek rather than every frame. Screen-pinned windows aren't
+drawn (a pin is glued to one output's screen space, not a world location,
+so it has nothing to show on a world map). An urgent window highlights in
+the same accent color as the triggering output's own "you are here"
+viewport glow.
 
 Ocean-only. Unlike the compass, **not** gated by `water_effects` -- the
 minimap reads as navigation utility rather than a visual effect, so it
 stays available with water off.
 
+`preset` picks a visual baseline; `background_color`/`window_color`/
+`accent_color` still override individual colors on top of whichever preset
+is active, the same shape `compass`'s `shape` + `urgent_color`/`deep_color`
+already uses.
+
+- `plain` -- the original flat schematic: sharp corners, no glow, same
+  dark-panel/labeled-box language as `toggle-overview`'s Classic grid.
+- `bioluminescent` (default) -- deep-water gradient backdrop, rounded
+  glassy window boxes, and a cyan/teal glow rim, matching the compass's
+  own bioluminescent palette.
+- `glass` -- frosted, low-contrast rounded panels with a neutral drop
+  shadow instead of a colored glow, for a subtler look.
+
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | Master switch for the minimap under Ocean. |
 | `key` | chord string | `Super+Space` | Hold this chord to peek. A single modifier+key combo (no multi-key helper chords). |
+| `preset` | string | `bioluminescent` | Visual baseline: `plain`, `bioluminescent`, or `glass`. |
+| `background_color` | color, optional | preset default | Overrides the backdrop. `background` is an alias. |
+| `window_color` | color, optional | preset default | Overrides window box fill. `window` is an alias. |
+| `accent_color` | color, optional | preset default | Overrides the viewport-beacon/urgent-highlight/glow color, and the window border. `accent` is an alias. |
 
 ```wave
 minimap {
     enabled = true
     key = "Super+Space"
+    preset = bioluminescent
 }
 ```
 
