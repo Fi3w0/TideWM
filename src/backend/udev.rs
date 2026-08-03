@@ -1440,23 +1440,49 @@ fn render_surface(
     } else {
         state.depth_frame_elements(renderer, output, &placements)
     };
-    let (glass_elements, glass_surfaces) = if locked {
-        (Vec::new(), Vec::new())
+    #[allow(clippy::mutable_key_type)]
+    let (mut glass_layers, glass_surfaces) = if locked {
+        (HashMap::new(), Vec::new())
     } else {
         let surfaces = state.glass_eligible_surfaces(&placements);
-        let elements = state.glass_frame_elements(renderer, output, &placements, &surfaces);
-        (elements, surfaces)
+        let layers = state.glass_layer_elements(renderer, output, &placements, &surfaces);
+        (layers, surfaces)
     };
     let mut replaced_surfaces = depth_surfaces;
     // A shader compile failure produces no replacement elements. In that
     // case keep the real window in the ordinary walk rather than hiding it.
-    if !glass_elements.is_empty() {
+    if !glass_layers.is_empty() {
         replaced_surfaces.extend(glass_surfaces);
     }
+    // The canvas grid, caustics, and BelowWindows ripples all sit between
+    // windows and the wallpaper. They are passed INTO
+    // `desktop_render_elements` so they land *above* whatever wallpaper
+    // engine is attached -- awww/swww/swaybg/hyprpaper are layer-shell
+    // Background surfaces inside that walk, and anything spliced after it
+    // would render behind the wallpaper.
+    let ripple_layers = if locked {
+        Default::default()
+    } else {
+        state.ripple_frame_elements(renderer, output)
+    };
+    let ocean_canvas = state.ocean_canvas_frame_element(renderer, output);
+    let caustics = state.caustics_frame_element(renderer, output);
+    let backdrop: Vec<OutputRenderElements> = ocean_canvas
+        .into_iter()
+        .chain(caustics)
+        .chain(ripple_layers.below_windows)
+        .collect();
     let space_elements = if locked {
         Vec::new()
     } else {
-        state.desktop_render_elements(renderer, output, &placements, &replaced_surfaces)?
+        state.desktop_render_elements(
+            renderer,
+            output,
+            &placements,
+            &replaced_surfaces,
+            &mut glass_layers,
+            backdrop,
+        )?
     };
 
     let lock_elements = if locked {
@@ -1483,11 +1509,8 @@ fn render_surface(
         state.wallpaper_element(output, renderer)
     };
 
-    let ripple_layers = state.ripple_frame_elements(renderer, output);
     let workspace_transition = state.workspace_transition_frame_element(renderer, output);
     let depth_transition = state.depth_transition_frame_element(renderer, output);
-    let ocean_canvas = state.ocean_canvas_frame_element(renderer, output);
-    let caustics = state.caustics_frame_element(renderer, output);
     let compass_elements = state.compass_frame_elements(renderer, output);
     let closing_windows = state.closing_window_frame_elements(renderer, output);
     let mut elements: Vec<OutputRenderElements> = ripple_layers.above_all;
@@ -1515,11 +1538,7 @@ fn render_surface(
     elements.extend(workspace_transition);
     elements.extend(closing_windows);
     elements.extend(depth_elements);
-    elements.extend(glass_elements);
     elements.extend(space_elements);
-    elements.extend(ripple_layers.below_windows);
-    elements.extend(ocean_canvas);
-    elements.extend(caustics);
     elements.extend(wallpaper_element.map(OutputRenderElements::Composited));
     elements.extend(lock_elements.into_iter().map(OutputRenderElements::Lock));
     elements.extend(ripple_layers.below_all);

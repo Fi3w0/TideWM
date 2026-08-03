@@ -321,7 +321,8 @@ pub fn init_winit(
                             }
                         };
                         let glass_surfaces = state.glass_eligible_surfaces(&placements);
-                        let glass_elements = state.glass_frame_elements(
+                        #[allow(clippy::mutable_key_type)]
+                        let mut glass_layers = state.glass_layer_elements(
                             renderer,
                             &entry.output,
                             &placements,
@@ -332,19 +333,47 @@ pub fn init_winit(
                         // Only skip from the normal walk what actually got a
                         // replacement element built -- a shader-compile
                         // failure or missing output geometry makes
-                        // glass_frame_elements return empty, and
+                        // glass_layer_elements return empty, and
                         // skipping windows the empty result won't draw would
                         // make them vanish from the frame entirely rather
                         // than just losing the effect.
                         let mut skip = depth_surfaces;
-                        if !glass_elements.is_empty() {
+                        if !glass_layers.is_empty() {
                             skip.extend(glass_surfaces.iter().cloned());
                         }
+                        // Ripple layers are grouped by `RippleLayer` so
+                        // each backend can splice them at the right z
+                        // position in the front-to-back list: AboveAll
+                        // at the very front, AboveWindows between chrome
+                        // and windows, BelowWindows between windows and
+                        // wallpaper, BelowAll at the very back. Built as
+                        // a Vec directly rather than `.chain()`ed because
+                        // four distinct insertion points don't fit the
+                        // chain's single-insertion-point shape.
+                        let ripple_layers = state.ripple_frame_elements(renderer, &entry.output);
+                        // The canvas grid, caustics, and BelowWindows ripples
+                        // all sit between windows and the wallpaper. They are
+                        // passed INTO `desktop_render_elements` so they land
+                        // *above* whatever wallpaper engine is attached --
+                        // awww/swww/swaybg/hyprpaper are layer-shell
+                        // Background surfaces inside that walk, and anything
+                        // spliced after it would render behind the wallpaper.
+                        let ocean_canvas =
+                            state.ocean_canvas_frame_element(renderer, &entry.output);
+                        let caustics = state.caustics_frame_element(renderer, &entry.output);
+                        let backdrop: Vec<crate::backend::udev::OutputRenderElements> =
+                            ocean_canvas
+                                .into_iter()
+                                .chain(caustics)
+                                .chain(ripple_layers.below_windows)
+                                .collect();
                         let space_elements = match state.desktop_render_elements(
                             renderer,
                             &entry.output,
                             &placements,
                             &skip,
+                            &mut glass_layers,
+                            backdrop,
                         ) {
                             Some(elements) => elements,
                             None => {
@@ -362,14 +391,10 @@ pub fn init_winit(
                         // a Vec directly rather than `.chain()`ed because
                         // four distinct insertion points don't fit the
                         // chain's single-insertion-point shape.
-                        let ripple_layers = state.ripple_frame_elements(renderer, &entry.output);
                         let workspace_transition =
                             state.workspace_transition_frame_element(renderer, &entry.output);
                         let depth_transition =
                             state.depth_transition_frame_element(renderer, &entry.output);
-                        let ocean_canvas =
-                            state.ocean_canvas_frame_element(renderer, &entry.output);
-                        let caustics = state.caustics_frame_element(renderer, &entry.output);
                         let compass_elements =
                             state.compass_frame_elements(renderer, &entry.output);
                         let closing_windows =
@@ -394,11 +419,7 @@ pub fn init_winit(
                         elements.extend(workspace_transition);
                         elements.extend(closing_windows);
                         elements.extend(depth_elements);
-                        elements.extend(glass_elements);
                         elements.extend(space_elements);
-                        elements.extend(ripple_layers.below_windows);
-                        elements.extend(ocean_canvas);
-                        elements.extend(caustics);
                         elements.extend(
                             wallpaper_element
                                 .map(crate::backend::udev::OutputRenderElements::Composited),

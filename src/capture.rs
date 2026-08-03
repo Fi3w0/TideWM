@@ -575,26 +575,42 @@ impl Smallvil {
             // Ripple layers are respected just like the visible-frame
             // loops: AboveAll frontmost, then chrome-less AboveWindows,
             // then windows, then BelowWindows/wallpaper, then BelowAll.
-            let ripple_layers = self.ripple_frame_elements(renderer, &output);
             let workspace_transition = self.workspace_transition_frame_element(renderer, &output);
             let depth_transition = self.depth_transition_frame_element(renderer, &output);
-            let ocean_canvas = self.ocean_canvas_frame_element(renderer, &output);
-            let caustics = self.caustics_frame_element(renderer, &output);
             let closing_windows = self.closing_window_frame_elements(renderer, &output);
             let Some(placements) = self.render_placements(&output) else {
                 fail!(completion, CaptureFailureReason::Unknown);
                 return;
             };
             let glass_surfaces = self.glass_eligible_surfaces(&placements);
-            let glass_elements =
-                self.glass_frame_elements(renderer, &output, &placements, &glass_surfaces);
+            #[allow(clippy::mutable_key_type)]
+            let mut glass_layers =
+                self.glass_layer_elements(renderer, &output, &placements, &glass_surfaces);
             let (depth_elements, depth_surfaces) =
                 self.depth_frame_elements(renderer, &output, &placements);
             let mut skip = depth_surfaces;
-            if !glass_elements.is_empty() {
+            if !glass_layers.is_empty() {
                 skip.extend(glass_surfaces.iter().cloned());
             }
-            match self.desktop_render_elements(renderer, &output, &placements, &skip) {
+            // The canvas grid, caustics, and BelowWindows ripples all sit
+            // between windows and the wallpaper, passed INTO the walk so a
+            // layer-shell wallpaper engine can't cover them.
+            let ripple_layers = self.ripple_frame_elements(renderer, &output);
+            let ocean_canvas = self.ocean_canvas_frame_element(renderer, &output);
+            let caustics = self.caustics_frame_element(renderer, &output);
+            let backdrop: Vec<OutputRenderElements> = ocean_canvas
+                .into_iter()
+                .chain(caustics)
+                .chain(ripple_layers.below_windows)
+                .collect();
+            match self.desktop_render_elements(
+                renderer,
+                &output,
+                &placements,
+                &skip,
+                &mut glass_layers,
+                backdrop,
+            ) {
                 Some(space_elements) => {
                     elements.extend(ripple_layers.above_all);
                     elements.extend(depth_transition);
@@ -602,11 +618,7 @@ impl Smallvil {
                     elements.extend(workspace_transition);
                     elements.extend(closing_windows);
                     elements.extend(depth_elements);
-                    elements.extend(glass_elements);
                     elements.extend(space_elements);
-                    elements.extend(ripple_layers.below_windows);
-                    elements.extend(ocean_canvas);
-                    elements.extend(caustics);
                     if let Some(wallpaper) = self.wallpaper_element(&output, renderer) {
                         elements.push(OutputRenderElements::Composited(wallpaper));
                     }

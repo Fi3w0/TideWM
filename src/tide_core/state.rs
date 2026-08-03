@@ -1651,12 +1651,15 @@ impl Smallvil {
         }
     }
 
+    #[allow(clippy::mutable_key_type)] // WlSurface-keyed glass layer map
     pub(crate) fn desktop_render_elements(
         &mut self,
         renderer: &mut GlesRenderer,
         output: &Output,
         placements: &[crate::placement::PlacedWindow],
         skip: &[WlSurface],
+        glass_layers: &mut HashMap<WlSurface, Vec<crate::backend::udev::OutputRenderElements>>,
+        backdrop: Vec<crate::backend::udev::OutputRenderElements>,
     ) -> Option<Vec<crate::backend::udev::OutputRenderElements>> {
         self.space.output_geometry(output)?;
         let mut result = Vec::new();
@@ -1677,7 +1680,7 @@ impl Smallvil {
             .borders_possible()
             .then(|| crate::decoration::border_program(&mut self.border_program, renderer))
             .flatten();
-        #[allow(clippy::too_many_arguments)]
+        #[allow(clippy::too_many_arguments, clippy::mutable_key_type)]
         fn append_windows(
             state: &mut Smallvil,
             renderer: &mut GlesRenderer,
@@ -1688,6 +1691,7 @@ impl Smallvil {
             rounded_program: Option<&GlesTexProgram>,
             border_program: Option<&GlesPixelProgram>,
             placements: &[crate::placement::PlacedWindow],
+            glass_layers: &mut HashMap<WlSurface, Vec<crate::backend::udev::OutputRenderElements>>,
             result: &mut Vec<crate::backend::udev::OutputRenderElements>,
         ) {
             let Some(output_geo) = state.space.output_geometry(output) else {
@@ -1765,6 +1769,14 @@ impl Smallvil {
                             .map(crate::backend::udev::OutputRenderElements::Space),
                     );
                 }
+                // The glass layer sits directly behind its own window's
+                // surface, in the window's real z-slot -- not hoisted above
+                // everything. Front-to-back (index 0 topmost): surface,
+                // then glass, then shadow. Skipped windows (depth-replaced)
+                // have no glass layer here; their replacement pass owns them.
+                if let Some(layers) = surface.and_then(|s| glass_layers.remove(s)) {
+                    result.extend(layers);
+                }
                 if let (Some(surface), Some(program)) = (surface, shadow_program) {
                     if let Some(shadow) =
                         state.window_shadow_element(output, entry, surface, program.clone(), visual)
@@ -1819,6 +1831,7 @@ impl Smallvil {
             rounded_program.as_ref(),
             border_program.as_ref(),
             placements,
+            &mut *glass_layers,
             &mut result,
         );
         append_layers(
@@ -1838,8 +1851,16 @@ impl Smallvil {
             rounded_program.as_ref(),
             border_program.as_ref(),
             placements,
+            &mut *glass_layers,
             &mut result,
         );
+        // The canvas grid and caustics sit between windows and the
+        // layer-shell wallpaper: awww/swaybg attach at the Background layer
+        // inside the layer map, so they must be pushed BEFORE that layer
+        // here (front-to-back, index 0 topmost) or the wallpaper would
+        // cover them -- exactly what happened when these were spliced after
+        // `space_elements` by the backends.
+        result.extend(backdrop);
         append_layers(
             self,
             renderer,
@@ -4879,14 +4900,23 @@ impl Smallvil {
                 output,
                 &placements,
                 std::slice::from_ref(&surface),
+                &mut HashMap::new(),
+                Vec::new(),
             ) else {
                 continue;
             };
-            let behind: Vec<crate::backend::udev::OutputRenderElements> = self
-                .wallpaper_element(output, renderer)
-                .map(crate::backend::udev::OutputRenderElements::Composited)
+            // Front-to-back, index 0 topmost: the windows come first and the
+            // wallpaper goes last, the same order the visible frame uses.
+            // Pushing the wallpaper first put it *on top of* every window in
+            // the captured texture -- the glass then sampled a texture that
+            // was nothing but wallpaper, which read as "the aqua wave only
+            // shows the background and ignores everything else."
+            let behind: Vec<crate::backend::udev::OutputRenderElements> = space_elements
                 .into_iter()
-                .chain(space_elements)
+                .chain(
+                    self.wallpaper_element(output, renderer)
+                        .map(crate::backend::udev::OutputRenderElements::Composited),
+                )
                 .collect();
 
             let reusable = self
@@ -4958,25 +4988,27 @@ impl Smallvil {
     }
 
     /// Builds, for each of `surfaces` (from `glass_eligible_surfaces`),
-    /// the window's own surface element immediately followed by its
-    /// selected glass layer -- in that order so the window's real (semi-
-    /// transparent) content draws on top of the treated backdrop. Meant to
-    /// be prepended ahead of the rest of
-    /// `desktop_render_elements`'s output (called with the same `surfaces`
-    /// as `skip`), which puts every eligible window topmost among windows;
-    /// see `water_glass.rs`'s module doc comment for why plain layering
-    /// (not real multi-window z-order) is the deliberate scope for this
-    /// first cut. Lazily compiles the shader on first call.
-    pub(crate) fn glass_frame_elements(
+    /// *only* the glass layer (water/frost element sampling the captured
+    /// backdrop). The window's own surface, popups, and border are NOT built
+    /// here anymore -- `desktop_render_elements` renders them in the
+    /// window's real z-slot and inserts each glass layer directly behind its
+    /// own window, so a glass window sits among windows and under chrome
+    /// like any other window, instead of being hoisted above everything
+    /// (which put the glass over layer-shell bars, the old behavior).
+    /// Returns a map keyed by surface so the walk can match layers to
+    /// windows. Lazily compiles the shaders on first call.
+    #[allow(clippy::mutable_key_type)] // WlSurface keys, same as every other map here
+    pub(crate) fn glass_layer_elements(
         &mut self,
         renderer: &mut GlesRenderer,
         output: &Output,
         placements: &[crate::placement::PlacedWindow],
         surfaces: &[WlSurface],
-    ) -> Vec<crate::backend::udev::OutputRenderElements> {
-        let mut result = Vec::new();
+    ) -> HashMap<WlSurface, Vec<crate::backend::udev::OutputRenderElements>> {
+        let mut layers: HashMap<WlSurface, Vec<crate::backend::udev::OutputRenderElements>> =
+            HashMap::new();
         if surfaces.is_empty() {
-            return result;
+            return layers;
         }
         let needs_water = surfaces.iter().any(|surface| {
             self.window_glass_modes
@@ -4996,25 +5028,8 @@ impl Smallvil {
                 crate::frost_glass::frost_glass_program(&mut self.frost_glass_program, renderer)
             })
             .flatten();
-        let shadow_program = self
-            .shadows_possible()
-            .then(|| crate::shadow::shadow_program(&mut self.shadow_program, renderer))
-            .flatten();
-        let rounded_program = self
-            .rounding_possible()
-            .then(|| {
-                crate::decoration::rounded_surface_program(
-                    &mut self.rounded_surface_program,
-                    renderer,
-                )
-            })
-            .flatten();
-        let border_program = self
-            .borders_possible()
-            .then(|| crate::decoration::border_program(&mut self.border_program, renderer))
-            .flatten();
         let Some(output_geo) = self.space.output_geometry(output) else {
-            return result;
+            return layers;
         };
         for surface in surfaces {
             let Some((capture_id, capture_commit, capture_texture)) = self
@@ -5033,40 +5048,8 @@ impl Smallvil {
             let Some(physical_rect) = self.placement_physical_rect(placement, output) else {
                 continue;
             };
-            let window = placement.window.clone();
             let location = placement.rect.loc;
             let visual = self.placement_visual_sample(placement);
-            let visual_offset: Point<i32, Logical> = Point::from((
-                visual.offset.x.round() as i32,
-                visual.offset.y.round() as i32,
-            ));
-            let visual_size = visual.rounded_size_or(window.geometry().size);
-            let alpha = self.window_render_alpha_for(surface, placement.is_fullscreen())
-                * self.depth_live_alpha(surface)
-                * visual.opacity;
-            let render_location = location - output_geo.loc - window.geometry().loc + visual_offset;
-
-            let (popups, main) = self.window_surface_elements(
-                renderer,
-                output,
-                &window,
-                surface,
-                render_location,
-                visual_size,
-                alpha,
-                rounded_program.clone(),
-                placement.is_floating(),
-                placement.is_fullscreen(),
-            );
-            result.extend(popups);
-            if let Some(program) = &border_program {
-                if let Some(border) =
-                    self.window_border_element(output, placement, surface, program.clone(), visual)
-                {
-                    result.push(crate::backend::udev::OutputRenderElements::Border(border));
-                }
-            }
-            result.extend(main);
             match self.window_glass_modes.get(surface).copied() {
                 Some(crate::config::GlassMode::Frost) => {
                     if let Some(program) = &frost_program {
@@ -5087,19 +5070,21 @@ impl Smallvil {
                                 frost.corner_softness * output_scale,
                             )
                         };
-                        result.push(crate::backend::udev::OutputRenderElements::FrostGlass(
-                            crate::frost_glass::FrostGlassElement::new(
-                                capture_id.clone(),
-                                capture_commit,
-                                capture_texture.clone(),
-                                physical_rect,
-                                program.clone(),
-                                frost,
-                                corner_radii,
-                                rounding_power,
-                                corner_softness,
+                        layers.entry(surface.clone()).or_default().push(
+                            crate::backend::udev::OutputRenderElements::FrostGlass(
+                                crate::frost_glass::FrostGlassElement::new(
+                                    capture_id.clone(),
+                                    capture_commit,
+                                    capture_texture.clone(),
+                                    physical_rect,
+                                    program.clone(),
+                                    frost,
+                                    corner_radii,
+                                    rounding_power,
+                                    corner_softness,
+                                ),
                             ),
-                        ));
+                        );
                     }
                 }
                 Some(crate::config::GlassMode::Plain) => {}
@@ -5154,38 +5139,29 @@ impl Smallvil {
                                 (anim.phase(anim_cfg.speed), anim_cfg.amplitude * envelope)
                             }
                         };
-                        result.push(crate::backend::udev::OutputRenderElements::WaterGlass(
-                            crate::water_glass::WaterGlassElement::new(
-                                capture_id.clone(),
-                                capture_commit,
-                                capture_texture.clone(),
-                                physical_rect,
-                                program.clone(),
-                                corner_radii,
-                                rounding.power,
-                                rounding.antialias
-                                    * output.current_scale().fractional_scale() as f32,
-                                visual.opacity,
-                                phase,
-                                amp,
+                        layers.entry(surface.clone()).or_default().push(
+                            crate::backend::udev::OutputRenderElements::WaterGlass(
+                                crate::water_glass::WaterGlassElement::new(
+                                    capture_id.clone(),
+                                    capture_commit,
+                                    capture_texture.clone(),
+                                    physical_rect,
+                                    program.clone(),
+                                    corner_radii,
+                                    rounding.power,
+                                    rounding.antialias
+                                        * output.current_scale().fractional_scale() as f32,
+                                    visual.opacity,
+                                    phase,
+                                    amp,
+                                ),
                             ),
-                        ));
+                        );
                     }
                 }
             }
-            // Front-to-back ordering: the real client surface is first,
-            // then its sampled glass backdrop, then the shadow immediately
-            // behind both. This keeps translucent text/content above the
-            // glass and prevents the shadow from becoming a full-window tint.
-            if let Some(program) = &shadow_program {
-                if let Some(shadow) =
-                    self.window_shadow_element(output, placement, surface, program.clone(), visual)
-                {
-                    result.push(crate::backend::udev::OutputRenderElements::Shadow(shadow));
-                }
-            }
         }
-        result
+        layers
     }
 
     fn capture_workspace_desktop(
@@ -5196,20 +5172,35 @@ impl Smallvil {
     ) -> Option<GlesTexture> {
         let placements = self.render_placements(output)?;
         let glass_surfaces = self.glass_eligible_surfaces(&placements);
-        let glass_elements =
-            self.glass_frame_elements(renderer, output, &placements, &glass_surfaces);
+        #[allow(clippy::mutable_key_type)]
+        let mut glass_layers =
+            self.glass_layer_elements(renderer, output, &placements, &glass_surfaces);
         let (depth_elements, depth_surfaces) =
             self.depth_frame_elements(renderer, output, &placements);
         let mut skip = depth_surfaces;
-        if !glass_elements.is_empty() {
+        if !glass_layers.is_empty() {
             skip.extend(glass_surfaces.iter().cloned());
         }
-        let space_elements = self.desktop_render_elements(renderer, output, &placements, &skip)?;
+        // The canvas grid, caustics, and BelowWindows ripples ride inside
+        // the walk so a layer-shell wallpaper engine can't cover them.
+        let ocean_canvas = self.ocean_canvas_frame_element(renderer, output);
+        let caustics = self.caustics_frame_element(renderer, output);
+        let backdrop: Vec<crate::backend::udev::OutputRenderElements> = ocean_canvas
+            .into_iter()
+            .chain(caustics)
+            .collect();
+        let space_elements = self.desktop_render_elements(
+            renderer,
+            output,
+            &placements,
+            &skip,
+            &mut glass_layers,
+            backdrop,
+        )?;
         let closing_windows = self.closing_window_frame_elements(renderer, output);
         let elements: Vec<crate::backend::udev::OutputRenderElements> = closing_windows
             .into_iter()
             .chain(depth_elements)
-            .chain(glass_elements)
             .chain(space_elements)
             .chain(
                 self.wallpaper_element(output, renderer)
