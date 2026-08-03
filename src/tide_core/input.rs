@@ -645,6 +645,7 @@ impl Smallvil {
             InputEvent::DeviceAdded { .. } | InputEvent::DeviceRemoved { .. }
         ) {
             self.idle_notifier_state.notify_activity(&self.seat);
+            self.last_activity = std::time::Instant::now();
         }
 
         match event {

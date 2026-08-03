@@ -1967,7 +1967,7 @@ impl Default for FrostConfig {
 /// (damage, an active animation elsewhere); a non-zero value opts into
 /// constant motion at roughly that frame rate, keeping the wallpaper
 /// "breathing" at the cost of a steady redraw.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CausticsConfig {
     pub enabled: bool,
     /// Peak alpha contribution, 0..1.
@@ -1981,6 +1981,13 @@ pub struct CausticsConfig {
     /// Constant-motion frame rate, 0 for damage-piggyback. Clamped to a
     /// small range at parse time.
     pub fps: u32,
+    /// Idle-decay frame rates: after `idle_after_ms[i]` milliseconds of no
+    /// input activity, the effective frame rate drops to `idle_fps[i]`.
+    /// Both lists are parallel, ascending in time, and empty means no
+    /// decay (the current behavior). Defaults: 30fps after 5 minutes,
+    /// 15fps after 10, 10fps after 30.
+    pub idle_fps: Vec<u32>,
+    pub idle_after_ms: Vec<u64>,
 }
 
 impl Default for CausticsConfig {
@@ -1992,6 +1999,8 @@ impl Default for CausticsConfig {
             scale: 1.0,
             speed: 1.0,
             fps: 0,
+            idle_fps: vec![30, 15, 10],
+            idle_after_ms: vec![300_000, 600_000, 1_800_000],
         }
     }
 }
@@ -4177,6 +4186,24 @@ fn apply_water_glass_block(cfg: &mut WaterGlassConfig, body: &[waves::Entry]) {
     }
 }
 
+/// Parses a space-separated list of non-negative integers. `None` when any
+/// token fails to parse. Used by the caustics idle-decay tiers.
+fn parse_u32_list(value: &str) -> Option<Vec<u32>> {
+    let list: Vec<u32> = value
+        .split_whitespace()
+        .map(|token| token.parse::<u32>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    (!list.is_empty()).then_some(list)
+}
+
+fn parse_u64_list(value: &str) -> Option<Vec<u64>> {
+    let list: Vec<u64> = value
+        .split_whitespace()
+        .map(|token| token.parse::<u64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    (!list.is_empty()).then_some(list)
+}
+
 fn apply_caustics_block(cfg: &mut CausticsConfig, body: &[waves::Entry]) {
     for entry in body {
         let waves::Entry::Assign(key, value) = entry else {
@@ -4207,6 +4234,20 @@ fn apply_caustics_block(cfg: &mut CausticsConfig, body: &[waves::Entry]) {
             "fps" => match value.parse::<u32>() {
                 Ok(value) => cfg.fps = value.clamp(0, 60),
                 _ => tracing::warn!(value, "Expected caustics.fps from 0 to 60, ignoring"),
+            },
+            "idle_fps" => match parse_u32_list(value) {
+                Some(list) => cfg.idle_fps = list,
+                None => tracing::warn!(
+                    value,
+                    "Expected space-separated integers for caustics.idle_fps, ignoring"
+                ),
+            },
+            "idle_after_ms" => match parse_u64_list(value) {
+                Some(list) => cfg.idle_after_ms = list,
+                None => tracing::warn!(
+                    value,
+                    "Expected space-separated integers for caustics.idle_after_ms, ignoring"
+                ),
             },
             other => tracing::warn!(key = %other, "Unknown key in `caustics` block, ignoring"),
         }
@@ -6715,6 +6756,10 @@ classic_depth {
 #     scale = 1.0                    # pattern size, 0.1 to 8
 #     speed = 1.0                    # drift speed, 0 to 8
 #     fps = 0                        # 0 piggybacks, else 1 to 60
+#     # Idle decay: after idle_after_ms[i] of no input, drop to idle_fps[i].
+#     # Parallel ascending lists; empty lists disable the decay.
+#     idle_fps = 30 15 10
+#     idle_after_ms = 300000 600000 1800000
 # }
 
 # Analytical drop shadows (Phase R2). These are independent of
@@ -7870,6 +7915,8 @@ mod tests {
              scale = 0\n\
              speed = -2\n\
              fps = 999\n\
+             idle_fps = 20 10\n\
+             idle_after_ms = 600000 1200000\n\
              }\n",
             Path::new("<caustics-test>"),
         )
@@ -7881,10 +7928,14 @@ mod tests {
         assert_eq!(config.caustics.scale, 0.1);
         assert_eq!(config.caustics.speed, 0.0);
         assert_eq!(config.caustics.fps, 60);
+        assert_eq!(config.caustics.idle_fps, vec![20, 10]);
+        assert_eq!(config.caustics.idle_after_ms, vec![600000, 1200000]);
 
         let defaults = parse_default_config().caustics;
         assert!(!defaults.enabled);
         assert_eq!(defaults, CausticsConfig::default());
+        assert_eq!(defaults.idle_fps, vec![30, 15, 10]);
+        assert_eq!(defaults.idle_after_ms, vec![300000, 600000, 1800000]);
     }
 
     #[test]

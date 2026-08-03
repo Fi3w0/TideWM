@@ -219,6 +219,14 @@ pub struct Smallvil {
     /// (`backend/udev.rs`) -- authoritative regardless of why a given
     /// render happened to run.
     pub(crate) last_pointer_motion: Instant,
+    /// Timestamp of the last real input activity (any keyboard/pointer/
+    /// touch event reaching `process_input_event`). Drives the caustics
+    /// idle-decay tiers: after `caustics.idle_after_ms[i]` of no input, the
+    /// effective frame rate drops to `caustics.idle_fps[i]`, so an idle
+    /// desktop's always-on overlay winds down over minutes instead of
+    /// burning frames at full rate forever. Pointer motion alone is not
+    /// enough -- keys and touch must reset it too.
+    pub(crate) last_activity: Instant,
     /// Whether a `cursor_hide_after_ms` wake-up timer is currently pending.
     /// `note_pointer_motion` only arms a new timer when this is `false`,
     /// rather than spawning a fresh calloop source on every single motion
@@ -2572,6 +2580,7 @@ impl Smallvil {
             last_config_event: Instant::now() - Duration::from_secs(1),
             config_reload_timer_armed: false,
             last_pointer_motion: Instant::now(),
+            last_activity: Instant::now(),
             cursor_idle_timer_armed: false,
             needs_redraw: true,
             active_submap: None,
@@ -5674,13 +5683,34 @@ impl Smallvil {
     /// whole point of leaving it at zero. Honors the configured rate by
     /// gating on the time since the last advance, so a `fps = 15` value
     /// doesn't actually redraw at the display's full refresh.
+    /// The frame rate the caustics overlay should currently run at:
+    /// `caustics.fps` when the user is active, stepping down through the
+    /// configured idle tiers as minutes pass without input. Empty tier
+    /// lists (or a short list) leave the rate at `fps` for the remaining
+    /// idle time. Both lists are parallel and ascending in time.
+    fn caustics_effective_fps(&self) -> u32 {
+        let cfg = &self.config.caustics;
+        let mut fps = cfg.fps;
+        if cfg.idle_fps.is_empty() || cfg.idle_after_ms.is_empty() {
+            return fps;
+        }
+        let idle_ms = self.last_activity.elapsed().as_millis() as u64;
+        for (after_ms, tier_fps) in cfg.idle_after_ms.iter().zip(&cfg.idle_fps) {
+            if idle_ms >= *after_ms {
+                fps = (*tier_fps).min(fps);
+            }
+        }
+        fps.max(1)
+    }
+
     fn caustics_active(&self) -> bool {
         let cfg = &self.config.caustics;
         if !self.config.water_effects || !cfg.enabled || cfg.fps == 0 {
             return false;
         }
+        let fps = self.caustics_effective_fps();
         self.caustics_last_advance.elapsed()
-            >= Duration::from_secs_f32(1.0 / cfg.fps.max(1) as f32)
+            >= Duration::from_secs_f32(1.0 / fps.max(1) as f32)
     }
 
     /// Off-screen urgent/deep compass cues for the Ocean engine (spatial
