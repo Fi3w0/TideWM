@@ -178,6 +178,48 @@ impl Default for SwayConfig {
     }
 }
 
+/// How the water-glass refraction distortion moves over time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlassAnimation {
+    /// The original fixed distortion: no time uniform, never ticks frames
+    /// on its own.
+    Static,
+    /// The distortion is energized by disturbances -- the window moving,
+    /// the backdrop behind it changing, a ripple passing underneath -- and
+    /// settles back to still over `settle_ms`. An idle desktop with glass
+    /// windows visible still ticks zero frames.
+    Reactive,
+    /// A constant slow drift, whether anything is moving or not. Ticks
+    /// frames for as long as a water-glass window is visible, by design.
+    Ambient,
+}
+
+/// Water-glass motion tuning (`water_glass { }`). The glass layer itself
+/// is selected per window by the `glass` rule (or the legacy
+/// `opacity < 1` trigger); this block only controls how the refraction
+/// animates once selected. `water_effects` remains the master bypass.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WaterGlassConfig {
+    pub animation: GlassAnimation,
+    /// Phase drift speed multiplier. `1.0` is the default rate.
+    pub speed: f32,
+    /// Distortion strength multiplier on the shader's built-in UV offset.
+    pub amplitude: f32,
+    /// Reactive-mode settle time after the last disturbance, milliseconds.
+    pub settle_ms: u32,
+}
+
+impl Default for WaterGlassConfig {
+    fn default() -> Self {
+        Self {
+            animation: GlassAnimation::Reactive,
+            speed: 1.0,
+            amplitude: 1.0,
+            settle_ms: 1200,
+        }
+    }
+}
+
 /// Continuous lateral "swim" between workspaces (spatial roadmap S0).
 /// Instead of the discrete one-shot switch (and its wave transition), a
 /// horizontal trackpad swipe pans the viewport continuously: neighboring
@@ -695,6 +737,9 @@ pub struct Config {
     /// `glass = frost` in its rule; water remains the compatibility default
     /// for translucent floating windows with no explicit glass choice.
     pub frost: FrostConfig,
+    /// Water-glass refraction motion: static, disturbance-reactive
+    /// (default), or constant ambient drift.
+    pub water_glass: WaterGlassConfig,
     /// Analytical window shadows. Independent of `water_effects`: shadows
     /// are general compositor decoration, while the water master toggle
     /// only gates TideWM's water/glass/depth identity effects.
@@ -975,6 +1020,7 @@ impl Config {
             depth: raw.depth,
             classic_depth: raw.classic_depth,
             frost: raw.frost,
+            water_glass: raw.water_glass,
             shadow: raw.shadow,
             rounding: raw.rounding,
             border: raw.border,
@@ -1204,6 +1250,7 @@ struct RawConfig {
     depth: DepthConfig,
     classic_depth: ClassicDepthConfig,
     frost: FrostConfig,
+    water_glass: WaterGlassConfig,
     shadow: ShadowConfig,
     rounding: RoundingConfig,
     border: BorderConfig,
@@ -1367,6 +1414,7 @@ impl Default for RawConfig {
             depth: DepthConfig::default(),
             classic_depth: ClassicDepthConfig::default(),
             frost: FrostConfig::default(),
+            water_glass: WaterGlassConfig::default(),
             shadow: ShadowConfig::default(),
             rounding: RoundingConfig::default(),
             border: BorderConfig::default(),
@@ -3278,6 +3326,9 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "depth" => apply_depth_block(&mut raw.depth, body),
         "classic_depth" | "depth_deck" => apply_classic_depth_block(&mut raw.classic_depth, body),
         "frost" => apply_frost_block(&mut raw.frost, body),
+        "water_glass" | "water_glass_animation" => {
+            apply_water_glass_block(&mut raw.water_glass, body)
+        }
         "shadow" => apply_shadow_block(&mut raw.shadow, body),
         "rounding" | "corners" => apply_rounding_block(&mut raw.rounding, body),
         "border" => apply_border_block(&mut raw.border, body),
@@ -3914,6 +3965,51 @@ fn apply_sway_block(cfg: &mut SwayConfig, body: &[waves::Entry]) {
                 _ => tracing::warn!(value, "Expected sway.damping from 0.1 to 20, ignoring"),
             },
             other => tracing::warn!(key = %other, "Unknown key in `sway` block, ignoring"),
+        }
+    }
+}
+
+fn parse_glass_animation(value: &str) -> Option<GlassAnimation> {
+    match value.trim().to_lowercase().as_str() {
+        "static" | "off" | "none" => Some(GlassAnimation::Static),
+        "reactive" | "disturbed" => Some(GlassAnimation::Reactive),
+        "ambient" | "always" | "drift" => Some(GlassAnimation::Ambient),
+        _ => None,
+    }
+}
+
+fn apply_water_glass_block(cfg: &mut WaterGlassConfig, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `water_glass` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "animation" | "mode" => match parse_glass_animation(value) {
+                Some(animation) => cfg.animation = animation,
+                None => tracing::warn!(
+                    value,
+                    "Expected static, reactive, or ambient for water_glass.animation, ignoring"
+                ),
+            },
+            "speed" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.speed = value.clamp(0.0, 8.0),
+                _ => tracing::warn!(value, "Expected water_glass.speed from 0 to 8, ignoring"),
+            },
+            "amplitude" | "strength" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.amplitude = value.clamp(0.0, 4.0),
+                _ => {
+                    tracing::warn!(value, "Expected water_glass.amplitude from 0 to 4, ignoring")
+                }
+            },
+            "settle_ms" | "settle" => match value.parse::<u32>() {
+                Ok(value) => cfg.settle_ms = value.clamp(100, 10_000),
+                _ => tracing::warn!(
+                    value,
+                    "Expected water_glass.settle_ms from 100 to 10000, ignoring"
+                ),
+            },
+            other => tracing::warn!(key = %other, "Unknown key in `water_glass` block, ignoring"),
         }
     }
 }
@@ -6372,6 +6468,18 @@ classic_depth {
 #     corner_softness = 1.0          # antialias width, physical pixels
 # }
 
+# Water-glass refraction motion. `reactive` (default) energizes the
+# distortion when the window moves, the backdrop behind it changes, or a
+# ripple passes underneath, then settles back to still -- an idle desktop
+# ticks zero frames. `ambient` drifts constantly and ticks frames while
+# glass is visible; `static` is the original fixed distortion.
+# water_glass {
+#     animation = reactive           # static reactive ambient
+#     speed = 1.0                    # phase drift multiplier, 0 to 8
+#     amplitude = 1.0                # distortion strength, 0 to 4
+#     settle_ms = 1200               # reactive settle time, 100 to 10000
+# }
+
 # Analytical drop shadows (Phase R2). These are independent of
 # `water_effects`: disabling the water identity does not remove ordinary
 # window decoration. Values are logical pixels and follow output scale.
@@ -6925,6 +7033,7 @@ mod tests {
             depth: DepthConfig::default(),
             classic_depth: ClassicDepthConfig::default(),
             frost: FrostConfig::default(),
+            water_glass: WaterGlassConfig::default(),
             shadow: ShadowConfig::default(),
             rounding: RoundingConfig::default(),
             border: BorderConfig::default(),
@@ -7440,6 +7549,29 @@ mod tests {
         let defaults = parse_default_config().sway;
         assert!(!defaults.enabled);
         assert_eq!(defaults, SwayConfig::default());
+    }
+
+    #[test]
+    fn water_glass_block_parses_clamps_and_matches_generated_defaults() {
+        let entries = waves::parse(
+            "water_glass {\n\
+             animation = ambient\n\
+             speed = 99\n\
+             amplitude = -1\n\
+             settle_ms = 5\n\
+             }\n",
+            Path::new("<water-glass-test>"),
+        )
+        .unwrap();
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        assert_eq!(config.water_glass.animation, GlassAnimation::Ambient);
+        assert_eq!(config.water_glass.speed, 8.0);
+        assert_eq!(config.water_glass.amplitude, 0.0);
+        assert_eq!(config.water_glass.settle_ms, 100);
+
+        let defaults = parse_default_config().water_glass;
+        assert_eq!(defaults.animation, GlassAnimation::Reactive);
+        assert_eq!(defaults, WaterGlassConfig::default());
     }
 
     #[test]

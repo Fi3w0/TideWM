@@ -259,6 +259,13 @@ pub struct Smallvil {
     /// `detach_mapped_toplevel` alongside `window_opacity`, or this grows
     /// for the life of the session.
     pub(crate) backdrop_textures: HashMap<WlSurface, crate::backdrop::BackdropCapture>,
+    /// Per-window water-glass animation state (`water_glass::GlassAnim`):
+    /// when the distortion was last disturbed and what frame state that
+    /// disturbance was derived from. Only populated for windows taking the
+    /// water branch of `glass_frame_elements` while the resolved
+    /// `water_glass.animation` isn't `static`; evicted in
+    /// `detach_mapped_toplevel` alongside `backdrop_textures`.
+    pub(crate) glass_anim: HashMap<WlSurface, crate::water_glass::GlassAnim>,
     /// Compiled lazily on first use (needs a live renderer, unlike
     /// `toast::font()`'s process-global `OnceLock`); see
     /// `water_glass::water_glass_program`.
@@ -2340,6 +2347,7 @@ impl Smallvil {
             window_glass_modes: HashMap::new(),
             backdrop_textures: HashMap::new(),
             water_glass_program: None,
+            glass_anim: HashMap::new(),
             frost_glass_program: None,
             shadow_program: None,
             rounded_surface_program: None,
@@ -4164,6 +4172,39 @@ impl Smallvil {
                 }))
             || !self.closing_window_animations.is_empty()
             || self.animated_borders_possible()
+            || self.glass_animation_active()
+    }
+
+    /// Whether any water-glass window's refraction is currently animating
+    /// and needs the frame pump kept alive: always in `ambient` mode, only
+    /// during the post-disturbance settle tail in `reactive` mode, never
+    /// in `static` mode. Entries are also cross-checked against the water
+    /// glass branch's own eligibility (backdrop captured, mode resolves to
+    /// water) so a window hot-reloaded to frost or plain glass can't keep
+    /// the compositor ticking through its leftover entry.
+    fn glass_animation_active(&self) -> bool {
+        if !self.config.water_effects || self.glass_anim.is_empty() {
+            return false;
+        }
+        let takes_water_branch = |surface: &WlSurface| {
+            self.backdrop_textures.contains_key(surface)
+                && !matches!(
+                    self.window_glass_modes.get(surface),
+                    Some(crate::config::GlassMode::Frost) | Some(crate::config::GlassMode::Plain)
+                )
+        };
+        match self.config.water_glass.animation {
+            crate::config::GlassAnimation::Static => false,
+            crate::config::GlassAnimation::Ambient => {
+                self.glass_anim.keys().any(takes_water_branch)
+            }
+            crate::config::GlassAnimation::Reactive => {
+                let settle_ms = self.config.water_glass.settle_ms;
+                self.glass_anim
+                    .iter()
+                    .any(|(surface, anim)| anim.envelope(settle_ms) > 0.0 && takes_water_branch(surface))
+            }
+        }
     }
 
     #[cfg(feature = "accessibility")]
@@ -5044,6 +5085,47 @@ impl Smallvil {
                         } else {
                             [0.0; 4]
                         };
+                        let anim_cfg = self.config.water_glass;
+                        let (phase, amp) = match anim_cfg.animation {
+                            crate::config::GlassAnimation::Static => (0.0, anim_cfg.amplitude),
+                            mode => {
+                                // A ripple passing underneath disturbs the
+                                // glass: ripples are output-local logical,
+                                // so compare in that space.
+                                let local_rect = Rectangle::new(
+                                    location - output_geo.loc,
+                                    placement.rect.size,
+                                );
+                                let output_name = output.name();
+                                let ripple_passed = self.ripples.iter().any(|ripple| {
+                                    !ripple.finished() && ripple.output == output_name && {
+                                        let rad = ripple.radius() as i32;
+                                        Rectangle::new(
+                                            Point::from((
+                                                ripple.center.x as i32 - rad,
+                                                ripple.center.y as i32 - rad,
+                                            )),
+                                            Size::from((2 * rad, 2 * rad)),
+                                        )
+                                        .overlaps(local_rect)
+                                    }
+                                });
+                                let anim = self.glass_anim.entry(surface.clone()).or_insert_with(
+                                    || {
+                                        crate::water_glass::GlassAnim::new(
+                                            physical_rect,
+                                            capture_commit,
+                                        )
+                                    },
+                                );
+                                anim.observe(physical_rect, capture_commit, ripple_passed);
+                                let envelope = match mode {
+                                    crate::config::GlassAnimation::Ambient => 1.0,
+                                    _ => anim.envelope(anim_cfg.settle_ms),
+                                };
+                                (anim.phase(anim_cfg.speed), anim_cfg.amplitude * envelope)
+                            }
+                        };
                         result.push(crate::backend::udev::OutputRenderElements::WaterGlass(
                             crate::water_glass::WaterGlassElement::new(
                                 capture_id.clone(),
@@ -5056,6 +5138,8 @@ impl Smallvil {
                                 rounding.antialias
                                     * output.current_scale().fractional_scale() as f32,
                                 visual.opacity,
+                                phase,
+                                amp,
                             ),
                         ));
                     }

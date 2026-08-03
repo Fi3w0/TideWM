@@ -27,6 +27,83 @@ use smithay::{
     utils::{user_data::UserDataMap, Buffer, Physical, Rectangle, Scale, Transform},
 };
 
+use std::time::Instant;
+
+/// Base phase drift rate, radians per second at `speed = 1.0`. Slow
+/// enough that ambient mode reads as water, not vibration.
+const PHASE_RATE: f32 = 2.2;
+
+/// Per-window water-glass animation state, stored in
+/// `Smallvil::glass_anim`. Closed-form like the rest of this codebase's
+/// motion (`viscosity.rs`, `sway.rs`, `ripple.rs`): no per-frame
+/// integration, just a phase derived from an epoch and a smoothstep
+/// settle envelope over the time since the last disturbance.
+pub struct GlassAnim {
+    /// Phase origin for this window. Per-window (not process-global) so a
+    /// window becoming glass mid-session doesn't jump to some arbitrary
+    /// shared angle; continuity only has to hold per window.
+    epoch: Instant,
+    /// Last time the glass was disturbed: the window moved, the backdrop
+    /// behind it was recaptured, or a ripple passed underneath.
+    last_kick: Instant,
+    /// What the last rendered frame looked like, so the next frame can
+    /// tell whether anything it draws from actually changed. Disturbances
+    /// are derived from state deltas here in the render walk rather than
+    /// hooked at N call sites -- one authoritative compare, no drift
+    /// between "who kicks" and "what's drawn" (the same lesson as
+    /// `urgent_pulse_last`'s reconcile-at-the-tick).
+    last_rect: Rectangle<i32, Physical>,
+    last_commit: CommitCounter,
+}
+
+impl GlassAnim {
+    /// A freshly appeared glass window starts kicked: mapping disturbs
+    /// the water it lands on, same premise as the map ripple.
+    pub fn new(rect: Rectangle<i32, Physical>, commit: CommitCounter) -> Self {
+        let now = Instant::now();
+        Self {
+            epoch: now,
+            last_kick: now,
+            last_rect: rect,
+            last_commit: commit,
+        }
+    }
+
+    /// Returns true (and re-stamps the disturbance clock) when the frame
+    /// state the glass is drawn from changed since the last call, or when
+    /// `ripple_passed` says an active ripple's bounding square intersects
+    /// this window's rect this frame.
+    pub fn observe(
+        &mut self,
+        rect: Rectangle<i32, Physical>,
+        commit: CommitCounter,
+        ripple_passed: bool,
+    ) -> bool {
+        let changed = rect != self.last_rect || commit != self.last_commit;
+        self.last_rect = rect;
+        self.last_commit = commit;
+        if changed || ripple_passed {
+            self.last_kick = Instant::now();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Smoothstep decay from 1 at the last disturbance to 0 after
+    /// `settle_ms`, so the distortion eases out instead of snapping off.
+    pub fn envelope(&self, settle_ms: u32) -> f32 {
+        let x = (self.last_kick.elapsed().as_secs_f32() * 1000.0 / settle_ms.max(1) as f32)
+            .clamp(0.0, 1.0);
+        1.0 - x * x * (3.0 - 2.0 * x)
+    }
+
+    /// Current wave phase in radians.
+    pub fn phase(&self, speed: f32) -> f32 {
+        self.epoch.elapsed().as_secs_f32() * speed * PHASE_RATE
+    }
+}
+
 /// Adapted directly from Smithay's own default texture fragment shader
 /// (`backend/renderer/gles/shaders/implicit/texture.frag` in the pinned
 /// source) -- same `//_DEFINES_` placeholder and `#if defined(...)`
@@ -34,9 +111,12 @@ use smithay::{
 /// of defines regardless of which custom shader is compiled. The only
 /// change from the original is the sampling coordinate: a small,
 /// position-based sine/cosine offset instead of a straight `v_coords`
-/// lookup. Deliberately static (no time uniform) for this first cut --
-/// animating the ripple is a later polish pass, once something is driving
-/// it through the R0 `Animation` clock.
+/// lookup. The offset is animated by two extra uniforms: `u_phase`
+/// advances the wave over time and `u_amp` scales the distortion
+/// strength. Static mode passes `u_phase = 0, u_amp = amplitude` and
+/// reproduces the original fixed look exactly; reactive mode modulates
+/// `u_amp` by a settle envelope; ambient mode lets `u_phase` run
+/// continuously. See `config::WaterGlassConfig`.
 const WATER_GLASS_FRAGMENT_SHADER: &str = r#"
 #version 100
 
@@ -58,6 +138,8 @@ uniform vec2 u_size;
 uniform vec4 u_corner_radii;
 uniform float u_rounding_power;
 uniform float u_antialias;
+uniform float u_phase;
+uniform float u_amp;
 varying vec2 v_coords;
 
 #if defined(DEBUG_FLAGS)
@@ -94,9 +176,9 @@ float rounded_coverage(vec2 point) {
 }
 
 void main() {
-    vec2 distorted = v_coords + vec2(
-        sin(v_coords.y * 24.0) * 0.012,
-        cos(v_coords.x * 20.0) * 0.012
+    vec2 distorted = v_coords + u_amp * vec2(
+        sin(v_coords.y * 24.0 + u_phase) * 0.012,
+        cos(v_coords.x * 20.0 + u_phase * 0.85) * 0.012
     );
     distorted = clamp(distorted, 0.0, 1.0);
     vec4 color = texture2D(tex, distorted);
@@ -136,6 +218,8 @@ pub fn water_glass_program(
             UniformName::new("u_corner_radii", UniformType::_4f),
             UniformName::new("u_rounding_power", UniformType::_1f),
             UniformName::new("u_antialias", UniformType::_1f),
+            UniformName::new("u_phase", UniformType::_1f),
+            UniformName::new("u_amp", UniformType::_1f),
         ],
     ) {
         Ok(program) => {
@@ -166,6 +250,11 @@ pub struct WaterGlassElement {
     rounding_power: f32,
     antialias: f32,
     opacity: f32,
+    /// Wave phase in radians and distortion-strength multiplier for this
+    /// frame, resolved by `Smallvil::glass_frame_elements` from
+    /// `config::WaterGlassConfig` plus the window's animation state.
+    phase: f32,
+    amp: f32,
 }
 
 impl WaterGlassElement {
@@ -180,6 +269,8 @@ impl WaterGlassElement {
         rounding_power: f32,
         antialias: f32,
         opacity: f32,
+        phase: f32,
+        amp: f32,
     ) -> Self {
         Self {
             id,
@@ -191,6 +282,8 @@ impl WaterGlassElement {
             rounding_power,
             antialias,
             opacity,
+            phase,
+            amp,
         }
     }
 }
@@ -261,6 +354,8 @@ impl RenderElement<GlesRenderer> for WaterGlassElement {
                 Uniform::new("u_corner_radii", self.corner_radii),
                 Uniform::new("u_rounding_power", self.rounding_power),
                 Uniform::new("u_antialias", self.antialias),
+                Uniform::new("u_phase", self.phase),
+                Uniform::new("u_amp", self.amp),
             ],
         )
     }
@@ -281,5 +376,41 @@ mod tests {
         assert!(WATER_GLASS_FRAGMENT_SHADER.contains("uniform float alpha"));
         assert!(WATER_GLASS_FRAGMENT_SHADER.contains("varying vec2 v_coords"));
         assert!(WATER_GLASS_FRAGMENT_SHADER.contains("u_corner_radii"));
+        assert!(WATER_GLASS_FRAGMENT_SHADER.contains("uniform float u_phase"));
+        assert!(WATER_GLASS_FRAGMENT_SHADER.contains("uniform float u_amp"));
+    }
+
+    #[test]
+    fn envelope_decays_from_one_to_zero_over_settle() {
+        let rect = Rectangle::new((0, 0).into(), (100, 100).into());
+        let anim = GlassAnim::new(rect, CommitCounter::default());
+        assert!(anim.envelope(1200) > 0.99);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let mid = anim.envelope(60);
+        assert!(mid < 0.99, "envelope should be decaying, got {mid}");
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert_eq!(anim.envelope(60), 0.0);
+    }
+
+    #[test]
+    fn observe_kicks_on_rect_commit_or_ripple_change_only() {
+        let rect = Rectangle::new((0, 0).into(), (100, 100).into());
+        let mut anim = GlassAnim::new(rect, CommitCounter::default());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let before = anim.envelope(40);
+        assert!(!anim.observe(rect, CommitCounter::default(), false));
+
+        let mut commit = CommitCounter::default();
+        commit.increment();
+        assert!(anim.observe(rect, commit, false));
+        assert!(anim.envelope(40) > before);
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let settled = anim.envelope(40);
+        assert!(anim.observe(rect, commit, true));
+        assert!(anim.envelope(40) > settled);
+
+        let moved = Rectangle::new((10, 0).into(), (100, 100).into());
+        assert!(anim.observe(moved, commit, false));
     }
 }

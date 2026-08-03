@@ -1176,6 +1176,7 @@ impl Smallvil {
         self.window_sway.remove(surface);
         self.window_frame_snapshots.remove(surface);
         self.backdrop_textures.remove(surface);
+        self.glass_anim.remove(surface);
         self.window_depths.remove(surface);
         self.depth_schematics.remove(surface);
         self.focus_history.retain(|s| s != surface);
