@@ -176,6 +176,15 @@ pub struct Smallvil {
     /// otherwise. Built once when toggled on, not rebuilt every frame --
     /// see `toggle_overview`.
     pub overview: Option<crate::overview::Overview>,
+    /// `Some` while the whole-world minimap (`minimap.rs`) is being held
+    /// open on the output that triggered it. Built once at peek-open, not
+    /// rebuilt per frame -- see `open_minimap_peek`/`close_minimap_peek`.
+    pub(crate) minimap_peek: Option<crate::minimap::MinimapPeek>,
+    /// Whether `config.minimap`'s trigger keysym is currently physically
+    /// held down. Tracked separately from XKB modifier state because the
+    /// trigger is an ordinary key, not a modifier -- mirrors
+    /// `helper_keys_down`'s own press/release bookkeeping shape.
+    pub(crate) minimap_trigger_down: bool,
     /// Structural parked-window state for Classic workspaces. This remains
     /// empty unless the opt-in `classic_depth` feature is used.
     pub classic_depth: crate::classic_depth::ClassicDepthDeck,
@@ -2229,6 +2238,8 @@ impl Smallvil {
                 }),
             builtin_wallpaper: crate::wallpaper::BuiltinWallpaper::build(),
             overview: None,
+            minimap_peek: None,
+            minimap_trigger_down: false,
             classic_depth: crate::classic_depth::ClassicDepthDeck::default(),
             ocean,
             depth_deck_overlay: None,
@@ -3822,6 +3833,13 @@ impl Smallvil {
             pointer.unset_grab(self, serial, self.start_time.elapsed().as_millis() as u32);
         }
         self.release_popup_grab();
+        // If a minimap peek is open when the lock starts, drop it rather
+        // than leaving it stranded: the peek's pointer short-circuit
+        // (`process_input_event`'s `PointerMotion`/`PointerButton` arms)
+        // checks `minimap_peek.is_some()` ahead of any lock handling, so a
+        // still-open peek would keep consuming pointer input meant for the
+        // lock surface until the trigger chord eventually releases.
+        self.minimap_peek = None;
 
         if self.space.outputs().next().is_none() {
             // No displays attached -- nothing to render a locked frame on,
@@ -5291,6 +5309,160 @@ impl Smallvil {
             .collect()
     }
 
+    /// Builds and shows the whole-world minimap (spatial roadmap S5's other
+    /// half, alongside the compass) on `output` -- called once `input.rs`
+    /// detects `config.minimap`'s hold chord has just become fully held.
+    /// A no-op if it's already open (holding the chord longer doesn't
+    /// rebuild it), outside Ocean, `minimap.enabled` is false, the session
+    /// is locked, or the pointer is already grabbed (a move/resize/pan
+    /// drag in progress) -- the peek's own button handling never calls
+    /// `pointer.button()`, so opening mid-drag would strand that grab's
+    /// commit logic waiting for a release event it will never see. Same
+    /// "don't start while the pointer is already grabbed" guard
+    /// `modifier_pan_fingers`'s gesture-start already checks for the same
+    /// reason. Callers must treat "did not open" (`self.minimap_peek` still
+    /// `None` after this returns) as a real outcome, not just "already
+    /// open" -- in particular, the chord press that triggers this must not
+    /// intercept the key unless a peek actually opened, or it would
+    /// silently shadow an ordinary keybind on the same combo.
+    ///
+    /// Reads window rects from `Ocean::world_layouts`, the same source
+    /// `compass_frame_elements` uses -- keeps the compass and the minimap
+    /// agreeing on exactly the same window set, and folds in
+    /// `attached_sizes`/the floating stack for free.
+    pub(crate) fn open_minimap_peek(&mut self, output: &Output) {
+        if self.minimap_peek.is_some()
+            || self.config.spatial_engine != crate::config::SpatialEngine::Ocean
+            || !self.config.minimap.enabled
+            || !matches!(self.session_lock, SessionLock::Unlocked)
+            || self
+                .seat
+                .get_pointer()
+                .is_some_and(|pointer| pointer.is_grabbed())
+        {
+            return;
+        }
+        let Some(mode) = output.current_mode() else {
+            return;
+        };
+        let output_name = output.name();
+        let pointer_location = self
+            .seat
+            .get_pointer()
+            .map(|pointer| pointer.current_location())
+            .unwrap_or_default();
+
+        let windows: Vec<(Rectangle<i32, Logical>, String)> = self
+            .ocean
+            .world_layouts(self.config.gaps, self.config.bsp_split_bias)
+            .into_iter()
+            .filter_map(|(window, rect, _kind)| {
+                let surface = window.toplevel()?.wl_surface().clone();
+                Some((rect, crate::tab_strip::window_title(&surface)))
+            })
+            .collect();
+        let reef_rects: Vec<Rectangle<i32, Logical>> =
+            self.ocean.reefs().iter().map(|reef| reef.rect).collect();
+        let viewports: Vec<(String, Rectangle<i32, Logical>)> = self
+            .space
+            .outputs()
+            .filter_map(|candidate| {
+                let geo = self.space.output_geometry(candidate)?;
+                let camera = self.ocean.camera(&candidate.name());
+                let zoom = camera.zoom.max(0.05);
+                let size = Size::from((
+                    (geo.size.w as f64 / zoom).round() as i32,
+                    (geo.size.h as f64 / zoom).round() as i32,
+                ));
+                let loc = Point::from((
+                    camera.origin.x.round() as i32,
+                    camera.origin.y.round() as i32,
+                ));
+                Some((candidate.name(), Rectangle::new(loc, size)))
+            })
+            .collect();
+
+        self.minimap_peek = Some(crate::minimap::MinimapPeek::build(
+            output_name,
+            (mode.size.w, mode.size.h),
+            pointer_location,
+            &windows,
+            &reef_rects,
+            &viewports,
+        ));
+        self.request_redraw();
+    }
+
+    /// Dismisses the minimap peek without traveling, if one is open.
+    /// Idempotent -- both the chord-release path and the post-click path
+    /// in `minimap_click_travel` may call this for the same peek.
+    pub(crate) fn close_minimap_peek(&mut self) {
+        if self.minimap_peek.take().is_some() {
+            self.request_redraw();
+        }
+    }
+
+    /// Live pointer position feed for the open peek, so a click can resolve
+    /// a world point without reading `current_location()` from inside a
+    /// grab/button dispatch -- see `MinimapPeek::last_location`'s own doc
+    /// for why that specific call shape is what froze this compositor
+    /// twice before (`TileMoveGrab` 0.15.1, `sync_visible_floating_window`).
+    pub(crate) fn update_minimap_pointer(&mut self, location: Point<f64, Logical>) {
+        if let Some(peek) = self.minimap_peek.as_mut() {
+            peek.set_last_location(location);
+        }
+    }
+
+    /// Resolves the peek's last known pointer position to a world point,
+    /// travels the triggering output's Ocean camera there, and dismisses.
+    /// A no-op if no peek is open (nothing left to click).
+    pub(crate) fn minimap_click_travel(&mut self) {
+        let Some(peek) = self.minimap_peek.take() else {
+            return;
+        };
+        let world = peek.world_point_at_last_location();
+        let output_name = peek.output_name().to_string();
+        let Some(viewport) = self
+            .space
+            .outputs()
+            .find(|candidate| candidate.name() == output_name)
+            .and_then(|candidate| self.space.output_geometry(candidate))
+            .map(|geo| geo.size)
+        else {
+            self.request_redraw();
+            return;
+        };
+        let target = Rectangle::new(
+            Point::from((world.x.round() as i32, world.y.round() as i32)),
+            Size::from((0, 0)),
+        );
+        self.ocean.center_on_rect(
+            &output_name,
+            viewport,
+            target,
+            Duration::from_millis(self.config.ocean.camera_animation_ms),
+            self.config.ocean.camera_sway,
+        );
+        self.request_redraw();
+    }
+
+    /// Off-screen render element for the open minimap peek, filtered to the
+    /// output it was built for -- same raw `Option<MemoryRenderBufferRenderElement<_>>`
+    /// shape as `overview.rs`'s own `render_element`, so both backends'
+    /// existing `overview_element`-style `.chain()` assembly can carry it
+    /// too, wrapped by the same single `OutputRenderElements::Composited`
+    /// map at the end -- no new element type needed.
+    pub(crate) fn minimap_frame_element(
+        &self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        self.minimap_peek
+            .as_ref()
+            .filter(|peek| peek.output_name() == output.name())
+            .and_then(|peek| peek.render_element(renderer))
+    }
+
     /// Drops transient render state for a disconnected output. In
     /// particular, this releases a full-output texture immediately instead
     /// of retaining VRAM under an orphaned connector name, and drops that
@@ -5304,6 +5476,13 @@ impl Smallvil {
         self.ocean_canvases.remove(output_name);
         self.compasses.remove(output_name);
         self.swim_cameras.remove(output_name);
+        if self
+            .minimap_peek
+            .as_ref()
+            .is_some_and(|peek| peek.output_name() == output_name)
+        {
+            self.minimap_peek = None;
+        }
     }
 
     /// Spawns an impulse ripple (`ripple.rs`, Phase R1) on `trigger`,

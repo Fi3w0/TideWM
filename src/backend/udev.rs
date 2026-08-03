@@ -1398,6 +1398,13 @@ fn render_surface(
             .filter(|overview| overview.output_name() == output.name())
             .and_then(|overview| overview.render_element(renderer))
     };
+    // The minimap can show window titles too -- same lock-gating, same
+    // reasoning as the overview above it.
+    let minimap_element = if locked {
+        None
+    } else {
+        state.minimap_frame_element(renderer, output)
+    };
     let depth_deck_element = if locked {
         None
     } else {
@@ -1482,6 +1489,7 @@ fn render_surface(
     elements.extend(
         picker_element
             .into_iter()
+            .chain(minimap_element)
             .chain(depth_deck_element)
             .chain(overview_element)
             .chain(toast_element)

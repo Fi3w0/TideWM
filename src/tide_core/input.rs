@@ -40,7 +40,7 @@ use smithay::{
 use std::{collections::HashSet, time::Duration};
 
 use crate::{
-    config::{Action, Direction, Keybind, TouchpadConfig},
+    config::{Action, Direction, Keybind, Mods, TouchpadConfig},
     grabs::{
         resize_grab::ResizeEdge, CascadeResizeGrab, MoveSurfaceGrab, OceanPanGrab,
         OceanTileMoveGrab, ResizeSurfaceGrab, TileMoveGrab, TileResizeGrab, TileWindowResizeGrab,
@@ -624,6 +624,17 @@ impl Smallvil {
                 |_, _, _| FilterResult::Forward,
             );
         }
+
+        // This synthesizes releases through a no-op filter closure, not
+        // the real one above -- so the minimap peek's own release-tracking
+        // (which lives entirely inside that closure) never runs for these.
+        // This is exactly the "stuck open" failure its state-checked
+        // design exists to prevent: a lost real release is the whole
+        // reason this function exists, so clear it explicitly here too.
+        if self.minimap_trigger_down {
+            self.minimap_trigger_down = false;
+            self.close_minimap_peek();
+        }
     }
 
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) {
@@ -784,6 +795,39 @@ impl Smallvil {
                             {
                                 return FilterResult::Intercept(());
                             }
+
+                            // Minimap peek dismissal is state-checked, not
+                            // tied to catching one specific release event:
+                            // a release can go missing (host focus loss,
+                            // VT switch -- the exact reasons
+                            // `release_stuck_keys` exists), so this
+                            // recomputes "is the chord still fully held"
+                            // from `modifiers`, which XKB has already
+                            // updated for this event by the time this
+                            // closure runs. Covers both ways the chord can
+                            // break: the trigger key itself releasing, or a
+                            // required modifier releasing while the
+                            // trigger key stays down.
+                            let trigger_released = data.minimap_trigger_down
+                                && released == Some(data.config.minimap.keysym);
+                            if data.minimap_trigger_down {
+                                let held = Mods {
+                                    ctrl: modifiers.ctrl,
+                                    alt: modifiers.alt,
+                                    shift: modifiers.shift,
+                                    logo: modifiers.logo,
+                                };
+                                if trigger_released || !data.config.minimap.mods.is_held_by(held) {
+                                    data.minimap_trigger_down = false;
+                                    data.close_minimap_peek();
+                                }
+                            }
+                            if trigger_released {
+                                // Symmetric with the press below: a client
+                                // never sees this key release without
+                                // having seen the matching press either.
+                                return FilterResult::Intercept(());
+                            }
                             return FilterResult::Forward;
                         }
 
@@ -863,6 +907,44 @@ impl Smallvil {
                             return FilterResult::Intercept(());
                         }
 
+                        // Hold-to-peek the whole-world minimap (spatial
+                        // roadmap S5's other half, alongside the compass).
+                        // Unlike every entry in `table` below, a chord
+                        // match here doesn't fire a one-shot action: it
+                        // opens the peek and starts tracking the trigger
+                        // keysym's own held state, since staying held is
+                        // what keeps it open. Independent of `table`
+                        // entirely (checked regardless of an active
+                        // submap/rescue-mode) so it stays reachable the
+                        // same way the screencast picker's own keys do.
+                        //
+                        // Only intercepted if a peek actually opened.
+                        // `open_minimap_peek` itself no-ops under Classic,
+                        // with `minimap.enabled = false`, or with no
+                        // resolvable output -- and this chord must fall
+                        // through to `table` below in all of those cases,
+                        // or it would silently shadow an ordinary user
+                        // keybind on the same combo for zero benefit
+                        // (exactly what a Classic-engine config, the
+                        // common case, would otherwise get).
+                        if data.config.minimap.keysym == keysym {
+                            let held = Mods {
+                                ctrl: modifiers.ctrl,
+                                alt: modifiers.alt,
+                                shift: modifiers.shift,
+                                logo: modifiers.logo,
+                            };
+                            if data.config.minimap.mods.is_held_by(held) {
+                                if let Some(output) = data.primary_output() {
+                                    data.open_minimap_peek(&output);
+                                }
+                                if data.minimap_peek.is_some() {
+                                    data.minimap_trigger_down = true;
+                                    return FilterResult::Intercept(());
+                                }
+                            }
+                        }
+
                         // A submap fully replaces the base table rather
                         // than layering on top of it (matches sway/
                         // Hyprland: while "in a mode," only that mode's
@@ -911,6 +993,35 @@ impl Smallvil {
             }
             InputEvent::PointerMotion { event, .. } => {
                 self.note_pointer_motion();
+
+                // The minimap peek is compositor-owned modal chrome, the
+                // same "no input leaks to a client underneath it" rule the
+                // screencast picker already applies to keys -- so this
+                // skips relative-motion delivery, surface-under hit
+                // testing, and pointer-constraint handling entirely rather
+                // than just not acting on their results. Still moves the
+                // real cursor sprite (`pointer.motion` with no focus
+                // target) so there's visual feedback while aiming a click.
+                if self.minimap_peek.is_some() {
+                    let pointer = self.seat.get_pointer().unwrap();
+                    let new_loc = self.clamp_to_outputs(pointer.current_location() + event.delta());
+                    self.update_minimap_pointer(new_loc);
+                    pointer.motion(
+                        self,
+                        None,
+                        &MotionEvent {
+                            location: new_loc,
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time_msec(),
+                        },
+                    );
+                    pointer.frame(self);
+                    if self.udev_renderer.is_some() {
+                        self.request_redraw();
+                    }
+                    return;
+                }
+
                 // Relative motion: what every real mouse/trackpad sends
                 // (absolute is tablets/touchscreens, or a nested backend's
                 // host compositor giving already-absolute coordinates).
@@ -1072,6 +1183,25 @@ impl Smallvil {
 
                 let pos = event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
 
+                if self.minimap_peek.is_some() {
+                    let pointer = self.seat.get_pointer().unwrap();
+                    self.update_minimap_pointer(pos);
+                    pointer.motion(
+                        self,
+                        None,
+                        &MotionEvent {
+                            location: pos,
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time_msec(),
+                        },
+                    );
+                    pointer.frame(self);
+                    if self.udev_renderer.is_some() {
+                        self.request_redraw();
+                    }
+                    return;
+                }
+
                 let serial = SERIAL_COUNTER.next_serial();
 
                 let pointer = self.seat.get_pointer().unwrap();
@@ -1124,6 +1254,21 @@ impl Smallvil {
                         },
                     );
                     pointer.frame(self);
+                    return;
+                }
+
+                // The minimap peek is compositor-owned modal chrome with no
+                // client "under" it in any meaningful sense -- consume the
+                // button fully rather than routing it through
+                // `pointer.button()`, which is the call that runs grab
+                // dispatch. This also means `minimap_click_travel`'s own
+                // use of the peek's tracked `last_location` (never
+                // `current_location()` from inside a grab callback) is the
+                // only pointer-position read this path needs.
+                if self.minimap_peek.is_some() {
+                    if button_state == ButtonState::Pressed {
+                        self.minimap_click_travel();
+                    }
                     return;
                 }
 

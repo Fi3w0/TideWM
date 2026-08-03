@@ -26,6 +26,11 @@
 //! schematic box reflects its plain tiled slot, not the override. Good
 //! enough for "roughly what's on each workspace," not a pixel-accurate
 //! preview.
+//!
+//! The CPU rasterization primitives below (`fill_rect`, `stroke_rect`,
+//! `draw_label`, `rgba`) are `pub(crate)` and reused as-is by
+//! `crate::minimap`, Ocean's whole-world equivalent of this schematic --
+//! same dark-panel/labeled-box visual language, different content source.
 
 use fontdue::Font;
 use smithay::{
@@ -159,11 +164,11 @@ fn draw_cell(pixels: &mut [u8], canvas_w: i32, canvas_h: i32, font: &Font, cell:
     }
 }
 
-fn rgba((r, g, b): (u8, u8, u8)) -> (u8, u8, u8, u8) {
+pub(crate) fn rgba((r, g, b): (u8, u8, u8)) -> (u8, u8, u8, u8) {
     (r, g, b, 255)
 }
 
-fn fill_rect(
+pub(crate) fn fill_rect(
     pixels: &mut [u8],
     canvas_w: i32,
     canvas_h: i32,
@@ -181,7 +186,7 @@ fn fill_rect(
     }
 }
 
-fn stroke_rect(
+pub(crate) fn stroke_rect(
     pixels: &mut [u8],
     canvas_w: i32,
     canvas_h: i32,
@@ -209,7 +214,7 @@ fn stroke_rect(
 /// Draws `title` clipped to `rect`'s bounds -- overflowing glyphs are
 /// simply cut off rather than measured and pre-truncated, same choice
 /// `tab_strip::draw_label` makes for its own segments.
-fn draw_label(
+pub(crate) fn draw_label(
     pixels: &mut [u8],
     canvas_w: i32,
     canvas_h: i32,

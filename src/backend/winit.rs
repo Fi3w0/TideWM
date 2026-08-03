@@ -288,6 +288,7 @@ pub fn init_winit(
                             .as_ref()
                             .filter(|overview| overview.output_name() == entry.output.name())
                             .and_then(|overview| overview.render_element(renderer));
+                        let minimap_element = state.minimap_frame_element(renderer, &entry.output);
                         let depth_deck_element = state
                             .depth_deck_overlay
                             .as_ref()
@@ -376,6 +377,7 @@ pub fn init_winit(
                         elements.extend(
                             picker_element
                                 .into_iter()
+                                .chain(minimap_element)
                                 .chain(depth_deck_element)
                                 .chain(overview_element)
                                 .chain(toast_element)

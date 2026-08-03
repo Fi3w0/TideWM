@@ -480,6 +480,38 @@ compass {
 }
 ```
 
+### `minimap { }`
+
+Whole-world overview minimap for the Ocean engine (spatial roadmap S5's
+other half, alongside the compass). Hold the configured `key` to peek: a
+schematic map of every window in the shared world, plus every connected
+output's current camera viewport (the triggering output's own viewport
+drawn with the active accent color, every other output's viewport plainer),
+scaled to fit the screen. Click a window or region while still holding to
+travel that output's camera there and dismiss the peek; release without
+clicking just dismisses it, same place you started.
+
+Same dark-panel/labeled-box visual language as `toggle-overview`'s Classic
+schematic, built once per peek rather than every frame. Screen-pinned
+windows aren't drawn (a pin is glued to one output's screen space, not a
+world location, so it has nothing to show on a world map).
+
+Ocean-only. Unlike the compass, **not** gated by `water_effects` -- the
+minimap reads as navigation utility rather than a visual effect, so it
+stays available with water off.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | Master switch for the minimap under Ocean. |
+| `key` | chord string | `Super+Space` | Hold this chord to peek. A single modifier+key combo (no multi-key helper chords). |
+
+```wave
+minimap {
+    enabled = true
+    key = "Super+Space"
+}
+```
+
 ### `classic_depth { }`
 
 Enables the Classic spatial engine's per-workspace Depth Deck. This is

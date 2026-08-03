@@ -253,6 +253,42 @@ impl Default for CompassConfig {
     }
 }
 
+/// Whole-world Ocean overview minimap (spatial roadmap S5's other half,
+/// alongside the compass). Hold `key` to peek: a schematic map of every
+/// window in the shared world plus every connected output's current camera
+/// viewport, click a window or region to travel this output's camera there
+/// and dismiss, or release without clicking to just dismiss. Ocean-only.
+/// Deliberately *not* gated by `water_effects` -- unlike the compass (an
+/// identity/bioluminescence effect), the minimap reads as navigation
+/// utility, so it stays available with water off.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MinimapConfig {
+    pub enabled: bool,
+    /// Modifiers that must be held for `keysym` to open the peek.
+    pub mods: Mods,
+    /// The trigger key itself. Held together with `mods`; releasing either
+    /// closes the peek.
+    pub keysym: Keysym,
+}
+
+impl Default for MinimapConfig {
+    fn default() -> Self {
+        // Deliberately not bare Super: every default keybind is
+        // `Super+<key>`, so a bare-Super hold would fire the peek on every
+        // ordinary keybind attempt. A real base key keeps release-tracking
+        // to one keysym and doesn't collide with `pointer_modifier` (also
+        // Super by default), whose own drag grabs would otherwise lose
+        // pointer input for the hold's duration.
+        let (mods, keysym) =
+            parse_simple_chord("Super+Space").expect("built-in minimap default chord must parse");
+        Self {
+            enabled: true,
+            mods,
+            keysym,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Left,
@@ -628,6 +664,9 @@ pub struct Config {
     /// (spatial roadmap S5). Ocean-only; `water_effects` is the master
     /// bypass.
     pub compass: CompassConfig,
+    /// Whole-world overview minimap (spatial roadmap S5). Ocean-only;
+    /// deliberately independent of `water_effects` -- see its own doc.
+    pub minimap: MinimapConfig,
     /// Window lifecycle and layout-motion animation timing. Logical state
     /// changes immediately; this controls only visual settling.
     pub animations: WindowAnimationsConfig,
@@ -920,6 +959,7 @@ impl Config {
             sway: raw.sway,
             swim: raw.swim,
             compass: raw.compass,
+            minimap: raw.minimap,
             animations: raw.animations,
             workspace_transition: raw.workspace_transition,
             depth: raw.depth,
@@ -1148,6 +1188,7 @@ struct RawConfig {
     sway: SwayConfig,
     swim: SwimConfig,
     compass: CompassConfig,
+    minimap: MinimapConfig,
     animations: WindowAnimationsConfig,
     workspace_transition: WorkspaceTransitionConfig,
     depth: DepthConfig,
@@ -1310,6 +1351,7 @@ impl Default for RawConfig {
             sway: SwayConfig::default(),
             swim: SwimConfig::default(),
             compass: CompassConfig::default(),
+            minimap: MinimapConfig::default(),
             animations: WindowAnimationsConfig::default(),
             workspace_transition: WorkspaceTransitionConfig::default(),
             depth: DepthConfig::default(),
@@ -3206,6 +3248,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "sway" => apply_sway_block(&mut raw.sway, body),
         "swim" => apply_swim_block(&mut raw.swim, body),
         "compass" => apply_compass_block(&mut raw.compass, body),
+        "minimap" => apply_minimap_block(&mut raw.minimap, body),
         "ocean" => apply_ocean_block(&mut raw.ocean, body),
         "animations" | "window_animations" => apply_animations_block(&mut raw.animations, body),
         "depth" => apply_depth_block(&mut raw.depth, body),
@@ -3921,6 +3964,29 @@ fn apply_compass_block(cfg: &mut CompassConfig, body: &[waves::Entry]) {
                 ),
             },
             other => tracing::warn!(key = %other, "Unknown key in `compass` block, ignoring"),
+        }
+    }
+}
+
+fn apply_minimap_block(cfg: &mut MinimapConfig, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `minimap` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "enabled" => set_bool(&mut cfg.enabled, key, value),
+            "key" => match parse_simple_chord(value) {
+                Some((mods, keysym)) => {
+                    cfg.mods = mods;
+                    cfg.keysym = keysym;
+                }
+                None => tracing::warn!(
+                    value,
+                    "Expected minimap.key as a single modifier+key chord (e.g. \"Super+Space\"), ignoring"
+                ),
+            },
+            other => tracing::warn!(key = %other, "Unknown key in `minimap` block, ignoring"),
         }
     }
 }
@@ -5767,6 +5833,29 @@ fn parse_modifiers(value: &str) -> Option<Mods> {
     saw_modifier.then_some(mods)
 }
 
+/// Parses a `minimap.key`-style hold chord: modifiers plus exactly one
+/// ordinary trigger key, no multi-key helper support (unlike
+/// `parse_keybind`'s `held_keysyms`) -- a hold gesture only needs to know
+/// its own single terminal key, not a chain of helper modifiers.
+fn parse_simple_chord(combo: &str) -> Option<(Mods, Keysym)> {
+    let mut mods = Mods::default();
+    let mut key_name = None;
+
+    for part in combo.split('+') {
+        match part.trim().to_lowercase().as_str() {
+            "super" | "logo" | "mod4" => mods.logo = true,
+            "ctrl" | "control" => mods.ctrl = true,
+            "alt" | "mod1" => mods.alt = true,
+            "shift" => mods.shift = true,
+            other if key_name.is_none() => key_name = Some(other.to_string()),
+            _ => return None,
+        }
+    }
+
+    let keysym = xkb::keysym_from_name(&key_name?, xkb::KEYSYM_CASE_INSENSITIVE);
+    (keysym.raw() != 0).then_some((mods, keysym))
+}
+
 /// Keys almost never meant to be bound bare (no modifier) in the base
 /// keybind table: doing so steals that key from every focused client,
 /// including plain typing. Single ASCII letters/digits plus the common
@@ -6760,6 +6849,7 @@ mod tests {
             sway: SwayConfig::default(),
             swim: SwimConfig::default(),
             compass: CompassConfig::default(),
+            minimap: MinimapConfig::default(),
             animations: WindowAnimationsConfig::default(),
             workspace_transition: WorkspaceTransitionConfig::default(),
             depth: DepthConfig::default(),

@@ -339,6 +339,13 @@ impl OceanSpace {
         })
     }
 
+    /// Configured reef rectangles, for the minimap's world extent -- an
+    /// empty reef is still a landmark worth framing even with nothing
+    /// inside it yet.
+    pub(crate) fn reefs(&self) -> &[OceanReef] {
+        &self.reefs
+    }
+
     fn set_camera(
         &mut self,
         output: &str,
