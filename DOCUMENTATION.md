@@ -830,6 +830,8 @@ Configures the Phase R1 impulse ripple shared by window-map, focus-change, and u
 | `focus_preset` | preset | inherited | Appearance used only when focus changes. `focus_style` is an alias. |
 | `urgent_preset` | preset | inherited | Appearance used only for an urgent-attention impulse. `urgent_style` is an alias. |
 | `focus_on_map` | bool | `false` | When `true`, automatic focus during map also emits `focus_preset`, deliberately stacking it over the map effect. `stack_focus_on_map` is an alias. Later focus handoffs are unaffected. |
+| `urgent_repeat` | bool | `true` | When `true`, the urgent ripple re-fires every `urgent_repeat_interval_ms` until the window is focused or its hint clears, instead of firing once. `urgent_pulse` is an alias. |
+| `urgent_repeat_interval_ms` | integer | `1500` | Milliseconds between urgent-repeat pulses, clamped to `100`–`60000`. `urgent_interval_ms` and `urgent_interval` are aliases. |
 | `shapes` | space-separated list | `ring` | Compatibility mode: any combination of `ring`, `square`, `droplet`, and `cross`. Assigning this key automatically selects `preset = legacy`. `shape` and `form` are aliases. |
 | `color` | color | `8EDDFF` | RGB tint. Use bare `RRGGBB`, quoted `"#RRGGBB"`, `rgb(RRGGBB)`, or `rgba(RRGGBB, AA)`. A bare leading `#` starts a Waves comment, so it must be quoted. Alpha in the color form is currently ignored; use `peak_alpha`. |
 | `secondary_color` | color | `E8FCFF` | Gradient, membrane, and highlight tint. `accent_color` and `highlight_color` are aliases. |
@@ -888,6 +890,62 @@ another named preset, and include any ripple field. Cycles and unknown names
 warn and safely fall back. Selection order is system defaults → named preset
 → global overrides → per-app named preset → per-app overrides, so a rule can
 reuse a bundle and still change one field locally.
+
+### `water_glass { }`
+
+Controls how the water-glass refraction distortion moves over time. The glass
+layer itself is selected per window by the `glass` rule (or the legacy
+`opacity < 1` trigger); this block only controls how the refraction animates
+once selected. `water_effects = false` bypasses the whole effect.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `animation` | enum | `reactive` | `static` is the original fixed distortion (no time uniform, never ticks frames on its own). `reactive` energizes the distortion when the window moves, the backdrop behind it changes, or a ripple passes underneath, then settles back to still over `settle_ms`. `ambient` drifts constantly, ticking frames while glass is visible by design. `mode` is an alias. |
+| `speed` | float | `1.0` | Phase drift multiplier, clamped to `0`–`8`. |
+| `amplitude` | float | `1.0` | Distortion strength multiplier on the shader's built-in UV offset, clamped to `0`–`4`. `strength` is an alias. |
+| `settle_ms` | integer | `1200` | Reactive-mode settle time after the last disturbance, clamped to `100`–`10000`. `settle` is an alias. |
+
+```
+water_glass {
+    animation = reactive
+    speed = 1.0
+    amplitude = 1.0
+    settle_ms = 1200
+}
+```
+
+### `caustics { }`
+
+Ambient caustic light patterns over the wallpaper, below windows. One
+analytical full-output shader element per output: no texture, no framebuffer,
+no element at all when disabled or locked. Works under both Classic and Ocean
+engines. `water_effects = false` is the master bypass.
+
+The motion model preserves the idle-zero-frames rule by default: `fps = 0`
+animates only on frames that are already being rendered for some other reason
+(damage, an active animation elsewhere), so an idle desktop shows static
+caustics that read as part of the wallpaper. A non-zero `fps` opts into
+constant drift at roughly that rate.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Enables the overlay. |
+| `intensity` | float | `0.35` | Peak light alpha, clamped to `0`–`1`. `strength` and `alpha` are aliases. |
+| `color` | color | `8CDDFF` | RGB tint of the light ridges. Uses the same color formats as `ripple.color`. |
+| `scale` | float | `1.0` | Pattern size multiplier; higher packs more cells per output, clamped to `0.1`–`8`. |
+| `speed` | float | `1.0` | Phase drift speed multiplier, clamped to `0`–`8`. |
+| `fps` | integer | `0` | `0` piggybacks on damage-driven frames. `1`–`60` opts into constant motion at roughly that rate. |
+
+```
+caustics {
+    enabled = true
+    intensity = 0.35
+    color = 8CDDFF
+    scale = 1.0
+    speed = 1.0
+    fps = 0
+}
+```
 
 ### `env { }`
 
