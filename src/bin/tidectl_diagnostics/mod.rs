@@ -259,23 +259,41 @@ pub fn run_checks() -> (Vec<Check>, Option<Diagnostics>) {
                 .get("XDG_CURRENT_DESKTOP")
                 .map(String::as_str)
                 .unwrap_or("");
-            if current_desktop == "tidewm" {
-                checks.push(Check::new(
-                    "xdg-desktop-portal",
-                    Verdict::Pass,
-                    format!("running (pid {pid}) with XDG_CURRENT_DESKTOP=tidewm"),
-                ));
-            } else if current_desktop.is_empty() {
+            // The portal frontend fixes its backend at startup from the
+            // session env it inherited. The staleness signal is a *mismatch*
+            // with the desktop this CLI is running inside -- a portal that
+            // predates a session switch (relogin on a surviving systemd user
+            // manager) keeps the old desktop's env and routes every request
+            // to the wrong backend. Matching the active session is healthy
+            // even when that desktop isn't TideWM (Hyprland, KDE, ...).
+            let session_desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+            if current_desktop.is_empty() {
                 checks.push(Check::new(
                     "xdg-desktop-portal",
                     Verdict::Warn,
                     format!("running (pid {pid}) but XDG_CURRENT_DESKTOP unset -- screensharing may route to the wrong backend"),
                 ));
+            } else if current_desktop == session_desktop {
+                checks.push(Check::new(
+                    "xdg-desktop-portal",
+                    Verdict::Pass,
+                    format!("running (pid {pid}), backend matches the active session ({current_desktop})"),
+                ));
+            } else if session_desktop.is_empty() {
+                checks.push(Check::new(
+                    "xdg-desktop-portal",
+                    Verdict::Warn,
+                    format!(
+                        "running (pid {pid}) with XDG_CURRENT_DESKTOP={current_desktop}, and this shell's session desktop is unset -- can't verify routing"
+                    ),
+                ));
             } else {
                 checks.push(Check::new(
                     "xdg-desktop-portal",
                     Verdict::Fail,
-                    format!("running (pid {pid}) with XDG_CURRENT_DESKTOP={current_desktop} -- portal requests will go to that compositor's backend, not TideWM's; restart the portal service after logging in through TideWM"),
+                    format!(
+                        "running (pid {pid}) with XDG_CURRENT_DESKTOP={current_desktop} but this session is {session_desktop} -- the portal predates a session switch and routes requests to the wrong backend; restart it after logging in through {session_desktop}"
+                    ),
                 ));
             }
         }
