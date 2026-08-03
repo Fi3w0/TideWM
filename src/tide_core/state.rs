@@ -3432,9 +3432,17 @@ impl Smallvil {
     }
 
     /// `Action::ResizeToMonitor`: sets the focused Ocean floating window's
-    /// world-space size to its output's raw resolution, centered on its
-    /// current center point. No-op for a tiled window (`floating_rect`
-    /// returns `None`) or outside Ocean.
+    /// world-space size to its output's resolution inset by the configured
+    /// gap, centered on its current center point. No-op for a tiled window
+    /// (`floating_rect` returns `None`) or outside Ocean.
+    ///
+    /// Inset by `gaps` rather than the raw output size -- the border is
+    /// drawn as a stroke around the window's own configured rect (see
+    /// `window_border_element`), not inside it, so a window sized to
+    /// exactly fill the output pushes its border past the visible screen
+    /// edge entirely. Same margin `do_maximize_request`/"border
+    /// fullscreen" already insets its own target rect by, just reused here
+    /// instead of the raw resolution.
     ///
     /// Sends the client's configure directly rather than relying on
     /// `retile()` -- unlike a tiled window (sized every call from
@@ -3460,7 +3468,11 @@ impl Smallvil {
         let Some(output_geo) = self.space.output_geometry(&output) else {
             return;
         };
-        let size = output_geo.size;
+        let size = crate::layout::inset(
+            Rectangle::new(Point::default(), output_geo.size),
+            self.config.gaps,
+        )
+        .size;
         let center: Point<i32, Logical> = Point::from((
             current.loc.x + current.size.w / 2,
             current.loc.y + current.size.h / 2,
