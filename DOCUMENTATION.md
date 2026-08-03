@@ -1274,12 +1274,14 @@ rewriting a line removes or changes it completely.
 
 `$XDG_RUNTIME_DIR/tidewm-<pid>.sock`: one JSON request line in, one JSON response line out, per connection. Read queries return structured data; `{"request": "action", "action": "<any string above>"}` runs any action string. `{"request":"batch","actions":["workspace:2","spawn:kitty"]}` validates the complete list first, then executes up to 128 actions in order, so an invalid later item cannot leave a half-run batch. This is genuinely the same path a keybind press uses (`config::parse_action` → `Smallvil::run_action`).
 
-Queries: `outputs`, `workspaces`, `windows`, `focused-window`, `active-submap`.
+Queries: `outputs`, `workspaces`, `windows`, `focused-window`, `active-submap`, `diagnostics`.
 In Ocean, `outputs` reports `active_workspace: null`, the current two-axis
 `camera_origin`, and `camera_zoom`; `workspaces` returns an empty list because bookmarks
 are navigation targets rather than real workspaces. Ocean window entries use
 `workspace: null` and `output: null` (the same world can be visible through
 multiple outputs), plus `entry_output` as a non-owning input/focus hint.
+
+`diagnostics` is the compositor-side half of `tidectl doctor`/`report`: version, git commit, build profile and date, backend (`winit`/`udev`), uptime, spatial engine, `water_effects`, config path and current parse warnings, XWayland enablement, session-lock state, layer-surface count, and keybind/submap counts. It exists so a bug report can state exactly which build ran without guessing from the host.
 
 **Subscribe (event stream).** The same socket also supports a long-lived mode for reactive widgets (a waybar module, an eww `deflisten`, a QuickShell socket reader) that shouldn't have to poll the queries above. Send `{"request": "subscribe", "events": ["window", "workspace", "focus", "urgent", "depth", "config"]}` as the first and only request on a fresh connection; omitting `events` (or sending an empty array) subscribes to all six channels. The server replies with one ack line (`{"ok": true, "data": {"subscription_id": <n>, "events": [...]}}` — the resolved channel list, so a typo'd filter is visible at handshake time instead of silently matching nothing), then keeps the connection open and writes one `{"event": "<kind>", "data": ...}` line per matching change until the client disconnects. The connection's lifetime is the subscription's lifetime.
 
@@ -1301,6 +1303,11 @@ tidectl batch workspace:2 spawn:kitty
 tidectl active-submap
 --json                          # on any query, for scripting
 ```
+
+**Diagnostics.** Two host-side commands run entirely outside the socket, so they work even when TideWM won't start:
+
+- `tidectl doctor` runs a quick health check battery (compositor reachability, build profile, config warnings, PipeWire, xdg-desktop-portal, GPU, XWayland, journal errors, core dumps, compositor memory) and prints one `PASS`/`WARN`/`FAIL`/`SKIP` line per check. Exit code 0 = nothing wrong, 1 = warnings, 2 = failures. `tidectl doctor --json` emits the same checks as machine-readable JSON.
+- `tidectl report [--output <path>]` writes a plain-text diagnostic file (default `tidewm-report.txt`) for attaching to a GitHub issue: build provenance, system, GPU, the embedded doctor quick check, live compositor state (outputs/workspaces/windows), services, and recent errors. The report stays compact (about 2-3 pages) when everything is healthy and only expands the log-heavy sections when problems were detected. A privacy note at the top reminds you the file includes window titles — review before attaching.
 
 Full flag/command list: `tidectl --help`.
 
