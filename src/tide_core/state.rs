@@ -9067,21 +9067,19 @@ impl Smallvil {
         match Config::reload() {
             Ok((mut new_config, mut warnings)) => {
                 let had_error_overlay = self.config_error_overlay.take().is_some();
+                let mut migrated_engine = false;
                 if new_config.spatial_engine != self.config.spatial_engine {
                     // S6: instead of refusing, translate every live window
                     // to the new engine in place. `migrate_spatial_engine`
                     // sets `self.config.spatial_engine` itself (before its
                     // own retile), and `new_config` carries the same target
                     // value, so the `self.config = new_config` below stays
-                    // consistent with the migrated spatial state.
+                    // consistent with the migrated spatial state. The
+                    // notice goes to a toast, not the persistent warning
+                    // panel -- this is the user's intent, not a config
+                    // problem.
                     self.migrate_spatial_engine(new_config.spatial_engine);
-                    warnings.push(format!(
-                        "Migrated live windows to the {} engine",
-                        match new_config.spatial_engine {
-                            crate::config::SpatialEngine::Classic => "classic",
-                            crate::config::SpatialEngine::Ocean => "ocean",
-                        }
-                    ));
+                    migrated_engine = true;
                 }
                 if new_config.ocean.reefs != self.config.ocean.reefs
                     || new_config.ocean.bookmarks != self.config.ocean.bookmarks
@@ -9244,8 +9242,26 @@ impl Smallvil {
                 // way a hard failure already does, instead of stacking a
                 // duplicate timed toast over the persistent panel's corner.
                 self.config_warnings = warnings.clone();
-                self.toast = (self.config.show_config_reload_toast && warnings.is_empty())
-                    .then(|| Toast::new("Configuration reloaded", ToastKind::Info, ui_theme));
+                // A successful engine migration is an expected, user-intended
+                // operation -- informational, not a config problem. It shows
+                // a toast like the ordinary reload does (with its own
+                // message) instead of the persistent warning panel, which is
+                // reserved for footguns and would otherwise sit on screen
+                // until a further clean reload.
+                let migration_toast = if migrated_engine {
+                    let message = format!(
+                        "Migrated live windows to the {} engine",
+                        match self.config.spatial_engine {
+                            crate::config::SpatialEngine::Classic => "classic",
+                            crate::config::SpatialEngine::Ocean => "ocean",
+                        }
+                    );
+                    Some(Toast::new(&message, ToastKind::Info, ui_theme))
+                } else {
+                    (self.config.show_config_reload_toast && warnings.is_empty())
+                        .then(|| Toast::new("Configuration reloaded", ToastKind::Info, ui_theme))
+                };
+                self.toast = migration_toast;
                 if !warnings.is_empty() {
                     self.config_error_overlay =
                         Some(crate::error_overlay::ConfigErrorOverlay::new(
