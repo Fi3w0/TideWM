@@ -119,6 +119,20 @@ pub struct OceanReef {
     layout: BspLayout,
 }
 
+/// Everything `drain_for_classic` hands the engine-migration caller:
+/// reef trees with their world rects, freely-placed windows with world
+/// rects, each output's last camera origin, per-window entry-output
+/// hints, and the surfaces that were pinned to screen. The caller
+/// translates these into Classic workspace trees, floating tags, and pin
+/// membership; the hints have no Classic counterpart and are dropped.
+pub type ClassicMigrationSnapshot = (
+    Vec<(String, Rectangle<i32, Logical>, BspLayout)>,
+    Vec<(WlSurface, Window, Rectangle<i32, Logical>)>,
+    HashMap<String, OceanPoint>,
+    HashMap<WlSurface, String>,
+    Vec<WlSurface>,
+);
+
 struct OceanScreenPin {
     output: String,
     viewport_loc: Point<f64, Logical>,
@@ -727,6 +741,88 @@ impl OceanSpace {
         }
     }
 
+    // -- Engine migration (S6) -------------------------------------------------
+
+    /// Adds a reef carrying a pre-populated BSP tree. Used only by engine
+    /// migration from Classic, where a workspace's tree moves whole into a
+    /// reef rather than being rebuilt window-by-window.
+    pub fn push_migrated_reef(
+        &mut self,
+        name: String,
+        rect: Rectangle<i32, Logical>,
+        layout: BspLayout,
+    ) {
+        self.reefs.push(OceanReef {
+            _name: name,
+            rect,
+            auto_width: false,
+            auto_height: false,
+            anchor_empty_layout_to_camera: false,
+            layout,
+        });
+    }
+
+    /// Adds a freely-placed window at a world rect, used by engine migration.
+    pub fn push_migrated_floating(
+        &mut self,
+        surface: WlSurface,
+        window: Window,
+        rect: Rectangle<i32, Logical>,
+    ) {
+        self.floating_stack.retain(|s| s != &surface);
+        self.floating_stack.push(surface.clone());
+        self.floating.insert(surface, (window, rect));
+    }
+
+    /// Sets a camera's origin directly. Used by engine migration to point
+    /// each output's camera at the reef that was its active workspace.
+    pub fn set_camera_origin(&mut self, output: &str, origin: OceanPoint) {
+        self.ensure_camera(output);
+        if let Some(cam) = self.cameras.get_mut(output) {
+            cam.origin = origin;
+            cam.zoom = 1.0;
+        }
+    }
+
+    /// Drains every piece of spatial state for engine migration to Classic.
+    /// Returns the migration snapshot so the caller can translate it into
+    /// Classic workspace trees and floating tags. Clears all Ocean-only
+    /// state (bookmarks, pins, drag state) -- those have no Classic
+    /// counterpart and are dropped by design.
+    pub fn drain_for_classic(&mut self) -> ClassicMigrationSnapshot {
+        let reefs = self
+            .reefs
+            .drain(..)
+            .map(|r| (r._name, r.rect, r.layout))
+            .collect();
+        let floating = self
+            .floating
+            .drain()
+            .map(|(surface, (window, rect))| (surface, window, rect))
+            .collect();
+        let camera_origins = self
+            .cameras
+            .iter()
+            .map(|(k, v)| (k.clone(), v.origin))
+            .collect();
+        // `WlSurface` keys carry interior-mutable liveness flags, the same
+        // reason every other `HashMap<WlSurface, _>` in this codebase
+        // carries the lint allow.
+        #[allow(clippy::mutable_key_type)]
+        let entry_outputs = std::mem::take(&mut self.entry_outputs);
+        let pinned_surfaces: Vec<WlSurface> = self.screen_pins.keys().cloned().collect();
+        self.camera_motions.clear();
+        self.cameras.clear();
+        self.bookmarks.clear();
+        self.runtime_bookmarks.clear();
+        self.attached_sizes.clear();
+        self.floating_stack.clear();
+        self.screen_pins.clear();
+        self.drag_override = None;
+        self.drag_hint = None;
+        self.app_order.clear();
+        (reefs, floating, camera_origins, entry_outputs, pinned_surfaces)
+    }
     /// Stable world geometry for every Ocean tile. This is also the sizing
     /// authority used to configure clients; camera motion never resizes one.
     pub fn tiled_layouts(
@@ -1691,5 +1787,41 @@ mod tests {
             (Duration::ZERO, 0.0),
         ));
         assert_eq!(ocean.camera("main").origin.y, 0.0);
+    }
+
+    #[test]
+    fn migrated_reefs_round_trip_through_drain_for_classic() {
+        let mut ocean = OceanSpace::default();
+        let rect = Rectangle::new((0, 0).into(), (1200, 800).into());
+        ocean.push_migrated_reef("ws-1".to_string(), rect, BspLayout::default());
+        ocean.set_camera_origin("left", OceanPoint { x: 0.0, y: 0.0 });
+
+        let (reefs, floating, cameras, entries, pins) = ocean.drain_for_classic();
+        assert_eq!(reefs.len(), 1);
+        assert_eq!(reefs[0].0, "ws-1");
+        assert_eq!(reefs[0].1, rect);
+        assert!(floating.is_empty());
+        assert_eq!(cameras.get("left"), Some(&OceanPoint { x: 0.0, y: 0.0 }));
+        assert!(entries.is_empty());
+        assert!(pins.is_empty());
+        // Everything was cleared for the destination engine.
+        assert!(ocean.reefs.is_empty());
+        assert!(ocean.cameras.is_empty());
+        assert!(ocean.bookmarks.is_empty());
+    }
+
+    #[test]
+    fn drain_for_classic_is_idempotent_on_empty_state() {
+        let mut ocean = OceanSpace::default();
+        // A camera that exists is snapshotted (the caller needs it to pick
+        // the active workspace) and cleared from the source engine.
+        ocean.ensure_camera("left");
+        let (reefs, floating, cameras, entries, pins) = ocean.drain_for_classic();
+        assert!(reefs.is_empty());
+        assert!(floating.is_empty());
+        assert_eq!(cameras.get("left"), Some(&OceanPoint { x: 0.0, y: 0.0 }));
+        assert!(entries.is_empty());
+        assert!(pins.is_empty());
+        assert!(ocean.cameras.is_empty());
     }
 }

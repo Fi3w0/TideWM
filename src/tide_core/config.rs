@@ -6338,7 +6338,7 @@ $sub = P                         # ordinary keys can be held as helper modifiers
 
 terminal = $wave(kitty, alacritty, foot, xterm)
 pointer_modifier = $mod             # left-drag moves; right-drag resizes
-spatial_engine = classic            # classic or ocean; takes effect on launch
+spatial_engine = classic            # classic or ocean; a live change migrates all windows in place
 show_welcome_hint = true
 show_config_reload_toast = true     # false hides successful reload cards only
 water_effects = true

@@ -631,6 +631,44 @@ impl Layouts {
         self.cascade_state.insert(key, state);
     }
 
+    // -- Engine migration (S6) -------------------------------------------------
+
+    /// Drains every populated workspace tree for engine migration to Ocean.
+    /// Returns `(output, workspace, tree)` triples, removing the tree and
+    /// all associated per-workspace state (algorithm, master ratio, cascade
+    /// state) from this `Layouts`. Empty trees are skipped -- they were
+    /// never real content, just lazily-created stubs.
+    pub(crate) fn drain_for_migration(&mut self) -> Vec<(String, u32, BspLayout)> {
+        let keys: Vec<(String, u32)> = self
+            .trees
+            .iter()
+            .filter(|(_, tree)| !tree.windows().is_empty())
+            .map(|(k, _)| k.clone())
+            .collect();
+        keys.into_iter()
+            .filter_map(|key| {
+                self.algorithms.remove(&key);
+                self.master_ratio.remove(&key);
+                self.cascade_state.remove(&key);
+                let tree = self.trees.remove(&key)?;
+                (!tree.windows().is_empty()).then_some((key.0, key.1, tree))
+            })
+            .collect()
+    }
+
+    /// Inserts a pre-populated workspace tree, used by engine migration from
+    /// Ocean where a reef's tree moves whole into a workspace slot. Does
+    /// not set an algorithm -- the caller should follow up with
+    /// `set_algorithm` or rely on `default_algorithm`.
+    pub(crate) fn insert_migrated_tree(
+        &mut self,
+        output: String,
+        workspace: u32,
+        tree: BspLayout,
+    ) {
+        self.trees.insert((output, workspace), tree);
+    }
+
     /// Finds the cascade grid boundary nearest `point`, mirroring
     /// `hit_test_split`'s shape but walking the last-resolved row/cell
     /// partition (`cascade_state`, populated by `layout()`) instead of a
@@ -2088,5 +2126,38 @@ mod tests {
 
         layouts.set_default_algorithm(LayoutAlgorithm::Master);
         assert_eq!(layouts.algorithm("DP-1", 2), LayoutAlgorithm::Master);
+    }
+
+    #[test]
+    fn drain_for_migration_returns_empty_trees_and_clears_per_workspace_state() {
+        let mut layouts = Layouts::default();
+        // Empty trees are lazily-created stubs and must not be drained:
+        // their per-workspace algorithm/ratio settings survive a Classic
+        // -> Ocean -> Classic round trip this way.
+        layouts.trees.insert(
+            ("DP-1".to_string(), 1),
+            BspLayout::default(),
+        );
+        layouts.set_algorithm("DP-1", 1, LayoutAlgorithm::Master);
+        layouts.adjust_master_ratio("DP-1", 1, 0.1);
+
+        let drained = layouts.drain_for_migration();
+        assert!(drained.is_empty());
+        // The stub tree itself stays, as do its per-workspace settings.
+        assert!(layouts.trees.contains_key(&("DP-1".to_string(), 1)));
+        assert_eq!(layouts.algorithm("DP-1", 1), LayoutAlgorithm::Master);
+
+        // Draining twice is a no-op.
+        assert!(layouts.drain_for_migration().is_empty());
+    }
+
+    #[test]
+    fn insert_migrated_tree_stores_the_tree_whole() {
+        let mut layouts = Layouts::default();
+        let tree = BspLayout::default();
+        layouts.insert_migrated_tree("DP-1".to_string(), 3, tree);
+        assert_eq!(layouts.window_count("DP-1", 3), 0);
+        assert_eq!(layouts.algorithm("DP-1", 3), LayoutAlgorithm::Bsp);
+        assert!(!layouts.trees.contains_key(&("DP-2".to_string(), 3)));
     }
 }

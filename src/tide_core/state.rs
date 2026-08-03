@@ -7141,6 +7141,303 @@ impl Smallvil {
         self.workspace_previous.remove(from_output);
     }
 
+    // -- Spatial-engine migration (S6) -----------------------------------------
+
+    /// How much world-space separation sits between adjacent reefs created
+    /// from a Classic workspace stack, in logical pixels. Wide enough to
+    /// read as distinct islands, narrow enough that panning between them
+    /// feels connected.
+    const REEF_GAP: i32 = 128;
+
+    /// Migrates every live window's spatial ownership from the current
+    /// engine to `target`, in place, without restarting. Replaces the old
+    /// startup-only force-revert in `reload_config`.
+    ///
+    /// Both engines share the compositor core (window registry, protocols,
+    /// the model-neutral `PlacedWindow` render contract), so migration is a
+    /// state translation, not a re-map: Classic workspace trees move whole
+    /// into Ocean reefs (same `BspLayout` type) and back, floating windows
+    /// are translated between workspace-local and world coordinates, and
+    /// engine-neutral tags (`fullscreen`, `maximized`, `focus_history`,
+    /// `pinned` as a semantic) ride through. Pins map between Classic's
+    /// `pinned` set and Ocean's viewport-anchored screen pins; tab groups
+    /// carry across -- the tab-strip render path reads placements, which
+    /// both engines produce. Engine-only state with no counterpart on the
+    /// other side is deliberately dropped: Classic's depth deck is recalled
+    /// to the surface first (its parked windows rejoin their trees), and
+    /// Ocean's bookmarks and camera history are discarded.
+    fn migrate_spatial_engine(&mut self, target: crate::config::SpatialEngine) {
+        if target == self.config.spatial_engine {
+            return;
+        }
+        tracing::info!(
+            from = ?self.config.spatial_engine,
+            to = ?target,
+            "migrating spatial engine"
+        );
+        match target {
+            crate::config::SpatialEngine::Classic => self.migrate_ocean_to_classic(),
+            crate::config::SpatialEngine::Ocean => self.migrate_classic_to_ocean(),
+        }
+        self.config.spatial_engine = target;
+        // Rebuild the `Space::map_element` cache under the new engine's
+        // ownership. `retile_with_viscosity`'s Ocean branch calls
+        // `retile_ocean` (maps every reef window) and its Classic branch
+        // walks `Layouts::layout` -- exactly the remap a migration needs.
+        self.retile_with_viscosity(false, None);
+        // Classic's retile only maps tree windows. Floating windows
+        // migrated in from Ocean must be placed explicitly, mirroring the
+        // `pinned || workspace == active` visibility rule
+        // `migrate_output_windows` already uses.
+        if target == crate::config::SpatialEngine::Classic {
+            let floating: Vec<(WlSurface, Rectangle<i32, Logical>, Window)> = self
+                .floating_workspace
+                .iter()
+                .map(|(surface, tag)| (surface.clone(), tag.rect, tag.window.clone()))
+                .collect();
+            for (surface, rect, window) in floating {
+                let Some(tag) = self.floating_workspace.get(&surface) else {
+                    continue;
+                };
+                if self.pinned.contains(&surface)
+                    || self.layout.active_workspace(&tag.output) == tag.workspace
+                {
+                    self.space.map_element(window.clone(), rect.loc, false);
+                    if let Some(output) = self.output_by_name(&tag.output) {
+                        self.set_window_fractional_scale(&window, &output);
+                    }
+                }
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Classic -> Ocean. Every populated workspace becomes a reef on its
+    /// output's lateral workspace line (workspace N at `X = (N-1) * (W +
+    /// REEF_GAP)`, `Y = 0`), the camera points at the previously-active
+    /// workspace's reef, and floating windows translate to world
+    /// coordinates around their workspace's reef.
+    fn migrate_classic_to_ocean(&mut self) {
+        // Depth-deck windows have no Ocean counterpart: recall them to
+        // their workspace tiles first so the tree move carries them. The
+        // deck picker overlay is Classic UI and must not linger.
+        for entry in self.classic_depth.drain() {
+            self.layout
+                .insert(&entry.output, entry.workspace, entry.window.clone(), None);
+        }
+        self.depth_deck_overlay = None;
+        self.classic_depth.close();
+
+        let output_viewports: Vec<(String, smithay::utils::Size<i32, Logical>)> = self
+            .space
+            .outputs()
+            .filter_map(|output| Some((output.name(), self.space.output_geometry(output)?.size)))
+            .collect();
+
+        // Snapshot the active workspace per output before draining.
+        let active: std::collections::HashMap<String, u32> = output_viewports
+            .iter()
+            .map(|(name, _)| (name.clone(), self.layout.active_workspace(name)))
+            .collect();
+
+        // Drain the trees first (each is unique per (output, workspace)).
+        let mut trees = self.layout.drain_for_migration();
+        let floating: Vec<(WlSurface, FloatingTag)> = self.floating_workspace.drain().collect();
+
+        // Clear remaining Classic-only render state. `pinned` is left
+        // alone (harmless under Ocean, preserves round-trip identity) and
+        // `groups` ride across per the S6 design decision.
+        self.pseudo_tiled.clear();
+
+        for (output_name, viewport) in &output_viewports {
+            // Move this output's trees into reefs, workspace N at
+            // X = (N-1) * stride on the lateral line.
+            let mut i = 0;
+            while i < trees.len() {
+                if trees[i].0 != *output_name {
+                    i += 1;
+                    continue;
+                }
+                let (_, workspace, tree) = trees.remove(i);
+                let reef_x = (workspace as i32 - 1) * (viewport.w + Self::REEF_GAP);
+                let reef_rect = Rectangle::new(Point::from((reef_x, 0)), *viewport);
+                let reef_name = self
+                    .config
+                    .workspace_names
+                    .iter()
+                    .find_map(|(name, number)| (*number == workspace).then(|| name.clone()))
+                    .unwrap_or_else(|| format!("ws-{workspace}"));
+                self.ocean
+                    .push_migrated_reef(reef_name, reef_rect, tree);
+            }
+            // Point the camera at the previously-active workspace's reef.
+            let active_ws = active.get(output_name).copied().unwrap_or(1);
+            let cam_x = (active_ws as f64 - 1.0) * (viewport.w as f64 + Self::REEF_GAP as f64);
+            self.ocean.set_camera_origin(
+                output_name,
+                crate::ocean::OceanPoint { x: cam_x, y: 0.0 },
+            );
+        }
+
+        // Floating windows translate to world coordinates around their
+        // workspace's reef; pinned windows additionally get an Ocean
+        // screen pin so the pin semantic survives the crossing. The
+        // cameras were set above, which `pin_to_screen` needs to compute
+        // its viewport anchor.
+        for (surface, tag) in floating {
+            let viewport_w = output_viewports
+                .iter()
+                .find(|(name, _)| name == &tag.output)
+                .map(|(_, size)| size.w)
+                .unwrap_or(1920);
+            let reef_x = (tag.workspace as i32 - 1) * (viewport_w + Self::REEF_GAP);
+            let world_rect = Rectangle::new(
+                Point::from((tag.rect.loc.x + reef_x, tag.rect.loc.y)),
+                tag.rect.size,
+            );
+            let was_pinned = self.pinned.contains(&surface);
+            self.ocean
+                .push_migrated_floating(surface.clone(), tag.window, world_rect);
+            if was_pinned {
+                self.ocean.pin_to_screen(&surface, &tag.output);
+            }
+        }
+        // `pinned` is a Classic-only set; Ocean represents pin status via
+        // screen pins. Clear it so the debug-build invariant (pinned
+        // windows stay in `floating_workspace`) holds under Ocean, where
+        // that map is drained.
+        self.pinned.clear();
+
+        // Workspace-switch bookkeeping is Classic-only.
+        self.scratchpad_previous.clear();
+        self.workspace_previous.clear();
+    }
+
+    /// Ocean -> Classic. Reefs sorted left-to-right become workspaces 1..N
+    /// on the output whose camera is nearest to each reef; the active
+    /// workspace is the one each output's camera is looking at. Floating
+    /// windows land on the workspace of the reef nearest their world rect,
+    /// clamped into the output's visible area; screen-pinned windows
+    /// re-enter the Classic `pinned` set.
+    fn migrate_ocean_to_classic(&mut self) {
+        let (reefs, floating, camera_origins, entry_outputs, pinned_surfaces) =
+            self.ocean.drain_for_classic();
+
+        let output_names: Vec<String> = self
+            .space
+            .outputs()
+            .map(|output| output.name())
+            .collect();
+        let output_viewports: std::collections::HashMap<String, smithay::utils::Size<i32, Logical>> =
+            self.space
+                .outputs()
+                .filter_map(|output| {
+                    Some((output.name(), self.space.output_geometry(output)?.size))
+                })
+                .collect();
+
+        // Sort reefs left-to-right so workspace numbering is stable.
+        let mut sorted_reefs = reefs;
+        sorted_reefs.sort_by_key(|(_, rect, _)| rect.loc.x);
+
+        // Nearest-output helper for one reef.
+        let nearest_output = |rect: &Rectangle<i32, Logical>| -> String {
+            output_names
+                .iter()
+                .min_by(|a, b| {
+                    let cam_a = camera_origins.get(a.as_str()).map(|o| o.x).unwrap_or(0.0);
+                    let cam_b = camera_origins.get(b.as_str()).map(|o| o.x).unwrap_or(0.0);
+                    let center = rect.loc.x as f64 + rect.size.w as f64 / 2.0;
+                    (cam_a - center).abs().total_cmp(&(cam_b - center).abs())
+                })
+                .cloned()
+                .unwrap_or_default()
+        };
+
+        // Workspace counter per output, the workspace number each output's
+        // camera is currently looking at (for active selection), and the
+        // reef rects assigned so floating windows can find their nearest
+        // workspace afterward.
+        let mut ws_counters: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+        let mut nearest_ws: std::collections::HashMap<String, (f64, u32)> =
+            std::collections::HashMap::new();
+        let mut reef_slots: Vec<(String, u32, Rectangle<i32, Logical>)> = Vec::new();
+
+        for (_, rect, tree) in sorted_reefs {
+            let target_output = nearest_output(&rect);
+            let ws = ws_counters.entry(target_output.clone()).or_insert(1);
+            self.layout
+                .insert_migrated_tree(target_output.clone(), *ws, tree);
+            let center_x = rect.loc.x as f64 + rect.size.w as f64 / 2.0;
+            let cam_x = camera_origins.get(&target_output).map(|o| o.x).unwrap_or(0.0);
+            let dist = (cam_x - center_x).abs();
+            match nearest_ws.get(&target_output) {
+                Some((best, _)) if *best <= dist => {}
+                _ => {
+                    nearest_ws.insert(target_output.clone(), (dist, *ws));
+                }
+            }
+            reef_slots.push((target_output, *ws, rect));
+            *ws += 1;
+        }
+
+        // Set active workspaces from the cameras.
+        for output_name in &output_names {
+            let active = nearest_ws.get(output_name).map(|(_, ws)| *ws).unwrap_or(1);
+            self.layout.set_active_workspace(output_name, active);
+        }
+
+        // Floating windows land on the workspace of the reef nearest their
+        // world rect, clamped into the output's visible area.
+        for (surface, window, world_rect) in floating {
+            let target_output = nearest_output(&world_rect);
+            let viewport = output_viewports
+                .get(&target_output)
+                .copied()
+                .unwrap_or(smithay::utils::Size::from((1920, 1080)));
+            let ws = reef_slots
+                .iter()
+                .filter(|(output, _, _)| output == &target_output)
+                .min_by_key(|(_, _, rect)| {
+                    let center = world_rect.loc.x as f64 + world_rect.size.w as f64 / 2.0;
+                    (rect.loc.x as f64 + rect.size.w as f64 / 2.0 - center)
+                        .abs()
+                        .to_bits()
+                })
+                .map(|(_, ws, _)| *ws)
+                .unwrap_or(1);
+            let local_x = world_rect.loc.x.clamp(0, (viewport.w - world_rect.size.w.max(1)).max(0));
+            let local_y = world_rect.loc.y.clamp(0, (viewport.h - world_rect.size.h.max(1)).max(0));
+            let local_rect = Rectangle::new(
+                Point::from((local_x, local_y)),
+                world_rect.size,
+            );
+            self.floating_workspace.insert(
+                surface,
+                FloatingTag {
+                    window,
+                    output: target_output.clone(),
+                    workspace: ws,
+                    rect: local_rect,
+                },
+            );
+        }
+
+        // Screen-pinned windows re-enter the Classic `pinned` set (their
+        // floating entries were created just above; Classic's invariant is
+        // that pinned windows stay floating, which holds).
+        for surface in pinned_surfaces {
+            if self.floating_workspace.contains_key(&surface) {
+                self.pinned.insert(surface);
+            }
+        }
+
+        // Ocean-only state has no Classic counterpart; `entry_outputs` was
+        // drained and is discarded.
+        let _ = entry_outputs;
+    }
+
     /// Runs the udev backend's real DRM power hook (if any -- `None` under
     /// winit, logical-only there) for `output`, then updates
     /// `wlr_output_power_management_state`'s own tracking/broadcast on
@@ -8759,10 +9056,20 @@ impl Smallvil {
             Ok((mut new_config, mut warnings)) => {
                 let had_error_overlay = self.config_error_overlay.take().is_some();
                 if new_config.spatial_engine != self.config.spatial_engine {
-                    warnings.push(
-                        "spatial_engine is startup-only; restart TideWM to change it".to_string(),
-                    );
-                    new_config.spatial_engine = self.config.spatial_engine;
+                    // S6: instead of refusing, translate every live window
+                    // to the new engine in place. `migrate_spatial_engine`
+                    // sets `self.config.spatial_engine` itself (before its
+                    // own retile), and `new_config` carries the same target
+                    // value, so the `self.config = new_config` below stays
+                    // consistent with the migrated spatial state.
+                    self.migrate_spatial_engine(new_config.spatial_engine);
+                    warnings.push(format!(
+                        "Migrated live windows to the {} engine",
+                        match new_config.spatial_engine {
+                            crate::config::SpatialEngine::Classic => "classic",
+                            crate::config::SpatialEngine::Ocean => "ocean",
+                        }
+                    ));
                 }
                 if new_config.ocean.reefs != self.config.ocean.reefs
                     || new_config.ocean.bookmarks != self.config.ocean.bookmarks
