@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Two scope notes before you write, so nothing gets filed into a known "no": TideWM exposes protocols for external tools rather than building first-party apps that duplicate them (no built-in screenshot picker, launcher, or bar — grim/rofi/waybar already exist and work here). And features that were considered and parked with reasons live in AGENT.md's Phase N section — worth a skim; several "parked" items got built the moment someone actually asked, so asking is exactly the right move.
+        Two scope notes before you write, so nothing gets filed into a known "no": TideWM exposes protocols for external tools rather than building first-party apps that duplicate them (no built-in screenshot picker, launcher, or bar — grim/rofi/waybar already exist and work here). And features that were considered and parked with reasons are tracked in DOCUMENTATION.md's action catalog and the project's changelog — several "parked" items got built the moment someone actually asked, so asking is exactly the right move.
   - type: textarea
     id: problem
     attributes:

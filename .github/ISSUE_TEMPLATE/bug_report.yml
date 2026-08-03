@@ -5,15 +5,28 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time. The dropdowns below aren't bureaucracy — backend and GPU genuinely change which code ran, so answering them usually saves a whole round-trip of questions before a fix can start.
+        Thanks for taking the time. Two things speed up every bug report enormously:
+
+        1. **Run `tidectl report` and attach the file it writes** (default `tidewm-report.txt`). It bundles the quick health check plus your OS, kernel, build, GPU, compositor state, services, and recent errors into one attachment — no copy-pasting logs by hand. If TideWM won't even start, the report still works: it collects the host side and your journal.
+        2. **Run `tidectl doctor`** first and mention anything it flags — a broken PipeWire or a portal pointed at the wrong desktop is often the whole story.
+  - type: markdown
+    attributes:
+      value: |
+        The dropdowns below aren't bureaucracy either — backend and GPU genuinely change which code ran.
   - type: input
     id: version
     attributes:
       label: TideWM version
-      description: "`tidectl --version`, the CHANGELOG version you built, or a commit hash."
-      placeholder: "0.60.0 / 9e28e65"
+      description: "From the report's Summary line, or `tidectl --version`. A commit hash is even better."
+      placeholder: "0.90.0 (commit 9e28e65, release)"
     validations:
       required: true
+  - type: input
+    id: report
+    attributes:
+      label: tidectl report attachment
+      description: "Please run `tidectl report` and attach the file. If you can't (no shell access), say so — the dropdowns below still help."
+      placeholder: "tidewm-report.txt"
   - type: dropdown
     id: backend
     attributes:
@@ -96,7 +109,7 @@ body:
     id: logs
     attributes:
       label: Logs
-      description: "Run with `RUST_LOG=TideWM=debug` (capital TideWM — lowercase silently matches nothing) and paste what's relevant. For a crash, the panic message and backtrace (`RUST_BACKTRACE=1`) are the single most useful thing you can include."
+      description: "The report attachment already contains your recent journal errors. Add anything extra here: run with `RUST_LOG=TideWM=debug` (capital TideWM — lowercase silently matches nothing) and paste what's relevant. For a crash, the panic message and backtrace (`RUST_BACKTRACE=1`) are the single most useful thing you can include."
       render: text
   - type: textarea
     id: config

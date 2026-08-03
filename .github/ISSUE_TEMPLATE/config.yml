@@ -3,6 +3,6 @@ contact_links:
   - name: Documentation (config reference, actions, IPC)
     url: https://github.com/Fi3w0/TideWM/blob/master/DOCUMENTATION.md
     about: The complete config-key and action-string reference — worth checking before filing "how do I" as a bug.
-  - name: Architecture notes (AGENT.md)
-    url: https://github.com/Fi3w0/TideWM/blob/master/AGENT.md
-    about: Why things are built the way they are, what's verified on real hardware, and what's deliberately parked.
+  - name: Spatial model notes
+    url: https://github.com/Fi3w0/TideWM/blob/master/SPATIAL_MODEL.md
+    about: How the Classic and Ocean spatial engines work, and how live migration between them behaves.

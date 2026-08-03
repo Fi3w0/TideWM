@@ -6,11 +6,13 @@ body:
     attributes:
       value: |
         Real-hardware reports are what moved this project from "compiles" to "works" — the Nvidia nested pass that fixed four bugs in one day started as exactly this kind of report. Everything here except the hardware line is optional: a partial report beats no report.
+
+        If you can, run `tidectl report` while TideWM is running (or `tidectl doctor` after it, even if it crashed — the host checks still run) and attach the file; it covers version, build, GPU, and environment without retyping them.
   - type: input
     id: version
     attributes:
       label: TideWM version / commit
-      placeholder: "0.60.0"
+      placeholder: "0.90.0"
     validations:
       required: true
   - type: input

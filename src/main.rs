@@ -107,6 +107,27 @@ const FOREIGN_COMPOSITOR_ENV: &[&str] = &[
 /// launches us belongs to the host desktop, so blindly retaining its session
 /// variables makes tools such as fastfetch identify nested TideWM clients as
 /// Hyprland and lets children accidentally address the host compositor's IPC.
+/// `<version> (commit <hash>, <profile>, built <date>)` with each part
+/// best-effort -- outside a git checkout the commit and date are omitted.
+/// Shared in spirit with tidectl's own copy (separate binaries can't share
+/// code without a lib target); keep the two in sync.
+pub fn build_tag() -> String {
+    let mut parts = vec![env!("CARGO_PKG_VERSION").to_string()];
+    if let Some(commit) = option_env!("TIDEWM_GIT_COMMIT") {
+        let dirty = option_env!("TIDEWM_GIT_DIRTY").is_some();
+        parts.push(format!("commit {commit}{}", if dirty { "-dirty" } else { "" }));
+    }
+    parts.push(if cfg!(debug_assertions) {
+        "debug build".to_string()
+    } else {
+        "release build".to_string()
+    });
+    if let Some(date) = option_env!("TIDEWM_BUILD_DATE") {
+        parts.push(format!("built {date}"));
+    }
+    parts.join(", ")
+}
+
 fn configure_session_environment() {
     std::env::set_var("XDG_CURRENT_DESKTOP", "tidewm");
     std::env::set_var("XDG_SESSION_DESKTOP", "tidewm");
@@ -289,7 +310,7 @@ fn parse_args() -> Args {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-v" | "--version" => {
-                println!("TideWM {}", env!("CARGO_PKG_VERSION"));
+                println!("TideWM {} ({})", env!("CARGO_PKG_VERSION"), build_tag());
                 std::process::exit(0);
             }
             "-h" | "--help" => {
@@ -379,8 +400,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     apply_user_env(&state.config.env);
 
     if nested {
+        state.backend_name = "winit";
         crate::backend::winit::init_winit(&mut event_loop, &mut state)?;
     } else {
+        state.backend_name = "udev";
         crate::backend::udev::init_udev(&mut event_loop, &mut state)?;
     }
 

@@ -150,6 +150,16 @@ pub struct Smallvil {
     pub socket_name: OsString,
     pub display_handle: DisplayHandle,
 
+    /// Which backend is driving this session: `"winit"` (nested) or
+    /// `"udev"` (standalone DRM/TTY). Set by `main.rs` after backend init;
+    /// surfaced through the IPC `diagnostics` request so `tidectl report`
+    /// can say which code path a bug ran on without guessing from env.
+    pub(crate) backend_name: &'static str,
+    /// Config parse/apply warnings from the last load or reload, kept so
+    /// `tidectl report`'s quick check can show "config has N warnings"
+    /// instead of the user having to reproduce them by saving the file.
+    pub(crate) config_warnings: Vec<String>,
+
     pub config: Config,
     /// Every touchpad-class device `apply_touchpad_config` has been run
     /// against (populated on `DeviceAdded`, pruned on `DeviceRemoved` --
@@ -2303,6 +2313,8 @@ impl Smallvil {
         Self {
             start_time,
             display_handle: dh,
+            backend_name: "unknown",
+            config_warnings: startup_config_warnings.clone(),
 
             config,
             known_touchpads: Vec::new(),
@@ -9231,6 +9243,7 @@ impl Smallvil {
                 // after -- so warnings suppress the reload toast the same
                 // way a hard failure already does, instead of stacking a
                 // duplicate timed toast over the persistent panel's corner.
+                self.config_warnings = warnings.clone();
                 self.toast = (self.config.show_config_reload_toast && warnings.is_empty())
                     .then(|| Toast::new("Configuration reloaded", ToastKind::Info, ui_theme));
                 if !warnings.is_empty() {

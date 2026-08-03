@@ -87,6 +87,10 @@ enum Request {
     Windows,
     FocusedWindow,
     ActiveSubmap,
+    /// Compositor-side facts for `tidectl doctor`/`report`: version, build
+    /// profile, commit, backend, uptime, engine, config path and warnings,
+    /// and counts that a bug report wants without guessing from the host.
+    Diagnostics,
     Action {
         action: String,
     },
@@ -799,6 +803,7 @@ fn handle_request(state: &mut Smallvil, request: Request) -> serde_json::Value {
         Request::Windows => json!({ "ok": true, "data": windows_json(state) }),
         Request::FocusedWindow => json!({ "ok": true, "data": focused_window_json(state) }),
         Request::ActiveSubmap => json!({ "ok": true, "data": state.active_submap }),
+        Request::Diagnostics => json!({ "ok": true, "data": diagnostics_json(state) }),
         // Subscribe is intercepted upstream in `register_connection` before
         // `response_payload` ever runs, since handling it requires the
         // connection's stream (not available here). Reaching this arm means
@@ -971,6 +976,50 @@ fn focused_window_json(state: &Smallvil) -> serde_json::Value {
         }
         None => serde_json::Value::Null,
     }
+}
+
+/// Compositor-side facts for `tidectl doctor`/`report`. The host-side
+/// checks (kernel, GPU, services) run in the CLI itself; this is the half
+/// only a running TideWM knows: what it is, how it was built, how long it's
+/// been up, what the config parser said, and what state it's in right now.
+fn diagnostics_json(state: &Smallvil) -> serde_json::Value {
+    let layer_surfaces: usize = state
+        .space
+        .outputs()
+        .map(|output| {
+            smithay::desktop::layer_map_for_output(output)
+                .layers()
+                .count()
+        })
+        .sum();
+    let keybinds = state.config.keybinds.len();
+    let submaps = state.config.submaps.len();
+    #[cfg(feature = "screencast")]
+    let screencast_feature = state.screencast.is_some();
+    #[cfg(not(feature = "screencast"))]
+    let screencast_feature = false;
+    json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "commit": option_env!("TIDEWM_GIT_COMMIT"),
+        "dirty": option_env!("TIDEWM_GIT_DIRTY").is_some(),
+        "build_date": option_env!("TIDEWM_BUILD_DATE"),
+        "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
+        "backend": state.backend_name,
+        "uptime_secs": state.start_time.elapsed().as_secs(),
+        "spatial_engine": match state.config.spatial_engine {
+            crate::config::SpatialEngine::Classic => "classic",
+            crate::config::SpatialEngine::Ocean => "ocean",
+        },
+        "water_effects": state.config.water_effects,
+        "config_path": crate::config::Config::path(),
+        "config_warnings": state.config_warnings,
+        "xwayland_enabled": state.config.xwayland.enabled,
+        "session_lock": !matches!(state.session_lock, crate::tide_core::state::SessionLock::Unlocked),
+        "layer_surfaces": layer_surfaces,
+        "keybind_count": keybinds,
+        "submap_count": submaps,
+        "screencast_feature": screencast_feature,
+    })
 }
 
 fn window_json(

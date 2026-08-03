@@ -10,6 +10,13 @@
 //! few space-separated shorthands (`workspace 3` instead of `workspace:3`);
 //! an unrecognized action string is rejected by the compositor itself,
 //! same as a bad keybind would be.
+//!
+//! Two host-side commands live outside the socket protocol entirely:
+//! `tidectl doctor` (a battery of quick health checks) and `tidectl report`
+//! (a plain-text diagnostic file for attaching to GitHub issues) -- see
+//! `tidectl_diagnostics.rs`.
+
+mod tidectl_diagnostics;
 
 use std::env;
 use std::io::{Read, Write};
@@ -43,6 +50,14 @@ fn main() {
     if args.is_empty() {
         print_help();
         std::process::exit(1);
+    }
+
+    // Host-side commands: run before any socket work, so a compositor that
+    // won't even start can still be diagnosed.
+    match args[0].as_str() {
+        "doctor" => return cmd_doctor(json_output),
+        "report" => return cmd_report(),
+        _ => {}
     }
 
     let request = build_request(&args).unwrap_or_else(|msg| fail(&msg));
@@ -86,6 +101,116 @@ fn main() {
         print_response(&args[0], response.get("data").unwrap_or(&Value::Null));
     }
     std::process::exit(if ok { 0 } else { 1 });
+}
+
+/// `tidectl doctor [--json]`: runs the health checks and prints one line
+/// per check. Exit code: 0 = nothing wrong, 1 = warnings, 2 = failures
+/// (skipped checks don't count either way). `--json` prints the checks as
+/// machine-readable JSON for bars/scripts.
+fn cmd_doctor(json_output: bool) {
+    let (checks, _diagnostics) = tidectl_diagnostics::run_checks();
+    if json_output {
+        let payload: Vec<Value> = checks
+            .iter()
+            .map(|check| {
+                json!({
+                    "name": check.name,
+                    "verdict": check.verdict.label().to_lowercase(),
+                    "detail": check.detail,
+                })
+            })
+            .collect();
+        let verdict = if checks.iter().any(|c| c.verdict == tidectl_diagnostics::Verdict::Fail) {
+            "fail"
+        } else if checks.iter().any(|c| c.verdict == tidectl_diagnostics::Verdict::Warn) {
+            "warn"
+        } else {
+            "ok"
+        };
+        println!(
+            "{}",
+            json!({ "ok": true, "verdict": verdict, "checks": payload })
+        );
+    } else {
+        for check in &checks {
+            println!("[{:>4}] {}: {}", check.verdict.label(), check.name, check.detail);
+        }
+        let warns = checks.iter().filter(|c| c.verdict == tidectl_diagnostics::Verdict::Warn).count();
+        let fails = checks.iter().filter(|c| c.verdict == tidectl_diagnostics::Verdict::Fail).count();
+        println!();
+        println!(
+            "{} -- {} passed, {} warnings, {} failed, {} skipped",
+            if fails > 0 {
+                "PROBLEMS DETECTED"
+            } else if warns > 0 {
+                "WARNINGS"
+            } else {
+                "Everything looks OK"
+            },
+            checks.iter().filter(|c| c.verdict == tidectl_diagnostics::Verdict::Pass).count(),
+            warns,
+            fails,
+            checks.iter().filter(|c| c.verdict == tidectl_diagnostics::Verdict::Skip).count(),
+        );
+        println!("For a full report to attach to an issue: tidectl report");
+    }
+    let fails = checks.iter().filter(|c| c.verdict == tidectl_diagnostics::Verdict::Fail).count();
+    let warns = checks.iter().filter(|c| c.verdict == tidectl_diagnostics::Verdict::Warn).count();
+    std::process::exit(if fails > 0 {
+        2
+    } else if warns > 0 {
+        1
+    } else {
+        0
+    });
+}
+
+/// `tidectl report [--output <path>]`: writes the full diagnostic report
+/// to a file (default `tidewm-report.txt` in the current directory) and
+/// prints where it went. The quick check runs first and is embedded; the
+/// report stays compact unless problems were detected, in which case the
+/// log-heavy sections expand.
+fn cmd_report() {
+    let mut output: PathBuf = PathBuf::from("tidewm-report.txt");
+    let mut args = env::args().skip(2);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-o" | "--output" => match args.next() {
+                Some(path) => output = PathBuf::from(path),
+                None => fail("--output requires a path argument"),
+            },
+            "-h" | "--help" => {
+                println!("USAGE: tidectl report [--output <path>]");
+                std::process::exit(0);
+            }
+            other => fail(&format!("unrecognized argument '{other}' for report")),
+        }
+    }
+
+    let (checks, diagnostics) = tidectl_diagnostics::run_checks();
+    let verbose = tidectl_diagnostics::needs_verbose(&checks);
+    let report = tidectl_diagnostics::render_report(&checks, &diagnostics, verbose);
+    if let Err(err) = std::fs::write(&output, &report) {
+        fail(&format!("failed to write {}: {err}", output.display()));
+    }
+    println!("Report written to {}", output.display());
+    let fails = checks
+        .iter()
+        .filter(|c| c.verdict == tidectl_diagnostics::Verdict::Fail)
+        .count();
+    let warns = checks
+        .iter()
+        .filter(|c| c.verdict == tidectl_diagnostics::Verdict::Warn)
+        .count();
+    if fails > 0 {
+        println!("Problems detected -- the report includes expanded detail.");
+    } else if warns > 0 {
+        println!("A few warnings to review -- the report stays compact.");
+    } else {
+        println!("Everything looks healthy; the report is compact.");
+    }
+    println!("Attach the file to a GitHub issue at https://github.com/Fi3w0/TideWM/issues");
+    std::process::exit(0);
 }
 
 fn fail(msg: &str) -> ! {
@@ -311,6 +436,14 @@ QUERIES:
     windows             list currently mapped windows
     focused-window       (alias: focused) the currently focused window, if any
     active-submap        the currently active `submap <name> {{ }}` block, if any
+
+DIAGNOSTICS:
+    doctor              run quick health checks (PASS/WARN/FAIL/SKIP)
+    doctor --json       same checks as machine-readable JSON
+    report [--output <path>]   write a full diagnostic report file (default
+                        tidewm-report.txt) for attaching to a GitHub issue;
+                        embeds the doctor quick check, stays compact unless
+                        problems were detected
 
 ACTIONS:
     Any action a `bind` accepts in config.wave works here too, e.g.:
