@@ -869,7 +869,13 @@ impl OceanSpace {
         self.drag_override = None;
         self.drag_hint = None;
         self.app_order.clear();
-        (reefs, floating, camera_origins, entry_outputs, pinned_surfaces)
+        (
+            reefs,
+            floating,
+            camera_origins,
+            entry_outputs,
+            pinned_surfaces,
+        )
     }
     /// Stable world geometry for every Ocean tile. This is also the sizing
     /// authority used to configure clients; camera motion never resizes one.
@@ -971,7 +977,10 @@ impl OceanSpace {
         gap: i32,
         split_bias: SplitBias,
     ) {
-        let Some(reef_index) = self.reefs.iter().position(|reef| reef.layout.contains(surface))
+        let Some(reef_index) = self
+            .reefs
+            .iter()
+            .position(|reef| reef.layout.contains(surface))
         else {
             return;
         };
@@ -1821,8 +1830,7 @@ mod tests {
         };
         let mut motion = motion;
         for fraction in [0.1, 0.25, 0.5, 0.75, 0.9] {
-            motion.started = Instant::now()
-                - Duration::from_secs_f64(1.0 * fraction);
+            motion.started = Instant::now() - Duration::from_secs_f64(1.0 * fraction);
             let sampled = motion.sample();
             let under = OceanPoint {
                 x: sampled.origin.x + anchor.x / sampled.zoom,

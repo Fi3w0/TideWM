@@ -108,9 +108,7 @@ impl FloatPhysics {
     /// The decay envelope, not the instantaneous offset, decides rest: a
     /// window passing through the midpoint of a bob is not finished.
     pub fn finished(&self) -> bool {
-        self.amp_x
-            .hypot(self.amp_y)
-            * (-self.damping * self.start.elapsed().as_secs_f64()).exp()
+        self.amp_x.hypot(self.amp_y) * (-self.damping * self.start.elapsed().as_secs_f64()).exp()
             <= SETTLE_EPSILON
     }
 }
@@ -147,8 +145,7 @@ pub fn falloff_kick(source: (f64, f64), target: (f64, f64), radius: f64) -> Opti
 /// bounded to `amplitude` by construction -- no separate clamp needed.
 pub fn ambient_sample(elapsed: f64, amplitude: f64, period_s: f64) -> (f64, f64) {
     let omega = std::f64::consts::TAU / period_s.max(0.001);
-    let x = amplitude
-        * (0.6 * (omega * elapsed).sin() + 0.4 * (omega * 1.9 * elapsed + 1.3).sin());
+    let x = amplitude * (0.6 * (omega * elapsed).sin() + 0.4 * (omega * 1.9 * elapsed + 1.3).sin());
     let y = amplitude
         * (0.5 * (omega * 1.3 * elapsed + 0.6).sin() + 0.3 * (omega * 2.7 * elapsed + 2.1).sin());
     (x, y)
@@ -261,7 +258,13 @@ pub fn step_body(
 /// "sum a couple of incommensurate sines" shape for the same
 /// never-quite-repeats feel, as a real traveling wave `sin(kx - wt)`
 /// rather than a per-window phase offset.
-pub fn wave_target(world_x: f64, elapsed: f64, amplitude: f64, wavelength: f64, speed: f64) -> (f64, f64) {
+pub fn wave_target(
+    world_x: f64,
+    elapsed: f64,
+    amplitude: f64,
+    wavelength: f64,
+    speed: f64,
+) -> (f64, f64) {
     let k = std::f64::consts::TAU / wavelength.max(1.0);
     let omega = k * speed;
     let phase = k * world_x - omega * elapsed;
@@ -458,7 +461,10 @@ mod tests {
 
     #[test]
     fn ambient_sample_is_a_pure_function_of_elapsed_time() {
-        assert_eq!(ambient_sample(3.7, 24.0, 5.0), ambient_sample(3.7, 24.0, 5.0));
+        assert_eq!(
+            ambient_sample(3.7, 24.0, 5.0),
+            ambient_sample(3.7, 24.0, 5.0)
+        );
     }
 
     #[test]
@@ -488,7 +494,10 @@ mod tests {
         for _ in 0..2000 {
             step_body(&mut body, (0.0, 0.0), 40.0, 8.0, 24.0, 1.0 / 120.0);
         }
-        assert!(body.finished(), "a kicked body settles back to rest over time");
+        assert!(
+            body.finished(),
+            "a kicked body settles back to rest over time"
+        );
     }
 
     #[test]
@@ -501,7 +510,8 @@ mod tests {
             step_body(&mut body, target, 40.0, 8.0, 24.0, 1.0 / 120.0);
         }
         assert!(
-            body.velocity.0.abs() > BODY_SETTLE_EPSILON || body.offset.0.abs() > BODY_SETTLE_EPSILON,
+            body.velocity.0.abs() > BODY_SETTLE_EPSILON
+                || body.offset.0.abs() > BODY_SETTLE_EPSILON,
             "continuous forcing should keep the body from reading as settled"
         );
     }
@@ -513,7 +523,10 @@ mod tests {
         for _ in 0..600 {
             step_body(&mut body, (0.0, 0.0), 40.0, 8.0, 24.0, 1.0 / 120.0);
             let mag = body.offset.0.hypot(body.offset.1);
-            assert!(mag <= 24.0 + 1e-6, "offset {mag} exceeded max_offset mid-simulation");
+            assert!(
+                mag <= 24.0 + 1e-6,
+                "offset {mag} exceeded max_offset mid-simulation"
+            );
         }
     }
 

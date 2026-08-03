@@ -660,12 +660,7 @@ impl Layouts {
     /// Ocean where a reef's tree moves whole into a workspace slot. Does
     /// not set an algorithm -- the caller should follow up with
     /// `set_algorithm` or rely on `default_algorithm`.
-    pub(crate) fn insert_migrated_tree(
-        &mut self,
-        output: String,
-        workspace: u32,
-        tree: BspLayout,
-    ) {
+    pub(crate) fn insert_migrated_tree(&mut self, output: String, workspace: u32, tree: BspLayout) {
         self.trees.insert((output, workspace), tree);
     }
 
@@ -2134,10 +2129,9 @@ mod tests {
         // Empty trees are lazily-created stubs and must not be drained:
         // their per-workspace algorithm/ratio settings survive a Classic
         // -> Ocean -> Classic round trip this way.
-        layouts.trees.insert(
-            ("DP-1".to_string(), 1),
-            BspLayout::default(),
-        );
+        layouts
+            .trees
+            .insert(("DP-1".to_string(), 1), BspLayout::default());
         layouts.set_algorithm("DP-1", 1, LayoutAlgorithm::Master);
         layouts.adjust_master_ratio("DP-1", 1, 0.1);
 

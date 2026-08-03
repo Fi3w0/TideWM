@@ -251,7 +251,10 @@ mod tests {
         // Advancing requires a program handle, which needs a live EGL
         // context unit tests don't have -- so the accumulation itself is
         // exercised through the same dt math frame_element uses.
-        let dt = caustics.last_advance.elapsed().min(Duration::from_millis(100));
+        let dt = caustics
+            .last_advance
+            .elapsed()
+            .min(Duration::from_millis(100));
         caustics.phase += dt.as_secs_f32();
         assert!(caustics.phase > before);
     }
@@ -260,7 +263,10 @@ mod tests {
     fn long_stall_advance_is_capped() {
         let mut caustics = Caustics::default();
         caustics.last_advance = Instant::now() - Duration::from_secs(60);
-        let dt = caustics.last_advance.elapsed().min(Duration::from_millis(100));
+        let dt = caustics
+            .last_advance
+            .elapsed()
+            .min(Duration::from_millis(100));
         assert!(dt <= Duration::from_millis(100));
     }
 }

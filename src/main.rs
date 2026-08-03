@@ -22,9 +22,8 @@ pub(crate) use visual::source_picker;
 pub(crate) use visual::{
     animation, backdrop, caustics, compass, decoration, depth, depth_deck, depth_transition,
     error_overlay, float_physics, frost_glass, minimap, ocean_canvas, overview, ripple, shadow,
-    sway, swim,
-    tab_strip, toast, ui_theme, viscosity, wallpaper, water_glass, welcome, window_animation,
-    workspace_transition,
+    sway, swim, tab_strip, toast, ui_theme, viscosity, wallpaper, water_glass, welcome,
+    window_animation, workspace_transition,
 };
 
 use std::{process::Child, sync::Mutex};
@@ -116,7 +115,10 @@ pub fn build_tag() -> String {
     let mut parts = vec![env!("CARGO_PKG_VERSION").to_string()];
     if let Some(commit) = option_env!("TIDEWM_GIT_COMMIT") {
         let dirty = option_env!("TIDEWM_GIT_DIRTY").is_some();
-        parts.push(format!("commit {commit}{}", if dirty { "-dirty" } else { "" }));
+        parts.push(format!(
+            "commit {commit}{}",
+            if dirty { "-dirty" } else { "" }
+        ));
     }
     parts.push(if cfg!(debug_assertions) {
         "debug build".to_string()

@@ -1544,7 +1544,10 @@ impl Smallvil {
     /// The rect half of `window_center_for_kick`, also used by F1 `full`
     /// tier's per-tick collision pass, which needs real width/height for
     /// AABB overlap tests, not just a center point.
-    pub(crate) fn window_rect_for_kick(&self, surface: &WlSurface) -> Option<Rectangle<i32, Logical>> {
+    pub(crate) fn window_rect_for_kick(
+        &self,
+        surface: &WlSurface,
+    ) -> Option<Rectangle<i32, Logical>> {
         self.floating_workspace
             .get(surface)
             .map(|tag| tag.rect)
@@ -1598,7 +1601,8 @@ impl Smallvil {
         let mut candidates: Vec<WlSurface> = self.floating_workspace.keys().cloned().collect();
         candidates.extend(self.ocean.floating_surfaces().cloned());
         for surface in candidates {
-            if self.float_physics_tier_for_surface(&surface) == crate::config::FloatPhysicsTier::Full
+            if self.float_physics_tier_for_surface(&surface)
+                == crate::config::FloatPhysicsTier::Full
             {
                 self.window_float_bodies
                     .entry(surface)
@@ -2501,9 +2505,10 @@ impl Smallvil {
                 let rule = self
                     .config
                     .resolve_window_rules(app_id.as_deref(), title.as_deref());
-                let cfg = self
-                    .config
-                    .resolve_ripple_config(rule.ripple.as_ref(), crate::config::RippleTrigger::Urgent);
+                let cfg = self.config.resolve_ripple_config(
+                    rule.ripple.as_ref(),
+                    crate::config::RippleTrigger::Urgent,
+                );
                 if cfg.enabled == Some(false)
                     || !cfg.urgent_repeat.unwrap_or(true)
                     || !cfg.fires_on(crate::config::RippleTrigger::Urgent)
@@ -2521,7 +2526,8 @@ impl Smallvil {
             // Stamped before the spawn attempt on purpose: a spawn that
             // no-ops (hidden workspace, ripple cap reached) must not be
             // retried on every 100ms tick until it succeeds.
-            self.urgent_pulse_last.insert(surface.clone(), Instant::now());
+            self.urgent_pulse_last
+                .insert(surface.clone(), Instant::now());
             self.spawn_ripple(&surface, crate::config::RippleTrigger::Urgent);
         }
     }
@@ -4134,9 +4140,16 @@ impl Smallvil {
             current.loc.x + current.size.w / 2,
             current.loc.y + current.size.h / 2,
         ));
-        let rect = Rectangle::new(Point::from((center.x - size.w / 2, center.y - size.h / 2)), size);
+        let rect = Rectangle::new(
+            Point::from((center.x - size.w / 2, center.y - size.h / 2)),
+            size,
+        );
         self.ocean.set_floating_rect(&surface, rect);
-        if let Some(toplevel) = self.ocean.window(&surface).and_then(|w| w.toplevel().cloned()) {
+        if let Some(toplevel) = self
+            .ocean
+            .window(&surface)
+            .and_then(|w| w.toplevel().cloned())
+        {
             toplevel.with_pending_state(|state| state.size = Some(size));
             toplevel.send_pending_configure();
         }
@@ -4160,11 +4173,10 @@ impl Smallvil {
         let animation = Duration::from_millis(self.config.ocean.camera_animation_ms);
         match self.ocean.app_slot(index).cloned() {
             Some(surface) => {
-                if let Some(rect) = self.ocean.world_rect(
-                    &surface,
-                    self.config.gaps,
-                    self.config.bsp_split_bias,
-                ) {
+                if let Some(rect) =
+                    self.ocean
+                        .world_rect(&surface, self.config.gaps, self.config.bsp_split_bias)
+                {
                     self.ocean.center_on_rect(
                         &output.name(),
                         viewport,
@@ -4780,9 +4792,9 @@ impl Smallvil {
             }
             crate::config::GlassAnimation::Reactive => {
                 let settle_ms = self.config.water_glass.settle_ms;
-                self.glass_anim
-                    .iter()
-                    .any(|(surface, anim)| anim.envelope(settle_ms) > 0.0 && takes_water_branch(surface))
+                self.glass_anim.iter().any(|(surface, anim)| {
+                    anim.envelope(settle_ms) > 0.0 && takes_water_branch(surface)
+                })
             }
         }
     }
@@ -5636,10 +5648,8 @@ impl Smallvil {
                                 // A ripple passing underneath disturbs the
                                 // glass: ripples are output-local logical,
                                 // so compare in that space.
-                                let local_rect = Rectangle::new(
-                                    location - output_geo.loc,
-                                    placement.rect.size,
-                                );
+                                let local_rect =
+                                    Rectangle::new(location - output_geo.loc, placement.rect.size);
                                 let output_name = output.name();
                                 let ripple_passed = self.ripples.iter().any(|ripple| {
                                     !ripple.finished() && ripple.output == output_name && {
@@ -5654,14 +5664,13 @@ impl Smallvil {
                                         .overlaps(local_rect)
                                     }
                                 });
-                                let anim = self.glass_anim.entry(surface.clone()).or_insert_with(
-                                    || {
+                                let anim =
+                                    self.glass_anim.entry(surface.clone()).or_insert_with(|| {
                                         crate::water_glass::GlassAnim::new(
                                             physical_rect,
                                             capture_commit,
                                         )
-                                    },
-                                );
+                                    });
                                 anim.observe(physical_rect, capture_commit, ripple_passed);
                                 let envelope = match mode {
                                     crate::config::GlassAnimation::Ambient => 1.0,
@@ -5715,10 +5724,8 @@ impl Smallvil {
         // the walk so a layer-shell wallpaper engine can't cover them.
         let ocean_canvas = self.ocean_canvas_frame_element(renderer, output);
         let caustics = self.caustics_frame_element(renderer, output);
-        let backdrop: Vec<crate::backend::udev::OutputRenderElements> = ocean_canvas
-            .into_iter()
-            .chain(caustics)
-            .collect();
+        let backdrop: Vec<crate::backend::udev::OutputRenderElements> =
+            ocean_canvas.into_iter().chain(caustics).collect();
         let space_elements = self.desktop_render_elements(
             renderer,
             output,
@@ -5984,7 +5991,9 @@ impl Smallvil {
             .or_default()
             .frame_element(program, area, &self.config.caustics);
         self.caustics_last_advance = Instant::now();
-        Some(crate::backend::udev::OutputRenderElements::Caustics(element))
+        Some(crate::backend::udev::OutputRenderElements::Caustics(
+            element,
+        ))
     }
 
     /// Whether the configured `caustics.fps` says the frame pump should be
@@ -6020,8 +6029,7 @@ impl Smallvil {
             return false;
         }
         let fps = self.caustics_effective_fps();
-        self.caustics_last_advance.elapsed()
-            >= Duration::from_secs_f32(1.0 / fps.max(1) as f32)
+        self.caustics_last_advance.elapsed() >= Duration::from_secs_f32(1.0 / fps.max(1) as f32)
     }
 
     /// Off-screen urgent/deep compass cues for the Ocean engine (spatial
@@ -6090,8 +6098,7 @@ impl Smallvil {
                 shape: cfg.shape,
             },
         );
-        let Some(program) =
-            crate::compass::compass_program(&mut self.compass_program, renderer)
+        let Some(program) = crate::compass::compass_program(&mut self.compass_program, renderer)
         else {
             return Vec::new();
         };
@@ -7864,16 +7871,13 @@ impl Smallvil {
                     .iter()
                     .find_map(|(name, number)| (*number == workspace).then(|| name.clone()))
                     .unwrap_or_else(|| format!("ws-{workspace}"));
-                self.ocean
-                    .push_migrated_reef(reef_name, reef_rect, tree);
+                self.ocean.push_migrated_reef(reef_name, reef_rect, tree);
             }
             // Point the camera at the previously-active workspace's reef.
             let active_ws = active.get(output_name).copied().unwrap_or(1);
             let cam_x = (active_ws as f64 - 1.0) * (viewport.w as f64 + Self::REEF_GAP as f64);
-            self.ocean.set_camera_origin(
-                output_name,
-                crate::ocean::OceanPoint { x: cam_x, y: 0.0 },
-            );
+            self.ocean
+                .set_camera_origin(output_name, crate::ocean::OceanPoint { x: cam_x, y: 0.0 });
         }
 
         // Floating windows translate to world coordinates around their
@@ -7920,18 +7924,15 @@ impl Smallvil {
         let (reefs, floating, camera_origins, entry_outputs, pinned_surfaces) =
             self.ocean.drain_for_classic();
 
-        let output_names: Vec<String> = self
+        let output_names: Vec<String> = self.space.outputs().map(|output| output.name()).collect();
+        let output_viewports: std::collections::HashMap<
+            String,
+            smithay::utils::Size<i32, Logical>,
+        > = self
             .space
             .outputs()
-            .map(|output| output.name())
+            .filter_map(|output| Some((output.name(), self.space.output_geometry(output)?.size)))
             .collect();
-        let output_viewports: std::collections::HashMap<String, smithay::utils::Size<i32, Logical>> =
-            self.space
-                .outputs()
-                .filter_map(|output| {
-                    Some((output.name(), self.space.output_geometry(output)?.size))
-                })
-                .collect();
 
         // Sort reefs left-to-right so workspace numbering is stable.
         let mut sorted_reefs = reefs;
@@ -7967,7 +7968,10 @@ impl Smallvil {
             self.layout
                 .insert_migrated_tree(target_output.clone(), *ws, tree);
             let center_x = rect.loc.x as f64 + rect.size.w as f64 / 2.0;
-            let cam_x = camera_origins.get(&target_output).map(|o| o.x).unwrap_or(0.0);
+            let cam_x = camera_origins
+                .get(&target_output)
+                .map(|o| o.x)
+                .unwrap_or(0.0);
             let dist = (cam_x - center_x).abs();
             match nearest_ws.get(&target_output) {
                 Some((best, _)) if *best <= dist => {}
@@ -8004,12 +8008,15 @@ impl Smallvil {
                 })
                 .map(|(_, ws, _)| *ws)
                 .unwrap_or(1);
-            let local_x = world_rect.loc.x.clamp(0, (viewport.w - world_rect.size.w.max(1)).max(0));
-            let local_y = world_rect.loc.y.clamp(0, (viewport.h - world_rect.size.h.max(1)).max(0));
-            let local_rect = Rectangle::new(
-                Point::from((local_x, local_y)),
-                world_rect.size,
-            );
+            let local_x = world_rect
+                .loc
+                .x
+                .clamp(0, (viewport.w - world_rect.size.w.max(1)).max(0));
+            let local_y = world_rect
+                .loc
+                .y
+                .clamp(0, (viewport.h - world_rect.size.h.max(1)).max(0));
+            let local_rect = Rectangle::new(Point::from((local_x, local_y)), world_rect.size);
             self.floating_workspace.insert(
                 surface,
                 FloatingTag {
@@ -8548,7 +8555,8 @@ impl Smallvil {
         // spawn_ripple needs a real on-screen location -- the repeat tick
         // keeps trying, so the pulse starts up on its own once the
         // workspace becomes visible again.
-        self.urgent_pulse_last.insert(surface.clone(), Instant::now());
+        self.urgent_pulse_last
+            .insert(surface.clone(), Instant::now());
         self.spawn_ripple(surface, crate::config::RippleTrigger::Urgent);
         self.emit_ipc_event(crate::ipc::IpcEvent::UrgentChanged {
             surface: surface.clone(),

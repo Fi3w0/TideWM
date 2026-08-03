@@ -120,9 +120,15 @@ fn cmd_doctor(json_output: bool) {
                 })
             })
             .collect();
-        let verdict = if checks.iter().any(|c| c.verdict == tidectl_diagnostics::Verdict::Fail) {
+        let verdict = if checks
+            .iter()
+            .any(|c| c.verdict == tidectl_diagnostics::Verdict::Fail)
+        {
             "fail"
-        } else if checks.iter().any(|c| c.verdict == tidectl_diagnostics::Verdict::Warn) {
+        } else if checks
+            .iter()
+            .any(|c| c.verdict == tidectl_diagnostics::Verdict::Warn)
+        {
             "warn"
         } else {
             "ok"
@@ -133,10 +139,21 @@ fn cmd_doctor(json_output: bool) {
         );
     } else {
         for check in &checks {
-            println!("[{:>4}] {}: {}", check.verdict.label(), check.name, check.detail);
+            println!(
+                "[{:>4}] {}: {}",
+                check.verdict.label(),
+                check.name,
+                check.detail
+            );
         }
-        let warns = checks.iter().filter(|c| c.verdict == tidectl_diagnostics::Verdict::Warn).count();
-        let fails = checks.iter().filter(|c| c.verdict == tidectl_diagnostics::Verdict::Fail).count();
+        let warns = checks
+            .iter()
+            .filter(|c| c.verdict == tidectl_diagnostics::Verdict::Warn)
+            .count();
+        let fails = checks
+            .iter()
+            .filter(|c| c.verdict == tidectl_diagnostics::Verdict::Fail)
+            .count();
         println!();
         println!(
             "{} -- {} passed, {} warnings, {} failed, {} skipped",
@@ -147,15 +164,27 @@ fn cmd_doctor(json_output: bool) {
             } else {
                 "Everything looks OK"
             },
-            checks.iter().filter(|c| c.verdict == tidectl_diagnostics::Verdict::Pass).count(),
+            checks
+                .iter()
+                .filter(|c| c.verdict == tidectl_diagnostics::Verdict::Pass)
+                .count(),
             warns,
             fails,
-            checks.iter().filter(|c| c.verdict == tidectl_diagnostics::Verdict::Skip).count(),
+            checks
+                .iter()
+                .filter(|c| c.verdict == tidectl_diagnostics::Verdict::Skip)
+                .count(),
         );
         println!("For a full report to attach to an issue: tidectl report");
     }
-    let fails = checks.iter().filter(|c| c.verdict == tidectl_diagnostics::Verdict::Fail).count();
-    let warns = checks.iter().filter(|c| c.verdict == tidectl_diagnostics::Verdict::Warn).count();
+    let fails = checks
+        .iter()
+        .filter(|c| c.verdict == tidectl_diagnostics::Verdict::Fail)
+        .count();
+    let warns = checks
+        .iter()
+        .filter(|c| c.verdict == tidectl_diagnostics::Verdict::Warn)
+        .count();
     std::process::exit(if fails > 0 {
         2
     } else if warns > 0 {

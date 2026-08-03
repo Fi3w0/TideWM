@@ -182,7 +182,10 @@ pub fn run_checks() -> (Vec<Check>, Option<Diagnostics>) {
     // --- Config ------------------------------------------------------------------
     if let Some(diag) = &diagnostics {
         let data = &diag.json["data"];
-        let path = data.get("config_path").and_then(Value::as_str).unwrap_or("?");
+        let path = data
+            .get("config_path")
+            .and_then(Value::as_str)
+            .unwrap_or("?");
         let warnings: Vec<String> = data
             .get("config_warnings")
             .and_then(Value::as_array)
@@ -194,12 +197,20 @@ pub fn run_checks() -> (Vec<Check>, Option<Diagnostics>) {
             })
             .unwrap_or_default();
         if warnings.is_empty() {
-            checks.push(Check::new("config", Verdict::Pass, format!("{path} parses cleanly")));
+            checks.push(Check::new(
+                "config",
+                Verdict::Pass,
+                format!("{path} parses cleanly"),
+            ));
         } else {
             checks.push(Check::new(
                 "config",
                 Verdict::Warn,
-                format!("{} warning(s) in {path}: {}", warnings.len(), warnings.join("; ")),
+                format!(
+                    "{} warning(s) in {path}: {}",
+                    warnings.len(),
+                    warnings.join("; ")
+                ),
             ));
         }
     } else {
@@ -266,10 +277,14 @@ pub fn run_checks() -> (Vec<Check>, Option<Diagnostics>) {
     .or_else(|| {
         // Fallback when systemctl isn't available: match only the exact
         // frontend binary path so a backend process can never match.
-        command_output(&["pgrep", "-f", "^/usr/lib/xdg-desktop-portal$|xdg-desktop-portal$"])
-            .as_deref()
-            .and_then(|s| s.lines().next())
-            .and_then(|line| line.trim().parse::<i64>().ok())
+        command_output(&[
+            "pgrep",
+            "-f",
+            "^/usr/lib/xdg-desktop-portal$|xdg-desktop-portal$",
+        ])
+        .as_deref()
+        .and_then(|s| s.lines().next())
+        .and_then(|line| line.trim().parse::<i64>().ok())
     });
     match portal_pid {
         Some(pid) => {
@@ -403,7 +418,8 @@ pub fn run_checks() -> (Vec<Check>, Option<Diagnostics>) {
         checks.push(Check::new(
             "xwayland",
             Verdict::Warn,
-            "xwayland-satellite running but xwayland is disabled in config -- stray process".to_string(),
+            "xwayland-satellite running but xwayland is disabled in config -- stray process"
+                .to_string(),
         ));
     } else {
         checks.push(Check::new(
@@ -428,7 +444,10 @@ pub fn run_checks() -> (Vec<Check>, Option<Diagnostics>) {
             checks.push(Check::new(
                 "journal",
                 Verdict::Warn,
-                format!("{} error line(s) in the last 24h; newest: {last}", lines.len()),
+                format!(
+                    "{} error line(s) in the last 24h; newest: {last}",
+                    lines.len()
+                ),
             ));
         }
         None => {
@@ -454,7 +473,11 @@ pub fn run_checks() -> (Vec<Check>, Option<Diagnostics>) {
             checks.push(Check::new(
                 "core dumps",
                 Verdict::Fail,
-                format!("{} core dump(s) in the last 7 days -- a crash; first: {}", lines.len(), lines[0]),
+                format!(
+                    "{} core dump(s) in the last 7 days -- a crash; first: {}",
+                    lines.len(),
+                    lines[0]
+                ),
             ));
         }
         None => {
@@ -563,9 +586,7 @@ fn journal_errors(hours: u64) -> Option<Vec<String>> {
         .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())?;
     let interesting: Vec<String> = all
         .lines()
-        .filter(|line| {
-            line.contains("error") || line.contains("panic") || line.contains("ERROR")
-        })
+        .filter(|line| line.contains("error") || line.contains("panic") || line.contains("ERROR"))
         .map(str::to_string)
         .take(20)
         .collect();
@@ -614,10 +635,7 @@ fn query_data(diagnostics: &Diagnostics, req: &Value) -> Option<Value> {
 /// Whether the report should expand into verbose mode: any FAIL, or more
 /// than one WARN. A healthy system stays compact.
 pub fn needs_verbose(checks: &[Check]) -> bool {
-    let warns = checks
-        .iter()
-        .filter(|c| c.verdict == Verdict::Warn)
-        .count();
+    let warns = checks.iter().filter(|c| c.verdict == Verdict::Warn).count();
     checks.iter().any(|c| c.verdict == Verdict::Fail) || warns > 1
 }
 
@@ -635,10 +653,7 @@ pub fn render_report(checks: &[Check], diagnostics: &Option<Diagnostics>, verbos
 
     out.push_str("TideWM diagnostic report\n");
     out.push_str("========================\n");
-    out.push_str(&format!(
-        "Generated: {}\n",
-        local_now()
-    ));
+    out.push_str(&format!("Generated: {}\n", local_now()));
     out.push_str("Attach this file to a GitHub issue: https://github.com/Fi3w0/TideWM/issues\n");
     out.push_str("Privacy: the report includes window titles and config warnings. Review before attaching.\n\n");
 
@@ -647,24 +662,41 @@ pub fn render_report(checks: &[Check], diagnostics: &Option<Diagnostics>, verbos
     if let Some(diag) = diagnostics {
         let data = &diag.json["data"];
         let version = data.get("version").and_then(Value::as_str).unwrap_or("?");
-        let commit = data.get("commit").and_then(Value::as_str).unwrap_or("unknown");
+        let commit = data
+            .get("commit")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
         let dirty = data.get("dirty").and_then(Value::as_bool).unwrap_or(false);
         let profile = data.get("profile").and_then(Value::as_str).unwrap_or("?");
-        let build_date = data.get("build_date").and_then(Value::as_str).unwrap_or("?");
+        let build_date = data
+            .get("build_date")
+            .and_then(Value::as_str)
+            .unwrap_or("?");
         let backend = data.get("backend").and_then(Value::as_str).unwrap_or("?");
-        let engine = data.get("spatial_engine").and_then(Value::as_str).unwrap_or("?");
+        let engine = data
+            .get("spatial_engine")
+            .and_then(Value::as_str)
+            .unwrap_or("?");
         let uptime = data.get("uptime_secs").and_then(Value::as_u64).unwrap_or(0);
-        let water = data.get("water_effects").and_then(Value::as_bool).unwrap_or(false);
+        let water = data
+            .get("water_effects")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         out.push_str(&format!(
             "Version     : {version} (commit {commit}{}, {profile}, built {build_date})\n",
             if dirty { "-dirty" } else { "" }
         ));
         out.push_str(&format!("Backend     : {backend}\n"));
-        out.push_str(&format!("Engine      : {engine}  (water effects {})\n", if water { "on" } else { "off" }));
+        out.push_str(&format!(
+            "Engine      : {engine}  (water effects {})\n",
+            if water { "on" } else { "off" }
+        ));
         out.push_str(&format!("Uptime      : {}\n", human_duration(uptime)));
         out.push_str(&format!(
             "Config      : {} ({})\n",
-            data.get("config_path").and_then(Value::as_str).unwrap_or("?"),
+            data.get("config_path")
+                .and_then(Value::as_str)
+                .unwrap_or("?"),
             match data
                 .get("config_warnings")
                 .and_then(Value::as_array)
@@ -677,8 +709,12 @@ pub fn render_report(checks: &[Check], diagnostics: &Option<Diagnostics>, verbos
         ));
         out.push_str(&format!(
             "Layers      : {} layer surfaces, {} keybinds\n",
-            data.get("layer_surfaces").and_then(Value::as_u64).unwrap_or(0),
-            data.get("keybind_count").and_then(Value::as_u64).unwrap_or(0),
+            data.get("layer_surfaces")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            data.get("keybind_count")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
         ));
     } else {
         out.push_str("Version     : tidectl's own (see below -- compositor not running)\n");
@@ -687,7 +723,8 @@ pub fn render_report(checks: &[Check], diagnostics: &Option<Diagnostics>, verbos
             env!("CARGO_PKG_VERSION"),
             build_tag()
         ));
-    }    out.push_str(&format!(
+    }
+    out.push_str(&format!(
         "Quick check : {} -- {} passed, {} warnings, {} failed, {} skipped\n\n",
         verdict,
         checks.iter().filter(|c| c.verdict == Verdict::Pass).count(),
@@ -725,10 +762,7 @@ pub fn render_report(checks: &[Check], diagnostics: &Option<Diagnostics>, verbos
         out.push_str(&format!("Host        : {host} (nested host compositor)\n"));
     }
     if let Some(wayland) = std::env::var_os("WAYLAND_DISPLAY") {
-        out.push_str(&format!(
-            "Wayland     : {}\n",
-            wayland.to_string_lossy()
-        ));
+        out.push_str(&format!("Wayland     : {}\n", wayland.to_string_lossy()));
     }
     if let Some(gpu) = gpu_summary() {
         out.push_str(&format!("GPU         : {gpu}\n"));
@@ -751,7 +785,10 @@ pub fn render_report(checks: &[Check], diagnostics: &Option<Diagnostics>, verbos
                     .and_then(|s| Some((s.first()?.as_i64()?, s.get(1)?.as_i64()?)))
                     .unwrap_or((0, 0));
                 let scale = o.get("scale").and_then(Value::as_f64).unwrap_or(1.0);
-                let ws = o.get("active_workspace").and_then(Value::as_u64).unwrap_or(0);
+                let ws = o
+                    .get("active_workspace")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
                 out.push_str(&format!("  {name}  {w}x{h} scale={scale} workspace={ws}\n"));
             }
         }
@@ -775,7 +812,15 @@ pub fn render_report(checks: &[Check], diagnostics: &Option<Diagnostics>, verbos
         let windows = query_data(diag, &json!({ "request": "windows" }));
         if let Some(Value::Array(windows)) = windows {
             let cap = if verbose { windows.len() } else { 12 };
-            out.push_str(&format!("Windows ({}{}):\n", windows.len(), if windows.len() > cap { format!(", first {cap} shown") } else { String::new() }));
+            out.push_str(&format!(
+                "Windows ({}{}):\n",
+                windows.len(),
+                if windows.len() > cap {
+                    format!(", first {cap} shown")
+                } else {
+                    String::new()
+                }
+            ));
             for w in windows.iter().take(cap) {
                 let title = w.get("title").and_then(Value::as_str).unwrap_or("");
                 let app_id = w.get("app_id").and_then(Value::as_str).unwrap_or("");
@@ -812,13 +857,15 @@ pub fn render_report(checks: &[Check], diagnostics: &Option<Diagnostics>, verbos
 
     // --- Services -----------------------------------------------------------------
     out.push_str("== 5. Services ==\n");
-    for name in ["pipewire", "xdg-desktop-portal", "xwayland", "journal", "core dumps"] {
+    for name in [
+        "pipewire",
+        "xdg-desktop-portal",
+        "xwayland",
+        "journal",
+        "core dumps",
+    ] {
         if let Some(check) = checks.iter().find(|c| c.name == name) {
-            out.push_str(&format!(
-                "{:<20}: {}\n",
-                name,
-                check.detail
-            ));
+            out.push_str(&format!("{:<20}: {}\n", name, check.detail));
         }
     }
     out.push('\n');
@@ -829,7 +876,11 @@ pub fn render_report(checks: &[Check], diagnostics: &Option<Diagnostics>, verbos
         if !lines.is_empty() {
             out.push_str(&format!(
                 "== 6. Recent compositor errors (journalctl, {}) ==\n",
-                if verbose { "last 40 lines" } else { "first 10 lines" }
+                if verbose {
+                    "last 40 lines"
+                } else {
+                    "first 10 lines"
+                }
             ));
             for line in lines.iter().take(cap) {
                 out.push_str(&format!("  {line}\n"));
@@ -837,7 +888,9 @@ pub fn render_report(checks: &[Check], diagnostics: &Option<Diagnostics>, verbos
             out.push('\n');
         }
     } else {
-        out.push_str("== 6. Recent compositor errors ==\n  journalctl unavailable or no TideWM entries\n\n");
+        out.push_str(
+            "== 6. Recent compositor errors ==\n  journalctl unavailable or no TideWM entries\n\n",
+        );
     }
 
     // --- Core dumps detail ---------------------------------------------------------------
@@ -909,15 +962,13 @@ fn gpu_summary() -> Option<String> {
 
 fn mesa_version() -> Option<String> {
     let glxinfo = command_output(&["glxinfo", "-B"])?;
-    glxinfo
-        .lines()
-        .find_map(|line| {
-            if line.contains("OpenGL renderer") || line.contains("OpenGL version") {
-                Some(line.trim().to_string())
-            } else {
-                None
-            }
-        })
+    glxinfo.lines().find_map(|line| {
+        if line.contains("OpenGL renderer") || line.contains("OpenGL version") {
+            Some(line.trim().to_string())
+        } else {
+            None
+        }
+    })
 }
 
 /// `tidectl --version`-style build tag; mirrors `main.rs::build_tag`. The
@@ -927,7 +978,10 @@ fn build_tag() -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(commit) = option_env!("TIDEWM_GIT_COMMIT") {
         let dirty = option_env!("TIDEWM_GIT_DIRTY").is_some();
-        parts.push(format!("commit {commit}{}", if dirty { "-dirty" } else { "" }));
+        parts.push(format!(
+            "commit {commit}{}",
+            if dirty { "-dirty" } else { "" }
+        ));
     }
     parts.push(if cfg!(debug_assertions) {
         "debug build".to_string()

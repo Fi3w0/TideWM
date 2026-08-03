@@ -19,7 +19,9 @@ use smithay::{
         },
         utils::CommitCounter,
     },
-    utils::{user_data::UserDataMap, Buffer, Logical, Physical, Point, Rectangle, Scale, Size, Transform},
+    utils::{
+        user_data::UserDataMap, Buffer, Logical, Physical, Point, Rectangle, Scale, Size, Transform,
+    },
 };
 
 /// Hard cap on simultaneously rendered cues. Urgent cues sort first, then

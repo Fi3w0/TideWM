@@ -1457,10 +1457,7 @@ impl Default for RawConfig {
             "Super+M".to_string(),
             "toggle-border-fullscreen".to_string(),
         );
-        keybinds.insert(
-            "Super+Shift+M".to_string(),
-            "resize-to-monitor".to_string(),
-        );
+        keybinds.insert("Super+Shift+M".to_string(), "resize-to-monitor".to_string());
         keybinds.insert("Super+Tab".to_string(), "cycle-focus".to_string());
         keybinds.insert("Super+H".to_string(), "focus-left".to_string());
         keybinds.insert("Super+L".to_string(), "focus-right".to_string());
@@ -4189,7 +4186,10 @@ fn apply_float_physics_block(cfg: &mut FloatPhysicsConfig, body: &[waves::Entry]
                 "response" | "gain" => match value.parse::<f32>() {
                     Ok(value) if value.is_finite() => cfg.response = value.clamp(0.0, 1.0),
                     _ => {
-                        tracing::warn!(value, "Expected float_physics.response from 0 to 1, ignoring")
+                        tracing::warn!(
+                            value,
+                            "Expected float_physics.response from 0 to 1, ignoring"
+                        )
                     }
                 },
                 "max_offset" | "amplitude" => match value.parse::<f32>() {
@@ -4209,19 +4209,28 @@ fn apply_float_physics_block(cfg: &mut FloatPhysicsConfig, body: &[waves::Entry]
                 "damping" => match value.parse::<f32>() {
                     Ok(value) if value.is_finite() => cfg.damping = value.clamp(0.1, 20.0),
                     _ => {
-                        tracing::warn!(value, "Expected float_physics.damping from 0.1 to 20, ignoring")
+                        tracing::warn!(
+                            value,
+                            "Expected float_physics.damping from 0.1 to 20, ignoring"
+                        )
                     }
                 },
                 "bob_ratio" => match value.parse::<f32>() {
                     Ok(value) if value.is_finite() => cfg.bob_ratio = value.clamp(0.0, 2.0),
                     _ => {
-                        tracing::warn!(value, "Expected float_physics.bob_ratio from 0 to 2, ignoring")
+                        tracing::warn!(
+                            value,
+                            "Expected float_physics.bob_ratio from 0 to 2, ignoring"
+                        )
                     }
                 },
                 "radius" => match value.parse::<f32>() {
                     Ok(value) if value.is_finite() => cfg.radius = value.clamp(0.0, 2048.0),
                     _ => {
-                        tracing::warn!(value, "Expected float_physics.radius from 0 to 2048, ignoring")
+                        tracing::warn!(
+                            value,
+                            "Expected float_physics.radius from 0 to 2048, ignoring"
+                        )
                     }
                 },
                 "falloff" => set_bool(&mut cfg.falloff, key, value),
@@ -4240,7 +4249,9 @@ fn apply_float_physics_block(cfg: &mut FloatPhysicsConfig, body: &[waves::Entry]
                     ),
                 },
                 "bounce_off_edges" => set_bool(&mut cfg.bounce_off_edges, key, value),
-                other => tracing::warn!(key = %other, "Unknown key in `float_physics` block, ignoring"),
+                other => {
+                    tracing::warn!(key = %other, "Unknown key in `float_physics` block, ignoring")
+                }
             },
             waves::Entry::Block(keyword, header, wave_body) if keyword == "wave" => {
                 if !header.trim().is_empty() {
@@ -4325,7 +4336,10 @@ fn apply_water_glass_block(cfg: &mut WaterGlassConfig, body: &[waves::Entry]) {
             "amplitude" | "strength" => match value.parse::<f32>() {
                 Ok(value) if value.is_finite() => cfg.amplitude = value.clamp(0.0, 4.0),
                 _ => {
-                    tracing::warn!(value, "Expected water_glass.amplitude from 0 to 4, ignoring")
+                    tracing::warn!(
+                        value,
+                        "Expected water_glass.amplitude from 0 to 4, ignoring"
+                    )
                 }
             },
             "settle_ms" | "settle" => match value.parse::<u32>() {
@@ -4372,10 +4386,7 @@ fn apply_caustics_block(cfg: &mut CausticsConfig, body: &[waves::Entry]) {
             },
             "color" => match parse_ripple_color(value) {
                 Some(c) => cfg.color = c,
-                None => tracing::warn!(
-                    value,
-                    "Expected a hex color for caustics.color, ignoring"
-                ),
+                None => tracing::warn!(value, "Expected a hex color for caustics.color, ignoring"),
             },
             "scale" => match value.parse::<f32>() {
                 Ok(value) if value.is_finite() => cfg.scale = value.clamp(0.1, 8.0),
@@ -4448,22 +4459,32 @@ fn apply_compass_block(cfg: &mut CompassConfig, body: &[waves::Entry]) {
                 if let Some(color) = parse_ripple_color(value) {
                     cfg.urgent_color = color;
                 } else {
-                    tracing::warn!(value, "Expected compass.urgent_color as #RRGGBB/rgb(...), ignoring");
+                    tracing::warn!(
+                        value,
+                        "Expected compass.urgent_color as #RRGGBB/rgb(...), ignoring"
+                    );
                 }
             }
             "deep_color" | "deep" => {
                 if let Some(color) = parse_ripple_color(value) {
                     cfg.deep_color = color;
                 } else {
-                    tracing::warn!(value, "Expected compass.deep_color as #RRGGBB/rgb(...), ignoring");
+                    tracing::warn!(
+                        value,
+                        "Expected compass.deep_color as #RRGGBB/rgb(...), ignoring"
+                    );
                 }
             }
             "max_distance" => match value.parse::<f32>() {
-                Ok(value) if value.is_finite() && value > 0.0 => cfg.max_distance = value.min(50_000.0),
+                Ok(value) if value.is_finite() && value > 0.0 => {
+                    cfg.max_distance = value.min(50_000.0)
+                }
                 _ => tracing::warn!(value, "Expected compass.max_distance > 0, ignoring"),
             },
             "size" => match value.parse::<f32>() {
-                Ok(value) if value.is_finite() && value > 0.0 => cfg.size = value.clamp(8.0, 1024.0),
+                Ok(value) if value.is_finite() && value > 0.0 => {
+                    cfg.size = value.clamp(8.0, 1024.0)
+                }
                 _ => tracing::warn!(value, "Expected compass.size from 8 to 1024, ignoring"),
             },
             "alpha" | "peak_alpha" => match value.parse::<f32>() {
@@ -8063,7 +8084,9 @@ mod tests {
             Some(FloatPhysicsTier::Off)
         );
         assert_eq!(
-            config.resolve_window_rules(Some("foot"), None).float_physics,
+            config
+                .resolve_window_rules(Some("foot"), None)
+                .float_physics,
             None
         );
 

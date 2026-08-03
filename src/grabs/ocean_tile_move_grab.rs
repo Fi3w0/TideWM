@@ -92,8 +92,11 @@ impl OceanTileMoveGrab {
             }
             None => {
                 let world_rect = self.current_world_rect(data);
-                data.ocean
-                    .make_floating(&self.surface, data.config.gaps, data.config.bsp_split_bias);
+                data.ocean.make_floating(
+                    &self.surface,
+                    data.config.gaps,
+                    data.config.bsp_split_bias,
+                );
                 data.ocean.set_floating_rect(&self.surface, world_rect);
             }
         }

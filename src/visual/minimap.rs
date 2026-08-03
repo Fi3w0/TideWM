@@ -491,7 +491,8 @@ impl MinimapPeek {
             return None;
         }
         let half = CURSOR_GLYPH as f64 / 2.0;
-        let physical_loc = (loc - output_loc.to_f64() - Point::from((half, half))).to_physical(scale);
+        let physical_loc =
+            (loc - output_loc.to_f64() - Point::from((half, half))).to_physical(scale);
         MemoryRenderBufferRenderElement::from_buffer(
             renderer,
             physical_loc,
