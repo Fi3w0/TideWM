@@ -1828,7 +1828,6 @@ mod tests {
         let Some(motion) = ocean.camera_motions.get_mut("main") else {
             panic!("zoom_at with a non-zero duration must create a motion");
         };
-        let mut motion = motion;
         for fraction in [0.1, 0.25, 0.5, 0.75, 0.9] {
             motion.started = Instant::now() - Duration::from_secs_f64(1.0 * fraction);
             let sampled = motion.sample();

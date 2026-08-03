@@ -261,8 +261,10 @@ mod tests {
 
     #[test]
     fn long_stall_advance_is_capped() {
-        let mut caustics = Caustics::default();
-        caustics.last_advance = Instant::now() - Duration::from_secs(60);
+        let caustics = Caustics {
+            last_advance: Instant::now() - Duration::from_secs(60),
+            ..Caustics::default()
+        };
         let dt = caustics
             .last_advance
             .elapsed()
