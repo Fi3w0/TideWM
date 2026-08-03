@@ -382,8 +382,14 @@ pub fn run_checks() -> (Vec<Check>, Option<Diagnostics>) {
         None => driver_detail,
     };
 
+    // No render node *and* no known driver module loaded means there is no
+    // real GPU here at all -- expected on a headless CI/build machine, not
+    // a problem to report. A driver loaded with no render node is the real
+    // failure case (permissions, missing KMS support, misconfiguration).
     let verdict = if dri_present {
         Verdict::Pass
+    } else if drivers.is_empty() {
+        Verdict::Skip
     } else {
         Verdict::Fail
     };
