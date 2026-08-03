@@ -815,6 +815,21 @@ pub fn init_udev(
                 );
             }
 
+            // An active animation (caustics at fps>0, a toast fading, a
+            // ripple in flight, ...) needs another frame even though nothing
+            // else marked itself dirty in the meantime. Checked here in the
+            // main loop rather than inside render_surface: with the check
+            // only in the render path, an idle desktop never renders, so a
+            // rate-gated effect (caustics' 1/fps) never gets re-evaluated
+            // and starves to a few frames per second. The effect's own gate
+            // still throttles actual renders to its configured fps; this
+            // only guarantees the pump keeps asking. Goes through the
+            // request_redraw -> take_needs_redraw path, so every output is
+            // re-dirtied, not just the one(s) that just rendered.
+            if state.has_active_animation() {
+                state.request_redraw();
+            }
+
             state.space.refresh();
             state.popups.cleanup();
             state.refresh_popup_grab();
@@ -1620,11 +1635,21 @@ fn render_surface(
         state.send_layer_frames(output, state.start_time.elapsed());
     }
 
-    // An active animation (a toast still fading, today) needs another
-    // frame even though nothing else marked itself dirty in the meantime.
+    // An active animation (a toast still fading, caustics at fps>0, a
+    // ripple in flight, ...) needs another frame even though nothing else
+    // marked itself dirty in the meantime. Checked here in the main loop --
+    // not inside render_surface -- so a request happens every tick even
+    // when the previous render stamped the animation's last-advance clock
+    // and the frame gate (e.g. caustics' 1/fps) is currently quiet: with
+    // the check only inside the render path, an idle desktop never renders,
+    // so the gate never gets re-evaluated and the effect starves to a
+    // few frames per second. Goes through the normal request_redraw() ->
+    // take_needs_redraw() path (checked at the top of *next* tick), which
+    // re-dirties every output, not just whichever one(s) just rendered.
+    // The effect's own rate gate still throttles actual renders to its
+    // configured fps; this only guarantees the pump keeps asking.
     if state.has_active_animation() {
         state.request_redraw();
-        surface.dirty = true;
     }
 
     empty_frame_retry
