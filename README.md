@@ -23,9 +23,9 @@ Underneath the water is a real tiling window manager: fast keyboard-driven layou
 
 ## See it
 
-<video src="https://github.com/Fi3w0/TideWM/raw/master/share/media/demo-clasic.mp4" controls width="960">
-  Your browser does not support embedded video. <a href="share/media/demo-clasic.mp4">Download the demo</a>.
-</video>
+<img src="share/media/demo-clasic.gif" width="960" alt="TideWM demo: ripples on open, wave workspace transitions, glass and shadows">
+
+[Full-quality video (mp4)](share/media/demo-clasic.mp4) if the GIF is too compressed for your taste.
 
 ## Why people are trying it
 
