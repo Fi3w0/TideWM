@@ -2375,6 +2375,12 @@ impl Smallvil {
                     self.toggle_pseudo_tile(&surface);
                 }
             }
+            Action::ToggleFloatAmbient => {
+                let focused = self.focused_window_surface();
+                if let Some(surface) = focused {
+                    self.toggle_float_ambient(&surface);
+                }
+            }
             Action::RaiseWindow => {
                 let focused = self.focused_window_surface();
                 if let Some(surface) = focused {

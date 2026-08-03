@@ -1048,6 +1048,24 @@ impl Smallvil {
         // is off; see `spawn_window_map_ripple`'s own doc.
         self.spawn_window_map_ripple(surface);
 
+        // Cosmetic float-physics disturbance (F1 `light`, spatial roadmap):
+        // a newly mapped floating window "lands in the water" with a
+        // downward-biased kick, and any floating neighbors within
+        // `float_physics.radius` rock too. Fixed synthetic magnitude --
+        // there's no real motion to sample the way a drag has, so this is
+        // a starting point, open to the same feel-tuning pass as every
+        // other `float_physics` default. `float_physics_kick_near` itself
+        // is the no-op gate when the mechanic or this window's rule
+        // disables it.
+        const MAP_KICK_IMPULSE: f64 = 120.0;
+        if let Some(center) = self.window_center_for_kick(surface) {
+            if let Some(window) = self.mapped_toplevel_window(surface) {
+                if let Some(output) = self.output_for_window(&window) {
+                    self.float_physics_kick_near(&output, center, (0.0, MAP_KICK_IMPULSE));
+                }
+            }
+        }
+
         self.announce_foreign_toplevel(surface);
     }
 
@@ -1174,6 +1192,8 @@ impl Smallvil {
         self.window_move_animations.remove(surface);
         self.window_viscosity.remove(surface);
         self.window_sway.remove(surface);
+        self.window_float_physics.remove(surface);
+        self.window_float_ambient.remove(surface);
         self.window_frame_snapshots.remove(surface);
         self.backdrop_textures.remove(surface);
         self.glass_anim.remove(surface);

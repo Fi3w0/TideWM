@@ -314,6 +314,21 @@ pub struct Smallvil {
     /// closed-form record per mapped window; a settled entry finishes and
     /// is pruned, so idle windows never keep the frame pump alive.
     pub(crate) window_sway: HashMap<WlSurface, crate::sway::FloatingSway>,
+    /// Cosmetic 2D bob-and-drift for floating windows (F1 `light`). One
+    /// small closed-form record per disturbed window; a settled entry
+    /// finishes and is pruned, so idle windows never keep the frame pump
+    /// alive. When a window resolves float-physics-enabled it is tracked
+    /// here instead of in `window_sway` -- the two never stack.
+    pub(crate) window_float_physics: HashMap<WlSurface, crate::float_physics::FloatPhysics>,
+    /// Windows with ambient "sitting on water" sway toggled on
+    /// (`toggle-float-ambient`), keyed to the `Instant` it was toggled on --
+    /// the time origin `float_physics::ambient_sample`'s `elapsed` measures
+    /// from, sampled fresh in `base_window_visual_sample`. Unlike
+    /// `window_float_physics`, entries here don't finish on their own --
+    /// they persist until explicitly toggled off, deliberately keeping the
+    /// frame pump alive the whole time. Independent of `window_float_physics`
+    /// entirely: the two offsets simply add when both are active.
+    pub(crate) window_float_ambient: HashMap<WlSurface, Instant>,
     /// Continuous lateral swim camera, one entry per output that has ever
     /// swum. The offset is purely visual (the logical workspace identity is
     /// still `Layouts::active`'s `u32`); at rest it is zero and the entry
@@ -1136,6 +1151,29 @@ impl Smallvil {
             if let Some(sway) = self.window_sway.get(surface) {
                 sample.offset.x += sway.sample();
             }
+            if let Some(physics) = self.window_float_physics.get(surface) {
+                let (ox, oy) = physics.sample();
+                sample.offset.x += ox;
+                sample.offset.y += oy;
+            }
+            // Ambient sway is a continuous function of elapsed time, not a
+            // pruned/decaying record like the two above -- sampled fresh
+            // every frame straight from `Instant::now()`, no per-frame tick
+            // needed to drive it. `is_floating` re-checked here (not just
+            // at toggle time) so a window that stops floating after being
+            // toggled on doesn't keep swaying off its tile.
+            if let Some(start) = self.window_float_ambient.get(surface) {
+                if self.is_floating(surface) {
+                    let config = self.config.float_physics;
+                    let (ax, ay) = crate::float_physics::ambient_sample(
+                        start.elapsed().as_secs_f64(),
+                        config.max_offset as f64,
+                        config.ambient_period_s as f64,
+                    );
+                    sample.offset.x += ax;
+                    sample.offset.y += ay;
+                }
+            }
         }
         sample
     }
@@ -1303,6 +1341,169 @@ impl Smallvil {
                 );
             }
         }
+        self.request_redraw();
+    }
+
+    /// `sway_enabled_for_surface`'s counterpart for F1 `light`. `pub(crate)`
+    /// (unlike `sway_enabled_for_surface`) because the drag call site in
+    /// `grabs/move_grab.rs` branches on it directly: when both resolve
+    /// enabled for the same window, `float_physics_kick` takes over instead
+    /// of `sway_kick` -- the two mechanics never stack.
+    pub(crate) fn float_physics_enabled_for_surface(&self, surface: &WlSurface) -> bool {
+        if !self.config.water_effects {
+            return false;
+        }
+        let (app_id, title) = self.toplevel_identity(surface);
+        self.config
+            .resolve_window_rules(app_id.as_deref(), title.as_deref())
+            .float_physics
+            .unwrap_or(self.config.float_physics.enabled)
+    }
+
+    /// Feeds one 2D disturbance into a floating window's bob-and-drift
+    /// (F1 `light`). Called directly for the window a disturbance
+    /// originates at (a drag, or the source of a `float_physics_kick_near`
+    /// spread); a no-op when the water identity, the mechanic, or this
+    /// window's rule disables it. A kick counts as attention: it resets
+    /// the window's depth clock the same way real focus does, so a
+    /// disturbed float stays buoyant on the existing `depth {}` timer
+    /// instead of sinking mid-bob.
+    pub(crate) fn float_physics_kick(&mut self, surface: &WlSurface, impulse: (f64, f64)) {
+        if (impulse.0.abs() < f64::EPSILON && impulse.1.abs() < f64::EPSILON)
+            || !self.float_physics_enabled_for_surface(surface)
+        {
+            return;
+        }
+        let config = self.config.float_physics;
+        let response = config.response as f64;
+        let max_offset = config.max_offset as f64;
+        let bob_ratio = config.bob_ratio as f64;
+        match self.window_float_physics.get_mut(surface) {
+            Some(physics) => physics.kick(impulse, response, max_offset, bob_ratio),
+            None => {
+                self.window_float_physics.insert(
+                    surface.clone(),
+                    crate::float_physics::FloatPhysics::kicked(
+                        impulse,
+                        response,
+                        max_offset,
+                        bob_ratio,
+                        config.frequency as f64,
+                        config.damping as f64,
+                    ),
+                );
+            }
+        }
+        self.note_depth_attention(surface);
+        self.request_redraw();
+    }
+
+    /// Spreads one 2D disturbance across every floating window on `output`,
+    /// scaled by distance from `point` per `float_physics.radius`: `1.0` at
+    /// `point` itself, falling off linearly to zero at `radius`, matching
+    /// `falloff_kick`. `falloff = false` limits the effect to whatever
+    /// window sits exactly at `point` (a window mapping's own center), so
+    /// no neighbor spillover. Used by disturbance sources that aren't
+    /// already a specific dragged window: a window mapping, or a
+    /// workspace-transition wave passing across the output.
+    pub(crate) fn float_physics_kick_near(
+        &mut self,
+        output: &Output,
+        point: (f64, f64),
+        impulse: (f64, f64),
+    ) {
+        if !self.config.water_effects {
+            return;
+        }
+        // `render_placements` (Classic) reads `Space::elements_for_output`,
+        // a per-output cache normally kept fresh by each backend's render
+        // loop calling `space.refresh()` once a frame -- see
+        // `refocus_after_hide`'s identical comment. Both call sites here
+        // (a window mapping, a workspace-transition wave) run synchronously
+        // right after their own `map_element`/`apply_workspace_switch`,
+        // before that frame's render pass, so without this the cache is
+        // stale and this always sees zero placements for a window just
+        // mapped or just switched in. Cheap and idempotent to call an extra
+        // time here.
+        self.space.refresh();
+        let Some(placements) = self.render_placements(output) else {
+            return;
+        };
+        let radius = self.config.float_physics.radius as f64;
+        let falloff = self.config.float_physics.falloff;
+        for placement in &placements {
+            if !placement.is_floating() {
+                continue;
+            }
+            let Some(surface) = placement.surface() else {
+                continue;
+            };
+            // Not `placement.rect`: a just-mapped window's `PlacedWindow`
+            // still carries `window.geometry()`'s pre-commit (often
+            // zero) size, the same buffer-commit lag `spawn_ripple`
+            // documents -- collapsing its "center" to its top-left corner
+            // and pushing it outside its own kick radius. This is the
+            // same already-resolved-rect helper `point` itself came from
+            // at the call site, so a window kicking itself always
+            // measures at distance zero.
+            let Some(center) = self.window_center_for_kick(surface) else {
+                continue;
+            };
+            let Some(fraction) = crate::float_physics::falloff_kick(point, center, radius) else {
+                continue;
+            };
+            if !falloff && fraction < 1.0 {
+                continue;
+            }
+            self.float_physics_kick(surface, (impulse.0 * fraction, impulse.1 * fraction));
+        }
+    }
+
+    /// Best-effort window center in global logical coordinates, used as a
+    /// disturbance origin. Mirrors `spawn_ripple`'s own preference order:
+    /// the floating tag's already-resolved target rect (set before a
+    /// first-map floating conversion's own buffer commit lands) over the
+    /// window's possibly still-stale committed geometry.
+    pub(crate) fn window_center_for_kick(&self, surface: &WlSurface) -> Option<(f64, f64)> {
+        let rect = self
+            .floating_workspace
+            .get(surface)
+            .map(|tag| tag.rect)
+            .or_else(|| {
+                let window = self.mapped_toplevel_window(surface)?;
+                self.space
+                    .element_location(&window)
+                    .map(|loc| Rectangle::new(loc, window.geometry().size))
+            })?;
+        Some((
+            rect.loc.x as f64 + rect.size.w as f64 / 2.0,
+            rect.loc.y as f64 + rect.size.h as f64 / 2.0,
+        ))
+    }
+
+    fn is_floating(&self, surface: &WlSurface) -> bool {
+        self.floating_workspace.contains_key(surface) || self.ocean.floating_rect(surface).is_some()
+    }
+
+    /// Toggles ambient "sitting on water" sway for `surface`: once on, a
+    /// continuous sine-wave offset (`float_physics::ambient_sample`, sampled
+    /// fresh every frame in `base_window_visual_sample`) runs until toggled
+    /// off again, independent of the drag/map/wave kick sources -- it never
+    /// settles the way a kick does, by design. Floating windows only -- a
+    /// tiled window has no offset render slot to sway in without visibly
+    /// drifting off its own tile boundary, so this is a silent no-op on one.
+    pub(crate) fn toggle_float_ambient(&mut self, surface: &WlSurface) {
+        if !self.is_floating(surface) {
+            return;
+        }
+        if self.window_float_ambient.remove(surface).is_some() {
+            self.request_redraw();
+            return;
+        }
+        // The value is the time origin `ambient_sample`'s `elapsed` measures
+        // from, not a due time -- there's nothing to schedule.
+        self.window_float_ambient
+            .insert(surface.clone(), Instant::now());
         self.request_redraw();
     }
 
@@ -2403,6 +2604,8 @@ impl Smallvil {
             window_move_animations: HashMap::new(),
             window_viscosity: HashMap::new(),
             window_sway: HashMap::new(),
+            window_float_physics: HashMap::new(),
+            window_float_ambient: HashMap::new(),
             swim_cameras: HashMap::new(),
             window_frame_snapshots: HashMap::new(),
             closing_window_animations: Vec::new(),
@@ -4196,6 +4399,8 @@ impl Smallvil {
             .retain(|_, animation| !animation.finished());
         self.window_viscosity.retain(|_, motion| !motion.finished());
         self.window_sway.retain(|_, sway| !sway.finished());
+        self.window_float_physics
+            .retain(|_, physics| !physics.finished());
         self.swim_cameras.retain(|_, camera| !camera.at_rest());
         self.closing_window_animations
             .retain(|closing| !closing.animation.finished());
@@ -4209,6 +4414,12 @@ impl Smallvil {
             || !self.window_move_animations.is_empty()
             || !self.window_viscosity.is_empty()
             || !self.window_sway.is_empty()
+            || !self.window_float_physics.is_empty()
+            // Deliberately not pruned by a `finished()` check like the
+            // physics map above -- ambient entries persist until
+            // `toggle_float_ambient` removes them, so their mere presence
+            // (not decay state) is what should keep the pump alive.
+            || !self.window_float_ambient.is_empty()
             || !self.swim_cameras.is_empty()
             || self.ocean.has_active_camera_motion()
             || (self.config.spatial_engine == crate::config::SpatialEngine::Ocean
@@ -5279,6 +5490,28 @@ impl Smallvil {
                     &self.config.workspace_transition,
                 ),
             );
+            // Cosmetic float-physics disturbance (F1 `light`): every float
+            // on the output rocks as the wave passes, kicked from the
+            // output's center in the wave's travel direction. Only fires
+            // alongside the real wave visual above, not on the early-return
+            // discrete-switch path. Fixed synthetic magnitude, same
+            // tuning-owed caveat as the map kick.
+            const WAVE_KICK_IMPULSE: f64 = 120.0;
+            if let Some(output_geo) = self.space.output_geometry(output) {
+                let center = (
+                    output_geo.loc.x as f64 + output_geo.size.w as f64 / 2.0,
+                    output_geo.loc.y as f64 + output_geo.size.h as f64 / 2.0,
+                );
+                let dx = match direction {
+                    crate::workspace_transition::WorkspaceTransitionDirection::LeftToRight => {
+                        WAVE_KICK_IMPULSE
+                    }
+                    crate::workspace_transition::WorkspaceTransitionDirection::RightToLeft => {
+                        -WAVE_KICK_IMPULSE
+                    }
+                };
+                self.float_physics_kick_near(output, center, (dx, 0.0));
+            }
         }
     }
 
@@ -9167,6 +9400,24 @@ impl Smallvil {
                     .collect();
                 for surface in disabled_sway {
                     self.window_sway.remove(&surface);
+                }
+                let disabled_float_physics: Vec<WlSurface> = self
+                    .window_float_physics
+                    .keys()
+                    .filter(|surface| !self.float_physics_enabled_for_surface(surface))
+                    .cloned()
+                    .collect();
+                for surface in disabled_float_physics {
+                    self.window_float_physics.remove(&surface);
+                }
+                let disabled_float_ambient: Vec<WlSurface> = self
+                    .window_float_ambient
+                    .keys()
+                    .filter(|surface| !self.float_physics_enabled_for_surface(surface))
+                    .cloned()
+                    .collect();
+                for surface in disabled_float_ambient {
+                    self.window_float_ambient.remove(&surface);
                 }
                 if !self.config.animations.enabled || !self.config.animations.close.enabled {
                     self.window_frame_snapshots.clear();

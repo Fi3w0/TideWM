@@ -56,10 +56,7 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
         let delta = Point::from((view_delta.x / scale, view_delta.y / scale));
         let new_location = self.initial_window_location.to_f64() + delta;
         let new_location = new_location.to_i32_round();
-        let previous_x = data
-            .space
-            .element_location(&self.window)
-            .map(|location| location.x);
+        let previous_location = data.space.element_location(&self.window);
         data.retarget_window_viscosity(
             surface,
             Rectangle::new(new_location, self.window.geometry().size),
@@ -109,8 +106,18 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
                 data.ocean.set_tile_drag(surface.clone(), rect, hint);
             }
         }
-        if let Some(previous_x) = previous_x {
-            data.sway_kick(surface, (new_location.x - previous_x) as f64);
+        if let Some(previous_location) = previous_location {
+            let delta = (
+                (new_location.x - previous_location.x) as f64,
+                (new_location.y - previous_location.y) as f64,
+            );
+            // `light` subsumes `sway` for a window that resolves both
+            // enabled -- the two mechanics never stack on the same window.
+            if data.float_physics_enabled_for_surface(surface) {
+                data.float_physics_kick(surface, delta);
+            } else {
+                data.sway_kick(surface, delta.0);
+            }
         }
         data.request_redraw();
     }
