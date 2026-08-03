@@ -445,8 +445,7 @@ discoverable without navigating to them:
 - **Urgent** windows glow bright cyan in any direction (left, right, up,
   down, or diagonally toward a corner).
 - **Deep** windows (sunk via `sink-window`, or sitting in a lower reef)
-  glow cool blue at the bottom edge only -- lateral off-screen travel is
-  ordinary panning, not depth, so it produces no cue.
+  glow cool blue in any direction, same as urgent.
 
 Nearer windows glow brighter; the cue fades linearly to nothing at
 `max_distance`. The cues are ambient and render-only: they do not respond
