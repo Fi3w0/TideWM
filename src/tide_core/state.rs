@@ -337,6 +337,31 @@ pub struct Smallvil {
     /// frame pump alive the whole time. Independent of `window_float_physics`
     /// entirely: the two offsets simply add when both are active.
     pub(crate) window_float_ambient: HashMap<WlSurface, Instant>,
+    /// F1 `full` tier's rigid-body-ish state: one mass-spring-damper body
+    /// per floating window currently resolving `Full`, real velocity and
+    /// all, so it can exchange collision impulses the way `FloatPhysics`'
+    /// closed form can't. Ticked by `update_float_physics_full`, synced
+    /// (inserted/pruned) every tick by `sync_float_physics_bodies` rather
+    /// than only on a kick, since the continuous wave field needs a body to
+    /// push on `full` windows even before their first disturbance.
+    pub(crate) window_float_bodies: HashMap<WlSurface, crate::float_physics::FloatBody>,
+    /// Fixed-timestep accumulator for `update_float_physics_full`'s
+    /// integrator, carried across ticks so a variable frame interval still
+    /// advances the simulation in fixed, numerically stable steps. Clamped
+    /// to a small multiple of the fixed step so a long stall (a hung
+    /// nested host, a VT switch) can't dump a huge catch-up burst of
+    /// substeps into a single tick.
+    pub(crate) float_physics_accum: f64,
+    /// Wall-clock timestamp of the previous `update_float_physics_full`
+    /// call, used to derive the elapsed real time fed into the accumulator
+    /// above.
+    pub(crate) float_physics_last_tick: Instant,
+    /// Fixed time origin the traveling wave field's phase is measured from
+    /// (`float_physics::wave_target`'s `elapsed`). A single shared clock
+    /// (not one per window, unlike `window_float_ambient`) because the
+    /// wave is one continuous field every full-tier window samples by its
+    /// own position, not N independent oscillators.
+    pub(crate) float_physics_wave_clock: Instant,
     /// Continuous lateral swim camera, one entry per output that has ever
     /// swum. The offset is purely visual (the logical workspace identity is
     /// still `Layouts::active`'s `u32`); at rest it is zero and the entry
@@ -1021,6 +1046,20 @@ pub(crate) enum CompositorGesture {
     },
 }
 
+/// Per-tick, per-window context for F1 `full` tier's physics step:
+/// resolved once in `Smallvil::update_float_physics_full`, reused across
+/// every fixed-timestep substep. `anchor`/`output_bounds` are
+/// `(x, y, w, h)` in global logical coordinates -- plain tuples rather than
+/// `Rectangle<f64, Logical>` since every consumer does raw arithmetic on
+/// the four components anyway (`float_physics::resolve_collision`/
+/// `resolve_edge_collision` take the same shape).
+struct FloatBodyContext {
+    surface: WlSurface,
+    anchor: (f64, f64, f64, f64),
+    mass: f64,
+    output_bounds: Option<(f64, f64, f64, f64)>,
+}
+
 pub(crate) struct PopupGrabState {
     pub(crate) root: WlSurface,
     pub(crate) grab: PopupGrab<Smallvil>,
@@ -1163,6 +1202,10 @@ impl Smallvil {
                 let (ox, oy) = physics.sample();
                 sample.offset.x += ox;
                 sample.offset.y += oy;
+            }
+            if let Some(body) = self.window_float_bodies.get(surface) {
+                sample.offset.x += body.offset.0;
+                sample.offset.y += body.offset.1;
             }
             // Ambient sway is a continuous function of elapsed time, not a
             // pruned/decaying record like the two above -- sampled fresh
@@ -1352,20 +1395,29 @@ impl Smallvil {
         self.request_redraw();
     }
 
-    /// `sway_enabled_for_surface`'s counterpart for F1 `light`. `pub(crate)`
-    /// (unlike `sway_enabled_for_surface`) because the drag call site in
-    /// `grabs/move_grab.rs` branches on it directly: when both resolve
-    /// enabled for the same window, `float_physics_kick` takes over instead
-    /// of `sway_kick` -- the two mechanics never stack.
-    pub(crate) fn float_physics_enabled_for_surface(&self, surface: &WlSurface) -> bool {
+    /// `sway_enabled_for_surface`'s counterpart for F1. `pub(crate)` (unlike
+    /// `sway_enabled_for_surface`) because the drag call site in
+    /// `grabs/move_grab.rs` branches on it directly: when this resolves
+    /// `Light` or `Full` for the same window, `float_physics_kick` takes
+    /// over instead of `sway_kick` -- the two mechanics never stack.
+    pub(crate) fn float_physics_tier_for_surface(
+        &self,
+        surface: &WlSurface,
+    ) -> crate::config::FloatPhysicsTier {
         if !self.config.water_effects {
-            return false;
+            return crate::config::FloatPhysicsTier::Off;
         }
         let (app_id, title) = self.toplevel_identity(surface);
         self.config
             .resolve_window_rules(app_id.as_deref(), title.as_deref())
             .float_physics
-            .unwrap_or(self.config.float_physics.enabled)
+            .unwrap_or(self.config.float_physics.tier)
+    }
+
+    /// Convenience for call sites that only care whether F1 is active at
+    /// all (either tier), not which one.
+    pub(crate) fn float_physics_enabled_for_surface(&self, surface: &WlSurface) -> bool {
+        self.float_physics_tier_for_surface(surface) != crate::config::FloatPhysicsTier::Off
     }
 
     /// Feeds one 2D disturbance into a floating window's bob-and-drift
@@ -1377,29 +1429,38 @@ impl Smallvil {
     /// disturbed float stays buoyant on the existing `depth {}` timer
     /// instead of sinking mid-bob.
     pub(crate) fn float_physics_kick(&mut self, surface: &WlSurface, impulse: (f64, f64)) {
-        if (impulse.0.abs() < f64::EPSILON && impulse.1.abs() < f64::EPSILON)
-            || !self.float_physics_enabled_for_surface(surface)
-        {
+        if impulse.0.abs() < f64::EPSILON && impulse.1.abs() < f64::EPSILON {
             return;
         }
         let config = self.config.float_physics;
-        let response = config.response as f64;
-        let max_offset = config.max_offset as f64;
-        let bob_ratio = config.bob_ratio as f64;
-        match self.window_float_physics.get_mut(surface) {
-            Some(physics) => physics.kick(impulse, response, max_offset, bob_ratio),
-            None => {
-                self.window_float_physics.insert(
-                    surface.clone(),
-                    crate::float_physics::FloatPhysics::kicked(
-                        impulse,
-                        response,
-                        max_offset,
-                        bob_ratio,
-                        config.frequency as f64,
-                        config.damping as f64,
-                    ),
-                );
+        match self.float_physics_tier_for_surface(surface) {
+            crate::config::FloatPhysicsTier::Off => return,
+            crate::config::FloatPhysicsTier::Light => {
+                let response = config.response as f64;
+                let max_offset = config.max_offset as f64;
+                let bob_ratio = config.bob_ratio as f64;
+                match self.window_float_physics.get_mut(surface) {
+                    Some(physics) => physics.kick(impulse, response, max_offset, bob_ratio),
+                    None => {
+                        self.window_float_physics.insert(
+                            surface.clone(),
+                            crate::float_physics::FloatPhysics::kicked(
+                                impulse,
+                                response,
+                                max_offset,
+                                bob_ratio,
+                                config.frequency as f64,
+                                config.damping as f64,
+                            ),
+                        );
+                    }
+                }
+            }
+            crate::config::FloatPhysicsTier::Full => {
+                self.window_float_bodies
+                    .entry(surface.clone())
+                    .or_insert_with(crate::float_physics::FloatBody::at_rest)
+                    .kick(impulse, config.response as f64);
             }
         }
         self.note_depth_attention(surface);
@@ -1473,8 +1534,18 @@ impl Smallvil {
     /// first-map floating conversion's own buffer commit lands) over the
     /// window's possibly still-stale committed geometry.
     pub(crate) fn window_center_for_kick(&self, surface: &WlSurface) -> Option<(f64, f64)> {
-        let rect = self
-            .floating_workspace
+        let rect = self.window_rect_for_kick(surface)?;
+        Some((
+            rect.loc.x as f64 + rect.size.w as f64 / 2.0,
+            rect.loc.y as f64 + rect.size.h as f64 / 2.0,
+        ))
+    }
+
+    /// The rect half of `window_center_for_kick`, also used by F1 `full`
+    /// tier's per-tick collision pass, which needs real width/height for
+    /// AABB overlap tests, not just a center point.
+    pub(crate) fn window_rect_for_kick(&self, surface: &WlSurface) -> Option<Rectangle<i32, Logical>> {
+        self.floating_workspace
             .get(surface)
             .map(|tag| tag.rect)
             .or_else(|| {
@@ -1482,11 +1553,7 @@ impl Smallvil {
                 self.space
                     .element_location(&window)
                     .map(|loc| Rectangle::new(loc, window.geometry().size))
-            })?;
-        Some((
-            rect.loc.x as f64 + rect.size.w as f64 / 2.0,
-            rect.loc.y as f64 + rect.size.h as f64 / 2.0,
-        ))
+            })
     }
 
     fn is_floating(&self, surface: &WlSurface) -> bool {
@@ -1513,6 +1580,241 @@ impl Smallvil {
         self.window_float_ambient
             .insert(surface.clone(), Instant::now());
         self.request_redraw();
+    }
+
+    /// Ensures every currently-floating window resolving F1 `full` has a
+    /// body to push on (inserting `FloatBody::at_rest()` for one that
+    /// doesn't yet), and drops any body whose window stopped floating or
+    /// stopped resolving `full` (a rule change, a hot reload,
+    /// `toggle-floating`). Needed because the continuous wave field must
+    /// be able to act on a `full`-tier window even before its first kick --
+    /// unlike `light`, whose record is created lazily on first kick only,
+    /// `full`'s bodies are not purely kick-driven.
+    fn sync_float_physics_bodies(&mut self) {
+        if !self.config.water_effects {
+            self.window_float_bodies.clear();
+            return;
+        }
+        let mut candidates: Vec<WlSurface> = self.floating_workspace.keys().cloned().collect();
+        candidates.extend(self.ocean.floating_surfaces().cloned());
+        for surface in candidates {
+            if self.float_physics_tier_for_surface(&surface) == crate::config::FloatPhysicsTier::Full
+            {
+                self.window_float_bodies
+                    .entry(surface)
+                    .or_insert_with(crate::float_physics::FloatBody::at_rest);
+            }
+        }
+        let stale: Vec<WlSurface> = self
+            .window_float_bodies
+            .keys()
+            .filter(|surface| {
+                !self.is_floating(surface)
+                    || self.float_physics_tier_for_surface(surface)
+                        != crate::config::FloatPhysicsTier::Full
+            })
+            .cloned()
+            .collect();
+        for surface in stale {
+            self.window_float_bodies.remove(&surface);
+        }
+    }
+
+    /// Anchor rect (window's own logical position/size, unaffected by its
+    /// current cosmetic offset), mass (area-derived per the design
+    /// conversation -- a big window shoves a small one), and home-output
+    /// bounds (for edge bouncing, `self.output_for_window`'s existing
+    /// per-output resolution) for one F1 `full` body. Resolved once per
+    /// outer tick in `update_float_physics_full`, reused across every
+    /// substep -- a floating window's own logical position doesn't move
+    /// mid-tick, only its cosmetic offset does, which `step_float_physics_
+    /// full` tracks itself.
+    fn float_body_context(&self, surface: &WlSurface) -> Option<FloatBodyContext> {
+        let rect = self.window_rect_for_kick(surface)?;
+        let anchor = (
+            rect.loc.x as f64,
+            rect.loc.y as f64,
+            rect.size.w as f64,
+            rect.size.h as f64,
+        );
+        const MIN_MASS: f64 = 1.0;
+        let mass = (anchor.2 * anchor.3).max(MIN_MASS);
+        let output_bounds = self.mapped_toplevel_window(surface).and_then(|window| {
+            let output = self.output_for_window(&window)?;
+            let geo = self.space.output_geometry(&output)?;
+            Some((
+                geo.loc.x as f64,
+                geo.loc.y as f64,
+                geo.size.w as f64,
+                geo.size.h as f64,
+            ))
+        });
+        Some(FloatBodyContext {
+            surface: surface.clone(),
+            anchor,
+            mass,
+            output_bounds,
+        })
+    }
+
+    /// Advances F1 `full` tier's rigid-body-ish simulation. Called every
+    /// tick from both backends' existing ~60Hz frame timer, right
+    /// alongside `update_window_depths`/`update_urgent_pulses` -- that
+    /// timer already runs continuously regardless of whether anything is
+    /// animating, so this reuses it rather than inventing a second loop.
+    /// Internally a fixed-timestep accumulator (120Hz, capped substeps)
+    /// rather than stepping directly by the real frame interval, so the
+    /// spring/collision integration stays numerically stable regardless of
+    /// how choppy the real frame timing gets.
+    pub(crate) fn update_float_physics_full(&mut self) {
+        const FIXED_DT: f64 = 1.0 / 120.0;
+        const MAX_SUBSTEPS: u32 = 8;
+
+        let now = Instant::now();
+        let elapsed = now
+            .saturating_duration_since(self.float_physics_last_tick)
+            .as_secs_f64();
+        self.float_physics_last_tick = now;
+
+        self.sync_float_physics_bodies();
+        if self.window_float_bodies.is_empty() {
+            self.float_physics_accum = 0.0;
+            return;
+        }
+
+        self.float_physics_accum =
+            (self.float_physics_accum + elapsed).min(FIXED_DT * MAX_SUBSTEPS as f64);
+
+        let contexts: Vec<FloatBodyContext> = self
+            .window_float_bodies
+            .keys()
+            .filter_map(|surface| self.float_body_context(surface))
+            .collect();
+
+        let mut steps = 0;
+        while self.float_physics_accum >= FIXED_DT && steps < MAX_SUBSTEPS {
+            self.float_physics_accum -= FIXED_DT;
+            steps += 1;
+            self.step_float_physics_full(&contexts, FIXED_DT);
+        }
+        self.request_redraw();
+
+        // A body stays around either while it's still visibly moving, or
+        // while the wave field is actively forcing its window -- the
+        // latter needs `&self` access a `HashMap::retain` closure can't
+        // have alongside its own mutable borrow of the map, so it's
+        // resolved into a plain set first.
+        #[allow(clippy::mutable_key_type)]
+        let wave_active: HashSet<WlSurface> = if self.config.float_physics.wave.enabled {
+            contexts.iter().map(|ctx| ctx.surface.clone()).collect()
+        } else {
+            HashSet::new()
+        };
+        self.window_float_bodies
+            .retain(|surface, body| wave_active.contains(surface) || !body.finished());
+    }
+
+    /// One fixed `dt` physics substep across every F1 `full` body: wave/
+    /// spring forcing, then pairwise inter-window collisions, then
+    /// home-output edge bounces -- all velocity-only updates layered on
+    /// top of the position integration `step_body` already did for this
+    /// substep. Bodies are pulled into a plain local `Vec` for the
+    /// duration (a `HashMap` can't safely hand out two simultaneous `&mut`
+    /// entries for an arbitrary pair of keys without extra ceremony this
+    /// realistically single-digit window count doesn't need) and written
+    /// back at the end.
+    fn step_float_physics_full(&mut self, contexts: &[FloatBodyContext], dt: f64) {
+        let cfg = self.config.float_physics;
+        let wave = cfg.wave;
+        // Reuses `light` tier's two feel knobs as a damped spring's
+        // stiffness/drag instead of adding a parallel pair for one more
+        // tier -- see `FloatPhysicsConfig::frequency`/`damping`'s own doc
+        // comments.
+        let stiffness = (std::f64::consts::TAU * cfg.frequency as f64).powi(2);
+        let drag = 2.0 * cfg.damping as f64;
+        let elapsed = self.float_physics_wave_clock.elapsed().as_secs_f64();
+
+        let mut bodies: Vec<crate::float_physics::FloatBody> = contexts
+            .iter()
+            .map(|ctx| {
+                self.window_float_bodies
+                    .get(&ctx.surface)
+                    .copied()
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        for (i, ctx) in contexts.iter().enumerate() {
+            let target = if wave.enabled {
+                crate::float_physics::wave_target(
+                    ctx.anchor.0 + ctx.anchor.2 / 2.0,
+                    elapsed,
+                    wave.amplitude as f64,
+                    wave.wavelength as f64,
+                    wave.speed as f64,
+                )
+            } else {
+                (0.0, 0.0)
+            };
+            crate::float_physics::step_body(
+                &mut bodies[i],
+                target,
+                stiffness,
+                drag,
+                cfg.max_offset as f64,
+                dt,
+            );
+        }
+
+        for i in 0..contexts.len() {
+            for j in (i + 1)..contexts.len() {
+                let a_rect = (
+                    contexts[i].anchor.0 + bodies[i].offset.0,
+                    contexts[i].anchor.1 + bodies[i].offset.1,
+                    contexts[i].anchor.2,
+                    contexts[i].anchor.3,
+                );
+                let b_rect = (
+                    contexts[j].anchor.0 + bodies[j].offset.0,
+                    contexts[j].anchor.1 + bodies[j].offset.1,
+                    contexts[j].anchor.2,
+                    contexts[j].anchor.3,
+                );
+                let (left, right) = bodies.split_at_mut(j);
+                crate::float_physics::resolve_collision(
+                    a_rect,
+                    b_rect,
+                    &mut left[i].velocity,
+                    &mut right[0].velocity,
+                    contexts[i].mass,
+                    contexts[j].mass,
+                    cfg.restitution as f64,
+                );
+            }
+        }
+
+        if cfg.bounce_off_edges {
+            for (i, ctx) in contexts.iter().enumerate() {
+                if let Some(bounds) = ctx.output_bounds {
+                    let rect = (
+                        ctx.anchor.0 + bodies[i].offset.0,
+                        ctx.anchor.1 + bodies[i].offset.1,
+                        ctx.anchor.2,
+                        ctx.anchor.3,
+                    );
+                    crate::float_physics::resolve_edge_collision(
+                        rect,
+                        &mut bodies[i].velocity,
+                        bounds,
+                        cfg.restitution as f64,
+                    );
+                }
+            }
+        }
+
+        for (ctx, body) in contexts.iter().zip(bodies) {
+            self.window_float_bodies.insert(ctx.surface.clone(), body);
+        }
     }
 
     pub(crate) fn start_window_open_animation(&mut self, surface: &WlSurface) {
@@ -2615,6 +2917,10 @@ impl Smallvil {
             window_sway: HashMap::new(),
             window_float_physics: HashMap::new(),
             window_float_ambient: HashMap::new(),
+            window_float_bodies: HashMap::new(),
+            float_physics_accum: 0.0,
+            float_physics_last_tick: Instant::now(),
+            float_physics_wave_clock: Instant::now(),
             swim_cameras: HashMap::new(),
             window_frame_snapshots: HashMap::new(),
             closing_window_animations: Vec::new(),
@@ -4429,6 +4735,11 @@ impl Smallvil {
             // `toggle_float_ambient` removes them, so their mere presence
             // (not decay state) is what should keep the pump alive.
             || !self.window_float_ambient.is_empty()
+            // Pruned inside `update_float_physics_full` itself (which also
+            // needs to know whether the wave field is still forcing a
+            // given body, not just whether it's numerically settled), not
+            // here -- see that function's own retain call.
+            || !self.window_float_bodies.is_empty()
             || !self.swim_cameras.is_empty()
             || self.ocean.has_active_camera_motion()
             || (self.config.spatial_engine == crate::config::SpatialEngine::Ocean
@@ -9434,7 +9745,10 @@ impl Smallvil {
                 let disabled_float_physics: Vec<WlSurface> = self
                     .window_float_physics
                     .keys()
-                    .filter(|surface| !self.float_physics_enabled_for_surface(surface))
+                    .filter(|surface| {
+                        self.float_physics_tier_for_surface(surface)
+                            != crate::config::FloatPhysicsTier::Light
+                    })
                     .cloned()
                     .collect();
                 for surface in disabled_float_physics {
@@ -9449,6 +9763,7 @@ impl Smallvil {
                 for surface in disabled_float_ambient {
                     self.window_float_ambient.remove(&surface);
                 }
+                self.sync_float_physics_bodies();
                 if !self.config.animations.enabled || !self.config.animations.close.enabled {
                     self.window_frame_snapshots.clear();
                     self.closing_window_animations.clear();

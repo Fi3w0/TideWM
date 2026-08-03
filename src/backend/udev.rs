@@ -763,6 +763,7 @@ pub fn init_udev(
         .insert_source(Timer::immediate(), move |_, _, state: &mut Smallvil| {
             state.update_window_depths();
             state.update_urgent_pulses();
+            state.update_float_physics_full();
             if state.take_needs_redraw() {
                 let mut dev = device_for_timer.borrow_mut();
                 for surface in dev.surfaces.values_mut() {

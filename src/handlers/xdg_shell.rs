@@ -1194,6 +1194,7 @@ impl Smallvil {
         self.window_sway.remove(surface);
         self.window_float_physics.remove(surface);
         self.window_float_ambient.remove(surface);
+        self.window_float_bodies.remove(surface);
         self.window_frame_snapshots.remove(surface);
         self.backdrop_textures.remove(surface);
         self.glass_anim.remove(surface);

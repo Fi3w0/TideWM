@@ -1271,6 +1271,14 @@ impl OceanSpace {
         self.floating.get(surface).map(|(_, rect)| *rect)
     }
 
+    /// Every surface Ocean currently treats as freely floating (a world
+    /// rect, not a reef tile). Read-only iteration for F1 full-tier
+    /// float-physics' per-tick candidate scan, which needs to consider
+    /// floating windows under either spatial engine uniformly.
+    pub fn floating_surfaces(&self) -> impl Iterator<Item = &WlSurface> {
+        self.floating.keys()
+    }
+
     pub fn world_rect(
         &self,
         surface: &WlSurface,

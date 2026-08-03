@@ -158,6 +158,7 @@ pub fn init_winit(
         .insert_source(timer, move |_, _, state| {
             state.update_window_depths();
             state.update_urgent_pulses();
+            state.update_float_physics_full();
             let mut closing = false;
             for entry in &mut outputs {
                 let output = &entry.output;

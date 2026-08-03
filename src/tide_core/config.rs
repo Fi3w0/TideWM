@@ -178,27 +178,81 @@ impl Default for SwayConfig {
     }
 }
 
-/// Cosmetic 2D bob-and-drift for floating windows (spatial roadmap F1,
-/// `light` tier). Disturbance-kicked and render-only, decaying to rest the
-/// same way `sway` does so an idle desktop still ticks zero frames.
-/// Explicitly opt-in: `enabled` defaults false and `water_effects` remains
-/// the master bypass. A matching `rule { float_physics = true|false }`
-/// overrides this per app. When enabled for a window, it takes over from
-/// `sway` for that window (the two never stack).
+/// F1's three quality tiers. `Off` and `Light` behave exactly as the doc
+/// comments below already describe (closed-form, render-only bob-and-drift
+/// via `crate::float_physics::FloatPhysics`). `Full` is the "rigid-body
+/// boxes with mass, buoyancy, collisions, and a wave field" tier from the
+/// spatial roadmap: real velocity state (`crate::float_physics::FloatBody`)
+/// stepped by a fixed-timestep integrator so floating windows can actually
+/// exchange collision impulses, high-end only. `enabled = true|false` is
+/// still accepted as a legacy alias for `light`/`off`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatPhysicsTier {
+    Off,
+    Light,
+    Full,
+}
+
+/// Continuous forcing for `full` tier's mass-spring bodies. Unlike
+/// `light`'s per-window `toggle-float-ambient`, this is not a manual
+/// per-window toggle -- it is inherent to choosing `full`, since a wave
+/// field passing across every floating window is what makes the tier
+/// "full" rather than just a heavier `light`. `enabled = false` still gets
+/// mass and collisions, just no continuous forcing, so a `full`-tier body
+/// decays to rest like `light` does once nothing is disturbing it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FloatPhysicsWaveConfig {
+    pub enabled: bool,
+    /// Vertical displacement the traveling wave pulls a body's spring
+    /// anchor toward, logical pixels.
+    pub amplitude: f32,
+    /// Distance between wave crests, logical pixels.
+    pub wavelength: f32,
+    /// Wave travel speed, logical pixels per second.
+    pub speed: f32,
+}
+
+impl Default for FloatPhysicsWaveConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            amplitude: 10.0,
+            wavelength: 400.0,
+            speed: 60.0,
+        }
+    }
+}
+
+/// Cosmetic 2D bob-and-drift for floating windows (spatial roadmap F1).
+/// Disturbance-kicked and render-only; `light` decays to rest the same way
+/// `sway` does so an idle desktop still ticks zero frames, while `full`
+/// only decays to rest when its `wave` sub-block is off (see
+/// `FloatPhysicsTier`). Explicitly opt-in: `tier` defaults `off` and
+/// `water_effects` remains the master bypass. A matching
+/// `rule { float_physics = off|light|full }` overrides this per app. When
+/// enabled for a window, it takes over from `sway` for that window (the
+/// two never stack).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FloatPhysicsConfig {
-    pub enabled: bool,
-    /// Fraction of each disturbance impulse converted into displacement.
-    /// 0.0 freezes the effect, 1.0 follows the impulse one-to-one.
+    pub tier: FloatPhysicsTier,
+    /// Fraction of each disturbance impulse converted into displacement
+    /// (`light`) or velocity (`full`). 0.0 freezes the effect, 1.0 follows
+    /// the impulse one-to-one.
     pub response: f32,
     /// Hard cap on the combined lateral+vertical envelope, logical pixels.
     pub max_offset: f32,
-    /// Oscillation frequency, hertz. Shared by both axes.
+    /// `light`: oscillation frequency, hertz, shared by both axes. `full`:
+    /// the same knob reused as the mass-spring's natural frequency
+    /// (stiffness = `(2*pi*frequency)^2`), rather than adding a parallel
+    /// "stiffness" field for one more tier of the same effect.
     pub frequency: f32,
-    /// Exponential decay rate, per second. Higher settles back sooner.
+    /// `light`: exponential decay rate, per second, higher settles back
+    /// sooner. `full`: the same knob reused as the spring's linear drag
+    /// coefficient (`drag = 2 * damping`).
     pub damping: f32,
     /// Fraction of an impulse's magnitude always added to the vertical term,
     /// so even a lateral disturbance produces a bob. 0.0 is lateral-only.
+    /// `light` only -- `full`'s bob comes from the wave field instead.
     pub bob_ratio: f32,
     /// Radius around a disturbance within which nearby floating windows are
     /// also rocked, logical pixels. 0.0 limits kicks to the source window.
@@ -210,8 +264,20 @@ pub struct FloatPhysicsConfig {
     /// offset (`toggle-float-ambient`, per-window), seconds. Amplitude
     /// reuses `max_offset` directly -- a continuous wave has no separate
     /// "impulse strength" the way a kick does. See `float_physics::
-    /// ambient_sample` for the actual waveform.
+    /// ambient_sample` for the actual waveform. `light` only.
     pub ambient_period_s: f32,
+    /// `full` only: collision bounciness, `0` perfectly inelastic (windows
+    /// just stop pressing against each other) through `1` perfectly
+    /// elastic (a full bounce).
+    pub restitution: f32,
+    /// `full` only: whether a body's rect bouncing off its home output's
+    /// edge is part of the simulation, or whether floating windows can
+    /// drift past the screen edge unimpeded (still bounded by
+    /// `max_offset`, just with no wall to bounce off).
+    pub bounce_off_edges: bool,
+    /// `full` only: the continuous traveling-wave forcing. See
+    /// `FloatPhysicsWaveConfig`.
+    pub wave: FloatPhysicsWaveConfig,
 }
 
 impl Default for FloatPhysicsConfig {
@@ -219,7 +285,7 @@ impl Default for FloatPhysicsConfig {
         // Seeded from sway's proven values; the final feel is the user's
         // nested tuning pass, not these defaults.
         Self {
-            enabled: false,
+            tier: FloatPhysicsTier::Off,
             response: 0.08,
             max_offset: 24.0,
             frequency: 1.6,
@@ -228,6 +294,9 @@ impl Default for FloatPhysicsConfig {
             radius: 256.0,
             falloff: true,
             ambient_period_s: 5.0,
+            restitution: 0.3,
+            bounce_off_edges: true,
+            wave: FloatPhysicsWaveConfig::default(),
         }
     }
 }
@@ -1827,11 +1896,11 @@ pub struct WindowRule {
     /// Per-app opt-in/out for floating sway. Last matching rule wins;
     /// unset falls back to the global `sway { enabled }` value.
     pub sway: Option<bool>,
-    /// Per-app opt-in/out for cosmetic float physics (F1 `light`). Last
+    /// Per-app tier override for cosmetic float physics (F1). Last
     /// matching rule wins; unset falls back to the global
-    /// `float_physics { enabled }` value. When enabled, it takes over from
-    /// `sway` for that window -- the two never stack.
-    pub float_physics: Option<bool>,
+    /// `float_physics { tier }` value. When resolved `light` or `full`, it
+    /// takes over from `sway` for that window -- the two never stack.
+    pub float_physics: Option<FloatPhysicsTier>,
     /// Per-app buoyancy override for the automatic depth/attention system
     /// (Phase R1). `Some(false)` pins the matched window at tier zero
     /// forever -- it never dims or sinks regardless of inactivity, useful
@@ -4096,47 +4165,132 @@ fn apply_sway_block(cfg: &mut SwayConfig, body: &[waves::Entry]) {
 
 fn apply_float_physics_block(cfg: &mut FloatPhysicsConfig, body: &[waves::Entry]) {
     for entry in body {
+        match entry {
+            waves::Entry::Assign(key, value) => match key.as_str() {
+                "tier" => match value.trim().to_ascii_lowercase().as_str() {
+                    "off" | "false" => cfg.tier = FloatPhysicsTier::Off,
+                    "light" | "true" => cfg.tier = FloatPhysicsTier::Light,
+                    "full" => cfg.tier = FloatPhysicsTier::Full,
+                    _ => tracing::warn!(
+                        value,
+                        "Expected float_physics.tier: off light full, ignoring"
+                    ),
+                },
+                // Legacy alias from before `full` existed: a plain on/off
+                // switch mapped to `light`/`off`.
+                "enabled" => match parse_bool(value) {
+                    Some(true) => cfg.tier = FloatPhysicsTier::Light,
+                    Some(false) => cfg.tier = FloatPhysicsTier::Off,
+                    None => tracing::warn!(
+                        value,
+                        "Expected `true` or `false` for float_physics.enabled, ignoring"
+                    ),
+                },
+                "response" | "gain" => match value.parse::<f32>() {
+                    Ok(value) if value.is_finite() => cfg.response = value.clamp(0.0, 1.0),
+                    _ => {
+                        tracing::warn!(value, "Expected float_physics.response from 0 to 1, ignoring")
+                    }
+                },
+                "max_offset" | "amplitude" => match value.parse::<f32>() {
+                    Ok(value) if value.is_finite() => cfg.max_offset = value.clamp(0.0, 128.0),
+                    _ => tracing::warn!(
+                        value,
+                        "Expected float_physics.max_offset from 0 to 128, ignoring"
+                    ),
+                },
+                "frequency" => match value.parse::<f32>() {
+                    Ok(value) if value.is_finite() => cfg.frequency = value.clamp(0.1, 10.0),
+                    _ => tracing::warn!(
+                        value,
+                        "Expected float_physics.frequency from 0.1 to 10, ignoring"
+                    ),
+                },
+                "damping" => match value.parse::<f32>() {
+                    Ok(value) if value.is_finite() => cfg.damping = value.clamp(0.1, 20.0),
+                    _ => {
+                        tracing::warn!(value, "Expected float_physics.damping from 0.1 to 20, ignoring")
+                    }
+                },
+                "bob_ratio" => match value.parse::<f32>() {
+                    Ok(value) if value.is_finite() => cfg.bob_ratio = value.clamp(0.0, 2.0),
+                    _ => {
+                        tracing::warn!(value, "Expected float_physics.bob_ratio from 0 to 2, ignoring")
+                    }
+                },
+                "radius" => match value.parse::<f32>() {
+                    Ok(value) if value.is_finite() => cfg.radius = value.clamp(0.0, 2048.0),
+                    _ => {
+                        tracing::warn!(value, "Expected float_physics.radius from 0 to 2048, ignoring")
+                    }
+                },
+                "falloff" => set_bool(&mut cfg.falloff, key, value),
+                "ambient_period_s" => match value.parse::<f32>() {
+                    Ok(value) if value.is_finite() => cfg.ambient_period_s = value.clamp(0.5, 60.0),
+                    _ => tracing::warn!(
+                        value,
+                        "Expected float_physics.ambient_period_s from 0.5 to 60, ignoring"
+                    ),
+                },
+                "restitution" | "bounciness" => match value.parse::<f32>() {
+                    Ok(value) if value.is_finite() => cfg.restitution = value.clamp(0.0, 1.0),
+                    _ => tracing::warn!(
+                        value,
+                        "Expected float_physics.restitution from 0 to 1, ignoring"
+                    ),
+                },
+                "bounce_off_edges" => set_bool(&mut cfg.bounce_off_edges, key, value),
+                other => tracing::warn!(key = %other, "Unknown key in `float_physics` block, ignoring"),
+            },
+            waves::Entry::Block(keyword, header, wave_body) if keyword == "wave" => {
+                if !header.trim().is_empty() {
+                    tracing::warn!(header, "float_physics.wave block headers are ignored");
+                }
+                apply_float_physics_wave_block(&mut cfg.wave, wave_body);
+            }
+            waves::Entry::Block(keyword, ..) => {
+                tracing::warn!(block = %keyword, "Unknown block in `float_physics`, ignoring");
+            }
+            _ => tracing::warn!("Unexpected entry in `float_physics` block, ignoring"),
+        }
+    }
+}
+
+fn apply_float_physics_wave_block(cfg: &mut FloatPhysicsWaveConfig, body: &[waves::Entry]) {
+    for entry in body {
         let waves::Entry::Assign(key, value) = entry else {
-            tracing::warn!("Unexpected entry in `float_physics` block, ignoring");
+            tracing::warn!("Unexpected entry in `float_physics.wave` block, ignoring");
             continue;
         };
         match key.as_str() {
             "enabled" => set_bool(&mut cfg.enabled, key, value),
-            "response" | "gain" => match value.parse::<f32>() {
-                Ok(value) if value.is_finite() => cfg.response = value.clamp(0.0, 1.0),
-                _ => tracing::warn!(value, "Expected float_physics.response from 0 to 1, ignoring"),
-            },
-            "max_offset" | "amplitude" => match value.parse::<f32>() {
-                Ok(value) if value.is_finite() => cfg.max_offset = value.clamp(0.0, 128.0),
-                _ => {
-                    tracing::warn!(value, "Expected float_physics.max_offset from 0 to 128, ignoring")
-                }
-            },
-            "frequency" => match value.parse::<f32>() {
-                Ok(value) if value.is_finite() => cfg.frequency = value.clamp(0.1, 10.0),
-                _ => tracing::warn!(value, "Expected float_physics.frequency from 0.1 to 10, ignoring"),
-            },
-            "damping" => match value.parse::<f32>() {
-                Ok(value) if value.is_finite() => cfg.damping = value.clamp(0.1, 20.0),
-                _ => tracing::warn!(value, "Expected float_physics.damping from 0.1 to 20, ignoring"),
-            },
-            "bob_ratio" => match value.parse::<f32>() {
-                Ok(value) if value.is_finite() => cfg.bob_ratio = value.clamp(0.0, 2.0),
-                _ => tracing::warn!(value, "Expected float_physics.bob_ratio from 0 to 2, ignoring"),
-            },
-            "radius" => match value.parse::<f32>() {
-                Ok(value) if value.is_finite() => cfg.radius = value.clamp(0.0, 2048.0),
-                _ => tracing::warn!(value, "Expected float_physics.radius from 0 to 2048, ignoring"),
-            },
-            "falloff" => set_bool(&mut cfg.falloff, key, value),
-            "ambient_period_s" => match value.parse::<f32>() {
-                Ok(value) if value.is_finite() => cfg.ambient_period_s = value.clamp(0.5, 60.0),
+            "amplitude" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.amplitude = value.clamp(0.0, 128.0),
                 _ => tracing::warn!(
                     value,
-                    "Expected float_physics.ambient_period_s from 0.5 to 60, ignoring"
+                    "Expected float_physics.wave.amplitude from 0 to 128, ignoring"
                 ),
             },
-            other => tracing::warn!(key = %other, "Unknown key in `float_physics` block, ignoring"),
+            "wavelength" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() && value > 0.0 => {
+                    cfg.wavelength = value.clamp(10.0, 4096.0)
+                }
+                _ => tracing::warn!(
+                    value,
+                    "Expected float_physics.wave.wavelength from 10 to 4096, ignoring"
+                ),
+            },
+            "speed" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.speed = value.clamp(-2000.0, 2000.0),
+                _ => tracing::warn!(
+                    value,
+                    "Expected float_physics.wave.speed from -2000 to 2000, ignoring"
+                ),
+            },
+            other => tracing::warn!(
+                key = %other,
+                "Unknown key in `float_physics.wave` block, ignoring"
+            ),
         }
     }
 }
@@ -5729,7 +5883,15 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                     }
                 },
                 "sway" => set_opt_bool(&mut rule.sway, key, value),
-                "float_physics" => set_opt_bool(&mut rule.float_physics, key, value),
+                "float_physics" => match value.as_str() {
+                    "off" | "false" => rule.float_physics = Some(FloatPhysicsTier::Off),
+                    "light" | "true" => rule.float_physics = Some(FloatPhysicsTier::Light),
+                    "full" => rule.float_physics = Some(FloatPhysicsTier::Full),
+                    _ => tracing::warn!(
+                        value,
+                        "Expected a rule float_physics tier: off light full, ignoring"
+                    ),
+                },
                 "depth" => set_opt_bool(&mut rule.depth, key, value),
                 "shadow" => match value.as_str() {
                     "true" | "on" => {
@@ -6524,25 +6686,39 @@ connected_vessels {
 #     damping = 3.0                # higher settles back sooner
 # }
 
-# Cosmetic 2D bob-and-drift for floating windows: a drag, a window mapping,
-# or a workspace-transition wave kicks nearby floats, which rock and settle
-# back like they are sitting in water. Off by default; enabling this takes
-# over from `sway` for a given window. `rule { float_physics = true }` opts
-# one app in. water_effects = false also bypasses it. `toggle-float-ambient`
-# (per-window, keybind/tidectl) layers a continuous sine-wave sway on top,
+# Cosmetic physics for floating windows: a drag, a window mapping, or a
+# workspace-transition wave kicks nearby floats, which rock and settle back
+# like they are sitting in water. `tier = off` (default), `light`, or
+# `full`. `light` is the closed-form bob-and-drift above; `full` adds real
+# mass, inter-window collisions, and a continuous wave field -- high-end
+# only, and unlike `light` it does not fully settle while `wave.enabled`
+# stays true, since the wave is a permanent forcing rather than a decaying
+# kick. Enabling either tier takes over from `sway` for a given window.
+# `rule { float_physics = off|light|full }` overrides one app. water_effects
+# = false bypasses either tier entirely. `toggle-float-ambient` (per-window,
+# keybind/tidectl, `light` only) layers a continuous sine-wave sway on top,
 # amplitude = max_offset, so the window keeps gently rocking like it's
 # sitting on water until toggled off again -- unlike the kick sources
 # above, this one never settles while it's on.
 # float_physics {
-#     enabled = false
+#     tier = off
 #     response = 0.08              # fraction of each disturbance turned into motion
 #     max_offset = 24              # combined lateral+vertical cap, logical pixels; also ambient's amplitude
-#     frequency = 1.6              # oscillations per second (shared by both axes)
-#     damping = 3.0                # higher settles back sooner
-#     bob_ratio = 0.6              # vertical energy from an impulse's magnitude
+#     frequency = 1.6              # oscillations per second (light); full's spring stiffness knob
+#     damping = 3.0                # higher settles back sooner (light); full's spring drag knob
+#     bob_ratio = 0.6              # vertical energy from an impulse's magnitude (light only)
 #     radius = 256                 # how far a disturbance reaches, logical pixels
 #     falloff = true               # also rock nearby floats inside `radius`
-#     ambient_period_s = 5.0       # seconds per ambient sway cycle
+#     ambient_period_s = 5.0       # seconds per ambient sway cycle (light only)
+#     restitution = 0.3            # full only: collision bounciness, 0 to 1
+#     bounce_off_edges = true      # full only: bounce off the home output's edge
+#     # full only: continuous traveling-wave forcing.
+#     # wave {
+#     #     enabled = true
+#     #     amplitude = 10        # logical pixels
+#     #     wavelength = 400      # logical pixels between crests
+#     #     speed = 60            # logical pixels per second
+#     # }
 # }
 
 # Continuous lateral "swim" between workspaces (the infinite ocean's
@@ -7839,7 +8015,7 @@ mod tests {
     fn float_physics_block_parses_clamps_rules_and_matches_generated_defaults() {
         let entries = waves::parse(
             "float_physics {\n\
-             enabled = true\n\
+             tier = full\n\
              response = 2.5\n\
              max_offset = 999\n\
              frequency = 0\n\
@@ -7848,16 +8024,24 @@ mod tests {
              radius = 99999\n\
              falloff = false\n\
              ambient_period_s = 999\n\
+             restitution = 5\n\
+             bounce_off_edges = false\n\
+             wave {\n\
+             enabled = false\n\
+             amplitude = 999\n\
+             wavelength = 1\n\
+             speed = 99999\n\
+             }\n\
              }\n\
              rule {\n\
              app_id = kitty\n\
-             float_physics = false\n\
+             float_physics = off\n\
              }\n",
             Path::new("<float_physics-test>"),
         )
         .unwrap();
         let config = Config::from_raw(lower_entries(&entries)).0;
-        assert!(config.float_physics.enabled);
+        assert_eq!(config.float_physics.tier, FloatPhysicsTier::Full);
         assert_eq!(config.float_physics.response, 1.0);
         assert_eq!(config.float_physics.max_offset, 128.0);
         assert_eq!(config.float_physics.frequency, 0.1);
@@ -7866,19 +8050,47 @@ mod tests {
         assert_eq!(config.float_physics.radius, 2048.0);
         assert!(!config.float_physics.falloff);
         assert_eq!(config.float_physics.ambient_period_s, 60.0);
+        assert_eq!(config.float_physics.restitution, 1.0);
+        assert!(!config.float_physics.bounce_off_edges);
+        assert!(!config.float_physics.wave.enabled);
+        assert_eq!(config.float_physics.wave.amplitude, 128.0);
+        assert_eq!(config.float_physics.wave.wavelength, 10.0);
+        assert_eq!(config.float_physics.wave.speed, 2000.0);
         assert_eq!(
             config
                 .resolve_window_rules(Some("kitty"), None)
                 .float_physics,
-            Some(false)
+            Some(FloatPhysicsTier::Off)
         );
         assert_eq!(
             config.resolve_window_rules(Some("foot"), None).float_physics,
             None
         );
 
+        // Legacy true/false aliases still map onto light/off, both globally
+        // and per rule.
+        let legacy = waves::parse(
+            "float_physics {\n\
+             enabled = true\n\
+             }\n\
+             rule {\n\
+             app_id = kitty\n\
+             float_physics = true\n\
+             }\n",
+            Path::new("<float_physics-legacy-test>"),
+        )
+        .unwrap();
+        let legacy_config = Config::from_raw(lower_entries(&legacy)).0;
+        assert_eq!(legacy_config.float_physics.tier, FloatPhysicsTier::Light);
+        assert_eq!(
+            legacy_config
+                .resolve_window_rules(Some("kitty"), None)
+                .float_physics,
+            Some(FloatPhysicsTier::Light)
+        );
+
         let defaults = parse_default_config().float_physics;
-        assert!(!defaults.enabled);
+        assert_eq!(defaults.tier, FloatPhysicsTier::Off);
         assert_eq!(defaults, FloatPhysicsConfig::default());
     }
 
