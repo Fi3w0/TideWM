@@ -61,6 +61,23 @@ struct OceanCameraMotion {
     started: Instant,
     duration: Duration,
     sway_screen: f64,
+    /// When set, this motion is an anchored zoom: the world point under
+    /// `viewport_anchor` stays fixed for *every* sample, not just at the
+    /// endpoints. `origin` is derived from the interpolated zoom via the
+    /// anchor rather than interpolated independently -- interpolating
+    /// origin linearly while zoom interpolates geometrically makes the
+    /// anchor drift toward smaller world coordinates mid-flight (AM >= GM
+    /// on the inverse zooms), and a wheel event sampled mid-animation
+    /// bakes that transient bias into the next motion's endpoints,
+    /// accumulating drift on every rapid zoom step.
+    anchored: Option<AnchoredZoom>,
+}
+
+/// The anchor invariant an anchored zoom motion must preserve at all times:
+/// `origin + viewport_anchor / zoom == world_anchor`.
+struct AnchoredZoom {
+    world_anchor: OceanPoint,
+    viewport_anchor: Point<f64, Logical>,
 }
 
 impl OceanCameraMotion {
@@ -76,6 +93,9 @@ impl OceanCameraMotion {
         } else {
             self.to.zoom
         };
+        if let Some(anchored) = &self.anchored {
+            return self.sample_anchored(zoom, anchored);
+        }
         let dx = self.to.origin.x - self.from.origin.x;
         let dy = self.to.origin.y - self.from.origin.y;
         let distance = dx.hypot(dy);
@@ -98,6 +118,21 @@ impl OceanCameraMotion {
             origin: OceanPoint {
                 x: self.from.origin.x + dx * eased + normal_x * arc,
                 y: self.from.origin.y + dy * eased + normal_y * arc,
+            },
+            zoom,
+        }
+    }
+
+    /// The anchored-zoom variant of `sample`: zoom interpolates exactly as
+    /// above, but the origin is *derived* from the anchor invariant instead
+    /// of interpolated, so the world point under the viewport anchor never
+    /// drifts mid-flight. See `AnchoredZoom`'s doc comment for why this
+    /// matters when rapid wheel events retarget an in-flight motion.
+    fn sample_anchored(&self, zoom: f64, anchored: &AnchoredZoom) -> OceanCamera {
+        OceanCamera {
+            origin: OceanPoint {
+                x: anchored.world_anchor.x - anchored.viewport_anchor.x / zoom,
+                y: anchored.world_anchor.y - anchored.viewport_anchor.y / zoom,
             },
             zoom,
         }
@@ -366,6 +401,7 @@ impl OceanSpace {
         target: OceanCamera,
         duration: Duration,
         sway_screen: f64,
+        anchored: Option<AnchoredZoom>,
     ) {
         let current = self.ensure_camera(output);
         self.cameras.insert(output.to_string(), target);
@@ -380,6 +416,7 @@ impl OceanSpace {
                     started: Instant::now(),
                     duration,
                     sway_screen,
+                    anchored,
                 },
             );
         }
@@ -406,6 +443,7 @@ impl OceanSpace {
             },
             Duration::ZERO,
             0.0,
+            None,
         );
     }
 
@@ -426,6 +464,7 @@ impl OceanSpace {
             },
             duration,
             sway_screen,
+            None,
         );
     }
 
@@ -463,6 +502,7 @@ impl OceanSpace {
             },
             duration,
             sway_screen,
+            None,
         );
         true
     }
@@ -487,6 +527,7 @@ impl OceanSpace {
             },
             duration,
             sway_screen,
+            None,
         );
     }
 
@@ -503,6 +544,10 @@ impl OceanSpace {
             x: current.origin.x + viewport_anchor.x / current.zoom,
             y: current.origin.y + viewport_anchor.y / current.zoom,
         };
+        let anchored = AnchoredZoom {
+            world_anchor,
+            viewport_anchor,
+        };
         self.set_camera(
             output,
             OceanCamera {
@@ -514,6 +559,7 @@ impl OceanSpace {
             },
             duration,
             0.0,
+            Some(anchored),
         );
     }
 
@@ -543,6 +589,7 @@ impl OceanSpace {
             },
             duration,
             sway_screen,
+            None,
         );
     }
 
@@ -592,6 +639,7 @@ impl OceanSpace {
             },
             motion.0,
             motion.1,
+            None,
         );
         true
     }
@@ -1735,6 +1783,50 @@ mod tests {
         let camera = ocean.camera("main");
         assert_eq!(camera.zoom, 2.0);
         assert_eq!(camera.origin, OceanPoint { x: 300.0, y: 350.0 });
+    }
+
+    #[test]
+    fn zoom_motion_keeps_the_anchor_invariant_mid_animation() {
+        // The regression this guards: interpolating origin linearly while
+        // zoom interpolates geometrically makes the world point under the
+        // viewport anchor drift toward smaller world coordinates mid-
+        // flight (AM >= GM on the inverse zooms). A rapid wheel event that
+        // samples the camera mid-animation would bake that transient bias
+        // into the next motion's endpoints, accumulating drift. The
+        // anchored-zoom motion derives origin from the anchor + interpolated
+        // zoom, so the invariant holds at every instant, not just at t=0
+        // and t=duration.
+        let mut ocean = OceanSpace::from_config(&OceanConfig::default());
+        ocean.pan("main", 100.0, 200.0);
+        let anchor = Point::from((400.0, 300.0));
+        ocean.zoom_at("main", anchor, 2.0, Duration::from_millis(1000));
+        let start = ocean.camera("main");
+        let world_under_anchor = OceanPoint {
+            x: start.origin.x + anchor.x / start.zoom,
+            y: start.origin.y + anchor.y / start.zoom,
+        };
+        // Sample the in-flight motion at several instants directly from the
+        // motion state (no sleeping -- deterministic by constructing the
+        // motion and advancing its clock via the private fields).
+        let Some(motion) = ocean.camera_motions.get_mut("main") else {
+            panic!("zoom_at with a non-zero duration must create a motion");
+        };
+        let mut motion = motion;
+        for fraction in [0.1, 0.25, 0.5, 0.75, 0.9] {
+            motion.started = Instant::now()
+                - Duration::from_secs_f64(1.0 * fraction);
+            let sampled = motion.sample();
+            let under = OceanPoint {
+                x: sampled.origin.x + anchor.x / sampled.zoom,
+                y: sampled.origin.y + anchor.y / sampled.zoom,
+            };
+            assert!(
+                (under.x - world_under_anchor.x).abs() < 1e-9
+                    && (under.y - world_under_anchor.y).abs() < 1e-9,
+                "anchor drifted mid-animation at t={fraction}: \
+                 expected {world_under_anchor:?}, got {under:?}"
+            );
+        }
     }
 
     #[test]
