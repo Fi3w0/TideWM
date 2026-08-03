@@ -46,4 +46,5 @@ jobs:
       # check skips cleanly and the remaining host checks run for real.
       - name: tidectl doctor smoke test
         run: |
-          cargo run --locked --bin tidectl -- doctor --json | jq -e '.verdict == "ok" or .verdict == "warn"'
+          cargo run --locked --bin tidectl -- doctor --json | tee /tmp/doctor.json | jq .
+          jq -e '.verdict == "ok" or .verdict == "warn"' /tmp/doctor.json
