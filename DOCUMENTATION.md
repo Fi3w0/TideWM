@@ -466,6 +466,7 @@ block. Has no effect under the Classic engine.
 | `max_distance` | float, `> 0` | `3000` | World-logical pixels beyond the viewport edge at which a cue fades to zero. |
 | `size` | float, `8`–`1024` | `96` | Glow rect side, logical pixels. |
 | `alpha` | float, `0`–`1` | `0.85` | Peak glow alpha at zero distance. `peak_alpha` is an alias. |
+| `shape` | string | `circle` | Cue shape: `circle`/`glow`/`blob`, `arrow`/`triangle`, `chevron`/`wedge`, `ring`, `diamond`. Arrows and chevrons point toward the window. |
 
 ```wave
 compass {
@@ -475,6 +476,7 @@ compass {
     max_distance = 3000
     size = 96
     alpha = 0.85
+    shape = circle
 }
 ```
 

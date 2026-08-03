@@ -5275,6 +5275,7 @@ impl Smallvil {
                 max_distance: cfg.max_distance,
                 peak_alpha: cfg.alpha,
                 size: cfg.size,
+                shape: cfg.shape,
             },
         );
         let Some(program) =

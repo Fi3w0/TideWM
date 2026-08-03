@@ -35,22 +35,87 @@ uniform float alpha;
 uniform vec3 u_color;
 uniform float u_alpha;
 uniform float u_angle;
+uniform float u_shape;
+
+float sdLine(vec2 p, vec2 a, vec2 b) {
+    vec2 pa = p - a;
+    vec2 ba = b - a;
+    float h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0);
+    return length(pa - ba * h);
+}
 
 void main() {
     vec2 p = (v_coords - 0.5) * 2.0;
     float c = cos(u_angle);
     float s = sin(u_angle);
-    // Rotate so x runs along the cue's outward direction: the glow is
-    // narrow across the edge and elongated along it.
     vec2 r = vec2(p.x * c + p.y * s, -p.x * s + p.y * c);
-    float d = length(vec2(r.x * 2.4, r.y * 0.85));
-    float glow = 1.0 - smoothstep(0.0, 1.0, d);
+
+    float d;
+    if (u_shape < 0.5) {
+        // circle: soft elongated blob
+        d = length(vec2(r.x * 2.4, r.y * 0.85));
+    } else if (u_shape < 1.5) {
+        // arrow: filled triangle pointing toward the window (+x)
+        // Vertices: tip (0.55, 0), top-base (-0.30, 0.50), bottom-base (-0.30, -0.50)
+        float sd1 = dot(r - vec2(0.55, 0.0), vec2(-0.507, -0.862));
+        float sd3 = dot(r - vec2(-0.30, -0.50), vec2(-0.507, 0.862));
+        float sd2 = r.x + 0.30;
+        d = max(max(sd1, sd2), sd3);
+    } else if (u_shape < 2.5) {
+        // chevron: ">" stroke pointing toward the window
+        float upper = sdLine(r, vec2(-0.30, 0.42), vec2(0.32, 0.0)) - 0.10;
+        float lower = sdLine(r, vec2(0.32, 0.0), vec2(-0.30, -0.42)) - 0.10;
+        d = min(upper, lower);
+    } else if (u_shape < 3.5) {
+        // ring: hollow circle
+        d = abs(length(r) - 0.50) - 0.10;
+    } else {
+        // diamond
+        d = (abs(r.x) + abs(r.y)) * 1.3 - 0.50;
+    }
+
+    float glow = 1.0 - smoothstep(0.0, 1.0, max(d, 0.0));
     glow *= glow;
-    float core = 1.0 - smoothstep(0.0, 0.4, d);
+    float core = 1.0 - smoothstep(-0.05, 0.15, d);
     float a = clamp(glow * 0.7 + core * 0.6, 0.0, 1.0) * u_alpha * alpha;
     gl_FragColor = vec4(u_color * a, a);
 }
 "#;
+
+/// Shape drawn for each compass cue. Resolved to a `u_shape` uniform in
+/// the shader. `as_f32` is the shader index; keep the order in sync with
+/// the `if/else` chain above.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompassShape {
+    Circle,
+    Arrow,
+    Chevron,
+    Ring,
+    Diamond,
+}
+
+impl CompassShape {
+    pub fn as_f32(self) -> f32 {
+        match self {
+            CompassShape::Circle => 0.0,
+            CompassShape::Arrow => 1.0,
+            CompassShape::Chevron => 2.0,
+            CompassShape::Ring => 3.0,
+            CompassShape::Diamond => 4.0,
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value.trim().to_ascii_lowercase().as_str() {
+            "circle" | "glow" | "blob" => CompassShape::Circle,
+            "arrow" | "triangle" => CompassShape::Arrow,
+            "chevron" | "wedge" => CompassShape::Chevron,
+            "ring" => CompassShape::Ring,
+            "diamond" => CompassShape::Diamond,
+            _ => return None,
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CueKind {
@@ -69,6 +134,8 @@ pub struct CompassCue {
     pub alpha: f32,
     /// Element rect side, logical pixels.
     pub size: f32,
+    /// Shader shape index.
+    pub shape: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -80,6 +147,7 @@ pub struct CompassParams {
     pub max_distance: f32,
     pub peak_alpha: f32,
     pub size: f32,
+    pub shape: CompassShape,
 }
 
 /// Maps off-viewport world windows to edge cues. `viewport` is the
@@ -100,17 +168,16 @@ pub fn compute_cues(
     let right = viewport.loc.x + viewport.size.w;
     let top = viewport.loc.y;
     let bottom = viewport.loc.y + viewport.size.h;
+    // Screen-space bounds for clamping the glow fully inside the output.
+    let screen_w = viewport.size.w as f32 * zoom as f32;
+    let screen_h = viewport.size.h as f32 * zoom as f32;
+    let half = params.size / 2.0;
 
     let mut cues: Vec<((u8, f32), CompassCue)> = windows
         .iter()
         .filter_map(|(world_center, kind)| {
             let (wx, wy) = (world_center.x, world_center.y);
             if wx >= left && wx <= right && wy >= top && wy <= bottom {
-                return None;
-            }
-            // Deep cues only ever point downward: lateral off-screen
-            // travel is ordinary panning, not depth.
-            if *kind == CueKind::Deep && wy <= bottom {
                 return None;
             }
             let (dx, dy) = (wx - center.x, wy - center.y);
@@ -150,17 +217,19 @@ pub fn compute_cues(
                 CueKind::Urgent => 0u8,
                 CueKind::Deep => 1u8,
             };
+            // Clamp the glow center fully inside the output so the full
+            // rect is visible instead of half-clipped at the edge.
+            let sx = (((edge_x - viewport.loc.x) * zoom) as f32).clamp(half, screen_w - half);
+            let sy = (((edge_y - viewport.loc.y) * zoom) as f32).clamp(half, screen_h - half);
             Some((
                 (rank, beyond),
                 CompassCue {
-                    center: [
-                        ((edge_x - viewport.loc.x) * zoom) as f32,
-                        ((edge_y - viewport.loc.y) * zoom) as f32,
-                    ],
+                    center: [sx, sy],
                     angle: dy.atan2(dx) as f32,
                     color,
                     alpha: params.peak_alpha * factor,
                     size: params.size,
+                    shape: params.shape.as_f32(),
                 },
             ))
         })
@@ -232,6 +301,7 @@ pub fn compass_program(
             UniformName::new("u_color", UniformType::_3f),
             UniformName::new("u_alpha", UniformType::_1f),
             UniformName::new("u_angle", UniformType::_1f),
+            UniformName::new("u_shape", UniformType::_1f),
         ],
     ) {
         Ok(program) => {
@@ -300,6 +370,7 @@ impl RenderElement<GlesRenderer> for CompassElement {
                 Uniform::new("u_color", self.cue.color),
                 Uniform::new("u_alpha", self.cue.alpha),
                 Uniform::new("u_angle", self.cue.angle),
+                Uniform::new("u_shape", self.cue.shape),
             ],
         )
     }
@@ -316,6 +387,7 @@ mod tests {
             max_distance: 1000.0,
             peak_alpha: 0.85,
             size: 96.0,
+            shape: CompassShape::Circle,
         }
     }
 
@@ -330,32 +402,36 @@ mod tests {
     }
 
     #[test]
-    fn urgent_right_of_viewport_lands_on_right_edge() {
+    fn urgent_right_of_viewport_lands_near_right_edge() {
         let windows = [(Point::from((2500.0, 540.0)), CueKind::Urgent)];
         let cues = compute_cues(viewport(), 1.0, &windows, &params());
         assert_eq!(cues.len(), 1);
         let cue = cues[0];
-        assert!((cue.center[0] - 1920.0).abs() < 0.5);
+        let half = params().size / 2.0;
+        assert!((cue.center[0] - (1920.0 - half)).abs() < 0.5);
         assert!((cue.center[1] - 540.0).abs() < 0.5);
         assert!(cue.angle.abs() < 0.01);
         assert_eq!(cue.color, params().urgent_color);
     }
 
     #[test]
-    fn deep_below_viewport_lands_on_bottom_edge() {
+    fn deep_below_viewport_lands_near_bottom_edge() {
         let windows = [(Point::from((960.0, 1600.0)), CueKind::Deep)];
         let cues = compute_cues(viewport(), 1.0, &windows, &params());
         assert_eq!(cues.len(), 1);
         let cue = cues[0];
+        let half = params().size / 2.0;
         assert!((cue.center[0] - 960.0).abs() < 0.5);
-        assert!((cue.center[1] - 1080.0).abs() < 0.5);
+        assert!((cue.center[1] - (1080.0 - half)).abs() < 0.5);
         assert_eq!(cue.color, params().deep_color);
     }
 
     #[test]
-    fn deep_window_off_to_the_side_gets_no_cue() {
+    fn deep_window_off_to_the_side_still_glows() {
         let windows = [(Point::from((2500.0, 540.0)), CueKind::Deep)];
-        assert!(compute_cues(viewport(), 1.0, &windows, &params()).is_empty());
+        let cues = compute_cues(viewport(), 1.0, &windows, &params());
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].color, params().deep_color);
     }
 
     #[test]
@@ -394,7 +470,8 @@ mod tests {
         let windows = [(Point::from((2400.0, 270.0)), CueKind::Urgent)];
         let cues = compute_cues(viewport, 2.0, &windows, &params());
         assert_eq!(cues.len(), 1);
-        assert!((cues[0].center[0] - 1920.0).abs() < 0.5);
+        let half = params().size / 2.0;
+        assert!((cues[0].center[0] - (1920.0 - half)).abs() < 0.5);
         assert!((cues[0].center[1] - 540.0).abs() < 0.5);
     }
 
@@ -402,5 +479,19 @@ mod tests {
     fn shader_is_analytical_and_allocation_free() {
         assert!(!COMPASS_SHADER.contains("sampler2D"));
         assert!(COMPASS_SHADER.contains("u_angle"));
+        assert!(COMPASS_SHADER.contains("u_shape"));
+    }
+
+    #[test]
+    fn shape_parses_known_names_and_rejects_unknown() {
+        assert_eq!(CompassShape::parse("circle"), Some(CompassShape::Circle));
+        assert_eq!(CompassShape::parse("arrow"), Some(CompassShape::Arrow));
+        assert_eq!(CompassShape::parse("triangle"), Some(CompassShape::Arrow));
+        assert_eq!(CompassShape::parse("chevron"), Some(CompassShape::Chevron));
+        assert_eq!(CompassShape::parse("ring"), Some(CompassShape::Ring));
+        assert_eq!(CompassShape::parse("diamond"), Some(CompassShape::Diamond));
+        assert_eq!(CompassShape::parse("blob"), Some(CompassShape::Circle));
+        assert_eq!(CompassShape::parse("wedge"), Some(CompassShape::Chevron));
+        assert_eq!(CompassShape::parse("hexagon"), None);
     }
 }

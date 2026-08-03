@@ -235,6 +235,8 @@ pub struct CompassConfig {
     pub size: f32,
     /// Glow alpha at zero distance, fading linearly to `max_distance`.
     pub alpha: f32,
+    /// Shape drawn for each cue.
+    pub shape: crate::compass::CompassShape,
 }
 
 impl Default for CompassConfig {
@@ -246,6 +248,7 @@ impl Default for CompassConfig {
             max_distance: 3000.0,
             size: 96.0,
             alpha: 0.85,
+            shape: crate::compass::CompassShape::Circle,
         }
     }
 }
@@ -3909,6 +3912,13 @@ fn apply_compass_block(cfg: &mut CompassConfig, body: &[waves::Entry]) {
             "alpha" | "peak_alpha" => match value.parse::<f32>() {
                 Ok(value) if value.is_finite() => cfg.alpha = value.clamp(0.0, 1.0),
                 _ => tracing::warn!(value, "Expected compass.alpha from 0 to 1, ignoring"),
+            },
+            "shape" => match crate::compass::CompassShape::parse(value) {
+                Some(shape) => cfg.shape = shape,
+                None => tracing::warn!(
+                    value,
+                    "Expected compass.shape as circle/arrow/chevron/ring/diamond, ignoring"
+                ),
             },
             other => tracing::warn!(key = %other, "Unknown key in `compass` block, ignoring"),
         }
