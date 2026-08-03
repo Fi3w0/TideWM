@@ -36,50 +36,60 @@ Underneath the water is a real tiling window manager: fast keyboard-driven layou
 
 ## Try it
 
-TideWM builds from source, there's no package yet.
+TideWM builds from source, there's no package yet. Rust stable plus a handful of Wayland/GPU dev libraries:
 
 ```bash
-sudo pacman -S pkg-config wayland systemd-libs libinput libxkbcommon mesa libdrm seatd  # Arch
+# Arch
+sudo pacman -S pkg-config wayland systemd-libs libinput libxkbcommon mesa libdrm seatd
+
+# Fedora
+sudo dnf install pkgconf-pkg-config wayland-devel systemd-devel libinput-devel libxkbcommon-devel mesa-libEGL-devel mesa-libgbm-devel libdrm-devel libseat-devel
+
+# Debian / Ubuntu
+sudo apt install pkg-config libwayland-dev libudev-dev libinput-dev libxkbcommon-dev libegl1-mesa-dev libgbm-dev libdrm-dev libseat-dev
+```
+
+```bash
 git clone https://github.com/Fi3w0/TideWM.git
 cd TideWM
 cargo build --release --locked
 cargo run --locked   # opens nested inside your current session, safe to try
 ```
 
-Other distros, the full dependency list, and setting it up as a real login session: see [TECHNICAL_REPORT.md](TECHNICAL_REPORT.md#building).
+openSUSE and everything else, plus setting it up as a real login session: see [TECHNICAL_REPORT.md](TECHNICAL_REPORT.md#building).
 
 ## A taste of the defaults
 
-| Shortcut             | Action                     |
-| --------------------- | -------------------------- |
-| `Alt+Enter`           | Open a terminal            |
-| `Alt+H/J/K/L`         | Focus a direction           |
-| `Alt+V`               | Float a window              |
-| `Alt+F`               | Fullscreen                  |
-| `Super+1`..`Super+0`  | Switch workspace            |
-| `Alt+O`               | Workspace overview          |
+| Shortcut               | Action                      |
+| ---------------------- | --------------------------- |
+| `Super+Enter`          | Open a terminal             |
+| `Super+H/J/K/L`        | Focus a direction            |
+| `Super+V`              | Float a window               |
+| `Super+F`              | Fullscreen                   |
+| `Super+1`..`Super+0`   | Switch workspace             |
+| `Super+O`              | Workspace overview           |
 
 Everything here is rebindable, and this is a small slice of what's available. The full action/keybind/IPC catalog lives in [DOCUMENTATION.md](DOCUMENTATION.md).
 
 ## Configuration
 
-`~/.config/tidewm/config.wave`, generated with working defaults the first time you run it. Save it and TideWM picks up the change immediately, no restart.
+`~/.config/tidewm/config.wave`, generated with working defaults the first time you run it, already split into `config.wave` and `keybinds.wave` the way most people end up organizing it anyway. Save either one and TideWM picks up the change immediately, no restart.
 
 ```
 # config.wave
-include "monitors.wave"
 include "keybinds.wave"
 
 $mod = SUPER
-terminal = $wave(kitty, alacritty, foot)
+terminal = $wave(kitty, alacritty, foot, xterm)
 ```
 
 ```
 # keybinds.wave
-bind $mod+Return = spawn:$terminal
+bind $mod+Return = spawn:kitty
+bind $mod+Q = close-window
 ```
 
-Full key-by-key reference: [DOCUMENTATION.md](DOCUMENTATION.md).
+Everything hangs off that one `$mod` variable, so rebinding your primary modifier is a one-line change. Full key-by-key reference: [DOCUMENTATION.md](DOCUMENTATION.md).
 
 ## About this project
 
@@ -89,7 +99,7 @@ For what's actually implemented, what's verified on real hardware, and what's st
 
 ## Contributing
 
-Not soliciting code contributions yet, but this is exactly the point where testing reports matter most, especially on other GPUs and distros. See [CONTRIBUTING.md](CONTRIBUTING.md).
+The gates are open: issues, forks, and pull requests are all genuinely welcome. Testing reports matter most right now, especially on other GPUs and distros, but code contributions have a place too. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
