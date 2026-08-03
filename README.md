@@ -27,6 +27,10 @@ Underneath the water is a real tiling window manager: fast keyboard-driven layou
 
 [Full-quality video (mp4)](share/media/demo-clasic.mp4) if the GIF is too compressed for your taste.
 
+| Classic workspaces | The Ocean canvas |
+| --- | --- |
+| ![Classic mode: tiled terminals and a frosted-glass floating window](share/media/showcase-classic.png) | ![Ocean mode: a water-glass window refracting the wallpaper on the zoomed-out canvas](share/media/showcase-ocean.png) |
+
 ## Why people are trying it
 
 - **It actually looks like something.** Ripples on open, wave transitions between workspaces, glass and shadow on your windows, floating windows that drift like they're sitting on water. Every bit of it is a config toggle, and none of it costs you performance you'll notice.
