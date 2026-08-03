@@ -5716,9 +5716,10 @@ impl Smallvil {
             return Vec::new();
         };
         let mut elements = Vec::with_capacity(2);
-        if let Some(map) = peek.render_element(renderer) {
-            elements.push(map);
-        }
+        // Front-to-back, index 0 topmost: the cursor glyph must come first
+        // so it draws *over* the map, not beneath it -- the map's panel is
+        // translucent, and a cursor behind it showed as a faint ghost (the
+        // same element-order class as the session-lock bug).
         let scale = output.current_scale().fractional_scale();
         let output_loc = self
             .space
@@ -5727,6 +5728,9 @@ impl Smallvil {
             .unwrap_or_else(|| Point::from((0, 0)));
         if let Some(cursor) = peek.cursor_element(renderer, output_loc, scale) {
             elements.push(cursor);
+        }
+        if let Some(map) = peek.render_element(renderer) {
+            elements.push(map);
         }
         elements
     }
