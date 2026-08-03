@@ -229,19 +229,25 @@ pub fn run_checks() -> (Vec<Check>, Option<Diagnostics>) {
         .as_ref()
         .map(|dir| dir.join("pipewire-0"))
         .unwrap_or_else(|| PathBuf::from("/run/user/pipewire-0"));
+    let pipewire_installed = command_output(&["sh", "-c", "command -v pipewire"]).is_some();
     if pipewire_socket.exists() {
         checks.push(Check::new(
             "pipewire",
             Verdict::Pass,
             format!("socket {} present", pipewire_socket.display()),
         ));
-    } else if runtime_dir.is_none() {
-        // No user runtime dir at all: not a graphical session context
-        // (headless CI, minimal container). Expected, not a problem.
+    } else if runtime_dir.is_none() || !pipewire_installed {
+        // No user runtime dir at all (headless CI, minimal container), or
+        // PipeWire isn't even installed on this machine: not a graphical
+        // desktop session to hold to this standard. Expected, not a
+        // problem -- unlike a real desktop where PipeWire is installed and
+        // XDG_RUNTIME_DIR exists but the socket is still missing, which
+        // means the user service isn't running.
         checks.push(Check::new(
             "pipewire",
             Verdict::Skip,
-            "no XDG_RUNTIME_DIR -- not running in a graphical user session".to_string(),
+            "no XDG_RUNTIME_DIR or PipeWire not installed -- not a graphical desktop session"
+                .to_string(),
         ));
     } else {
         checks.push(Check::new(
