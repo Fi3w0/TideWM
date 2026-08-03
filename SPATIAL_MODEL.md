@@ -1,8 +1,10 @@
 # TideWM spatial model
 
-TideWM is one compositor with two selectable spatial engines. The engine is a
-startup choice because it changes window ownership and navigation; water,
-glass, animations, and other visual features remain independent toggles.
+TideWM is one compositor with two selectable spatial engines. The engine
+changes window ownership and navigation, but it is not a startup-only choice
+anymore: a hot reload that flips `spatial_engine` migrates every live window
+between the models in place (see "Migration" below). Water, glass, animations,
+and other visual features remain independent toggles.
 
 ## Classic
 
@@ -76,6 +78,30 @@ soft glow at the viewport edge points toward each off-screen urgent window
 (in any direction) and each deep window (below the viewport). Travel stays
 explicit.
 
+## Migration
+
+A config reload that changes `spatial_engine` migrates every live window in
+place instead of restarting:
+
+- **Classic → Ocean:** each output's populated workspace trees move whole into
+  reefs (both engines embed the same `BspLayout`, so it is a move, not a
+  rebuild) laid out on the lateral line at `X = (N-1) * (output width +
+  128px)`, `Y = 0`. The camera points at the previously-active workspace's
+  reef. Floating windows translate to world coordinates around their
+  workspace's reef; pinned windows become Ocean screen pins. Depth-deck
+  windows are recalled to their tiles first (the deck's picker overlay is
+  dropped). Tab groups and fullscreen/maximized entries carry across.
+- **Ocean → Classic:** reefs sorted left-to-right become workspaces `1..N` on
+  the output whose camera is nearest to each reef; the active workspace is the
+  reef each output's camera is looking at. Floating windows land on the
+  workspace of the reef nearest their world rect, clamped into the output's
+  visible area; screen-pinned windows re-enter the `pinned` set. Bookmarks and
+  camera history have no Classic counterpart and are dropped.
+
+Ocean-reef-per-workspace Master/Cascade workspaces reflow as BSP under Ocean
+(reefs only run the BSP layout algorithm); migrating back restores each
+workspace's remembered algorithm where a stub tree survived the round trip.
+
 ## Shared and separate state
 
 Both engines share the compositor core, Wayland objects, window/protocol
@@ -109,7 +135,8 @@ config.
 3. **Done:** model-neutral placement boundary for the shared renderer.
 4. **Done:** Ocean world coordinates, cameras, reefs, and bookmarks.
 5. **Done:** Ocean pan/zoom canvas feel and physical sink/dredge/surface travel.
-6. Ocean compass and whole-world overview. Compass done (edge-glow cues for off-screen urgent/deep windows); the whole-world overview minimap is the remaining slice.
+6. **Done:** Ocean compass and whole-world overview minimap.
+7. **Done:** live Classic↔Ocean migration (hot reload flips `spatial_engine` in place).
 
 The existing continuous workspace swim is an S0 Classic navigation bridge. It
 is useful on its own, but it is not the Ocean data model.
