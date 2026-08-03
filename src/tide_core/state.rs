@@ -5314,15 +5314,27 @@ impl Smallvil {
     /// detects `config.minimap`'s hold chord has just become fully held.
     /// A no-op if it's already open (holding the chord longer doesn't
     /// rebuild it), outside Ocean, `minimap.enabled` is false, the session
-    /// is locked, or the pointer is already grabbed (a move/resize/pan
-    /// drag in progress) -- the peek's own button handling never calls
-    /// `pointer.button()`, so opening mid-drag would strand that grab's
-    /// commit logic waiting for a release event it will never see. Same
-    /// "don't start while the pointer is already grabbed" guard
-    /// `modifier_pan_fingers`'s gesture-start already checks for the same
-    /// reason. Callers must treat "did not open" (`self.minimap_peek` still
-    /// `None` after this returns) as a real outcome, not just "already
-    /// open" -- in particular, the chord press that triggers this must not
+    /// is locked, or a move/resize/pan drag is in progress -- the peek's
+    /// own button handling never calls `pointer.button()`, so opening
+    /// mid-drag would strand that grab's commit logic waiting for a
+    /// release event it will never see. Same "don't start while the
+    /// pointer is already grabbed" guard `modifier_pan_fingers`'s
+    /// gesture-start already checks for the same reason.
+    ///
+    /// Deliberately checks `is_grabbed() && popup_grab.is_none()`, not
+    /// `is_grabbed()` alone -- `is_grabbed()` is also true for an ordinary
+    /// client popup's implicit grab (any open GTK/Qt dropdown), which
+    /// doesn't have the release-starvation hazard above: a popup grab is
+    /// about click-outside-to-dismiss routing, not a commit that waits on
+    /// a specific release event. Refusing to open just because a menu
+    /// happens to be open would be an unnecessary restriction; the popup
+    /// simply receives no input for the peek's duration and resumes
+    /// normally once it closes, the same `PointerButton` arm already
+    /// treats a popup grab as distinct from a move/resize grab.
+    ///
+    /// Callers must treat "did not open" (`self.minimap_peek` still `None`
+    /// after this returns) as a real outcome, not just "already open" --
+    /// in particular, the chord press that triggers this must not
     /// intercept the key unless a peek actually opened, or it would
     /// silently shadow an ordinary keybind on the same combo.
     ///
@@ -5335,10 +5347,11 @@ impl Smallvil {
             || self.config.spatial_engine != crate::config::SpatialEngine::Ocean
             || !self.config.minimap.enabled
             || !matches!(self.session_lock, SessionLock::Unlocked)
-            || self
-                .seat
-                .get_pointer()
-                .is_some_and(|pointer| pointer.is_grabbed())
+            || (self.popup_grab.is_none()
+                && self
+                    .seat
+                    .get_pointer()
+                    .is_some_and(|pointer| pointer.is_grabbed()))
         {
             return;
         }
