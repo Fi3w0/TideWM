@@ -5707,11 +5707,28 @@ impl Smallvil {
         &self,
         renderer: &mut GlesRenderer,
         output: &Output,
-    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
-        self.minimap_peek
+    ) -> Vec<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        let Some(peek) = self
+            .minimap_peek
             .as_ref()
             .filter(|peek| peek.output_name() == output.name())
-            .and_then(|peek| peek.render_element(renderer))
+        else {
+            return Vec::new();
+        };
+        let mut elements = Vec::with_capacity(2);
+        if let Some(map) = peek.render_element(renderer) {
+            elements.push(map);
+        }
+        let scale = output.current_scale().fractional_scale();
+        let output_loc = self
+            .space
+            .output_geometry(output)
+            .map(|geo| geo.loc)
+            .unwrap_or_else(|| Point::from((0, 0)));
+        if let Some(cursor) = peek.cursor_element(renderer, output_loc, scale) {
+            elements.push(cursor);
+        }
+        elements
     }
 
     /// Drops transient render state for a disconnected output. In

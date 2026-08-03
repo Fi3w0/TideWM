@@ -200,6 +200,13 @@ pub struct MinimapPeek {
     /// later through anything pointer-location-dependent.
     output_name: String,
     buffer: MemoryRenderBuffer,
+    /// Canvas size in logical pixels: the output size the map was built
+    /// for. Stored because `MemoryRenderBuffer` doesn't expose its size.
+    canvas_size: Size<i32, Logical>,
+    /// Small crosshair glyph drawn over the map at the pointer's current
+    /// canvas position, so aiming a click doesn't mean guessing. Rebuilt
+    /// only when the pointer moves (`set_last_location`), never per frame.
+    cursor_buffer: MemoryRenderBuffer,
     /// World point mapped to canvas-space (0, 0).
     world_origin: Point<f64, Logical>,
     /// Canvas pixels per world logical pixel.
@@ -212,6 +219,42 @@ pub struct MinimapPeek {
     /// `sync_visible_floating_window` incidents already in this project's
     /// history.
     last_location: Point<f64, Logical>,
+}
+
+/// Crosshair glyph size, logical pixels. Small, centered on the pointer.
+const CURSOR_GLYPH: i32 = 20;
+/// Glyph color: the same accent as the "you are here" viewport beacon.
+const CURSOR_COLOR: [u8; 4] = [118, 241, 255, 255];
+
+fn build_cursor_glyph() -> MemoryRenderBuffer {
+    let size = CURSOR_GLYPH;
+    let mut pixels = vec![0u8; (size * size * 4) as usize];
+    let center = size / 2;
+    let radius = size / 2 - 1;
+    let cross = 3;
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x - center;
+            let dy = y - center;
+            let dist = ((dx * dx + dy * dy) as f32).sqrt();
+            let on_ring = (dist - radius as f32).abs() <= 1.5;
+            let on_cross = (dx.abs() <= cross && dy.abs() <= cross)
+                || (dy.abs() <= 1 && dx.abs() > radius - 2)
+                || (dx.abs() <= 1 && dy.abs() > radius - 2);
+            if on_ring || on_cross {
+                let i = ((y * size + x) * 4) as usize;
+                pixels[i..i + 4].copy_from_slice(&CURSOR_COLOR);
+            }
+        }
+    }
+    MemoryRenderBuffer::from_slice(
+        &pixels,
+        Fourcc::Argb8888,
+        (size, size),
+        1,
+        Transform::Normal,
+        None,
+    )
 }
 
 impl MinimapPeek {
@@ -394,6 +437,8 @@ impl MinimapPeek {
         Self {
             output_name,
             buffer,
+            canvas_size: Size::from((width, height)),
+            cursor_buffer: build_cursor_glyph(),
             world_origin,
             scale,
             last_location: pointer_location,
@@ -421,7 +466,42 @@ impl MinimapPeek {
     }
 
     pub fn set_last_location(&mut self, location: Point<f64, Logical>) {
-        self.last_location = location;
+        if self.last_location != location {
+            self.last_location = location;
+        }
+    }
+
+    /// The crosshair element drawn over the map at the pointer's current
+    /// canvas position. The map fills the whole output, so the pointer's
+    /// canvas-space position is also its output-local position; the glyph
+    /// is centered on it. `None` while the pointer sits outside the output.
+    pub fn cursor_element(
+        &self,
+        renderer: &mut GlesRenderer,
+        output_loc: Point<i32, Logical>,
+        scale: f64,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        let loc = self.last_location;
+        let size = self.canvas_size;
+        if loc.x < output_loc.x as f64
+            || loc.y < output_loc.y as f64
+            || loc.x > (output_loc.x + size.w) as f64
+            || loc.y > (output_loc.y + size.h) as f64
+        {
+            return None;
+        }
+        let half = CURSOR_GLYPH as f64 / 2.0;
+        let physical_loc = (loc - output_loc.to_f64() - Point::from((half, half))).to_physical(scale);
+        MemoryRenderBufferRenderElement::from_buffer(
+            renderer,
+            physical_loc,
+            &self.cursor_buffer,
+            None,
+            None,
+            None,
+            Kind::Unspecified,
+        )
+        .ok()
     }
 
     /// Inverts `world_to_canvas` at the peek's last known pointer position

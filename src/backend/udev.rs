@@ -1405,7 +1405,7 @@ fn render_surface(
     // The minimap can show window titles too -- same lock-gating, same
     // reasoning as the overview above it.
     let minimap_element = if locked {
-        None
+        Vec::new()
     } else {
         state.minimap_frame_element(renderer, output)
     };
