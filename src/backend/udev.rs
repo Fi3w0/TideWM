@@ -147,6 +147,9 @@ smithay::backend::renderer::element::render_elements! {
     DepthTransition = crate::depth_transition::DepthTransitionElement,
     /// World-anchored Ocean reference grid behind windows and above wallpaper.
     OceanCanvas = crate::ocean_canvas::OceanCanvasElement,
+    /// Ambient caustic light over the wallpaper, below windows. Engine-
+    /// agnostic; gated by `water_effects` plus its own enable.
+    Caustics = crate::caustics::CausticsElement,
     /// Bioluminescent edge-glow cue for an off-screen urgent/deep Ocean
     /// window (spatial roadmap S5). Above windows, below chrome.
     Compass = crate::compass::CompassElement,
@@ -1484,6 +1487,7 @@ fn render_surface(
     let workspace_transition = state.workspace_transition_frame_element(renderer, output);
     let depth_transition = state.depth_transition_frame_element(renderer, output);
     let ocean_canvas = state.ocean_canvas_frame_element(renderer, output);
+    let caustics = state.caustics_frame_element(renderer, output);
     let compass_elements = state.compass_frame_elements(renderer, output);
     let closing_windows = state.closing_window_frame_elements(renderer, output);
     let mut elements: Vec<OutputRenderElements> = ripple_layers.above_all;
@@ -1515,6 +1519,7 @@ fn render_surface(
     elements.extend(space_elements);
     elements.extend(ripple_layers.below_windows);
     elements.extend(ocean_canvas);
+    elements.extend(caustics);
     elements.extend(wallpaper_element.map(OutputRenderElements::Composited));
     elements.extend(lock_elements.into_iter().map(OutputRenderElements::Lock));
     elements.extend(ripple_layers.below_all);

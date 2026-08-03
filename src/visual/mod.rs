@@ -6,6 +6,7 @@
 
 pub(crate) mod animation;
 pub(crate) mod backdrop;
+pub(crate) mod caustics;
 pub(crate) mod compass;
 pub(crate) mod decoration;
 pub(crate) mod depth;

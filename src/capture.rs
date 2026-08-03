@@ -579,6 +579,7 @@ impl Smallvil {
             let workspace_transition = self.workspace_transition_frame_element(renderer, &output);
             let depth_transition = self.depth_transition_frame_element(renderer, &output);
             let ocean_canvas = self.ocean_canvas_frame_element(renderer, &output);
+            let caustics = self.caustics_frame_element(renderer, &output);
             let closing_windows = self.closing_window_frame_elements(renderer, &output);
             let Some(placements) = self.render_placements(&output) else {
                 fail!(completion, CaptureFailureReason::Unknown);
@@ -605,6 +606,7 @@ impl Smallvil {
                     elements.extend(space_elements);
                     elements.extend(ripple_layers.below_windows);
                     elements.extend(ocean_canvas);
+                    elements.extend(caustics);
                     if let Some(wallpaper) = self.wallpaper_element(&output, renderer) {
                         elements.push(OutputRenderElements::Composited(wallpaper));
                     }

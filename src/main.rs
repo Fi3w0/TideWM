@@ -20,9 +20,10 @@ pub(crate) use tide_core::{
 #[cfg(feature = "screencast")]
 pub(crate) use visual::source_picker;
 pub(crate) use visual::{
-    animation, backdrop, compass, decoration, depth, depth_deck, depth_transition, error_overlay,
-    frost_glass, minimap, ocean_canvas, overview, ripple, shadow, sway, swim, tab_strip, toast,
-    ui_theme, viscosity, wallpaper, water_glass, welcome, window_animation, workspace_transition,
+    animation, backdrop, caustics, compass, decoration, depth, depth_deck, depth_transition,
+    error_overlay, frost_glass, minimap, ocean_canvas, overview, ripple, shadow, sway, swim,
+    tab_strip, toast, ui_theme, viscosity, wallpaper, water_glass, welcome, window_animation,
+    workspace_transition,
 };
 
 use std::{process::Child, sync::Mutex};

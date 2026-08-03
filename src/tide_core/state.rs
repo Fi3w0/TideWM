@@ -347,6 +347,18 @@ pub struct Smallvil {
     /// texture/framebuffer; the record only preserves damage identity.
     pub(crate) ocean_canvases: HashMap<String, crate::ocean_canvas::OceanCanvas>,
     pub(crate) ocean_canvas_program: Option<GlesPixelProgram>,
+    /// Per-output ambient caustics state and one shared compiled shader.
+    /// Engine-agnostic (works under both Classic and Ocean); gated by
+    /// `water_effects` plus `caustics.enabled`. The phase only advances
+    /// inside `caustics_frame_element`, so damage-driven idle desktops
+    /// freeze the pattern at zero extra frames; `caustics.fps > 0` opts
+    /// into constant motion via `has_active_animation`'s gate.
+    pub(crate) caustics: HashMap<String, crate::caustics::Caustics>,
+    pub(crate) caustics_program: Option<GlesPixelProgram>,
+    /// Last time any caustics phase advanced, for the `fps` constant-motion
+    /// gate. Global rather than per-output so a single display's tick
+    /// bootstraps entries on outputs that haven't rendered yet.
+    pub(crate) caustics_last_advance: Instant,
     /// Per-output compass state and one shared compiled shader (spatial
     /// roadmap S5). Ocean-only and gated by `water_effects`; no element is
     /// produced when nothing sits off-screen.
@@ -2372,6 +2384,9 @@ impl Smallvil {
             depth_transition_program: None,
             ocean_canvases: HashMap::new(),
             ocean_canvas_program: None,
+            caustics: HashMap::new(),
+            caustics_program: None,
+            caustics_last_advance: Instant::now(),
             compasses: HashMap::new(),
             compass_program: None,
             loop_handle,
@@ -4173,6 +4188,7 @@ impl Smallvil {
             || !self.closing_window_animations.is_empty()
             || self.animated_borders_possible()
             || self.glass_animation_active()
+            || self.caustics_active()
     }
 
     /// Whether any water-glass window's refraction is currently animating
@@ -5384,6 +5400,52 @@ impl Smallvil {
         Some(crate::backend::udev::OutputRenderElements::OceanCanvas(
             element,
         ))
+    }
+
+    /// Ambient caustic light over the wallpaper, below windows. One
+    /// analytical full-output element per output; no texture, no
+    /// framebuffer. The phase advances only while a frame is being
+    /// assembled, so the default `fps = 0` mode piggybacks on
+    /// damage-driven frames (idle desktop = static caustics, zero extra
+    /// frames). A non-zero `fps` opts into constant motion through
+    /// `has_active_animation`'s gate. Skipped entirely while a session
+    /// lock is held, matching the ocean canvas's own guard.
+    pub(crate) fn caustics_frame_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+    ) -> Option<crate::backend::udev::OutputRenderElements> {
+        if !matches!(self.session_lock, SessionLock::Unlocked)
+            || !self.config.water_effects
+            || !self.config.caustics.enabled
+        {
+            return None;
+        }
+        let area = Rectangle::from_size(self.space.output_geometry(output)?.size);
+        let program = crate::caustics::caustics_program(&mut self.caustics_program, renderer)?;
+        let element = self
+            .caustics
+            .entry(output.name())
+            .or_default()
+            .frame_element(program, area, &self.config.caustics);
+        self.caustics_last_advance = Instant::now();
+        Some(crate::backend::udev::OutputRenderElements::Caustics(element))
+    }
+
+    /// Whether the configured `caustics.fps` says the frame pump should be
+    /// kept alive for constant caustic motion. `fps = 0` (piggyback mode)
+    /// never returns true here -- in that mode caustics advance only on
+    /// frames already being rendered for some other reason, which is the
+    /// whole point of leaving it at zero. Honors the configured rate by
+    /// gating on the time since the last advance, so a `fps = 15` value
+    /// doesn't actually redraw at the display's full refresh.
+    fn caustics_active(&self) -> bool {
+        let cfg = &self.config.caustics;
+        if !self.config.water_effects || !cfg.enabled || cfg.fps == 0 {
+            return false;
+        }
+        self.caustics_last_advance.elapsed()
+            >= Duration::from_secs_f32(1.0 / cfg.fps.max(1) as f32)
     }
 
     /// Off-screen urgent/deep compass cues for the Ocean engine (spatial

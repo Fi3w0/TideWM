@@ -740,6 +740,8 @@ pub struct Config {
     /// Water-glass refraction motion: static, disturbance-reactive
     /// (default), or constant ambient drift.
     pub water_glass: WaterGlassConfig,
+    /// Ambient caustic light over the wallpaper, below windows.
+    pub caustics: CausticsConfig,
     /// Analytical window shadows. Independent of `water_effects`: shadows
     /// are general compositor decoration, while the water master toggle
     /// only gates TideWM's water/glass/depth identity effects.
@@ -1021,6 +1023,7 @@ impl Config {
             classic_depth: raw.classic_depth,
             frost: raw.frost,
             water_glass: raw.water_glass,
+            caustics: raw.caustics,
             shadow: raw.shadow,
             rounding: raw.rounding,
             border: raw.border,
@@ -1251,6 +1254,7 @@ struct RawConfig {
     classic_depth: ClassicDepthConfig,
     frost: FrostConfig,
     water_glass: WaterGlassConfig,
+    caustics: CausticsConfig,
     shadow: ShadowConfig,
     rounding: RoundingConfig,
     border: BorderConfig,
@@ -1415,6 +1419,7 @@ impl Default for RawConfig {
             classic_depth: ClassicDepthConfig::default(),
             frost: FrostConfig::default(),
             water_glass: WaterGlassConfig::default(),
+            caustics: CausticsConfig::default(),
             shadow: ShadowConfig::default(),
             rounding: RoundingConfig::default(),
             border: BorderConfig::default(),
@@ -1878,6 +1883,41 @@ impl Default for FrostConfig {
             tint_alpha: 0.0,
             corner_radius: 0.0,
             corner_softness: 1.0,
+        }
+    }
+}
+
+/// Ambient caustic light patterns over the wallpaper, below windows.
+/// `water_effects` is the master bypass. `fps = 0` (default) animates only
+/// on frames that are already being rendered for some other reason
+/// (damage, an active animation elsewhere); a non-zero value opts into
+/// constant motion at roughly that frame rate, keeping the wallpaper
+/// "breathing" at the cost of a steady redraw.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CausticsConfig {
+    pub enabled: bool,
+    /// Peak alpha contribution, 0..1.
+    pub intensity: f32,
+    /// Linear RGB tint of the light ridges.
+    pub color: [f32; 3],
+    /// Pattern size multiplier; higher packs more cells per output.
+    pub scale: f32,
+    /// Phase drift speed multiplier.
+    pub speed: f32,
+    /// Constant-motion frame rate, 0 for damage-piggyback. Clamped to a
+    /// small range at parse time.
+    pub fps: u32,
+}
+
+impl Default for CausticsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            intensity: 0.35,
+            color: [0.55, 0.85, 1.0],
+            scale: 1.0,
+            speed: 1.0,
+            fps: 0,
         }
     }
 }
@@ -3329,6 +3369,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "water_glass" | "water_glass_animation" => {
             apply_water_glass_block(&mut raw.water_glass, body)
         }
+        "caustics" => apply_caustics_block(&mut raw.caustics, body),
         "shadow" => apply_shadow_block(&mut raw.shadow, body),
         "rounding" | "corners" => apply_rounding_block(&mut raw.rounding, body),
         "border" => apply_border_block(&mut raw.border, body),
@@ -4010,6 +4051,42 @@ fn apply_water_glass_block(cfg: &mut WaterGlassConfig, body: &[waves::Entry]) {
                 ),
             },
             other => tracing::warn!(key = %other, "Unknown key in `water_glass` block, ignoring"),
+        }
+    }
+}
+
+fn apply_caustics_block(cfg: &mut CausticsConfig, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `caustics` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "enabled" => set_bool(&mut cfg.enabled, key, value),
+            "intensity" | "strength" | "alpha" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.intensity = value.clamp(0.0, 1.0),
+                _ => tracing::warn!(value, "Expected caustics.intensity from 0 to 1, ignoring"),
+            },
+            "color" => match parse_ripple_color(value) {
+                Some(c) => cfg.color = c,
+                None => tracing::warn!(
+                    value,
+                    "Expected a hex color for caustics.color, ignoring"
+                ),
+            },
+            "scale" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.scale = value.clamp(0.1, 8.0),
+                _ => tracing::warn!(value, "Expected caustics.scale from 0.1 to 8, ignoring"),
+            },
+            "speed" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.speed = value.clamp(0.0, 8.0),
+                _ => tracing::warn!(value, "Expected caustics.speed from 0 to 8, ignoring"),
+            },
+            "fps" => match value.parse::<u32>() {
+                Ok(value) => cfg.fps = value.clamp(0, 60),
+                _ => tracing::warn!(value, "Expected caustics.fps from 0 to 60, ignoring"),
+            },
+            other => tracing::warn!(key = %other, "Unknown key in `caustics` block, ignoring"),
         }
     }
 }
@@ -6480,6 +6557,21 @@ classic_depth {
 #     settle_ms = 1200               # reactive settle time, 100 to 10000
 # }
 
+# Ambient caustic light over the wallpaper, below windows. Off by
+# default. `fps = 0` (the default) animates only on frames already
+# rendering for some other reason, so an idle desktop shows static
+# caustics that read as part of the wallpaper; a non-zero value keeps
+# them drifting at roughly that rate. `water_effects` is the master
+# bypass.
+# caustics {
+#     enabled = false
+#     intensity = 0.35               # peak light alpha, 0 to 1
+#     color = 8CDDFF                 # bare RRGGBB
+#     scale = 1.0                    # pattern size, 0.1 to 8
+#     speed = 1.0                    # drift speed, 0 to 8
+#     fps = 0                        # 0 piggybacks, else 1 to 60
+# }
+
 # Analytical drop shadows (Phase R2). These are independent of
 # `water_effects`: disabling the water identity does not remove ordinary
 # window decoration. Values are logical pixels and follow output scale.
@@ -7034,6 +7126,7 @@ mod tests {
             classic_depth: ClassicDepthConfig::default(),
             frost: FrostConfig::default(),
             water_glass: WaterGlassConfig::default(),
+            caustics: CausticsConfig::default(),
             shadow: ShadowConfig::default(),
             rounding: RoundingConfig::default(),
             border: BorderConfig::default(),
@@ -7572,6 +7665,33 @@ mod tests {
         let defaults = parse_default_config().water_glass;
         assert_eq!(defaults.animation, GlassAnimation::Reactive);
         assert_eq!(defaults, WaterGlassConfig::default());
+    }
+
+    #[test]
+    fn caustics_block_parses_clamps_and_matches_generated_defaults() {
+        let entries = waves::parse(
+            "caustics {\n\
+             enabled = true\n\
+             intensity = 5\n\
+             color = 8CDDFF\n\
+             scale = 0\n\
+             speed = -2\n\
+             fps = 999\n\
+             }\n",
+            Path::new("<caustics-test>"),
+        )
+        .unwrap();
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        assert!(config.caustics.enabled);
+        assert_eq!(config.caustics.intensity, 1.0);
+        assert_eq!(config.caustics.color, parse_ripple_color("8CDDFF").unwrap());
+        assert_eq!(config.caustics.scale, 0.1);
+        assert_eq!(config.caustics.speed, 0.0);
+        assert_eq!(config.caustics.fps, 60);
+
+        let defaults = parse_default_config().caustics;
+        assert!(!defaults.enabled);
+        assert_eq!(defaults, CausticsConfig::default());
     }
 
     #[test]

@@ -369,6 +369,7 @@ pub fn init_winit(
                             state.depth_transition_frame_element(renderer, &entry.output);
                         let ocean_canvas =
                             state.ocean_canvas_frame_element(renderer, &entry.output);
+                        let caustics = state.caustics_frame_element(renderer, &entry.output);
                         let compass_elements =
                             state.compass_frame_elements(renderer, &entry.output);
                         let closing_windows =
@@ -397,6 +398,7 @@ pub fn init_winit(
                         elements.extend(space_elements);
                         elements.extend(ripple_layers.below_windows);
                         elements.extend(ocean_canvas);
+                        elements.extend(caustics);
                         elements.extend(
                             wallpaper_element
                                 .map(crate::backend::udev::OutputRenderElements::Composited),
