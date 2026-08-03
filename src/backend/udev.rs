@@ -1441,19 +1441,16 @@ fn render_surface(
         state.depth_frame_elements(renderer, output, &placements)
     };
     #[allow(clippy::mutable_key_type)]
-    let (mut glass_layers, glass_surfaces) = if locked {
-        (HashMap::new(), Vec::new())
+    let mut glass_layers = if locked {
+        HashMap::new()
     } else {
         let surfaces = state.glass_eligible_surfaces(&placements);
-        let layers = state.glass_layer_elements(renderer, output, &placements, &surfaces);
-        (layers, surfaces)
+        state.glass_layer_elements(renderer, output, &placements, &surfaces)
     };
-    let mut replaced_surfaces = depth_surfaces;
-    // A shader compile failure produces no replacement elements. In that
-    // case keep the real window in the ordinary walk rather than hiding it.
-    if !glass_layers.is_empty() {
-        replaced_surfaces.extend(glass_surfaces);
-    }
+    // Glass windows render in their normal z-slot (the walk inserts each
+    // glass layer behind its own surface); only depth-replaced windows are
+    // skipped.
+    let replaced_surfaces = depth_surfaces;
     // The canvas grid, caustics, and BelowWindows ripples all sit between
     // windows and the wallpaper. They are passed INTO
     // `desktop_render_elements` so they land *above* whatever wallpaper
