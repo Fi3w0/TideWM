@@ -1008,22 +1008,33 @@ impl Config {
                 }
             }
         } else {
-            let default = waves::parse(DEFAULT_CONFIG_WAVE, &path)
-                .map(|entries| {
-                    let mut raw = lower_entries(&entries);
-                    substitute_variables_in_raw(&mut raw);
-                    raw
-                })
-                .unwrap_or_else(|err| {
-                    tracing::error!(%err, "Built-in default Waves config failed to parse");
-                    RawConfig::default()
-                });
             if let Some(parent) = path.parent() {
                 let _ = fs::create_dir_all(parent);
             }
             if let Err(err) = fs::write(&path, DEFAULT_CONFIG_WAVE) {
                 tracing::warn!(%err, path = %path.display(), "Failed to write default config");
             }
+            // Guarded by existence, not just overwritten: a stray
+            // `keybinds.wave` a user already has (from a previous partial
+            // run, or hand-placed ahead of time) must not be clobbered
+            // just because `config.wave` itself didn't exist yet.
+            let keybinds_path = path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("keybinds.wave");
+            if !keybinds_path.exists() {
+                if let Err(err) = fs::write(&keybinds_path, DEFAULT_KEYBINDS_WAVE) {
+                    tracing::warn!(%err, path = %keybinds_path.display(), "Failed to write default keybinds");
+                }
+            }
+            // Load through the real disk-resolving path (not an in-memory
+            // parse of the constant) so `include "keybinds.wave"` above
+            // actually resolves on this very first boot, not just on the
+            // next reload.
+            let default = load_raw_config(&path).unwrap_or_else(|err| {
+                tracing::error!(%err, "Built-in default Waves config failed to parse");
+                RawConfig::default()
+            });
             (default, None)
         };
 
@@ -6674,425 +6685,133 @@ fn parse_workspace_ref(n: &str) -> WorkspaceRef {
 }
 
 const DEFAULT_CONFIG_WAVE: &str = r#"# TideWM configuration.
-# Full reference: DOCUMENTATION.md in the TideWM repo.
+# Full reference, every action string, and the whole protocol matrix:
+# DOCUMENTATION.md in the TideWM repo.
+#
+# Locked out by a bad edit? Ctrl+Alt+Escape turns on a small always-safe
+# keybind set (terminal, close, quit, floating, fullscreen) until the next
+# reload or restart.
 
-# include "monitors.wave"
-# include "keybinds.wave"
+# ~~~~~~~~~~~~~~~~~ the core ~~~~~~~~~~~~~~~~~
 
-$mod = ALT                       # primary window-management modifier
-$helper = SUPER                  # workspace/helper layer
-$move = CTRL                     # Ocean camera movement
-$sub = P                         # ordinary keys can be held as helper modifiers
+include "keybinds.wave"
+
+$mod = SUPER                     # one modifier, everything hangs off it
+
+# The first-boot hint card on the empty desktop. Set false or delete this
+# line entirely to keep it from coming back.
+show_welcome_hint = true
 
 terminal = $wave(kitty, alacritty, foot, xterm)
-pointer_modifier = $mod             # left-drag moves; right-drag resizes
-spatial_engine = classic            # classic or ocean; a live change migrates all windows in place
-show_welcome_hint = true
-show_config_reload_toast = true     # false hides successful reload cards only
+pointer_modifier = $mod          # left-drag moves a floating window; right-drag resizes
+spatial_engine = classic         # classic (workspaces) or ocean (infinite canvas), live-switchable
+show_config_reload_toast = true
+
+# ~~~~~~~~~~~~~~~~~ the water ~~~~~~~~~~~~~~~~~
+
+# Ripples, wave transitions, glass, viscosity, sway, and everything else
+# that makes this TideWM instead of any other tiling WM. One toggle, plus
+# a lot of dials that already have good defaults. The full catalog
+# (frost/shadow/rounding/border/ripple/depth/ocean/...) is in
+# DOCUMENTATION.md, not repeated here.
 water_effects = true
-viscosity = 1.0                    # 0 off; higher = slower drag/resize settling
-connected_vessels {
-    enabled = true
-    falloff = 0.5                  # pressure retained per ancestor tree level
-    max_splits = 4                 # primary split plus up to three ancestors
-}
+viscosity = 1.0                  # 0 turns off drag/resize settling, higher settles slower
 
-# Floating windows can sway side to side while dragged, like they are
-# sitting in water. Off by default; `rule { sway = true }` opts one app in.
-# sway {
-#     enabled = false
-#     response = 0.08              # fraction of each drag step turned into sway
-#     max_offset = 24              # lateral cap, logical pixels
-#     frequency = 1.6              # oscillations per second
-#     damping = 3.0                # higher settles back sooner
-# }
+# ~~~~~~~~~~~~~~~~~ the layout ~~~~~~~~~~~~~~~~~
 
-# Cosmetic physics for floating windows: a drag, a window mapping, or a
-# workspace-transition wave kicks nearby floats, which rock and settle back
-# like they are sitting in water. `tier = off` (default), `light`, or
-# `full`. `light` is the closed-form bob-and-drift above; `full` adds real
-# mass, inter-window collisions, and a continuous wave field -- high-end
-# only, and unlike `light` it does not fully settle while `wave.enabled`
-# stays true, since the wave is a permanent forcing rather than a decaying
-# kick. Enabling either tier takes over from `sway` for a given window.
-# `rule { float_physics = off|light|full }` overrides one app. water_effects
-# = false bypasses either tier entirely. `toggle-float-ambient` (per-window,
-# keybind/tidectl, `light` only) layers a continuous sine-wave sway on top,
-# amplitude = max_offset, so the window keeps gently rocking like it's
-# sitting on water until toggled off again -- unlike the kick sources
-# above, this one never settles while it's on.
-# float_physics {
-#     tier = off
-#     response = 0.08              # fraction of each disturbance turned into motion
-#     max_offset = 24              # combined lateral+vertical cap, logical pixels; also ambient's amplitude
-#     frequency = 1.6              # oscillations per second (light); full's spring stiffness knob
-#     damping = 3.0                # higher settles back sooner (light); full's spring drag knob
-#     bob_ratio = 0.6              # vertical energy from an impulse's magnitude (light only)
-#     radius = 256                 # how far a disturbance reaches, logical pixels
-#     falloff = true               # also rock nearby floats inside `radius`
-#     ambient_period_s = 5.0       # seconds per ambient sway cycle (light only)
-#     restitution = 0.3            # full only: collision bounciness, 0 to 1
-#     bounce_off_edges = true      # full only: bounce off the home output's edge
-#     # full only: continuous traveling-wave forcing.
-#     # wave {
-#     #     enabled = true
-#     #     amplitude = 10        # logical pixels
-#     #     wavelength = 400      # logical pixels between crests
-#     #     speed = 60            # logical pixels per second
-#     # }
-# }
-
-# Continuous lateral "swim" between workspaces (the infinite ocean's
-# lateral axis). A horizontal trackpad swipe pans the viewport: neighbor
-# spots slide in, the anchor advances past the halfway mark, and the
-# camera springs to rest on release. Off here falls back to the ordinary
-# discrete workspace switch. water_effects = false also bypasses it.
-# swim {
-#     enabled = false                # flip to true for continuous navigation
-#     neighbors = 1                  # spots kept mapped each side of the anchor
-#     response = 1.0                 # swipe travel per spot (1.0 = one swipe = one spot)
-#     snap_duration_ms = 220         # spring-to-rest after finger lift
-# }
-
-# Ocean is a separate WM engine, not a vertical workspace arrangement.
-# Every output is a camera into one continuous 2D world. Reefs are local
-# tiling zones; bookmarks are named camera return points. With no explicit
-# reefs, Ocean creates one output-sized `main` reef at the world origin.
-# ocean {
-#     freeform_windows = true       # move/resize drag detaches a reef tile
-#     smart_tiling = true            # tiled drags swap; floaters can snap back
-#     smart_tiling_snap_distance = 64 # screen pixels for floating reattachment
-#     smart_tiling_preserve_size = true # keep a floater's size when attached
-#     canvas_pan_button = left      # left middle right none
-#     canvas_pan_requires_modifier = false # true requires pointer_modifier
-#     camera_step = 480
-#     camera_animation_ms = 260     # 0 makes camera actions immediate
-#     camera_sway = 18              # curved canvas glide; 0 = straight
-#     canvas_guides = true          # moving world grid; independent toggle
-#     canvas_grid_size = 240        # logical world units between guide lines
-#     canvas_grid_alpha = 0.10      # 0 also makes the guide invisible
-#     canvas_marker = true          # center point appears only after movement
-#     canvas_marker_fade_ms = 4200  # fades away across 4.2 idle seconds
-#     zoom_enabled = true
-#     modifier_zoom = true          # $mod + wheel zooms around the pointer
-#     min_zoom = 0.25
-#     max_zoom = 2.0
-#     zoom_step = 1.2
-#     depth_enabled = true          # sink/dredge/surface + depth navigation
-#     reef main {
-#         x = 0
-#         y = 0
-#         # omitted width/height fit the real output; set them only when
-#         # you deliberately want a reef larger or smaller than its viewport
-#     }
-#     reef code {
-#         x = 4000
-#         y = 0
-#     }
-#     bookmark home {              # blocks must still span real lines
-#         x = 0
-#         y = 0
-#     }
-# }
-cursor_always_visible = false
-cursor_hide_after_ms = 0
-workspace_auto_back_and_forth = false
 gaps = 8
-default_layout = bsp
-master_orientation = left
-bsp_split_bias = auto
+default_layout = bsp             # bsp, master, or cascade
 
-# Workspace transition (Phase R1 water identity). Inspired by niri's
-# per-animation enabled/duration/curve controls, with TideWM-specific wave
-# geometry. All values below are the defaults.
-# workspace_transition {
-#     enabled = true
-#     style = water                  # water glow
-#     duration_ms = 520
-#     speed = 1.0                  # multiplier; 2.0 twice as fast, 0.5 half
-#     curve = cubic-in-out          # linear cubic-out cubic-in-out quad-out exp-out
-#     direction = auto              # auto left-to-right right-to-left
-#     workspace_motion = false      # slide both desktops; costs one extra texture
-#     workspace_motion_delay_ms = 150
-#     wave_amplitude = 34           # horizontal displacement, physical pixels
-#     wave_frequency = 3            # sine cycles from top to bottom
-#     edge_width = 18               # soft boundary half-width, physical pixels
-#     color = 8EDDFF                 # wavefront tint
-#     wave_size = 10                # water curl / glow core size, physical pixels
-#     wave_alpha = 0.9              # glow-style colored core opacity
-#     glow_size = 46                # glow-style reach beyond core, physical pixels
-#     glow_alpha = 0.25             # glow-style opacity
-#     water_depth = 260             # water shading/travel scale, physical pixels
-#     water_alpha = 0.88            # opacity while water fills the output
-#     foam_color = E8FCFF
-#     foam_size = 18                # white crest half-width, physical pixels
-#     foam_alpha = 0.95
-#     spray_amount = 0.7            # procedural droplets ahead of crest
-#     turbulence = 0.7              # secondary waves and moving streaks
-# }
+# ~~~~~~~~~~~~~~~~~ input ~~~~~~~~~~~~~~~~~
 
-# Window lifecycle/layout motion. Logical state and input change
-# immediately; these values only interpolate the pixels toward that state.
-# Presets: tide (default), wave, riptide, hypr-smooth. Explicit values below
-# always override the preset, regardless of assignment order.
-# animations {
-#     preset = tide
-#     enabled = true
-#     slowdown = 1.0
-#     open {
-#         enabled = true
-#         duration_ms = 190
-#         curve = cubic-bezier(0.16,1.0,0.3,1.0)
-#         # opacity_duration_ms = 190 # omitted follows duration_ms
-#         # opacity_curve = cubic-bezier(0.16,1.0,0.3,1.0)
-#         origin = offset             # offset | nearest-edge | top | right | bottom | left
-#         offset = 0x24
-#         from_opacity = 0.28
-#         to_opacity = 1.0
-#         effect = tide               # glide | tide | wave
-#         wave_amplitude = 4          # logical pixels, perpendicular to travel
-#         wave_cycles = 0.5           # used by wave; tide is one broad swell
-#         wave_decay = 2.2
-#     }
-#     close {
-#         enabled = true
-#         duration_ms = 160
-#         curve = cubic-out
-#         origin = offset
-#         offset = 0x18
-#         from_opacity = 1.0
-#         to_opacity = 0.0
-#         effect = tide
-#         wave_amplitude = 2.5
-#         wave_cycles = 0.5
-#         wave_decay = 2.0
-#     }
-#     movement {
-#         enabled = true
-#         animate_size = true          # scale position and size together
-#         duration_ms = 190
-#         curve = cubic-bezier(0.16,1.0,0.3,1.0)
-#         effect = tide
-#         wave_amplitude = 1.25
-#         wave_cycles = 0.5
-#         wave_decay = 2.4
-#     }
-# }
+input {
+    repeat_delay = 200
+    repeat_rate = 25
+    focus_follows_mouse = true
 
-# Classic's structural per-workspace Depth Deck is independent of the visual
-# depth block below and off by default. Enabling it never creates bindings;
-# use any explicit bind lines you want from the examples near the end.
-classic_depth {
-    enabled = false
-    animation = true
-    animation_duration_ms = 420
-    wave_color = 3EC4E0
-    wave_alpha = 0.72
+    # xkb_layout = us
+    # xkb_options = grp:alt_shift_toggle
+
+    touchpad {
+        # tap_to_click = true
+        # natural_scroll = true
+    }
 }
 
-# Automatic attention depth / buoyancy. Inactive windows keep their live
-# content at tier 1, then become lightweight title cards at tier 2+.
-# Focusing or typing into a window returns it to the surface immediately.
-# depth {
-#     enabled = true
-#     sink_after_ms = 30000
-#     tier_interval_ms = 30000
-#     max_tier = 2
-#     tier_one_alpha = 0.78
-#     cool_color = 2D7096
-#     cool_alpha = 0.24
-#     schematic_color = 102330
-#     schematic_alpha = 0.9
-#     border_color = 52A6C6
-#     urgent_color = 76F1FF
-#     urgent_alpha = 0.95
+# ~~~~~~~~~~~~~~~~~ x11 apps ~~~~~~~~~~~~~~~~~
+
+xwayland {
+    enabled = true
+    path = xwayland-satellite
+}
+
+# ~~~~~~~~~~~~~~~~~ monitors ~~~~~~~~~~~~~~~~~
+
+# TideWM picks a sensible mode/scale per monitor on its own; set this only
+# to override one.
+# output eDP-1 {
+#     mode = 1920x1080@60
+#     position = 0x0
+#     scale = 1.0
 # }
 
-# Frosted glass (Phase R2). Add `glass = frost` to a translucent floating
-# window rule to select it; an unset glass mode keeps water refraction.
-# frost {
-#     enabled = true
-#     radius = 12                    # physical pixels, 0 disables blur
-#     strength = 1.0                 # 0 sharp capture, 1 fully blurred
-#     opacity = 1.0                  # opacity of the processed backdrop layer
-#     saturation = 1.0              # 0 grayscale, 1 original, up to 2 vivid
-#     contrast = 1.0
-#     brightness = 1.0
-#     noise = 0.0                    # subtle grain; useful around 0.01-0.03
-#     noise_scale = 1.0              # physical size of the grain
-#     vibrancy = 0.0                 # extra saturation, 0 to 1
-#     vibrancy_darkness = 0.0        # bias vibrancy toward dark pixels
-#     tint_color = 8EDDFF
-#     tint_alpha = 0.0               # neutral by default; raise to mix in tint_color
-#     corner_radius = 0              # physical pixels
-#     corner_softness = 1.0          # antialias width, physical pixels
-# }
-
-# Water-glass refraction motion. `reactive` (default) energizes the
-# distortion when the window moves, the backdrop behind it changes, or a
-# ripple passes underneath, then settles back to still -- an idle desktop
-# ticks zero frames. `ambient` drifts constantly and ticks frames while
-# glass is visible; `static` is the original fixed distortion.
-# water_glass {
-#     animation = reactive           # static reactive ambient
-#     speed = 1.0                    # phase drift multiplier, 0 to 8
-#     amplitude = 1.0                # distortion strength, 0 to 4
-#     settle_ms = 1200               # reactive settle time, 100 to 10000
-# }
-
-# Ambient caustic light over the wallpaper, below windows. Off by
-# default. `fps = 0` (the default) animates only on frames already
-# rendering for some other reason, so an idle desktop shows static
-# caustics that read as part of the wallpaper; a non-zero value keeps
-# them drifting at roughly that rate. `water_effects` is the master
-# bypass.
-# caustics {
-#     enabled = false
-#     intensity = 0.35               # peak light alpha, 0 to 1
-#     color = 8CDDFF                 # bare RRGGBB
-#     scale = 1.0                    # pattern size, 0.1 to 8
-#     speed = 1.0                    # drift speed, 0 to 8
-#     fps = 0                        # 0 piggybacks, else 1 to 60
-#     # Idle decay: after idle_after_ms[i] of no input, drop to idle_fps[i].
-#     # Parallel ascending lists; empty lists disable the decay.
-#     idle_fps = 30 15 10
-#     idle_after_ms = 300000 600000 1800000
-# }
-
-# Analytical drop shadows (Phase R2). These are independent of
-# `water_effects`: disabling the water identity does not remove ordinary
-# window decoration. Values are logical pixels and follow output scale.
-# shadow {
-#     enabled = true
-#     softness = 28                  # niri blur radius / Hyprland range
-#     spread = 2                     # CSS-style; negative values contract
-#     offset = 0x8                   # <x>x<y>; `0 8` and `{0, 8}` also work
-#     scale = 1.0                    # Hyprland-compatible 0 to 1
-#     render_power = 2               # 1 soft/long, higher falls off faster
-#     sharp = false                  # hard edge, bypassing softness
-#     draw_behind_window = false     # false avoids tinting transparent apps
-#     color = 040E137A               # RRGGBBAA; active/focused
-#     inactive_color = 03080C4D
-#     urgent_color = 2EC7FFB8        # TideWM bioluminescent attention state
-#     opacity = 1.0
-#     inactive_opacity = 1.0
-#     urgent_opacity = 1.0
-#     corner_radius = 0
-#     floating_only = false
-#     fullscreen = false
-# }
-#
-# Rounded toplevel geometry. Radius accepts one value or CSS-order
-# top-left, top-right, bottom-right, bottom-left values.
-# rounding {
-#     enabled = true
-#     radius = 12
-#     power = 2.0                    # 2 circular; higher is more square
-#     antialias = 1.0                # physical pixels
-#     clip = true                    # clips content; popups stay independent
-#     floating_only = false
-#     fullscreen = false
-# }
-#
-# Fixed-cost solid/gradient borders. Equal from/to colors make a solid
-# border. Animation is opt-in because it continuously redraws.
-# border {
-#     enabled = true
-#     width = 2
-#     placement = outside            # outside, center, inside
-#     active_from = 2EC7FFEB
-#     active_to = 5CFFD2EB
-#     inactive_from = 143A489E
-#     inactive_to = 081C269E
-#     urgent_from = 5EE8FFFF
-#     urgent_to = 4775FFFF
-#     angle = 135
-#     opacity = 1.0
-#     inactive_opacity = 1.0
-#     urgent_opacity = 1.0
-#     animate = false
-#     animate_focused = true          # moving focused gradient
-#     animate_inactive = true         # moving unfocused gradient
-#     animate_urgent = true
-#     inactive_enabled = true         # false = focus/urgent ring only
-#     animation_speed = 28           # degrees per second
-#     pulse_amount = 0.0
-#     pulse_speed = 1.0              # cycles per second
-#     radius_offset = 0
-#     antialias = 1.0
-#     floating_only = false
-#     fullscreen = false
-# }
-#
-# Ripple (Phase R1 water identity). All values are the system defaults --
-# copy and uncomment what you want to change. Per-app overrides go in a
-# `rule { ripple { } }` sub-block (see below); the same fields work there.
-# Reusable custom bundles use `ripple_preset my-name { }`, then
-# `preset = my-name`, `map_preset = my-name`, etc.
-# ripple_preset edge-jelly {
-#     preset = jelly
-#     size_mode = min
-#     size_scale = 0.8
-#     anchor = nearest-edge
-#     edge_offset = 8
-#     color = 89B4FA
-#     secondary_color = CBA6F7
-#     wobble = 1.2
-# }
-# ripple {
-#     enabled = true
-#     preset = water-drop          # water-drop jelly bubble splash tide legacy
-#     map_preset = water-drop      # optional per-trigger appearance
-#     focus_preset = jelly
-#     urgent_preset = splash
-#     focus_on_map = false         # true deliberately stacks focus over map
-#     urgent_repeat = true         # pulse the urgent ripple until acknowledged
-#     urgent_repeat_interval_ms = 1500   # 100 to 60000
-#     shapes = ring                # legacy only: ring square droplet cross
-#     color = 8EDDFF               # bare RRGGBB; quote a leading-hash form
-#     secondary_color = E8FCFF     # gradient/highlight color
-#     peak_radius = 220            # logical pixels
-#     size_mode = fixed            # fixed window width height min max
-#     size_scale = 1.0              # multiplier for window-derived modes
-#     min_radius = 24               # final radius clamp
-#     max_radius = 2048
-#     thickness = 8                # outline half-width, logical pixels
-#     duration_ms = 650
-#     peak_alpha = 0.88            # 0.0 to 1.0
-#     glow = 0.55                  # halo strength, 0.0 to 2.0
-#     wobble = 0.7                 # organic movement, 0.0 to 2.0
-#     detail = 0.8                 # inner rings/highlights/spray, 0.0 to 2.0
-#     ease = cubic-out             # linear cubic-out cubic-in-out quad-out exp-out
-#     anchor = center              # center cursor top bottom left right nearest-edge + corners
-#     edge_position = 0.5           # 0.0 to 1.0 along a side
-#     edge_offset = 0               # positive moves outward, negative inward
-#     offset = 0x0                 # <dx>x<dy>, added to anchor
-#     layer = above-windows        # above-all above-windows below-windows below-all
-#     triggers = map               # map focus urgent
-# }
-pseudo_tile_scale = 0.7
+# ~~~~~~~~~~~~~~~~~ autostart & environment ~~~~~~~~~~~~~~~~~
 
 # spawn_at_startup = waybar
 # spawn_at_startup = swaybg -i ~/wallpaper.png
 
 # env {
 #     XCURSOR_THEME = Adwaita
-#     GDK_BACKEND = wayland
 # }
 
-# Windows
+# switch_events {
+#     lid_close = spawn:systemctl suspend
+# }
+
+# ~~~~~~~~~~~~~~~~~ window rules ~~~~~~~~~~~~~~~~~
+
+# Per-app placement and appearance, matched on app_id and/or title (regex
+# allowed). Every field a rule can set is in DOCUMENTATION.md.
+# rule {
+#     app_id = pavucontrol
+#     float = true
+# }
+"#;
+
+/// The keybind half of the shipped default, `include`d by
+/// `DEFAULT_CONFIG_WAVE` -- a real split (not just an example in a
+/// comment) so a fresh install looks like the two-file layout this
+/// project's own docs already recommend. Mirrors `RawConfig::default()`'s
+/// hardcoded fallback bind-for-bind (see the `default_layout_keybinds_...`
+/// and `default_submap_...` tests below, which assert both agree) --
+/// `RawConfig::default()` is the ultimate hard fallback used when no
+/// config exists at all or parsing fails outright, so the two must never
+/// silently diverge.
+const DEFAULT_KEYBINDS_WAVE: &str = r#"# Keybinds. Everything below hangs off $mod (config.wave), so rebinding
+# your primary modifier is a one-line change, not a find-and-replace.
+
+# ~~~~~~~~~~~~~~~~~ apps ~~~~~~~~~~~~~~~~~
+
 bind $mod+Return = spawn:kitty
+
+# Most setups also want a launcher and a file manager, but both assume a
+# tool this config can't verify you have installed -- uncomment yours:
+# bind $mod+D = spawn:wofi --show drun
+# bind $mod+E = spawn:thunar
+
+# ~~~~~~~~~~~~~~~~~ windows ~~~~~~~~~~~~~~~~~
+
 bind $mod+Q = close-window
+bind $mod+Shift+Q = quit
+
 bind $mod+V = toggle-floating
 bind $mod+F = toggle-fullscreen
 bind $mod+M = toggle-border-fullscreen
 bind $mod+Shift+M = resize-to-monitor
 bind $mod+P = toggle-pin
 bind $mod+Shift+P = toggle-pseudo-tile
-bind $mod+Shift+Q = quit
 
-# Focus and layout
-bind $mod+Tab = cycle-focus
+# Focus and swap, vim-style
 bind $mod+H = focus-left
 bind $mod+L = focus-right
 bind $mod+K = focus-up
@@ -7101,30 +6820,17 @@ bind $mod+Shift+H = swap-left
 bind $mod+Shift+L = swap-right
 bind $mod+Shift+K = swap-up
 bind $mod+Shift+J = swap-down
+bind $mod+Tab = cycle-focus
+
+# ~~~~~~~~~~~~~~~~~ tiling ~~~~~~~~~~~~~~~~~
+
 bind $mod+W = layout:bsp
 bind $mod+Shift+W = layout:master
 bind $mod+Ctrl+Minus = master-shrink
 bind $mod+Ctrl+Equal = master-grow
 bind $mod+O = toggle-overview
 
-# Ocean camera travel. These binds are activated only when
-# spatial_engine = ocean, so Classic does not swallow the arrow chords.
-bind $move+Left = ocean-pan-left
-bind $move+Right = ocean-pan-right
-bind $move+Up = ocean-pan-up
-bind $move+Down = ocean-pan-down
-# Keyboard zoom fallback; pointer_modifier+wheel is the direct canvas gesture.
-bind $move+I = ocean-zoom-in
-bind $move+O = ocean-zoom-out
-bind $move+0 = ocean-zoom-reset
-bind $move+Space = ocean-center-focused
-# Ocean depth: sink into the canvas, pull the nearest lower window up,
-# or return the focused window to the surface. Active only in Ocean mode.
-bind $mod+Ctrl+D = sink-window
-bind $mod+Ctrl+Shift+D = ocean-dredge-window
-bind $mod+Ctrl+Shift+U = ocean-surface-window
-
-# Groups (tabbing)
+# Group windows into one tabbed slot
 bind $mod+Ctrl+H = group-left
 bind $mod+Ctrl+L = group-right
 bind $mod+Ctrl+K = group-up
@@ -7133,42 +6839,37 @@ bind $mod+Shift+G = ungroup
 bind $mod+BracketRight = cycle-tab-next
 bind $mod+BracketLeft = cycle-tab-prev
 
-# Scratchpad
 bind $mod+Minus = toggle-scratchpad
 bind $mod+Shift+Minus = move-to-scratchpad
 
-# Workspaces (the helper key is independent from the main Alt layer)
-bind $helper+1 = workspace:1
-bind $helper+2 = workspace:2
-bind $helper+3 = workspace:3
-bind $helper+4 = workspace:4
-bind $helper+5 = workspace:5
-bind $helper+6 = workspace:6
-bind $helper+7 = workspace:7
-bind $helper+8 = workspace:8
-bind $helper+9 = workspace:9
-bind $helper+0 = workspace:10
-bind $helper+Shift+1 = move-to-workspace:1
-bind $helper+Shift+2 = move-to-workspace:2
-bind $helper+Shift+3 = move-to-workspace:3
-bind $helper+Shift+4 = move-to-workspace:4
-bind $helper+Shift+5 = move-to-workspace:5
-bind $helper+Shift+6 = move-to-workspace:6
-bind $helper+Shift+7 = move-to-workspace:7
-bind $helper+Shift+8 = move-to-workspace:8
-bind $helper+Shift+9 = move-to-workspace:9
-bind $helper+Shift+0 = move-to-workspace:10
-# bind $mod+Shift+O = swap-workspaces:DP-2
+# ~~~~~~~~~~~~~~~~~ workspaces ~~~~~~~~~~~~~~~~~
 
+bind $mod+1 = workspace:1
+bind $mod+2 = workspace:2
+bind $mod+3 = workspace:3
+bind $mod+4 = workspace:4
+bind $mod+5 = workspace:5
+bind $mod+6 = workspace:6
+bind $mod+7 = workspace:7
+bind $mod+8 = workspace:8
+bind $mod+9 = workspace:9
+bind $mod+0 = workspace:10
+bind $mod+Shift+1 = move-to-workspace:1
+bind $mod+Shift+2 = move-to-workspace:2
+bind $mod+Shift+3 = move-to-workspace:3
+bind $mod+Shift+4 = move-to-workspace:4
+bind $mod+Shift+5 = move-to-workspace:5
+bind $mod+Shift+6 = move-to-workspace:6
+bind $mod+Shift+7 = move-to-workspace:7
+bind $mod+Shift+8 = move-to-workspace:8
+bind $mod+Shift+9 = move-to-workspace:9
+bind $mod+Shift+0 = move-to-workspace:10
+
+# ~~~~~~~~~~~~~~~~~ submaps ~~~~~~~~~~~~~~~~~
+
+# A submap (sway/Hyprland's "mode"): a temporary keybind layer, entered
+# below, left active until its own exit -- not tied to focus.
 bind $mod+N = submap:nav
-
-# P is not an XKB modifier; TideWM still treats it as a held helper for
-# these chords and suppresses its press/release from focused clients.
-bind $sub+H = focus-left
-bind $sub+L = focus-right
-bind $sub+K = focus-up
-bind $sub+J = focus-down
-
 submap nav {
     bind h = focus-left
     bind l = focus-right
@@ -7177,82 +6878,32 @@ submap nav {
     bind Escape = exit-submap
 }
 
-input {
-    repeat_delay = 200
-    repeat_rate = 25
-    focus_follows_mouse = true
-    unfocus_on_empty = false       # true: empty Ocean/desktop clears focus
+# ~~~~~~~~~~~~~~~~~ ocean's camera ~~~~~~~~~~~~~~~~~
 
-    # xkb_layout = us
-    # xkb_options = grp:alt_shift_toggle
+# Off by default: these chords are ones apps use themselves (Ctrl+arrows
+# is word-jump in every editor), and the actions only do anything once
+# spatial_engine = ocean in config.wave anyway. Uncomment when you switch.
+# bind Ctrl+Left = ocean-pan-left
+# bind Ctrl+Right = ocean-pan-right
+# bind Ctrl+Up = ocean-pan-up
+# bind Ctrl+Down = ocean-pan-down
+# bind Ctrl+I = ocean-zoom-in
+# bind Ctrl+O = ocean-zoom-out
+# bind Ctrl+0 = ocean-zoom-reset
+# bind $mod+Ctrl+D = sink-window
+# bind $mod+Ctrl+Shift+D = ocean-dredge-window
+# bind $mod+Ctrl+Shift+U = ocean-surface-window
 
-    touchpad {
-        # tap_to_click = true
-        # natural_scroll = true
-        # accel_profile = adaptive
-        # workspace_swipe_fingers = 3
-        # workspace_swipe_distance = 200
-        # gesture_swipe_fingers = 3
-        # swipe_left = workspace:2
-        # swipe_right = workspace:1
-        # gesture_pinch_fingers = 4
-        # pinch_in = toggle-overview
-        # modifier_pan_fingers = 2      # $mod+2-finger swipe moves/pans
-    }
-}
+# ~~~~~~~~~~~~~~~~~ media keys ~~~~~~~~~~~~~~~~~
 
-xwayland {
-    enabled = true
-    path = xwayland-satellite
-}
-
-# output eDP-1 {
-#     mode = 1920x1080@60
-#     position = 0x0
-#     scale = 1.0
-# }
-
-# switch_events {
-#     lid_close = spawn:systemctl suspend
-#     lid_open = spawn:brightnessctl s 50%
-# }
-
-# rule {
-#     app_id = pavucontrol
-#     float = true
-#     glass = frost
-#     active_opacity = 1.0
-#     inactive_opacity = 0.92
-#     fullscreen_opacity = 1.0
-#     frost {
-#         radius = 18
-#         strength = 1.0
-#         opacity = 1.0
-#         tint_alpha = 0.0
-#         noise = 0.015
-#         corner_radius = 12
-#     }
-#     shadow {
-#         softness = 36
-#         spread = 4
-#         offset = 0x10
-#         color = 04131A80
-#         inactive_color = 02080C4D
-#         corner_radius = 12
-#     }
-#     rounding {
-#         radius = 18 18 10 10
-#         power = 2.4
-#         clip = true
-#     }
-#     border {
-#         width = 3
-#         active_from = 2EC7FFFF
-#         active_to = 5CFFD2FF
-#         animate = true
-#         animation_speed = 35
-#     }
-# }
+# Commented out since they assume tools this config can't verify you have
+# installed.
+# bind Print = spawn:grim ~/screenshot.png
+# bind XF86AudioRaiseVolume = spawn:pactl set-sink-volume @DEFAULT_SINK@ +5%
+# bind XF86AudioLowerVolume = spawn:pactl set-sink-volume @DEFAULT_SINK@ -5%
+# bind XF86AudioMute = spawn:pactl set-sink-mute @DEFAULT_SINK@ toggle
+# bind XF86MonBrightnessUp = spawn:brightnessctl set 10%+
+# bind XF86MonBrightnessDown = spawn:brightnessctl set 10%-
 "#;
 
 #[cfg(test)]
@@ -7842,21 +7493,26 @@ mod tests {
         assert_eq!(raw.terminal, "kitty");
     }
 
-    /// Parses and lowers `DEFAULT_CONFIG_WAVE` exactly the way `load_raw_config`
-    /// would for a real file (including `$mod` substitution), without
-    /// needing a real path on disk -- there's nothing to `include` in the
-    /// shipped default, so `waves::parse` alone (no `waves::resolve`) is
-    /// enough.
+    /// Writes both `DEFAULT_CONFIG_WAVE` and `DEFAULT_KEYBINDS_WAVE` to a
+    /// real temp directory and loads them through `load_raw_config`, the
+    /// exact code path a real first boot uses (see `load_with_error`) --
+    /// needed for real disk I/O now that the shipped default genuinely
+    /// `include`s a second file, unlike the old single-file default that
+    /// `waves::parse` alone could handle in memory.
     fn parse_default_config() -> Config {
-        let entries = waves::parse(DEFAULT_CONFIG_WAVE, Path::new("<default>"))
-            .expect("DEFAULT_CONFIG_WAVE must parse");
-        let mut raw = lower_entries(&entries);
-        substitute_variables_in_raw(&mut raw);
+        // Every caller shares one PID, so a fixed name would collide across
+        // the many test functions that call this concurrently -- thread id
+        // is stable within one call but unique across the parallel test
+        // threads that actually race on it.
+        let dir = TestDir::new(&format!("default-config-{:?}", std::thread::current().id()));
+        dir.write("keybinds.wave", DEFAULT_KEYBINDS_WAVE);
+        let main = dir.write("config.wave", DEFAULT_CONFIG_WAVE);
+        let raw = load_raw_config(&main).expect("the shipped default must parse and resolve");
         Config::from_raw(raw).0
     }
 
     #[test]
-    fn pointer_modifier_fallback_is_super_and_generated_default_is_alt() {
+    fn pointer_modifier_fallback_and_generated_default_both_use_super() {
         assert_eq!(
             Config::from_raw(RawConfig::default()).0.pointer_modifier,
             Mods {
@@ -7867,7 +7523,7 @@ mod tests {
         assert_eq!(
             parse_default_config().pointer_modifier,
             Mods {
-                alt: true,
+                logo: true,
                 ..Default::default()
             }
         );
@@ -8777,7 +8433,7 @@ mod tests {
     #[test]
     fn default_submap_parses_from_both_the_in_memory_and_written_defaults() {
         // Two independently hand-maintained representations of the same
-        // default (see `RawConfig::default()` and `DEFAULT_CONFIG_WAVE`'s
+        // default (see `RawConfig::default()` and `DEFAULT_KEYBINDS_WAVE`'s
         // own doc note) -- assert both actually agree, not just that one
         // of them happens to parse.
         for config in [
@@ -8828,7 +8484,7 @@ mod tests {
     fn default_layout_keybinds_parse_from_both_the_in_memory_and_written_defaults() {
         // Same two-representations-must-agree check as the submap test
         // above, for the layout-algorithm keybinds: also catches, for free,
-        // a duplicate `bind` for the same combo in DEFAULT_CONFIG_WAVE
+        // a duplicate `bind` for the same combo in DEFAULT_KEYBINDS_WAVE
         // (last one silently wins there, unlike a literal duplicate TOML
         // key, which used to fail the parse loudly -- worth a second look
         // at the template by eye if this test ever breaks unexpectedly).
@@ -8843,7 +8499,7 @@ mod tests {
             (
                 parse_default_config(),
                 Mods {
-                    alt: true,
+                    logo: true,
                     ..Default::default()
                 },
             ),
@@ -8894,6 +8550,28 @@ mod tests {
         assert!(
             warnings.is_empty(),
             "RawConfig::default() produced diagnostics: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn shipped_default_config_files_never_trip_the_footgun_lint() {
+        // Same check as above, but through the real written text
+        // (`DEFAULT_CONFIG_WAVE` + `DEFAULT_KEYBINDS_WAVE`, resolved via
+        // `load_raw_config` exactly like a real first boot) rather than
+        // the separate Rust-literal `RawConfig::default()` -- catches a
+        // problem in the shipped *text* specifically, like a genuinely
+        // missing include, that the Rust-side default can't.
+        let dir = TestDir::new(&format!(
+            "default-config-files-{:?}",
+            std::thread::current().id()
+        ));
+        dir.write("keybinds.wave", DEFAULT_KEYBINDS_WAVE);
+        let main = dir.write("config.wave", DEFAULT_CONFIG_WAVE);
+        let raw = load_raw_config(&main).expect("the shipped default must parse and resolve");
+        let (_, warnings) = Config::from_raw(raw);
+        assert!(
+            warnings.is_empty(),
+            "the shipped default config produced diagnostics: {warnings:?}"
         );
     }
 
