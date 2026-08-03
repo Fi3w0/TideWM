@@ -1,6 +1,6 @@
 # Contributing to TideWM
 
-TideWM is a solo/free-time project for now. It's not actively soliciting contributors yet, but it's built to eventually take them. These are the ground rules for when it does (and for anyone poking at a fork in the meantime).
+TideWM is a solo/free-time project, and the gates are open. Issues, forks, and pull requests are all genuinely welcome, not just tolerated — bug reports and hardware/driver testing especially, since real-hardware coverage is the thing a solo maintainer can least scale alone. These are the ground rules.
 
 ## Getting Started
 
