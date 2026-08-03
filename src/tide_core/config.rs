@@ -2836,6 +2836,14 @@ pub struct RippleConfig {
     /// the focus preset. Off by default so the map preset is the transaction's
     /// single visual cue; opt in when deliberate effect stacking is desired.
     pub focus_on_map: Option<bool>,
+    /// Repeat the urgent ripple until the window is focused or its urgent
+    /// hint clears, instead of firing once when the hint is set. Each pulse
+    /// is identical (no decay). Only meaningful for the urgent trigger.
+    pub urgent_repeat: Option<bool>,
+    /// Milliseconds between urgent-repeat pulses. Clamped to a 100ms floor
+    /// at resolve time so a pathological value can't turn the pulse into a
+    /// per-frame spawn loop.
+    pub urgent_repeat_interval_ms: Option<u32>,
     /// Shape(s) to draw. Empty in a per-rule config means "inherit the
     /// global shapes." Used by `preset = legacy`; assigning `shapes`
     /// automatically selects that preset for compatibility.
@@ -2894,6 +2902,8 @@ impl RippleConfig {
             focus_preset: None,
             urgent_preset: None,
             focus_on_map: Some(false),
+            urgent_repeat: Some(true),
+            urgent_repeat_interval_ms: Some(1500),
             shapes: vec![RippleShape::Ring],
             color: Some([0.55, 0.85, 1.0]),
             secondary_color: Some([0.91, 0.98, 1.0]),
@@ -2937,6 +2947,10 @@ impl RippleConfig {
                 .clone()
                 .or_else(|| self.urgent_preset.clone()),
             focus_on_map: other.focus_on_map.or(self.focus_on_map),
+            urgent_repeat: other.urgent_repeat.or(self.urgent_repeat),
+            urgent_repeat_interval_ms: other
+                .urgent_repeat_interval_ms
+                .or(self.urgent_repeat_interval_ms),
             shapes: if other.shapes.is_empty() {
                 self.shapes.clone()
             } else {
@@ -4689,6 +4703,22 @@ fn apply_ripple_block(cfg: &mut RippleConfig, body: &[waves::Entry]) {
                     "Expected `true` or `false` for ripple.focus_on_map, ignoring"
                 ),
             },
+            "urgent_repeat" | "urgent_pulse" => match parse_bool(value) {
+                Some(v) => cfg.urgent_repeat = Some(v),
+                None => tracing::warn!(
+                    value,
+                    "Expected `true` or `false` for ripple.urgent_repeat, ignoring"
+                ),
+            },
+            "urgent_repeat_interval_ms" | "urgent_interval_ms" | "urgent_interval" => {
+                match value.parse::<u32>() {
+                    Ok(v) if v > 0 => cfg.urgent_repeat_interval_ms = Some(v.clamp(100, 60_000)),
+                    _ => tracing::warn!(
+                        value,
+                        "Expected a positive integer for ripple.urgent_repeat_interval_ms, ignoring"
+                    ),
+                }
+            }
             "shape" | "shapes" | "form" => match parse_shapes(value) {
                 Some(shapes) if !shapes.is_empty() => {
                     cfg.shapes = shapes;
@@ -6429,6 +6459,8 @@ classic_depth {
 #     focus_preset = jelly
 #     urgent_preset = splash
 #     focus_on_map = false         # true deliberately stacks focus over map
+#     urgent_repeat = true         # pulse the urgent ripple until acknowledged
+#     urgent_repeat_interval_ms = 1500   # 100 to 60000
 #     shapes = ring                # legacy only: ring square droplet cross
 #     color = 8EDDFF               # bare RRGGBB; quote a leading-hash form
 #     secondary_color = E8FCFF     # gradient/highlight color
@@ -8290,6 +8322,31 @@ mod tests {
         assert_eq!(config.ripple.glow, Some(1.2));
         assert_eq!(config.ripple.wobble, Some(0.9));
         assert_eq!(config.ripple.detail, Some(1.1));
+    }
+
+    #[test]
+    fn urgent_repeat_parses_and_merges_with_clamped_interval() {
+        let entries = waves::parse(
+            "ripple {\n\
+             urgent_repeat = false\n\
+             urgent_repeat_interval_ms = 10\n\
+             }\n",
+            Path::new("<urgent-repeat-test>"),
+        )
+        .unwrap();
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        assert_eq!(config.ripple.urgent_repeat, Some(false));
+        // 10ms is below the 100ms floor; clamped at parse time.
+        assert_eq!(config.ripple.urgent_repeat_interval_ms, Some(100));
+
+        let resolved = config.resolve_ripple_config(None, RippleTrigger::Urgent);
+        assert_eq!(resolved.urgent_repeat, Some(false));
+        assert_eq!(resolved.urgent_repeat_interval_ms, Some(100));
+
+        // Unset inherits the system default (repeat on, 1500ms).
+        let default = RippleConfig::system_default();
+        assert_eq!(default.urgent_repeat, Some(true));
+        assert_eq!(default.urgent_repeat_interval_ms, Some(1500));
     }
 
     #[test]

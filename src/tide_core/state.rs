@@ -757,6 +757,18 @@ pub struct Smallvil {
     /// via `focus-urgent` (`Smallvil::focus_urgent`).
     pub urgent: HashSet<WlSurface>,
 
+    /// Last time each urgent window's repeat pulse fired, keyed by surface.
+    /// Reconciled against `urgent` inside `update_urgent_pulses` itself
+    /// (entries for surfaces no longer urgent are dropped there), so the
+    /// several paths that clear `urgent` -- focus, unmap, `focus-urgent` --
+    /// don't each have to remember to keep this map in sync. Same
+    /// reconcile-at-the-tick pattern the workspace-switch `Space` cache
+    /// staleness bugs taught: one authoritative point, not N call sites.
+    pub(crate) urgent_pulse_last: HashMap<WlSurface, Instant>,
+    /// Throttle for `update_urgent_pulses`, same shape as
+    /// `depth_last_tick`'s 10Hz gate for `update_window_depths`.
+    urgent_pulse_tick: Instant,
+
     /// Most-recently-focused-first order of every window that has ever
     /// held keyboard focus, updated from `reconcile_keyboard_focus`'s own
     /// activation-change block (except while `cycling_focus` is set, see
@@ -1895,6 +1907,64 @@ impl Smallvil {
         }
     }
 
+    /// Re-fires the urgent ripple for every still-urgent window whose
+    /// resolved ripple config has `urgent_repeat` on, once per
+    /// `urgent_repeat_interval_ms`. Both backends call this from their
+    /// already-bounded frame timer alongside `update_window_depths`, so
+    /// no per-window calloop source is needed; the 100ms gate below keeps
+    /// the tick itself cheap. Each pulse is identical (flat repeat, the
+    /// agreed design -- no decay), and each window holds at most one
+    /// active ripple at a time as long as the interval exceeds the ripple
+    /// lifetime, so pulsing can't starve the 16-ripple cap.
+    ///
+    /// `urgent_pulse_last` is reconciled against `urgent` here rather
+    /// than at every clear site: focus, unmap, and `focus-urgent` all
+    /// remove from `urgent` through different paths, and a stale entry
+    /// left behind would only waste a lookup, never fire -- but dropping
+    /// it here keeps the map bounded by the urgent set's actual size.
+    pub(crate) fn update_urgent_pulses(&mut self) {
+        if self.urgent_pulse_tick.elapsed() < Duration::from_millis(100) {
+            return;
+        }
+        self.urgent_pulse_tick = Instant::now();
+        self.urgent_pulse_last
+            .retain(|surface, _| self.urgent.contains(surface));
+        if !self.config.water_effects || self.urgent.is_empty() {
+            return;
+        }
+        let due: Vec<WlSurface> = self
+            .urgent
+            .iter()
+            .filter(|surface| {
+                let (app_id, title) = self.toplevel_identity(surface);
+                let rule = self
+                    .config
+                    .resolve_window_rules(app_id.as_deref(), title.as_deref());
+                let cfg = self
+                    .config
+                    .resolve_ripple_config(rule.ripple.as_ref(), crate::config::RippleTrigger::Urgent);
+                if cfg.enabled == Some(false)
+                    || !cfg.urgent_repeat.unwrap_or(true)
+                    || !cfg.fires_on(crate::config::RippleTrigger::Urgent)
+                {
+                    return false;
+                }
+                let interval = cfg.urgent_repeat_interval_ms.unwrap_or(1500).max(100) as u64;
+                self.urgent_pulse_last
+                    .get(*surface)
+                    .is_none_or(|last| last.elapsed() >= Duration::from_millis(interval))
+            })
+            .cloned()
+            .collect();
+        for surface in due {
+            // Stamped before the spawn attempt on purpose: a spawn that
+            // no-ops (hidden workspace, ripple cap reached) must not be
+            // retried on every 100ms tick until it succeeds.
+            self.urgent_pulse_last.insert(surface.clone(), Instant::now());
+            self.spawn_ripple(&surface, crate::config::RippleTrigger::Urgent);
+        }
+    }
+
     /// Broadcasts one state-change event to every matching IPC subscriber.
     /// The fast path (no subscribers connected) is a single `is_empty`
     /// check and return -- this is called from focus/workspace/map/unmap
@@ -2380,6 +2450,8 @@ impl Smallvil {
             workspace_previous: HashMap::new(),
             pseudo_tiled: HashSet::new(),
             urgent: HashSet::new(),
+            urgent_pulse_last: HashMap::new(),
+            urgent_pulse_tick: Instant::now(),
             focus_history: Vec::new(),
             cycling_focus: false,
             is_lid_closed: false,
@@ -7430,10 +7502,13 @@ impl Smallvil {
         if let Some(depth) = self.window_depths.get_mut(surface) {
             depth.visual_changed();
         }
-        // Single-shot for now, same as the map/focus triggers -- a no-op
-        // if the window's workspace is hidden, since spawn_ripple needs a
-        // real on-screen location. A repeating "pulse until acknowledged"
-        // is later scope (AGENT.md's Phase R1 entry), not built here.
+        // The immediate spawn is the first pulse; `update_urgent_pulses`
+        // re-fires it every `urgent_repeat_interval_ms` until the hint
+        // clears. A no-op if the window's workspace is hidden, since
+        // spawn_ripple needs a real on-screen location -- the repeat tick
+        // keeps trying, so the pulse starts up on its own once the
+        // workspace becomes visible again.
+        self.urgent_pulse_last.insert(surface.clone(), Instant::now());
         self.spawn_ripple(surface, crate::config::RippleTrigger::Urgent);
         self.emit_ipc_event(crate::ipc::IpcEvent::UrgentChanged {
             surface: surface.clone(),
