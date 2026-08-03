@@ -5,8 +5,8 @@ TideWM is a solo/free-time project for now. It's not actively soliciting contrib
 ## Getting Started
 
 1. Fork and clone the repo.
-2. Install a Rust stable toolchain, 1.86 or newer (`rustup default stable`) plus `rust-src`, `clippy`, `rustfmt`. See README.md's "Building" section for how the MSRV was verified.
-3. Make sure your system has `pkg-config` and the native libs README.md's "Building" section lists, mapped to the exact Smithay features TideWM enables.
+2. Install a Rust stable toolchain, 1.86 or newer (`rustup default stable`) plus `rust-src`, `clippy`, `rustfmt`. See TECHNICAL_REPORT.md's "Building" section for how the MSRV was verified.
+3. Make sure your system has `pkg-config` and the native libs TECHNICAL_REPORT.md's "Building" section lists, mapped to the exact Smithay features TideWM enables.
 
 ## Build
 
@@ -40,4 +40,4 @@ cargo run --locked                # runs nested inside your current session
 
 - Describe *what* changed and *why*, not just a restatement of the diff.
 - Note any RAM/perf impact if the change touches rendering, animation, or anything per-frame.
-- Update `README.md` / `CHANGELOG.md` / `DOCUMENTATION.md` if the change affects features, build steps, or config. See [SECURITY.md](SECURITY.md) instead if it's a security-relevant change.
+- Update `README.md` / `TECHNICAL_REPORT.md` / `CHANGELOG.md` / `DOCUMENTATION.md` if the change affects features, build steps, or config. See [SECURITY.md](SECURITY.md) instead if it's a security-relevant change.
