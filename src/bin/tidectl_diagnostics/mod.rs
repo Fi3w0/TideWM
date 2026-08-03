@@ -244,14 +244,33 @@ pub fn run_checks() -> (Vec<Check>, Option<Diagnostics>) {
     }
 
     // --- xdg-desktop-portal --------------------------------------------------------
-    // `-f` matches the full command line: both this and xwayland-satellite
-    // have comm names longer than the 15-char truncation, so `-x` against
-    // the untruncated name silently never matches.
-    let portal_pid = command_output(&["pgrep", "-f", "xdg-desktop-portal"]);
-    let portal_pid = portal_pid
-        .as_deref()
-        .and_then(|s| s.lines().next())
-        .and_then(|line| line.trim().parse::<i64>().ok());
+    // The *frontend's* MainPID comes from systemd (the same source
+    // main.rs's stale-portal check uses) because a bare pgrep matches both
+    // the frontend and the per-desktop backends (`xdg-desktop-portal-
+    // hyprland` and friends), and the backend's env is meaningless here --
+    // a leftover backend from a previous login can carry the old desktop's
+    // XDG_CURRENT_DESKTOP forever without being the thing that routes
+    // requests. The frontend is the only process whose env decides routing.
+    let portal_pid = command_output(&[
+        "systemctl",
+        "--user",
+        "show",
+        "-p",
+        "MainPID",
+        "--value",
+        "xdg-desktop-portal.service",
+    ])
+    .as_deref()
+    .and_then(|s| s.trim().parse::<i64>().ok())
+    .filter(|&pid| pid != 0)
+    .or_else(|| {
+        // Fallback when systemctl isn't available: match only the exact
+        // frontend binary path so a backend process can never match.
+        command_output(&["pgrep", "-f", "^/usr/lib/xdg-desktop-portal$|xdg-desktop-portal$"])
+            .as_deref()
+            .and_then(|s| s.lines().next())
+            .and_then(|line| line.trim().parse::<i64>().ok())
+    });
     match portal_pid {
         Some(pid) => {
             let env = read_proc_environ(pid);
