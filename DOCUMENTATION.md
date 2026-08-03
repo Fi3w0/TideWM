@@ -36,8 +36,14 @@ TideWM's own config format, not TOML. Three rules cover the whole grammar:
 ```
 $mod = SUPER
 terminal = $wave(kitty, alacritty, foot)
-bind $mod+Return = spawn:$terminal
+bind $mod+Return = spawn:kitty
 ```
+
+Note `terminal = ...` and `$mod = ...` are two different mechanisms:
+`terminal` is a recognized top-level key (feeds the welcome hint's own
+message), not a `$name = value` variable — so `spawn:$terminal` would
+*not* substitute. Only names actually defined with a leading `$` resolve
+inside a bind's action string.
 
 **Multi-file:** `include "path.wave"` as its own statement, repeatable (one per line), in any file (the main one, or one it includes). Each path resolves relative to the file that lists it; `~/` expands to your home directory. Rules:
 
@@ -58,9 +64,9 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `terminal` | string | `"kitty"` | Spawned by the shipped `$mod+Return` bind (`$mod = ALT` in the generated file). The terminal fallback is `$wave(kitty, alacritty, foot, xterm)` — see [`$wave(...)`](#waves-format) above. |
+| `terminal` | string | `"kitty"` | Spawned by the shipped `$mod+Return` bind (`$mod = SUPER` in the generated file). The terminal fallback is `$wave(kitty, alacritty, foot, xterm)` — see [`$wave(...)`](#waves-format) above. |
 | `spatial_engine` | `classic` \| `ocean` | `classic` | Selects one of TideWM's two WM ownership models. Classic keeps numbered workspaces. Ocean has no workspaces: outputs are cameras into one continuous 2D world. `engine` and `wm_mode` are aliases. Hot-reloadable: a change migrates every live window in place. Classic→Ocean turns each output's populated workspace trees into reefs on the lateral line at `X = (N-1) * (output width + 128)` with the camera at the previously-active workspace; depth-deck windows are recalled to their tiles, floating windows translate to world coordinates around their workspace's reef, and pinned windows become Ocean screen pins. Ocean→Classic turns reefs sorted left-to-right into workspaces `1..N` on the output whose camera is nearest, selects the active workspace from each camera, clamps floating windows into the visible area, and restores pins. Tab groups and fullscreen/maximized entries carry across both directions; Ocean bookmarks and camera history are dropped (no Classic counterpart). |
-| `pointer_modifier` | modifier or `+`-joined modifiers | `super` fallback; generated config uses `alt` | Modifier physically held for compositor mouse actions: left-drag moves floating windows or drag-swaps tiles; right-drag resizes floating or tiled windows. Accepts `super`/`logo`/`mod4`, `alt`/`mod1`, `ctrl`/`control`, and `shift`. The shipped config sets it to `$mod`. `mouse_modifier` and `drag_modifier` are aliases. |
+| `pointer_modifier` | modifier or `+`-joined modifiers | `super` | Modifier physically held for compositor mouse actions: left-drag moves floating windows or drag-swaps tiles; right-drag resizes floating or tiled windows. Accepts `super`/`logo`/`mod4`, `alt`/`mod1`, `ctrl`/`control`, and `shift`. The shipped config sets it to `$mod`. `mouse_modifier` and `drag_modifier` are aliases. |
 | `show_welcome_hint` | bool | `true` | Shows a persistent empty-desktop card reminding you to use your configured terminal bind. Disappears when a real window maps; delete this key (or set it `false`) to stop it returning. |
 | `show_config_reload_toast` | bool | `true` | Shows the short compositor card after a successful hot reload. `false` hides that confirmation only; parse errors and configuration warnings remain visible so a bad config cannot silently lock itself in. `config_reload_toast` is an alias. |
 | `water_effects` | bool | `true` | Master toggle for TideWM's water/aqua render identity. Disables water-glass, backdrop capture, impulse ripples, wave workspace transitions, automatic depth/buoyancy, interactive viscosity, connected-vessel resize, and floating sway when `false`. |
@@ -1171,8 +1177,10 @@ unless a bind uses it. A completely bare action such as
 `bind F = toggle-fullscreen` is valid and intentionally captures F from
 clients. Key names match the unshifted keysym, case-insensitively.
 
-Variables are reusable chord pieces, so one file may use independent layers
-such as `$mod = ALT`, `$helper = SUPER`, `$move = CTRL`, and `$sub = P`.
+Variables are reusable chord pieces. The shipped default uses one,
+`$mod = SUPER`, for everything; nothing stops splitting binds across
+independent layers of your own instead, e.g. `$mod = ALT`, `$helper =
+SUPER`, `$move = CTRL`.
 Parsed Waves bindings are authoritative: no built-in table or feature-specific
 bindings are invisibly merged underneath them. The one mechanism outside the
 normal table is the recovery chord `Ctrl+Alt+Escape`; it temporarily activates

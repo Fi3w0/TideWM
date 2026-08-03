@@ -64,8 +64,23 @@ Current release: **0.90.0**, second major pre-release. 1.0 is intentionally rese
 | `libseat` | The `seatd` package on most distros; also works against systemd-logind |
 
 ```bash
-sudo pacman -S pkg-config wayland systemd-libs libinput libxkbcommon mesa libdrm seatd  # Arch
+# Arch
+sudo pacman -S pkg-config wayland systemd-libs libinput libxkbcommon mesa libdrm seatd
+
+# Fedora
+sudo dnf install pkgconf-pkg-config wayland-devel systemd-devel libinput-devel \
+    libxkbcommon-devel mesa-libEGL-devel mesa-libgbm-devel libdrm-devel libseat-devel
+
+# Debian / Ubuntu
+sudo apt install pkg-config libwayland-dev libudev-dev libinput-dev \
+    libxkbcommon-dev libegl1-mesa-dev libgbm-dev libdrm-dev libseat-dev
+
+# openSUSE
+sudo zypper install pkgconf-pkg-config wayland-devel libudev-devel libinput-devel \
+    libxkbcommon-devel Mesa-libEGL-devel Mesa-libgbm-devel libdrm-devel libseat-devel
 ```
+
+These package names are believed correct but only actually exercised on Arch (the maintainer's own distro) — if the build fails looking for one on your distro, that's exactly the kind of report worth [opening an issue](https://github.com/Fi3w0/TideWM/issues/new/choose) for. The library list above (not the package names) is what actually matters if you need to hunt one down yourself.
 
 Optional: [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite) for X11 apps (`xwayland.enabled = false` to skip it).
 
