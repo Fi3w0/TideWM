@@ -995,6 +995,32 @@ impl Smallvil {
             InputEvent::PointerMotion { event, .. } => {
                 self.note_pointer_motion();
 
+                // The screencast source picker is compositor-owned modal
+                // chrome: while it is open, motion only moves the real
+                // cursor and updates its hover highlight -- nothing reaches
+                // a client underneath, the same rule the minimap peek and
+                // the picker's own keys already follow.
+                #[cfg(feature = "screencast")]
+                if self.screencast_picker.is_some() {
+                    let pointer = self.seat.get_pointer().unwrap();
+                    let new_loc = self.clamp_to_outputs(pointer.current_location() + event.delta());
+                    self.handle_screencast_picker_motion((new_loc.x, new_loc.y));
+                    pointer.motion(
+                        self,
+                        None,
+                        &MotionEvent {
+                            location: new_loc,
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time_msec(),
+                        },
+                    );
+                    pointer.frame(self);
+                    if self.udev_renderer.is_some() {
+                        self.request_redraw();
+                    }
+                    return;
+                }
+
                 // The minimap peek is compositor-owned modal chrome, the
                 // same "no input leaks to a client underneath it" rule the
                 // screencast picker already applies to keys -- so this
@@ -1255,6 +1281,18 @@ impl Smallvil {
                         },
                     );
                     pointer.frame(self);
+                    return;
+                }
+
+                // The screencast source picker is modal: a press on a row
+                // shares it, the Cancel button (or the panel's outside)
+                // cancels, and nothing reaches a client while it is open.
+                #[cfg(feature = "screencast")]
+                if self.screencast_picker.is_some() {
+                    if button_state == ButtonState::Pressed {
+                        let loc = self.seat.get_pointer().unwrap().current_location();
+                        self.handle_screencast_picker_button((loc.x, loc.y));
+                    }
                     return;
                 }
 
