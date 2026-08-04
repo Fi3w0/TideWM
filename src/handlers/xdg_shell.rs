@@ -653,7 +653,15 @@ pub fn handle_commit(state: &mut Smallvil, surface: &WlSurface) {
             state.note_toplevel_flutter(surface, false);
             state.unmap_toplevel(surface);
         }
-        ToplevelTransition::None => {}
+        ToplevelTransition::None => {
+            // The map commit itself is the client's natural size, sent
+            // before it ever saw the tiled configure -- never count it.
+            // From the second commit on, a tiled window that keeps
+            // rendering at a different size is refusing the tile.
+            if tracking == ToplevelTracking::Mapped {
+                state.note_tiled_size_refusal(surface);
+            }
+        }
     }
 
     #[cfg(feature = "screencast")]
@@ -917,6 +925,77 @@ impl Smallvil {
         self.flutter_floated.retain(|s| tracked.contains(s));
     }
 
+    /// Detects the other half of the tiling-averse-client class: a client
+    /// that *stays mapped* (no map/unmap flip, so `note_toplevel_flutter`
+    /// never fires) but commits its buffers at a size different from the
+    /// tiled size it was configured with. A video player with a locked
+    /// aspect is the canonical case -- it renders at its own aspect inside
+    /// the tile slot, hanging half-empty and overlapping nothing cleanly,
+    /// forever. Called on every toplevel commit after the map handshake.
+    ///
+    /// A couple of stale commits right after a retile are normal (the
+    /// client is still catching up to the new configure), so a streak only
+    /// counts consecutive mismatches that survive a full grace window.
+    /// When it does trip, the window is floated immediately (not just on
+    /// the next map) and remembered via `flutter_floated` so it is never
+    /// tiled again -- the one outcome it has nothing left to refuse.
+    fn note_tiled_size_refusal(&mut self, surface: &WlSurface) {
+        const REFUSAL_LIMIT: u32 = 3;
+        const REFUSAL_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+        const SIZE_TOLERANCE: i32 = 8;
+
+        // Only tiled windows promise an expected size, and only ones
+        // actually in the layout right now can be floated out of it.
+        let Some(expected) = self.expected_tiled_size.get(surface).copied() else {
+            return;
+        };
+        if !self.layout.contains(surface) || self.fullscreen.contains_key(surface) {
+            self.tiled_size_refusals.remove(surface);
+            return;
+        }
+        // An active pointer grab (tile resize/drag, move) legitimately
+        // lags commits behind the latest configure. Never count those.
+        if self.seat.get_pointer().is_some_and(|pointer| pointer.is_grabbed()) {
+            return;
+        }
+        let Some(window) = self.mapped_toplevel_window(surface) else {
+            return;
+        };
+        let actual = window.geometry().size;
+        let matches = (actual.w - expected.w).abs() <= SIZE_TOLERANCE
+            && (actual.h - expected.h).abs() <= SIZE_TOLERANCE;
+        if matches {
+            self.tiled_size_refusals.remove(surface);
+            return;
+        }
+
+        let now = std::time::Instant::now();
+        let record = self.tiled_size_refusals.entry(surface.clone()).or_default();
+        if record.first_refusal_at.is_none() {
+            record.first_refusal_at = Some(now);
+        }
+        record.refusals += 1;
+        let streak_age = record
+            .first_refusal_at
+            .map(|at| now.saturating_duration_since(at))
+            .unwrap_or_default();
+        if record.refusals >= REFUSAL_LIMIT && streak_age >= REFUSAL_WINDOW {
+            if self.flutter_floated.insert(surface.clone()) {
+                let (app_id, title) = self.toplevel_identity(surface);
+                tracing::info!(
+                    ?app_id,
+                    ?title,
+                    expected = ?expected,
+                    actual = ?actual,
+                    "tiled size refused persistently, floating surface instead of tiling"
+                );
+            }
+            self.tiled_size_refusals.remove(surface);
+            self.toggle_floating(surface);
+            self.request_redraw();
+        }
+    }
+
     fn map_toplevel(&mut self, surface: &WlSurface) {
         let (app_id, title) = self.toplevel_identity(surface);
         let rule = self
@@ -951,22 +1030,28 @@ impl Smallvil {
             return;
         };
         // Auto-float heuristic (Phase N tier 1): a dialog with a parent, or
-        // a window whose min/max size are equal and nonzero (a splash
-        // screen, a fixed-size utility panel), tiling by default is a bad
-        // first-run experience -- both niri and Hyprland float these
-        // implicitly. `rule.tile` is the one escape hatch back to tiled per
-        // app, checked here rather than baked into the heuristic itself.
+        // a window with a dimension pinned by min/max size (a splash
+        // screen, a fixed-size utility panel, a small bootstrapper), tiling
+        // by default is a bad first-run experience. Matches sway's
+        // `wants_floating` exactly: either dimension fixed (with both min
+        // dimensions nonzero) floats, since a BSP layout varies both
+        // dimensions and a pinned one can't take its slot. niri is more
+        // conservative (fixed *height* only); the OR version is the
+        // defensible match for BSP. `rule.tile` is the one escape hatch
+        // back to tiled per app, checked here rather than baked into the
+        // heuristic itself.
         let implicit_float = !rule.tile
             && self.unmapped_toplevels.get(surface).is_some_and(|window| {
                 let has_parent = window.toplevel().is_some_and(|t| t.parent().is_some());
-                let is_fixed_size = smithay::wayland::compositor::with_states(surface, |states| {
-                    let mut guard = states
-                        .cached_state
-                        .get::<smithay::wayland::shell::xdg::SurfaceCachedState>();
-                    let data = guard.current();
-                    data.min_size.w > 0 && data.min_size.h > 0 && data.min_size == data.max_size
-                });
-                has_parent || is_fixed_size
+                let is_pinned_dimension =
+                    smithay::wayland::compositor::with_states(surface, |states| {
+                        let mut guard = states
+                            .cached_state
+                            .get::<smithay::wayland::shell::xdg::SurfaceCachedState>();
+                        let data = guard.current();
+                        is_dimension_pinned(data.min_size, data.max_size)
+                    });
+                has_parent || is_pinned_dimension
             });
         // A surface caught in a map/unmap flutter storm is floated from now
         // on: tiling it is exactly what the client keeps refusing.
@@ -1275,6 +1360,8 @@ impl Smallvil {
         self.glass_anim.remove(surface);
         self.window_depths.remove(surface);
         self.depth_schematics.remove(surface);
+        self.expected_tiled_size.remove(surface);
+        self.tiled_size_refusals.remove(surface);
         self.focus_history.retain(|s| s != surface);
         // Closing the foreign-toplevel handle here (rather than only on
         // role destruction) means an xdg unmap also retires it; a later
@@ -1724,11 +1811,28 @@ fn ancestor_pids(pid: i32) -> Vec<i32> {
     ancestors
 }
 
+/// Whether a toplevel's min/max size pins at least one dimension, sway's
+/// `wants_floating` rule: both min dimensions nonzero, and either the
+/// width or the height range collapses to a single value. Such a window
+/// cannot take an arbitrary BSP slot (which varies both dimensions), so
+/// it is floated at map time. A fully unpinned window (both min
+/// dimensions zero, the usual case for terminals and browsers) is false.
+fn is_dimension_pinned(
+    min_size: smithay::utils::Size<i32, smithay::utils::Logical>,
+    max_size: smithay::utils::Size<i32, smithay::utils::Logical>,
+) -> bool {
+    min_size.w > 0
+        && min_size.h > 0
+        && (min_size.w == max_size.w || min_size.h == max_size.h)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        lifecycle_transition, skips_first_tile_configure, ToplevelTracking, ToplevelTransition,
+        is_dimension_pinned, lifecycle_transition, skips_first_tile_configure, ToplevelTracking,
+        ToplevelTransition,
     };
+    use smithay::utils::Size;
 
     #[test]
     fn role_without_buffer_stays_unmapped() {
@@ -1827,6 +1931,41 @@ mod tests {
             ..Default::default()
         };
         assert!(skips_first_tile_configure(&positioned, true)); // implicit_float + explicit position
+    }
+
+    #[test]
+    fn pinned_dimension_matches_sways_wants_floating() {
+        use smithay::utils::Size;
+
+        // Fully unpinned: both min dims zero -- the normal case for a
+        // terminal or browser, stays tiled.
+        assert!(!is_dimension_pinned(Size::from((0, 0)), Size::from((0, 0))));
+        // Resizable both ways (min smaller than max): stays tiled.
+        assert!(!is_dimension_pinned(
+            Size::from((200, 200)),
+            Size::from((1600, 1200))
+        ));
+        // Fixed in one dimension only: floats (a small bootstrapper, an
+        // OBS-style picker, a splash screen).
+        assert!(is_dimension_pinned(
+            Size::from((400, 300)),
+            Size::from((400, 300))
+        ));
+        assert!(is_dimension_pinned(
+            Size::from((400, 300)),
+            Size::from((400, 800))
+        ));
+        assert!(is_dimension_pinned(
+            Size::from((400, 300)),
+            Size::from((900, 300))
+        ));
+        // Zero min in one dimension: sway requires both min dims nonzero,
+        // so a "fixed width, unbounded height" hint without a height min
+        // does not float.
+        assert!(!is_dimension_pinned(
+            Size::from((400, 0)),
+            Size::from((400, 800))
+        ));
     }
 
     #[test]

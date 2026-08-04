@@ -814,8 +814,27 @@ pub struct Smallvil {
     /// surfaces the compositor still tracks.
     pub lifecycle_flutter: HashMap<WlSurface, LifecycleFlutter>,
 
-    /// Surfaces given up on after a `lifecycle_flutter` storm: they float
-    /// on every subsequent map, never tiled again.
+    /// Per-surface expected tiled size: the `state.size` most recently
+    /// sent to a tiled window by `retile_with_viscosity`. Compared against
+    /// the size the client actually commits, to catch the other half of
+    /// the size-refusal class: a client that *stays mapped* (no map/unmap
+    /// flip, so `lifecycle_flutter` never sees it) but renders at a
+    /// different size than the tile it was given -- a video player with a
+    /// locked aspect renders half-empty inside its slot forever. See
+    /// `note_tiled_size_refusal`. Pruned alongside `lifecycle_flutter`.
+    pub expected_tiled_size: HashMap<WlSurface, Size<i32, Logical>>,
+
+    /// Consecutive commits whose size didn't match `expected_tiled_size`,
+    /// per surface, with the time of the first such commit. Used by
+    /// `note_tiled_size_refusal` to distinguish "client is still mid-
+    /// resize" (a couple of stale commits, then it matches) from "client
+    /// refuses this size outright" (never matches). Reset on a matching
+    /// commit or a changed expected size.
+    pub tiled_size_refusals: HashMap<WlSurface, TiledSizeRefusal>,
+
+    /// Surfaces given up on after a `lifecycle_flutter` storm or a
+    /// `tiled_size_refusals` streak: they float on every subsequent map,
+    /// never tiled again.
     pub flutter_floated: HashSet<WlSurface>,
 
     /// Named scratchpads (Hyprland's named "special workspaces"):
@@ -1148,6 +1167,18 @@ pub struct LifecycleFlutter {
     pub last_unmapped_at: Option<std::time::Instant>,
     /// Consecutive map-after-recent-unmap flips inside the flutter window.
     pub flips: u32,
+}
+
+/// Per-surface tiled-size refusal tracking (see `Smallvil::tiled_size_refusals`).
+#[derive(Default)]
+pub struct TiledSizeRefusal {
+    /// Consecutive commits whose committed size didn't match the expected
+    /// tiled size. Reset to 0 the moment one does.
+    pub refusals: u32,
+    /// When the current streak started, so a slow-but-compliant client
+    /// (which takes a couple of frames to catch up to a new configure)
+    /// is never mistaken for a refuser.
+    pub first_refusal_at: Option<std::time::Instant>,
 }
 
 impl Smallvil {
@@ -3051,6 +3082,8 @@ impl Smallvil {
             scratchpad_named: HashMap::new(),
             swallowed: HashMap::new(),
             lifecycle_flutter: HashMap::new(),
+            expected_tiled_size: HashMap::new(),
+            tiled_size_refusals: HashMap::new(),
             flutter_floated: HashSet::new(),
             workspace_previous: HashMap::new(),
             pseudo_tiled: HashSet::new(),
@@ -6759,6 +6792,20 @@ impl Smallvil {
                     });
                     if skip_configure_for != Some(toplevel.wl_surface()) {
                         toplevel.send_pending_configure();
+                    }
+                    // Remember the size this tile promises the client, so
+                    // `note_tiled_size_refusal` can tell a client that is
+                    // still catching up to it from one that will never take
+                    // it. A changed expected size also resets any running
+                    // refusal streak: a fresh configure deserves a fresh
+                    // grace period.
+                    let surface = toplevel.wl_surface().clone();
+                    let changed = self
+                        .expected_tiled_size
+                        .insert(surface.clone(), rect.size)
+                        .is_some_and(|old| old != rect.size);
+                    if changed {
+                        self.tiled_size_refusals.remove(&surface);
                     }
                 }
                 if let Some(surface) = window.toplevel().map(|t| t.wl_surface().clone()) {
