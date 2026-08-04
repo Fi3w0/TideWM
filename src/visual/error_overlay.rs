@@ -146,19 +146,20 @@ fn build_buffer(
                 y,
                 (bg[0], bg[1], bg[2], (244.0 * coverage) as u8),
             );
+            let stroke = theme.border_width.round().max(1.0) as i32;
             let inner = rounded_rect_coverage(
                 x,
                 y,
-                left + 1,
-                top + 1,
-                card_width - 2,
-                card_height - 2,
-                (radius - 1.0).max(1.0),
+                left + stroke,
+                top + stroke,
+                card_width - stroke * 2,
+                card_height - stroke * 2,
+                (radius - stroke as f32).max(1.0),
             );
             let border = (coverage - inner).max(0.0);
             if border > 0.0 {
-                let accent = theme.accent(severity == OverlaySeverity::Error, t);
-                blend_text_pixel(&mut pixels, width, x, y, accent, (border * 220.0) as u8);
+                let accent = theme.popup_accent(severity == OverlaySeverity::Error, t);
+                blend_text_pixel(&mut pixels, width, x, y, accent, (border * 235.0) as u8);
             }
         }
     }

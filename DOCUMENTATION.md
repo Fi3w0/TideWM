@@ -824,6 +824,24 @@ border {
 
 Every field can be overridden inside `rule { border { } }`; matching blocks merge field by field. `border = on|off|none` is the rule shorthand.
 
+### `popup { }`
+
+Themes TideWM's own popup chrome: the config warning panel and the toast. Everything auto-follows the theme by default, so first-party UI matches window decoration without a second palette to keep in sync. Border thickness tracks `border.width` clamped into the 1-4px band a small pill can carry; border color tracks the same accent gradient window borders use; radius tracks the average `[rounding]` radius. Set a field only to pin that one piece away from the theme; the rest keep following it.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `border_width` | float, `0`–`8` | `border.width` (clamped `1`–`4`) | Popup border stroke thickness in logical pixels. `border-width` is an alias. |
+| `border_color` | RGBA color | accent gradient | Flat popup border color. When set, the gradient position is ignored and every sampled point uses this color. `border-color` is an alias. |
+| `radius` | float, `0`–`64` | average `[rounding]` radius | Popup corner radius in logical pixels. |
+
+```wave
+popup {
+    border_width = 3
+    border_color = FF0000
+    radius = 20
+}
+```
+
 ### `ripple { }`
 
 Configures the Phase R1 impulse ripple shared by window-map, focus-change, and urgent-attention events. A newly mapped window that automatically receives focus emits only its map ripple; the lifecycle focus step is coalesced so `map_preset` and `focus_preset` do not overlap. Later pointer, keyboard, or command-driven window-to-window focus changes emit the focus ripple normally. `water_effects = false` disables every ripple regardless of this block. The active ripple list is capped at 16 so rapid mapping cannot grow render state without bound.

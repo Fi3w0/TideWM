@@ -894,6 +894,9 @@ pub struct Config {
     pub rounding: RoundingConfig,
     /// Analytical solid/gradient window borders.
     pub border: BorderConfig,
+    /// Optional manual override for the compositor's own popup chrome
+    /// (config warning panel, toast). Auto by default -- see `PopupConfig`.
+    pub popup: PopupConfig,
     /// Global ripple defaults (Phase R1, see `ripple.rs`). Per-app
     /// `rule { ripple { } }` overrides merge over these at resolve time
     /// (`merge_over`). Kept sparse; `resolve_ripple_config` layers the
@@ -1185,6 +1188,7 @@ impl Config {
             shadow: raw.shadow,
             rounding: raw.rounding,
             border: raw.border,
+            popup: raw.popup,
             ripple: raw.ripple,
             ripple_presets: raw.ripple_presets,
             cursor_always_visible: raw.cursor_always_visible,
@@ -1420,6 +1424,7 @@ struct RawConfig {
     shadow: ShadowConfig,
     rounding: RoundingConfig,
     border: BorderConfig,
+    popup: PopupConfig,
     /// Sparse global overrides, mutated by `apply_ripple_block`. Runtime
     /// resolution layers these over `RippleConfig::system_default()`.
     ripple: RippleConfig,
@@ -1583,6 +1588,7 @@ impl Default for RawConfig {
             shadow: ShadowConfig::default(),
             rounding: RoundingConfig::default(),
             border: BorderConfig::default(),
+            popup: PopupConfig::default(),
             ripple: RippleConfig::default(),
             ripple_presets: HashMap::new(),
             cursor_always_visible: false,
@@ -2540,6 +2546,24 @@ impl BorderOverrides {
             fullscreen: self.fullscreen.unwrap_or(base.fullscreen),
         }
     }
+}
+
+/// Optional manual override for compositor-owned popup chrome (the config
+/// warning panel and toast). Every field defaults to `None` -- "auto":
+/// `UiTheme::from_config` already derives a full theme for this UI (panel
+/// tint, accent gradient, readable text, radius) from `[border]`/
+/// `[rounding]`, so first-party UI matches whatever the user has already
+/// configured for window decoration without a second palette to keep in
+/// sync. Set a field here only to pin that one piece away from the theme;
+/// everything else keeps auto-following it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PopupConfig {
+    /// Pixels. Auto matches `border.width`.
+    pub border_width: Option<f32>,
+    /// Auto matches the active/urgent accent gradient window borders use.
+    pub border_color: Option<[f32; 4]>,
+    /// Pixels. Auto matches the average `[rounding]` radius.
+    pub radius: Option<f32>,
 }
 
 /// Which built-in shape a ripple draws. Multiple shapes can stack
@@ -3553,6 +3577,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "shadow" => apply_shadow_block(&mut raw.shadow, body),
         "rounding" | "corners" => apply_rounding_block(&mut raw.rounding, body),
         "border" => apply_border_block(&mut raw.border, body),
+        "popup" => apply_popup_block(&mut raw.popup, body),
         "ripple" => apply_ripple_block(&mut raw.ripple, body),
         "ripple_preset" => {
             let name = header.trim().to_lowercase();
@@ -5712,6 +5737,30 @@ fn apply_border_override_block(cfg: &mut BorderOverrides, body: &[waves::Entry])
     }
 }
 
+fn apply_popup_block(cfg: &mut PopupConfig, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `popup` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "border_width" | "border-width" => {
+                cfg.border_width = parse_f32_clamped(value, 0.0, 8.0, "popup.border_width");
+            }
+            "border_color" | "border-color" => {
+                cfg.border_color = parse_rgba_color(value).or_else(|| {
+                    tracing::warn!(value, "Expected popup.border_color as an RGBA color, ignoring");
+                    None
+                });
+            }
+            "radius" => {
+                cfg.radius = parse_f32_clamped(value, 0.0, 64.0, "popup.radius");
+            }
+            _ => tracing::warn!(key, "Unknown popup key, ignoring"),
+        }
+    }
+}
+
 fn parse_shapes(value: &str) -> Option<Vec<RippleShape>> {
     let mut out = Vec::new();
     for tok in value.split_whitespace() {
@@ -7194,6 +7243,7 @@ mod tests {
             shadow: ShadowConfig::default(),
             rounding: RoundingConfig::default(),
             border: BorderConfig::default(),
+            popup: PopupConfig::default(),
             ripple: RippleConfig::system_default(),
             ripple_presets: HashMap::new(),
             cursor_always_visible: false,
@@ -8311,6 +8361,41 @@ mod tests {
         assert_eq!(border.placement, BorderPlacement::Inside);
         assert_eq!(border.inactive_opacity, 0.45);
         assert_eq!(border.active_to, config.border.active_to);
+    }
+
+    #[test]
+    fn popup_theme_is_auto_by_default_and_pinned_by_explicit_overrides() {
+        // Auto: nothing set, so the popup theme just follows border.width
+        // (clamped) and the accent gradient -- no [popup] block at all.
+        let auto = Config::from_raw(RawConfig::default()).0;
+        let auto_theme = crate::ui_theme::UiTheme::from_config(&auto);
+        assert_eq!(auto_theme.border_width, auto.border.width.clamp(1.0, 4.0));
+        assert_eq!(
+            auto_theme.popup_accent(false, 0.5),
+            auto_theme.accent(false, 0.5)
+        );
+
+        let entries = waves::parse(
+            "popup {\n\
+             border_width = 3\n\
+             border_color = FF0000\n\
+             radius = 20\n\
+             }\n",
+            Path::new("<popup-test>"),
+        )
+        .unwrap();
+        let pinned = Config::from_raw(lower_entries(&entries)).0;
+        assert_eq!(pinned.popup.border_width, Some(3.0));
+        assert_eq!(pinned.popup.radius, Some(20.0));
+
+        let theme = crate::ui_theme::UiTheme::from_config(&pinned);
+        assert_eq!(theme.border_width, 3.0);
+        assert_eq!(theme.radius, 20);
+        // The color pin ignores the gradient position entirely -- same
+        // flat color no matter where along the border it's sampled.
+        assert_eq!(theme.popup_accent(false, 0.0), [255, 0, 0]);
+        assert_eq!(theme.popup_accent(false, 1.0), [255, 0, 0]);
+        assert_eq!(theme.popup_accent(true, 0.5), [255, 0, 0]);
     }
 
     #[test]

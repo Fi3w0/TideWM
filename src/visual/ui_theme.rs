@@ -9,7 +9,7 @@
 
 use crate::config::Config;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UiTheme {
     pub panel_from: [u8; 3],
     pub panel_to: [u8; 3],
@@ -20,6 +20,13 @@ pub struct UiTheme {
     pub text: [u8; 3],
     pub muted_text: [u8; 3],
     pub radius: i32,
+    /// Popup border stroke width, logical pixels. Auto matches
+    /// `border.width` (the same thickness window borders use) unless
+    /// `[popup] { border_width }` pins it.
+    pub border_width: f32,
+    /// `[popup] { border_color }` pin. `None` (the default/auto case)
+    /// means `accent()`'s gradient, same as every other border in TideWM.
+    popup_border_color: Option<[u8; 3]>,
 }
 
 impl UiTheme {
@@ -49,6 +56,20 @@ impl UiTheme {
         } else {
             10
         };
+        let radius = config
+            .popup
+            .radius
+            .map(|radius| radius.round().clamp(4.0, 40.0) as i32)
+            .unwrap_or(radius);
+        // A popup pill/panel is small; a window's full configured border
+        // width can read as too heavy on it, so auto stays in a narrower
+        // band than `border.width` itself is allowed to.
+        let border_width = config
+            .popup
+            .border_width
+            .unwrap_or(config.border.width)
+            .clamp(1.0, 4.0);
+        let popup_border_color = config.popup.border_color.map(rgb);
         Self {
             panel_from,
             panel_to,
@@ -59,6 +80,8 @@ impl UiTheme {
             text,
             muted_text,
             radius,
+            border_width,
+            popup_border_color,
         }
     }
 
@@ -68,6 +91,13 @@ impl UiTheme {
         } else {
             mix(self.accent_from, self.accent_to, t)
         }
+    }
+
+    /// Border color for compositor-owned popup chrome: the `[popup]
+    /// { border_color }` pin if set, else the same gradient `accent()`
+    /// gives window borders.
+    pub fn popup_accent(self, urgent: bool, t: f32) -> [u8; 3] {
+        self.popup_border_color.unwrap_or_else(|| self.accent(urgent, t))
     }
 
     #[cfg(test)]
@@ -82,6 +112,8 @@ impl UiTheme {
             text: [245, 249, 250],
             muted_text: [174, 184, 188],
             radius: 12,
+            border_width: 2.0,
+            popup_border_color: None,
         }
     }
 }

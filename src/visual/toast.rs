@@ -244,19 +244,20 @@ fn rasterize_toast(
                 y,
                 (bg[0], bg[1], bg[2], (242.0 * coverage) as u8),
             );
+            let stroke = theme.border_width.round().max(1.0) as i32;
             let border = coverage
                 - rounded_rect_coverage_local(
                     x,
                     y,
-                    card_x + 1,
-                    card_y + 1,
-                    card_w - 2,
-                    CARD_HEIGHT - 2,
-                    (radius - 1.0).max(1.0),
+                    card_x + stroke,
+                    card_y + stroke,
+                    card_w - stroke * 2,
+                    CARD_HEIGHT - stroke * 2,
+                    (radius - stroke as f32).max(1.0),
                 );
             if border > 0.0 {
-                let accent = theme.accent(kind == ToastKind::Error, x as f32 / width as f32);
-                blend_color_pixel(&mut pixels, width, x, y, accent, (border * 210.0) as u8);
+                let accent = theme.popup_accent(kind == ToastKind::Error, x as f32 / width as f32);
+                blend_color_pixel(&mut pixels, width, x, y, accent, (border * 235.0) as u8);
             }
         }
     }
