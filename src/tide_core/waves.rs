@@ -283,24 +283,37 @@ fn merge_into(target: &mut Vec<Entry>, incoming: Vec<Entry>) {
 /// unparseable, or a genuine include cycle) propagate. A problem in an
 /// *included* file is logged as a warning and that one include is
 /// skipped, same resilience convention as everything else in this
-/// project's config loading.
-pub(crate) fn resolve(path: &Path) -> Result<Vec<Entry>, String> {
+/// project's config loading -- the returned `Vec<String>` carries that
+/// same message out to the caller so it can reach the compositor-owned
+/// warning panel, not just the log file (a broken include used to be
+/// invisible on screen entirely).
+pub(crate) fn resolve(path: &Path) -> Result<(Vec<Entry>, Vec<String>), String> {
     let mut ancestors = Vec::new();
-    resolve_inner(path, &mut ancestors)
+    let mut warnings = Vec::new();
+    let entries = resolve_inner(path, &mut ancestors, &mut warnings)?;
+    Ok((entries, warnings))
 }
 
-fn resolve_inner(path: &Path, ancestors: &mut Vec<PathBuf>) -> Result<Vec<Entry>, String> {
+fn resolve_inner(
+    path: &Path,
+    ancestors: &mut Vec<PathBuf>,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<Entry>, String> {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if ancestors.contains(&canonical) {
         return Err(format!("include cycle detected in file {}", path.display()));
     }
     ancestors.push(canonical);
-    let result = resolve_uncycled(path, ancestors);
+    let result = resolve_uncycled(path, ancestors, warnings);
     ancestors.pop();
     result
 }
 
-fn resolve_uncycled(path: &Path, ancestors: &mut Vec<PathBuf>) -> Result<Vec<Entry>, String> {
+fn resolve_uncycled(
+    path: &Path,
+    ancestors: &mut Vec<PathBuf>,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<Entry>, String> {
     let contents =
         fs::read_to_string(path).map_err(|err| format!("in file {}: {err}", path.display()))?;
     let entries = parse(&contents, path)?;
@@ -312,10 +325,11 @@ fn resolve_uncycled(path: &Path, ancestors: &mut Vec<PathBuf>) -> Result<Vec<Ent
         match entry {
             Entry::Include(include) => {
                 let include_path = resolve_include_path(parent, &include);
-                match resolve_inner(&include_path, ancestors) {
+                match resolve_inner(&include_path, ancestors, warnings) {
                     Ok(included) => merge_into(&mut merged, included),
                     Err(err) => {
                         tracing::warn!(path = %include_path.display(), %err, "Failed to load included config file, skipping");
+                        warnings.push(format!("Failed to load included config file: {err}, skipping"));
                     }
                 }
             }

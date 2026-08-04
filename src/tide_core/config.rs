@@ -1010,12 +1010,12 @@ impl Config {
     pub fn load_with_error() -> (Self, Option<String>, Vec<String>) {
         let path = config_path();
 
-        let (raw, error) = if path.exists() {
+        let (raw, error, include_warnings) = if path.exists() {
             match load_raw_config(&path) {
-                Ok(raw) => (raw, None),
+                Ok((raw, include_warnings)) => (raw, None, include_warnings),
                 Err(err) => {
                     tracing::warn!(%err, path = %path.display(), "Failed to parse config, using defaults");
-                    (RawConfig::default(), Some(err))
+                    (RawConfig::default(), Some(err), Vec::new())
                 }
             }
         } else {
@@ -1042,14 +1042,15 @@ impl Config {
             // parse of the constant) so `include "keybinds.wave"` above
             // actually resolves on this very first boot, not just on the
             // next reload.
-            let default = load_raw_config(&path).unwrap_or_else(|err| {
+            let (default, include_warnings) = load_raw_config(&path).unwrap_or_else(|err| {
                 tracing::error!(%err, "Built-in default Waves config failed to parse");
-                RawConfig::default()
+                (RawConfig::default(), Vec::new())
             });
-            (default, None)
+            (default, None, include_warnings)
         };
 
-        let (config, warnings) = Self::from_raw(raw);
+        let (config, mut warnings) = Self::from_raw(raw);
+        warnings.extend(include_warnings);
         (config, error, warnings)
     }
 
@@ -1060,8 +1061,10 @@ impl Config {
     /// successful reload is the same dropped-keybind/footgun-lint
     /// diagnostics `from_raw` produces -- empty in the common case.
     pub fn reload() -> Result<(Self, Vec<String>), String> {
-        let raw = load_raw_config(&config_path())?;
-        Ok(Self::from_raw(raw))
+        let (raw, include_warnings) = load_raw_config(&config_path())?;
+        let (config, mut warnings) = Self::from_raw(raw);
+        warnings.extend(include_warnings);
+        Ok((config, warnings))
     }
 
     /// The path being watched/loaded, so callers can set up a file watcher on it.
@@ -3449,11 +3452,11 @@ pub fn spawn_watcher() -> notify::Result<(RecommendedWatcher, Channel<Arc<Atomic
 /// `RawConfig`. The single entry point both `Config::load` and
 /// `Config::reload` use so they stay consistent about how includes are
 /// resolved.
-fn load_raw_config(path: &Path) -> Result<RawConfig, String> {
-    let entries = waves::resolve(path)?;
+fn load_raw_config(path: &Path) -> Result<(RawConfig, Vec<String>), String> {
+    let (entries, include_warnings) = waves::resolve(path)?;
     let mut raw = lower_entries(&entries);
     substitute_variables_in_raw(&mut raw);
-    Ok(raw)
+    Ok((raw, include_warnings))
 }
 
 /// Lowers a fully-merged Waves entry list into a `RawConfig`, starting
@@ -7372,7 +7375,7 @@ mod tests {
              bind $mainMod+Return = spawn:$terminal\n",
         );
 
-        let raw = load_raw_config(&main).expect("should parse");
+        let (raw, _) = load_raw_config(&main).expect("should parse");
         assert_eq!(raw.spawn_at_startup, vec!["kitty --daemon".to_string()]);
         assert_eq!(
             raw.keybinds.get("SUPER+Return").map(String::as_str),
@@ -7391,7 +7394,7 @@ mod tests {
              bind Super+F = toggle-fullscreen\n",
         );
 
-        let raw = load_raw_config(&main).expect("should parse");
+        let (raw, _) = load_raw_config(&main).expect("should parse");
         // Only what the file declared exists. No default table is merged
         // underneath it, regardless of which modifier variables it uses.
         assert!(!raw.keybinds.contains_key("Super+Q"));
@@ -7419,7 +7422,7 @@ mod tests {
             "terminal = $wave(definitely-not-a-real-binary, /bin/sh, kitty)\n",
         );
 
-        let raw = load_raw_config(&main).expect("should parse");
+        let (raw, _) = load_raw_config(&main).expect("should parse");
         assert_eq!(raw.terminal, "/bin/sh");
     }
 
@@ -7457,7 +7460,7 @@ mod tests {
             "include \"keybinds.wave\"\nterminal = kitty\nbind Super+F = toggle-fullscreen\n",
         );
 
-        let raw = load_raw_config(&main).expect("include chain should resolve");
+        let (raw, _) = load_raw_config(&main).expect("include chain should resolve");
 
         assert_eq!(raw.terminal, "kitty");
         // Included file's bind survives...
@@ -7481,7 +7484,7 @@ mod tests {
         dir.write("b.wave", "gaps = 12\n");
         let main = dir.write("config.wave", "include \"a.wave\"\ninclude \"b.wave\"\n");
 
-        let raw = load_raw_config(&main).unwrap();
+        let (raw, _) = load_raw_config(&main).unwrap();
         assert_eq!(raw.gaps, 12);
     }
 
@@ -7493,8 +7496,14 @@ mod tests {
             "include \"does-not-exist.wave\"\nterminal = kitty\n",
         );
 
-        let raw = load_raw_config(&main).expect("a bad include must not fail the top-level file");
+        let (raw, warnings) =
+            load_raw_config(&main).expect("a bad include must not fail the top-level file");
         assert_eq!(raw.terminal, "kitty");
+        // The failure must reach the caller, not just the log -- this is
+        // what the compositor's warning panel reads to know something's
+        // wrong (see `Config::load_with_error`/`Config::reload`).
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("does-not-exist.wave"));
     }
 
     #[test]
@@ -7510,9 +7519,11 @@ mod tests {
         dir.write("b.wave", "include \"a.wave\"\n");
         let a = dir.write("a.wave", "include \"b.wave\"\nterminal = kitty\n");
 
-        let raw =
+        let (raw, warnings) =
             load_raw_config(&a).expect("a cycle is skipped with a warning, not a hard failure");
         assert_eq!(raw.terminal, "kitty");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("include cycle"));
     }
 
     /// Writes both `DEFAULT_CONFIG_WAVE` and `DEFAULT_KEYBINDS_WAVE` to a
@@ -7529,7 +7540,7 @@ mod tests {
         let dir = TestDir::new(&format!("default-config-{:?}", std::thread::current().id()));
         dir.write("keybinds.wave", DEFAULT_KEYBINDS_WAVE);
         let main = dir.write("config.wave", DEFAULT_CONFIG_WAVE);
-        let raw = load_raw_config(&main).expect("the shipped default must parse and resolve");
+        let (raw, _) = load_raw_config(&main).expect("the shipped default must parse and resolve");
         Config::from_raw(raw).0
     }
 
@@ -8589,8 +8600,10 @@ mod tests {
         ));
         dir.write("keybinds.wave", DEFAULT_KEYBINDS_WAVE);
         let main = dir.write("config.wave", DEFAULT_CONFIG_WAVE);
-        let raw = load_raw_config(&main).expect("the shipped default must parse and resolve");
-        let (_, warnings) = Config::from_raw(raw);
+        let (raw, include_warnings) =
+            load_raw_config(&main).expect("the shipped default must parse and resolve");
+        let (_, mut warnings) = Config::from_raw(raw);
+        warnings.extend(include_warnings);
         assert!(
             warnings.is_empty(),
             "the shipped default config produced diagnostics: {warnings:?}"
