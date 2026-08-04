@@ -110,7 +110,15 @@ fn build_buffer(
     let top = CARD_MARGIN_Y;
     let card_width = (width - CARD_MARGIN_X * 2).max(1);
     let card_height = PANEL_HEIGHT - CARD_MARGIN_Y * 2;
-    let radius = theme.radius.min(card_height / 2) as f32;
+    // The theme radius is tuned against the toast pill's smaller card
+    // (70px tall). Applied raw, a larger panel's corners read as
+    // proportionally tight -- the rounding looks sized for a tiny toast.
+    // Scale by the card-height ratio so the panel keeps the same visual
+    // roundness the toast has, not a fixed pixel value.
+    let radius = (theme.radius as f32 * card_height as f32
+        / crate::toast::CARD_HEIGHT as f32)
+        .min(card_height as f32 / 2.0)
+        .max(4.0);
     for y in 0..PANEL_HEIGHT {
         for x in 0..width {
             let shadow = rounded_rect_coverage(

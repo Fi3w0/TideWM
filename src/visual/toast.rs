@@ -28,7 +28,11 @@ const LABEL_SIZE: f32 = 9.5;
 // same size ordinary short toasts use.
 const ERROR_FONT_SIZE: f32 = 12.0;
 const MARGIN: i32 = 24;
-const CARD_HEIGHT: i32 = 70;
+/// The pill's card height. Exposed so sibling compositor UI can scale
+/// their corner radius from the same reference: a surface taller than a
+/// toast needs proportionally larger corners, or the rounding reads as
+/// "sized for a tiny toast" on a bigger panel.
+pub(crate) const CARD_HEIGHT: i32 = 70;
 const CARD_INSET: i32 = 6;
 const ICON_WIDTH: i32 = 46;
 const TEXT_RIGHT_PAD: i32 = 22;
