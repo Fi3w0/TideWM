@@ -347,4 +347,38 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[1].ends_with('…'));
     }
+
+    /// A real, long diagnostic (`waves.rs`'s include-failure message) on a
+    /// narrow output (a portrait or secondary monitor) forces both allotted
+    /// body lines. The second line's baseline (`build_buffer`'s own
+    /// `top + 66 + index * 17` formula) must still leave every glyph above
+    /// the card's bottom edge (`PANEL_HEIGHT - CARD_MARGIN_Y`) -- text
+    /// bleeding past the rounded card into the shadow/background below it
+    /// is exactly what "the big warning is broken" looks like.
+    #[test]
+    fn wrapped_body_text_stays_above_the_cards_bottom_edge() {
+        let font = crate::toast::font();
+        let message = "Failed to load included config file: in file \
+                        /home/fiw/.config/tidewm/water.wave at line 38: \
+                        unexpected end of file, missing a closing `}`, skipping";
+        let width = 320;
+        let left = CARD_MARGIN_X;
+        let available = (width - left - PAD_X - CARD_MARGIN_X - 18).max(1);
+        let lines = wrap_text(font, message, BODY_SIZE, available, 2);
+        assert_eq!(lines.len(), 2, "narrow width should force both body lines");
+
+        let card_bottom = PANEL_HEIGHT - CARD_MARGIN_Y;
+        for (index, line) in lines.iter().enumerate() {
+            let baseline = CARD_MARGIN_Y + 66 + index as i32 * 17;
+            for ch in line.chars() {
+                let (metrics, _) = font.rasterize(ch, BODY_SIZE);
+                let glyph_bottom = baseline - metrics.ymin;
+                assert!(
+                    glyph_bottom <= card_bottom,
+                    "line {index} ('{line}') glyph '{ch}' bottom at y={glyph_bottom} \
+                     spills past the card's bottom edge at y={card_bottom}"
+                );
+            }
+        }
+    }
 }
