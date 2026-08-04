@@ -1,10 +1,16 @@
 //! Ambient caustic light patterns over the wallpaper, below windows.
 //!
-//! One analytical full-output pixel element per output: no texture, no
-//! framebuffer, and no element at all when the effect is disabled or the
-//! session is locked. Motion is phase-accumulated in `Caustics` and only
-//! advances when a frame is actually built, so the default mode piggybacks
-//! on damage-driven frames -- an idle desktop shows static caustics that
+//! The pattern is rendered analytically into a small offscreen texture
+//! (1/4 resolution, reused across frames) and blitted upscaled to the
+//! output every frame -- the pattern is very low-frequency, so the blit
+//! is visually identical to a direct full-output pass at roughly 1/16th
+//! of the fragment cost. That makes the `caustics.fps` constant-motion
+//! mode affordable on integrated graphics, instead of being the
+//! frame-rate tax a full-resolution procedural pass used to be.
+//!
+//! Motion is phase-accumulated in `Caustics` and only advances when a
+//! frame is actually built, so the default mode piggybacks on
+//! damage-driven frames -- an idle desktop shows static caustics that
 //! read as part of the wallpaper and ticks zero frames. Setting
 //! `caustics.fps` above zero opts into constant motion: the frame pump
 //! gate (`Smallvil::caustics_active`) keeps redraws coming at roughly
@@ -16,18 +22,31 @@
 
 use std::time::{Duration, Instant};
 
-use smithay::{
-    backend::renderer::{
+use smithay::backend::{
+    allocator::Fourcc,
+    renderer::{
+        damage::OutputDamageTracker,
         element::{Element, Id, Kind, RenderElement},
         gles::{
-            GlesError, GlesFrame, GlesPixelProgram, GlesRenderer, Uniform, UniformName, UniformType,
+            GlesError, GlesFrame, GlesPixelProgram, GlesRenderer, GlesTexture, Uniform,
+            UniformName, UniformType,
         },
         utils::CommitCounter,
+        Bind, Offscreen, Texture,
     },
-    utils::{user_data::UserDataMap, Buffer, Logical, Physical, Rectangle, Scale, Transform},
+};
+use smithay::utils::{
+    user_data::UserDataMap, Buffer, Logical, Physical, Rectangle, Scale, Size, Transform,
 };
 
 use crate::config::CausticsConfig;
+
+/// Offscreen render scale: the caustics pattern is low-frequency, so the
+/// visible output is a 1/4-resolution texture upscaled to the output.
+/// Fragment cost drops ~16x; the pattern density is resolution-independent
+/// (the shader works in output-relative coordinates), so the blit reads
+/// the same as a direct full-output pass.
+const CAUSTICS_DOWNSCALE: i32 = 4;
 
 /// Caustic interference from a few rotated, drifting sine fields,
 /// sharpened into light-web ridges. Deliberately evoking the wave
@@ -112,6 +131,8 @@ pub struct Caustics {
     phase: f32,
     last_advance: Instant,
     last_sample: Option<CausticsSample>,
+    /// Cached 1/4-resolution pattern texture, reused across frames.
+    texture: Option<GlesTexture>,
 }
 
 impl Default for Caustics {
@@ -122,17 +143,24 @@ impl Default for Caustics {
             phase: 0.0,
             last_advance: Instant::now(),
             last_sample: None,
+            texture: None,
         }
     }
 }
 
 impl Caustics {
+    /// Advances the phase, re-renders the low-res pattern texture if the
+    /// sample changed (or the texture is missing), and returns the blit
+    /// element for this output's frame. `None` on a render failure or an
+    /// empty output area -- the effect skips a frame rather than crash.
     pub fn frame_element(
         &mut self,
+        renderer: &mut GlesRenderer,
         program: GlesPixelProgram,
         area: Rectangle<i32, Logical>,
+        output_scale: f64,
         cfg: &CausticsConfig,
-    ) -> CausticsElement {
+    ) -> Option<CausticsElement> {
         // Cap the per-frame advance so a stall (VT switch, suspend, a
         // blocked render loop) doesn't turn into a visible pattern jump
         // on the next frame.
@@ -145,35 +173,94 @@ impl Caustics {
             color: cfg.color,
             scale: cfg.scale,
         };
-        if self.last_sample != Some(sample) {
+        let dirty = self.last_sample != Some(sample);
+        if dirty {
             self.last_sample = Some(sample);
             self.commit.increment();
         }
-        CausticsElement {
+        if area.size.w <= 0 || area.size.h <= 0 {
+            return None;
+        }
+        let physical: Rectangle<i32, Physical> = area.to_physical_precise_round(output_scale);
+        let low_w: i32 = (physical.size.w / CAUSTICS_DOWNSCALE).max(1);
+        let low_h: i32 = (physical.size.h / CAUSTICS_DOWNSCALE).max(1);
+        let low = Size::<i32, Physical>::from((low_w, low_h));
+        // Re-render the pattern only when it actually changed; a static
+        // sample (speed = 0, or an untouched piggyback frame) reuses the
+        // cached texture and the unchanged commit lets the damage tracker
+        // skip the blit entirely.
+        if dirty || self.texture.is_none() {
+            self.texture = render_pattern(renderer, &program, sample, low, self.texture.take());
+            self.texture.as_ref()?;
+        }
+        Some(CausticsElement {
             id: self.id.clone(),
             commit: self.commit,
-            area,
-            program,
-            sample,
-        }
+            texture: self.texture.as_ref()?.clone(),
+            geometry: physical,
+        })
     }
 }
 
-pub struct CausticsElement {
+/// Renders one frame of the analytical pattern into `reusable` (reallocated
+/// if its size no longer matches), returning the upscale-blit source.
+/// `None` on any GL failure, logged by the caller's absence of drama.
+fn render_pattern(
+    renderer: &mut GlesRenderer,
+    program: &GlesPixelProgram,
+    sample: CausticsSample,
+    size: Size<i32, Physical>,
+    reusable: Option<GlesTexture>,
+) -> Option<GlesTexture> {
+    let buffer_size: Size<i32, Buffer> = Size::from((size.w, size.h));
+    let mut texture = match reusable.filter(|texture| texture.size() == buffer_size) {
+        Some(texture) => texture,
+        None => renderer
+            .create_buffer(Fourcc::Argb8888, buffer_size)
+            .map_err(|err| tracing::warn!(%err, "Failed to allocate caustics pattern texture"))
+            .ok()?,
+    };
+    let mut target = renderer
+        .bind(&mut texture)
+        .map_err(|err| tracing::warn!(%err, "Failed to bind caustics pattern target"))
+        .ok()?;
+    let mut tracker =
+        OutputDamageTracker::new((size.w, size.h), 1.0, Transform::Normal);
+    let element = PatternElement {
+        id: Id::new(),
+        area: Rectangle::from_size(Size::<i32, Logical>::from((size.w, size.h))),
+        program: program.clone(),
+        sample,
+    };
+    if let Err(err) = tracker.render_output(renderer, &mut target, 0, &[element], [0.0, 0.0, 0.0, 0.0])
+    {
+        tracing::warn!(%err, "Failed to render caustics pattern");
+        return None;
+    }
+    drop(target);
+    Some(texture)
+}
+
+/// The offscreen pass: draws the procedural pattern into the low-res
+/// target. Same shader and uniforms the old direct full-output element
+/// used; the tracker runs at scale 1.0 over the low-res rect, so the
+/// pattern density (which is relative to the drawn rect) is unchanged.
+struct PatternElement {
     id: Id,
-    commit: CommitCounter,
     area: Rectangle<i32, Logical>,
     program: GlesPixelProgram,
     sample: CausticsSample,
 }
 
-impl Element for CausticsElement {
+impl Element for PatternElement {
     fn id(&self) -> &Id {
+        // Fresh per offscreen pass, which is fine: the tracker this id
+        // feeds is discarded with the pass.
         &self.id
     }
 
     fn current_commit(&self) -> CommitCounter {
-        self.commit
+        CommitCounter::default()
     }
 
     fn src(&self) -> Rectangle<f64, Buffer> {
@@ -191,12 +278,9 @@ impl Element for CausticsElement {
     fn kind(&self) -> Kind {
         Kind::Unspecified
     }
-
-    // No `opaque_regions` override: the pattern is translucent light over
-    // the wallpaper, which must keep drawing underneath.
 }
 
-impl RenderElement<GlesRenderer> for CausticsElement {
+impl RenderElement<GlesRenderer> for PatternElement {
     fn draw(
         &self,
         frame: &mut GlesFrame<'_, '_>,
@@ -219,6 +303,69 @@ impl RenderElement<GlesRenderer> for CausticsElement {
                 Uniform::new("u_color", self.sample.color),
                 Uniform::new("u_scale", self.sample.scale),
             ],
+        )
+    }
+}
+
+/// The on-screen element: upscale-blits the cached low-res pattern over
+/// the wallpaper. `commit` carries the pattern's change counter, so the
+/// damage tracker redraws the blit only when the pattern actually moved.
+pub struct CausticsElement {
+    id: Id,
+    commit: CommitCounter,
+    texture: GlesTexture,
+    geometry: Rectangle<i32, Physical>,
+}
+
+impl Element for CausticsElement {
+    fn id(&self) -> &Id {
+        &self.id
+    }
+
+    fn current_commit(&self) -> CommitCounter {
+        self.commit
+    }
+
+    fn src(&self) -> Rectangle<f64, Buffer> {
+        Rectangle::from_size(self.texture.size().to_f64())
+    }
+
+    fn geometry(&self, _scale: Scale<f64>) -> Rectangle<i32, Physical> {
+        self.geometry
+    }
+
+    fn alpha(&self) -> f32 {
+        1.0
+    }
+
+    fn kind(&self) -> Kind {
+        Kind::Unspecified
+    }
+
+    // No `opaque_regions` override: the pattern is translucent light over
+    // the wallpaper, which must keep drawing underneath.
+}
+
+impl RenderElement<GlesRenderer> for CausticsElement {
+    fn draw(
+        &self,
+        frame: &mut GlesFrame<'_, '_>,
+        src: Rectangle<f64, Buffer>,
+        dst: Rectangle<i32, Physical>,
+        damage: &[Rectangle<i32, Physical>],
+        opaque_regions: &[Rectangle<i32, Physical>],
+        _cache: Option<&UserDataMap>,
+    ) -> Result<(), GlesError> {
+        frame.render_texture_from_to(
+            &self.texture,
+            src,
+            dst,
+            damage,
+            opaque_regions,
+            Transform::Normal,
+            self.alpha(),
+            None,
+            &[],
         )
     }
 }

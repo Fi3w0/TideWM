@@ -5993,14 +5993,16 @@ impl Smallvil {
         ))
     }
 
-    /// Ambient caustic light over the wallpaper, below windows. One
-    /// analytical full-output element per output; no texture, no
-    /// framebuffer. The phase advances only while a frame is being
-    /// assembled, so the default `fps = 0` mode piggybacks on
-    /// damage-driven frames (idle desktop = static caustics, zero extra
-    /// frames). A non-zero `fps` opts into constant motion through
-    /// `has_active_animation`'s gate. Skipped entirely while a session
-    /// lock is held, matching the ocean canvas's own guard.
+    /// Ambient caustic light over the wallpaper, below windows. The
+    /// pattern renders analytically into a cached 1/4-resolution texture
+    /// and is upscale-blitted to the output, so the constant-motion mode
+    /// costs a fraction of the old full-output pass. The phase advances
+    /// only while a frame is being assembled, so the default `fps = 0`
+    /// mode piggybacks on damage-driven frames (idle desktop = static
+    /// caustics, zero extra frames). A non-zero `fps` opts into constant
+    /// motion through `has_active_animation`'s gate. Skipped entirely
+    /// while a session lock is held, matching the ocean canvas's own
+    /// guard.
     pub(crate) fn caustics_frame_element(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -6009,16 +6011,18 @@ impl Smallvil {
         if !matches!(self.session_lock, SessionLock::Unlocked)
             || !self.config.water_effects
             || !self.config.caustics.enabled
+            || self.config.caustics.intensity <= 0.0
         {
             return None;
         }
         let area = Rectangle::from_size(self.space.output_geometry(output)?.size);
+        let output_scale = output.current_scale().fractional_scale();
         let program = crate::caustics::caustics_program(&mut self.caustics_program, renderer)?;
         let element = self
             .caustics
             .entry(output.name())
             .or_default()
-            .frame_element(program, area, &self.config.caustics);
+            .frame_element(renderer, program, area, output_scale, &self.config.caustics)?;
         self.caustics_last_advance = Instant::now();
         Some(crate::backend::udev::OutputRenderElements::Caustics(
             element,
@@ -6036,7 +6040,9 @@ impl Smallvil {
     /// `caustics.fps` when the user is active, stepping down through the
     /// configured idle tiers as minutes pass without input. Empty tier
     /// lists (or a short list) leave the rate at `fps` for the remaining
-    /// idle time. Both lists are parallel and ascending in time.
+    /// idle time. Both lists are parallel and ascending in time. A tier
+    /// of 0 means "stop pumping entirely" -- `caustics_active` treats it
+    /// like `fps = 0` (frozen, zero extra frames), never as a 1Hz zombie.
     fn caustics_effective_fps(&self) -> u32 {
         let cfg = &self.config.caustics;
         let mut fps = cfg.fps;
@@ -6049,16 +6055,20 @@ impl Smallvil {
                 fps = (*tier_fps).min(fps);
             }
         }
-        fps.max(1)
+        fps
     }
 
     fn caustics_active(&self) -> bool {
         let cfg = &self.config.caustics;
-        if !self.config.water_effects || !cfg.enabled || cfg.fps == 0 {
+        // `speed = 0` with `fps > 0` would pump frames whose sample never
+        // changes: no commit increment, no damage, an EmptyFrame retry
+        // churn every vblank. Nothing to animate, so don't ask for frames.
+        if !self.config.water_effects || !cfg.enabled || cfg.fps == 0 || cfg.speed <= 0.0 {
             return false;
         }
         let fps = self.caustics_effective_fps();
-        self.caustics_last_advance.elapsed() >= Duration::from_secs_f32(1.0 / fps.max(1) as f32)
+        fps > 0
+            && self.caustics_last_advance.elapsed() >= Duration::from_secs_f32(1.0 / fps as f32)
     }
 
     /// Off-screen urgent/deep compass cues for the Ocean engine (spatial
@@ -6348,6 +6358,7 @@ impl Smallvil {
         self.ocean_canvases.remove(output_name);
         self.compasses.remove(output_name);
         self.swim_cameras.remove(output_name);
+        self.caustics.remove(output_name);
         if self
             .minimap_peek
             .as_ref()
@@ -6464,7 +6475,21 @@ impl Smallvil {
         let Some(win) = win else {
             return;
         };
-        let win = Rectangle::new(win.loc - output_geo.loc, win.size);
+        // Ocean windows render through the camera transform (see
+        // `ocean::placements`), but the fallbacks above return the window's
+        // world rect. Convert to the camera's view space before anchoring
+        // -- or the ripple lands somewhere off the window whenever the
+        // camera is zoomed in/out or panned, exactly the "ripple renders
+        // far away" reports. The pointer below is already view space, and
+        // running the radius through the view rect makes the ripple match
+        // the window's on-screen size at any zoom.
+        let win = if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+            // Windows render at output-local view coords
+            // `(world - camera.origin) * zoom`; anchor the ripple there too.
+            crate::ocean::world_to_view_rect(win, self.ocean.camera(&output.name()), Point::from((0, 0)))
+        } else {
+            Rectangle::new(win.loc - output_geo.loc, win.size)
+        };
         cfg.peak_radius = Some(cfg.radius_for_window(win.size.w as f32, win.size.h as f32));
         let anchor = cfg.anchor.unwrap_or(RippleAnchor::Center);
         let (dx, dy) = cfg.offset.unwrap_or((0, 0));

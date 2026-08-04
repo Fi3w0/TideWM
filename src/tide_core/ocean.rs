@@ -1439,7 +1439,11 @@ impl OceanSpace {
     }
 }
 
-fn world_to_view_rect(
+/// World-space rect -> view-space rect for one output's camera:
+/// `output_loc + (rect - camera.origin) * zoom`. Shared by the placement
+/// builder and ripple anchoring, so ripples land on the same rendered
+/// window the camera actually shows.
+pub(crate) fn world_to_view_rect(
     rect: Rectangle<i32, Logical>,
     camera: OceanCamera,
     output_loc: Point<i32, Logical>,
