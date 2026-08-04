@@ -2387,6 +2387,114 @@ impl Smallvil {
                     }
                 }
             }
+            Action::FocusApp(app_id) => {
+                if app_id.is_empty() {
+                    return;
+                }
+                type WlSurface = smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+                let windows: Vec<WlSurface> = self
+                    .space
+                    .elements()
+                    .filter_map(|window| {
+                        let toplevel = window.toplevel()?;
+                        let surface = toplevel.wl_surface().clone();
+                        let (id, _) = self.toplevel_identity(&surface);
+                        (id.as_deref() == Some(app_id.as_str())).then_some(surface)
+                    })
+                    .collect();
+                if windows.is_empty() {
+                    return;
+                }
+                let candidate = match self.config.spatial_engine {
+                    crate::config::SpatialEngine::Classic => {
+                        // Prefer a window already on the active workspace of
+                        // its output, else the first mapped. Switch to its
+                        // workspace first so the focus actually lands.
+                        let mut first: Option<WlSurface> = None;
+                        let mut target: Option<WlSurface> = None;
+                        for surface in windows {
+                            if first.is_none() {
+                                first = Some(surface.clone());
+                            }
+                            let (Some(output_name), Some(workspace)) = (
+                                self.layout.output_of(&surface),
+                                self.layout.workspace_of(&surface),
+                            ) else {
+                                continue;
+                            };
+                            if workspace == self.layout.active_workspace(output_name) {
+                                target = Some(surface);
+                                break;
+                            }
+                        }
+                        let target = target.or(first).expect("windows is non-empty");
+                        if let (Some(output_name), Some(workspace)) = (
+                            self.layout.output_of(&target),
+                            self.layout.workspace_of(&target),
+                        ) {
+                            if let Some(output) = self.output_by_name(output_name) {
+                                if workspace != self.layout.active_workspace(output_name) {
+                                    self.switch_workspace(&output, workspace);
+                                }
+                            }
+                        }
+                        target
+                    }
+                    crate::config::SpatialEngine::Ocean => {
+                        // Travel the primary output's camera to the window,
+                        // mirroring `jump_to_app_slot`'s travel-then-focus.
+                        if let Some(output) = self.primary_output() {
+                            if let Some(viewport) =
+                                self.space.output_geometry(&output).map(|geo| geo.size)
+                            {
+                                for surface in &windows {
+                                    if let Some(rect) = self.ocean.world_rect(
+                                        surface,
+                                        self.config.gaps,
+                                        self.config.bsp_split_bias,
+                                    ) {
+                                        self.ocean.center_on_rect(
+                                            &output.name(),
+                                            viewport,
+                                            rect,
+                                            Duration::from_millis(
+                                                self.config.ocean.camera_animation_ms,
+                                            ),
+                                            self.config.ocean.camera_sway,
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        windows[0].clone()
+                    }
+                };
+                self.focus_window(Some(candidate.clone()), SERIAL_COUNTER.next_serial());
+                self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged { surface: candidate });
+                self.request_redraw();
+            }
+            Action::CloseApp(app_id) => {
+                if app_id.is_empty() {
+                    return;
+                }
+                let windows: Vec<smithay::desktop::Window> = self
+                    .space
+                    .elements()
+                    .filter(|window| {
+                        window.toplevel().is_some_and(|toplevel| {
+                            let (id, _) = self.toplevel_identity(toplevel.wl_surface());
+                            id.as_deref() == Some(app_id.as_str())
+                        })
+                    })
+                    .cloned()
+                    .collect();
+                for window in windows {
+                    if let Some(toplevel) = window.toplevel() {
+                        toplevel.send_close();
+                    }
+                }
+            }
             Action::ToggleFloating => {
                 let focused = self.focused_window_surface();
                 if let Some(surface) = focused {

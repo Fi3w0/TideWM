@@ -745,6 +745,17 @@ pub enum Action {
     /// Stores the current output camera as a runtime bookmark. Configured
     /// bookmarks remain the startup baseline; this does not rewrite config.
     OceanSaveBookmark(String),
+    /// Focuses the most recently used mapped window of the given app_id
+    /// (the one on the current workspace when there is one), switching
+    /// workspace / traveling the camera there first if needed -- the dock
+    /// and taskbar's "smart open": running app, click icon, it comes to
+    /// you. No-op when the app has no mapped window; the caller (a bar's
+    /// pin) is expected to spawn it when it has none.
+    FocusApp(String),
+    /// Sends a graceful close request to every mapped window of the given
+    /// app_id -- the dock's "quit app". Apps that confirm-and-close on
+    /// their own handle it; anything stuck must be killed by the caller.
+    CloseApp(String),
     Quit,
 }
 
@@ -6516,6 +6527,12 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
     if let Some(name) = action.strip_prefix("ocean-save-bookmark:") {
         return (!name.trim().is_empty())
             .then(|| Action::OceanSaveBookmark(name.trim().to_string()));
+    }
+    if let Some(name) = action.strip_prefix("focus-app:") {
+        return (!name.trim().is_empty()).then(|| Action::FocusApp(name.trim().to_string()));
+    }
+    if let Some(name) = action.strip_prefix("close-app:") {
+        return (!name.trim().is_empty()).then(|| Action::CloseApp(name.trim().to_string()));
     }
     match action {
         "exit-submap" => Some(Action::ExitSubmap),
