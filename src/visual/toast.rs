@@ -338,12 +338,13 @@ pub(crate) fn rounded_rect_coverage_local(
     let (fx, fy) = ((x - left) as f32 + 0.5, (y - top) as f32 + 0.5);
     let (fw, fh) = (width as f32, height as f32);
 
-    let dx = (fx - fw / 2.0).abs() - (fw / 2.0 - radius);
-    let dy = (fy - fh / 2.0).abs() - (fh / 2.0 - radius);
-
-    if dx <= 0.0 || dy <= 0.0 {
-        return 1.0;
-    }
+    // See the identical fix in `error_overlay::rounded_rect_coverage`'s own
+    // doc comment: floor each axis's flat-region distance at zero instead
+    // of short-circuiting to "fully inside" the moment either axis alone
+    // is flat, or a point far outside on one axis read as fully covered as
+    // long as the other axis was in its flat middle.
+    let dx = ((fx - fw / 2.0).abs() - (fw / 2.0 - radius)).max(0.0);
+    let dy = ((fy - fh / 2.0).abs() - (fh / 2.0 - radius)).max(0.0);
 
     let dist = (dx * dx + dy * dy).sqrt();
     (radius - dist + 0.5).clamp(0.0, 1.0)
@@ -401,6 +402,24 @@ fn draw_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Same regression as `error_overlay`'s identical fix: a point far
+    /// outside the pill on the y axis, but in the flat (non-corner) x
+    /// region, must read as uncovered rather than the old short-circuit's
+    /// "flat on one axis means fully inside".
+    #[test]
+    fn coverage_is_zero_far_outside_the_shape_even_in_the_flat_region() {
+        let (left, top, width, height, radius) = (6, 6, 300, 70, 14.0);
+        let x_mid = left + width / 2;
+        assert_eq!(
+            rounded_rect_coverage_local(x_mid, 0, left, top, width, height, radius),
+            0.0
+        );
+        assert_eq!(
+            rounded_rect_coverage_local(x_mid, top + height / 2, left, top, width, height, radius),
+            1.0
+        );
+    }
 
     #[test]
     fn only_timed_toasts_request_animation_frames() {

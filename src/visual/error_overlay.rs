@@ -323,11 +323,19 @@ fn rounded_rect_coverage(
     let fy = (y - top) as f32 + 0.5;
     let fw = width as f32;
     let fh = height as f32;
-    let dx = (fx - fw / 2.0).abs() - (fw / 2.0 - radius);
-    let dy = (fy - fh / 2.0).abs() - (fh / 2.0 - radius);
-    if dx <= 0.0 || dy <= 0.0 {
-        return 1.0;
-    }
+    // Each axis's contribution is how far past that axis's flat region a
+    // point sits, floored at zero -- *not* an early return the moment
+    // either axis alone reads "still flat". The old `dx <= 0.0 || dy <=
+    // 0.0 => return 1.0` shortcut treated "flat along x" as "fully inside"
+    // regardless of how far outside the shape y actually was (and vice
+    // versa), so a point directly above/below the flat middle of an edge
+    // reported full coverage arbitrarily far from the shape -- the panel's
+    // fill/shadow/border all silently ignored their own top/bottom bounds
+    // there. Flooring each axis at zero first, then always taking the
+    // corner distance, keeps flat regions at 1.0 while a point genuinely
+    // outside on either axis correctly falls off.
+    let dx = ((fx - fw / 2.0).abs() - (fw / 2.0 - radius)).max(0.0);
+    let dy = ((fy - fh / 2.0).abs() - (fh / 2.0 - radius)).max(0.0);
     let distance = (dx * dx + dy * dy).sqrt();
     (radius - distance + 0.5).clamp(0.0, 1.0)
 }
@@ -335,6 +343,34 @@ fn rounded_rect_coverage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A point directly above the flat middle of the card's top edge, far
+    /// outside the shape on the y axis alone, must read as fully
+    /// uncovered -- the shape doesn't extend forever just because x
+    /// happens to sit in the flat (non-corner) region. Regression for a
+    /// real bug: the old formula's `dx <= 0.0 || dy <= 0.0 => return 1.0`
+    /// shortcut reported full coverage there, so the panel's fill/shadow/
+    /// border silently ignored their own vertical bounds across nearly
+    /// the whole card width -- visible as almost no margin/rounding
+    /// except right at the corners.
+    #[test]
+    fn coverage_is_zero_far_outside_the_shape_even_in_the_flat_region() {
+        let (left, top, width, height, radius) = (18, 9, 1884, 98, 12.0);
+        let x_mid = left + width / 2;
+        assert_eq!(
+            rounded_rect_coverage(x_mid, 0, left, top, width, height, radius),
+            0.0
+        );
+        assert_eq!(
+            rounded_rect_coverage(x_mid, top + height + 20, left, top, width, height, radius),
+            0.0
+        );
+        // Still fully covered well inside the same flat column.
+        assert_eq!(
+            rounded_rect_coverage(x_mid, top + height / 2, left, top, width, height, radius),
+            1.0
+        );
+    }
 
     #[test]
     fn wrapping_is_bounded_and_keeps_message_content() {
