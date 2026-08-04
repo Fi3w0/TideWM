@@ -3292,7 +3292,12 @@ impl WindowRule {
             return false;
         }
         if let Some(want) = &self.app_id {
-            if app_id != Some(want.as_str()) {
+            let Some(app_id) = app_id else { return false };
+            // Case-insensitive: app_ids are conventionally lowercase but
+            // real clients vary (and xwayland-satellite synthesizes them
+            // from WM_CLASS, which is free-form). A rule written as `mpv`
+            // silently missing a client reporting `MPV` is a footgun.
+            if !app_id.eq_ignore_ascii_case(want) {
                 return false;
             }
         }

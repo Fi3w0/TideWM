@@ -804,6 +804,20 @@ pub struct Smallvil {
     /// `restore_swallowed` when the child unmaps or is destroyed.
     pub swallowed: HashMap<WlSurface, SwallowedWindow>,
 
+    /// Per-surface map/unmap timing, used to detect the "flutter storm":
+    /// a client that nulls its buffer and immediately maps again, over
+    /// and over (a video player refusing a tiled size re-realizes its
+    /// surface on every refusal). Each quick flip increments `flips`;
+    /// once enough accumulate inside a short window the surface is marked
+    /// `flutter_floated` and `map_toplevel` floats it instead of tiling,
+    /// which is the one outcome that ends the storm. Pruned lazily to
+    /// surfaces the compositor still tracks.
+    pub lifecycle_flutter: HashMap<WlSurface, LifecycleFlutter>,
+
+    /// Surfaces given up on after a `lifecycle_flutter` storm: they float
+    /// on every subsequent map, never tiled again.
+    pub flutter_floated: HashSet<WlSurface>,
+
     /// Named scratchpads (Hyprland's named "special workspaces"):
     /// each name is lazily assigned its own reserved workspace number from
     /// `NAMED_SCRATCHPAD_BASE` upward on first use, then behaves exactly
@@ -1125,6 +1139,15 @@ pub(crate) fn is_scratchpad_workspace(workspace: u32) -> bool {
 pub struct SwallowedWindow {
     pub surface: WlSurface,
     pub window: Window,
+}
+
+/// Per-surface map/unmap flutter tracking (see `Smallvil::lifecycle_flutter`).
+#[derive(Default)]
+pub struct LifecycleFlutter {
+    /// When the surface last unmapped, if it unmapped recently.
+    pub last_unmapped_at: Option<std::time::Instant>,
+    /// Consecutive map-after-recent-unmap flips inside the flutter window.
+    pub flips: u32,
 }
 
 impl Smallvil {
@@ -3027,6 +3050,8 @@ impl Smallvil {
             scratchpad_previous: HashMap::new(),
             scratchpad_named: HashMap::new(),
             swallowed: HashMap::new(),
+            lifecycle_flutter: HashMap::new(),
+            flutter_floated: HashSet::new(),
             workspace_previous: HashMap::new(),
             pseudo_tiled: HashSet::new(),
             urgent: HashSet::new(),
@@ -4023,7 +4048,11 @@ impl Smallvil {
                 (name, workspace)
             });
 
-        let tag = self.floating_workspace.get_mut(&surface).unwrap();
+        let Some(tag) = self.floating_workspace.get_mut(&surface) else {
+            // The floating tag can vanish mid-commit if an unmap raced this
+            // sync; never crash the compositor over a stale rect write.
+            return;
+        };
         tag.rect = rect;
         if let Some((output, workspace)) = owner {
             tag.output = output;

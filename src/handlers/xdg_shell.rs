@@ -646,9 +646,13 @@ pub fn handle_commit(state: &mut Smallvil, surface: &WlSurface) {
     let transition = lifecycle_transition(tracking, has_buffer);
     match transition {
         ToplevelTransition::Map => {
+            state.note_toplevel_flutter(surface, true);
             state.map_toplevel(surface);
         }
-        ToplevelTransition::Unmap => state.unmap_toplevel(surface),
+        ToplevelTransition::Unmap => {
+            state.note_toplevel_flutter(surface, false);
+            state.unmap_toplevel(surface);
+        }
         ToplevelTransition::None => {}
     }
 
@@ -851,6 +855,68 @@ impl Smallvil {
         .unwrap_or((None, None))
     }
 
+    /// Tracks the map/unmap "flutter storm": a client that nulls its
+    /// buffer and immediately maps again, over and over. A video player
+    /// refusing a tiled size does exactly this -- every refusal re-realizes
+    /// its surface, which retiles and sends the tiled configure again,
+    /// which the player refuses again, with no bound. Each Map that follows
+    /// an Unmap inside `FLUTTER_WINDOW` counts a flip; at
+    /// `FLUTTER_FLOPS` the surface is marked `flutter_floated`, and the
+    /// next `map_toplevel` floats it instead of tiling -- the one outcome
+    /// that ends the storm (the window gets its natural size, nothing to
+    /// refuse). One real minimize is a single flip and never trips this.
+    fn note_toplevel_flutter(&mut self, surface: &WlSurface, mapping: bool) {
+        const FLUTTER_WINDOW: std::time::Duration = std::time::Duration::from_millis(1000);
+        const FLUTTER_FLOPS: u32 = 3;
+        let now = std::time::Instant::now();
+        if mapping {
+            let record = self.lifecycle_flutter.entry(surface.clone()).or_default();
+            record.flips = match record.last_unmapped_at {
+                Some(at) if now.saturating_duration_since(at) <= FLUTTER_WINDOW => {
+                    record.flips + 1
+                }
+                _ => 0,
+            };
+            let flips = record.flips;
+            if flips >= FLUTTER_FLOPS && self.flutter_floated.insert(surface.clone()) {
+                let (app_id, title) = self.toplevel_identity(surface);
+                tracing::info!(
+                    ?app_id,
+                    ?title,
+                    flips,
+                    "flutter storm detected, floating surface instead of tiling"
+                );
+            }
+        } else {
+            self.lifecycle_flutter
+                .entry(surface.clone())
+                .or_default()
+                .last_unmapped_at = Some(now);
+        }
+        // Bound the tracking to windows the compositor still knows about:
+        // drop records (and float flags) for surfaces that are neither
+        // mapped nor waiting in the unmapped set.
+        #[allow(clippy::mutable_key_type)] // WlSurface-keyed tracking set
+        let tracked: std::collections::HashSet<WlSurface> = self
+            .unmapped_toplevels
+            .keys()
+            .cloned()
+            .chain(
+                self.space
+                    .elements()
+                    .filter_map(|window| window.toplevel().map(|t| t.wl_surface().clone())),
+            )
+            .collect();
+        self.lifecycle_flutter.retain(|surface, record| {
+            record.flips >= FLUTTER_FLOPS
+                || record
+                    .last_unmapped_at
+                    .is_some_and(|at| now.saturating_duration_since(at) <= FLUTTER_WINDOW)
+                || tracked.contains(surface)
+        });
+        self.flutter_floated.retain(|s| tracked.contains(s));
+    }
+
     fn map_toplevel(&mut self, surface: &WlSurface) {
         let (app_id, title) = self.toplevel_identity(surface);
         let rule = self
@@ -902,6 +968,9 @@ impl Smallvil {
                 });
                 has_parent || is_fixed_size
             });
+        // A surface caught in a map/unmap flutter storm is floated from now
+        // on: tiling it is exactly what the client keeps refusing.
+        let flutter_float = self.flutter_floated.contains(surface);
 
         let Some(window) = self.unmapped_toplevels.remove(surface) else {
             return;
@@ -920,7 +989,12 @@ impl Smallvil {
         // exactly in its place. Skipped when the new window is about to
         // float -- hiding the terminal under a floating child would leave
         // an empty tile behind.
-        let swallow_target = if ocean_engine || rule.float || rule.pin || implicit_float {
+        let swallow_target = if ocean_engine
+            || rule.float
+            || rule.pin
+            || implicit_float
+            || flutter_float
+        {
             None
         } else {
             self.swallow_candidate(surface, &output.name(), workspace)
@@ -959,8 +1033,9 @@ impl Smallvil {
         // terminal, say) receives both in quick succession and visibly
         // re-flows its content twice. See `skips_first_tile_configure`'s own
         // doc comment for which conversions actually guarantee that second
-        // configure.
-        if skips_first_tile_configure(&rule, implicit_float) {
+        // configure. A flutter-floated window guarantees the same second
+        // (floating) configure, so it skips the tiled one too.
+        if skips_first_tile_configure(&rule, implicit_float) || flutter_float {
             self.retile_skip_first_configure(surface);
         } else {
             self.retile();
@@ -983,7 +1058,7 @@ impl Smallvil {
         // exact same logic the interactive toggles use, rather than
         // re-deriving floating-rect placement from scratch) is, for the
         // same reason, still applied before the window's first real frame.
-        if rule.float || rule.pin || rule.maximize || implicit_float {
+        if rule.float || rule.pin || rule.maximize || implicit_float || flutter_float {
             self.toggle_floating(surface);
             if rule.pin {
                 if ocean_engine {
