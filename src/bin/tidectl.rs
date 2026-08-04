@@ -15,11 +15,17 @@
 //! `tidectl doctor` (a battery of quick health checks) and `tidectl report`
 //! (a plain-text diagnostic file for attaching to GitHub issues) -- see
 //! `tidectl_diagnostics.rs`.
+//!
+//! `tidectl subscribe [event...]` is the one long-lived command: it opens
+//! the subscribe mode (`ipc.rs`) and prints one JSON line per event,
+//! `{"event": "<kind>", "data": ...}`, until the compositor disappears.
+//! A bar widget runs it as a persistent process and parses stdout instead
+//! of polling the one-shot queries -- instant updates, no busy loop.
 
 mod tidectl_diagnostics;
 
 use std::env;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
@@ -60,12 +66,18 @@ fn main() {
         _ => {}
     }
 
-    let request = build_request(&args).unwrap_or_else(|msg| fail(&msg));
     let socket = socket_override
         .clone()
         .map(Ok)
         .unwrap_or_else(find_socket)
         .unwrap_or_else(|msg| fail(&msg));
+
+    // Long-lived subscribe mode: takes over the process, never returns.
+    if args[0] == "subscribe" {
+        cmd_subscribe(&socket, &args[1..]);
+    }
+
+    let request = build_request(&args).unwrap_or_else(|msg| fail(&msg));
     let response = match send_request(&socket, &request) {
         Ok(r) => r,
         Err(e)
@@ -245,6 +257,70 @@ fn cmd_report() {
 fn fail(msg: &str) -> ! {
     eprintln!("tidectl: {msg}");
     std::process::exit(1);
+}
+
+/// `tidectl subscribe [event...]`: opens the long-lived subscribe mode and
+/// prints one JSON line per matching event until the compositor closes the
+/// connection. Event names are the IPC `events` array entries (`window`,
+/// `workspace`, `focus`, `urgent`, `depth`, `config`); with no arguments
+/// every kind is subscribed. A stale socket file (TideWM gone without a
+/// clean drop) is removed and retried once, same as the one-shot path.
+fn cmd_subscribe(socket_path: &Path, events: &[String]) -> ! {
+    let request = if events.is_empty() {
+        json!({ "request": "subscribe" })
+    } else {
+        json!({ "request": "subscribe", "events": events })
+    };
+    let stream = match UnixStream::connect(socket_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+            // Mirrors the one-shot path's stale-socket dance.
+            let _ = std::fs::remove_file(socket_path);
+            UnixStream::connect(socket_path)
+                .unwrap_or_else(|e| fail(&format!("failed to connect to {}: {e}", socket_path.display())))
+        }
+        Err(e) => fail(&format!("failed to connect to {}: {e}", socket_path.display())),
+    };
+    let mut write_stream = match stream.try_clone() {
+        Ok(s) => s,
+        Err(e) => fail(&format!("failed to clone socket: {e}")),
+    };
+    let mut payload = serde_json::to_vec(&request).unwrap_or_else(|e| fail(&format!("{e}")));
+    payload.push(b'\n');
+    write_stream
+        .write_all(&payload)
+        .unwrap_or_else(|e| fail(&format!("failed to write request: {e}")));
+
+    let mut reader = BufReader::new(stream);
+    let mut ack = String::new();
+    match reader.read_line(&mut ack) {
+        Ok(0) | Err(_) => fail("no response from TideWM (is it running?)"),
+        Ok(_) => {}
+    }
+    let ack: Value = serde_json::from_str(&ack).unwrap_or_else(|_| {
+        fail("unrecognized response from TideWM");
+    });
+    if !ack.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        let err = ack.get("error").and_then(Value::as_str).unwrap_or("subscribe refused");
+        fail(err);
+    }
+
+    // Streaming: one JSON line per event, echoed verbatim. Exit when the
+    // compositor goes away (socket EOF), so a supervisor can restart us.
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = reader
+            .read_line(&mut line)
+            .unwrap_or_else(|e| fail(&format!("read error on {}: {e}", socket_path.display())));
+        if read == 0 {
+            break;
+        }
+        print!("{line}");
+        use std::io::Write as _;
+        let _ = std::io::stdout().flush();
+    }
+    std::process::exit(0);
 }
 
 /// Builds the `{"request": ...}` JSON body. Read queries pass straight
@@ -458,6 +534,7 @@ fn print_help() {
 USAGE:
     tidectl <query>
     tidectl <action>
+    tidectl subscribe [event...]
 
 QUERIES:
     outputs             list outputs (name, mode, scale, position, transform, active workspace)
@@ -465,6 +542,13 @@ QUERIES:
     windows             list currently mapped windows
     focused-window       (alias: focused) the currently focused window, if any
     active-submap        the currently active `submap <name> {{ }}` block, if any
+
+STREAMING:
+    subscribe [event...]   long-lived: print one JSON line per event
+                        ({{"event": "...", "data": ...}}) until TideWM exits.
+                        Event names: window, workspace, focus, urgent,
+                        depth, config. No names subscribes to all. Use
+                        --socket to point at a specific compositor.
 
 DIAGNOSTICS:
     doctor              run quick health checks (PASS/WARN/FAIL/SKIP)
