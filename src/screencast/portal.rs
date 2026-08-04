@@ -186,10 +186,21 @@ impl Portal {
         }
 
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let token = format!("tidewm{id}");
         let mut results = HashMap::new();
+        // `session_handle_token` is load-bearing: modern xdg-desktop-portal
+        // (1.17+) builds its own session from the backend's token and
+        // *asserts* it is present (`xdp_session_initable_init`), crashing
+        // the whole portal when a backend replies without it. The old
+        // `session_id` key is kept for older portal versions.
+        results.insert(
+            "session_handle_token".to_string(),
+            OwnedValue::try_from(Value::from(token.clone()))
+                .expect("a String always converts to OwnedValue"),
+        );
         results.insert(
             "session_id".to_string(),
-            OwnedValue::try_from(Value::from(format!("tidewm{id}")))
+            OwnedValue::try_from(Value::from(token))
                 .expect("a String always converts to OwnedValue"),
         );
         tracing::debug!(%session_handle, "Portal screencast session created");

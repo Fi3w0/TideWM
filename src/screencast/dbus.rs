@@ -137,24 +137,32 @@ fn run(
     // `.name()` above) so a name collision here -- unlikely, but possible if
     // another compositor's backend is somehow already claiming it -- doesn't
     // take down the already-working Mutter interface too.
+    //
+    // Both case variants are claimed: xdg-desktop-portal derives the backend
+    // name from `XDG_CURRENT_DESKTOP`, and display managers hand that out in
+    // the session's exact spelling (`TideWM` here) while the conventional
+    // portal naming is lowercase -- some xdp versions lowercase the desktop
+    // name before looking up the backend, some use it verbatim. Claiming
+    // both means the backend is reachable either way, at the cost of one
+    // inert extra name.
     let portal_connection = async_connection.clone();
     let portal_task = async_connection.executor().spawn(
         async move {
-            match portal_connection
-                .request_name("org.freedesktop.impl.portal.desktop.tidewm")
-                .await
-            {
-                Ok(()) => tracing::info!(
-                    "Screencast portal backend registered as org.freedesktop.impl.portal.desktop.tidewm"
-                ),
-                Err(err) => {
-                    tracing::warn!(
-                        %err,
-                        "Failed to claim the screencast portal backend name; Discord/OBS-style \
-                         portal screen sharing will not reach TideWM (org.gnome.Mutter.ScreenCast \
-                         is still available for xdg-desktop-portal-gnome setups)"
-                    );
-                    return;
+            for name in [
+                "org.freedesktop.impl.portal.desktop.tidewm",
+                "org.freedesktop.impl.portal.desktop.TideWM",
+            ] {
+                match portal_connection.request_name(name).await {
+                    Ok(()) => tracing::info!("Screencast portal backend registered as {name}"),
+                    Err(err) => {
+                        tracing::warn!(
+                            %err,
+                            name,
+                            "Failed to claim the screencast portal backend name; Discord/OBS-style \
+                             portal screen sharing will not reach TideWM (org.gnome.Mutter.ScreenCast \
+                             is still available for xdg-desktop-portal-gnome setups)"
+                        );
+                    }
                 }
             }
             if let Err(err) = super::portal::watch_disconnects(&portal_connection, portal_sessions).await {

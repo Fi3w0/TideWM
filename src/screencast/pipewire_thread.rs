@@ -5,6 +5,14 @@
 //! direct GL rendering with an explicit completion fence; SHM continues to
 //! copy the newest owned BGRA readback. No GL, Wayland, or `Smallvil` value
 //! crosses into this thread.
+//!
+//! The worker survives a PipeWire daemon restart: a core error event (or
+//! the loop's own fd failing) ends the connection cycle and the worker
+//! reconnects with a fresh core and stream after a one-second backoff, up
+//! to `MAX_RECONNECTS` attempts -- matching xdg-desktop-portal-wlr's
+//! exit-and-restart semantics without the process death. Only after the
+//! retries are exhausted does the worker go dead, which the portal
+//! notices (`is_alive`) and heals on the app's next `Start`.
 
 use std::{
     os::fd::BorrowedFd,
@@ -115,6 +123,22 @@ pub(super) fn start(
     }
 }
 
+/// How one connection cycle ended. `DaemonLost` is retried with a fresh
+/// connection; `Stopped` is final.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConnectionOutcome {
+    Stopped,
+    DaemonLost,
+}
+
+/// How many fresh connection attempts a worker makes after the PipeWire
+/// daemon dies before giving up. Each attempt waits a second first, so
+/// the window is ~10 seconds of daemon downtime -- long enough to ride
+/// out a `systemctl --user restart pipewire`, short enough that a dead
+/// session surfaces to the portal (which restarts the stream on the next
+/// `Start`, see `dbus.rs`) instead of retrying forever.
+const MAX_RECONNECTS: u32 = 10;
+
 fn run(
     source: ScreencastSource,
     width: u32,
@@ -126,13 +150,85 @@ fn run(
 ) -> Result<(), String> {
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|err| err.to_string())?;
-    let context = pw::context::ContextRc::new(&mainloop, None).map_err(|err| err.to_string())?;
+    let mut reconnects = 0u32;
+    loop {
+        match run_connection(
+            &mainloop,
+            source.clone(),
+            width,
+            height,
+            draw_cursor,
+            &compositor,
+            &stop,
+            &started,
+        )? {
+            ConnectionOutcome::Stopped => return Ok(()),
+            ConnectionOutcome::DaemonLost => {
+                reconnects += 1;
+                if reconnects > MAX_RECONNECTS {
+                    return Err(format!(
+                        "PipeWire daemon unreachable after {MAX_RECONNECTS} reconnect attempts"
+                    ));
+                }
+                tracing::warn!(
+                    attempt = reconnects,
+                    "PipeWire connection lost; reconnecting screencast stream"
+                );
+                // One-second backoff before reconnecting. The loop is the
+                // only way to notice `stop`, so keep iterating through it.
+                let deadline = Instant::now() + Duration::from_secs(1);
+                while Instant::now() < deadline {
+                    if stop.try_recv().is_ok() {
+                        return Ok(());
+                    }
+                    let wait = deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(50));
+                    mainloop.loop_().iterate(pw::loop_::Timeout::Finite(wait));
+                }
+            }
+        }
+    }
+}
+
+/// One full connection cycle: core + stream + negotiation, then the
+/// trigger loop. Returns `DaemonLost` when the daemon dies (a core error
+/// event, or the loop reporting a fatal fd error), so the caller can
+/// reconnect with fresh objects -- PipeWire objects are single-use once
+/// their core is gone.
+#[allow(clippy::too_many_arguments)]
+fn run_connection(
+    mainloop: &pw::main_loop::MainLoopRc,
+    source: ScreencastSource,
+    width: u32,
+    height: u32,
+    draw_cursor: bool,
+    compositor: &smithay::reexports::calloop::channel::Sender<ScreencastEvent>,
+    stop: &mpsc::Receiver<()>,
+    started: &mpsc::SyncSender<Result<u32, String>>,
+) -> Result<ConnectionOutcome, String> {
+    let context = pw::context::ContextRc::new(mainloop, None).map_err(|err| err.to_string())?;
     let core = context.connect_rc(None).map_err(|err| err.to_string())?;
     let target = FrameTarget::new(draw_cursor);
     let node_name = match &source {
         ScreencastSource::Output(output) => format!("tidewm-screencast-{output}"),
         ScreencastSource::Window(id) => format!("tidewm-screencast-window-{id}"),
     };
+
+    // A dead daemon surfaces as a core error event (fatal, non-recoverable
+    // per the pw_core spec) or as the loop's own fd failing. Either one
+    // flips this flag and ends the cycle so the caller reconnects. Kept
+    // alive for the whole cycle by the `_core_listener` binding.
+    let daemon_lost = Arc::new(AtomicBool::new(false));
+    let daemon_lost_for_cb = daemon_lost.clone();
+    let _core_listener = core
+        .add_listener_local()
+        .error(move |id, seq, res, message| {
+            tracing::warn!(id, seq, res, %message, "PipeWire core error event");
+            daemon_lost_for_cb.store(true, Ordering::Release);
+        })
+        .register();
+
     let stream = pw::stream::StreamBox::new(
         &core,
         "TideWM monitor capture",
@@ -405,16 +501,29 @@ fn run(
     let mut next_trigger = Instant::now();
     loop {
         if target.is_closed() {
-            break;
+            return Ok(ConnectionOutcome::Stopped);
         }
         match stop.try_recv() {
-            Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
+            Ok(()) | Err(mpsc::TryRecvError::Disconnected) => {
+                return Ok(ConnectionOutcome::Stopped);
+            }
             Err(mpsc::TryRecvError::Empty) => {}
+        }
+        if daemon_lost.load(Ordering::Acquire) {
+            return Ok(ConnectionOutcome::DaemonLost);
         }
         let wait = next_trigger
             .saturating_duration_since(Instant::now())
             .min(Duration::from_millis(50));
-        mainloop.loop_().iterate(pw::loop_::Timeout::Finite(wait));
+        if mainloop.loop_().iterate(pw::loop_::Timeout::Finite(wait)) < 0 {
+            // The loop's own socket failed (typically EPIPE when the
+            // daemon dies). The core error event above is the other
+            // signal; either way the connection is unrecoverable.
+            return Ok(ConnectionOutcome::DaemonLost);
+        }
+        if daemon_lost.load(Ordering::Acquire) {
+            return Ok(ConnectionOutcome::DaemonLost);
+        }
         if Instant::now() >= next_trigger {
             if stream.is_driving() {
                 let _ = stream.trigger_process();
@@ -423,9 +532,7 @@ fn run(
         }
         if Instant::now() >= deadline && stream.node_id() == pw::constants::ID_ANY {
             let _ = started.try_send(Err("PipeWire did not assign a node id".into()));
-            break;
+            return Err("PipeWire did not assign a node id".into());
         }
     }
-    let _ = stream.disconnect();
-    Ok(())
 }
