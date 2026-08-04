@@ -276,10 +276,17 @@ fn cmd_subscribe(socket_path: &Path, events: &[String]) -> ! {
         Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
             // Mirrors the one-shot path's stale-socket dance.
             let _ = std::fs::remove_file(socket_path);
-            UnixStream::connect(socket_path)
-                .unwrap_or_else(|e| fail(&format!("failed to connect to {}: {e}", socket_path.display())))
+            UnixStream::connect(socket_path).unwrap_or_else(|e| {
+                fail(&format!(
+                    "failed to connect to {}: {e}",
+                    socket_path.display()
+                ))
+            })
         }
-        Err(e) => fail(&format!("failed to connect to {}: {e}", socket_path.display())),
+        Err(e) => fail(&format!(
+            "failed to connect to {}: {e}",
+            socket_path.display()
+        )),
     };
     let mut write_stream = match stream.try_clone() {
         Ok(s) => s,
@@ -301,7 +308,10 @@ fn cmd_subscribe(socket_path: &Path, events: &[String]) -> ! {
         fail("unrecognized response from TideWM");
     });
     if !ack.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-        let err = ack.get("error").and_then(Value::as_str).unwrap_or("subscribe refused");
+        let err = ack
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("subscribe refused");
         fail(err);
     }
 

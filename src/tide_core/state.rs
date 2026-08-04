@@ -6100,8 +6100,7 @@ impl Smallvil {
             return false;
         }
         let fps = self.caustics_effective_fps();
-        fps > 0
-            && self.caustics_last_advance.elapsed() >= Duration::from_secs_f32(1.0 / fps as f32)
+        fps > 0 && self.caustics_last_advance.elapsed() >= Duration::from_secs_f32(1.0 / fps as f32)
     }
 
     /// Off-screen urgent/deep compass cues for the Ocean engine (spatial
@@ -6519,7 +6518,11 @@ impl Smallvil {
         let win = if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
             // Windows render at output-local view coords
             // `(world - camera.origin) * zoom`; anchor the ripple there too.
-            crate::ocean::world_to_view_rect(win, self.ocean.camera(&output.name()), Point::from((0, 0)))
+            crate::ocean::world_to_view_rect(
+                win,
+                self.ocean.camera(&output.name()),
+                Point::from((0, 0)),
+            )
         } else {
             Rectangle::new(win.loc - output_geo.loc, win.size)
         };

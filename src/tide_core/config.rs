@@ -5749,7 +5749,10 @@ fn apply_popup_block(cfg: &mut PopupConfig, body: &[waves::Entry]) {
             }
             "border_color" | "border-color" => {
                 cfg.border_color = parse_rgba_color(value).or_else(|| {
-                    tracing::warn!(value, "Expected popup.border_color as an RGBA color, ignoring");
+                    tracing::warn!(
+                        value,
+                        "Expected popup.border_color as an RGBA color, ignoring"
+                    );
                     None
                 });
             }

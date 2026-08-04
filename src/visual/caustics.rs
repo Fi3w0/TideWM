@@ -224,15 +224,15 @@ fn render_pattern(
         .bind(&mut texture)
         .map_err(|err| tracing::warn!(%err, "Failed to bind caustics pattern target"))
         .ok()?;
-    let mut tracker =
-        OutputDamageTracker::new((size.w, size.h), 1.0, Transform::Normal);
+    let mut tracker = OutputDamageTracker::new((size.w, size.h), 1.0, Transform::Normal);
     let element = PatternElement {
         id: Id::new(),
         area: Rectangle::from_size(Size::<i32, Logical>::from((size.w, size.h))),
         program: program.clone(),
         sample,
     };
-    if let Err(err) = tracker.render_output(renderer, &mut target, 0, &[element], [0.0, 0.0, 0.0, 0.0])
+    if let Err(err) =
+        tracker.render_output(renderer, &mut target, 0, &[element], [0.0, 0.0, 0.0, 0.0])
     {
         tracing::warn!(%err, "Failed to render caustics pattern");
         return None;

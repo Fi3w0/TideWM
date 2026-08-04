@@ -158,7 +158,10 @@ impl SourcePicker {
     }
 
     fn to_local(&self, global: (f64, f64)) -> (f64, f64) {
-        (global.0 - self.location.0 as f64, global.1 - self.location.1 as f64)
+        (
+            global.0 - self.location.0 as f64,
+            global.1 - self.location.1 as f64,
+        )
     }
 
     fn row_at(&self, local: (f64, f64)) -> Option<usize> {
@@ -381,7 +384,14 @@ fn build_buffer(
 ) -> MemoryRenderBuffer {
     let mut pixels = vec![0u8; (width * height * 4) as usize];
     // Panel body: rounded, ink, thin cyan border.
-    fill_rounded_rect(&mut pixels, width, height, (0, 0, width, height), CORNER_RADIUS, BG);
+    fill_rounded_rect(
+        &mut pixels,
+        width,
+        height,
+        (0, 0, width, height),
+        CORNER_RADIUS,
+        BG,
+    );
     stroke_rounded_rect(
         &mut pixels,
         width,
@@ -394,7 +404,17 @@ fn build_buffer(
     let font = crate::toast::font();
 
     // Header: title + hint.
-    draw_text(&mut pixels, width, height, font, "Share a source", PAD + 2, PAD + 26, 21.0, TEXT);
+    draw_text(
+        &mut pixels,
+        width,
+        height,
+        font,
+        "Share a source",
+        PAD + 2,
+        PAD + 26,
+        21.0,
+        TEXT,
+    );
     let hint = "↑↓ navigate · Enter share · Esc cancel";
     let hint_w = text_width(font, hint, 12.0);
     draw_text(
@@ -440,7 +460,13 @@ fn build_buffer(
                 HOVER_TINT,
             );
         }
-        let accent = if is_selected { CYAN } else if is_hovered { TEXT } else { DIM };
+        let accent = if is_selected {
+            CYAN
+        } else if is_hovered {
+            TEXT
+        } else {
+            DIM
+        };
         draw_source_icon(
             &mut pixels,
             width,
@@ -571,7 +597,13 @@ fn draw_source_icon(
             // Monitor: rect outline + stand.
             stroke(pixels, x, y, 24, 16);
             fill_rect(pixels, width, height, (x + 8, y + 16, 8, 3), (r, g, b, 255));
-            fill_rect(pixels, width, height, (x + 10, y + 19, 4, 2), (r, g, b, 255));
+            fill_rect(
+                pixels,
+                width,
+                height,
+                (x + 10, y + 19, 4, 2),
+                (r, g, b, 255),
+            );
         }
     }
 }

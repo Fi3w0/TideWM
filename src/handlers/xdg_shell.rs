@@ -880,9 +880,7 @@ impl Smallvil {
         if mapping {
             let record = self.lifecycle_flutter.entry(surface.clone()).or_default();
             record.flips = match record.last_unmapped_at {
-                Some(at) if now.saturating_duration_since(at) <= FLUTTER_WINDOW => {
-                    record.flips + 1
-                }
+                Some(at) if now.saturating_duration_since(at) <= FLUTTER_WINDOW => record.flips + 1,
                 _ => 0,
             };
             let flips = record.flips;
@@ -955,7 +953,11 @@ impl Smallvil {
         }
         // An active pointer grab (tile resize/drag, move) legitimately
         // lags commits behind the latest configure. Never count those.
-        if self.seat.get_pointer().is_some_and(|pointer| pointer.is_grabbed()) {
+        if self
+            .seat
+            .get_pointer()
+            .is_some_and(|pointer| pointer.is_grabbed())
+        {
             return;
         }
         let Some(window) = self.mapped_toplevel_window(surface) else {
@@ -1074,16 +1076,12 @@ impl Smallvil {
         // exactly in its place. Skipped when the new window is about to
         // float -- hiding the terminal under a floating child would leave
         // an empty tile behind.
-        let swallow_target = if ocean_engine
-            || rule.float
-            || rule.pin
-            || implicit_float
-            || flutter_float
-        {
-            None
-        } else {
-            self.swallow_candidate(surface, &output.name(), workspace)
-        };
+        let swallow_target =
+            if ocean_engine || rule.float || rule.pin || implicit_float || flutter_float {
+                None
+            } else {
+                self.swallow_candidate(surface, &output.name(), workspace)
+            };
         if ocean_engine {
             let viewport = self
                 .space
@@ -1821,9 +1819,7 @@ fn is_dimension_pinned(
     min_size: smithay::utils::Size<i32, smithay::utils::Logical>,
     max_size: smithay::utils::Size<i32, smithay::utils::Logical>,
 ) -> bool {
-    min_size.w > 0
-        && min_size.h > 0
-        && (min_size.w == max_size.w || min_size.h == max_size.h)
+    min_size.w > 0 && min_size.h > 0 && (min_size.w == max_size.w || min_size.h == max_size.h)
 }
 
 #[cfg(test)]
@@ -1832,7 +1828,6 @@ mod tests {
         is_dimension_pinned, lifecycle_transition, skips_first_tile_configure, ToplevelTracking,
         ToplevelTransition,
     };
-    use smithay::utils::Size;
 
     #[test]
     fn role_without_buffer_stays_unmapped() {

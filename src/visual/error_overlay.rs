@@ -115,8 +115,7 @@ fn build_buffer(
     // proportionally tight -- the rounding looks sized for a tiny toast.
     // Scale by the card-height ratio so the panel keeps the same visual
     // roundness the toast has, not a fixed pixel value.
-    let radius = (theme.radius as f32 * card_height as f32
-        / crate::toast::CARD_HEIGHT as f32)
+    let radius = (theme.radius as f32 * card_height as f32 / crate::toast::CARD_HEIGHT as f32)
         .min(card_height as f32 / 2.0)
         .max(4.0);
     for y in 0..PANEL_HEIGHT {

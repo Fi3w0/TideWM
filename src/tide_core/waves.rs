@@ -329,7 +329,9 @@ fn resolve_uncycled(
                     Ok(included) => merge_into(&mut merged, included),
                     Err(err) => {
                         tracing::warn!(path = %include_path.display(), %err, "Failed to load included config file, skipping");
-                        warnings.push(format!("Failed to load included config file: {err}, skipping"));
+                        warnings.push(format!(
+                            "Failed to load included config file: {err}, skipping"
+                        ));
                     }
                 }
             }

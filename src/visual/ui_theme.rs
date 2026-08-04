@@ -97,7 +97,8 @@ impl UiTheme {
     /// { border_color }` pin if set, else the same gradient `accent()`
     /// gives window borders.
     pub fn popup_accent(self, urgent: bool, t: f32) -> [u8; 3] {
-        self.popup_border_color.unwrap_or_else(|| self.accent(urgent, t))
+        self.popup_border_color
+            .unwrap_or_else(|| self.accent(urgent, t))
     }
 
     #[cfg(test)]

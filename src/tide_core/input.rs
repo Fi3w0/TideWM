@@ -2391,7 +2391,8 @@ impl Smallvil {
                 if app_id.is_empty() {
                     return;
                 }
-                type WlSurface = smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+                type WlSurface =
+                    smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
                 let windows: Vec<WlSurface> = self
                     .space
                     .elements()
