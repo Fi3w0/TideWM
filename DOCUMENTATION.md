@@ -1309,8 +1309,11 @@ tidectl submap nav              # shorthand for action submap:nav
 tidectl action toggle-floating  # explicit passthrough, works for any action string
 tidectl batch workspace:2 spawn:kitty
 tidectl active-submap
+tidectl subscribe focus workspace window   # long-lived event stream, one JSON line per event
 --json                          # on any query, for scripting
 ```
+
+`tidectl subscribe [event...]` is the one long-lived CLI command: it opens the subscribe mode above and prints each `{"event": "<kind>", "data": ...}` line verbatim until TideWM exits (socket EOF ends the process cleanly, so a supervisor can restart it). With no event names every channel is subscribed. A bar or panel runs it as a persistent process and parses stdout — instant, event-driven updates with no polling; the QuickShell Tide rice uses exactly this instead of its old fixed-rate `tidectl` polls.
 
 **Diagnostics.** Two host-side commands run entirely outside the socket, so they work even when TideWM won't start:
 

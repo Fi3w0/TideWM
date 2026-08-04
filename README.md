@@ -56,8 +56,11 @@ sudo apt install pkg-config libwayland-dev libudev-dev libinput-dev libxkbcommon
 ```bash
 git clone https://github.com/Fi3w0/TideWM.git
 cd TideWM
-cargo build --release --locked
-cargo run --locked   # opens nested inside your current session, safe to try
+# `--features screencast` enables the portal screen-share backend (off by
+# default: it pulls in the zbus async runtime and PipeWire threads).
+# Without it, OBS/portal clients see no capture sources at all.
+cargo build --release --locked --features screencast
+cargo run --locked --features screencast   # opens nested inside your current session, safe to try
 ```
 
 openSUSE and everything else, plus setting it up as a real login session: see [TECHNICAL_REPORT.md](TECHNICAL_REPORT.md#building).
