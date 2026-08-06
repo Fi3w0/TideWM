@@ -155,6 +155,76 @@ Same function, same semantics, one registry. The node form is sugar, not a secon
 - **Loops use `$i`.** A loop variable substitutes textually, the way `$mod` does. It looks like a config variable and is not one.
 - **Aliases warn.** Renamed keys from the old format still parse, with a one-line deprecation warning in the panel. They go away after one release.
 
+## The desugaring contract (for implementers)
+
+This section is the exact surface-to-Lua mapping. The rule of thumb: the surface is sugar over a small registration API, and every surface construct maps to exactly one Lua construct. Implementations must follow this table, not invent a second translation.
+
+### The registration API (provided by the host environment)
+
+| Surface | Emitted Lua | Host behavior |
+| --- | --- | --- |
+| `key = value` (leaf) | `_leaf("key", value)` | Records an assignment entry; value serialized back to its textual form |
+| `$name = value` (variable) | `_vardef("name", value)` | Records a variable entry AND sets the Lua global `name` |
+| `name { }` (block) | `_block("name", "header", function() ... end)` | Runs the builder, captures produced entries into the block body |
+| `bind X { a b }` | `bind("X", {"a", "b"})` | One binding entry per action |
+| `bind X = action` (deprecated line form) | `bind("X", "action")` | Same registration, value is raw rest-of-line |
+| `include "path"` | `include("path")` | Records an include entry, resolved later by the existing include machinery |
+| `$wave(a, b)` in a string | `.. wave("a", "b")` spliced | First installed candidate, last-candidate fallback, unchanged from today |
+| `wave(a, b)` in an expression | `wave("a", "b")` | Same function, now callable anywhere |
+| `if` / `for` / `while` / `do` / `end` / `else` / `elseif` / `local` / `function` / `return` | passed through verbatim | Lua statements; surface lines inside their bodies are still transpiled |
+| `fn name(args) { }` | `local function name(args) ... end` | Macro sugar; params are in scope for `$param` concatenation |
+| `script { }` | body passed through raw | No transpilation, no comment stripping |
+| `on "event" { }` | not yet | Landed in W7 |
+
+The environment also exposes `math`, `string`, `table`, and a `tide` query table (empty in W1, populated in W7).
+
+### Statement dispatch
+
+A line, after comment stripping, is dispatched on its first word:
+
+1. `}` alone closes a block. A line ending in `{` (trimmed) opens one: first word is the keyword, the rest is the header (one quoted string or one bare word).
+2. A reserved first word: `bind`, `include`, `fn`, `script`, `on`, `if`, `elseif`, `else`, `for`, `while`, `do`, `end`, `local`, `function`, `return`.
+3. `key = value`: key is a bare identifier, `=` follows, the value is parsed as a value (see below). `bind X = ...` is the deprecated bind line form.
+4. Anything else: an expression statement, which must be a call (`name(...)`). A bare word that is not a call is an error, so a typo reads as an error instead of a silent no-op.
+
+Blocks are always multi-line, with one exception: `bind X { a, b }` may be written on one line, actions split on commas. This is the only one-liner in the grammar.
+
+### Values
+
+A value is one of two things, decided by a single rule: if the trimmed text contains whitespace or `(` or `[`, it is parsed as a Lua expression; otherwise it is a single token.
+
+Single token: a number, `true`/`false`, a color (`#RRGGBB` or `#RRGGBBAA`, serialized back as `RRGGBB`), a duration (`500ms`, `1.5s`, `90m`), or anything else is a bare string (`SUPER+Return`, `spawn:kitty`, `water-drop`).
+
+Expression: tokenized on whitespace and the operator/separator characters `( ) [ ] { } , + - * / % .. == ~= < > <= >= =`. Dots are part of word tokens, so `theme.primary` is one token. Tokens are then classified:
+
+- numbers and quoted strings: as-is
+- `true` / `false` / `nil`: as-is
+- Lua keywords (`and`, `or`, `not`, `then`, ...): as-is
+- a word followed by `(` or a known identifier (defined `$name` global, `fn` name, loop variable, `fn` parameter): as-is
+- a word containing a dot, whose base is a known identifier: as-is (Lua member access)
+- a color token: `_color("RRGGBB")`
+- a duration token: `_dur(600, "ms")`
+- `$wave(`: `wave(` with the arguments rewritten
+- anything else: a quoted string. This is what makes `wave(kitty, alacrittic)` and `media(comma, spotify)` work without quotes.
+
+`$name` substitution: a statically defined `$name` (a `$name = literal` line) substitutes its literal text. An in-scope loop variable or `fn` parameter emits a concatenation (`"SUPER+Num" .. i`). Anything else (`$HOME`, `$PATH`) is left untouched.
+
+### Strings inside binds
+
+A bind action line is a bare token, a quoted string, or a full expression that evaluates to a string. `$wave(...)` splice works in all three.
+
+### Comments
+
+`#` starts a comment unless it starts a color token (six or eight hex digits followed by end of line, whitespace, `,`, `]`, `)`, or `}`). `--` starts a comment. `--[[ ]]` is a block comment removed in a pre-pass. Quoted strings protect all three.
+
+### Deprecated forms
+
+The old `bind X = rest-of-line` form parses and registers, with the action taken verbatim. It is removed one release after the rewrite lands (W8).
+
+### Deferred
+
+`on "event"` handlers (W7), section globals so `theme.primary` reads as an expression (W4), list values serialized through entries (W4). The grammar accepts lists (`[a, b]`) and serializes them as `["a", "b"]`; config-level list semantics land with the W4 rename work.
+
 ## Wave outside TideWM
 
 Wave is TideWM's format today, but nothing about the grammar is TideWM-shaped. It knows nodes, leaves, statements, and typed values; it does not know workspaces. A config schema is just the set of node and key names an application accepts, so the parser is meant to lift into its own crate and embed anywhere YAML or JSON is used today, with two things those formats do not give you: computation in the file, and typed values your application defines, like colors and durations. `wavefmt` and the error conventions come with it.
