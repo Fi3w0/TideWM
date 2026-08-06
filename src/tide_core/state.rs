@@ -9795,6 +9795,8 @@ impl Smallvil {
         match Config::reload() {
             Ok((mut new_config, mut warnings)) => {
                 let had_error_overlay = self.config_error_overlay.take().is_some();
+                let diff =
+                    crate::config::diff_entries(&self.config.loaded_entries, &new_config.loaded_entries);
                 let mut migrated_engine = false;
                 if new_config.spatial_engine != self.config.spatial_engine {
                     // S6: instead of refusing, translate every live window
@@ -9867,6 +9869,14 @@ impl Smallvil {
                 if !self.config.animations.enabled || !self.config.animations.movement.enabled {
                     self.window_move_animations.clear();
                 }
+                // W3: the window-affecting battery below re-derives
+                // per-window state from the config. On a reload where
+                // nothing actually changed (an editor touched the file,
+                // a save rewrote it byte-identically) the result would be
+                // identical, so skip the whole battery instead of clearing
+                // glass backdrop textures and re-resolving every window
+                // for nothing.
+                if !diff.is_empty() {
                 let disabled_viscosity: Vec<WlSurface> = self
                     .window_viscosity
                     .keys()
@@ -9959,6 +9969,7 @@ impl Smallvil {
                 // shared pre-frame pipeline to rebuild against the current
                 // window geometry instead of briefly showing stale content.
                 self.backdrop_textures.clear();
+                }
                 // A reload that dropped or renamed the currently-active
                 // submap would otherwise leave every key silently
                 // unmatched (falling through as plain input) with no
@@ -9983,6 +9994,7 @@ impl Smallvil {
                     crate::input::apply_touchpad_config(&self.config.input.touchpad, device);
                 }
                 tracing::info!(
+                    changed = %diff.summary(),
                     reload_toast = self.config.show_config_reload_toast,
                     "Config reloaded"
                 );

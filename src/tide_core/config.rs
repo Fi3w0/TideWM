@@ -816,6 +816,12 @@ pub(crate) fn is_ocean_action(action: &Action) -> bool {
 }
 
 pub struct Config {
+    /// The merged entry list this config was lowered from (both formats
+    /// produce the same `waves::Entry` shape), kept for the reload diff:
+    /// `reload_config` compares the new file's entries against these to
+    /// know what actually changed and skip the window-affecting re-apply
+    /// battery on a no-op save.
+    pub(crate) loaded_entries: Vec<waves::Entry>,
     pub terminal: String,
     /// Startup-only spatial ownership model. Hot reload keeps the old value
     /// until the next TideWM launch so live windows never change owners.
@@ -1014,12 +1020,12 @@ impl Config {
     pub fn load_with_error() -> (Self, Option<String>, Vec<String>) {
         let path = config_path();
 
-        let (raw, error, include_warnings) = if path.exists() {
+        let (raw, error, include_warnings, entries) = if path.exists() {
             match load_raw_config(&path) {
-                Ok((raw, include_warnings)) => (raw, None, include_warnings),
+                Ok((raw, include_warnings, entries)) => (raw, None, include_warnings, entries),
                 Err(err) => {
                     tracing::warn!(%err, path = %path.display(), "Failed to parse config, using defaults");
-                    (RawConfig::default(), Some(err), Vec::new())
+                    (RawConfig::default(), Some(err), Vec::new(), Vec::new())
                 }
             }
         } else {
@@ -1046,15 +1052,17 @@ impl Config {
             // parse of the constant) so `include "keybinds.wave"` above
             // actually resolves on this very first boot, not just on the
             // next reload.
-            let (default, include_warnings) = load_raw_config(&path).unwrap_or_else(|err| {
-                tracing::error!(%err, "Built-in default Waves config failed to parse");
-                (RawConfig::default(), Vec::new())
-            });
-            (default, None, include_warnings)
+            let (default, include_warnings, entries) =
+                load_raw_config(&path).unwrap_or_else(|err| {
+                    tracing::error!(%err, "Built-in default Waves config failed to parse");
+                    (RawConfig::default(), Vec::new(), Vec::new())
+                });
+            (default, None, include_warnings, entries)
         };
 
-        let (config, mut warnings) = Self::from_raw(raw);
+        let (mut config, mut warnings) = Self::from_raw(raw);
         warnings.extend(include_warnings);
+        config.loaded_entries = entries;
         (config, error, warnings)
     }
 
@@ -1065,9 +1073,10 @@ impl Config {
     /// successful reload is the same dropped-keybind/footgun-lint
     /// diagnostics `from_raw` produces -- empty in the common case.
     pub fn reload() -> Result<(Self, Vec<String>), String> {
-        let (raw, include_warnings) = load_raw_config(&config_path())?;
-        let (config, mut warnings) = Self::from_raw(raw);
+        let (raw, include_warnings, entries) = load_raw_config(&config_path())?;
+        let (mut config, mut warnings) = Self::from_raw(raw);
         warnings.extend(include_warnings);
+        config.loaded_entries = entries;
         Ok((config, warnings))
     }
 
@@ -1165,6 +1174,7 @@ impl Config {
             .collect();
 
         let config = Self {
+            loaded_entries: Vec::new(),
             terminal: raw.terminal,
             spatial_engine,
             ocean: raw.ocean,
@@ -3515,7 +3525,7 @@ pub fn spawn_watcher() -> notify::Result<(RecommendedWatcher, Channel<Arc<Atomic
 /// as a fallback with a deprecation warning, so pre-rewrite configs keep
 /// working until the W8 migration. A file that uses new syntax never
 /// falls back: a parse error in it reports the Wave parser's message.
-fn load_raw_config(path: &Path) -> Result<(RawConfig, Vec<String>), String> {
+fn load_raw_config(path: &Path) -> Result<(RawConfig, Vec<String>, Vec<waves::Entry>), String> {
     let uses_new = std::fs::read_to_string(path)
         .map(|contents| wave::uses_new_only_syntax(&contents))
         .unwrap_or(false);
@@ -3542,7 +3552,7 @@ fn load_raw_config(path: &Path) -> Result<(RawConfig, Vec<String>), String> {
 
     let mut raw = lower_entries(&entries);
     substitute_variables_in_raw(&mut raw);
-    Ok((raw, warnings))
+    Ok((raw, warnings, entries))
 }
 
 /// Lowers a fully-merged Waves entry list into a `RawConfig`, starting
@@ -3550,6 +3560,174 @@ fn load_raw_config(path: &Path) -> Result<(RawConfig, Vec<String>), String> {
 /// Unknown keys/blocks warn and are ignored rather than failing the whole
 /// config -- same forgiving convention TOML loading always used (a typo
 /// shouldn't take down a working session).
+/// What changed between two merged entry lists (W3's reload diff).
+/// Computed at the entry level, so it is grammar-agnostic: old and new
+/// Wave configs produce the same `waves::Entry` shape.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct ConfigDiff {
+    /// Top-level keys whose value changed: (key, old, new). Added keys
+    /// come through with an empty old, removed with an empty new.
+    pub keys_changed: Vec<(String, String, String)>,
+    pub binds_added: Vec<(String, String)>,
+    pub binds_removed: Vec<(String, String)>,
+    /// Combos whose action list changed: (combo, old actions joined, new).
+    pub binds_changed: Vec<(String, String, String)>,
+    /// Blocks whose bodies changed: (keyword, header).
+    pub blocks_changed: Vec<(String, String)>,
+}
+
+impl ConfigDiff {
+    pub fn is_empty(&self) -> bool {
+        self.keys_changed.is_empty()
+            && self.binds_added.is_empty()
+            && self.binds_removed.is_empty()
+            && self.binds_changed.is_empty()
+            && self.blocks_changed.is_empty()
+    }
+
+    /// A one-line human summary for the reload log: "3 keys, binds
+    /// +1 -1 ~2, blocks: border, input".
+    pub fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.keys_changed.is_empty() {
+            let keys: Vec<&str> = self.keys_changed.iter().map(|(k, _, _)| k.as_str()).collect();
+            parts.push(format!(
+                "{} key{} changed ({})",
+                keys.len(),
+                if keys.len() == 1 { "" } else { "s" },
+                keys.join(", ")
+            ));
+        }
+        if !self.binds_added.is_empty()
+            || !self.binds_removed.is_empty()
+            || !self.binds_changed.is_empty()
+        {
+            parts.push(format!(
+                "binds +{} -{} ~{}",
+                self.binds_added.len(),
+                self.binds_removed.len(),
+                self.binds_changed.len()
+            ));
+        }
+        if !self.blocks_changed.is_empty() {
+            let keywords: Vec<&str> = self
+                .blocks_changed
+                .iter()
+                .map(|(k, _)| k.as_str())
+                .collect();
+            parts.push(format!("blocks changed ({})", keywords.join(", ")));
+        }
+        if parts.is_empty() {
+            "nothing changed".to_string()
+        } else {
+            parts.join(", ")
+        }
+    }
+}
+
+/// Diffs two merged entry lists per section: top-level keys, binds, and
+/// blocks. Variables and includes are deliberately skipped: they are
+/// substitution/resolution machinery, not configuration.
+pub(crate) fn diff_entries(old: &[waves::Entry], new: &[waves::Entry]) -> ConfigDiff {
+    let old_keys = collect_assigns(old);
+    let new_keys = collect_assigns(new);
+    let mut keys_changed = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for key in old_keys.keys().chain(new_keys.keys()) {
+        if !seen.insert(key) {
+            continue; // present in both lists, already compared
+        }
+        let o = old_keys.get(key).cloned().unwrap_or_default();
+        let n = new_keys.get(key).cloned().unwrap_or_default();
+        if o != n {
+            keys_changed.push((key.clone(), o, n));
+        }
+    }
+    keys_changed.sort();
+
+    let old_binds = collect_binds(old);
+    let new_binds = collect_binds(new);
+    let mut binds_added = Vec::new();
+    let mut binds_removed = Vec::new();
+    let mut binds_changed = Vec::new();
+    for (combo, actions) in &new_binds {
+        match old_binds.get(combo) {
+            None => {
+                for a in actions {
+                    binds_added.push((combo.clone(), a.clone()));
+                }
+            }
+            Some(old_actions) if old_actions != actions => {
+                binds_changed.push((combo.clone(), old_actions.join(" "), actions.join(" ")));
+            }
+            Some(_) => {}
+        }
+    }
+    for (combo, actions) in &old_binds {
+        if !new_binds.contains_key(combo) {
+            for a in actions {
+                binds_removed.push((combo.clone(), a.clone()));
+            }
+        }
+    }
+    binds_added.sort();
+    binds_removed.sort();
+    binds_changed.sort();
+
+    let old_blocks = collect_blocks(old);
+    let new_blocks = collect_blocks(new);
+    let mut blocks_changed: Vec<(String, String)> = Vec::new();
+    let mut seen_blocks = std::collections::BTreeSet::new();
+    for key in old_blocks.keys().chain(new_blocks.keys()) {
+        if seen_blocks.insert(key) && old_blocks.get(key) != new_blocks.get(key) {
+            blocks_changed.push(key.clone());
+        }
+    }
+    blocks_changed.sort();
+
+    ConfigDiff {
+        keys_changed,
+        binds_added,
+        binds_removed,
+        binds_changed,
+        blocks_changed,
+    }
+}
+
+fn collect_assigns(entries: &[waves::Entry]) -> std::collections::BTreeMap<String, String> {
+    let mut map = std::collections::BTreeMap::new();
+    for entry in entries {
+        if let waves::Entry::Assign(key, value) = entry {
+            map.insert(key.clone(), value.clone()); // last write wins, as in lowering
+        }
+    }
+    map
+}
+
+fn collect_binds(entries: &[waves::Entry]) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut map: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for entry in entries {
+        if let waves::Entry::Bind(combo, action) = entry {
+            map.entry(combo.clone()).or_default().push(action.clone());
+        }
+    }
+    map
+}
+
+fn collect_blocks(entries: &[waves::Entry]) -> std::collections::BTreeMap<(String, String), Vec<waves::Entry>> {
+    let mut map: std::collections::BTreeMap<(String, String), Vec<waves::Entry>> =
+        std::collections::BTreeMap::new();
+    for entry in entries {
+        if let waves::Entry::Block(keyword, header, body) = entry {
+            map.entry((keyword.clone(), header.clone()))
+                .or_default()
+                .push(waves::Entry::Block(keyword.clone(), header.clone(), body.clone()));
+        }
+    }
+    map
+}
+
 fn lower_entries(entries: &[waves::Entry]) -> RawConfig {
     let mut raw = RawConfig::default();
     // A parsed Waves file is authoritative. Defaults belong in the
@@ -7317,6 +7495,7 @@ mod tests {
     #[test]
     fn resolve_window_rules_folds_last_scalar_wins_bools_accumulate() {
         let mut config = Config {
+            loaded_entries: Vec::new(),
             terminal: String::new(),
             spatial_engine: SpatialEngine::Classic,
             ocean: OceanConfig::default(),
@@ -7526,7 +7705,7 @@ mod tests {
              bind $mainMod+Return = spawn:$terminal\n",
         );
 
-        let (raw, _) = load_raw_config(&main).expect("should parse");
+        let (raw, _, _) = load_raw_config(&main).expect("should parse");
         assert_eq!(raw.spawn_at_startup, vec!["kitty --daemon".to_string()]);
         assert_eq!(
             raw.keybinds.get("SUPER+Return").map(String::as_str),
@@ -7545,7 +7724,7 @@ mod tests {
              bind Super+F = toggle-fullscreen\n",
         );
 
-        let (raw, _) = load_raw_config(&main).expect("should parse");
+        let (raw, _, _) = load_raw_config(&main).expect("should parse");
         // Only what the file declared exists. No default table is merged
         // underneath it, regardless of which modifier variables it uses.
         assert!(!raw.keybinds.contains_key("Super+Q"));
@@ -7591,9 +7770,9 @@ mod tests {
                    spawn_at_startup = waybar\n";
 
         let dir_old = TestDir::new("wave-new-syntax-old");
-        let (raw_old, _) = load_raw_config(&dir_old.write("config.wave", old)).expect("old parses");
+        let (raw_old, _, _) = load_raw_config(&dir_old.write("config.wave", old)).expect("old parses");
         let dir_new = TestDir::new("wave-new-syntax-new");
-        let (raw_new, warnings) =
+        let (raw_new, warnings, _) =
             load_raw_config(&dir_new.write("config.wave", new)).expect("new evaluates");
 
         assert!(warnings.is_empty(), "new syntax should not warn: {warnings:?}");
@@ -7618,7 +7797,7 @@ mod tests {
         );
         // Old-syntax files load through the line-based grammar; the
         // deprecation notice is log-only during the transition.
-        let (raw, warnings) = load_raw_config(&main).expect("old grammar should load");
+        let (raw, warnings, _) = load_raw_config(&main).expect("old grammar should load");
         assert_eq!(
             raw.keybinds.get("SUPER+Q").map(String::as_str),
             Some("close-window")
@@ -7642,6 +7821,104 @@ mod tests {
     }
 
     #[test]
+    fn diff_entries_reports_changed_keys_binds_and_blocks() {
+        use waves::Entry;
+        let old = vec![
+            Entry::VarDef("mod".into(), "SUPER".into()),
+            Entry::Assign("gaps".into(), "8".into()),
+            Entry::Assign("terminal".into(), "kitty".into()),
+            Entry::Bind("SUPER+Q".into(), "close-window".into()),
+            Entry::Bind("SUPER+F".into(), "toggle-fullscreen".into()),
+            Entry::Block(
+                "border".into(),
+                "".into(),
+                vec![Entry::Assign("width".into(), "2".into())],
+            ),
+        ];
+        let new = vec![
+            Entry::VarDef("mod".into(), "SUPER".into()),
+            Entry::Assign("gaps".into(), "12".into()),
+            Entry::Bind("SUPER+Q".into(), "close-window".into()),
+            Entry::Bind("SUPER+F".into(), "toggle-floating".into()),
+            Entry::Bind("SUPER+D".into(), "spawn:rofi".into()),
+            Entry::Block(
+                "border".into(),
+                "".into(),
+                vec![Entry::Assign("width".into(), "3".into())],
+            ),
+        ];
+
+        let diff = diff_entries(&old, &new);
+        assert_eq!(
+            diff.keys_changed,
+            vec![
+                ("gaps".to_string(), "8".to_string(), "12".to_string()),
+                ("terminal".to_string(), "kitty".to_string(), String::new()),
+            ]
+        );
+        assert_eq!(
+            diff.binds_added,
+            vec![("SUPER+D".to_string(), "spawn:rofi".to_string())]
+        );
+        assert_eq!(
+            diff.binds_removed,
+            vec![]
+        );
+        assert_eq!(
+            diff.binds_changed,
+            vec![(
+                "SUPER+F".to_string(),
+                "toggle-fullscreen".to_string(),
+                "toggle-floating".to_string()
+            )]
+        );
+        assert_eq!(
+            diff.blocks_changed,
+            vec![("border".to_string(), String::new())]
+        );
+        assert!(!diff.is_empty());
+        let summary = diff.summary();
+        assert!(summary.contains("2 keys changed"), "{summary}");
+        assert!(summary.contains("binds +1 -0 ~1"), "{summary}");
+        assert!(summary.contains("blocks changed (border)"), "{summary}");
+    }
+
+    #[test]
+    fn diff_entries_is_empty_for_identical_lists() {
+        use waves::Entry;
+        let entries = vec![
+            Entry::Assign("gaps".into(), "8".into()),
+            Entry::Bind("SUPER+Q".into(), "close-window".into()),
+        ];
+        let diff = diff_entries(&entries, &entries);
+        assert!(diff.is_empty());
+        assert_eq!(diff.summary(), "nothing changed");
+    }
+
+    #[test]
+    fn reload_of_unchanged_file_diffs_empty_and_change_is_detected() {
+        fn load_from(path: &Path) -> Config {
+            let (raw, _, entries) = load_raw_config(path).expect("should parse");
+            let (mut config, _) = Config::from_raw(raw);
+            config.loaded_entries = entries;
+            config
+        }
+        let dir = TestDir::new("wave-reload-diff");
+        let main = dir.write("config.wave", "gaps = 8\nterminal = kitty\n");
+        let first = load_from(&main);
+        let second = load_from(&main);
+        assert!(diff_entries(&first.loaded_entries, &second.loaded_entries).is_empty());
+
+        dir.write("config.wave", "gaps = 12\nterminal = kitty\n");
+        let third = load_from(&main);
+        let diff = diff_entries(&first.loaded_entries, &third.loaded_entries);
+        assert_eq!(
+            diff.keys_changed,
+            vec![("gaps".to_string(), "8".to_string(), "12".to_string())]
+        );
+    }
+
+    #[test]
     fn load_raw_config_resolves_wave_fallback_to_the_first_real_command() {
         // /bin/sh always exists on any system that can even run this test
         // suite; "definitely-not-a-real-binary" never will. First match
@@ -7652,7 +7929,7 @@ mod tests {
             "terminal = $wave(definitely-not-a-real-binary, /bin/sh, kitty)\n",
         );
 
-        let (raw, _) = load_raw_config(&main).expect("should parse");
+        let (raw, _, _) = load_raw_config(&main).expect("should parse");
         assert_eq!(raw.terminal, "/bin/sh");
     }
 
@@ -7690,7 +7967,7 @@ mod tests {
             "include \"keybinds.wave\"\nterminal = kitty\nbind Super+F = toggle-fullscreen\n",
         );
 
-        let (raw, _) = load_raw_config(&main).expect("include chain should resolve");
+        let (raw, _, _) = load_raw_config(&main).expect("include chain should resolve");
 
         assert_eq!(raw.terminal, "kitty");
         // Included file's bind survives...
@@ -7714,7 +7991,7 @@ mod tests {
         dir.write("b.wave", "gaps = 12\n");
         let main = dir.write("config.wave", "include \"a.wave\"\ninclude \"b.wave\"\n");
 
-        let (raw, _) = load_raw_config(&main).unwrap();
+        let (raw, _, _) = load_raw_config(&main).unwrap();
         assert_eq!(raw.gaps, 12);
     }
 
@@ -7726,7 +8003,7 @@ mod tests {
             "include \"does-not-exist.wave\"\nterminal = kitty\n",
         );
 
-        let (raw, warnings) =
+        let (raw, warnings, _) =
             load_raw_config(&main).expect("a bad include must not fail the top-level file");
         assert_eq!(raw.terminal, "kitty");
         // The failure must reach the caller, not just the log -- this is
@@ -7749,7 +8026,7 @@ mod tests {
         dir.write("b.wave", "include \"a.wave\"\n");
         let a = dir.write("a.wave", "include \"b.wave\"\nterminal = kitty\n");
 
-        let (raw, warnings) =
+        let (raw, warnings, _) =
             load_raw_config(&a).expect("a cycle is skipped with a warning, not a hard failure");
         assert_eq!(raw.terminal, "kitty");
         assert_eq!(warnings.len(), 1);
@@ -7770,7 +8047,7 @@ mod tests {
         let dir = TestDir::new(&format!("default-config-{:?}", std::thread::current().id()));
         dir.write("keybinds.wave", DEFAULT_KEYBINDS_WAVE);
         let main = dir.write("config.wave", DEFAULT_CONFIG_WAVE);
-        let (raw, _) = load_raw_config(&main).expect("the shipped default must parse and resolve");
+        let (raw, _, _) = load_raw_config(&main).expect("the shipped default must parse and resolve");
         Config::from_raw(raw).0
     }
 
@@ -8865,7 +9142,7 @@ mod tests {
         ));
         dir.write("keybinds.wave", DEFAULT_KEYBINDS_WAVE);
         let main = dir.write("config.wave", DEFAULT_CONFIG_WAVE);
-        let (raw, include_warnings) =
+        let (raw, include_warnings, _) =
             load_raw_config(&main).expect("the shipped default must parse and resolve");
         let (_, mut warnings) = Config::from_raw(raw);
         warnings.extend(include_warnings);
