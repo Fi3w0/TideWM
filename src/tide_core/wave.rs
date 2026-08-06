@@ -21,6 +21,8 @@ use std::rc::Rc;
 
 use mlua::{FromLua, Function, Lua, StdLib, Value, Variadic};
 
+use super::wave_fmt::{split_line_comment, strip_block_comments, strip_line_comment};
+
 use super::waves::Entry;
 
 // ---------------------------------------------------------------------------
@@ -34,79 +36,6 @@ fn is_reserved(word: &str) -> bool {
         "bind" | "include" | "fn" | "script" | "on" | "if" | "elseif" | "else" | "for"
             | "while" | "do" | "end" | "local" | "function" | "return"
     )
-}
-
-/// Removes `--[[ ... ]]` spans, replacing them with newlines so line
-/// numbers in error messages stay correct. Quote-aware for the opener.
-fn strip_block_comments(source: &str) -> String {
-    let chars: Vec<char> = source.chars().collect();
-    let mut out = String::with_capacity(source.len());
-    let mut i = 0;
-    let mut in_quotes = false;
-    while i < chars.len() {
-        let c = chars[i];
-        if c == '"' {
-            in_quotes = !in_quotes;
-            out.push(c);
-            i += 1;
-            continue;
-        }
-        if !in_quotes
-            && c == '-'
-            && i + 3 < chars.len()
-            && chars[i + 1] == '-'
-            && chars[i + 2] == '['
-            && chars[i + 3] == '['
-        {
-            let mut j = i + 4;
-            let mut closed = false;
-            while j + 1 < chars.len() {
-                if chars[j] == ']' && chars[j + 1] == ']' {
-                    closed = true;
-                    break;
-                }
-                j += 1;
-            }
-            let end = if closed { j + 2 } else { chars.len() };
-            out.extend(std::iter::repeat_n('\n', end - i));
-            i = end;
-            continue;
-        }
-        out.push(c);
-        i += 1;
-    }
-    out
-}
-
-/// Strips a `#` or `--` comment, but not outside a quoted string, and
-/// not a `#` that starts a color token (six or eight hex digits followed
-/// by end of line, whitespace, `,`, `]`, `)`, or `}`).
-fn strip_line_comment(line: &str) -> &str {
-    let mut in_quotes = false;
-    for (i, ch) in line.char_indices() {
-        match ch {
-            '"' => in_quotes = !in_quotes,
-            '#' if !in_quotes => {
-                let hex_len = line[i + 1..]
-                    .chars()
-                    .take_while(|c| c.is_ascii_hexdigit())
-                    .count();
-                if hex_len == 6 || hex_len == 8 {
-                    let after = line[i + 1 + hex_len..].chars().next();
-                    let delimited = after
-                        .map(|c| c.is_whitespace() || matches!(c, ',' | ']' | ')' | '}'))
-                        .unwrap_or(true);
-                    if delimited {
-                        continue; // a color token, not a comment
-                    }
-                }
-                return &line[..i];
-            }
-            '-' if !in_quotes && line[i..].starts_with("--") => return &line[..i],
-            _ => {}
-        }
-    }
-    line
 }
 
 fn lua_quote(s: &str) -> String {
