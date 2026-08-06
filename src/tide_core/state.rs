@@ -2585,9 +2585,12 @@ impl Smallvil {
                 let (app_id, title) = self.toplevel_identity(surface);
                 let pid = self.client_pid(surface);
                 let is_xwayland = self.is_xwayland_surface(surface);
-                let rule = self
-                    .config
-                    .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
+                let rule = self.config.resolve_window_rules(
+                    app_id.as_deref(),
+                    title.as_deref(),
+                    pid,
+                    is_xwayland,
+                );
                 let cfg = self.config.resolve_ripple_config(
                     rule.ripple.as_ref(),
                     crate::config::RippleTrigger::Urgent,
@@ -5142,9 +5145,9 @@ impl Smallvil {
         let (app_id, title) = self.toplevel_identity(surface);
         let pid = self.client_pid(surface);
         let is_xwayland = self.is_xwayland_surface(surface);
-        let rule = self
-            .config
-            .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
+        let rule =
+            self.config
+                .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
         rule.frost
             .as_ref()
             .map(|overrides| overrides.apply_to(&self.config.frost))
@@ -5155,9 +5158,9 @@ impl Smallvil {
         let (app_id, title) = self.toplevel_identity(surface);
         let pid = self.client_pid(surface);
         let is_xwayland = self.is_xwayland_surface(surface);
-        let rule = self
-            .config
-            .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
+        let rule =
+            self.config
+                .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
         rule.shadow
             .as_ref()
             .map(|overrides| overrides.apply_to(&self.config.shadow))
@@ -5168,9 +5171,9 @@ impl Smallvil {
         let (app_id, title) = self.toplevel_identity(surface);
         let pid = self.client_pid(surface);
         let is_xwayland = self.is_xwayland_surface(surface);
-        let rule = self
-            .config
-            .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
+        let rule =
+            self.config
+                .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
         rule.rounding
             .as_ref()
             .map(|overrides| overrides.apply_to(&self.config.rounding))
@@ -5181,9 +5184,9 @@ impl Smallvil {
         let (app_id, title) = self.toplevel_identity(surface);
         let pid = self.client_pid(surface);
         let is_xwayland = self.is_xwayland_surface(surface);
-        let rule = self
-            .config
-            .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
+        let rule =
+            self.config
+                .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
         rule.border
             .as_ref()
             .map(|overrides| overrides.apply_to(&self.config.border))
@@ -6489,9 +6492,9 @@ impl Smallvil {
         let (app_id, title) = self.toplevel_identity(surface);
         let pid = self.client_pid(surface);
         let is_xwayland = self.is_xwayland_surface(surface);
-        let rule = self
-            .config
-            .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
+        let rule =
+            self.config
+                .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
         let mut cfg = self
             .config
             .resolve_ripple_config(rule.ripple.as_ref(), trigger);
@@ -9921,8 +9924,10 @@ impl Smallvil {
         match Config::reload_in(&self.config_lua, &self.tide) {
             Ok((mut new_config, mut warnings)) => {
                 let had_error_overlay = self.config_error_overlay.take().is_some();
-                let diff =
-                    crate::config::diff_entries(&self.config.loaded_entries, &new_config.loaded_entries);
+                let diff = crate::config::diff_entries(
+                    &self.config.loaded_entries,
+                    &new_config.loaded_entries,
+                );
                 let mut migrated_engine = false;
                 if new_config.spatial_engine != self.config.spatial_engine {
                     // S6: instead of refusing, translate every live window
@@ -10003,98 +10008,106 @@ impl Smallvil {
                 // glass backdrop textures and re-resolving every window
                 // for nothing.
                 if !diff.is_empty() {
-                let disabled_viscosity: Vec<WlSurface> = self
-                    .window_viscosity
-                    .keys()
-                    .filter(|surface| self.viscosity_for_surface(surface) <= f64::EPSILON)
-                    .cloned()
-                    .collect();
-                for surface in disabled_viscosity {
-                    self.window_viscosity.remove(&surface);
-                }
-                let disabled_sway: Vec<WlSurface> = self
-                    .window_sway
-                    .keys()
-                    .filter(|surface| !self.sway_enabled_for_surface(surface))
-                    .cloned()
-                    .collect();
-                for surface in disabled_sway {
-                    self.window_sway.remove(&surface);
-                }
-                let disabled_float_physics: Vec<WlSurface> = self
-                    .window_float_physics
-                    .keys()
-                    .filter(|surface| {
-                        self.float_physics_tier_for_surface(surface)
-                            != crate::config::FloatPhysicsTier::Light
-                    })
-                    .cloned()
-                    .collect();
-                for surface in disabled_float_physics {
-                    self.window_float_physics.remove(&surface);
-                }
-                let disabled_float_ambient: Vec<WlSurface> = self
-                    .window_float_ambient
-                    .keys()
-                    .filter(|surface| !self.float_physics_enabled_for_surface(surface))
-                    .cloned()
-                    .collect();
-                for surface in disabled_float_ambient {
-                    self.window_float_ambient.remove(&surface);
-                }
-                self.sync_float_physics_bodies();
-                if !self.config.animations.enabled || !self.config.animations.close.enabled {
-                    self.window_frame_snapshots.clear();
-                    self.closing_window_animations.clear();
-                }
-                self.depth_schematics.clear();
-                self.depth_last_tick = Instant::now() - Duration::from_millis(100);
-                self.update_window_depths();
-                if !self.config.water_effects || !self.config.workspace_transition.enabled {
-                    self.workspace_transitions.clear();
-                    let pending = std::mem::take(&mut self.pending_workspace_transitions);
-                    for (output_name, workspace) in pending {
-                        if let Some(output) = self.output_by_name(&output_name) {
-                            self.switch_workspace_immediate(&output, workspace);
+                    let disabled_viscosity: Vec<WlSurface> = self
+                        .window_viscosity
+                        .keys()
+                        .filter(|surface| self.viscosity_for_surface(surface) <= f64::EPSILON)
+                        .cloned()
+                        .collect();
+                    for surface in disabled_viscosity {
+                        self.window_viscosity.remove(&surface);
+                    }
+                    let disabled_sway: Vec<WlSurface> = self
+                        .window_sway
+                        .keys()
+                        .filter(|surface| !self.sway_enabled_for_surface(surface))
+                        .cloned()
+                        .collect();
+                    for surface in disabled_sway {
+                        self.window_sway.remove(&surface);
+                    }
+                    let disabled_float_physics: Vec<WlSurface> = self
+                        .window_float_physics
+                        .keys()
+                        .filter(|surface| {
+                            self.float_physics_tier_for_surface(surface)
+                                != crate::config::FloatPhysicsTier::Light
+                        })
+                        .cloned()
+                        .collect();
+                    for surface in disabled_float_physics {
+                        self.window_float_physics.remove(&surface);
+                    }
+                    let disabled_float_ambient: Vec<WlSurface> = self
+                        .window_float_ambient
+                        .keys()
+                        .filter(|surface| !self.float_physics_enabled_for_surface(surface))
+                        .cloned()
+                        .collect();
+                    for surface in disabled_float_ambient {
+                        self.window_float_ambient.remove(&surface);
+                    }
+                    self.sync_float_physics_bodies();
+                    if !self.config.animations.enabled || !self.config.animations.close.enabled {
+                        self.window_frame_snapshots.clear();
+                        self.closing_window_animations.clear();
+                    }
+                    self.depth_schematics.clear();
+                    self.depth_last_tick = Instant::now() - Duration::from_millis(100);
+                    self.update_window_depths();
+                    if !self.config.water_effects || !self.config.workspace_transition.enabled {
+                        self.workspace_transitions.clear();
+                        let pending = std::mem::take(&mut self.pending_workspace_transitions);
+                        for (output_name, workspace) in pending {
+                            if let Some(output) = self.output_by_name(&output_name) {
+                                self.switch_workspace_immediate(&output, workspace);
+                            }
                         }
                     }
-                }
-                if !self.swim_enabled() {
-                    for camera in self.swim_cameras.values_mut() {
-                        camera.snap_to_rest();
+                    if !self.swim_enabled() {
+                        for camera in self.swim_cameras.values_mut() {
+                            camera.snap_to_rest();
+                        }
                     }
-                }
-                self.window_opacity = self
-                    .foreign_toplevels
-                    .keys()
-                    .filter_map(|surface| {
-                        let (app_id, title) = self.toplevel_identity(surface);
-                        let pid = self.client_pid(surface);
-                        let is_xwayland = self.is_xwayland_surface(surface);
-                        let rule = self
-                            .config
-                            .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
-                        crate::config::WindowOpacity::from_rule(&rule)
-                            .map(|opacity| (surface.clone(), opacity))
-                    })
-                    .collect();
-                self.window_glass_modes = self
-                    .foreign_toplevels
-                    .keys()
-                    .filter_map(|surface| {
-                        let (app_id, title) = self.toplevel_identity(surface);
-                        let pid = self.client_pid(surface);
-                        let is_xwayland = self.is_xwayland_surface(surface);
-                        self.config
-                            .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland)
-                            .glass
-                            .map(|mode| (surface.clone(), mode))
-                    })
-                    .collect();
-                // The mode or frost tuning may have changed. Force the
-                // shared pre-frame pipeline to rebuild against the current
-                // window geometry instead of briefly showing stale content.
-                self.backdrop_textures.clear();
+                    self.window_opacity = self
+                        .foreign_toplevels
+                        .keys()
+                        .filter_map(|surface| {
+                            let (app_id, title) = self.toplevel_identity(surface);
+                            let pid = self.client_pid(surface);
+                            let is_xwayland = self.is_xwayland_surface(surface);
+                            let rule = self.config.resolve_window_rules(
+                                app_id.as_deref(),
+                                title.as_deref(),
+                                pid,
+                                is_xwayland,
+                            );
+                            crate::config::WindowOpacity::from_rule(&rule)
+                                .map(|opacity| (surface.clone(), opacity))
+                        })
+                        .collect();
+                    self.window_glass_modes = self
+                        .foreign_toplevels
+                        .keys()
+                        .filter_map(|surface| {
+                            let (app_id, title) = self.toplevel_identity(surface);
+                            let pid = self.client_pid(surface);
+                            let is_xwayland = self.is_xwayland_surface(surface);
+                            self.config
+                                .resolve_window_rules(
+                                    app_id.as_deref(),
+                                    title.as_deref(),
+                                    pid,
+                                    is_xwayland,
+                                )
+                                .glass
+                                .map(|mode| (surface.clone(), mode))
+                        })
+                        .collect();
+                    // The mode or frost tuning may have changed. Force the
+                    // shared pre-frame pipeline to rebuild against the current
+                    // window geometry instead of briefly showing stale content.
+                    self.backdrop_textures.clear();
                 }
                 // A reload that dropped or renamed the currently-active
                 // submap would otherwise leave every key silently

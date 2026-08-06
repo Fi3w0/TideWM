@@ -33,8 +33,21 @@ use super::waves::Entry;
 fn is_reserved(word: &str) -> bool {
     matches!(
         word,
-        "bind" | "include" | "fn" | "script" | "on" | "if" | "elseif" | "else" | "for"
-            | "while" | "do" | "end" | "local" | "function" | "return"
+        "bind"
+            | "include"
+            | "fn"
+            | "script"
+            | "on"
+            | "if"
+            | "elseif"
+            | "else"
+            | "for"
+            | "while"
+            | "do"
+            | "end"
+            | "local"
+            | "function"
+            | "return"
     )
 }
 
@@ -108,9 +121,28 @@ fn is_duration(word: &str) -> bool {
 fn is_lua_keyword(word: &str) -> bool {
     matches!(
         word,
-        "and" | "break" | "do" | "else" | "elseif" | "end" | "false" | "for" | "function"
-            | "goto" | "if" | "in" | "local" | "nil" | "not" | "or" | "repeat" | "return"
-            | "then" | "true" | "until" | "while"
+        "and"
+            | "break"
+            | "do"
+            | "else"
+            | "elseif"
+            | "end"
+            | "false"
+            | "for"
+            | "function"
+            | "goto"
+            | "if"
+            | "in"
+            | "local"
+            | "nil"
+            | "not"
+            | "or"
+            | "repeat"
+            | "return"
+            | "then"
+            | "true"
+            | "until"
+            | "while"
     )
 }
 
@@ -550,8 +582,26 @@ fn tokenize(expr: &str) -> Vec<String> {
 fn is_operator(tok: &str) -> bool {
     matches!(
         tok,
-        "(" | ")" | "[" | "]" | "{" | "}" | "," | "+" | "-" | "*" | "/" | "%" | "<" | ">"
-            | "=" | "~" | ".." | "==" | "~=" | "<=" | ">="
+        "(" | ")"
+            | "["
+            | "]"
+            | "{"
+            | "}"
+            | ","
+            | "+"
+            | "-"
+            | "*"
+            | "/"
+            | "%"
+            | "<"
+            | ">"
+            | "="
+            | "~"
+            | ".."
+            | "=="
+            | "~="
+            | "<="
+            | ">="
     )
 }
 
@@ -584,11 +634,7 @@ pub(crate) fn compile(source: &str, path: &Path) -> Result<String, String> {
 
 /// `compile` with a caller-provided symbol table, so the resolve pass can
 /// make `@name` definitions from other files visible to this emitter.
-fn compile_with(
-    source: &str,
-    path: &Path,
-    sym: &mut Symbols,
-) -> Result<String, String> {
+fn compile_with(source: &str, path: &Path, sym: &mut Symbols) -> Result<String, String> {
     let pre = strip_block_comments(source);
     let lines: Vec<&str> = pre.lines().collect();
     let mut pos = 0usize;
@@ -739,12 +785,8 @@ fn emit_body(
             } else {
                 sym.runtime_vars.insert(name.to_string());
             }
-            let value_expr = rewrite_value(value, sym).map_err(|e| {
-                format!(
-                    "in file {} at line {line_no}: {e}",
-                    path.display()
-                )
-            })?;
+            let value_expr = rewrite_value(value, sym)
+                .map_err(|e| format!("in file {} at line {line_no}: {e}", path.display()))?;
             out.push_str(&format!("_vardef({}, {})\n", lua_quote(name), value_expr));
             continue;
         }
@@ -757,16 +799,15 @@ fn emit_body(
         if line.ends_with("}") {
             if let Some(head) = line.strip_suffix('}').map(str::trim_end) {
                 if let Some(open) = head.strip_suffix('{').map(str::trim_end) {
-                    let (keyword, rest) = open
-                        .split_once(char::is_whitespace)
-                        .unwrap_or((open, ""));
+                    let (keyword, rest) =
+                        open.split_once(char::is_whitespace).unwrap_or((open, ""));
                     if !keyword.is_empty() && !is_reserved(keyword) {
                         let header_expr = if rest.is_empty() {
                             lua_quote("")
                         } else {
-                            Rewriter { sym }
-                                .rewrite_string(rest)
-                                .map_err(|e| format!("in file {} at line {line_no}: {e}", path.display()))?
+                            Rewriter { sym }.rewrite_string(rest).map_err(|e| {
+                                format!("in file {} at line {line_no}: {e}", path.display())
+                            })?
                         };
                         sym.block_globals.insert(keyword.to_string());
                         sym.body_fields.push(std::collections::HashSet::new());
@@ -810,7 +851,11 @@ fn emit_body(
             // inside the body via _field.
             sym.block_globals.insert(keyword.to_string());
             sym.body_fields.push(std::collections::HashSet::new());
-            out.push_str(&format!("_block({}, {}, function()\n", lua_quote(keyword), header_expr));
+            out.push_str(&format!(
+                "_block({}, {}, function()\n",
+                lua_quote(keyword),
+                header_expr
+            ));
             *depth += 1;
             emit_body(lines, pos, sym, out, path, depth)?;
             sym.body_fields.pop();
@@ -820,12 +865,8 @@ fn emit_body(
 
         // -- leaves -------------------------------------------------------------
         if let Some((key, value)) = split_leaf(line) {
-            let value_expr = rewrite_value(value.trim(), sym).map_err(|e| {
-                format!(
-                    "in file {} at line {line_no}: {e}",
-                    path.display()
-                )
-            })?;
+            let value_expr = rewrite_value(value.trim(), sym)
+                .map_err(|e| format!("in file {} at line {line_no}: {e}", path.display()))?;
             if let Some(fields) = sym.body_fields.last_mut() {
                 fields.insert(key.to_string());
             }
@@ -836,17 +877,16 @@ fn emit_body(
         // -- expression statement ------------------------------------------------
         // Must be a call: word followed by `(`.
         let call_end = line.find('(');
-        let call_name = call_end
-            .map(|i| line[..i].trim())
-            .filter(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.'));
+        let call_name = call_end.map(|i| line[..i].trim()).filter(|w| {
+            !w.is_empty()
+                && w.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+        });
         match call_name {
             Some(name) if !is_reserved(name) => {
-                let rewritten = Rewriter { sym }.rewrite(line).map_err(|e| {
-                    format!(
-                        "in file {} at line {line_no}: {e}",
-                        path.display()
-                    )
-                })?;
+                let rewritten = Rewriter { sym }
+                    .rewrite(line)
+                    .map_err(|e| format!("in file {} at line {line_no}: {e}", path.display()))?;
                 out.push_str(&rewritten);
                 out.push('\n');
             }
@@ -920,7 +960,11 @@ fn rewrite_value(value: &str, sym: &Symbols) -> Result<String, String> {
         }
         if let Some((base, _)) = value.split_once('.') {
             if sym.in_innermost_body(base) {
-                return Ok(format!("_field({}).{}", lua_quote(base), &value[base.len() + 1..]));
+                return Ok(format!(
+                    "_field({}).{}",
+                    lua_quote(base),
+                    &value[base.len() + 1..]
+                ));
             }
             if sym.block_globals.contains(base) {
                 return Ok(value.to_string());
@@ -1090,7 +1134,8 @@ fn emit_bind_call(
 }
 
 #[allow(clippy::too_many_arguments)] // the shared surface-parser signature; refactor when W2 wires config.rs in
-fn emit_fn(    line: &str,
+fn emit_fn(
+    line: &str,
     line_no: usize,
     sym: &mut Symbols,
     out: &mut String,
@@ -1220,7 +1265,11 @@ fn emit_on(
     *depth += 1;
     emit_body(lines, pos, sym, &mut body, path, depth)?;
     let source = format!("function()\n{body}end");
-    out.push_str(&format!("_on({}, {})\n", lua_quote(event), lua_quote(&source)));
+    out.push_str(&format!(
+        "_on({}, {})\n",
+        lua_quote(event),
+        lua_quote(&source)
+    ));
     Ok(())
 }
 
@@ -1241,7 +1290,12 @@ fn serialize_value(value: Value) -> Result<String, String> {
             if let Ok(c) = ud.borrow::<ColorValue>() {
                 return Ok(c.serialize());
             }
-            Err(format!("unsupported config value type: {}", ud.type_name().map(|s| s.to_string_lossy()).unwrap_or_else(|_| "?".to_string())))
+            Err(format!(
+                "unsupported config value type: {}",
+                ud.type_name()
+                    .map(|s| s.to_string_lossy())
+                    .unwrap_or_else(|_| "?".to_string())
+            ))
         }
         Value::Table(t) => {
             let mut items = Vec::new();
@@ -1319,24 +1373,21 @@ impl mlua::UserData for DurationValue {
         // operands in original order), so Mul is a meta FUNCTION that
         // handles either side; Add/Sub/Unm always have the duration on
         // the left.
-        methods.add_meta_function(
-            mlua::MetaMethod::Mul,
-            |lua, (a, b): (Value, Value)| {
-                if let Ok(d) = DurationValue::from_lua(a.clone(), lua) {
-                    let n = f64::from_lua(b, lua)?;
-                    return Ok(DurationValue {
-                        ms: d.ms * n,
-                        unit: d.unit,
-                    });
-                }
-                let d = DurationValue::from_lua(b, lua)?;
-                let n = f64::from_lua(a, lua)?;
-                Ok(DurationValue {
+        methods.add_meta_function(mlua::MetaMethod::Mul, |lua, (a, b): (Value, Value)| {
+            if let Ok(d) = DurationValue::from_lua(a.clone(), lua) {
+                let n = f64::from_lua(b, lua)?;
+                return Ok(DurationValue {
                     ms: d.ms * n,
                     unit: d.unit,
-                })
-            },
-        );
+                });
+            }
+            let d = DurationValue::from_lua(b, lua)?;
+            let n = f64::from_lua(a, lua)?;
+            Ok(DurationValue {
+                ms: d.ms * n,
+                unit: d.unit,
+            })
+        });
         methods.add_meta_method(mlua::MetaMethod::Div, |_, a, b: f64| {
             Ok(DurationValue {
                 ms: a.ms / b,
@@ -1416,31 +1467,41 @@ impl mlua::UserData for ColorValue {
                 b: color.b * (1.0 - t),
             })
         });
-        methods.add_function("lighten", |_, (self_v, amount): (mlua::AnyUserData, f64)| {
-            let color = self_v.borrow::<ColorValue>()?;
-            let t = amount.clamp(0.0, 1.0);
-            Ok(ColorValue {
-                r: color.r + (255.0 - color.r) * t,
-                g: color.g + (255.0 - color.g) * t,
-                b: color.b + (255.0 - color.b) * t,
-            })
-        });
+        methods.add_function(
+            "lighten",
+            |_, (self_v, amount): (mlua::AnyUserData, f64)| {
+                let color = self_v.borrow::<ColorValue>()?;
+                let t = amount.clamp(0.0, 1.0);
+                Ok(ColorValue {
+                    r: color.r + (255.0 - color.r) * t,
+                    g: color.g + (255.0 - color.g) * t,
+                    b: color.b + (255.0 - color.b) * t,
+                })
+            },
+        );
         // Accepted and dropped, matching the config surface's current
         // "alpha in the color form is ignored" behavior.
         methods.add_function("alpha", |_, (self_v, _amount): (mlua::AnyUserData, f64)| {
             self_v.borrow::<ColorValue>().map(|c| *c)
         });
-        methods.add_function("with_alpha", |_, (self_v, _amount): (mlua::AnyUserData, f64)| {
-            self_v.borrow::<ColorValue>().map(|c| *c)
-        });
+        methods.add_function(
+            "with_alpha",
+            |_, (self_v, _amount): (mlua::AnyUserData, f64)| {
+                self_v.borrow::<ColorValue>().map(|c| *c)
+            },
+        );
     }
 }
 
 /// Does `candidate` resolve to an executable file, directly or via `$PATH`?
 fn path_has_exec(candidate: &str) -> bool {
-    let check = |p: &Path| p.is_file() && {
-        use std::os::unix::fs::PermissionsExt;
-        p.metadata().map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+    let check = |p: &Path| {
+        p.is_file() && {
+            use std::os::unix::fs::PermissionsExt;
+            p.metadata()
+                .map(|m| m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        }
     };
     if candidate.contains('/') {
         return check(Path::new(candidate));
@@ -1594,7 +1655,9 @@ fn install_env(
                             .set(keyword.as_str(), true)?;
                     }
                     let body = inner.borrow().clone();
-                    top(&s3).borrow_mut().push(Entry::Block(keyword, header, body));
+                    top(&s3)
+                        .borrow_mut()
+                        .push(Entry::Block(keyword, header, body));
                     Ok(())
                 },
             )
@@ -1636,9 +1699,7 @@ fn install_env(
                         for v in t.sequence_values() {
                             let v = v?;
                             let Value::String(s) = v else {
-                                return Err(mlua::Error::external(
-                                    "bind actions must be strings",
-                                ));
+                                return Err(mlua::Error::external("bind actions must be strings"));
                             };
                             sink.push(Entry::Bind(combo.clone(), s.to_string_lossy()));
                         }
@@ -1867,7 +1928,10 @@ pub(crate) fn lua_value_to_json(value: Value) -> Result<serde_json::Value, Strin
                 Ok(serde_json::Value::Object(out))
             }
         }
-        other => Err(format!("unsupported value type in eval result: {}", other.type_name())),
+        other => Err(format!(
+            "unsupported value type in eval result: {}",
+            other.type_name()
+        )),
     }
 }
 
@@ -1881,7 +1945,12 @@ pub(crate) fn evaluate(source: &str, path: &Path) -> Result<Vec<Entry>, String> 
         StdLib::MATH | StdLib::STRING | StdLib::TABLE,
         mlua::LuaOptions::default(),
     )
-    .map_err(|e| format!("in file {}: failed to create Lua state: {e}", path.display()))?;
+    .map_err(|e| {
+        format!(
+            "in file {}: failed to create Lua state: {e}",
+            path.display()
+        )
+    })?;
 
     let stack: EntryStack = Rc::new(RefCell::new(vec![Rc::new(RefCell::new(Vec::new()))]));
     let collect = Rc::new(Cell::new(false));
@@ -1890,7 +1959,9 @@ pub(crate) fn evaluate(source: &str, path: &Path) -> Result<Vec<Entry>, String> 
     install_env(&lua, &stack, collect, statics, bodies, &TideInfo::default())?;
 
     let chunk = lua.load(&lua_source).set_name(path.display().to_string());
-    chunk.exec().map_err(|e| format!("in file {}: {e}", path.display()))?;
+    chunk
+        .exec()
+        .map_err(|e| format!("in file {}: {e}", path.display()))?;
 
     let entries = top(&stack).borrow().clone();
     Ok(entries)
@@ -1928,8 +1999,8 @@ fn resolve_uncycled(
     sym: &mut Symbols,
     collect: Rc<Cell<bool>>,
 ) -> Result<Vec<Entry>, String> {
-    let contents =
-        std::fs::read_to_string(path).map_err(|err| format!("in file {}: {err}", path.display()))?;
+    let contents = std::fs::read_to_string(path)
+        .map_err(|err| format!("in file {}: {err}", path.display()))?;
 
     // Each file evaluates as its own chunk; a fresh top-level sink keeps
     // its entries separate from included files' entries.
@@ -1965,7 +2036,15 @@ fn resolve_uncycled(
         match entry {
             Entry::Include(include) => {
                 let include_path = super::waves::resolve_include_path(parent, &include);
-                match resolve_walk(&include_path, ancestors, warnings, lua, stack, sym, collect.clone()) {
+                match resolve_walk(
+                    &include_path,
+                    ancestors,
+                    warnings,
+                    lua,
+                    stack,
+                    sym,
+                    collect.clone(),
+                ) {
                     Ok(included) => super::waves::merge_into(&mut merged, included),
                     Err(err) => {
                         tracing::warn!(path = %include_path.display(), %err, "Failed to load included config file, skipping");
@@ -1997,7 +2076,12 @@ pub(crate) fn resolve(path: &Path) -> Result<(Vec<Entry>, Vec<String>), String> 
         StdLib::MATH | StdLib::STRING | StdLib::TABLE,
         mlua::LuaOptions::default(),
     )
-    .map_err(|e| format!("in file {}: failed to create Lua state: {e}", path.display()))?;
+    .map_err(|e| {
+        format!(
+            "in file {}: failed to create Lua state: {e}",
+            path.display()
+        )
+    })?;
     resolve_with_lua(&lua, &TideInfo::default(), path)
 }
 
@@ -2022,13 +2106,28 @@ pub(crate) fn resolve_with_lua(
     // textually substitutable in every round-two emitter.
     let bodies = Rc::new(RefCell::new(Vec::new()));
     let collect = Rc::new(Cell::new(true));
-    install_env(lua, &stack, collect.clone(), statics_out.clone(), bodies, tide)?;
+    install_env(
+        lua,
+        &stack,
+        collect.clone(),
+        statics_out.clone(),
+        bodies,
+        tide,
+    )?;
     let mut ancestors = Vec::new();
     let mut sym = Symbols {
         lenient: true,
         ..Default::default()
     };
-    resolve_walk(path, &mut ancestors, &mut Vec::new(), lua, &stack, &mut sym, collect.clone())?;
+    resolve_walk(
+        path,
+        &mut ancestors,
+        &mut Vec::new(),
+        lua,
+        &stack,
+        &mut sym,
+        collect.clone(),
+    )?;
 
     // Round 2: evaluate with the collected definitions visible to every
     // emitter. `compile_with` mutates the shared symbols (loop/`fn`
@@ -2040,7 +2139,15 @@ pub(crate) fn resolve_with_lua(
     sym.lenient = false;
     sym.statics = statics_out.borrow().clone();
     let mut warnings = Vec::new();
-    let entries = resolve_walk(path, &mut ancestors, &mut warnings, lua, &stack, &mut sym, collect)?;
+    let entries = resolve_walk(
+        path,
+        &mut ancestors,
+        &mut warnings,
+        lua,
+        &stack,
+        &mut sym,
+        collect,
+    )?;
 
     Ok((entries, warnings))
 }
@@ -2058,7 +2165,6 @@ fn clear_user_globals(lua: &Lua) -> Result<(), mlua::Error> {
     }
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -2080,7 +2186,9 @@ mod tests {
 
     #[test]
     fn typed_literals_color_duration_number_bool() {
-        let lua = compile_str("color = #8EDDFF\nduration = 600ms\nslow = 1.5s\ngaps = 8\nwater_effects = true\n");
+        let lua = compile_str(
+            "color = #8EDDFF\nduration = 600ms\nslow = 1.5s\ngaps = 8\nwater_effects = true\n",
+        );
         assert!(lua.contains("_leaf(\"color\", _color(\"8EDDFF\"))"));
         assert!(lua.contains("_leaf(\"duration\", _dur(600, \"ms\"))"));
         assert!(lua.contains("_leaf(\"slow\", _dur(1.5, \"s\"))"));
@@ -2138,7 +2246,9 @@ mod tests {
         let lua = compile_str("@extra = 4\ngaps = 8 * extra\n");
         assert!(lua.contains("_leaf(\"gaps\", 8 * 4)"));
         // runtime variable: reachable as the identifier in expressions
-        let lua = compile_str("@mod = SUPER\n@terminal = wave(kitty, sh)\nbind $mod+Return { spawn:$terminal }\n");
+        let lua = compile_str(
+            "@mod = SUPER\n@terminal = wave(kitty, sh)\nbind $mod+Return { spawn:$terminal }\n",
+        );
         assert!(lua.contains("_vardef(\"terminal\", wave(\"kitty\", \"sh\"))"));
         assert!(lua.contains("bind(\"SUPER+Return\", {\"spawn:\" .. terminal})"));
     }
@@ -2169,7 +2279,8 @@ mod tests {
 
     #[test]
     fn block_and_nested_block() {
-        let lua = compile_str("border {\n    width = 2\n    gradient = [theme.primary, theme.deep]\n}\n");
+        let lua =
+            compile_str("border {\n    width = 2\n    gradient = [theme.primary, theme.deep]\n}\n");
         assert!(lua.contains("_block(\"border\", \"\", function()"));
         assert!(lua.contains("_leaf(\"width\", 2)"));
         assert!(lua.contains("_leaf(\"gradient\", {\"theme.primary\", \"theme.deep\"})"));
@@ -2201,7 +2312,9 @@ mod tests {
     #[test]
     fn wave_splice_inside_string() {
         let lua = compile_str("@mod = SUPER\nbind $mod+Return { spawn:$wave(kitty, alacritty) }\n");
-        assert!(lua.contains("bind(\"SUPER+Return\", {\"spawn:\" .. wave(\"kitty\", \"alacritty\")})"));
+        assert!(
+            lua.contains("bind(\"SUPER+Return\", {\"spawn:\" .. wave(\"kitty\", \"alacritty\")})")
+        );
         let lua = compile_str("@mod = SUPER\nbind $mod+Return { \"spawn:\" .. wave(\"kitty\") }\n");
         assert!(lua.contains("bind(\"SUPER+Return\", {\"spawn:\" .. wave(\"kitty\")})"));
     }
@@ -2263,13 +2376,28 @@ mod tests {
     #[test]
     fn compile_eval_expression_handles_surface_and_identifiers() {
         // durations and colors are surface literals
-        assert_eq!(compile_eval_expression("600ms * 2").unwrap(), "_dur(600, \"ms\") * 2");
-        assert_eq!(compile_eval_expression("1.5s / 2").unwrap(), "_dur(1.5, \"s\") / 2");
-        assert_eq!(compile_eval_expression("#8EDDFF").unwrap(), "_color(\"8EDDFF\")");
+        assert_eq!(
+            compile_eval_expression("600ms * 2").unwrap(),
+            "_dur(600, \"ms\") * 2"
+        );
+        assert_eq!(
+            compile_eval_expression("1.5s / 2").unwrap(),
+            "_dur(1.5, \"s\") / 2"
+        );
+        assert_eq!(
+            compile_eval_expression("#8EDDFF").unwrap(),
+            "_color(\"8EDDFF\")"
+        );
         // unknown names stay identifiers for the session Lua to resolve
-        assert_eq!(compile_eval_expression("theme.primary").unwrap(), "theme.primary");
+        assert_eq!(
+            compile_eval_expression("theme.primary").unwrap(),
+            "theme.primary"
+        );
         assert_eq!(compile_eval_expression("mod").unwrap(), "mod");
-        assert_eq!(compile_eval_expression("tide.backend == \"winit\"").unwrap(), "tide.backend == \"winit\"");
+        assert_eq!(
+            compile_eval_expression("tide.backend == \"winit\"").unwrap(),
+            "tide.backend == \"winit\""
+        );
         // markers error with a hint
         let err = compile_eval_expression("$mod").unwrap_err();
         assert!(err.contains("use `mod`"), "{err}");
@@ -2299,10 +2427,7 @@ mod tests {
             workspace: 3,
             ..Default::default()
         };
-        let dir = std::env::temp_dir().join(format!(
-            "tidewm-wave-on-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("tidewm-wave-on-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let main = dir.join("config.wave");
@@ -2371,7 +2496,6 @@ mod tests {
         assert_eq!(entries[2], Entry::Assign("terminal".into(), "sh".into()));
     }
 
-
     #[test]
     fn duration_math_and_serialization() {
         // 600ms * 2 -> 1200ms; 1.5s * 2 -> 3s; 90m / 2 -> 45m
@@ -2404,7 +2528,10 @@ mod tests {
     #[test]
     fn dbg_chunk() {
         let src = "theme {\n    primary = #8EDDFF\n    deep = primary.darken(0.35)\n}\n";
-        eprintln!("=== CHUNK:\n{}", compile(src, std::path::Path::new("t.wave")).unwrap());
+        eprintln!(
+            "=== CHUNK:\n{}",
+            compile(src, std::path::Path::new("t.wave")).unwrap()
+        );
     }
 
     #[test]
@@ -2416,25 +2543,35 @@ mod tests {
         .expect("palette should evaluate");
         // deep = 8EDDFF * 0.65: r=142*0.65=92.3->92=0x5C,
         // g=221*0.65=143.65->144=0x90, b=255*0.65=165.75->166=0xA6
-        assert_eq!(entries[0], Entry::Block("theme".into(), "".into(), vec![
-            Entry::Assign("primary".into(), "8EDDFF".into()),
-            Entry::Assign("deep".into(), "5C90A6".into()),
-            // lighten(0.15): 142+(255-142)*0.15=159=0x9F, 221+34*.15=226=0xE2, 255=0xFF
-            Entry::Assign("highlight".into(), "9FE2FF".into()),
-        ]));
+        assert_eq!(
+            entries[0],
+            Entry::Block(
+                "theme".into(),
+                "".into(),
+                vec![
+                    Entry::Assign("primary".into(), "8EDDFF".into()),
+                    Entry::Assign("deep".into(), "5C90A6".into()),
+                    // lighten(0.15): 142+(255-142)*0.15=159=0x9F, 221+34*.15=226=0xE2, 255=0xFF
+                    Entry::Assign("highlight".into(), "9FE2FF".into()),
+                ]
+            )
+        );
         // gradient = [theme.primary, theme.deep]; list items serialize
         // as bare values (colors as RRGGBB)
-        assert_eq!(entries[1], Entry::Block("border".into(), "".into(), vec![
-            Entry::Assign("gradient".into(), "[8EDDFF, 5C90A6]".into()),
-        ]));
+        assert_eq!(
+            entries[1],
+            Entry::Block(
+                "border".into(),
+                "".into(),
+                vec![Entry::Assign("gradient".into(), "[8EDDFF, 5C90A6]".into()),]
+            )
+        );
     }
 
     #[test]
     fn resolve_handles_includes_in_new_syntax() {
-        let dir = std::env::temp_dir().join(format!(
-            "tidewm-wave-resolve-test-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("tidewm-wave-resolve-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -2463,6 +2600,3 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
-
-
-

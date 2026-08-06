@@ -1007,12 +1007,9 @@ impl Smallvil {
         let (app_id, title) = self.toplevel_identity(surface);
         let pid = self.client_pid(surface);
         let is_xwayland = self.is_xwayland_surface(surface);
-        let rule = self.config.resolve_window_rules(
-            app_id.as_deref(),
-            title.as_deref(),
-            pid,
-            is_xwayland,
-        );
+        let rule =
+            self.config
+                .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
         if let Some(opacity) = crate::config::WindowOpacity::from_rule(&rule) {
             self.window_opacity.insert(surface.clone(), opacity);
         } else {
@@ -1427,12 +1424,9 @@ impl Smallvil {
         let (app_id, title) = self.toplevel_identity(&entry.surface);
         let pid = self.client_pid(&entry.surface);
         let is_xwayland = self.is_xwayland_surface(&entry.surface);
-        let rule = self.config.resolve_window_rules(
-            app_id.as_deref(),
-            title.as_deref(),
-            pid,
-            is_xwayland,
-        );
+        let rule =
+            self.config
+                .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
         if let Some(opacity) = crate::config::WindowOpacity::from_rule(&rule) {
             self.window_opacity.insert(entry.surface.clone(), opacity);
         }
@@ -1486,7 +1480,12 @@ impl Smallvil {
                 let (app_id, title) = self.toplevel_identity(&surface);
                 let is_xwayland = self.is_xwayland_surface(&surface);
                 self.config
-                    .resolve_window_rules(app_id.as_deref(), title.as_deref(), Some(pid), is_xwayland)
+                    .resolve_window_rules(
+                        app_id.as_deref(),
+                        title.as_deref(),
+                        Some(pid),
+                        is_xwayland,
+                    )
                     .swallow
                     .then_some(surface)
             })
@@ -1509,7 +1508,8 @@ impl Smallvil {
     /// whenever xwayland is disabled, satellite never started, or the
     /// surface's client is already gone.
     pub(crate) fn is_xwayland_surface(&self, surface: &WlSurface) -> bool {
-        self.xwayland_satellite_pid.is_some() && self.client_pid(surface) == self.xwayland_satellite_pid
+        self.xwayland_satellite_pid.is_some()
+            && self.client_pid(surface) == self.xwayland_satellite_pid
     }
 
     pub(crate) fn preferred_output_for_toplevel(&self, surface: &WlSurface) -> Option<String> {

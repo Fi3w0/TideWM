@@ -1068,8 +1068,8 @@ impl Config {
             // parse of the constant) so `include "keybinds.wave"` above
             // actually resolves on this very first boot, not just on the
             // next reload.
-            let (default, include_warnings, entries) =
-                load_raw_config_in(lua, tide, &path).unwrap_or_else(|err| {
+            let (default, include_warnings, entries) = load_raw_config_in(lua, tide, &path)
+                .unwrap_or_else(|err| {
                     tracing::error!(%err, "Built-in default Waves config failed to parse");
                     (RawConfig::default(), Vec::new(), Vec::new())
                 });
@@ -1098,7 +1098,10 @@ impl Config {
     }
 
     /// [`Config::reload`] on the session Lua with live-compositor facts.
-    pub(crate) fn reload_in(lua: &mlua::Lua, tide: &wave::TideInfo) -> Result<(Self, Vec<String>), String> {
+    pub(crate) fn reload_in(
+        lua: &mlua::Lua,
+        tide: &wave::TideInfo,
+    ) -> Result<(Self, Vec<String>), String> {
         let (raw, include_warnings, entries) = load_raw_config_in(lua, tide, &config_path())?;
         let (mut config, mut warnings) = Self::from_raw(raw);
         warnings.extend(include_warnings);
@@ -3544,7 +3547,12 @@ fn load_raw_config(path: &Path) -> Result<(RawConfig, Vec<String>, Vec<waves::En
         mlua::StdLib::MATH | mlua::StdLib::STRING | mlua::StdLib::TABLE,
         mlua::LuaOptions::default(),
     )
-    .map_err(|e| format!("in file {}: failed to create Lua state: {e}", path.display()))?;
+    .map_err(|e| {
+        format!(
+            "in file {}: failed to create Lua state: {e}",
+            path.display()
+        )
+    })?;
     load_raw_config_in(&lua, &wave::TideInfo::default(), path)
 }
 
@@ -3654,7 +3662,11 @@ impl ConfigDiff {
     pub fn summary(&self) -> String {
         let mut parts = Vec::new();
         if !self.keys_changed.is_empty() {
-            let keys: Vec<&str> = self.keys_changed.iter().map(|(k, _, _)| k.as_str()).collect();
+            let keys: Vec<&str> = self
+                .keys_changed
+                .iter()
+                .map(|(k, _, _)| k.as_str())
+                .collect();
             parts.push(format!(
                 "{} key{} changed ({})",
                 keys.len(),
@@ -3779,14 +3791,20 @@ fn collect_binds(entries: &[waves::Entry]) -> std::collections::BTreeMap<String,
     map
 }
 
-fn collect_blocks(entries: &[waves::Entry]) -> std::collections::BTreeMap<(String, String), Vec<waves::Entry>> {
+fn collect_blocks(
+    entries: &[waves::Entry],
+) -> std::collections::BTreeMap<(String, String), Vec<waves::Entry>> {
     let mut map: std::collections::BTreeMap<(String, String), Vec<waves::Entry>> =
         std::collections::BTreeMap::new();
     for entry in entries {
         if let waves::Entry::Block(keyword, header, body) = entry {
             map.entry((keyword.clone(), header.clone()))
                 .or_default()
-                .push(waves::Entry::Block(keyword.clone(), header.clone(), body.clone()));
+                .push(waves::Entry::Block(
+                    keyword.clone(),
+                    header.clone(),
+                    body.clone(),
+                ));
         }
     }
     map
@@ -3830,10 +3848,24 @@ fn lower_entries(entries: &[waves::Entry]) -> RawConfig {
 fn is_known_top_level_key(key: &str) -> bool {
     matches!(
         key,
-        "terminal" | "engine" | "drag_modifier" | "welcome_hint" | "reload_toast"
-            | "water_effects" | "viscosity" | "cursor_always_visible" | "cursor_hide_after"
-            | "auto_back_and_forth" | "workspace_name" | "gaps" | "workspace_gaps"
-            | "layout" | "master_side" | "split_bias" | "pseudo_tile_scale" | "spawn"
+        "terminal"
+            | "engine"
+            | "drag_modifier"
+            | "welcome_hint"
+            | "reload_toast"
+            | "water_effects"
+            | "viscosity"
+            | "cursor_always_visible"
+            | "cursor_hide_after"
+            | "auto_back_and_forth"
+            | "workspace_name"
+            | "gaps"
+            | "workspace_gaps"
+            | "layout"
+            | "master_side"
+            | "split_bias"
+            | "pseudo_tile_scale"
+            | "spawn"
     )
 }
 
@@ -3845,9 +3877,7 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
             raw.pointer_modifier = value.to_string()
         }
         "welcome_hint" => set_bool(&mut raw.show_welcome_hint, key, value),
-        "reload_toast" => {
-            set_bool(&mut raw.show_config_reload_toast, key, value)
-        }
+        "reload_toast" => set_bool(&mut raw.show_config_reload_toast, key, value),
         "water_effects" => set_bool(&mut raw.water_effects, key, value),
         "viscosity" => match parse_viscosity(value) {
             Some(value) => raw.viscosity = value,
@@ -3858,12 +3888,13 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
             if let Some(ms) = parse_duration_ms(value) {
                 raw.cursor_hide_after_ms = ms as i32;
             } else {
-                tracing::warn!(value, "Expected a duration like 2s or 2000ms for cursor_hide_after, ignoring");
+                tracing::warn!(
+                    value,
+                    "Expected a duration like 2s or 2000ms for cursor_hide_after, ignoring"
+                );
             }
         }
-        "auto_back_and_forth" => {
-            set_bool(&mut raw.workspace_auto_back_and_forth, key, value)
-        }
+        "auto_back_and_forth" => set_bool(&mut raw.workspace_auto_back_and_forth, key, value),
         "gaps" => set_i32(&mut raw.gaps, key, value),
         "layout" => raw.default_layout = value.to_string(),
         "master_side" => raw.master_orientation = value.to_string(),
@@ -3886,12 +3917,8 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
     match keyword {
         "input" => apply_input_block(&mut raw.input, body),
         "xwayland" => apply_xwayland_block(&mut raw.xwayland, body),
-        "transition" => {
-            apply_workspace_transition_block(&mut raw.workspace_transition, body)
-        }
-        "vessels" => {
-            apply_connected_vessels_block(&mut raw.connected_vessels, body)
-        }
+        "transition" => apply_workspace_transition_block(&mut raw.workspace_transition, body),
+        "vessels" => apply_connected_vessels_block(&mut raw.connected_vessels, body),
         "sway" => apply_sway_block(&mut raw.sway, body),
         "physics" => apply_float_physics_block(&mut raw.float_physics, body),
         "swim" => apply_swim_block(&mut raw.swim, body),
@@ -3902,9 +3929,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "depth" => apply_depth_block(&mut raw.depth, body),
         "depth_deck" => apply_classic_depth_block(&mut raw.classic_depth, body),
         "frost" => apply_frost_block(&mut raw.frost, body),
-        "glass" => {
-            apply_water_glass_block(&mut raw.water_glass, body)
-        }
+        "glass" => apply_water_glass_block(&mut raw.water_glass, body),
         "caustics" => apply_caustics_block(&mut raw.caustics, body),
         "shadow" => apply_shadow_block(&mut raw.shadow, body),
         "rounding" => apply_rounding_block(&mut raw.rounding, body),
@@ -4183,17 +4208,15 @@ fn apply_window_animation_block(cfg: &mut WindowAnimationConfig, body: &[waves::
                     "Expected a built-in easing or cubic-bezier(x1,y1,x2,y2), ignoring"
                 ),
             },
-            "opacity_duration" => {
-                match parse_duration_ms(value) {
-                    Some(value) if (1..=10_000).contains(&value) => {
-                        cfg.opacity_duration_ms = Some(value)
-                    }
-                    _ => tracing::warn!(
-                        value,
-                        "Expected opacity animation duration from 1 to 10000ms, ignoring"
-                    ),
+            "opacity_duration" => match parse_duration_ms(value) {
+                Some(value) if (1..=10_000).contains(&value) => {
+                    cfg.opacity_duration_ms = Some(value)
                 }
-            }
+                _ => tracing::warn!(
+                    value,
+                    "Expected opacity animation duration from 1 to 10000ms, ignoring"
+                ),
+            },
             "opacity_curve" | "fade_curve" | "opacity_ease" => {
                 match parse_window_animation_curve(value) {
                     Some(value) => cfg.opacity_curve = Some(value),
@@ -5760,7 +5783,10 @@ fn parse_bool(value: &str) -> Option<bool> {
 ///
 /// Returns linear-space RGB in `[0.0, 1.0]`.
 fn parse_ripple_color(value: &str) -> Option<[f32; 3]> {
-    let v = value.trim().strip_prefix('#').unwrap_or_else(|| value.trim());
+    let v = value
+        .trim()
+        .strip_prefix('#')
+        .unwrap_or_else(|| value.trim());
     decode_hex_rgb(v)
 }
 
@@ -5780,7 +5806,10 @@ fn decode_hex_rgb(hex: &str) -> Option<[f32; 3]> {
 /// have a separate dedicated alpha knob. Accepts bare/`#` hex and the
 /// legacy `0xAARRGGBB` form.
 fn parse_rgba_color(value: &str) -> Option<[f32; 4]> {
-    let value = value.trim().strip_prefix('#').unwrap_or_else(|| value.trim());
+    let value = value
+        .trim()
+        .strip_prefix('#')
+        .unwrap_or_else(|| value.trim());
     if let Some(hex) = value.strip_prefix("0x") {
         if hex.len() != 8 {
             return None;
@@ -5803,7 +5832,6 @@ fn decode_hex_rgba(hex: &str) -> Option<[f32; 4]> {
     let color = decode_hex_rgb(rgb)?;
     Some([color[0], color[1], color[2], alpha as f32 / 255.0])
 }
-
 
 fn apply_rounding_block(cfg: &mut RoundingConfig, body: &[waves::Entry]) {
     let mut overrides = RoundingOverrides::default();
@@ -7251,7 +7279,12 @@ mod tests {
             title_regex: Some(regex::Regex::new("(?i)private browsing").unwrap()),
             ..Default::default()
         };
-        assert!(rule.matches(Some("org.mozilla.firefox"), Some("Private Browsing"), None, false));
+        assert!(rule.matches(
+            Some("org.mozilla.firefox"),
+            Some("Private Browsing"),
+            None,
+            false
+        ));
         assert!(!rule.matches(Some("kitty"), Some("Private Browsing"), None, false));
 
         let invalid =
@@ -7456,11 +7489,10 @@ mod tests {
         assert!(!none_matched.float);
     }
 
-
     #[test]
     fn ocean_selector_reefs_bookmarks_and_actions_parse_without_resolution_defaults() {
         let entries = wave_entries(
-"spatial_engine = ocean\n\
+            "spatial_engine = ocean\n\
              ocean {\n\
                  camera_step = 720\n\
                  depth_enabled = false\n\
@@ -7496,7 +7528,8 @@ mod tests {
              bind Super+Ctrl+D { sink-window }\n\
              bind Super+Ctrl+Shift+D { ocean-dredge-window }\n\
              bind Super+Ctrl+Shift+U { ocean-surface-window }\n\
-             bind Super+1 { ocean-bookmark:code }\n");
+             bind Super+1 { ocean-bookmark:code }\n",
+        );
         let config = Config::from_raw(lower_entries(&entries)).0;
 
         assert_eq!(config.spatial_engine, SpatialEngine::Ocean);
@@ -7538,7 +7571,6 @@ mod tests {
             .iter()
             .any(|bind| { matches!(&bind.action, Action::OceanBookmark(name) if name == "code") }));
     }
-
 
     #[test]
     fn parsed_keybinds_are_authoritative_and_never_merge_hidden_defaults() {
@@ -7597,7 +7629,6 @@ mod tests {
         assert!(!raw.keybinds.contains_key("$mod+Q"));
     }
 
-
     #[test]
     fn load_raw_config_new_syntax_error_is_authoritative() {
         // @mod is new-only syntax, so the Wave parser's error must
@@ -7652,10 +7683,7 @@ mod tests {
             diff.binds_added,
             vec![("SUPER+D".to_string(), "spawn:rofi".to_string())]
         );
-        assert_eq!(
-            diff.binds_removed,
-            vec![]
-        );
+        assert_eq!(diff.binds_removed, vec![]);
         assert_eq!(
             diff.binds_changed,
             vec![(
@@ -7903,8 +7931,14 @@ mod tests {
              default_layout = master\n",
         );
         let (raw, _, _) = load_raw_config(&old).expect("config still loads");
-        assert!(raw.default_layout.is_empty(), "legacy default_layout must be ignored");
-        assert_eq!(raw.spatial_engine, "classic", "the default engine must still apply");
+        assert!(
+            raw.default_layout.is_empty(),
+            "legacy default_layout must be ignored"
+        );
+        assert_eq!(
+            raw.spatial_engine, "classic",
+            "the default engine must still apply"
+        );
     }
 
     #[test]
@@ -8049,7 +8083,8 @@ mod tests {
         let dir = TestDir::new(&format!("default-config-{:?}", std::thread::current().id()));
         dir.write("keybinds.wave", DEFAULT_KEYBINDS_WAVE);
         let main = dir.write("config.wave", DEFAULT_CONFIG_WAVE);
-        let (raw, _, _) = load_raw_config(&main).expect("the shipped default must parse and resolve");
+        let (raw, _, _) =
+            load_raw_config(&main).expect("the shipped default must parse and resolve");
         Config::from_raw(raw).0
     }
 
@@ -8070,8 +8105,7 @@ mod tests {
             }
         );
 
-        let entries = wave_entries(
-"@mod = ALT\npointer_modifier = mod .. \"+SHIFT\"\n");
+        let entries = wave_entries("@mod = ALT\npointer_modifier = mod .. \"+SHIFT\"\n");
         let raw = lower_entries(&entries);
         assert_eq!(
             Config::from_raw(raw).0.pointer_modifier,
@@ -8086,7 +8120,7 @@ mod tests {
     #[test]
     fn ocean_direct_manipulation_and_reload_card_are_user_configurable() {
         let entries = wave_entries(
-"reload_toast = false\n\
+            "reload_toast = false\n\
              ocean {\n\
                  freeform_windows = false\n\
                  smart_tiling = true\n\
@@ -8094,7 +8128,8 @@ mod tests {
                  smart_tiling_preserve_size = false\n\
                  canvas_pan_button = middle\n\
                  canvas_pan_requires_modifier = true\n\
-             }\n");
+             }\n",
+        );
         let config = Config::from_raw(lower_entries(&entries)).0;
         assert!(!config.show_config_reload_toast);
         assert!(!config.ocean.freeform_windows);
@@ -8117,7 +8152,7 @@ mod tests {
     #[test]
     fn viscosity_parses_clamps_and_uses_the_last_matching_rule() {
         let entries = wave_entries(
-"viscosity = 1.75\n\
+            "viscosity = 1.75\n\
              rule {\n\
              app_id = kitty\n\
              viscosity = 0.4\n\
@@ -8125,15 +8160,20 @@ mod tests {
              rule {\n\
              app_id = kitty\n\
              viscosity = 9\n\
-             }\n");
+             }\n",
+        );
         let config = Config::from_raw(lower_entries(&entries)).0;
         assert_eq!(config.viscosity, 1.75);
         assert_eq!(
-            config.resolve_window_rules(Some("kitty"), None, None, false).viscosity,
+            config
+                .resolve_window_rules(Some("kitty"), None, None, false)
+                .viscosity,
             Some(4.0)
         );
         assert_eq!(
-            config.resolve_window_rules(Some("foot"), None, None, false).viscosity,
+            config
+                .resolve_window_rules(Some("foot"), None, None, false)
+                .viscosity,
             None
         );
         assert_eq!(parse_default_config().viscosity, 1.0);
@@ -8142,11 +8182,12 @@ mod tests {
     #[test]
     fn connected_vessels_block_parses_clamps_and_matches_generated_defaults() {
         let entries = wave_entries(
-"vessels {\n\
+            "vessels {\n\
              enabled = false\n\
              falloff = 1.7\n\
              max_splits = 7\n\
-             }\n");
+             }\n",
+        );
         let config = Config::from_raw(lower_entries(&entries)).0;
         assert!(!config.connected_vessels.enabled);
         assert_eq!(config.connected_vessels.falloff, 1.0);
@@ -8161,12 +8202,13 @@ mod tests {
     #[test]
     fn swim_block_parses_clamps_and_matches_generated_defaults() {
         let entries = wave_entries(
-"swim {\n\
+            "swim {\n\
              enabled = true\n\
              neighbors = 9\n\
              response = 12.0\n\
              snap_duration_ms = 99999\n\
-             }\n");
+             }\n",
+        );
         let config = Config::from_raw(lower_entries(&entries)).0;
         assert!(config.swim.enabled);
         assert_eq!(config.swim.neighbors, 4);
@@ -8183,7 +8225,7 @@ mod tests {
     #[test]
     fn sway_block_parses_clamps_rules_and_matches_generated_defaults() {
         let entries = wave_entries(
-"sway {\n\
+            "sway {\n\
              enabled = true\n\
              response = 2.5\n\
              max_offset = 999\n\
@@ -8193,7 +8235,8 @@ mod tests {
              rule {\n\
              app_id = kitty\n\
              sway = false\n\
-             }\n");
+             }\n",
+        );
         let config = Config::from_raw(lower_entries(&entries)).0;
         assert!(config.sway.enabled);
         assert_eq!(config.sway.response, 1.0);
@@ -8201,10 +8244,17 @@ mod tests {
         assert_eq!(config.sway.frequency, 0.1);
         assert_eq!(config.sway.damping, 20.0);
         assert_eq!(
-            config.resolve_window_rules(Some("kitty"), None, None, false).sway,
+            config
+                .resolve_window_rules(Some("kitty"), None, None, false)
+                .sway,
             Some(false)
         );
-        assert_eq!(config.resolve_window_rules(Some("foot"), None, None, false).sway, None);
+        assert_eq!(
+            config
+                .resolve_window_rules(Some("foot"), None, None, false)
+                .sway,
+            None
+        );
 
         let defaults = parse_default_config().sway;
         assert!(!defaults.enabled);
@@ -8214,7 +8264,7 @@ mod tests {
     #[test]
     fn float_physics_block_parses_clamps_rules_and_matches_generated_defaults() {
         let entries = wave_entries(
-"physics {\n\
+            "physics {\n\
              tier = full\n\
              response = 2.5\n\
              max_offset = 999\n\
@@ -8236,7 +8286,8 @@ mod tests {
              rule {\n\
              app_id = kitty\n\
              float_physics = off\n\
-             }\n");
+             }\n",
+        );
         let config = Config::from_raw(lower_entries(&entries)).0;
         assert_eq!(config.float_physics.tier, FloatPhysicsTier::Full);
         assert_eq!(config.float_physics.response, 1.0);
@@ -8269,13 +8320,14 @@ mod tests {
         // Legacy true/false aliases still map onto light/off, both globally
         // and per rule.
         let legacy = wave_entries(
-"physics {\n\
+            "physics {\n\
              enabled = true\n\
              }\n\
              rule {\n\
              app_id = kitty\n\
              float_physics = true\n\
-             }\n");
+             }\n",
+        );
         let legacy_config = Config::from_raw(lower_entries(&legacy)).0;
         assert_eq!(legacy_config.float_physics.tier, FloatPhysicsTier::Light);
         assert_eq!(
@@ -8293,12 +8345,13 @@ mod tests {
     #[test]
     fn water_glass_block_parses_clamps_and_matches_generated_defaults() {
         let entries = wave_entries(
-"glass {\n\
+            "glass {\n\
              animation = ambient\n\
              speed = 99\n\
              amplitude = -1\n\
              settle_ms = 5\n\
-             }\n");
+             }\n",
+        );
         let config = Config::from_raw(lower_entries(&entries)).0;
         assert_eq!(config.water_glass.animation, GlassAnimation::Ambient);
         assert_eq!(config.water_glass.speed, 8.0);
@@ -8313,7 +8366,7 @@ mod tests {
     #[test]
     fn caustics_block_parses_clamps_and_matches_generated_defaults() {
         let entries = wave_entries(
-"caustics {\n\
+            "caustics {\n\
              enabled = true\n\
              intensity = 5\n\
              color = 8CDDFF\n\
@@ -8322,7 +8375,8 @@ mod tests {
              fps = 999\n\
              idle_fps = [20, 10]\n\
              idle_after = [600000, 1200000]\n\
-             }\n");
+             }\n",
+        );
         let config = Config::from_raw(lower_entries(&entries)).0;
         assert!(config.caustics.enabled);
         assert_eq!(config.caustics.intensity, 1.0);
@@ -8343,22 +8397,30 @@ mod tests {
     #[test]
     fn rule_depth_override_uses_the_last_matching_rule() {
         let entries = wave_entries(
-"rule {\n\
+            "rule {\n\
              app_id = kitty\n\
              depth = false\n\
              }\n\
              rule {\n\
              app_id = kitty\n\
              depth = true\n\
-             }\n");
+             }\n",
+        );
         let config = Config::from_raw(lower_entries(&entries)).0;
         // Two matching rules for the same app: the later one wins, same
         // fold rule every other Option<bool> rule field uses.
         assert_eq!(
-            config.resolve_window_rules(Some("kitty"), None, None, false).depth,
+            config
+                .resolve_window_rules(Some("kitty"), None, None, false)
+                .depth,
             Some(true)
         );
-        assert_eq!(config.resolve_window_rules(Some("foot"), None, None, false).depth, None);
+        assert_eq!(
+            config
+                .resolve_window_rules(Some("foot"), None, None, false)
+                .depth,
+            None
+        );
     }
 
     #[test]
@@ -8379,7 +8441,6 @@ mod tests {
             .iter()
             .any(|warning| warning.contains("Invalid pointer_modifier")));
     }
-
 
     #[test]
     fn mod_left_at_super_or_undefined_produces_no_leftover_super_lint() {
@@ -8418,7 +8479,7 @@ mod tests {
     #[test]
     fn workspace_transition_block_parses_every_tuning_knob() {
         let entries = wave_entries(
-"transition {\n\
+            "transition {\n\
              enabled = false\n\
              style = glow\n\
              duration = 900ms\n\
@@ -8442,7 +8503,8 @@ mod tests {
              foam_alpha = 0.88\n\
              spray_amount = 0.6\n\
              turbulence = 1.2\n\
-             }\n");
+             }\n",
+        );
         let config = Config::from_raw(lower_entries(&entries)).0;
         let transition = config.workspace_transition;
 
@@ -8477,7 +8539,7 @@ mod tests {
     #[test]
     fn window_animation_blocks_parse_bezier_offsets_and_opacity() {
         let entries = wave_entries(
-"animations {\n\
+            "animations {\n\
              preset = wave\n\
              enabled = true\n\
              slowdown = 1.5\n\
@@ -8504,7 +8566,8 @@ mod tests {
              duration = 360\n\
              curve = exp-out\n\
              }\n\
-             }\n");
+             }\n",
+        );
         let animations = Config::from_raw(lower_entries(&entries)).0.animations;
 
         assert!(animations.enabled);
@@ -8538,7 +8601,7 @@ mod tests {
     #[test]
     fn frost_block_and_per_window_glass_mode_parse() {
         let entries = wave_entries(
-"frost {\n\
+            "frost {\n\
              enabled = false\n\
              radius = 24\n\
              strength = 0.75\n\
@@ -8568,7 +8631,8 @@ mod tests {
              tint_alpha = 0.0\n\
              noise = 0.02\n\
              }\n\
-             }\n");
+             }\n",
+        );
         let config = Config::from_raw(lower_entries(&entries)).0;
 
         assert!(!config.frost.enabled);
@@ -8616,7 +8680,7 @@ mod tests {
     #[test]
     fn shadow_block_and_per_window_overrides_parse_and_merge() {
         let entries = wave_entries(
-"shadow {\n\
+            "shadow {\n\
              enabled = false\n\
              range = 42\n\
              spread = -3\n\
@@ -8650,7 +8714,8 @@ mod tests {
              spread = 5\n\
              inactive_opacity = 0.7\n\
              }\n\
-             }\n");
+             }\n",
+        );
         let config = Config::from_raw(lower_entries(&entries)).0;
 
         assert!(!config.shadow.enabled);
@@ -8691,7 +8756,7 @@ mod tests {
     #[test]
     fn rounding_and_border_blocks_parse_and_merge_per_window() {
         let entries = wave_entries(
-"rounding {\n\
+            "rounding {\n\
              radius = [18, 14, 10, 6]\n\
              power = 2.5\n\
              antialias = 1.25\n\
@@ -8726,7 +8791,8 @@ mod tests {
              placement = inside\n\
              inactive_opacity = 0.45\n\
              }\n\
-             }\n");
+             }\n",
+        );
         let config = Config::from_raw(lower_entries(&entries)).0;
         assert_eq!(config.rounding.radii, [18.0, 14.0, 10.0, 6.0]);
         assert_eq!(config.rounding.power, 2.5);
@@ -8766,11 +8832,12 @@ mod tests {
         );
 
         let entries = wave_entries(
-"popup {\n\
+            "popup {\n\
              border_width = 3\n\
              border_color = FF0000\n\
              radius = 20\n\
-             }\n");
+             }\n",
+        );
         let pinned = Config::from_raw(lower_entries(&entries)).0;
         assert_eq!(pinned.popup.border_width, Some(3.0));
         assert_eq!(pinned.popup.radius, Some(20.0));
@@ -8788,15 +8855,23 @@ mod tests {
     #[test]
     fn glass_mode_is_last_match_wins_and_plain_is_explicit() {
         let entries = wave_entries(
-"rule {\n app_id = kitty\n glass = frost\n }\n\
-             rule {\n app_id = kitty\n glass = none\n }\n");
+            "rule {\n app_id = kitty\n glass = frost\n }\n\
+             rule {\n app_id = kitty\n glass = none\n }\n",
+        );
         let config = Config::from_raw(lower_entries(&entries)).0;
 
         assert_eq!(
-            config.resolve_window_rules(Some("kitty"), None, None, false).glass,
+            config
+                .resolve_window_rules(Some("kitty"), None, None, false)
+                .glass,
             Some(GlassMode::Plain)
         );
-        assert_eq!(config.resolve_window_rules(Some("foot"), None, None, false).glass, None);
+        assert_eq!(
+            config
+                .resolve_window_rules(Some("foot"), None, None, false)
+                .glass,
+            None
+        );
     }
 
     #[test]
@@ -8835,7 +8910,7 @@ mod tests {
     #[test]
     fn depth_block_parses_every_tuning_knob() {
         let entries = wave_entries(
-"depth {\n\
+            "depth {\n\
              enabled = false\n\
              sink_after_ms = 1200\n\
              tier_interval_ms = 800\n\
@@ -8848,7 +8923,8 @@ mod tests {
              border_color = AABBCC\n\
              urgent_color = FFEEDD\n\
              urgent_alpha = 0.84\n\
-             }\n");
+             }\n",
+        );
         let depth = Config::from_raw(lower_entries(&entries)).0.depth;
         assert!(!depth.enabled);
         assert_eq!(depth.sink_after_ms, 1200);
@@ -8891,7 +8967,7 @@ mod tests {
     #[test]
     fn classic_depth_is_independently_opt_in() {
         let entries = wave_entries(
-"depth_deck {\n\
+            "depth_deck {\n\
              enabled = true\n\
              animation = false\n\
              animation_duration_ms = 610\n\
@@ -8899,7 +8975,8 @@ mod tests {
              wave_alpha = 0.44\n\
              }\n\
              bind Super+D { depth-down }\n\
-             bind Super+Shift+D { depth-up }\n");
+             bind Super+Shift+D { depth-up }\n",
+        );
         let config = Config::from_raw(lower_entries(&entries)).0;
         assert!(config.classic_depth.enabled);
         assert!(!config.classic_depth.animation);
@@ -9112,9 +9189,10 @@ mod tests {
     #[test]
     fn ordinary_keys_can_be_held_as_user_defined_helpers() {
         let entries = wave_entries(
-"@sub = P\n\
+            "@sub = P\n\
              bind $sub+Ctrl+H { focus-left }\n\
-             bind F { toggle-fullscreen }\n");
+             bind F { toggle-fullscreen }\n",
+        );
         let raw = lower_entries(&entries);
         let (config, warnings) = Config::from_raw(raw);
         assert!(warnings.is_empty());
@@ -9185,7 +9263,7 @@ mod tests {
         );
 
         let entries = wave_entries(
-"ripple {\n\
+            "ripple {\n\
              preset = tide\n\
              map_preset = splash\n\
              focus_preset = jelly\n\
@@ -9196,7 +9274,8 @@ mod tests {
              wobble = 0.9\n\
              detail = 1.1\n\
              triggers = [map, focus, urgent]\n\
-             }\n");
+             }\n",
+        );
         let config = Config::from_raw(lower_entries(&entries)).0;
         assert_eq!(
             config.ripple.preset,
@@ -9224,10 +9303,11 @@ mod tests {
     #[test]
     fn urgent_repeat_parses_and_merges_with_clamped_interval() {
         let entries = wave_entries(
-"ripple {\n\
+            "ripple {\n\
              urgent_repeat = false\n\
              urgent_repeat_interval_ms = 10\n\
-             }\n");
+             }\n",
+        );
         let config = Config::from_raw(lower_entries(&entries)).0;
         assert_eq!(config.ripple.urgent_repeat, Some(false));
         // 10ms is below the 100ms floor; clamped at parse time.
@@ -9245,8 +9325,7 @@ mod tests {
 
     #[test]
     fn assigning_legacy_shapes_selects_the_compatibility_preset() {
-        let entries = wave_entries(
-"ripple {\nshapes = [ring, square]\n}\n");
+        let entries = wave_entries("ripple {\nshapes = [ring, square]\n}\n");
         let config = Config::from_raw(lower_entries(&entries)).0;
         assert_eq!(
             config.ripple.preset,
@@ -9261,7 +9340,7 @@ mod tests {
     #[test]
     fn named_ripple_presets_inherit_and_keep_local_adjustments() {
         let entries = wave_entries(
-"ripple_preset ocean-base {\n\
+            "ripple_preset ocean-base {\n\
              preset = tide\n\
              color = 89B4FA\n\
              size_mode = window\n\
@@ -9285,7 +9364,8 @@ mod tests {
              focus_preset = ocean-jelly\n\
              color = CBA6F7\n\
              triggers = [map, focus]\n\
-             }\n");
+             }\n",
+        );
         let config = Config::from_raw(lower_entries(&entries)).0;
 
         let map = config.resolve_ripple_config(None, RippleTrigger::Map);

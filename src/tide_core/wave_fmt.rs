@@ -203,7 +203,10 @@ mod tests {
     fn preserves_block_comments_verbatim() {
         let src = "--[[ a multi\nline block ]]gaps=8\n";
         let formatted = format_source(src);
-        assert!(formatted.contains("--[[ a multi\nline block ]]"), "{formatted}");
+        assert!(
+            formatted.contains("--[[ a multi\nline block ]]"),
+            "{formatted}"
+        );
         assert!(formatted.contains("gaps = 8"), "{formatted}");
     }
 

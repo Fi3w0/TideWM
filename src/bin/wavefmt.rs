@@ -28,7 +28,9 @@ fn usage() -> String {
            (no flag)   print the formatted file to stdout\n\
            -w/--write  rewrite the file in place\n\
            -c/--check  exit 1 if any file is not already formatted\n",
-        std::env::args().next().unwrap_or_else(|| "wavefmt".to_string())
+        std::env::args()
+            .next()
+            .unwrap_or_else(|| "wavefmt".to_string())
     )
 }
 
