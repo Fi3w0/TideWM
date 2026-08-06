@@ -12,4 +12,5 @@ pub(crate) mod layout;
 pub(crate) mod ocean;
 pub(crate) mod placement;
 pub(crate) mod state;
+pub(crate) mod wave;
 pub(crate) mod waves;
