@@ -57,6 +57,7 @@ accesskit_unix = { version = "0.22.0", optional = true }
 # < 0.3.0 via pkg-config, older than what current distros ship. We only need
 # DrmScanner (unconditional), not the EDID make/model/serial lookup.
 smithay-drm-extras = { git = "https://github.com/Smithay/smithay.git", rev = "ff5fa7df392cecfba049ffed55cdaa4e98a8e7ef", default-features = false }
+mlua = { version = "0.12", default-features = false, features = ["lua54", "vendored"] }
 
 [dependencies.smithay]
 git = "https://github.com/Smithay/smithay.git"
