@@ -9,15 +9,10 @@
 //! way means this module can be tested against its own syntax rules
 //! alone, without dragging in every config field this project has today.
 //!
-//! This is the W1 prototype: the grammar core. `on "event"` handlers
-//! (W7), section globals so `theme.primary` reads as an expression (W4),
-//! and duration math (`600ms * 2`, W4's typed values) are deliberately
-//! not here yet.
-//!
-//! Dead-code allowance: `config.rs` still lowers through the line-based
-//! `waves` parser; wiring `evaluate` in is the W2/W3 step, so the whole
-//! module is unreferenced outside its tests until then.
-#![allow(dead_code)]
+//! This is the W1/W2 slice of the rewrite: the grammar core and the
+//! config-loading integration. `on "event"` handlers (W7), section
+//! globals so `theme.primary` reads as an expression (W4), and duration
+//! math (`600ms * 2`, W4's typed values) are deliberately not here yet.
 
 use std::cell::{Cell, RefCell};
 
@@ -588,6 +583,7 @@ fn find_matching_paren(s: &str) -> Option<usize> {
 }
 
 /// The surface parser: `source` -> Lua chunk text.
+#[allow(dead_code)] // exercised by tests; W6's wavefmt and W7's tidectl eval consume it
 pub(crate) fn compile(source: &str, path: &Path) -> Result<String, String> {
     compile_with(source, path, &mut Symbols::default())
 }
@@ -1369,6 +1365,7 @@ fn install_env(
 
 /// Compiles and evaluates a Wave file, returning the same [`Entry`] list
 /// the line-based parser produces.
+#[allow(dead_code)] // exercised by tests; W7's tidectl eval consumes it
 pub(crate) fn evaluate(source: &str, path: &Path) -> Result<Vec<Entry>, String> {
     let lua_source = compile(source, path)?;
     // Sandboxed from creation: only math/string/table, no io/os/package.
