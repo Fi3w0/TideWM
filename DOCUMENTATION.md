@@ -15,7 +15,7 @@ Full reference for configuring and controlling TideWM: every config key, every a
 | Flag | Notes |
 | --- | --- |
 | `-c, --config <path>` | Load this file instead of `$XDG_CONFIG_HOME/tidewm/config.wave`. Applies to the hot-reload watcher too, not just the initial load. |
-| `-s, --spawn <command>` | Spawn one specific command right after startup, instead of nothing. No shell parsing (same rule as `spawn_at_startup`). |
+| `-s, --spawn <command>` | Spawn one specific command right after startup, instead of nothing. No shell parsing (same rule as the `spawn` config key). |
 | `-v, --version` | Print the version and exit. |
 | `-h, --help` | Print usage and exit. |
 
@@ -23,27 +23,46 @@ Full reference for configuring and controlling TideWM: every config key, every a
 
 `$XDG_CONFIG_HOME/tidewm/config.wave`, or `~/.config/tidewm/config.wave` if `XDG_CONFIG_HOME` isn't set (or the path given to `--config`, see above). Written out with working defaults on first run. Almost every change hot-reloads on save — no restart needed — and a bad edit is shown in a persistent compositor-owned panel that reserves space above tiled windows (with file/line detail) while the previous config keeps running. Fixing the file clears the panel; the existing short reload/debug toast remains separate. `spatial_engine` is hot-reloadable too: a change migrates every live window between the Classic and Ocean models in place instead of requiring a restart (workspace stacks become reefs laid out on the lateral line, and back; see the Ocean section below for the mapping). Startup-owned exceptions are `xwayland { enabled }` and Ocean reef/bookmark declarations; changing one shows a restart-required warning. Ocean's `camera_step` remains hot-reloadable. Keyboard layout and already-connected touchpads also apply immediately.
 
-### Waves format
+### Wave format
 
-TideWM's own config format, not TOML. Three rules cover the whole grammar:
+TideWM's own config format. The surface is declarative data, and underneath it is Lua: every value is an expression, and statements (`if`, `for`, `fn`, `script`, `on`) are first-class. Read `WAVE.md` for the design rationale and the exact desugaring contract; this section is the working summary.
 
-- **`key = value` is the rest of the line** after the first `=`, trimmed — so a spawn command's own flags and spaces never need quoting (`bind $mod+R = spawn:rofi -show drun` just works). Quote a value only if you need to keep meaningful leading/trailing whitespace, or a literal `#`.
-- **A line ending in `{` opens a block**, always real multi-line — `output eDP-1 { position = 0x0 scale = 1.0 }` all on one line is not valid. No exceptions; this is what keeps "rest of line" from being ambiguous.
-- **`#` starts a comment**, unless it's inside `"quotes"`.
+A line is one of three things:
 
-`$name = value` defines a variable, substituted anywhere below (only names actually defined this way are substituted — a `$HOME` or `$PATH` inside a spawn command is left untouched). `$wave(a, b, c, ...)` is a built-in, not something you define: it resolves to the first candidate whose own first word is a real, executable file (checked directly, or via `$PATH`), falling back to the last candidate untried if none resolve — so a spawn still gets attempted and fails visibly instead of silently doing nothing. This is what makes the shipped default config's `terminal = $wave(kitty, alacritty, foot, xterm)` line actually portable across machines instead of hardcoding one binary name.
+- **`key = value`**, a setting. The value is a typed literal (number, `true`/`false`, a color like `#8EDDFF`, a duration like `600ms`/`1.5s`/`90m`, a bare string like `spawn:kitty` or `SUPER+Return`, a `[list, of, things]`), or an expression: `gaps = 8 * scale`, `deep = primary.darken(0.35)`.
+- **`name { ... }`**, a block, always real multi-line. `output eDP-1 { ... }` and `rule { ... }` are blocks; a block's keyword becomes a Lua table you can reference (`theme.primary`), and inside a block, sibling fields resolve: `deep = primary.darken(0.35)` reads the `primary` leaf above it.
+- **A statement**: `@name = value` defines a variable, `include "path.wave"` includes, `bind`, `if`, `for`, `fn`, `script`, `on`.
 
+**`@` defines, `$` references.** `@mod = SUPER` defines a variable (the only place `@` appears); `$mod` in a bare string references it (the only place `$` appears); expressions use the plain name (`pointer_modifier = mod`). Quoted strings are literal: `"$HOME"` in a spawn command is verbatim text. An undefined `$name` is a compile error with the fix in the message. `$wave(a, b, c, ...)` in a bare string is the portable-candidate builtin: it resolves to the first candidate that is a real executable (directly or via `$PATH`), falling back to the last candidate untried — `terminal = wave(kitty, alacritty, foot)` is the expression form of the same thing.
+
+```wave
+@mod = SUPER
+terminal = wave(kitty, alacritty, foot)
+
+bind $mod+Return { spawn:kitty }
+bind $mod+Q      { close-window }
+bind $mod+D      { "spawn:rofi -show drun" }
 ```
-$mod = SUPER
-terminal = $wave(kitty, alacritty, foot)
-bind $mod+Return = spawn:kitty
+
+Binds are node form: `bind <combo> { <action> }`, one action per line (or comma-separated on one line). The old `bind <combo> = <action>` line form still parses as a deprecated alias. `terminal` is a top-level key, not a `@name` variable — reference it as `$terminal` only after defining `@terminal = ...`.
+
+**Typed values.** Durations and colors are real values with math: `600ms * 2` is `1200ms`, `1.5s * 2` is `3s`, `2 * 300ms` is `600ms`; `primary.darken(0.35)`, `primary.lighten(0.15)`, and `alpha(a)` derive palette colors. Every duration key accepts a unit (`cursor_hide_after = 2s`) or a bare millisecond number.
+
+**Reactive config.** `on "event" { ... }` registers a handler body that runs when the event fires, with the live `tide` table (`tide.backend`, `tide.gpu.vendor`, `tide.outputs`, `tide.workspace`) refreshed first:
+
+```wave
+on "workspace-changed" {
+    if tide.workspace == 3 then
+        spawn("kitty --class notes")
+    end
+}
 ```
 
-Note `terminal = ...` and `$mod = ...` are two different mechanisms:
-`terminal` is a recognized top-level key (feeds the welcome hint's own
-message), not a `$name = value` variable — so `spawn:$terminal` would
-*not* substitute. Only names actually defined with a leading `$` resolve
-inside a bind's action string.
+`spawn(cmd)` and `action(string)` inside a handler queue an action that runs after the dispatch. Events: `window-opened`, `window-closed`, `window-changed`, `workspace-changed`, `focus-changed`, `urgent-changed`, `depth-changed`, `config-reloaded`. The same `tide` table powers hardware conditionals at load time: `if tide.backend == "udev" and tide.gpu.vendor == "nvidia" then ... end`.
+
+**Live queries.** `tidectl eval <expression>` evaluates on the running session's Lua — config variables, section tables, and the live `tide` table are all answerable (`tidectl eval "theme.primary"`, `tidectl eval "tide.workspace"`).
+
+**Old configs still load.** A config in the pre-Lua line-based grammar parses through a compatibility fallback with a log warning until the migration release; a file that uses any new construct is always parsed by the Wave engine, never silently misparsed.
 
 **Multi-file:** `include "path.wave"` as its own statement, repeatable (one per line), in any file (the main one, or one it includes). Each path resolves relative to the file that lists it; `~/` expands to your home directory. Rules:
 
@@ -56,7 +75,7 @@ inside a bind's action string.
 
 ## Wallpaper behavior
 
-TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh session never needs a separate daemon. The source is decoded once at its native 3840×2160 resolution and scales to each output with centered `cover` cropping rather than distortion; it is never pre-downsampled, and it is hidden while the session is locked. This costs about 31.6 MiB of steady-state pixel backing in exchange for retaining full 4K detail. It is intentionally only a fallback: standard Wayland layer-shell background clients render above it, so tools such as `swaybg`, `swww`/`awww`, or another compatible wallpaper daemon can provide images, animations, transitions, and per-output management without a TideWM-specific API. Start one with `spawn_at_startup` if desired.
+TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh session never needs a separate daemon. The source is decoded once at its native 3840×2160 resolution and scales to each output with centered `cover` cropping rather than distortion; it is never pre-downsampled, and it is hidden while the session is locked. This costs about 31.6 MiB of steady-state pixel backing in exchange for retaining full 4K detail. It is intentionally only a fallback: standard Wayland layer-shell background clients render above it, so tools such as `swaybg`, `swww`/`awww`, or another compatible wallpaper daemon can provide images, animations, transitions, and per-output management without a TideWM-specific API. Start one with `spawn = [swaybg ...]` if desired.
 
 ## Config reference
 
@@ -64,7 +83,7 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `terminal` | string | `"kitty"` | Spawned by the shipped `$mod+Return` bind (`$mod = SUPER` in the generated file). The terminal fallback is `$wave(kitty, alacritty, foot, xterm)` — see [`$wave(...)`](#waves-format) above. |
+| `terminal` | string | `"kitty"` | Spawned by the shipped `$mod+Return` bind (`@mod = SUPER` in the generated file). The terminal fallback is `wave(kitty, alacritty, foot, xterm)` — see the Wave format section above. |
 | `spatial_engine` | `classic` \| `ocean` | `classic` | Selects one of TideWM's two WM ownership models. Classic keeps numbered workspaces. Ocean has no workspaces: outputs are cameras into one continuous 2D world. `engine` and `wm_mode` are aliases. Hot-reloadable: a change migrates every live window in place. Classic→Ocean turns each output's populated workspace trees into reefs on the lateral line at `X = (N-1) * (output width + 128)` with the camera at the previously-active workspace; depth-deck windows are recalled to their tiles, floating windows translate to world coordinates around their workspace's reef, and pinned windows become Ocean screen pins. Ocean→Classic turns reefs sorted left-to-right into workspaces `1..N` on the output whose camera is nearest, selects the active workspace from each camera, clamps floating windows into the visible area, and restores pins. Tab groups and fullscreen/maximized entries carry across both directions; Ocean bookmarks and camera history are dropped (no Classic counterpart). |
 | `pointer_modifier` | modifier or `+`-joined modifiers | `super` | Modifier physically held for compositor mouse actions: left-drag moves floating windows or drag-swaps tiles; right-drag resizes floating or tiled windows. Accepts `super`/`logo`/`mod4`, `alt`/`mod1`, `ctrl`/`control`, and `shift`. The shipped config sets it to `$mod`. `mouse_modifier` and `drag_modifier` are aliases. |
 | `show_welcome_hint` | bool | `true` | Shows a persistent empty-desktop card reminding you to use your configured terminal bind. Disappears when a real window maps; delete this key (or set it `false`) to stop it returning. |
@@ -72,7 +91,7 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | `water_effects` | bool | `true` | Master toggle for TideWM's water/aqua render identity. Disables water-glass, backdrop capture, impulse ripples, wave workspace transitions, automatic depth/buoyancy, interactive viscosity, connected-vessel resize, and floating sway when `false`. |
 | `viscosity` | float, `0`–`4` | `1.0` | Interactive window move/resize damping. `0` follows the pointer immediately; higher values settle more slowly. Render-only: logical geometry and hit-testing stay at the pointer target. Disabled by `water_effects = false`. |
 | `cursor_always_visible` | bool | `false` | Forces the udev backend's software cursor to stay visible even when a client asks to hide it (e.g. a terminal hiding its own pointer glyph after inactivity). Off by default — respecting a client's own hide request is correct behavior; this is an opt-in override. |
-| `cursor_hide_after_ms` | integer | `0` | udev backend only: hides the software cursor after this many milliseconds of no real pointer motion (niri's `cursor.hide-after-inactive-ms`). `0` disables it. Independent of `cursor_always_visible` — that overrides a *client's* hide request, this is a compositor-driven idle timer, and the two can be combined. |
+| `cursor_hide_after` | duration | `0` | udev backend only: hides the software cursor after this long without real pointer motion (niri's `cursor.hide-after-inactive-ms`), e.g. `2s` or `2000ms`; `0` disables it. Independent of `cursor_always_visible` — that overrides a *client's* hide request, this is a compositor-driven idle timer, and the two can be combined. `cursor_hide_after_ms` is the legacy alias. |
 | `workspace_auto_back_and_forth` | bool | `false` | Re-selecting the already-active workspace jumps back to whichever one was active immediately before it, instead of no-opping (niri's own feature of the same name). |
 | `workspace_name` | repeatable key | none | Names a workspace number for use in `workspace:<name>`/`move-to-workspace:<name>` (niri's `set-workspace-name`, Hyprland's `workspace name:foo`) — `workspace_name = 3 web`, repeat the key once per name. Purely an addressing convenience: the workspace's real identity is still its number. An unknown name at action time warns and no-ops rather than switching. |
 | `gaps` | integer | `8` | Pixel gap the tiling engine applies around and between tiles, both layout algorithms. |
@@ -81,7 +100,7 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | `master_orientation` | `left` \| `right` \| `top` \| `bottom` | `left` | Which side the master pane sits on under `default_layout = master`. `left`/`right` stack the other windows vertically in the remaining strip; `top`/`bottom` stack them horizontally instead. One global setting, not per-workspace. |
 | `bsp_split_bias` | `auto` \| `horizontal` \| `vertical` | `auto` | Manual override for `default_layout = bsp`'s per-split axis choice. `auto` is the existing aspect-ratio-driven behavior, unchanged. `horizontal`/`vertical` force every split one way regardless of window/output shape (Hyprland dwindle's `force_split` idea). One global setting, not per-workspace. |
 | `pseudo_tile_scale` | float, `0.05`–`1.0` | `0.7` | Fraction of its tile a pseudo-tiled window keeps, centered within it. Out-of-range values are clamped, not rejected. |
-| `spawn_at_startup` | repeatable key | none | Commands launched once at startup — repeat the key once per command (`spawn_at_startup = waybar` on its own line, again for the next one), not one line holding a list. Args split on whitespace — no shell involved, so quoting/globs/pipes aren't supported; wrap in `sh -c "..."` yourself if you need those. |
+| `spawn` | list | none | Commands launched once at startup, as a real list: `spawn = [waybar, "swaybg -i ~/wallpaper.png -m fill"]`. Args split on whitespace — no shell involved, so quoting/globs/pipes aren't supported; wrap in `sh -c "..."` yourself if you need those. `spawn_at_startup` is the legacy alias (repeat the key once per command). |
 
 ### Workspace transitions
 
@@ -95,12 +114,12 @@ The enable/duration/curve split follows niri’s useful per-animation configurat
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | Disables only workspace transitions; other water effects stay active. |
 | `style` | `water` \| `glow` | `water` | `water` fills the output before revealing the new workspace. `glow` uses the original thin colored boundary. |
-| `duration_ms` | integer, `50`–`5000` | `520` | Transition lifetime in milliseconds. `duration` is an alias. |
-| `speed` | float, `0.1`–`10` | `1.0` | Speed multiplier applied to `duration_ms`: `2.0` is twice as fast and `0.5` is half speed. |
+| `duration` | duration | `520` | Transition lifetime: `600ms`, `1.5s`, `0.6s`. `duration_ms` is the legacy alias. |
+| `speed` | float, `0.1`–`10` | `1.0` | Speed multiplier applied to `duration`: `2.0` is twice as fast and `0.5` is half speed. |
 | `curve` | enum | `cubic-in-out` | Progress easing: `linear`, `cubic-out`, `cubic-in-out`, `quad-out`, or `exp-out`. `ease` is an alias. |
 | `direction` | enum | `auto` | `auto` sweeps right-to-left for a higher-numbered workspace and left-to-right for a lower-numbered one. `left-to-right`/`ltr` and `right-to-left`/`rtl` force one direction. |
 | `workspace_motion` | bool | `false` | Captures both desktops and slides the outgoing one out while the incoming one enters under the wave. Costs one additional transient full-output texture. `move_workspaces` is an alias. |
-| `workspace_motion_delay_ms` | integer, `0`–`5000` | `150` | Delay after the water begins before both desktops start sliding. `100`, `200`, and `300` correspond to 0.1, 0.2, and 0.3 seconds. Values beyond 95% of the effective transition lifetime are clamped to that point. `motion_delay_ms` is an alias. |
+| `workspace_motion_delay` | duration | `150` | Delay after the water begins before both desktops start sliding, e.g. `150ms`. Values beyond 95% of the effective transition lifetime are clamped to that point. `workspace_motion_delay_ms` and `motion_delay_ms` are legacy aliases. |
 | `wave_amplitude` | float, `0`–`500` | `34` | Maximum horizontal displacement of the moving boundary in physical pixels. `0` produces a straight wipe. `amplitude` is an alias. |
 | `wave_frequency` | float, `0`–`20` | `3` | Sine cycles from the output’s top edge to its bottom edge. `0` removes vertical waviness. `frequency` is an alias. |
 | `edge_width` | float, `0.5`–`250` | `18` | Half-width of the soft cross-fade boundary in physical pixels. Lower is sharper; higher is softer. |
@@ -121,12 +140,12 @@ The enable/duration/curve split follows niri’s useful per-animation configurat
 workspace_transition {
     enabled = true
     style = water
-    duration_ms = 600
+    duration = 600ms
     speed = 1
     curve = cubic-out
     direction = auto
     workspace_motion = true
-    workspace_motion_delay_ms = 150
+    workspace_motion_delay = 150ms
     wave_amplitude = 52
     wave_frequency = 2.5
     edge_width = 14
@@ -1195,27 +1214,28 @@ layer_rule {
 
 ### `bind`
 
-`bind <chord> = <action-string>`. XKB modifiers (`Super`/`Logo`/`Mod4`,
+`bind <chord> { <action> }` — one action per line inside the block, or comma-separated on one line. XKB modifiers (`Super`/`Logo`/`Mod4`,
 `Ctrl`/`Control`, `Alt`, `Shift`) can be combined freely. Ordinary keys can
-also be held as user-defined helpers: `bind P+H = focus-left` suppresses P
+also be held as user-defined helpers: `bind P+H { focus-left }` suppresses P
 while held and runs the action when H is pressed; `P+R+H` and combinations
 such as `P+Ctrl+H` work too. P has no reserved meaning—it is a normal key
 unless a bind uses it. A completely bare action such as
-`bind F = toggle-fullscreen` is valid and intentionally captures F from
+`bind F { toggle-fullscreen }` is valid and intentionally captures F from
 clients. Key names match the unshifted keysym, case-insensitively.
 
 Variables are reusable chord pieces. The shipped default uses one,
-`$mod = SUPER`, for everything; nothing stops splitting binds across
-independent layers of your own instead, e.g. `$mod = ALT`, `$helper =
-SUPER`, `$move = CTRL`.
-Parsed Waves bindings are authoritative: no built-in table or feature-specific
+`@mod = SUPER`, for everything; nothing stops splitting binds across
+independent layers of your own instead, e.g. `@mod = ALT`, `@helper =
+SUPER`, `@move = CTRL`.
+Parsed Wave bindings are authoritative: no built-in table or feature-specific
 bindings are invisibly merged underneath them. The one mechanism outside the
 normal table is the recovery chord `Ctrl+Alt+Escape`; it temporarily activates
 a known-safe fallback table without rewriting the file. The fallback clears
 on the next successful config reload or TideWM restart.
 
 See [Action strings](#action-strings) for every value a bind can take. A later
-`bind` on the same chord overrides an earlier one.
+`bind` on the same chord overrides an earlier one. The old
+`bind <chord> = <action>` line form still parses as a deprecated alias.
 
 ### `submap <name> { }`
 
@@ -1223,11 +1243,11 @@ A temporary alternate keybind table (sway/Hyprland's "mode" idea), same `bind` s
 
 ```
 submap nav {
-    bind h = focus-left
-    bind l = focus-right
-    bind k = focus-up
-    bind j = focus-down
-    bind Escape = exit-submap
+    bind h { focus-left }
+    bind l { focus-right }
+    bind k { focus-up }
+    bind j { focus-down }
+    bind Escape { exit-submap }
 }
 ```
 
@@ -1309,7 +1329,7 @@ rewriting a line removes or changes it completely.
 
 `$XDG_RUNTIME_DIR/tidewm-<pid>.sock`: one JSON request line in, one JSON response line out, per connection. Read queries return structured data; `{"request": "action", "action": "<any string above>"}` runs any action string. `{"request":"batch","actions":["workspace:2","spawn:kitty"]}` validates the complete list first, then executes up to 128 actions in order, so an invalid later item cannot leave a half-run batch. This is genuinely the same path a keybind press uses (`config::parse_action` → `Smallvil::run_action`).
 
-Queries: `outputs`, `workspaces`, `windows`, `focused-window`, `active-submap`, `diagnostics`.
+Queries: `outputs`, `workspaces`, `windows`, `focused-window`, `active-submap`, `diagnostics`. `{"request": "eval", "expression": "<wave expression>"}` evaluates on the live session Lua (config variables, section tables, and the refreshed `tide` table) and returns the value as JSON.
 In Ocean, `outputs` reports `active_workspace: null`, the current two-axis
 `camera_origin`, and `camera_zoom`; `workspaces` returns an empty list because bookmarks
 are navigation targets rather than real workspaces. Ocean window entries use
@@ -1336,6 +1356,8 @@ tidectl submap nav              # shorthand for action submap:nav
 tidectl action toggle-floating  # explicit passthrough, works for any action string
 tidectl batch workspace:2 spawn:kitty
 tidectl active-submap
+tidectl eval "theme.primary"               # evaluate on the live session Lua
+tidectl eval "tide.workspace"              # the tide table is refreshed first
 tidectl subscribe focus workspace window   # long-lived event stream, one JSON line per event
 --json                          # on any query, for scripting
 ```

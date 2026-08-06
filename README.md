@@ -86,17 +86,17 @@ Everything here is rebindable, and this is a small slice of what's available. Th
 # config.wave
 include "keybinds.wave"
 
-$mod = SUPER
-terminal = $wave(kitty, alacritty, foot, xterm)
+@mod = SUPER
+terminal = wave(kitty, alacritty, foot, xterm)
 ```
 
 ```
 # keybinds.wave
-bind $mod+Return = spawn:kitty
-bind $mod+Q = close-window
+bind $mod+Return { spawn:kitty }
+bind $mod+Q      { close-window }
 ```
 
-Everything hangs off that one `$mod` variable, so rebinding your primary modifier is a one-line change. Full key-by-key reference: [DOCUMENTATION.md](DOCUMENTATION.md).
+`@` defines a variable, `$` references it in a bind, and everything hangs off that one `@mod`, so rebinding your primary modifier is a one-line change. Config is data on the surface and Lua underneath: colors and durations are real values (`600ms * 2` is `1200ms`, `primary.darken(0.35)` derives a palette), hardware conditionals read the `tide` table, `on "event"` blocks react to the session, and `tidectl eval` queries it all live. Full key-by-key reference: [DOCUMENTATION.md](DOCUMENTATION.md), and the format's design and rough edges: [WAVE.md](WAVE.md).
 
 ## About this project
 
