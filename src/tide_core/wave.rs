@@ -750,6 +750,37 @@ fn emit_body(
         }
 
         // -- blocks ------------------------------------------------------------
+        // An empty one-liner, `vessels { }` / `output eDP-1 { }`: the
+        // natural way to say "all defaults". Unambiguous (nothing between
+        // the braces), so it is the one exception to multi-line blocks
+        // alongside bind.
+        if line.ends_with("}") {
+            if let Some(head) = line.strip_suffix('}').map(str::trim_end) {
+                if let Some(open) = head.strip_suffix('{').map(str::trim_end) {
+                    let (keyword, rest) = open
+                        .split_once(char::is_whitespace)
+                        .unwrap_or((open, ""));
+                    if !keyword.is_empty() && !is_reserved(keyword) {
+                        let header_expr = if rest.is_empty() {
+                            lua_quote("")
+                        } else {
+                            Rewriter { sym }
+                                .rewrite_string(rest)
+                                .map_err(|e| format!("in file {} at line {line_no}: {e}", path.display()))?
+                        };
+                        sym.block_globals.insert(keyword.to_string());
+                        sym.body_fields.push(std::collections::HashSet::new());
+                        out.push_str(&format!(
+                            "_block({}, {}, function()\nend)\n",
+                            lua_quote(keyword),
+                            header_expr
+                        ));
+                        sym.body_fields.pop();
+                        continue;
+                    }
+                }
+            }
+        }
         if line.ends_with('{') {
             let header = line.strip_suffix('{').unwrap().trim();
             let (keyword, rest) = header
@@ -2288,6 +2319,16 @@ mod tests {
         assert!(err.contains("use `mod`"), "{err}");
         let err = compile_eval_expression("@mod").unwrap_err();
         assert!(err.contains("use `mod`"), "{err}");
+    }
+
+    #[test]
+    fn empty_one_line_blocks_are_allowed() {
+        let lua = compile_str("vessels { }\noutput eDP-1 { }\n");
+        assert!(lua.contains("_block(\"vessels\", \"\", function()\nend)"));
+        assert!(lua.contains("_block(\"output\", \"eDP-1\", function()\nend)"));
+        // a non-empty one-liner is still an error
+        let err = compile("vessels { enabled = true }\n", Path::new("test.wave")).unwrap_err();
+        assert!(err.contains("line 1"), "{err}");
     }
 
     #[test]
