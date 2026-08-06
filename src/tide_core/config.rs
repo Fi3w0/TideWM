@@ -3828,6 +3828,37 @@ fn collect_blocks(entries: &[waves::Entry]) -> std::collections::BTreeMap<(Strin
     map
 }
 
+/// The W8 rename map: old key spelling -> canonical new spelling.
+/// Deprecated aliases still parse (so old configs keep working) but log
+/// a one-line notice pointing at the new name.
+fn deprecated_key_alias(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "spawn_at_startup" => "spawn",
+        "spatial_engine" => "engine",
+        "pointer_modifier" | "mouse_modifier" => "drag_modifier",
+        "show_welcome_hint" => "welcome_hint",
+        "show_config_reload_toast" | "config_reload_toast" => "reload_toast",
+        "workspace_auto_back_and_forth" => "auto_back_and_forth",
+        "default_layout" => "layout",
+        "master_orientation" => "master_side",
+        "bsp_split_bias" => "split_bias",
+        "cursor_hide_after_ms" => "cursor_hide_after",
+        _ => return None,
+    })
+}
+
+fn deprecated_block_alias(keyword: &str) -> Option<&'static str> {
+    Some(match keyword {
+        "workspace_transition" => "transition",
+        "connected_vessels" | "connected_resize" => "vessels",
+        "water_glass" | "water_glass_animation" => "glass",
+        "float_physics" => "physics",
+        "classic_depth" => "depth_deck",
+        "submap" => "mode",
+        _ => return None,
+    })
+}
+
 fn lower_entries(entries: &[waves::Entry]) -> RawConfig {
     let mut raw = RawConfig::default();
     // A parsed Waves file is authoritative. Defaults belong in the
@@ -3849,8 +3880,16 @@ fn lower_entries(entries: &[waves::Entry]) -> RawConfig {
             // (`_handlers`, registered by the `_on` environment
             // function); the entry exists for the model and diagnostics.
             waves::Entry::Handler(_, _) => {}
-            waves::Entry::Assign(key, value) => apply_top_level_assign(&mut raw, key, value),
+            waves::Entry::Assign(key, value) => {
+                if let Some(new) = deprecated_key_alias(key) {
+                    tracing::warn!(key, new, "Deprecated config key; use `{new}` instead");
+                }
+                apply_top_level_assign(&mut raw, key, value)
+            }
             waves::Entry::Block(keyword, header, body) => {
+                if let Some(new) = deprecated_block_alias(keyword) {
+                    tracing::warn!(keyword, new, "Deprecated config block; use `{new}` instead");
+                }
                 apply_top_level_block(&mut raw, keyword, header, body)
             }
         }
@@ -3866,12 +3905,15 @@ fn is_known_top_level_key(key: &str) -> bool {
     matches!(
         key,
         "terminal" | "spatial_engine" | "engine" | "wm_mode" | "pointer_modifier"
-            | "mouse_modifier" | "drag_modifier" | "show_welcome_hint"
-            | "show_config_reload_toast" | "config_reload_toast" | "water_effects"
+            | "mouse_modifier" | "drag_modifier" | "show_welcome_hint" | "welcome_hint"
+            | "show_config_reload_toast" | "config_reload_toast" | "reload_toast"
+            | "water_effects"
             | "viscosity" | "cursor_always_visible" | "cursor_hide_after"
             | "cursor_hide_after_ms" | "workspace_auto_back_and_forth"
-            | "workspace_name" | "gaps" | "workspace_gaps" | "default_layout"
-            | "master_orientation" | "bsp_split_bias" | "pseudo_tile_scale" | "spawn"
+            | "auto_back_and_forth"
+            | "workspace_name" | "gaps" | "workspace_gaps" | "default_layout" | "layout"
+            | "master_orientation" | "master_side" | "bsp_split_bias" | "split_bias"
+            | "pseudo_tile_scale" | "spawn"
             | "spawn_at_startup"
     )
 }
@@ -3883,8 +3925,8 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
         "pointer_modifier" | "mouse_modifier" | "drag_modifier" => {
             raw.pointer_modifier = value.to_string()
         }
-        "show_welcome_hint" => set_bool(&mut raw.show_welcome_hint, key, value),
-        "show_config_reload_toast" | "config_reload_toast" => {
+        "welcome_hint" | "show_welcome_hint" => set_bool(&mut raw.show_welcome_hint, key, value),
+        "reload_toast" | "show_config_reload_toast" | "config_reload_toast" => {
             set_bool(&mut raw.show_config_reload_toast, key, value)
         }
         "water_effects" => set_bool(&mut raw.water_effects, key, value),
@@ -3900,13 +3942,13 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
                 tracing::warn!(value, "Expected a duration like 2s or 2000ms for cursor_hide_after, ignoring");
             }
         }
-        "workspace_auto_back_and_forth" => {
+        "auto_back_and_forth" | "workspace_auto_back_and_forth" => {
             set_bool(&mut raw.workspace_auto_back_and_forth, key, value)
         }
         "gaps" => set_i32(&mut raw.gaps, key, value),
-        "default_layout" => raw.default_layout = value.to_string(),
-        "master_orientation" => raw.master_orientation = value.to_string(),
-        "bsp_split_bias" => raw.bsp_split_bias = value.to_string(),
+        "layout" | "default_layout" => raw.default_layout = value.to_string(),
+        "master_side" | "master_orientation" => raw.master_orientation = value.to_string(),
+        "split_bias" | "bsp_split_bias" => raw.bsp_split_bias = value.to_string(),
         "workspace_name" => raw.workspace_names.push(value.to_string()),
         "workspace_gaps" => raw.workspace_gaps.push(value.to_string()),
         "pseudo_tile_scale" => set_f64(&mut raw.pseudo_tile_scale, key, value),
@@ -3925,14 +3967,14 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
     match keyword {
         "input" => apply_input_block(&mut raw.input, body),
         "xwayland" => apply_xwayland_block(&mut raw.xwayland, body),
-        "workspace_transition" => {
+        "transition" | "workspace_transition" => {
             apply_workspace_transition_block(&mut raw.workspace_transition, body)
         }
-        "connected_vessels" | "connected_resize" => {
+        "vessels" | "connected_vessels" | "connected_resize" => {
             apply_connected_vessels_block(&mut raw.connected_vessels, body)
         }
         "sway" => apply_sway_block(&mut raw.sway, body),
-        "float_physics" => apply_float_physics_block(&mut raw.float_physics, body),
+        "physics" | "float_physics" => apply_float_physics_block(&mut raw.float_physics, body),
         "swim" => apply_swim_block(&mut raw.swim, body),
         "compass" => apply_compass_block(&mut raw.compass, body),
         "minimap" => apply_minimap_block(&mut raw.minimap, body),
@@ -3941,7 +3983,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "depth" => apply_depth_block(&mut raw.depth, body),
         "classic_depth" | "depth_deck" => apply_classic_depth_block(&mut raw.classic_depth, body),
         "frost" => apply_frost_block(&mut raw.frost, body),
-        "water_glass" | "water_glass_animation" => {
+        "glass" | "water_glass" | "water_glass_animation" => {
             apply_water_glass_block(&mut raw.water_glass, body)
         }
         "caustics" => apply_caustics_block(&mut raw.caustics, body),
@@ -3965,7 +4007,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "output" => raw.outputs.push(lower_output_block(header, body)),
         "rule" => raw.window_rules.push(lower_window_rule_block(body)),
         "layer_rule" => raw.layer_rules.push(lower_layer_rule_block(body)),
-        "submap" => {
+        "submap" | "mode" => {
             let name = header.trim();
             if name.is_empty() {
                 tracing::warn!("`submap` block needs a name, ignoring");
@@ -6957,6 +6999,9 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
             (!name.is_empty()).then(|| name.to_string()),
         ));
     }
+    if let Some(name) = action.strip_prefix("mode:") {
+        return Some(Action::EnterSubmap(name.to_string()));
+    }
     if let Some(name) = action.strip_prefix("submap:") {
         return Some(Action::EnterSubmap(name.to_string()));
     }
@@ -6983,7 +7028,7 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         return (!name.trim().is_empty()).then(|| Action::CloseApp(name.trim().to_string()));
     }
     match action {
-        "exit-submap" => Some(Action::ExitSubmap),
+        "exit-submap" | "exit-mode" => Some(Action::ExitSubmap),
         "master-grow" => Some(Action::GrowMaster),
         "master-shrink" => Some(Action::ShrinkMaster),
         "toggle-overview" => Some(Action::ToggleOverview),
@@ -8212,6 +8257,92 @@ mod tests {
         );
         // The tide table carries the loader's facts.
         assert_eq!(lua.load("tide.backend").eval::<String>().unwrap(), "winit");
+    }
+
+    #[test]
+    fn rename_map_canonical_and_legacy_names_lower_identically() {
+        let dir = TestDir::new("wave-renames");
+        let new = dir.write(
+            "config.wave",
+            "engine = classic\n\
+             drag_modifier = SUPER\n\
+             welcome_hint = true\n\
+             reload_toast = true\n\
+             auto_back_and_forth = true\n\
+             layout = master\n\
+             master_side = top\n\
+             split_bias = horizontal\n\
+             transition {\n\
+                 duration = 600ms\n\
+             }\n\
+             vessels {\n\
+                 enabled = true\n\
+             }\n\
+             glass {\n\
+                 tint_alpha = 0.1\n\
+             }\n\
+             physics {\n\
+                 tier = light\n\
+             }\n\
+             mode nav {\n\
+                 bind h { focus-left }\n\
+             }\n",
+        );
+        let (raw_new, warnings, _) = load_raw_config(&new).expect("new names should parse");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(raw_new.spatial_engine, "classic");
+        assert_eq!(raw_new.pointer_modifier, "SUPER");
+        assert!(raw_new.show_welcome_hint);
+        assert!(raw_new.show_config_reload_toast);
+        assert!(raw_new.workspace_auto_back_and_forth);
+        assert_eq!(raw_new.default_layout, "master");
+        assert_eq!(raw_new.master_orientation, "top");
+        assert_eq!(raw_new.bsp_split_bias, "horizontal");
+        assert!(raw_new.submaps.contains_key("nav"));
+
+        // The legacy spellings parse to the same values (and the
+        // deprecation notices are log-only).
+        let dir = TestDir::new("wave-renames-legacy");
+        let old = dir.write(
+            "config.wave",
+            "spatial_engine = classic\n\
+             pointer_modifier = SUPER\n\
+             show_welcome_hint = true\n\
+             show_config_reload_toast = true\n\
+             workspace_auto_back_and_forth = true\n\
+             default_layout = master\n\
+             master_orientation = top\n\
+             bsp_split_bias = horizontal\n\
+             workspace_transition {\n\
+                 duration = 600ms\n\
+             }\n\
+             connected_vessels {\n\
+                 enabled = true\n\
+             }\n\
+             water_glass {\n\
+                 tint_alpha = 0.1\n\
+             }\n\
+             float_physics {\n\
+                 tier = light\n\
+             }\n\
+             submap nav {\n\
+                 bind h = focus-left\n\
+             }\n",
+        );
+        let (raw_old, _, _) = load_raw_config(&old).expect("legacy names should parse");
+        assert_eq!(raw_old.spatial_engine, raw_new.spatial_engine);
+        assert_eq!(raw_old.pointer_modifier, raw_new.pointer_modifier);
+        assert_eq!(raw_old.default_layout, raw_new.default_layout);
+        assert_eq!(raw_old.master_orientation, raw_new.master_orientation);
+        assert_eq!(raw_old.bsp_split_bias, raw_new.bsp_split_bias);
+        assert_eq!(raw_old.submaps, raw_new.submaps);
+    }
+
+    #[test]
+    fn mode_actions_alias_submap_actions() {
+        let parsed = |s: &str| parse_action(s).expect("should parse");
+        assert!(matches!(parsed("mode:nav"), Action::EnterSubmap(n) if n == "nav"));
+        assert!(matches!(parsed("exit-mode"), Action::ExitSubmap));
     }
 
     #[test]

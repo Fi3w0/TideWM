@@ -84,21 +84,21 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `terminal` | string | `"kitty"` | Spawned by the shipped `$mod+Return` bind (`@mod = SUPER` in the generated file). The terminal fallback is `wave(kitty, alacritty, foot, xterm)` — see the Wave format section above. |
-| `spatial_engine` | `classic` \| `ocean` | `classic` | Selects one of TideWM's two WM ownership models. Classic keeps numbered workspaces. Ocean has no workspaces: outputs are cameras into one continuous 2D world. `engine` and `wm_mode` are aliases. Hot-reloadable: a change migrates every live window in place. Classic→Ocean turns each output's populated workspace trees into reefs on the lateral line at `X = (N-1) * (output width + 128)` with the camera at the previously-active workspace; depth-deck windows are recalled to their tiles, floating windows translate to world coordinates around their workspace's reef, and pinned windows become Ocean screen pins. Ocean→Classic turns reefs sorted left-to-right into workspaces `1..N` on the output whose camera is nearest, selects the active workspace from each camera, clamps floating windows into the visible area, and restores pins. Tab groups and fullscreen/maximized entries carry across both directions; Ocean bookmarks and camera history are dropped (no Classic counterpart). |
-| `pointer_modifier` | modifier or `+`-joined modifiers | `super` | Modifier physically held for compositor mouse actions: left-drag moves floating windows or drag-swaps tiles; right-drag resizes floating or tiled windows. Accepts `super`/`logo`/`mod4`, `alt`/`mod1`, `ctrl`/`control`, and `shift`. The shipped config sets it to `$mod`. `mouse_modifier` and `drag_modifier` are aliases. |
-| `show_welcome_hint` | bool | `true` | Shows a persistent empty-desktop card reminding you to use your configured terminal bind. Disappears when a real window maps; delete this key (or set it `false`) to stop it returning. |
-| `show_config_reload_toast` | bool | `true` | Shows the short compositor card after a successful hot reload. `false` hides that confirmation only; parse errors and configuration warnings remain visible so a bad config cannot silently lock itself in. `config_reload_toast` is an alias. |
+| `engine` | `classic` \| `ocean` | `classic` | Selects one of TideWM's two WM ownership models. Classic keeps numbered workspaces. Ocean has no workspaces: outputs are cameras into one continuous 2D world. `spatial_engine` and `wm_mode` are legacy aliases. Hot-reloadable: a change migrates every live window in place. Classic→Ocean turns each output's populated workspace trees into reefs on the lateral line at `X = (N-1) * (output width + 128)` with the camera at the previously-active workspace; depth-deck windows are recalled to their tiles, floating windows translate to world coordinates around their workspace's reef, and pinned windows become Ocean screen pins. Ocean→Classic turns reefs sorted left-to-right into workspaces `1..N` on the output whose camera is nearest, selects the active workspace from each camera, clamps floating windows into the visible area, and restores pins. Tab groups and fullscreen/maximized entries carry across both directions; Ocean bookmarks and camera history are dropped (no Classic counterpart). |
+| `drag_modifier` | modifier or `+`-joined modifiers | `super` | Modifier physically held for compositor mouse actions: left-drag moves floating windows or drag-swaps tiles; right-drag resizes floating or tiled windows. Accepts `super`/`logo`/`mod4`, `alt`/`mod1`, `ctrl`/`control`, and `shift`. The shipped config sets it to `mod`. `pointer_modifier` and `mouse_modifier` are legacy aliases. |
+| `welcome_hint` | bool | `true` | Shows a persistent empty-desktop card reminding you to use your configured terminal bind. Disappears when a real window maps; delete this key (or set it `false`) to stop it returning. |
+| `reload_toast` | bool | `true` | Shows the short compositor card after a successful hot reload. `false` hides that confirmation only; parse errors and configuration warnings remain visible so a bad config cannot silently lock itself in. `show_config_reload_toast` and `config_reload_toast` are legacy aliases. |
 | `water_effects` | bool | `true` | Master toggle for TideWM's water/aqua render identity. Disables water-glass, backdrop capture, impulse ripples, wave workspace transitions, automatic depth/buoyancy, interactive viscosity, connected-vessel resize, and floating sway when `false`. |
 | `viscosity` | float, `0`–`4` | `1.0` | Interactive window move/resize damping. `0` follows the pointer immediately; higher values settle more slowly. Render-only: logical geometry and hit-testing stay at the pointer target. Disabled by `water_effects = false`. |
 | `cursor_always_visible` | bool | `false` | Forces the udev backend's software cursor to stay visible even when a client asks to hide it (e.g. a terminal hiding its own pointer glyph after inactivity). Off by default — respecting a client's own hide request is correct behavior; this is an opt-in override. |
 | `cursor_hide_after` | duration | `0` | udev backend only: hides the software cursor after this long without real pointer motion (niri's `cursor.hide-after-inactive-ms`), e.g. `2s` or `2000ms`; `0` disables it. Independent of `cursor_always_visible` — that overrides a *client's* hide request, this is a compositor-driven idle timer, and the two can be combined. `cursor_hide_after_ms` is the legacy alias. |
-| `workspace_auto_back_and_forth` | bool | `false` | Re-selecting the already-active workspace jumps back to whichever one was active immediately before it, instead of no-opping (niri's own feature of the same name). |
+| `auto_back_and_forth` | bool | `false` | Re-selecting the already-active workspace jumps back to whichever one was active immediately before it, instead of no-opping (niri's own feature of the same name). |
 | `workspace_name` | repeatable key | none | Names a workspace number for use in `workspace:<name>`/`move-to-workspace:<name>` (niri's `set-workspace-name`, Hyprland's `workspace name:foo`) — `workspace_name = 3 web`, repeat the key once per name. Purely an addressing convenience: the workspace's real identity is still its number. An unknown name at action time warns and no-ops rather than switching. |
 | `gaps` | integer | `8` | Pixel gap the tiling engine applies around and between tiles, both layout algorithms. |
 | `workspace_gaps` | repeatable key | none | Per-workspace gap override — `workspace_gaps = 3 0` (workspace 3, no gaps), repeat the key once per workspace. Accepts a `workspace_name` alias in place of the number. Beats both the output-level `gaps` override and the global `gaps`. |
-| `default_layout` | `bsp` \| `master` \| `cascade` | `bsp` | Starting tiling algorithm for a workspace with no runtime override (see `layout:bsp`/`layout:master`/`layout:cascade` actions below). `bsp` is dwindle-style: split orientation follows each window's own aspect ratio. `master` is one master pane plus an evenly-split stack. `cascade` wraps windows into rows left to right, top to bottom, choosing the row count so the grid's shape best matches the output's own aspect ratio -- TideWM's own "fills the basin" mode. Row height and cell width are manually draggable the same way as BSP (an empty-gap border drag, or a modifier+body drag on the window), except a drag only ever redistributes the two immediate neighbors either side of it, not BSP's wider connected-vessel chain; opening or closing a window keeps a row's manual sizing as long as that row's own window count didn't change. |
-| `master_orientation` | `left` \| `right` \| `top` \| `bottom` | `left` | Which side the master pane sits on under `default_layout = master`. `left`/`right` stack the other windows vertically in the remaining strip; `top`/`bottom` stack them horizontally instead. One global setting, not per-workspace. |
-| `bsp_split_bias` | `auto` \| `horizontal` \| `vertical` | `auto` | Manual override for `default_layout = bsp`'s per-split axis choice. `auto` is the existing aspect-ratio-driven behavior, unchanged. `horizontal`/`vertical` force every split one way regardless of window/output shape (Hyprland dwindle's `force_split` idea). One global setting, not per-workspace. |
+| `layout` | `bsp` \| `master` \| `cascade` | `bsp` | Starting tiling algorithm for a workspace with no runtime override (see `layout:bsp`/`layout:master`/`layout:cascade` actions below). `bsp` is dwindle-style: split orientation follows each window's own aspect ratio. `master` is one master pane plus an evenly-split stack. `cascade` wraps windows into rows left to right, top to bottom, choosing the row count so the grid's shape best matches the output's own aspect ratio -- TideWM's own "fills the basin" mode. Row height and cell width are manually draggable the same way as BSP (an empty-gap border drag, or a modifier+body drag on the window), except a drag only ever redistributes the two immediate neighbors either side of it, not BSP's wider connected-vessel chain; opening or closing a window keeps a row's manual sizing as long as that row's own window count didn't change. |
+| `master_side` | `left` \| `right` \| `top` \| `bottom` | `left` | Which side the master pane sits on under `default_layout = master`. `left`/`right` stack the other windows vertically in the remaining strip; `top`/`bottom` stack them horizontally instead. One global setting, not per-workspace. |
+| `split_bias` | `auto` \| `horizontal` \| `vertical` | `auto` | Manual override for `default_layout = bsp`'s per-split axis choice. `auto` is the existing aspect-ratio-driven behavior, unchanged. `horizontal`/`vertical` force every split one way regardless of window/output shape (Hyprland dwindle's `force_split` idea). One global setting, not per-workspace. |
 | `pseudo_tile_scale` | float, `0.05`–`1.0` | `0.7` | Fraction of its tile a pseudo-tiled window keeps, centered within it. Out-of-range values are clamped, not rejected. |
 | `spawn` | list | none | Commands launched once at startup, as a real list: `spawn = [waybar, "swaybg -i ~/wallpaper.png -m fill"]`. Args split on whitespace — no shell involved, so quoting/globs/pipes aren't supported; wrap in `sh -c "..."` yourself if you need those. `spawn_at_startup` is the legacy alias (repeat the key once per command). |
 
@@ -137,7 +137,7 @@ The enable/duration/curve split follows niri’s useful per-animation configurat
 | `turbulence` | float, `0`–`2` | `0.7` | `water` style only: strength of secondary crest harmonics and moving caustic streaks. |
 
 ```wave
-workspace_transition {
+transition {
     enabled = true
     style = water
     duration = 600ms
@@ -267,7 +267,7 @@ and values up to `4.0` progressively slow settling. `water_effects = false`
 bypasses it globally. A matching `rule { viscosity = ... }` overrides the
 global value for one app.
 
-### `connected_vessels { }`
+### `vessels { }` (legacy: `connected_vessels { }`)
 
 Connected-vessel resize spreads BSP pressure beyond the nearest split. The
 split selected by a direct border drag, modifier-right-drag, or keyboard resize
@@ -934,7 +934,7 @@ warn and safely fall back. Selection order is system defaults → named preset
 → global overrides → per-app named preset → per-app overrides, so a rule can
 reuse a bundle and still change one field locally.
 
-### `water_glass { }`
+### `glass { }` (legacy: `water_glass { }`)
 
 Controls how the water-glass refraction distortion moves over time. The glass
 layer itself is selected per window by the `glass` rule (or the legacy
@@ -1237,9 +1237,9 @@ See [Action strings](#action-strings) for every value a bind can take. A later
 `bind` on the same chord overrides an earlier one. The old
 `bind <chord> = <action>` line form still parses as a deprecated alias.
 
-### `submap <name> { }`
+### `mode <name> { }` (legacy: `submap <name> { }`)
 
-A temporary alternate keybind table (sway/Hyprland's "mode" idea), same `bind` statements as the top level (no modifier prefix needed if the submap's own binds are unmodified, like the shipped `nav` example). Entered via a `submap:<name>` action, which **fully replaces** the base binds — not layered on top of them — until an explicit `exit-submap` bind. Not tied to focus; stays active until you explicitly leave it. A config reload that drops or renames the active submap auto-exits back to the base binds.
+A temporary alternate keybind table (sway/Hyprland's "mode" idea), same `bind` statements as the top level (no modifier prefix needed if the submap's own binds are unmodified, like the shipped `nav` example). Entered via a `submap:<name>` action, which **fully replaces** the base binds — not layered on top of them — until an explicit `exit-mode` bind (`exit-submap` is the legacy alias). Not tied to focus; stays active until you explicitly leave it. A config reload that drops or renames the active submap auto-exits back to the base binds.
 
 ```
 submap nav {
@@ -1247,7 +1247,7 @@ submap nav {
     bind l { focus-right }
     bind k { focus-up }
     bind j { focus-down }
-    bind Escape { exit-submap }
+    bind Escape { exit-mode }
 }
 ```
 
@@ -1306,8 +1306,8 @@ synthesizes Ocean or Depth bindings behind the config, and deleting or
 rewriting a line removes or changes it completely.
 
 **Modes**
-- `submap:<name>` — enter a `submap <name> { }` block
-- `exit-submap`
+- `mode:<name>` — enter a `mode <name> { }` block (`submap:<name>` is the legacy alias)
+- `exit-mode` (legacy: `exit-submap`)
 - `toggle-overview` — schematic grid of every workspace on the current output (see README's Features list; not live thumbnails)
 
 **Classic Depth Deck** (all no-op while `classic_depth.enabled = false`)

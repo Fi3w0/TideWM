@@ -195,7 +195,7 @@ fn parse_block(
 fn block_is_keyed(keyword: &str) -> bool {
     matches!(
         keyword,
-        "input" | "touchpad" | "env" | "switch_events" | "submap" | "ripple_preset"
+        "input" | "touchpad" | "env" | "switch_events" | "submap" | "mode" | "ripple_preset"
     )
 }
 
