@@ -130,6 +130,29 @@ fn lua_quote(s: &str) -> String {
     out
 }
 
+/// Undoes `\"` and `\\` escapes inside a quoted string's inner text, so
+/// a quoted literal can be re-emitted with clean escaping.
+fn unescape_quotes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn is_number(word: &str) -> bool {
     word.parse::<f64>().is_ok()
 }
@@ -166,8 +189,14 @@ fn is_lua_keyword(word: &str) -> bool {
     )
 }
 
-/// The names visible as Lua identifiers: statically defined `$name`
-/// variables, `fn` names, and in-scope loop variables / `fn` parameters.
+/// The names visible as Lua identifiers: variables defined with
+/// `@name = value` (statically known or runtime), `fn` names, and
+/// in-scope loop variables / `fn` parameters.
+///
+/// `@` is the definition marker, `$` the string-reference marker, and
+/// expressions use plain identifiers: `@extra = 4` defines a variable,
+/// `bind $mod+Num$i { ... }` references it in a string, and
+/// `gaps = 8 * extra` uses it in an expression.
 ///
 /// The scope stack holds one entry per opened Lua block: `Some(vars)` for
 /// `for` and `fn` bodies, `None` for `if`/`while`/`do`. `end` pops the
@@ -175,14 +204,21 @@ fn is_lua_keyword(word: &str) -> bool {
 /// loop's `end` runs.
 #[derive(Default)]
 struct Symbols {
+    /// `@name = <literal>` definitions, name -> the literal text.
     statics: std::collections::HashMap<String, String>,
+    /// `@name = <expression>` definitions: the Lua global exists at
+    /// runtime, reachable as the plain identifier `name`.
+    runtime_vars: std::collections::HashSet<String>,
     fns: std::collections::HashSet<String>,
     scopes: Vec<Option<std::collections::HashSet<String>>>,
 }
 
 impl Symbols {
     fn in_scope(&self, name: &str) -> bool {
-        self.statics.contains_key(name) || self.fns.contains(name) || self.scope_contains(name)
+        self.statics.contains_key(name)
+            || self.runtime_vars.contains(name)
+            || self.fns.contains(name)
+            || self.scope_contains(name)
     }
 
     fn scope_contains(&self, name: &str) -> bool {
@@ -193,12 +229,13 @@ impl Symbols {
     }
 
     /// String-position `$name`: statically known -> its literal text;
-    /// in scope (loop var / fn param) -> a concatenation identifier;
-    /// otherwise -> None (leave the text untouched).
-    fn static_or_scope(&self, name: &str) -> Option<String> {
+    /// a runtime variable, loop var, or `fn` parameter -> the plain
+    /// identifier (a concatenation at runtime); otherwise -> None, and
+    /// the caller reports the loud "not defined" error.
+    fn resolve_string(&self, name: &str) -> Option<String> {
         if let Some(lit) = self.statics.get(name) {
             Some(lit.clone())
-        } else if self.scope_contains(name) {
+        } else if self.runtime_vars.contains(name) || self.scope_contains(name) {
             Some(name.to_string())
         } else {
             None
@@ -212,62 +249,70 @@ struct Rewriter<'a> {
 }
 
 impl<'a> Rewriter<'a> {
-    fn classify_word(&self, word: &str) -> String {
+    fn classify_word(&self, word: &str) -> Result<String, String> {
+        // `$` and `@` only mean "a config name inside a bare string" /
+        // "a variable definition line". In an expression both are errors
+        // pointing at the identifier form.
+        if let Some(name) = word.strip_prefix('@') {
+            return Err(format!(
+                "`@{name}` only defines a variable on its own line (`@{name} = value`); in an expression use `{name}`"
+            ));
+        }
         if let Some(name) = word.strip_prefix('$') {
             if name == "wave" {
-                // handled by the tokenizer as a call; never classified alone
-                return "wave".to_string();
+                return Err(
+                    "`$wave(...)` is for strings; in an expression call `wave(...)`".to_string(),
+                );
             }
             if self.sym.in_scope(name) {
-                return name.to_string();
+                return Err(format!(
+                    "`${name}` cannot be used in an expression; use `{name}` (no `$`)"
+                ));
             }
-            return lua_quote(word); // $HOME, $PATH, unknown: literal text
+            return Err(format!(
+                "`${name}` is not defined; define it with `@{name} = value`, and use `{name}` (no `$`) in expressions"
+            ));
         }
         if is_number(word) || is_lua_keyword(word) || matches!(word, "true" | "false" | "nil") {
-            return word.to_string();
+            return Ok(word.to_string());
         }
         if is_color(word) {
             let hex = word.strip_prefix('#').unwrap();
-            return format!("_color({})", lua_quote(&hex[..6.min(hex.len())]));
+            return Ok(format!("_color({})", lua_quote(&hex[..6.min(hex.len())])));
         }
         if is_duration(word) {
             let (num, unit) = split_duration(word).unwrap();
-            return format!("_dur({}, {})", num, lua_quote(unit));
+            return Ok(format!("_dur({}, {})", num, lua_quote(unit)));
         }
         if let Some((base, _)) = word.split_once('.') {
             if self.sym.in_scope(base) {
-                return word.to_string(); // member access on a known identifier
+                return Ok(word.to_string()); // member access on a known identifier
             }
         }
-        lua_quote(word)
+        if self.sym.in_scope(word) {
+            return Ok(word.to_string()); // defined @variable, fn name, loop var, or fn param
+        }
+        Ok(lua_quote(word))
     }
 
     /// Rewrites an expression string into Lua with canonical spacing:
     /// `(` `[` `{` attach to what precedes, `)` `]` `}` attach to what
     /// follows, `,` gets one space after. A word followed by `(` is a
     /// call name and stays an identifier; an unknown function is a loud
-    /// runtime error, not a silently quoted string.
-    fn rewrite(&self, expr: &str) -> String {
+    /// runtime error, not a silently quoted string. The `$` marker never
+    /// appears in expressions: a `$name` token is an error suggesting the
+    /// identifier form.
+    fn rewrite(&self, expr: &str) -> Result<String, String> {
         let mut out = String::new();
         let mut need_space = false;
         let tokens = tokenize(expr);
         let mut it = tokens.iter().peekable();
         while let Some(tok) = it.next() {
             let is_call_name = it.peek() == Some(&&"(".to_string());
-            let text = if is_operator(tok) || is_quoted_string(tok) {
-                tok.clone()
-            } else if tok == "$wave" {
-                "wave".to_string()
-            } else if let Some(name) = tok.strip_prefix('$') {
-                if self.sym.in_scope(name) {
-                    name.to_string()
-                } else {
-                    lua_quote(tok)
-                }
-            } else if is_call_name {
+            let text = if is_operator(tok) || is_quoted_string(tok) || is_call_name {
                 tok.clone()
             } else {
-                self.classify_word(tok)
+                self.classify_word(tok)?
             };
             if need_space && !matches!(tok.as_str(), "(" | "[" | "{" | ")" | "]" | "}" | ",") {
                 out.push(' ');
@@ -282,20 +327,19 @@ impl<'a> Rewriter<'a> {
                 _ => need_space = true,
             }
         }
-        out
+        Ok(out)
     }
 
     /// String-position text: build a quoted string or a concatenation.
-    fn rewrite_string(&self, text: &str) -> String {
-        // A fully quoted string is taken as-is (its inner text).
-        let text = if let Some(inner) = text
-            .strip_prefix('"')
-            .and_then(|t| t.strip_suffix('"'))
-        {
-            inner
-        } else {
-            text
-        };
+    ///
+    /// A fully quoted string is literal: no `$` processing at all, so
+    /// `"$HOME"` in a spawn command is verbatim text and quoting finally
+    /// protects a value. `$` processing happens only in bare strings, and
+    /// an undefined `$name` is a loud error, never silent text.
+    fn rewrite_string(&self, text: &str) -> Result<String, String> {
+        if let Some(inner) = text.strip_prefix('"').and_then(|t| t.strip_suffix('"')) {
+            return Ok(lua_quote(&unescape_quotes(inner)));
+        }
         let mut out = String::new();
         let mut lit = String::new();
         let mut has_dynamic = false;
@@ -335,9 +379,10 @@ impl<'a> Rewriter<'a> {
                     .map(|(j, _)| j)
                     .unwrap_or(rest.len());
                 let name = &rest[..name_end];
-                match self.sym.static_or_scope(name) {
+                match self.sym.resolve_string(name) {
                     Some(repl) if repl == name => {
-                        // loop variable / fn parameter: splice an identifier
+                        // runtime variable, loop variable, or fn parameter:
+                        // splice the identifier
                         if !lit.is_empty() {
                             out.push_str(&lua_quote(&lit));
                             out.push_str(" .. ");
@@ -351,8 +396,9 @@ impl<'a> Rewriter<'a> {
                         lit.push_str(&repl);
                     }
                     None => {
-                        lit.push('$');
-                        lit.push_str(name);
+                        return Err(format!(
+                            "`${name}` is not defined; define it with `@{name} = value`, or quote the string if you mean literal text"
+                        ));
                     }
                 }
                 for _ in 0..name_end {
@@ -366,13 +412,13 @@ impl<'a> Rewriter<'a> {
             if has_dynamic {
                 out.push_str(&lua_quote(&lit));
             } else {
-                return lua_quote(&lit);
+                return Ok(lua_quote(&lit));
             }
         }
         if has_dynamic {
-            out
+            Ok(out)
         } else {
-            lua_quote("")
+            Ok(lua_quote(""))
         }
     }
 }
@@ -552,7 +598,7 @@ fn emit_body(
             if first == "if" || first == "while" || first == "do" {
                 sym.scopes.push(None);
             }
-            out.push_str(&passthrough(line, sym));
+            out.push_str(line);
             out.push('\n');
             continue;
         }
@@ -570,7 +616,7 @@ fn emit_body(
                 .map(|w| w.trim_end_matches(',').to_string())
                 .collect();
             sym.scopes.push(Some(vars.into_iter().collect()));
-            out.push_str(&passthrough(line, sym));
+            out.push_str(line);
             out.push('\n');
             continue;
         }
@@ -595,7 +641,9 @@ fn emit_body(
                     path.display()
                 ));
             }
-            let path_expr = Rewriter { sym }.rewrite_string(rest);
+            let path_expr = Rewriter { sym }
+                .rewrite_string(rest)
+                .map_err(|e| format!("in file {} at line {line_no}: {e}", path.display()))?;
             out.push_str(&format!("include({path_expr})\n"));
             continue;
         }
@@ -615,17 +663,20 @@ fn emit_body(
         }
 
         // -- variable definitions ---------------------------------------------
-        if let Some(rest) = line.strip_prefix('$') {
+        // `@name = value` defines a variable. `@` never appears anywhere
+        // else; references are `$name` in bare strings, and expressions
+        // use the plain identifier `name`.
+        if let Some(rest) = line.strip_prefix('@') {
             let Some((name, value)) = rest.split_once('=') else {
                 return Err(format!(
-                    "in file {} at line {line_no}: expected `$name = value`",
+                    "in file {} at line {line_no}: expected `@name = value`",
                     path.display()
                 ));
             };
             let name = name.trim();
             if name.is_empty() {
                 return Err(format!(
-                    "in file {} at line {line_no}: `$` needs a variable name before `=`",
+                    "in file {} at line {line_no}: `@` needs a variable name before `=`",
                     path.display()
                 ));
             }
@@ -635,6 +686,7 @@ fn emit_body(
             // expression value is only reachable as the Lua global.
             let is_static = !value.contains(char::is_whitespace)
                 && !value.contains(['(', '['])
+                && !value.starts_with('@')
                 && !value.starts_with('$');
             if is_static {
                 let text = value
@@ -643,8 +695,15 @@ fn emit_body(
                     .unwrap_or(value)
                     .to_string();
                 sym.statics.insert(name.to_string(), text);
+            } else {
+                sym.runtime_vars.insert(name.to_string());
             }
-            let value_expr = rewrite_value(value, sym);
+            let value_expr = rewrite_value(value, sym).map_err(|e| {
+                format!(
+                    "in file {} at line {line_no}: {e}",
+                    path.display()
+                )
+            })?;
             out.push_str(&format!("_vardef({}, {})\n", lua_quote(name), value_expr));
             continue;
         }
@@ -670,7 +729,9 @@ fn emit_body(
             let header_expr = if rest.is_empty() {
                 lua_quote("")
             } else {
-                Rewriter { sym }.rewrite_string(rest)
+                Rewriter { sym }
+                    .rewrite_string(rest)
+                    .map_err(|e| format!("in file {} at line {line_no}: {e}", path.display()))?
             };
             out.push_str(&format!("_block({}, {}, function()\n", lua_quote(keyword), header_expr));
             *depth += 1;
@@ -681,7 +742,12 @@ fn emit_body(
 
         // -- leaves -------------------------------------------------------------
         if let Some((key, value)) = split_leaf(line) {
-            let value_expr = rewrite_value(value.trim(), sym);
+            let value_expr = rewrite_value(value.trim(), sym).map_err(|e| {
+                format!(
+                    "in file {} at line {line_no}: {e}",
+                    path.display()
+                )
+            })?;
             out.push_str(&format!("_leaf({}, {})\n", lua_quote(key), value_expr));
             continue;
         }
@@ -694,7 +760,12 @@ fn emit_body(
             .filter(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.'));
         match call_name {
             Some(name) if !is_reserved(name) => {
-                let rewritten = Rewriter { sym }.rewrite(line);
+                let rewritten = Rewriter { sym }.rewrite(line).map_err(|e| {
+                    format!(
+                        "in file {} at line {line_no}: {e}",
+                        path.display()
+                    )
+                })?;
                 out.push_str(&rewritten);
                 out.push('\n');
             }
@@ -723,57 +794,42 @@ fn split_leaf(line: &str) -> Option<(&str, &str)> {
 }
 
 /// Value rule: whitespace/parens/brackets -> expression, else a single
-/// token (literal or bare string).
-fn rewrite_value(value: &str, sym: &Symbols) -> String {
+/// token (literal or bare string). A `$name` token in value position is
+/// an error: `$` means string reference, expressions use the identifier.
+fn rewrite_value(value: &str, sym: &Symbols) -> Result<String, String> {
     let rewriter = Rewriter { sym };
     if value.contains(char::is_whitespace) || value.contains(['(', '[']) {
         rewriter.rewrite(value)
     } else {
         // single token
+        if let Some(name) = value.strip_prefix('@') {
+            return Err(format!(
+                "`@{name}` only defines a variable on its own line (`@{name} = value`); as a value use `{name}`"
+            ));
+        }
         if let Some(name) = value.strip_prefix('$') {
             if sym.in_scope(name) {
-                return name.to_string();
+                return Err(format!(
+                    "`${name}` cannot be used as a value; use `{name}` (no `$`)"
+                ));
             }
+            return Err(format!(
+                "`${name}` is not defined; define it with `@{name} = value`, and use `{name}` (no `$`) as a value"
+            ));
         }
         if is_number(value) || matches!(value, "true" | "false") {
-            return value.to_string();
+            return Ok(value.to_string());
         }
         if is_color(value) {
             let hex = value.strip_prefix('#').unwrap();
-            return format!("_color({})", lua_quote(&hex[..6.min(hex.len())]));
+            return Ok(format!("_color({})", lua_quote(&hex[..6.min(hex.len())])));
         }
         if is_duration(value) {
             let (num, unit) = split_duration(value).unwrap();
-            return format!("_dur({}, {})", num, lua_quote(unit));
+            return Ok(format!("_dur({}, {})", num, lua_quote(unit)));
         }
         rewriter.rewrite_string(value)
     }
-}
-
-/// Passthrough lines get `$name` textual substitution only.
-fn passthrough(line: &str, sym: &Symbols) -> String {
-    let mut out = String::new();
-    let mut chars = line.char_indices().peekable();
-    while let Some((i, c)) = chars.next() {
-        if c == '$' {
-            let rest = &line[i + 1..];
-            let name_end = rest
-                .char_indices()
-                .find(|(_, c)| !c.is_ascii_alphanumeric() && *c != '_')
-                .map(|(j, _)| j)
-                .unwrap_or(rest.len());
-            let name = &rest[..name_end];
-            if let Some(repl) = sym.static_or_scope(name) {
-                out.push_str(&repl);
-                for _ in 0..name_end {
-                    chars.next();
-                }
-                continue;
-            }
-        }
-        out.push(c);
-    }
-    out
 }
 
 /// Splits a one-line bind body into actions on commas at paren depth 0
@@ -803,13 +859,11 @@ fn split_inline_actions(s: &str) -> Vec<&str> {
 /// (so `spawn:$wave(a, b)` keeps raw-segment semantics), quoted strings
 /// and expressions go through the expression rewriter verbatim, and a
 /// bare token is a plain string.
-fn rewrite_action(action: &str, sym: &Symbols) -> String {
+fn rewrite_action(action: &str, sym: &Symbols) -> Result<String, String> {
     let rewriter = Rewriter { sym };
     if action.contains('$') {
         rewriter.rewrite_string(action)
-    } else if action.contains(char::is_whitespace)
-        || action.contains(['(', '['])
-    {
+    } else if action.contains(char::is_whitespace) || action.contains(['(', '[']) {
         rewriter.rewrite(action)
     } else {
         rewriter.rewrite_string(action)
@@ -836,7 +890,8 @@ fn emit_bind(
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
                 .map(|s| rewrite_action(s, sym))
-                .collect::<Vec<_>>();
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("in file {} at line {line_no}: {e}", path.display()))?;
             return emit_bind_call(combo_text, actions, sym, out, line_no, path);
         }
         if !after.is_empty() {
@@ -872,7 +927,10 @@ fn emit_bind(
                     path.display()
                 ));
             }
-            actions.push(rewrite_action(a, sym));
+            actions.push(
+                rewrite_action(a, sym)
+                    .map_err(|e| format!("in file {} at line {a_no}: {e}", path.display()))?,
+            );
         }
         if !closed {
             return Err(format!(
@@ -884,8 +942,12 @@ fn emit_bind(
     }
     // deprecated line form: bind X = rest of line
     if let Some((combo_text, action)) = rest.split_once('=') {
-        let combo = Rewriter { sym }.rewrite_string(combo_text.trim());
-        let action = Rewriter { sym }.rewrite_string(action.trim());
+        let combo = Rewriter { sym }
+            .rewrite_string(combo_text.trim())
+            .map_err(|e| format!("in file {} at line {line_no}: {e}", path.display()))?;
+        let action = Rewriter { sym }
+            .rewrite_string(action.trim())
+            .map_err(|e| format!("in file {} at line {line_no}: {e}", path.display()))?;
         out.push_str(&format!("bind({combo}, {action})\n"));
         return Ok(());
     }
@@ -909,7 +971,9 @@ fn emit_bind_call(
             path.display()
         ));
     }
-    let combo_expr = Rewriter { sym }.rewrite_string(combo_text);
+    let combo_expr = Rewriter { sym }
+        .rewrite_string(combo_text)
+        .map_err(|e| format!("in file {} at line {line_no}: {e}", path.display()))?;
     let list = format!("{{{}}}", actions.join(", "));
     out.push_str(&format!("bind({combo_expr}, {list})\n"));
     Ok(())
@@ -1291,11 +1355,40 @@ mod tests {
 
     #[test]
     fn var_def_and_use_in_string_and_expression() {
-        let lua = compile_str("$mod = SUPER\nbind $mod+Return { spawn:kitty }\n");
+        // @ defines, $ references in strings, plain name in expressions
+        let lua = compile_str("@mod = SUPER\nbind $mod+Return { spawn:kitty }\n");
         assert!(lua.contains("_vardef(\"mod\", \"SUPER\")"));
         assert!(lua.contains("bind(\"SUPER+Return\", {\"spawn:kitty\"})"));
-        let lua = compile_str("$extra = 4\ngaps = 8 * $extra\n");
+        let lua = compile_str("@extra = 4\ngaps = 8 * extra\n");
         assert!(lua.contains("_leaf(\"gaps\", 8 * extra)"));
+        // runtime variable: reachable as the identifier in expressions
+        let lua = compile_str("@mod = SUPER\n@terminal = wave(kitty, sh)\nbind $mod+Return { spawn:$terminal }\n");
+        assert!(lua.contains("_vardef(\"terminal\", wave(\"kitty\", \"sh\"))"));
+        assert!(lua.contains("bind(\"SUPER+Return\", {\"spawn:\" .. terminal})"));
+    }
+
+    #[test]
+    fn markers_have_one_role_each() {
+        // `$` in an expression is an error pointing at the identifier
+        let err = compile("@extra = 4\ngaps = 8 * $extra\n", Path::new("test.wave")).unwrap_err();
+        assert!(err.contains("use `extra` (no `$`)"), "{err}");
+        // `$` as a bare value is an error
+        let err = compile("@extra = 4\ngaps = $extra\n", Path::new("test.wave")).unwrap_err();
+        assert!(err.contains("use `extra` (no `$`)"), "{err}");
+        // an undefined `$name` is an error, never silent text
+        let err = compile("bind $mod+Q { close-window }\n", Path::new("test.wave")).unwrap_err();
+        assert!(err.contains("`$mod` is not defined"), "{err}");
+        // `@` in an expression is an error
+        let err = compile("gaps = 8 * @extra\n", Path::new("test.wave")).unwrap_err();
+        assert!(err.contains("only defines a variable"), "{err}");
+        // `@` as a bare value is an error
+        let err = compile("gaps = @extra\n", Path::new("test.wave")).unwrap_err();
+        assert!(err.contains("only defines a variable"), "{err}");
+        // quoted strings are literal: no substitution, no errors
+        let lua = compile_str("@mod = SUPER\nbind \"$mod+Q\" { close-window }\n");
+        assert!(lua.contains("bind(\"$mod+Q\", {\"close-window\"})"));
+        let lua = compile_str("spawn = \"sh -c 'echo $HOME'\"\n");
+        assert!(lua.contains("_leaf(\"spawn\", \"sh -c 'echo $HOME'\")"));
     }
 
     #[test]
@@ -1315,32 +1408,32 @@ mod tests {
 
     #[test]
     fn bind_multiline_one_line_and_line_form() {
-        let lua = compile_str("$mod = SUPER\nbind $mod+Q {\n    close-window\n}\n");
+        let lua = compile_str("@mod = SUPER\nbind $mod+Q {\n    close-window\n}\n");
         assert!(lua.contains("bind(\"SUPER+Q\", {\"close-window\"})"));
-        let lua = compile_str("$mod = SUPER\nbind $mod+D { \"spawn:rofi -show drun\" }\n");
+        let lua = compile_str("@mod = SUPER\nbind $mod+D { \"spawn:rofi -show drun\" }\n");
         assert!(lua.contains("bind(\"SUPER+D\", {\"spawn:rofi -show drun\"})"));
-        let lua = compile_str("$mod = SUPER\nbind $mod+R = spawn:rofi -show drun\n");
+        let lua = compile_str("@mod = SUPER\nbind $mod+R = spawn:rofi -show drun\n");
         assert!(lua.contains("bind(\"SUPER+R\", \"spawn:rofi -show drun\")"));
     }
 
     #[test]
     fn bind_one_liner_multiple_actions() {
-        let lua = compile_str("$mod = SUPER\nbind $mod+T { close-window, toggle-floating }\n");
+        let lua = compile_str("@mod = SUPER\nbind $mod+T { close-window, toggle-floating }\n");
         assert!(lua.contains("bind(\"SUPER+T\", {\"close-window\", \"toggle-floating\"})"));
     }
 
     #[test]
     fn wave_splice_inside_string() {
-        let lua = compile_str("$mod = SUPER\nbind $mod+Return { spawn:$wave(kitty, alacritty) }\n");
+        let lua = compile_str("@mod = SUPER\nbind $mod+Return { spawn:$wave(kitty, alacritty) }\n");
         assert!(lua.contains("bind(\"SUPER+Return\", {\"spawn:\" .. wave(\"kitty\", \"alacritty\")})"));
-        let lua = compile_str("$mod = SUPER\nbind $mod+Return { \"spawn:\" .. wave(\"kitty\") }\n");
+        let lua = compile_str("@mod = SUPER\nbind $mod+Return { \"spawn:\" .. wave(\"kitty\") }\n");
         assert!(lua.contains("bind(\"SUPER+Return\", {\"spawn:\" .. wave(\"kitty\")})"));
     }
 
     #[test]
     fn loop_with_var_concat() {
         let lua = compile_str(
-            "$mod = SUPER\nfor i = 1, 9 do\n    bind $mod+Num$i { workspace:$i }\nend\n",
+            "@mod = SUPER\nfor i = 1, 9 do\n    bind $mod+Num$i { workspace:$i }\nend\n",
         );
         assert!(lua.contains("for i = 1, 9 do"));
         assert!(lua.contains("bind(\"SUPER+Num\" .. i, {\"workspace:\" .. i})"));
@@ -1350,7 +1443,7 @@ mod tests {
     #[test]
     fn fn_macro_and_call() {
         let lua = compile_str(
-            "$mod = SUPER\nfn media(key, app) {\n    bind $mod+$key { spawn:$app }\n}\nmedia(comma, spotify)\n",
+            "@mod = SUPER\nfn media(key, app) {\n    bind $mod+$key { spawn:$app }\n}\nmedia(comma, spotify)\n",
         );
         assert!(lua.contains("local function media(key, app)"));
         assert!(lua.contains("bind(\"SUPER+\" .. key, {\"spawn:\" .. app})"));
@@ -1393,7 +1486,7 @@ mod tests {
     #[test]
     fn evaluate_produces_entries() {
         let entries = evaluate(
-            "$mod = SUPER\nterminal = kitty\nborder {\n    width = 2\n}\nbind $mod+Q { close-window }\n",
+            "@mod = SUPER\nterminal = kitty\nborder {\n    width = 2\n}\nbind $mod+Q { close-window }\n",
             Path::new("test.wave"),
         )
         .expect("evaluate should succeed");
