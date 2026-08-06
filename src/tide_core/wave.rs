@@ -1714,6 +1714,63 @@ fn install_env(
         )
         .map_err(|e| e.to_string())?;
 
+    // Legacy color spellings from the old grammar. `rgb(RRGGBB)` keeps
+    // the color value (darken/lighten still work on it). `rgba(...)`
+    // returns the 8-digit hex string (`RRGGBBAA` from the one-arg form,
+    // or the alpha folded in from the two-arg form) so the alpha reaches
+    // the config parsers that understand it.
+    lua.globals()
+        .set(
+            "rgb",
+            lua.create_function(|_, hex: String| {
+                ColorValue::from_hex(&hex)
+                    .ok_or_else(|| mlua::Error::external(format!("invalid color `{hex}`")))
+            })
+            .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+    lua.globals()
+        .set(
+            "rgba",
+            lua.create_function(|_, args: Variadic<String>| {
+                let hex = match args.as_slice() {
+                    [hex] => {
+                        let hex = hex.strip_prefix('#').unwrap_or(hex);
+                        if hex.len() == 8 {
+                            hex.to_string()
+                        } else {
+                            format!("{}FF", &hex[..6.min(hex.len())])
+                        }
+                    }
+                    [hex, alpha] => {
+                        let alpha: u8 = alpha.parse().map_err(mlua::Error::external)?;
+                        let hex = hex.strip_prefix('#').unwrap_or(hex);
+                        format!("{}{:02X}", &hex[..6.min(hex.len())], alpha)
+                    }
+                    _ => {
+                        return Err(mlua::Error::external(
+                            "rgba needs RRGGBBAA or RRGGBB, AA",
+                        ))
+                    }
+                };
+                Ok(hex)
+            })
+            .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+
+    // Legacy `bezier(x1,y1,x2,y2)` easing spelling: normalizes to the
+    // CSS-compatible `cubic-bezier(...)` string the config surface parses.
+    lua.globals()
+        .set(
+            "bezier",
+            lua.create_function(|_, (x1, y1, x2, y2): (f64, f64, f64, f64)| {
+                Ok(format!("cubic-bezier({x1},{y1},{x2},{y2})"))
+            })
+            .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+
     lua.globals()
         .set(
             "_dur",
@@ -2072,37 +2129,6 @@ fn clear_user_globals(lua: &Lua) -> Result<(), mlua::Error> {
     Ok(())
 }
 
-/// Does this file use constructs that only the new Wave grammar knows?
-///
-/// The dual-mode loader must not fall back to the old line-based grammar
-/// for such files: the old parser silently misparses them as garbage
-/// (`@mod = SUPER` becomes an assignment whose key is `@mod`, and
-/// `terminal = wave(...)` becomes a raw string). The checks are
-/// conservative, biased toward "new-only" so a fallback is never taken
-/// when it could be wrong. `$wave(` in a value is deliberately not a
-/// marker: it is valid in both grammars.
-pub(crate) fn uses_new_only_syntax(contents: &str) -> bool {
-    for raw in contents.lines() {
-        let line = strip_line_comment(raw).trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with('@') {
-            return true;
-        }
-        if line.starts_with("bind ") && line.contains('{') {
-            return true;
-        }
-        if let Some((_, value)) = line.split_once('=') {
-            let value = value.trim();
-            if value.starts_with('#') || (value.contains(['(', '[']) && !value.contains("$wave("))
-            {
-                return true;
-            }
-        }
-    }
-    false
-}
 
 #[cfg(test)]
 mod tests {
@@ -2415,59 +2441,6 @@ mod tests {
         assert_eq!(entries[2], Entry::Assign("terminal".into(), "sh".into()));
     }
 
-    /// The W1 equivalence gate: the same config written in the old
-    /// line-based syntax and the new Wave syntax must produce the same
-    /// `Entry` list. Literal combos are used so the comparison is about
-    /// grammar fidelity alone; `$name` substitution into combos is
-    /// config.rs integration work (W2/W3).
-    #[test]
-    fn equivalent_to_line_based_parser_on_shared_sample() {
-        let old = r#"terminal = kitty
-gaps = 8
-water_effects = true
-color = 8EDDFF
-input {
-    xkb_layout = us
-    touchpad {
-        natural_scroll = true
-    }
-}
-bind SUPER+Return = spawn:kitty
-spawn_at_startup = waybar
-"#;
-        let new = r#"terminal = kitty
-gaps = 8
-water_effects = true
-color = #8EDDFF
-input {
-    xkb_layout = us
-    touchpad {
-        natural_scroll = true
-    }
-}
-bind SUPER+Return { spawn:kitty }
-spawn_at_startup = waybar
-"#;
-        let old_entries = super::super::waves::parse(old, Path::new("old.wave"))
-            .expect("old syntax should parse");
-        let new_entries = evaluate(new, Path::new("new.wave")).expect("new syntax should evaluate");
-        assert_eq!(old_entries, new_entries);
-    }
-
-    #[test]
-    fn uses_new_only_syntax_detects_new_constructs() {
-        // new-only: @ definitions, bind node forms, expressions, colors
-        assert!(uses_new_only_syntax("@mod = SUPER\n"));
-        assert!(uses_new_only_syntax("bind $mod+Q { close-window }\n"));
-        assert!(uses_new_only_syntax("terminal = wave(kitty, alacritty)\n"));
-        assert!(uses_new_only_syntax("color = #8EDDFF\n"));
-        assert!(uses_new_only_syntax("@mod = SUPER\nterminal = $wave(kitty)\n"));
-        // old-compatible: line-form binds, $wave() values, plain values
-        assert!(!uses_new_only_syntax("$mod = SUPER\nbind $mod+Q = close-window\n"));
-        assert!(!uses_new_only_syntax("terminal = $wave(kitty, alacritty)\n"));
-        assert!(!uses_new_only_syntax("include \"keybinds.wave\"\n# a comment\n"));
-        assert!(!uses_new_only_syntax("spawn_at_startup = sh -c \"echo hi\"\n"));
-    }
 
     #[test]
     fn duration_math_and_serialization() {

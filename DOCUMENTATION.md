@@ -62,7 +62,7 @@ on "workspace-changed" {
 
 **Live queries.** `tidectl eval <expression>` evaluates on the running session's Lua — config variables, section tables, and the live `tide` table are all answerable (`tidectl eval "theme.primary"`, `tidectl eval "tide.workspace"`).
 
-**Old configs still load.** A config in the pre-Lua line-based grammar parses through a compatibility fallback with a log warning until the migration release; a file that uses any new construct is always parsed by the Wave engine, never silently misparsed.
+The line-based grammar is gone; Wave is the only grammar. Old configs were migrated (the mechanical changes: `$mod = SUPER` becomes `@mod = SUPER`, `bind X = Y` becomes `bind X { Y }`, `$wave(...)` becomes `wave(...)` in values, `spawn_at_startup` lines become one `spawn = [...]` list) and legacy key names still parse as deprecated aliases with a log notice.
 
 **Multi-file:** `include "path.wave"` as its own statement, repeatable (one per line), in any file (the main one, or one it includes). Each path resolves relative to the file that lists it; `~/` expands to your home directory. Rules:
 

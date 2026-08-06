@@ -1,27 +1,16 @@
-//! Waves: TideWM's own config file format (`.wave`).
+//! Waves: the shared config model and merge policy for the Wave format.
 //!
-//! Line-based on purpose, not a general expression grammar -- this is
-//! genuinely how Hyprland's own parser works too (split on the first `=`,
-//! everything after is one opaque value), and it's what makes
-//! `bind $mod+R = spawn:$wave(rofi -show drun, wofi --show drun)` work
-//! with no string-quoting needed for the common case (a command with its
-//! own spaces/flags). The tradeoff this buys: **every block is real
-//! multi-line, always** -- `output eDP-1 { position = 0x0 }` all on one
-//! line is not valid, because a value is "the rest of the line," and a
-//! line ending in `{` is unambiguously a block header. No exceptions, one
-//! rule, easy to explain.
-//!
-//! This module only knows the generic shape (assignments, `$var`
-//! definitions, `bind combo = action` statements, `include "path"`
-//! statements, and `keyword [header] { ... }` blocks) and how multiple
-//! files merge together. It has no idea what a valid top-level key is --
+//! The Wave engine (`wave.rs`) evaluates config into these [`Entry`]
+//! values; this module knows nothing about parsing. It owns the generic
+//! shape (assignments, `@name` variable definitions, bind statements,
+//! handler registrations, and `keyword [header] { ... }` blocks), how
+//! multiple files merge together, and the include-path resolution the
+//! engine walks with. It has no idea what a valid top-level key is --
 //! that's `config.rs`'s job when it lowers a merged [`Entry`] list into a
 //! [`crate::config`]-internal `RawConfig`. Keeping the split this way
-//! means this module can be tested against its own syntax rules alone,
+//! means this module can be tested against its merge rules alone,
 //! without dragging in every config field this project happens to have
 //! today.
-
-use std::fs;
 use std::path::{Path, PathBuf};
 
 /// One parsed line (or block) from a `.wave` file. Deliberately untyped
@@ -49,149 +38,6 @@ pub(crate) enum Entry {
 
 /// Strips a `#` comment, but only outside a quoted string -- a spawn
 /// command or window title can legitimately contain `#`.
-fn strip_comment(line: &str) -> &str {
-    let mut in_quotes = false;
-    for (i, ch) in line.char_indices() {
-        match ch {
-            '"' => in_quotes = !in_quotes,
-            '#' if !in_quotes => return &line[..i],
-            _ => {}
-        }
-    }
-    line
-}
-
-/// Strips one layer of surrounding `"..."` if present. Quoting a value is
-/// always optional (rest-of-line already captures everything, `#` and
-/// leading/trailing whitespace aside) -- this exists for cases like
-/// `include "monitors.wave"` or a title match with meaningful leading/
-/// trailing spaces, not because plain values need it.
-fn unquote(s: &str) -> String {
-    let s = s.trim();
-    if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
-        s[1..s.len() - 1].to_string()
-    } else {
-        s.to_string()
-    }
-}
-
-/// Parses `contents` into a flat list of top-level [`Entry`] values.
-/// `path` is only used to prefix error messages with something the user
-/// can actually locate.
-pub(crate) fn parse(contents: &str, path: &Path) -> Result<Vec<Entry>, String> {
-    let lines: Vec<&str> = contents.lines().collect();
-    let mut pos = 0usize;
-    parse_block(&lines, &mut pos, path, false)
-}
-
-fn parse_block(
-    lines: &[&str],
-    pos: &mut usize,
-    path: &Path,
-    nested: bool,
-) -> Result<Vec<Entry>, String> {
-    let mut entries = Vec::new();
-    while *pos < lines.len() {
-        let line_no = *pos + 1;
-        let raw = lines[*pos];
-        *pos += 1;
-        let line = strip_comment(raw).trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line == "}" {
-            if !nested {
-                return Err(format!(
-                    "in file {} at line {line_no}: unexpected `}}` with no open block",
-                    path.display()
-                ));
-            }
-            return Ok(entries);
-        }
-
-        if let Some(header) = line.strip_suffix('{') {
-            let header = header.trim();
-            let (keyword, rest) = header
-                .split_once(char::is_whitespace)
-                .unwrap_or((header, ""));
-            if keyword.is_empty() {
-                return Err(format!(
-                    "in file {} at line {line_no}: expected a block name before `{{`",
-                    path.display()
-                ));
-            }
-            let body = parse_block(lines, pos, path, true)?;
-            entries.push(Entry::Block(
-                keyword.to_string(),
-                rest.trim().to_string(),
-                body,
-            ));
-            continue;
-        }
-
-        if let Some(rest) = line
-            .strip_prefix("include")
-            .and_then(|r| (r.is_empty() || r.starts_with(char::is_whitespace)).then_some(r.trim()))
-        {
-            if rest.is_empty() {
-                return Err(format!(
-                    "in file {} at line {line_no}: `include` needs a path",
-                    path.display()
-                ));
-            }
-            entries.push(Entry::Include(unquote(rest)));
-            continue;
-        }
-
-        let Some((lhs, rhs)) = line.split_once('=') else {
-            return Err(format!(
-                "in file {} at line {line_no}: expected `key = value`, a block ending in `{{`, `include \"path\"`, or `}}` -- got `{line}`",
-                path.display()
-            ));
-        };
-        let lhs = lhs.trim();
-        let value = unquote(rhs.trim());
-        if let Some(name) = lhs.strip_prefix('$') {
-            let name = name.trim();
-            if name.is_empty() {
-                return Err(format!(
-                    "in file {} at line {line_no}: `$` needs a variable name before `=`",
-                    path.display()
-                ));
-            }
-            entries.push(Entry::VarDef(name.to_string(), value));
-        } else if let Some(combo) = lhs.strip_prefix("bind ") {
-            let combo = combo.trim();
-            if combo.is_empty() {
-                return Err(format!(
-                    "in file {} at line {line_no}: `bind` needs a key combo before `=`",
-                    path.display()
-                ));
-            }
-            entries.push(Entry::Bind(combo.to_string(), value));
-        } else if lhs.is_empty() {
-            return Err(format!(
-                "in file {} at line {line_no}: missing key before `=`",
-                path.display()
-            ));
-        } else {
-            entries.push(Entry::Assign(lhs.to_string(), value));
-        }
-    }
-    if nested {
-        return Err(format!(
-            "in file {}: unexpected end of file, missing a closing `}}`",
-            path.display()
-        ));
-    }
-    Ok(entries)
-}
-
-/// Which merge policy a block keyword uses when folding one file's
-/// entries onto another's -- see `merge_into`'s doc comment. A small,
-/// fixed allowlist rather than something declared per-block, because it's
-/// a property of what each keyword *means*, not something a `.wave` file
-/// should ever need to say for itself.
 fn block_is_keyed(keyword: &str) -> bool {
     matches!(
         keyword,
@@ -295,76 +141,6 @@ pub(crate) fn merge_into(target: &mut Vec<Entry>, incoming: Vec<Entry>) {
 /// same message out to the caller so it can reach the compositor-owned
 /// warning panel, not just the log file (a broken include used to be
 /// invisible on screen entirely).
-pub(crate) fn resolve(path: &Path) -> Result<(Vec<Entry>, Vec<String>), String> {
-    resolve_with(path, parse)
-}
-
-/// `resolve`, parameterized over how a file's text becomes entries, so the
-/// Wave engine can reuse the exact same include/merge/cycle machinery with
-/// `wave::evaluate` as the parser.
-pub(crate) fn resolve_with(
-    path: &Path,
-    parse_file: fn(&str, &Path) -> Result<Vec<Entry>, String>,
-) -> Result<(Vec<Entry>, Vec<String>), String> {
-    let mut ancestors = Vec::new();
-    let mut warnings = Vec::new();
-    let entries = resolve_inner(path, parse_file, &mut ancestors, &mut warnings)?;
-    Ok((entries, warnings))
-}
-
-fn resolve_inner(
-    path: &Path,
-    parse_file: fn(&str, &Path) -> Result<Vec<Entry>, String>,
-    ancestors: &mut Vec<PathBuf>,
-    warnings: &mut Vec<String>,
-) -> Result<Vec<Entry>, String> {
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if ancestors.contains(&canonical) {
-        return Err(format!("include cycle detected in file {}", path.display()));
-    }
-    ancestors.push(canonical);
-    let result = resolve_uncycled(path, parse_file, ancestors, warnings);
-    ancestors.pop();
-    result
-}
-
-fn resolve_uncycled(
-    path: &Path,
-    parse_file: fn(&str, &Path) -> Result<Vec<Entry>, String>,
-    ancestors: &mut Vec<PathBuf>,
-    warnings: &mut Vec<String>,
-) -> Result<Vec<Entry>, String> {
-    let contents =
-        fs::read_to_string(path).map_err(|err| format!("in file {}: {err}", path.display()))?;
-    let entries = parse_file(&contents, path)?;
-
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut merged = Vec::new();
-    let mut own_entries = Vec::with_capacity(entries.len());
-    for entry in entries {
-        match entry {
-            Entry::Include(include) => {
-                let include_path = resolve_include_path(parent, &include);
-                match resolve_inner(&include_path, parse_file, ancestors, warnings) {
-                    Ok(included) => merge_into(&mut merged, included),
-                    Err(err) => {
-                        tracing::warn!(path = %include_path.display(), %err, "Failed to load included config file, skipping");
-                        warnings.push(format!(
-                            "Failed to load included config file: {err}, skipping"
-                        ));
-                    }
-                }
-            }
-            other => own_entries.push(other),
-        }
-    }
-    merge_into(&mut merged, own_entries);
-    Ok(merged)
-}
-
-/// Expands a leading `~/` against `$HOME` and resolves the result against
-/// `base_dir` (the including file's own directory) if it's not already
-/// absolute.
 pub(crate) fn resolve_include_path(base_dir: &Path, include: &str) -> PathBuf {
     let expanded = match include.strip_prefix("~/") {
         Some(rest) => match std::env::var_os("HOME") {
@@ -384,115 +160,18 @@ pub(crate) fn resolve_include_path(base_dir: &Path, include: &str) -> PathBuf {
 mod tests {
     use super::*;
 
-    fn parse_str(s: &str) -> Vec<Entry> {
-        parse(s, Path::new("test.wave")).expect("parse should succeed")
+    fn assign(key: &str, value: &str) -> Entry {
+        Entry::Assign(key.to_string(), value.to_string())
     }
 
-    #[test]
-    fn parses_flat_assignments_and_strips_comments() {
-        let entries = parse_str("# a comment\nterminal = kitty # trailing comment\ngaps = 8\n");
-        assert_eq!(
-            entries,
-            vec![
-                Entry::Assign("terminal".into(), "kitty".into()),
-                Entry::Assign("gaps".into(), "8".into()),
-            ]
-        );
-    }
-
-    #[test]
-    fn hash_inside_quotes_is_not_a_comment() {
-        let entries = parse_str(r#"title = "Firefox # 1""#);
-        assert_eq!(
-            entries,
-            vec![Entry::Assign("title".into(), "Firefox # 1".into())]
-        );
-    }
-
-    #[test]
-    fn parses_var_def_bind_and_include() {
-        let entries =
-            parse_str("$mod = SUPER\nbind $mod+Return = spawn:kitty\ninclude \"monitors.wave\"\n");
-        assert_eq!(
-            entries,
-            vec![
-                Entry::VarDef("mod".into(), "SUPER".into()),
-                Entry::Bind("$mod+Return".into(), "spawn:kitty".into()),
-                Entry::Include("monitors.wave".into()),
-            ]
-        );
-    }
-
-    #[test]
-    fn bind_value_with_commas_and_spaces_needs_no_quoting() {
-        let entries = parse_str("bind $mod+R = spawn:$wave(rofi -show drun, wofi --show drun)");
-        assert_eq!(
-            entries,
-            vec![Entry::Bind(
-                "$mod+R".into(),
-                "spawn:$wave(rofi -show drun, wofi --show drun)".into()
-            )]
-        );
-    }
-
-    #[test]
-    fn parses_nested_blocks() {
-        let entries = parse_str(
-            "input {\n    xkb_layout = us\n    touchpad {\n        natural_scroll = true\n    }\n}\n",
-        );
-        assert_eq!(
-            entries,
-            vec![Entry::Block(
-                "input".into(),
-                "".into(),
-                vec![
-                    Entry::Assign("xkb_layout".into(), "us".into()),
-                    Entry::Block(
-                        "touchpad".into(),
-                        "".into(),
-                        vec![Entry::Assign("natural_scroll".into(), "true".into())]
-                    ),
-                ]
-            )]
-        );
-    }
-
-    #[test]
-    fn block_header_is_captured() {
-        let entries = parse_str("output eDP-1 {\n    scale = 1.0\n}\n");
-        assert_eq!(
-            entries,
-            vec![Entry::Block(
-                "output".into(),
-                "eDP-1".into(),
-                vec![Entry::Assign("scale".into(), "1.0".into())]
-            )]
-        );
-    }
-
-    #[test]
-    fn unclosed_block_is_an_error() {
-        assert!(parse_str_result("input {\n    xkb_layout = us\n").is_err());
-    }
-
-    #[test]
-    fn stray_closing_brace_is_an_error() {
-        assert!(parse_str_result("}\n").is_err());
-    }
-
-    #[test]
-    fn garbage_line_is_an_error() {
-        assert!(parse_str_result("this is not valid\n").is_err());
-    }
-
-    fn parse_str_result(s: &str) -> Result<Vec<Entry>, String> {
-        parse(s, Path::new("test.wave"))
+    fn block(keyword: &str, header: &str, body: Vec<Entry>) -> Entry {
+        Entry::Block(keyword.to_string(), header.to_string(), body)
     }
 
     #[test]
     fn repeated_key_within_one_file_last_wins_after_merge() {
         let mut acc = Vec::new();
-        merge_into(&mut acc, parse_str("gaps = 8\ngaps = 12\n"));
+        merge_into(&mut acc, vec![assign("gaps", "8"), assign("gaps", "12")]);
         assert_eq!(acc, vec![Entry::Assign("gaps".into(), "12".into())]);
     }
 
@@ -501,13 +180,13 @@ mod tests {
         let mut acc = Vec::new();
         merge_into(
             &mut acc,
-            parse_str("spawn_at_startup = waybar\nspawn_at_startup = swww init\n"),
+            vec![assign("spawn_at_startup", "waybar"), assign("spawn_at_startup", "swww init")],
         );
         assert_eq!(
             acc,
             vec![
-                Entry::Assign("spawn_at_startup".into(), "waybar".into()),
-                Entry::Assign("spawn_at_startup".into(), "swww init".into()),
+                assign("spawn_at_startup", "waybar"),
+                assign("spawn_at_startup", "swww init"),
             ]
         );
     }
@@ -515,10 +194,22 @@ mod tests {
     #[test]
     fn keyed_blocks_merge_field_by_field_but_output_blocks_just_append() {
         let mut acc = Vec::new();
-        merge_into(&mut acc, parse_str("input {\n    xkb_layout = us\n}\n"));
-        merge_into(&mut acc, parse_str("input {\n    repeat_rate = 30\n}\n"));
-        merge_into(&mut acc, parse_str("output eDP-1 {\n    scale = 1.0\n}\n"));
-        merge_into(&mut acc, parse_str("output eDP-1 {\n    scale = 2.0\n}\n"));
+        merge_into(
+            &mut acc,
+            vec![block("input", "", vec![assign("xkb_layout", "us")])],
+        );
+        merge_into(
+            &mut acc,
+            vec![block("input", "", vec![assign("repeat_rate", "30")])],
+        );
+        merge_into(
+            &mut acc,
+            vec![block("output", "eDP-1", vec![assign("scale", "1.0")])],
+        );
+        merge_into(
+            &mut acc,
+            vec![block("output", "eDP-1", vec![assign("scale", "2.0")])],
+        );
 
         assert_eq!(
             acc,
