@@ -1061,19 +1061,8 @@ fn emit_bind(
         }
         return emit_bind_call(combo_text, actions, sym, out, line_no, path);
     }
-    // deprecated line form: bind X = rest of line
-    if let Some((combo_text, action)) = rest.split_once('=') {
-        let combo = Rewriter { sym }
-            .rewrite_string(combo_text.trim())
-            .map_err(|e| format!("in file {} at line {line_no}: {e}", path.display()))?;
-        let action = Rewriter { sym }
-            .rewrite_string(action.trim())
-            .map_err(|e| format!("in file {} at line {line_no}: {e}", path.display()))?;
-        out.push_str(&format!("bind({combo}, {action})\n"));
-        return Ok(());
-    }
     Err(format!(
-        "in file {} at line {line_no}: expected `bind <combo> = <action>` or `bind <combo> {{ ... }}`",
+        "in file {} at line {line_no}: expected `bind <combo> {{ ... }}`",
         path.display()
     ))
 }
@@ -1714,63 +1703,6 @@ fn install_env(
         )
         .map_err(|e| e.to_string())?;
 
-    // Legacy color spellings from the old grammar. `rgb(RRGGBB)` keeps
-    // the color value (darken/lighten still work on it). `rgba(...)`
-    // returns the 8-digit hex string (`RRGGBBAA` from the one-arg form,
-    // or the alpha folded in from the two-arg form) so the alpha reaches
-    // the config parsers that understand it.
-    lua.globals()
-        .set(
-            "rgb",
-            lua.create_function(|_, hex: String| {
-                ColorValue::from_hex(&hex)
-                    .ok_or_else(|| mlua::Error::external(format!("invalid color `{hex}`")))
-            })
-            .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-    lua.globals()
-        .set(
-            "rgba",
-            lua.create_function(|_, args: Variadic<String>| {
-                let hex = match args.as_slice() {
-                    [hex] => {
-                        let hex = hex.strip_prefix('#').unwrap_or(hex);
-                        if hex.len() == 8 {
-                            hex.to_string()
-                        } else {
-                            format!("{}FF", &hex[..6.min(hex.len())])
-                        }
-                    }
-                    [hex, alpha] => {
-                        let alpha: u8 = alpha.parse().map_err(mlua::Error::external)?;
-                        let hex = hex.strip_prefix('#').unwrap_or(hex);
-                        format!("{}{:02X}", &hex[..6.min(hex.len())], alpha)
-                    }
-                    _ => {
-                        return Err(mlua::Error::external(
-                            "rgba needs RRGGBBAA or RRGGBB, AA",
-                        ))
-                    }
-                };
-                Ok(hex)
-            })
-            .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-
-    // Legacy `bezier(x1,y1,x2,y2)` easing spelling: normalizes to the
-    // CSS-compatible `cubic-bezier(...)` string the config surface parses.
-    lua.globals()
-        .set(
-            "bezier",
-            lua.create_function(|_, (x1, y1, x2, y2): (f64, f64, f64, f64)| {
-                Ok(format!("cubic-bezier({x1},{y1},{x2},{y2})"))
-            })
-            .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-
     lua.globals()
         .set(
             "_dur",
@@ -2256,8 +2188,8 @@ mod tests {
         assert!(lua.contains("bind(\"SUPER+Q\", {\"close-window\"})"));
         let lua = compile_str("@mod = SUPER\nbind $mod+D { \"spawn:rofi -show drun\" }\n");
         assert!(lua.contains("bind(\"SUPER+D\", {\"spawn:rofi -show drun\"})"));
-        let lua = compile_str("@mod = SUPER\nbind $mod+R = spawn:rofi -show drun\n");
-        assert!(lua.contains("bind(\"SUPER+R\", \"spawn:rofi -show drun\")"));
+        let lua = compile_str("@mod = SUPER\nbind $mod+R { \"spawn:rofi -show drun\" }\n");
+        assert!(lua.contains("bind(\"SUPER+R\", {\"spawn:rofi -show drun\"})"));
     }
 
     #[test]

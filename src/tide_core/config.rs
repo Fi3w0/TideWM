@@ -699,7 +699,7 @@ pub enum Action {
     SwapWorkspacesWithOutput(String),
     /// Switches which keybind table is consulted (sway/Hyprland's "mode"/
     /// "submap" idea): a temporary layer of binds on top of `[keybinds]`,
-    /// entered by name and left active until an explicit `exit-submap`
+    /// entered by name and left active until an explicit `exit-mode`
     /// bind, not tied to focus or any other implicit event. See
     /// `Config::submaps`, `Smallvil::active_submap`.
     EnterSubmap(String),
@@ -1156,7 +1156,7 @@ impl Config {
 
         let default_layout = parse_layout_algorithm(&raw.default_layout).unwrap_or_else(|| {
             if !raw.default_layout.is_empty() {
-                tracing::warn!(value = %raw.default_layout, "Unknown default_layout, using bsp");
+                tracing::warn!(value = %raw.default_layout, "Unknown layout, using bsp");
             }
             LayoutAlgorithm::Bsp
         });
@@ -1506,13 +1506,6 @@ struct RawConfig {
     layer_rules: Vec<LayerRule>,
     submaps: HashMap<String, HashMap<String, String>>,
     env: HashMap<String, String>,
-    /// `$name` values substituted into `terminal`/`spawn_at_startup`/
-    /// `[keybinds]`/`[submap.*]`/`[switch_events]` right after parsing (see
-    /// `substitute_variables_in_raw`) -- Hyprland's own `$mainMod`/
-    /// `$terminal` convention, so one keybind or spawn command can be
-    /// reused instead of repeated verbatim everywhere. Never touches
-    /// anything itself once substitution runs.
-    variables: HashMap<String, String>,
 }
 
 impl Default for RawConfig {
@@ -1582,7 +1575,7 @@ impl Default for RawConfig {
 
         // A submap (sway/Hyprland's "mode" idea): a temporary alternate
         // keybind table, entered above via Super+N, left active until its
-        // own exit-submap bind -- not tied to focus or any other implicit
+        // own exit-mode bind -- not tied to focus or any other implicit
         // event. This one's a vim-motion focus-move mode (h/j/k/l with no
         // modifier held); a resize mode is the more common example
         // elsewhere, but needs a keyboard resize action this project
@@ -1592,7 +1585,7 @@ impl Default for RawConfig {
         nav_submap.insert("l".to_string(), "focus-right".to_string());
         nav_submap.insert("k".to_string(), "focus-up".to_string());
         nav_submap.insert("j".to_string(), "focus-down".to_string());
-        nav_submap.insert("Escape".to_string(), "exit-submap".to_string());
+        nav_submap.insert("Escape".to_string(), "exit-mode".to_string());
         let mut submaps = HashMap::new();
         submaps.insert("nav".to_string(), nav_submap);
 
@@ -1650,7 +1643,6 @@ impl Default for RawConfig {
             layer_rules: Vec::new(),
             submaps,
             env: HashMap::new(),
-            variables: HashMap::new(),
         }
     }
 }
@@ -3567,8 +3559,7 @@ fn load_raw_config_in(
 ) -> Result<(RawConfig, Vec<String>, Vec<waves::Entry>), String> {
     let (entries, warnings) = wave::resolve_with_lua(lua, tide, path)?;
 
-    let mut raw = lower_entries(&entries);
-    substitute_variables_in_raw(&mut raw);
+    let raw = lower_entries(&entries);
     Ok((raw, warnings, entries))
 }
 
@@ -3801,37 +3792,6 @@ fn collect_blocks(entries: &[waves::Entry]) -> std::collections::BTreeMap<(Strin
     map
 }
 
-/// The W8 rename map: old key spelling -> canonical new spelling.
-/// Deprecated aliases still parse (so old configs keep working) but log
-/// a one-line notice pointing at the new name.
-fn deprecated_key_alias(key: &str) -> Option<&'static str> {
-    Some(match key {
-        "spawn_at_startup" => "spawn",
-        "spatial_engine" => "engine",
-        "pointer_modifier" | "mouse_modifier" => "drag_modifier",
-        "show_welcome_hint" => "welcome_hint",
-        "show_config_reload_toast" | "config_reload_toast" => "reload_toast",
-        "workspace_auto_back_and_forth" => "auto_back_and_forth",
-        "default_layout" => "layout",
-        "master_orientation" => "master_side",
-        "bsp_split_bias" => "split_bias",
-        "cursor_hide_after_ms" => "cursor_hide_after",
-        _ => return None,
-    })
-}
-
-fn deprecated_block_alias(keyword: &str) -> Option<&'static str> {
-    Some(match keyword {
-        "workspace_transition" => "transition",
-        "connected_vessels" | "connected_resize" => "vessels",
-        "water_glass" | "water_glass_animation" => "glass",
-        "float_physics" => "physics",
-        "classic_depth" => "depth_deck",
-        "submap" => "mode",
-        _ => return None,
-    })
-}
-
 fn lower_entries(entries: &[waves::Entry]) -> RawConfig {
     let mut raw = RawConfig::default();
     // A parsed Waves file is authoritative. Defaults belong in the
@@ -3841,8 +3801,9 @@ fn lower_entries(entries: &[waves::Entry]) -> RawConfig {
     raw.submaps.clear();
     for entry in entries {
         match entry {
-            waves::Entry::VarDef(name, value) => {
-                raw.variables.insert(name.clone(), value.clone());
+            waves::Entry::VarDef(_, _) => {
+                // Variables are resolved by the Wave engine at emit time;
+                // the entry exists for the model and merge policy only.
             }
             waves::Entry::Bind(combo, action) => {
                 raw.keybinds.insert(combo.clone(), action.clone());
@@ -3853,16 +3814,8 @@ fn lower_entries(entries: &[waves::Entry]) -> RawConfig {
             // (`_handlers`, registered by the `_on` environment
             // function); the entry exists for the model and diagnostics.
             waves::Entry::Handler(_, _) => {}
-            waves::Entry::Assign(key, value) => {
-                if let Some(new) = deprecated_key_alias(key) {
-                    tracing::warn!(key, new, "Deprecated config key; use `{new}` instead");
-                }
-                apply_top_level_assign(&mut raw, key, value)
-            }
+            waves::Entry::Assign(key, value) => apply_top_level_assign(&mut raw, key, value),
             waves::Entry::Block(keyword, header, body) => {
-                if let Some(new) = deprecated_block_alias(keyword) {
-                    tracing::warn!(keyword, new, "Deprecated config block; use `{new}` instead");
-                }
                 apply_top_level_block(&mut raw, keyword, header, body)
             }
         }
@@ -3877,17 +3830,10 @@ fn lower_entries(entries: &[waves::Entry]) -> RawConfig {
 fn is_known_top_level_key(key: &str) -> bool {
     matches!(
         key,
-        "terminal" | "spatial_engine" | "engine" | "wm_mode" | "pointer_modifier"
-            | "mouse_modifier" | "drag_modifier" | "show_welcome_hint" | "welcome_hint"
-            | "show_config_reload_toast" | "config_reload_toast" | "reload_toast"
-            | "water_effects"
-            | "viscosity" | "cursor_always_visible" | "cursor_hide_after"
-            | "cursor_hide_after_ms" | "workspace_auto_back_and_forth"
-            | "auto_back_and_forth"
-            | "workspace_name" | "gaps" | "workspace_gaps" | "default_layout" | "layout"
-            | "master_orientation" | "master_side" | "bsp_split_bias" | "split_bias"
-            | "pseudo_tile_scale" | "spawn"
-            | "spawn_at_startup"
+        "terminal" | "engine" | "drag_modifier" | "welcome_hint" | "reload_toast"
+            | "water_effects" | "viscosity" | "cursor_always_visible" | "cursor_hide_after"
+            | "auto_back_and_forth" | "workspace_name" | "gaps" | "workspace_gaps"
+            | "layout" | "master_side" | "split_bias" | "pseudo_tile_scale" | "spawn"
     )
 }
 
@@ -3898,8 +3844,8 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
         "pointer_modifier" | "mouse_modifier" | "drag_modifier" => {
             raw.pointer_modifier = value.to_string()
         }
-        "welcome_hint" | "show_welcome_hint" => set_bool(&mut raw.show_welcome_hint, key, value),
-        "reload_toast" | "show_config_reload_toast" | "config_reload_toast" => {
+        "welcome_hint" => set_bool(&mut raw.show_welcome_hint, key, value),
+        "reload_toast" => {
             set_bool(&mut raw.show_config_reload_toast, key, value)
         }
         "water_effects" => set_bool(&mut raw.water_effects, key, value),
@@ -3908,27 +3854,27 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
             None => tracing::warn!(value, "Expected finite viscosity from 0.0 to 4.0, ignoring"),
         },
         "cursor_always_visible" => set_bool(&mut raw.cursor_always_visible, key, value),
-        "cursor_hide_after_ms" | "cursor_hide_after" => {
+        "cursor_hide_after" => {
             if let Some(ms) = parse_duration_ms(value) {
                 raw.cursor_hide_after_ms = ms as i32;
             } else {
                 tracing::warn!(value, "Expected a duration like 2s or 2000ms for cursor_hide_after, ignoring");
             }
         }
-        "auto_back_and_forth" | "workspace_auto_back_and_forth" => {
+        "auto_back_and_forth" => {
             set_bool(&mut raw.workspace_auto_back_and_forth, key, value)
         }
         "gaps" => set_i32(&mut raw.gaps, key, value),
-        "layout" | "default_layout" => raw.default_layout = value.to_string(),
-        "master_side" | "master_orientation" => raw.master_orientation = value.to_string(),
-        "split_bias" | "bsp_split_bias" => raw.bsp_split_bias = value.to_string(),
+        "layout" => raw.default_layout = value.to_string(),
+        "master_side" => raw.master_orientation = value.to_string(),
+        "split_bias" => raw.bsp_split_bias = value.to_string(),
         "workspace_name" => raw.workspace_names.push(value.to_string()),
         "workspace_gaps" => raw.workspace_gaps.push(value.to_string()),
         "pseudo_tile_scale" => set_f64(&mut raw.pseudo_tile_scale, key, value),
         // List-shaped, not scalar -- accumulates because `waves::merge_into`
         // already let every occurrence of this one key through instead of
         // deduping to the last (see `waves::assign_is_multi`).
-        "spawn_at_startup" | "spawn" => match parse_list_value(value) {
+        "spawn" => match parse_list_value(value) {
             Some(items) => raw.spawn_at_startup.extend(items),
             None => raw.spawn_at_startup.push(value.to_string()),
         },
@@ -3940,28 +3886,28 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
     match keyword {
         "input" => apply_input_block(&mut raw.input, body),
         "xwayland" => apply_xwayland_block(&mut raw.xwayland, body),
-        "transition" | "workspace_transition" => {
+        "transition" => {
             apply_workspace_transition_block(&mut raw.workspace_transition, body)
         }
-        "vessels" | "connected_vessels" | "connected_resize" => {
+        "vessels" => {
             apply_connected_vessels_block(&mut raw.connected_vessels, body)
         }
         "sway" => apply_sway_block(&mut raw.sway, body),
-        "physics" | "float_physics" => apply_float_physics_block(&mut raw.float_physics, body),
+        "physics" => apply_float_physics_block(&mut raw.float_physics, body),
         "swim" => apply_swim_block(&mut raw.swim, body),
         "compass" => apply_compass_block(&mut raw.compass, body),
         "minimap" => apply_minimap_block(&mut raw.minimap, body),
         "ocean" => apply_ocean_block(&mut raw.ocean, body),
-        "animations" | "window_animations" => apply_animations_block(&mut raw.animations, body),
+        "animations" => apply_animations_block(&mut raw.animations, body),
         "depth" => apply_depth_block(&mut raw.depth, body),
-        "classic_depth" | "depth_deck" => apply_classic_depth_block(&mut raw.classic_depth, body),
+        "depth_deck" => apply_classic_depth_block(&mut raw.classic_depth, body),
         "frost" => apply_frost_block(&mut raw.frost, body),
-        "glass" | "water_glass" | "water_glass_animation" => {
+        "glass" => {
             apply_water_glass_block(&mut raw.water_glass, body)
         }
         "caustics" => apply_caustics_block(&mut raw.caustics, body),
         "shadow" => apply_shadow_block(&mut raw.shadow, body),
-        "rounding" | "corners" => apply_rounding_block(&mut raw.rounding, body),
+        "rounding" => apply_rounding_block(&mut raw.rounding, body),
         "border" => apply_border_block(&mut raw.border, body),
         "popup" => apply_popup_block(&mut raw.popup, body),
         "ripple" => apply_ripple_block(&mut raw.ripple, body),
@@ -3980,7 +3926,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "output" => raw.outputs.push(lower_output_block(header, body)),
         "rule" => raw.window_rules.push(lower_window_rule_block(body)),
         "layer_rule" => raw.layer_rules.push(lower_layer_rule_block(body)),
-        "submap" | "mode" => {
+        "mode" => {
             let name = header.trim();
             if name.is_empty() {
                 tracing::warn!("`submap` block needs a name, ignoring");
@@ -4223,7 +4169,7 @@ fn apply_window_animation_block(cfg: &mut WindowAnimationConfig, body: &[waves::
                     "Expected `true` or `false` for animate_size, ignoring"
                 ),
             },
-            "duration_ms" | "duration" => match parse_duration_ms(value) {
+            "duration" => match parse_duration_ms(value) {
                 Some(value) if (1..=10_000).contains(&value) => cfg.duration_ms = value,
                 _ => tracing::warn!(
                     value,
@@ -4237,7 +4183,7 @@ fn apply_window_animation_block(cfg: &mut WindowAnimationConfig, body: &[waves::
                     "Expected a built-in easing or cubic-bezier(x1,y1,x2,y2), ignoring"
                 ),
             },
-            "opacity_duration_ms" | "fade_duration_ms" | "opacity_duration" => {
+            "opacity_duration" => {
                 match parse_duration_ms(value) {
                     Some(value) if (1..=10_000).contains(&value) => {
                         cfg.opacity_duration_ms = Some(value)
@@ -4370,11 +4316,11 @@ fn apply_workspace_transition_block(cfg: &mut WorkspaceTransitionConfig, body: &
                     "Expected workspace_transition.style: water glow, ignoring"
                 ),
             },
-            "duration_ms" | "duration" => match parse_duration_ms(value) {
+            "duration" => match parse_duration_ms(value) {
                 Some(value) if (50..=5000).contains(&value) => cfg.duration_ms = value,
                 _ => tracing::warn!(
                     value,
-                    "Expected workspace_transition.duration_ms from 50 to 5000, ignoring"
+                    "Expected transition.duration from 50 to 5000ms, ignoring"
                 ),
             },
             "speed" => match value.parse::<f32>() {
@@ -4409,7 +4355,7 @@ fn apply_workspace_transition_block(cfg: &mut WorkspaceTransitionConfig, body: &
             "workspace_motion" | "move_workspaces" => {
                 set_bool(&mut cfg.workspace_motion, key, value)
             }
-            "workspace_motion_delay_ms" | "motion_delay_ms" | "workspace_motion_delay" => match parse_duration_ms(value) {
+            "workspace_motion_delay" => match parse_duration_ms(value) {
                 Some(value) if value <= 5000 => cfg.workspace_motion_delay_ms = value,
                 _ => tracing::warn!(
                     value,
@@ -4867,7 +4813,7 @@ fn apply_caustics_block(cfg: &mut CausticsConfig, body: &[waves::Entry]) {
                     "Expected space-separated integers for caustics.idle_fps, ignoring"
                 ),
             },
-            "idle_after_ms" | "idle_after" => match parse_duration_list(value) {
+            "idle_after" => match parse_duration_list(value) {
                 Some(list) => cfg.idle_after_ms = list,
                 None => tracing::warn!(
                     value,
@@ -4899,7 +4845,7 @@ fn apply_swim_block(cfg: &mut SwimConfig, body: &[waves::Entry]) {
                 Some(value) => cfg.snap_duration_ms = value.min(2000),
                 _ => tracing::warn!(
                     value,
-                    "Expected swim.snap_duration_ms from 0 to 2000, ignoring"
+                    "Expected swim.snap_duration from 0 to 2000ms, ignoring"
                 ),
             },
             other => tracing::warn!(key = %other, "Unknown key in `swim` block, ignoring"),
@@ -5100,7 +5046,7 @@ fn apply_classic_depth_block(cfg: &mut ClassicDepthConfig, body: &[waves::Entry]
         match key.as_str() {
             "enabled" => set_bool(&mut cfg.enabled, key, value),
             "animation" | "animate" => set_bool(&mut cfg.animation, key, value),
-            "animation_duration_ms" | "duration_ms" => match parse_duration_ms(value) {
+            "animation_duration_ms" => match parse_duration_ms(value) {
                 Some(value) if value <= 3000 => cfg.animation_duration_ms = value,
                 _ => tracing::warn!(
                     value,
@@ -5745,7 +5691,7 @@ fn apply_ripple_block(cfg: &mut RippleConfig, body: &[waves::Entry]) {
                 Ok(v) if v.is_finite() && v > 0.0 => cfg.thickness = Some(v),
                 _ => tracing::warn!(value, "Expected a positive number for ripple.thickness, ignoring"),
             },
-            "duration_ms" | "duration" => match parse_duration_ms(value) {
+            "duration" => match parse_duration_ms(value) {
                 Some(v) if v > 0 => cfg.duration_ms = Some(v),
                 _ => tracing::warn!(value, "Expected a positive integer for ripple.duration_ms, ignoring"),
             },
@@ -5808,33 +5754,13 @@ fn parse_bool(value: &str) -> Option<bool> {
     }
 }
 
-/// Parses a hex color in any of the forms users naturally write:
-/// - `#RRGGBB` / `#RRGGBBAA` -- requires quotes in `config.wave`, since
-///   the Waves grammar strips `#` as a comment outside quotes
-/// - `RRGGBB` / `RRGGBBAA` -- bare hex, no quotes needed
-/// - `rgb(RRGGBB)` / `rgba(RRGGBB, AA)` -- Hyprland-style, also no
-///   quotes needed (the alpha byte/argument is silently ignored for now;
-///   `peak_alpha` is the dedicated transparency knob).
+/// Parses a hex color: `RRGGBB` / `RRGGBBAA` bare, or `#RRGGBB` /
+/// `#RRGGBBAA` (the alpha byte is silently ignored for now; `peak_alpha`
+/// is the dedicated transparency knob).
 ///
 /// Returns linear-space RGB in `[0.0, 1.0]`.
 fn parse_ripple_color(value: &str) -> Option<[f32; 3]> {
-    let v = value.trim();
-    // Hyprland-style: rgb(...) / rgba(...)
-    if let Some(inner) = v
-        .strip_prefix("rgb(")
-        .or_else(|| v.strip_prefix("rgba("))
-        .and_then(|s| s.strip_suffix(')'))
-    {
-        // rgba() may have a second comma-separated alpha argument --
-        // drop it (silently), since peak_alpha is the knob that controls
-        // transparency for ripples.
-        let hex_part = inner.split(',').next()?.trim();
-        return decode_hex_rgb(hex_part);
-    }
-    // Strip an optional leading `#` (only present if the user quoted
-    // the value in the config, since Waves otherwise eats `#` as a
-    // comment).
-    let v = v.strip_prefix('#').unwrap_or(v);
+    let v = value.trim().strip_prefix('#').unwrap_or_else(|| value.trim());
     decode_hex_rgb(v)
 }
 
@@ -5851,10 +5777,10 @@ fn decode_hex_rgb(hex: &str) -> Option<[f32; 3]> {
 }
 
 /// Shadow colors keep their alpha channel, unlike ripple/frost colors which
-/// have a separate dedicated alpha knob. Accepts CSS/Hyprland-shaped hex,
-/// decimal `rgb()`/`rgba()`, and Hyprland's legacy `0xAARRGGBB`.
+/// have a separate dedicated alpha knob. Accepts bare/`#` hex and the
+/// legacy `0xAARRGGBB` form.
 fn parse_rgba_color(value: &str) -> Option<[f32; 4]> {
-    let value = value.trim();
+    let value = value.trim().strip_prefix('#').unwrap_or_else(|| value.trim());
     if let Some(hex) = value.strip_prefix("0x") {
         if hex.len() != 8 {
             return None;
@@ -5865,53 +5791,7 @@ fn parse_rgba_color(value: &str) -> Option<[f32; 4]> {
         let b = u8::from_str_radix(&hex[6..8], 16).ok()?;
         return Some([r, g, b, a].map(|channel| channel as f32 / 255.0));
     }
-
-    if let Some(inner) = value
-        .strip_prefix("rgb(")
-        .and_then(|inner| inner.strip_suffix(')'))
-    {
-        if inner.contains(',') {
-            let channels: Vec<_> = inner.split(',').map(str::trim).collect();
-            if channels.len() != 3 {
-                return None;
-            }
-            return Some([
-                parse_rgb_channel(channels[0])?,
-                parse_rgb_channel(channels[1])?,
-                parse_rgb_channel(channels[2])?,
-                1.0,
-            ]);
-        }
-        return decode_hex_rgba(inner);
-    }
-
-    if let Some(inner) = value
-        .strip_prefix("rgba(")
-        .and_then(|inner| inner.strip_suffix(')'))
-    {
-        let channels: Vec<_> = inner.split(',').map(str::trim).collect();
-        return match channels.as_slice() {
-            // Hyprland's current compact form: rgba(RRGGBBAA).
-            [hex] => decode_hex_rgba(hex),
-            // TideWM's already-documented compatibility form:
-            // rgba(RRGGBB, AA), accepting byte or normalized alpha.
-            [hex, alpha] => {
-                let mut color = decode_hex_rgba(hex)?;
-                color[3] = parse_alpha_channel(alpha)?;
-                Some(color)
-            }
-            // CSS decimal rgba(r,g,b,a).
-            [r, g, b, a] => Some([
-                parse_rgb_channel(r)?,
-                parse_rgb_channel(g)?,
-                parse_rgb_channel(b)?,
-                parse_alpha_channel(a)?,
-            ]),
-            _ => None,
-        };
-    }
-
-    decode_hex_rgba(value.strip_prefix('#').unwrap_or(value))
+    decode_hex_rgba(value)
 }
 
 fn decode_hex_rgba(hex: &str) -> Option<[f32; 4]> {
@@ -5924,20 +5804,6 @@ fn decode_hex_rgba(hex: &str) -> Option<[f32; 4]> {
     Some([color[0], color[1], color[2], alpha as f32 / 255.0])
 }
 
-fn parse_rgb_channel(value: &str) -> Option<f32> {
-    let value = value.parse::<f32>().ok()?;
-    value.is_finite().then_some((value / 255.0).clamp(0.0, 1.0))
-}
-
-fn parse_alpha_channel(value: &str) -> Option<f32> {
-    if value.len() <= 2 && value.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Some(u8::from_str_radix(value, 16).ok()? as f32 / 255.0);
-    }
-    let value = value.parse::<f32>().ok()?;
-    value
-        .is_finite()
-        .then_some(if value > 1.0 { value / 255.0 } else { value }.clamp(0.0, 1.0))
-}
 
 fn apply_rounding_block(cfg: &mut RoundingConfig, body: &[waves::Entry]) {
     let mut overrides = RoundingOverrides::default();
@@ -6424,7 +6290,7 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                         "Expected rule shadow to be true/false/on/off/none, ignoring"
                     ),
                 },
-                "rounding" | "corners" => {
+                "rounding" => {
                     let overrides = rule.rounding.get_or_insert_with(RoundingOverrides::default);
                     match value.trim().to_ascii_lowercase().as_str() {
                         "true" | "on" => overrides.enabled = Some(true),
@@ -6613,164 +6479,6 @@ fn set_opt_f64(field: &mut Option<f64>, key: &str, value: &str) {
     }
 }
 
-/// Replaces `$name` tokens with their `[variables]` value, but only for
-/// names actually defined there -- Hyprland's own `$mainMod`/`$terminal`
-/// convention (see their real `keybinds.conf`: `bind = $mainMod, Q, exec,
-/// $terminal`). Every other `$` (a spawn command's own `$HOME`, `$PATH`,
-/// anything not one of this config's variables) is left exactly as
-/// written -- substituting *any* `$word` unconditionally would corrupt
-/// those instead of just leaving them for the shell/program that actually
-/// understands them.
-///
-/// `$wave(a, b, c)` is checked first, ahead of the plain-name lookup --
-/// it's a built-in, not something `[variables]` could ever define, so it
-/// works even with no variables set at all. See `resolve_wave_fallback`.
-fn substitute_variables(s: &str, variables: &HashMap<String, String>) -> String {
-    if !s.contains('$') {
-        return s.to_string();
-    }
-    let mut result = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(dollar) = rest.find('$') {
-        result.push_str(&rest[..dollar]);
-        let after = &rest[dollar + 1..];
-
-        if let Some(args) = after.strip_prefix("wave(") {
-            if let Some(end) = args.find(')') {
-                result.push_str(&resolve_wave_fallback(
-                    args[..end].split(',').map(str::trim),
-                ));
-                rest = &args[end + 1..];
-                continue;
-            }
-            // No closing `)` -- not actually a well-formed `$wave(...)`,
-            // fall through to plain-name handling below instead of
-            // silently eating the rest of the line.
-        }
-
-        let name_len = after
-            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
-            .unwrap_or(after.len());
-        let name = &after[..name_len];
-        if let Some(value) = (!name.is_empty()).then(|| variables.get(name)).flatten() {
-            result.push_str(value);
-            rest = &after[name_len..];
-        } else {
-            result.push('$');
-            rest = after;
-        }
-    }
-    result.push_str(rest);
-    result
-}
-
-/// Resolves `$wave(a, b, c)` to the first candidate whose own first
-/// whitespace-separated word names a real, executable file -- on `$PATH`,
-/// or directly if it contains a `/`. Falls back to the last candidate,
-/// untried, if none resolve, so a spawn still gets attempted and fails
-/// with a normal, visible "command not found" rather than silently
-/// spawning nothing; an empty candidate list resolves to an empty string.
-fn resolve_wave_fallback<'a>(candidates: impl Iterator<Item = &'a str>) -> String {
-    let candidates: Vec<&str> = candidates.collect();
-    let found = candidates.iter().find(|c| command_exists(c));
-    if found.is_none() {
-        tracing::warn!(
-            ?candidates,
-            "$wave(...): none of these were found, using the last one anyway"
-        );
-    }
-    found
-        .or(candidates.last())
-        .map(|s| s.to_string())
-        .unwrap_or_default()
-}
-
-/// Whether `candidate`'s first whitespace-separated word is a real,
-/// executable file -- checked directly if it contains a `/`, otherwise
-/// searched on `$PATH`, the same resolution order a shell uses.
-fn command_exists(candidate: &str) -> bool {
-    let bin = candidate.split_whitespace().next().unwrap_or("");
-    if bin.is_empty() {
-        return false;
-    }
-    if bin.contains('/') {
-        return is_executable_file(Path::new(bin));
-    }
-    std::env::var_os("PATH").is_some_and(|paths| {
-        std::env::split_paths(&paths).any(|dir| is_executable_file(&dir.join(bin)))
-    })
-}
-
-fn is_executable_file(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-}
-
-/// Applies `substitute_variables` to every field that plausibly reuses a
-/// variable -- keybind/submap combos and actions, `spawn_at_startup`,
-/// `terminal`, `pointer_modifier`, `switch_events` -- deliberately skipping match criteria like
-/// `[[window_rule]]`'s `app_id`/`title` and `[[output]]`'s connector name,
-/// since those describe something to match against, not a command or bind
-/// where reusing a value makes sense.
-fn substitute_variables_in_raw(raw: &mut RawConfig) {
-    // No early return on `raw.variables.is_empty()` -- `$wave(...)` is a
-    // built-in `substitute_variables` resolves on its own, not something
-    // `[variables]` defines, so it must still run with zero variables set.
-    raw.terminal = substitute_variables(&raw.terminal, &raw.variables);
-    raw.pointer_modifier = substitute_variables(&raw.pointer_modifier, &raw.variables);
-    raw.spawn_at_startup = raw
-        .spawn_at_startup
-        .iter()
-        .map(|s| substitute_variables(s, &raw.variables))
-        .collect();
-    raw.keybinds = raw
-        .keybinds
-        .iter()
-        .map(|(combo, action)| {
-            (
-                substitute_variables(combo, &raw.variables),
-                substitute_variables(action, &raw.variables),
-            )
-        })
-        .collect();
-    raw.submaps = raw
-        .submaps
-        .iter()
-        .map(|(name, binds)| {
-            let binds = binds
-                .iter()
-                .map(|(combo, action)| {
-                    (
-                        substitute_variables(combo, &raw.variables),
-                        substitute_variables(action, &raw.variables),
-                    )
-                })
-                .collect();
-            (name.clone(), binds)
-        })
-        .collect();
-    raw.switch_events.lid_close = raw
-        .switch_events
-        .lid_close
-        .as_deref()
-        .map(|s| substitute_variables(s, &raw.variables));
-    raw.switch_events.lid_open = raw
-        .switch_events
-        .lid_open
-        .as_deref()
-        .map(|s| substitute_variables(s, &raw.variables));
-    raw.switch_events.tablet_mode_on = raw
-        .switch_events
-        .tablet_mode_on
-        .as_deref()
-        .map(|s| substitute_variables(s, &raw.variables));
-    raw.switch_events.tablet_mode_off = raw
-        .switch_events
-        .tablet_mode_off
-        .as_deref()
-        .map(|s| substitute_variables(s, &raw.variables));
-}
-
 static CONFIG_PATH_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 /// Overrides the config path for the rest of this process's lifetime
@@ -6820,7 +6528,7 @@ fn config_path() -> PathBuf {
 /// `lint_footguns` is set, a heads-up for a modifier-less bind on a key
 /// normally used for typing. `lint_footguns` is false for submap tables --
 /// bare keys there are the whole point of a submap (see the default `nav`
-/// submap's bare `Escape = exit-submap`), only the always-active base
+/// submap's bare `Escape = exit-mode`), only the always-active base
 /// `[keybinds]` table can silently steal a key from every other window.
 fn parse_keybind(
     combo: &str,
@@ -7005,7 +6713,7 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         return (!name.trim().is_empty()).then(|| Action::CloseApp(name.trim().to_string()));
     }
     match action {
-        "exit-submap" | "exit-mode" => Some(Action::ExitSubmap),
+        "exit-mode" => Some(Action::ExitSubmap),
         "master-grow" => Some(Action::GrowMaster),
         "master-shrink" => Some(Action::ShrinkMaster),
         "toggle-overview" => Some(Action::ToggleOverview),
@@ -7361,12 +7069,12 @@ bind $mod+Shift+0  { move-to-workspace:10 }
 # A submap (sway/Hyprland's "mode"): a temporary keybind layer, entered
 # below, left active until its own exit -- not tied to focus.
 bind $mod+N  { submap:nav }
-submap nav {
+mode nav {
     bind h  { focus-left }
-    bind l = focus-right
-    bind k = focus-up
-    bind j = focus-down
-    bind Escape = exit-submap
+    bind l { focus-right }
+    bind k { focus-up }
+    bind j { focus-down }
+    bind Escape { exit-mode }
 }
 
 # ~~~~~~~~~~~~~~~~~ ocean's camera ~~~~~~~~~~~~~~~~~
@@ -7374,8 +7082,8 @@ submap nav {
 # Off by default: these chords are ones apps use themselves (Ctrl+arrows
 # is word-jump in every editor), and the actions only do anything once
 # spatial_engine = ocean in config.wave anyway. Uncomment when you switch.
-# bind Ctrl+Left = ocean-pan-left
-# bind Ctrl+Right = ocean-pan-right
+# bind Ctrl+Left { ocean-pan-left }
+# bind Ctrl+Right { ocean-pan-right }
 # bind Ctrl+Up = ocean-pan-up
 # bind Ctrl+Down = ocean-pan-down
 # bind Ctrl+I = ocean-zoom-in
@@ -7748,35 +7456,6 @@ mod tests {
         assert!(!none_matched.float);
     }
 
-    #[test]
-    fn substitute_variables_replaces_only_defined_names_leaves_other_dollars_alone() {
-        let mut variables = HashMap::new();
-        variables.insert("mainMod".to_string(), "SUPER".to_string());
-        variables.insert("terminal".to_string(), "kitty".to_string());
-
-        assert_eq!(
-            substitute_variables("$mainMod+Return", &variables),
-            "SUPER+Return"
-        );
-        assert_eq!(
-            substitute_variables("spawn:$terminal", &variables),
-            "spawn:kitty"
-        );
-        // $HOME/$PATH aren't defined variables -- must survive untouched,
-        // since these commonly appear in real spawn commands and corrupting
-        // them would be far worse than leaving an unknown $name alone.
-        assert_eq!(
-            substitute_variables("spawn:sh -c \"echo $HOME\"", &variables),
-            "spawn:sh -c \"echo $HOME\""
-        );
-        // A bare trailing `$` (no identifier following) must not panic or loop.
-        assert_eq!(substitute_variables("cost is $5", &variables), "cost is $5");
-        // No variables defined at all -- short-circuits, returns unchanged.
-        assert_eq!(
-            substitute_variables("$mainMod+Q", &HashMap::new()),
-            "$mainMod+Q"
-        );
-    }
 
     #[test]
     fn ocean_selector_reefs_bookmarks_and_actions_parse_without_resolution_defaults() {
@@ -7812,12 +7491,12 @@ mod tests {
                      y = -80\n\
                  }\n\
              }\n\
-             bind Super+Ctrl+H = ocean-pan-left\n\
-             bind Super+Ctrl+I = ocean-zoom-in\n\
-             bind Super+Ctrl+D = sink-window\n\
-             bind Super+Ctrl+Shift+D = ocean-dredge-window\n\
-             bind Super+Ctrl+Shift+U = ocean-surface-window\n\
-             bind Super+1 = ocean-bookmark:code\n");
+             bind Super+Ctrl+H { ocean-pan-left }\n\
+             bind Super+Ctrl+I { ocean-zoom-in }\n\
+             bind Super+Ctrl+D { sink-window }\n\
+             bind Super+Ctrl+Shift+D { ocean-dredge-window }\n\
+             bind Super+Ctrl+Shift+U { ocean-surface-window }\n\
+             bind Super+1 { ocean-bookmark:code }\n");
         let config = Config::from_raw(lower_entries(&entries)).0;
 
         assert_eq!(config.spatial_engine, SpatialEngine::Ocean);
@@ -7860,25 +7539,6 @@ mod tests {
             .any(|bind| { matches!(&bind.action, Action::OceanBookmark(name) if name == "code") }));
     }
 
-    #[test]
-    fn load_raw_config_substitutes_variables_into_keybinds_and_spawn_at_startup() {
-        let dir = TestDir::new("variables");
-        let main = dir.write(
-            "config.wave",
-            "spawn = [\"$terminal --daemon\"]\n\
-             @mainMod = SUPER\n\
-             @terminal = kitty\n\
-             bind $mainMod+Return { spawn:$terminal }\n",
-        );
-
-        let (raw, _, _) = load_raw_config(&main).expect("should parse");
-        assert_eq!(raw.spawn_at_startup, vec!["kitty --daemon".to_string()]);
-        assert_eq!(
-            raw.keybinds.get("SUPER+Return").map(String::as_str),
-            Some("spawn:kitty")
-        );
-        assert!(!raw.keybinds.contains_key("$mainMod+Return"));
-    }
 
     #[test]
     fn parsed_keybinds_are_authoritative_and_never_merge_hidden_defaults() {
@@ -7886,8 +7546,8 @@ mod tests {
         let main = dir.write(
             "config.wave",
             "@mod = ALT\n\
-             bind $mod+Q = close-window\n\
-             bind Super+F = toggle-fullscreen\n",
+             bind $mod+Q { close-window }\n\
+             bind Super+F { toggle-fullscreen }\n",
         );
 
         let (raw, _, _) = load_raw_config(&main).expect("should parse");
@@ -8063,7 +7723,7 @@ mod tests {
         let main = dir.write(
             "config.wave",
             "cursor_hide_after = 2s\n\
-             workspace_transition {\n\
+             transition {\n\
                  duration = 600ms\n\
                  workspace_motion_delay = 150ms\n\
              }\n",
@@ -8073,11 +7733,6 @@ mod tests {
         let transition = &raw.workspace_transition;
         assert_eq!(transition.duration_ms, 600);
         assert_eq!(transition.workspace_motion_delay_ms, 150);
-        // legacy spellings still parse
-        let dir = TestDir::new("wave-durations-legacy");
-        let main = dir.write("config.wave", "cursor_hide_after_ms = 3000\n");
-        let (raw, _, _) = load_raw_config(&main).expect("should parse");
-        assert_eq!(raw.cursor_hide_after_ms, 3000);
     }
 
     #[test]
@@ -8097,7 +7752,7 @@ mod tests {
         );
         // legacy scalar spelling still works
         let dir = TestDir::new("wave-spawn-scalar");
-        let main = dir.write("config.wave", "spawn_at_startup = waybar\n");
+        let main = dir.write("config.wave", "spawn = [waybar]\n");
         let (raw, _, _) = load_raw_config(&main).expect("should parse");
         assert_eq!(raw.spawn_at_startup, vec!["waybar".to_string()]);
     }
@@ -8239,42 +7894,17 @@ mod tests {
         assert_eq!(raw_new.bsp_split_bias, "horizontal");
         assert!(raw_new.submaps.contains_key("nav"));
 
-        // The legacy spellings parse to the same values (and the
-        // deprecation notices are log-only).
-        let dir = TestDir::new("wave-renames-legacy");
+        // Legacy spellings are gone: they warn as unknown keys and are
+        // ignored, never silently applied.
+        let dir = TestDir::new("wave-renames-rejected");
         let old = dir.write(
             "config.wave",
             "spatial_engine = classic\n\
-             pointer_modifier = SUPER\n\
-             show_welcome_hint = true\n\
-             show_config_reload_toast = true\n\
-             workspace_auto_back_and_forth = true\n\
-             default_layout = master\n\
-             master_orientation = top\n\
-             bsp_split_bias = horizontal\n\
-             workspace_transition {\n\
-                 duration = 600ms\n\
-             }\n\
-             connected_vessels {\n\
-                 enabled = true\n\
-             }\n\
-             water_glass {\n\
-                 tint_alpha = 0.1\n\
-             }\n\
-             float_physics {\n\
-                 tier = light\n\
-             }\n\
-             submap nav {\n\
-                 bind h = focus-left\n\
-             }\n",
+             default_layout = master\n",
         );
-        let (raw_old, _, _) = load_raw_config(&old).expect("legacy names should parse");
-        assert_eq!(raw_old.spatial_engine, raw_new.spatial_engine);
-        assert_eq!(raw_old.pointer_modifier, raw_new.pointer_modifier);
-        assert_eq!(raw_old.default_layout, raw_new.default_layout);
-        assert_eq!(raw_old.master_orientation, raw_new.master_orientation);
-        assert_eq!(raw_old.bsp_split_bias, raw_new.bsp_split_bias);
-        assert_eq!(raw_old.submaps, raw_new.submaps);
+        let (raw, _, _) = load_raw_config(&old).expect("config still loads");
+        assert!(raw.default_layout.is_empty(), "legacy default_layout must be ignored");
+        assert_eq!(raw.spatial_engine, "classic", "the default engine must still apply");
     }
 
     #[test]
@@ -8333,10 +7963,10 @@ mod tests {
     #[test]
     fn load_raw_config_resolves_relative_includes_with_including_files_own_keys_winning() {
         let dir = TestDir::new("includes");
-        dir.write("keybinds.wave", "bind Super+Q = close-window\n");
+        dir.write("keybinds.wave", "bind Super+Q { close-window }\n");
         let main = dir.write(
             "config.wave",
-            "include \"keybinds.wave\"\nterminal = kitty\nbind Super+F = toggle-fullscreen\n",
+            "include \"keybinds.wave\"\nterminal = kitty\nbind Super+F { toggle-fullscreen }\n",
         );
 
         let (raw, _, _) = load_raw_config(&main).expect("include chain should resolve");
@@ -8442,8 +8072,7 @@ mod tests {
 
         let entries = wave_entries(
 "@mod = ALT\npointer_modifier = mod .. \"+SHIFT\"\n");
-        let mut raw = lower_entries(&entries);
-        substitute_variables_in_raw(&mut raw);
+        let raw = lower_entries(&entries);
         assert_eq!(
             Config::from_raw(raw).0.pointer_modifier,
             Mods {
@@ -8457,7 +8086,7 @@ mod tests {
     #[test]
     fn ocean_direct_manipulation_and_reload_card_are_user_configurable() {
         let entries = wave_entries(
-"show_config_reload_toast = false\n\
+"reload_toast = false\n\
              ocean {\n\
                  freeform_windows = false\n\
                  smart_tiling = true\n\
@@ -8513,7 +8142,7 @@ mod tests {
     #[test]
     fn connected_vessels_block_parses_clamps_and_matches_generated_defaults() {
         let entries = wave_entries(
-"connected_vessels {\n\
+"vessels {\n\
              enabled = false\n\
              falloff = 1.7\n\
              max_splits = 7\n\
@@ -8585,7 +8214,7 @@ mod tests {
     #[test]
     fn float_physics_block_parses_clamps_rules_and_matches_generated_defaults() {
         let entries = wave_entries(
-"float_physics {\n\
+"physics {\n\
              tier = full\n\
              response = 2.5\n\
              max_offset = 999\n\
@@ -8640,7 +8269,7 @@ mod tests {
         // Legacy true/false aliases still map onto light/off, both globally
         // and per rule.
         let legacy = wave_entries(
-"float_physics {\n\
+"physics {\n\
              enabled = true\n\
              }\n\
              rule {\n\
@@ -8664,7 +8293,7 @@ mod tests {
     #[test]
     fn water_glass_block_parses_clamps_and_matches_generated_defaults() {
         let entries = wave_entries(
-"water_glass {\n\
+"glass {\n\
              animation = ambient\n\
              speed = 99\n\
              amplitude = -1\n\
@@ -8692,7 +8321,7 @@ mod tests {
              speed = -2\n\
              fps = 999\n\
              idle_fps = [20, 10]\n\
-             idle_after_ms = [600000, 1200000]\n\
+             idle_after = [600000, 1200000]\n\
              }\n");
         let config = Config::from_raw(lower_entries(&entries)).0;
         assert!(config.caustics.enabled);
@@ -8751,20 +8380,6 @@ mod tests {
             .any(|warning| warning.contains("Invalid pointer_modifier")));
     }
 
-    #[test]
-    fn modifier_variables_never_police_deliberate_mixed_modifier_bindings() {
-        let mut variables = HashMap::new();
-        variables.insert("mod".to_string(), "ALT".to_string());
-        let raw = RawConfig {
-            variables,
-            ..Default::default()
-        };
-        let (_, warnings) = Config::from_raw(raw);
-        assert!(
-            warnings.is_empty(),
-            "unexpected modifier policy: {warnings:?}"
-        );
-    }
 
     #[test]
     fn mod_left_at_super_or_undefined_produces_no_leftover_super_lint() {
@@ -8773,10 +8388,7 @@ mod tests {
             .iter()
             .any(|w| w.contains("$mod is set away from Super")));
 
-        let mut variables = HashMap::new();
-        variables.insert("mod".to_string(), "SUPER".to_string());
         let raw = RawConfig {
-            variables,
             ..Default::default()
         };
         let (_, warnings) = Config::from_raw(raw);
@@ -8787,12 +8399,9 @@ mod tests {
 
     #[test]
     fn mod_freed_from_super_with_every_bind_rewritten_has_nothing_left_to_warn_about() {
-        let mut variables = HashMap::new();
-        variables.insert("mod".to_string(), "ALT".to_string());
         let mut keybinds = HashMap::new();
         keybinds.insert("ALT+Return".to_string(), "spawn:kitty".to_string());
         let raw = RawConfig {
-            variables,
             keybinds,
             pointer_modifier: "ALT".to_string(),
             ..Default::default()
@@ -8809,19 +8418,19 @@ mod tests {
     #[test]
     fn workspace_transition_block_parses_every_tuning_knob() {
         let entries = wave_entries(
-"workspace_transition {\n\
+"transition {\n\
              enabled = false\n\
              style = glow\n\
-             duration_ms = 900\n\
+             duration = 900ms\n\
              speed = 1.75\n\
              curve = exp-out\n\
              direction = left-to-right\n\
              workspace_motion = true\n\
-             workspace_motion_delay_ms = 225\n\
+             workspace_motion_delay = 225ms\n\
              wave_amplitude = 72.5\n\
              wave_frequency = 4.5\n\
              edge_width = 26\n\
-             color = rgb(FF0088)\n\
+             color = #FF0088\n\
              wave_size = 14\n\
              wave_alpha = 0.8\n\
              glow_size = 64\n\
@@ -8873,9 +8482,9 @@ mod tests {
              enabled = true\n\
              slowdown = 1.5\n\
              open {\n\
-             duration_ms = 240\n\
+             duration = 240ms\n\
              curve = \"cubic-bezier(0.1,0.8,0.2,1.1)\"\n\
-             opacity_duration_ms = 410\n\
+             opacity_duration = 410ms\n\
              opacity_curve = cubic-in-out\n\
              offset = -12x32\n\
              from_opacity = 0.2\n\
@@ -9016,9 +8625,9 @@ mod tests {
              render_power = 4\n\
              sharp = true\n\
              ignore_window = false\n\
-             color = rgba(11223380)\n\
+             color = 11223380\n\
              color_inactive = 0x40102030\n\
-             urgent_color = rgba(00CCFF, 192)\n\
+             urgent_color = 00CCFFC0\n\
              opacity = 0.8\n\
              inactive_opacity = 0.5\n\
              urgent_opacity = 0.95\n\
@@ -9282,15 +8891,15 @@ mod tests {
     #[test]
     fn classic_depth_is_independently_opt_in() {
         let entries = wave_entries(
-"classic_depth {\n\
+"depth_deck {\n\
              enabled = true\n\
              animation = false\n\
              animation_duration_ms = 610\n\
              wave_color = 123456\n\
              wave_alpha = 0.44\n\
              }\n\
-             bind Super+D = depth-down\n\
-             bind Super+Shift+D = depth-up\n");
+             bind Super+D { depth-down }\n\
+             bind Super+Shift+D { depth-up }\n");
         let config = Config::from_raw(lower_entries(&entries)).0;
         assert!(config.classic_depth.enabled);
         assert!(!config.classic_depth.animation);
@@ -9487,7 +9096,7 @@ mod tests {
     #[test]
     fn bare_typing_key_in_a_submap_is_not_flagged() {
         // Submaps rely on bare keys by design (the default `nav` submap's
-        // own Escape = exit-submap) -- only the always-active base table
+        // own Escape = exit-mode) -- only the always-active base table
         // can silently steal a key from every other window.
         let mut raw = RawConfig::default();
         let mut submap = HashMap::new();
@@ -9504,10 +9113,9 @@ mod tests {
     fn ordinary_keys_can_be_held_as_user_defined_helpers() {
         let entries = wave_entries(
 "@sub = P\n\
-             bind $sub+Ctrl+H = focus-left\n\
-             bind F = toggle-fullscreen\n");
-        let mut raw = lower_entries(&entries);
-        substitute_variables_in_raw(&mut raw);
+             bind $sub+Ctrl+H { focus-left }\n\
+             bind F { toggle-fullscreen }\n");
+        let raw = lower_entries(&entries);
         let (config, warnings) = Config::from_raw(raw);
         assert!(warnings.is_empty());
 
@@ -9550,18 +9158,15 @@ mod tests {
     }
 
     #[test]
-    fn ripple_color_accepts_hash_bare_and_rgb_forms() {
-        // #RRGGBB (quoted in config.wave), bare RRGGBB (no quotes needed),
-        // and Hyprland-style rgb()/rgba() must all resolve to the same
-        // color, and an 8-digit hex silently drops its alpha byte.
-        let cyan = Some([0.0, 1.0, 1.0]);
-        assert_eq!(parse_ripple_color("#00ffff"), cyan);
-        assert_eq!(parse_ripple_color("00ffff"), cyan);
-        assert_eq!(parse_ripple_color("#00ffffff"), cyan);
-        assert_eq!(parse_ripple_color("rgb(00ffff)"), cyan);
-        assert_eq!(parse_ripple_color("rgba(00ffff, 128)"), cyan);
-        assert_eq!(parse_ripple_color("not-a-color"), None);
-        assert_eq!(parse_ripple_color("#zzzzzz"), None);
+    fn ripple_color_accepts_hash_and_bare_forms() {
+        let parse = parse_ripple_color;
+        assert_eq!(parse("00FFFF"), Some([0.0, 1.0, 1.0]));
+        assert_eq!(parse("#00FFFF"), Some([0.0, 1.0, 1.0]));
+        assert_eq!(parse("00FFFF80"), Some([0.0, 1.0, 1.0]));
+        // the Hyprland-style rgb()/rgba() text forms are gone with the
+        // old grammar
+        assert_eq!(parse("rgb(0,255,255)"), None);
+        assert_eq!(parse("rgba(00FFFF, 128)"), None);
     }
 
     #[test]
@@ -9722,17 +9327,15 @@ mod tests {
     }
 
     #[test]
-    fn shadow_color_keeps_alpha_across_css_and_hyprland_forms() {
-        let expected = [0.0, 1.0, 1.0, 128.0 / 255.0];
-        assert_eq!(parse_rgba_color("00ffff80"), Some(expected));
-        assert_eq!(parse_rgba_color("#00ffff80"), Some(expected));
-        assert_eq!(parse_rgba_color("rgba(00ffff80)"), Some(expected));
-        assert_eq!(parse_rgba_color("rgba(00ffff, 128)"), Some(expected));
-        assert_eq!(
-            parse_rgba_color("rgba(0,255,255,0.5019608)"),
-            Some(expected)
-        );
-        assert_eq!(parse_rgba_color("0x8000ffff"), Some(expected));
-        assert_eq!(parse_rgba_color("nope"), None);
+    fn shadow_color_keeps_alpha_across_hex_forms() {
+        let parse = parse_rgba_color;
+        assert_eq!(parse("00FFFF"), Some([0.0, 1.0, 1.0, 1.0]));
+        assert_eq!(parse("#00FFFF"), Some([0.0, 1.0, 1.0, 1.0]));
+        assert_eq!(parse("00FFFF80"), Some([0.0, 1.0, 1.0, 0.5019608]));
+        // 0x form is AARRGGBB
+        assert_eq!(parse("0x8000FFFF"), Some([0.0, 1.0, 1.0, 0.5019608]));
+        // the Hyprland-style rgb()/rgba() text forms are gone with the
+        // old grammar
+        assert_eq!(parse("rgb(0,255,255)"), None);
     }
 }

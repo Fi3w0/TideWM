@@ -44,7 +44,7 @@ bind $mod+Q      { close-window }
 bind $mod+D      { "spawn:rofi -show drun" }
 ```
 
-Binds are node form: `bind <combo> { <action> }`, one action per line (or comma-separated on one line). The old `bind <combo> = <action>` line form still parses as a deprecated alias. `terminal` is a top-level key, not a `@name` variable — reference it as `$terminal` only after defining `@terminal = ...`.
+Binds are node form: `bind <combo> { <action> }`, one action per line (or comma-separated on one line). `terminal` is a top-level key, not a `@name` variable — reference it as `$terminal` only after defining `@terminal = ...`.
 
 **Typed values.** Durations and colors are real values with math: `600ms * 2` is `1200ms`, `1.5s * 2` is `3s`, `2 * 300ms` is `600ms`; `primary.darken(0.35)`, `primary.lighten(0.15)`, and `alpha(a)` derive palette colors. Every duration key accepts a unit (`cursor_hide_after = 2s`) or a bare millisecond number.
 
@@ -62,7 +62,7 @@ on "workspace-changed" {
 
 **Live queries.** `tidectl eval <expression>` evaluates on the running session's Lua — config variables, section tables, and the live `tide` table are all answerable (`tidectl eval "theme.primary"`, `tidectl eval "tide.workspace"`).
 
-The line-based grammar is gone; Wave is the only grammar. Old configs were migrated (the mechanical changes: `$mod = SUPER` becomes `@mod = SUPER`, `bind X = Y` becomes `bind X { Y }`, `$wave(...)` becomes `wave(...)` in values, `spawn_at_startup` lines become one `spawn = [...]` list) and legacy key names still parse as deprecated aliases with a log notice.
+The line-based grammar is gone; Wave is the only grammar. Old configs were migrated (the mechanical changes: `$mod = SUPER` becomes `@mod = SUPER`, `bind X = Y` becomes `bind X { Y }`, `$wave(...)` becomes `wave(...)` in values, `spawn_at_startup` lines become one `spawn = [...]` list) and the old spellings no longer parse: a legacy key is an unknown-key warning.
 
 **Multi-file:** `include "path.wave"` as its own statement, repeatable (one per line), in any file (the main one, or one it includes). Each path resolves relative to the file that lists it; `~/` expands to your home directory. Rules:
 
@@ -84,14 +84,14 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `terminal` | string | `"kitty"` | Spawned by the shipped `$mod+Return` bind (`@mod = SUPER` in the generated file). The terminal fallback is `wave(kitty, alacritty, foot, xterm)` — see the Wave format section above. |
-| `engine` | `classic` \| `ocean` | `classic` | Selects one of TideWM's two WM ownership models. Classic keeps numbered workspaces. Ocean has no workspaces: outputs are cameras into one continuous 2D world. `spatial_engine` and `wm_mode` are legacy aliases. Hot-reloadable: a change migrates every live window in place. Classic→Ocean turns each output's populated workspace trees into reefs on the lateral line at `X = (N-1) * (output width + 128)` with the camera at the previously-active workspace; depth-deck windows are recalled to their tiles, floating windows translate to world coordinates around their workspace's reef, and pinned windows become Ocean screen pins. Ocean→Classic turns reefs sorted left-to-right into workspaces `1..N` on the output whose camera is nearest, selects the active workspace from each camera, clamps floating windows into the visible area, and restores pins. Tab groups and fullscreen/maximized entries carry across both directions; Ocean bookmarks and camera history are dropped (no Classic counterpart). |
-| `drag_modifier` | modifier or `+`-joined modifiers | `super` | Modifier physically held for compositor mouse actions: left-drag moves floating windows or drag-swaps tiles; right-drag resizes floating or tiled windows. Accepts `super`/`logo`/`mod4`, `alt`/`mod1`, `ctrl`/`control`, and `shift`. The shipped config sets it to `mod`. `pointer_modifier` and `mouse_modifier` are legacy aliases. |
+| `engine` | `classic` \| `ocean` | `classic` | Selects one of TideWM's two WM ownership models. Classic keeps numbered workspaces. Ocean has no workspaces: outputs are cameras into one continuous 2D world. Hot-reloadable: a change migrates every live window in place. Classic→Ocean turns each output's populated workspace trees into reefs on the lateral line at `X = (N-1) * (output width + 128)` with the camera at the previously-active workspace; depth-deck windows are recalled to their tiles, floating windows translate to world coordinates around their workspace's reef, and pinned windows become Ocean screen pins. Ocean→Classic turns reefs sorted left-to-right into workspaces `1..N` on the output whose camera is nearest, selects the active workspace from each camera, clamps floating windows into the visible area, and restores pins. Tab groups and fullscreen/maximized entries carry across both directions; Ocean bookmarks and camera history are dropped (no Classic counterpart). |
+| `drag_modifier` | modifier or `+`-joined modifiers | `super` | Modifier physically held for compositor mouse actions: left-drag moves floating windows or drag-swaps tiles; right-drag resizes floating or tiled windows. Accepts `super`/`logo`/`mod4`, `alt`/`mod1`, `ctrl`/`control`, and `shift`. The shipped config sets it to `mod`. |
 | `welcome_hint` | bool | `true` | Shows a persistent empty-desktop card reminding you to use your configured terminal bind. Disappears when a real window maps; delete this key (or set it `false`) to stop it returning. |
-| `reload_toast` | bool | `true` | Shows the short compositor card after a successful hot reload. `false` hides that confirmation only; parse errors and configuration warnings remain visible so a bad config cannot silently lock itself in. `show_config_reload_toast` and `config_reload_toast` are legacy aliases. |
+| `reload_toast` | bool | `true` | Shows the short compositor card after a successful hot reload. `false` hides that confirmation only; parse errors and configuration warnings remain visible so a bad config cannot silently lock itself in. |
 | `water_effects` | bool | `true` | Master toggle for TideWM's water/aqua render identity. Disables water-glass, backdrop capture, impulse ripples, wave workspace transitions, automatic depth/buoyancy, interactive viscosity, connected-vessel resize, and floating sway when `false`. |
 | `viscosity` | float, `0`–`4` | `1.0` | Interactive window move/resize damping. `0` follows the pointer immediately; higher values settle more slowly. Render-only: logical geometry and hit-testing stay at the pointer target. Disabled by `water_effects = false`. |
 | `cursor_always_visible` | bool | `false` | Forces the udev backend's software cursor to stay visible even when a client asks to hide it (e.g. a terminal hiding its own pointer glyph after inactivity). Off by default — respecting a client's own hide request is correct behavior; this is an opt-in override. |
-| `cursor_hide_after` | duration | `0` | udev backend only: hides the software cursor after this long without real pointer motion (niri's `cursor.hide-after-inactive-ms`), e.g. `2s` or `2000ms`; `0` disables it. Independent of `cursor_always_visible` — that overrides a *client's* hide request, this is a compositor-driven idle timer, and the two can be combined. `cursor_hide_after_ms` is the legacy alias. |
+| `cursor_hide_after` | duration | `0` | udev backend only: hides the software cursor after this long without real pointer motion (niri's `cursor.hide-after-inactive-ms`), e.g. `2s` or `2000ms`; `0` disables it. Independent of `cursor_always_visible` — that overrides a *client's* hide request, this is a compositor-driven idle timer, and the two can be combined. |
 | `auto_back_and_forth` | bool | `false` | Re-selecting the already-active workspace jumps back to whichever one was active immediately before it, instead of no-opping (niri's own feature of the same name). |
 | `workspace_name` | repeatable key | none | Names a workspace number for use in `workspace:<name>`/`move-to-workspace:<name>` (niri's `set-workspace-name`, Hyprland's `workspace name:foo`) — `workspace_name = 3 web`, repeat the key once per name. Purely an addressing convenience: the workspace's real identity is still its number. An unknown name at action time warns and no-ops rather than switching. |
 | `gaps` | integer | `8` | Pixel gap the tiling engine applies around and between tiles, both layout algorithms. |
@@ -100,7 +100,7 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | `master_side` | `left` \| `right` \| `top` \| `bottom` | `left` | Which side the master pane sits on under `default_layout = master`. `left`/`right` stack the other windows vertically in the remaining strip; `top`/`bottom` stack them horizontally instead. One global setting, not per-workspace. |
 | `split_bias` | `auto` \| `horizontal` \| `vertical` | `auto` | Manual override for `default_layout = bsp`'s per-split axis choice. `auto` is the existing aspect-ratio-driven behavior, unchanged. `horizontal`/`vertical` force every split one way regardless of window/output shape (Hyprland dwindle's `force_split` idea). One global setting, not per-workspace. |
 | `pseudo_tile_scale` | float, `0.05`–`1.0` | `0.7` | Fraction of its tile a pseudo-tiled window keeps, centered within it. Out-of-range values are clamped, not rejected. |
-| `spawn` | list | none | Commands launched once at startup, as a real list: `spawn = [waybar, "swaybg -i ~/wallpaper.png -m fill"]`. Args split on whitespace — no shell involved, so quoting/globs/pipes aren't supported; wrap in `sh -c "..."` yourself if you need those. `spawn_at_startup` is the legacy alias (repeat the key once per command). |
+| `spawn` | list | none | Commands launched once at startup, as a real list: `spawn = [waybar, "swaybg -i ~/wallpaper.png -m fill"]`. Args split on whitespace — no shell involved, so quoting/globs/pipes aren't supported; wrap in `sh -c "..."` yourself if you need those. |
 
 ### Workspace transitions
 
@@ -114,16 +114,16 @@ The enable/duration/curve split follows niri’s useful per-animation configurat
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | Disables only workspace transitions; other water effects stay active. |
 | `style` | `water` \| `glow` | `water` | `water` fills the output before revealing the new workspace. `glow` uses the original thin colored boundary. |
-| `duration` | duration | `520` | Transition lifetime: `600ms`, `1.5s`, `0.6s`. `duration_ms` is the legacy alias. |
+| `duration` | duration | `520` | Transition lifetime: `600ms`, `1.5s`, `0.6s`. |
 | `speed` | float, `0.1`–`10` | `1.0` | Speed multiplier applied to `duration`: `2.0` is twice as fast and `0.5` is half speed. |
 | `curve` | enum | `cubic-in-out` | Progress easing: `linear`, `cubic-out`, `cubic-in-out`, `quad-out`, or `exp-out`. `ease` is an alias. |
 | `direction` | enum | `auto` | `auto` sweeps right-to-left for a higher-numbered workspace and left-to-right for a lower-numbered one. `left-to-right`/`ltr` and `right-to-left`/`rtl` force one direction. |
 | `workspace_motion` | bool | `false` | Captures both desktops and slides the outgoing one out while the incoming one enters under the wave. Costs one additional transient full-output texture. `move_workspaces` is an alias. |
-| `workspace_motion_delay` | duration | `150` | Delay after the water begins before both desktops start sliding, e.g. `150ms`. Values beyond 95% of the effective transition lifetime are clamped to that point. `workspace_motion_delay_ms` and `motion_delay_ms` are legacy aliases. |
+| `workspace_motion_delay` | duration | `150` | Delay after the water begins before both desktops start sliding, e.g. `150ms`. Values beyond 95% of the effective transition lifetime are clamped to that point. |
 | `wave_amplitude` | float, `0`–`500` | `34` | Maximum horizontal displacement of the moving boundary in physical pixels. `0` produces a straight wipe. `amplitude` is an alias. |
 | `wave_frequency` | float, `0`–`20` | `3` | Sine cycles from the output’s top edge to its bottom edge. `0` removes vertical waviness. `frequency` is an alias. |
 | `edge_width` | float, `0.5`–`250` | `18` | Half-width of the soft cross-fade boundary in physical pixels. Lower is sharper; higher is softer. |
-| `color` | color | `8EDDFF` | Main water color, or the wavefront tint under `glow`. Accepts bare `RRGGBB`, quoted `"#RRGGBB"`, `rgb(RRGGBB)`, or `rgba(RRGGBB, AA)`. |
+| `color` | color | `8EDDFF` | Main water color, or the wavefront tint under `glow`. Accepts bare `RRGGBB` or quoted `"#RRGGBB"`. |
 | `wave_size` | float, `0`–`250` | `10` | Curl/lobe size under `water`, or colored core half-width under `glow`, in physical pixels. `size` is an alias. |
 | `wave_alpha` | float, `0`–`1` | `0.9` | Colored core opacity under `glow`. `alpha` is an alias. |
 | `glow_size` | float, `0`–`500` | `46` | `glow` style only: reach beyond the colored core in physical pixels. |
@@ -197,9 +197,9 @@ supports:
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | Disables only this transition. |
 | `animate_size` | bool | movement `true`, lifecycle `false` | Interpolates the outer window size together with movement. It currently affects the `movement` block; `resize`, `size`, and `animate-size` are aliases. |
-| `duration_ms` | integer, `1`–`10000` | open `190`, close `160`, movement `190` | Geometry lifetime before the visual state reaches its logical target. `duration` is an alias. |
+| `duration` | duration | open `190ms`, close `160ms`, movement `190ms` | Geometry lifetime before the visual state reaches its logical target. |
 | `curve` | easing | see example | `linear`, `quad-out`, `cubic-out`, `cubic-in-out`, `exp-out`, or CSS-compatible `cubic-bezier(x1,y1,x2,y2)`. `ease-out-quad`, `ease-out-cubic`, and `ease-out-expo` aliases are accepted. |
-| `opacity_duration_ms` | integer, `1`–`10000` | follows `duration_ms` | Independent opacity lifetime. `fade_duration_ms` and `opacity_duration` are aliases. |
+| `opacity_duration` | duration | follows `duration` | Independent opacity lifetime. |
 | `opacity_curve` | easing | follows `curve` | Independent opacity easing. Accepts the same values as `curve`; `fade_curve` and `opacity_ease` are aliases. |
 | `origin` | direction | `offset` | `offset` uses the configured travel. `nearest-edge` mirrors an unforced Hyprland `slide`; `top`, `right`, `bottom`, and `left` force an output edge. `slide_from`, `slide-from`, and `direction` are aliases. |
 | `offset` | `<x>x<y>` | open `0x24`, close `0x18` | Opening begins at this logical-pixel offset and settles to zero. Closing travels from zero to this offset. Used when `origin = offset`; movement derives its offset from old/new geometry. `travel` is an alias. |
@@ -217,7 +217,7 @@ animations {
     slowdown = 1.0
 
     open {
-        duration_ms = 190
+        duration = 190ms
         curve = cubic-bezier(0.16,1,0.3,1)
         origin = offset
         offset = 0x24
@@ -229,7 +229,7 @@ animations {
     }
 
     close {
-        duration_ms = 160
+        duration = 160ms
         curve = cubic-out
         origin = offset
         offset = 0x18
@@ -242,7 +242,7 @@ animations {
 
     movement {
         animate_size = true
-        duration_ms = 190
+        duration = 190ms
         curve = cubic-bezier(0.16,1,0.3,1)
         effect = tide
         wave_amplitude = 1.25
@@ -586,7 +586,7 @@ Set `animation = false` (or duration `0`) for an immediate switch.
 | --- | --- | --- | --- |
 | `enabled` | bool | `false` | Master switch. When false, deck actions are removed from keyboard matching and remain inert over IPC. |
 | `animation` | bool | `true` | Enables the vertical pressure-wave switch cue. |
-| `animation_duration_ms` | integer, `0`–`3000` | `420` | Sweep duration; `0` is immediate. `duration_ms` is an alias. |
+| `animation_duration_ms` | duration | `420` | Sweep duration; `0` is immediate. |
 | `wave_color` | color | `3EC4E0` | Pressure crest/wake tint. `color` is an alias. |
 | `wave_alpha` | float, `0`–`1` | `0.72` | Transition strength. `alpha` is an alias. |
 
@@ -710,7 +710,7 @@ Configures Phase R2 compositor-drawn drop shadows. TideWM combines niri’s CSS-
 
 Shadows are ordinary decoration and therefore independent of `water_effects`. The default `draw_behind_window = false` is especially important for transparent/frosted apps: TideWM cuts the actual window body out of the shadow, so the shadow cannot become a dark or colored filter over the client. Set it to `true` only when a client’s unknown rounded CSD shape would otherwise leave artifacts.
 
-Every key also works inside `rule { shadow { } }`; omitted fields inherit the global block and multiple matching shadow sub-blocks merge field by field. Colors accept `RRGGBB`, `RRGGBBAA`, quoted `"#RRGGBBAA"`, `rgb(...)`, `rgba(...)`, and legacy Hyprland `0xAARRGGBB`.
+Every key also works inside `rule { shadow { } }`; omitted fields inherit the global block and multiple matching shadow sub-blocks merge field by field. Colors accept `RRGGBB`, `RRGGBBAA`, quoted `"#RRGGBBAA"`, and legacy `0xAARRGGBB`.
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -876,7 +876,7 @@ Configures the Phase R1 impulse ripple shared by window-map, focus-change, and u
 | `urgent_repeat` | bool | `true` | When `true`, the urgent ripple re-fires every `urgent_repeat_interval_ms` until the window is focused or its hint clears, instead of firing once. `urgent_pulse` is an alias. |
 | `urgent_repeat_interval_ms` | integer | `1500` | Milliseconds between urgent-repeat pulses, clamped to `100`–`60000`. `urgent_interval_ms` and `urgent_interval` are aliases. |
 | `shapes` | space-separated list | `ring` | Compatibility mode: any combination of `ring`, `square`, `droplet`, and `cross`. Assigning this key automatically selects `preset = legacy`. `shape` and `form` are aliases. |
-| `color` | color | `8EDDFF` | RGB tint. Use bare `RRGGBB`, quoted `"#RRGGBB"`, `rgb(RRGGBB)`, or `rgba(RRGGBB, AA)`. A bare leading `#` starts a Waves comment, so it must be quoted. Alpha in the color form is currently ignored; use `peak_alpha`. |
+| `color` | color | `8EDDFF` | RGB tint. Use bare `RRGGBB` or quoted `"#RRGGBB"`. A bare leading `#` starts a Wave comment, so it must be quoted. Alpha in the color form is currently ignored; use `peak_alpha`. |
 | `secondary_color` | color | `E8FCFF` | Gradient, membrane, and highlight tint. `accent_color` and `highlight_color` are aliases. |
 | `peak_radius` | positive float | `220` | Maximum radius in logical pixels. `radius` is an alias. |
 | `size_mode` | enum | `fixed` | `fixed` uses `peak_radius`; `window` uses half the diagonal; `width`, `height`, `min`, and `max` use half that window dimension. `radius_mode` and `scale_mode` are aliases. |
@@ -884,7 +884,7 @@ Configures the Phase R1 impulse ripple shared by window-map, focus-change, and u
 | `min_radius` | float | `24` | Lower clamp applied after adaptive sizing. |
 | `max_radius` | float | `2048` | Upper clamp applied after adaptive sizing. |
 | `thickness` | positive float | `8` | Outline half-width in logical pixels. |
-| `duration_ms` | positive integer | `650` | Ripple lifetime in milliseconds. `duration` is an alias. |
+| `duration` | duration | `650` | Ripple lifetime. |
 | `peak_alpha` | float | `0.88` | Peak opacity, clamped to `0.0`–`1.0`. `alpha` is an alias. |
 | `glow` | float | `0.55` | Soft halo strength, clamped to `0.0`–`2.0`. `glow_strength` is an alias. |
 | `wobble` | float | `0.7` | Organic displacement strength, clamped to `0.0`–`2.0`. `jiggle` and `distortion` are aliases. |
@@ -921,7 +921,7 @@ ripple {
     focus_on_map = false
     color = 89B4FA
     secondary_color = CBA6F7
-    duration_ms = 650
+    duration = 650ms
     glow = 0.65
     wobble = 0.9
     triggers = map focus urgent
@@ -1239,7 +1239,7 @@ See [Action strings](#action-strings) for every value a bind can take. A later
 
 ### `mode <name> { }` (legacy: `submap <name> { }`)
 
-A temporary alternate keybind table (sway/Hyprland's "mode" idea), same `bind` statements as the top level (no modifier prefix needed if the submap's own binds are unmodified, like the shipped `nav` example). Entered via a `submap:<name>` action, which **fully replaces** the base binds — not layered on top of them — until an explicit `exit-mode` bind (`exit-submap` is the legacy alias). Not tied to focus; stays active until you explicitly leave it. A config reload that drops or renames the active submap auto-exits back to the base binds.
+A temporary alternate keybind table (sway/Hyprland's "mode" idea), same `bind` statements as the top level (no modifier prefix needed if the submap's own binds are unmodified, like the shipped `nav` example). Entered via a `submap:<name>` action, which **fully replaces** the base binds — not layered on top of them — until an explicit `exit-mode` bind. Not tied to focus; stays active until you explicitly leave it. A config reload that drops or renames the active submap auto-exits back to the base binds.
 
 ```
 submap nav {
@@ -1306,7 +1306,7 @@ synthesizes Ocean or Depth bindings behind the config, and deleting or
 rewriting a line removes or changes it completely.
 
 **Modes**
-- `mode:<name>` — enter a `mode <name> { }` block (`submap:<name>` is the legacy alias)
+- `mode:<name>` — enter a `mode <name> { }` block
 - `exit-mode` (legacy: `exit-submap`)
 - `toggle-overview` — schematic grid of every workspace on the current output (see README's Features list; not live thumbnails)
 

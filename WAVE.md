@@ -183,7 +183,6 @@ This section is the exact surface-to-Lua mapping. The rule of thumb: the surface
 | `@name = value` (variable) | `_vardef("name", value)` | Records a variable entry AND sets the Lua global `name` |
 | `name { }` (block) | `_block("name", "header", function() ... end)` | Runs the builder, captures produced entries into the block body |
 | `bind X { a b }` | `bind("X", {"a", "b"})` | One binding entry per action |
-| `bind X = action` (deprecated line form) | `bind("X", "action")` | Same registration, value is raw rest-of-line |
 | `include "path"` | `include("path")` | Records an include entry, resolved later by the existing include machinery |
 | `$wave(a, b)` in a string | `.. wave("a", "b")` spliced | First installed candidate, last-candidate fallback, unchanged from today |
 | `wave(a, b)` in an expression | `wave("a", "b")` | Same function, now callable anywhere |
@@ -201,7 +200,7 @@ A line, after comment stripping, is dispatched on its first word:
 1. `}` alone closes a block. A line ending in `{` (trimmed) opens one: first word is the keyword, the rest is the header (one quoted string or one bare word).
 2. A reserved first word: `bind`, `include`, `fn`, `script`, `on`, `if`, `elseif`, `else`, `for`, `while`, `do`, `end`, `local`, `function`, `return`.
 3. `@name = value`: a variable definition. `@` is the definition marker and appears nowhere else.
-4. `key = value`: key is a bare identifier, `=` follows, the value is parsed as a value (see below). `bind X = ...` is the deprecated bind line form.
+4. `key = value`: key is a bare identifier, `=` follows, the value is parsed as a value (see below).
 5. Anything else: an expression statement, which must be a call (`name(...)`). A bare word that is not a call is an error, so a typo reads as an error instead of a silent no-op.
 
 Blocks are always multi-line, with one exception: `bind X { a, b }` may be written on one line, actions split on commas. This is the only one-liner in the grammar.
@@ -214,7 +213,7 @@ Single token: a number, `true`/`false`, a color (`#RRGGBB` or `#RRGGBBAA`, seria
 
 **Colors are values.** `#8EDDFF` carries real channels, so `primary.darken(0.35)`, `primary.lighten(0.15)`, and `alpha(a)` (accepted, currently dropped) work in expressions.
 
-**Durations are values.** `600ms * 2` is `1200ms`, `1.5s * 2` is `3s`, `90m / 2` is `45m`, `1s + 500ms` keeps the first operand's unit. A bare `600` still parses as the legacy millisecond form.
+**Durations are values.** `600ms * 2` is `1200ms`, `1.5s * 2` is `3s`, `90m / 2` is `45m`, `1s + 500ms` keeps the first operand's unit. A bare `600` still parses as milliseconds.
 
 **Section globals.** A `name { }` block exposes its body as a Lua table under `name`, so `theme.primary` reads as an expression outside the block, and sibling fields resolve inside the block: `deep = primary.darken(0.35)` reads the `primary` leaf defined above it. A block never clobbers an existing global (the `math` library, the registration functions).
 

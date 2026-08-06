@@ -40,7 +40,7 @@ pub(crate) enum Entry {
 fn block_is_keyed(keyword: &str) -> bool {
     matches!(
         keyword,
-        "input" | "touchpad" | "env" | "switch_events" | "submap" | "mode" | "ripple_preset"
+        "input" | "touchpad" | "env" | "switch_events" | "mode" | "ripple_preset"
     )
 }
 
@@ -53,7 +53,7 @@ fn block_is_keyed(keyword: &str) -> bool {
 fn assign_is_multi(key: &str) -> bool {
     matches!(
         key,
-        "spawn_at_startup" | "spawn" | "workspace_name" | "workspace_gaps"
+        "spawn" | "workspace_name" | "workspace_gaps"
     )
 }
 
@@ -72,12 +72,12 @@ fn assign_is_multi(key: &str) -> bool {
 ///   file is a hard parse error there; Waves is more forgiving on
 ///   purpose, since "last bind on this combo wins" is a perfectly
 ///   sensible thing to want across a multi-file split). The one
-///   exception is [`assign_is_multi`]'s keys (`spawn_at_startup`,
-///   `workspace_name`), which accumulate instead -- see its own doc comment.
+///   exception is [`assign_is_multi`]'s keys (`spawn`, `workspace_name`),
+///   which accumulate instead -- see its own doc comment.
 /// - A block whose keyword is in [`block_is_keyed`] (`input`, `touchpad`,
-///   `env`, `switch_events`, `submap`, `ripple_preset`) merges recursively with an
+///   `env`, `switch_events`, `mode`, `ripple_preset`) merges recursively with an
 ///   existing block of the same keyword *and* header (the header is the
-///   submap name for `submap`, empty for the others) -- these are
+///   mode name for `mode`, empty for the others) -- these are
 ///   conceptually single named sections, the same as a TOML table
 ///   merging key-by-key across files.
 /// - Every other block (`output`, `rule`, anything not in the allowlist)
@@ -175,18 +175,15 @@ mod tests {
     }
 
     #[test]
-    fn spawn_at_startup_accumulates_instead_of_overwriting() {
+    fn spawn_accumulates_instead_of_overwriting() {
         let mut acc = Vec::new();
         merge_into(
             &mut acc,
-            vec![assign("spawn_at_startup", "waybar"), assign("spawn_at_startup", "swww init")],
+            vec![assign("spawn", "waybar"), assign("spawn", "swww init")],
         );
         assert_eq!(
             acc,
-            vec![
-                assign("spawn_at_startup", "waybar"),
-                assign("spawn_at_startup", "swww init"),
-            ]
+            vec![assign("spawn", "waybar"), assign("spawn", "swww init")]
         );
     }
 
