@@ -9903,9 +9903,10 @@ impl Smallvil {
         expression: &str,
     ) -> Result<serde_json::Value, String> {
         self.sync_tide();
+        let lua_expr = crate::wave::compile_eval_expression(expression)?;
         let value: mlua::Value = self
             .config_lua
-            .load(expression)
+            .load(&lua_expr)
             .set_name("eval")
             .eval()
             .map_err(|e| e.to_string())?;

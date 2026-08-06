@@ -3858,6 +3858,24 @@ fn lower_entries(entries: &[waves::Entry]) -> RawConfig {
     raw
 }
 
+/// Is `key` a recognized top-level config key (see
+/// `apply_top_level_assign`)? Used to tell a computation block like
+/// `theme { }` (whose keys are unknown on purpose) apart from a typo'd
+/// real block.
+fn is_known_top_level_key(key: &str) -> bool {
+    matches!(
+        key,
+        "terminal" | "spatial_engine" | "engine" | "wm_mode" | "pointer_modifier"
+            | "mouse_modifier" | "drag_modifier" | "show_welcome_hint"
+            | "show_config_reload_toast" | "config_reload_toast" | "water_effects"
+            | "viscosity" | "cursor_always_visible" | "cursor_hide_after"
+            | "cursor_hide_after_ms" | "workspace_auto_back_and_forth"
+            | "workspace_name" | "gaps" | "workspace_gaps" | "default_layout"
+            | "master_orientation" | "bsp_split_bias" | "pseudo_tile_scale" | "spawn"
+            | "spawn_at_startup"
+    )
+}
+
 fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
     match key {
         "terminal" => raw.terminal = value.to_string(),
@@ -3977,7 +3995,19 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
             }
         }
         "switch_events" => apply_switch_events_block(&mut raw.switch_events, body),
-        other => tracing::warn!(keyword = %other, "Unknown config block, ignoring"),
+        other => {
+            // A computation block (the Wave palette's `theme { }`) has no
+            // config meaning: its values feed expressions through section
+            // globals, so it is silently ignored. A block that tries to
+            // set known keys is a real typo and still warns.
+            let computation_only = body.iter().all(|entry| {
+                matches!(entry, waves::Entry::Assign(key, _) if !is_known_top_level_key(key))
+                    || matches!(entry, waves::Entry::Block(k, _, _) if k == other)
+            });
+            if !computation_only {
+                tracing::warn!(keyword = %other, "Unknown config block, ignoring");
+            }
+        }
     }
 }
 

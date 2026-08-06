@@ -148,6 +148,11 @@ struct Symbols {
     /// of erroring, so the resolve pre-pass can evaluate files whose
     /// definitions live in other files. Never used for real configs.
     lenient: bool,
+    /// Eval mode: bare words stay identifiers even when nothing is known
+    /// about them, and `$`/`@` are errors -- the session Lua decides what
+    /// a name is at eval time (`tidectl eval "mod"` answers the `@mod`
+    /// global, `theme.primary` answers the section table).
+    eval_mode: bool,
 }
 
 impl Symbols {
@@ -198,6 +203,11 @@ impl<'a> Rewriter<'a> {
         // pointing at the identifier form (unless collecting, where
         // everything stays literal text).
         if let Some(name) = word.strip_prefix('@') {
+            if self.sym.eval_mode {
+                return Err(format!(
+                    "`@{name}` is a config definition marker; in eval use `{name}`"
+                ));
+            }
             if self.sym.lenient {
                 return Ok(lua_quote(word));
             }
@@ -206,6 +216,11 @@ impl<'a> Rewriter<'a> {
             ));
         }
         if let Some(name) = word.strip_prefix('$') {
+            if self.sym.eval_mode {
+                return Err(format!(
+                    "`${name}` is a config string reference; in eval use `{name}`"
+                ));
+            }
             if name == "wave" {
                 if self.sym.lenient {
                     return Ok(lua_quote(word));
@@ -236,6 +251,10 @@ impl<'a> Rewriter<'a> {
         if is_duration(word) {
             let (num, unit) = split_duration(word).unwrap();
             return Ok(format!("_dur({}, {})", num, lua_quote(unit)));
+        }
+        if self.sym.eval_mode {
+            // The session Lua decides: unknown names resolve or fail there.
+            return Ok(word.to_string());
         }
         if let Some((base, rest)) = word.split_once('.') {
             if self.sym.in_innermost_body(base) {
@@ -879,6 +898,9 @@ fn rewrite_value(value: &str, sym: &Symbols) -> Result<String, String> {
         if sym.in_innermost_body(value) {
             return Ok(format!("_field({})", lua_quote(value)));
         }
+        if sym.eval_mode {
+            return Ok(value.to_string());
+        }
         if sym.in_scope(value) {
             // a defined @variable, fn name, loop var, or fn param: the
             // identifier, not the string of its name
@@ -886,6 +908,18 @@ fn rewrite_value(value: &str, sym: &Symbols) -> Result<String, String> {
         }
         rewriter.rewrite_string(value)
     }
+}
+
+/// Compiles a bare Wave expression for `tidectl eval`: surface literals
+/// (durations, colors, lists) and operators work, `@`/`$` markers error
+/// with a hint, and any other name stays an identifier for the session
+/// Lua to resolve (`mod`, `theme.primary`, `tide.backend`).
+pub(crate) fn compile_eval_expression(expr: &str) -> Result<String, String> {
+    let sym = Symbols {
+        eval_mode: true,
+        ..Default::default()
+    };
+    rewrite_value(expr, &sym)
 }
 
 /// Splits a one-line bind body into actions on commas at paren depth 0
@@ -2237,6 +2271,23 @@ mod tests {
         assert!(err.contains("needs an event name and a block"));
         let err = compile("}\n", Path::new("test.wave")).unwrap_err();
         assert!(err.contains("unexpected `}`"));
+    }
+
+    #[test]
+    fn compile_eval_expression_handles_surface_and_identifiers() {
+        // durations and colors are surface literals
+        assert_eq!(compile_eval_expression("600ms * 2").unwrap(), "_dur(600, \"ms\") * 2");
+        assert_eq!(compile_eval_expression("1.5s / 2").unwrap(), "_dur(1.5, \"s\") / 2");
+        assert_eq!(compile_eval_expression("#8EDDFF").unwrap(), "_color(\"8EDDFF\")");
+        // unknown names stay identifiers for the session Lua to resolve
+        assert_eq!(compile_eval_expression("theme.primary").unwrap(), "theme.primary");
+        assert_eq!(compile_eval_expression("mod").unwrap(), "mod");
+        assert_eq!(compile_eval_expression("tide.backend == \"winit\"").unwrap(), "tide.backend == \"winit\"");
+        // markers error with a hint
+        let err = compile_eval_expression("$mod").unwrap_err();
+        assert!(err.contains("use `mod`"), "{err}");
+        let err = compile_eval_expression("@mod").unwrap_err();
+        assert!(err.contains("use `mod`"), "{err}");
     }
 
     #[test]
