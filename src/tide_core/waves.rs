@@ -235,7 +235,7 @@ fn assign_is_multi(key: &str) -> bool {
 ///   always appends as a new entry, never merges -- these are
 ///   conceptually arrays (TOML's `[[output]]`/`[[window_rule]]`
 ///   concatenate across files, they don't merge by name).
-fn merge_into(target: &mut Vec<Entry>, incoming: Vec<Entry>) {
+pub(crate) fn merge_into(target: &mut Vec<Entry>, incoming: Vec<Entry>) {
     for entry in incoming {
         match &entry {
             Entry::Assign(key, _) => {
@@ -288,14 +288,25 @@ fn merge_into(target: &mut Vec<Entry>, incoming: Vec<Entry>) {
 /// warning panel, not just the log file (a broken include used to be
 /// invisible on screen entirely).
 pub(crate) fn resolve(path: &Path) -> Result<(Vec<Entry>, Vec<String>), String> {
+    resolve_with(path, parse)
+}
+
+/// `resolve`, parameterized over how a file's text becomes entries, so the
+/// Wave engine can reuse the exact same include/merge/cycle machinery with
+/// `wave::evaluate` as the parser.
+pub(crate) fn resolve_with(
+    path: &Path,
+    parse_file: fn(&str, &Path) -> Result<Vec<Entry>, String>,
+) -> Result<(Vec<Entry>, Vec<String>), String> {
     let mut ancestors = Vec::new();
     let mut warnings = Vec::new();
-    let entries = resolve_inner(path, &mut ancestors, &mut warnings)?;
+    let entries = resolve_inner(path, parse_file, &mut ancestors, &mut warnings)?;
     Ok((entries, warnings))
 }
 
 fn resolve_inner(
     path: &Path,
+    parse_file: fn(&str, &Path) -> Result<Vec<Entry>, String>,
     ancestors: &mut Vec<PathBuf>,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<Entry>, String> {
@@ -304,19 +315,20 @@ fn resolve_inner(
         return Err(format!("include cycle detected in file {}", path.display()));
     }
     ancestors.push(canonical);
-    let result = resolve_uncycled(path, ancestors, warnings);
+    let result = resolve_uncycled(path, parse_file, ancestors, warnings);
     ancestors.pop();
     result
 }
 
 fn resolve_uncycled(
     path: &Path,
+    parse_file: fn(&str, &Path) -> Result<Vec<Entry>, String>,
     ancestors: &mut Vec<PathBuf>,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<Entry>, String> {
     let contents =
         fs::read_to_string(path).map_err(|err| format!("in file {}: {err}", path.display()))?;
-    let entries = parse(&contents, path)?;
+    let entries = parse_file(&contents, path)?;
 
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let mut merged = Vec::new();
@@ -325,7 +337,7 @@ fn resolve_uncycled(
         match entry {
             Entry::Include(include) => {
                 let include_path = resolve_include_path(parent, &include);
-                match resolve_inner(&include_path, ancestors, warnings) {
+                match resolve_inner(&include_path, parse_file, ancestors, warnings) {
                     Ok(included) => merge_into(&mut merged, included),
                     Err(err) => {
                         tracing::warn!(path = %include_path.display(), %err, "Failed to load included config file, skipping");
@@ -345,7 +357,7 @@ fn resolve_uncycled(
 /// Expands a leading `~/` against `$HOME` and resolves the result against
 /// `base_dir` (the including file's own directory) if it's not already
 /// absolute.
-fn resolve_include_path(base_dir: &Path, include: &str) -> PathBuf {
+pub(crate) fn resolve_include_path(base_dir: &Path, include: &str) -> PathBuf {
     let expanded = match include.strip_prefix("~/") {
         Some(rest) => match std::env::var_os("HOME") {
             Some(home) => PathBuf::from(home).join(rest),

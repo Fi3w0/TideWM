@@ -19,8 +19,9 @@
 //! module is unreferenced outside its tests until then.
 #![allow(dead_code)]
 
-use std::cell::RefCell;
-use std::path::Path;
+use std::cell::{Cell, RefCell};
+
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use mlua::{Function, Lua, StdLib, Value, Variadic};
@@ -211,6 +212,10 @@ struct Symbols {
     runtime_vars: std::collections::HashSet<String>,
     fns: std::collections::HashSet<String>,
     scopes: Vec<Option<std::collections::HashSet<String>>>,
+    /// Collect-mode emission: `$name` in strings is left verbatim instead
+    /// of erroring, so the resolve pre-pass can evaluate files whose
+    /// definitions live in other files. Never used for real configs.
+    lenient: bool,
 }
 
 impl Symbols {
@@ -252,17 +257,27 @@ impl<'a> Rewriter<'a> {
     fn classify_word(&self, word: &str) -> Result<String, String> {
         // `$` and `@` only mean "a config name inside a bare string" /
         // "a variable definition line". In an expression both are errors
-        // pointing at the identifier form.
+        // pointing at the identifier form (unless collecting, where
+        // everything stays literal text).
         if let Some(name) = word.strip_prefix('@') {
+            if self.sym.lenient {
+                return Ok(lua_quote(word));
+            }
             return Err(format!(
                 "`@{name}` only defines a variable on its own line (`@{name} = value`); in an expression use `{name}`"
             ));
         }
         if let Some(name) = word.strip_prefix('$') {
             if name == "wave" {
+                if self.sym.lenient {
+                    return Ok(lua_quote(word));
+                }
                 return Err(
                     "`$wave(...)` is for strings; in an expression call `wave(...)`".to_string(),
                 );
+            }
+            if self.sym.lenient {
+                return Ok(lua_quote(word));
             }
             if self.sym.in_scope(name) {
                 return Err(format!(
@@ -289,8 +304,14 @@ impl<'a> Rewriter<'a> {
                 return Ok(word.to_string()); // member access on a known identifier
             }
         }
+        // A statically known @variable folds to its literal value; a
+        // runtime variable, fn name, loop var, or fn param stays the
+        // identifier.
+        if let Some(text) = self.sym.statics.get(word) {
+            return Ok(classify_literal(text));
+        }
         if self.sym.in_scope(word) {
-            return Ok(word.to_string()); // defined @variable, fn name, loop var, or fn param
+            return Ok(word.to_string());
         }
         Ok(lua_quote(word))
     }
@@ -396,9 +417,14 @@ impl<'a> Rewriter<'a> {
                         lit.push_str(&repl);
                     }
                     None => {
-                        return Err(format!(
-                            "`${name}` is not defined; define it with `@{name} = value`, or quote the string if you mean literal text"
-                        ));
+                        if self.sym.lenient {
+                            lit.push('$');
+                            lit.push_str(name);
+                        } else {
+                            return Err(format!(
+                                "`${name}` is not defined; define it with `@{name} = value`, or quote the string if you mean literal text"
+                            ));
+                        }
                     }
                 }
                 for _ in 0..name_end {
@@ -465,6 +491,24 @@ fn op_token_len(chars: &[char], i: usize) -> Option<usize> {
         None // squeezed between two words: part of a word, not an operator
     } else {
         Some(len)
+    }
+}
+
+/// Re-classifies a statically known variable's text as a Lua literal:
+/// numbers, booleans, colors, and durations stay typed; anything else is
+/// a quoted string. This is what makes `@mod = SUPER` usable as
+/// `pointer_modifier = mod` in an expression.
+fn classify_literal(text: &str) -> String {
+    if is_number(text) || matches!(text, "true" | "false") {
+        text.to_string()
+    } else if is_color(text) {
+        let hex = text.strip_prefix('#').unwrap();
+        format!("_color({})", lua_quote(&hex[..6.min(hex.len())]))
+    } else if is_duration(text) {
+        let (num, unit) = split_duration(text).unwrap();
+        format!("_dur({}, {})", num, lua_quote(unit))
+    } else {
+        lua_quote(text)
     }
 }
 
@@ -545,13 +589,22 @@ fn find_matching_paren(s: &str) -> Option<usize> {
 
 /// The surface parser: `source` -> Lua chunk text.
 pub(crate) fn compile(source: &str, path: &Path) -> Result<String, String> {
+    compile_with(source, path, &mut Symbols::default())
+}
+
+/// `compile` with a caller-provided symbol table, so the resolve pass can
+/// make `@name` definitions from other files visible to this emitter.
+fn compile_with(
+    source: &str,
+    path: &Path,
+    sym: &mut Symbols,
+) -> Result<String, String> {
     let pre = strip_block_comments(source);
     let lines: Vec<&str> = pre.lines().collect();
     let mut pos = 0usize;
-    let mut sym = Symbols::default();
     let mut out = String::from("-- wave: compiled surface (generated; do not edit)\n");
     let mut depth = 0usize;
-    emit_body(&lines, &mut pos, &mut sym, &mut out, path, &mut depth)?;
+    emit_body(&lines, &mut pos, sym, &mut out, path, &mut depth)?;
     if depth != 0 {
         return Err(format!(
             "in file {}: unexpected end of file, missing a closing `}}`",
@@ -803,11 +856,17 @@ fn rewrite_value(value: &str, sym: &Symbols) -> Result<String, String> {
     } else {
         // single token
         if let Some(name) = value.strip_prefix('@') {
+            if sym.lenient {
+                return Ok(lua_quote(value));
+            }
             return Err(format!(
                 "`@{name}` only defines a variable on its own line (`@{name} = value`); as a value use `{name}`"
             ));
         }
         if let Some(name) = value.strip_prefix('$') {
+            if sym.lenient {
+                return Ok(lua_quote(value));
+            }
             if sym.in_scope(name) {
                 return Err(format!(
                     "`${name}` cannot be used as a value; use `{name}` (no `$`)"
@@ -827,6 +886,14 @@ fn rewrite_value(value: &str, sym: &Symbols) -> Result<String, String> {
         if is_duration(value) {
             let (num, unit) = split_duration(value).unwrap();
             return Ok(format!("_dur({}, {})", num, lua_quote(unit)));
+        }
+        if let Some(text) = sym.statics.get(value) {
+            return Ok(classify_literal(text));
+        }
+        if sym.in_scope(value) {
+            // a defined @variable, fn name, loop var, or fn param: the
+            // identifier, not the string of its name
+            return Ok(value.to_string());
         }
         rewriter.rewrite_string(value)
     }
@@ -1129,51 +1196,62 @@ fn top(stack: &EntryStack) -> EntrySink {
     stack.borrow().last().unwrap().clone()
 }
 
-/// Compiles and evaluates a Wave file, returning the same [`Entry`] list
-/// the line-based parser produces.
-pub(crate) fn evaluate(source: &str, path: &Path) -> Result<Vec<Entry>, String> {
-    let lua_source = compile(source, path)?;
-    // Sandboxed from creation: only math/string/table, no io/os/package.
-    let lua = Lua::new_with(
-        StdLib::MATH | StdLib::STRING | StdLib::TABLE,
-        mlua::LuaOptions::default(),
-    )
-    .map_err(|e| format!("in file {}: failed to create Lua state: {e}", path.display()))?;
-
-    let stack: EntryStack = Rc::new(RefCell::new(vec![Rc::new(RefCell::new(Vec::new()))]));
-
+/// Installs the registration environment into `lua`. All closures share
+/// the entry-sink `stack` and the `collect` flag: in collect mode (the
+/// resolve pre-pass) only `_vardef` has an effect, so `@name = value`
+/// definitions from every reachable file land in `statics_out` without
+/// producing entries.
+fn install_env(
+    lua: &Lua,
+    stack: &EntryStack,
+    collect: Rc<Cell<bool>>,
+    statics_out: Rc<RefCell<std::collections::HashMap<String, String>>>,
+) -> Result<(), String> {
+    let c1 = collect.clone();
     let s1 = stack.clone();
     lua.globals()
         .set(
             "_leaf",
             lua.create_function(move |_, (key, value): (String, Value)| {
-                let s = serialize_value(value).map_err(mlua::Error::external)?;
-                top(&s1).borrow_mut().push(Entry::Assign(key, s));
+                if !c1.get() {
+                    let s = serialize_value(value).map_err(mlua::Error::external)?;
+                    top(&s1).borrow_mut().push(Entry::Assign(key, s));
+                }
                 Ok(())
             })
             .map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())?;
 
+    let c2 = collect.clone();
     let s2 = stack.clone();
+    let st2 = statics_out.clone();
     lua.globals()
         .set(
             "_vardef",
             lua.create_function(move |lua, (name, value): (String, Value)| {
+                // Always: the global and the textually substitutable form.
                 lua.globals().set(name.clone(), value.clone())?;
                 let s = serialize_value(value).map_err(mlua::Error::external)?;
-                top(&s2).borrow_mut().push(Entry::VarDef(name, s));
+                st2.borrow_mut().insert(name.clone(), s.clone());
+                if !c2.get() {
+                    top(&s2).borrow_mut().push(Entry::VarDef(name, s));
+                }
                 Ok(())
             })
             .map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())?;
 
+    let c3 = collect.clone();
     let s3 = stack.clone();
     lua.globals()
         .set(
             "_block",
             lua.create_function(move |_, (keyword, header, builder): (String, String, Function)| {
+                if c3.get() {
+                    return Ok(());
+                }
                 let inner = Rc::new(RefCell::new(Vec::new()));
                 s3.borrow_mut().push(inner.clone());
                 builder.call::<()>(())?;
@@ -1186,11 +1264,15 @@ pub(crate) fn evaluate(source: &str, path: &Path) -> Result<Vec<Entry>, String> 
         )
         .map_err(|e| e.to_string())?;
 
+    let c4 = collect.clone();
     let s4 = stack.clone();
     lua.globals()
         .set(
             "bind",
             lua.create_function(move |_, (combo, action): (String, Value)| {
+                if c4.get() {
+                    return Ok(());
+                }
                 let sink = top(&s4);
                 let mut sink = sink.borrow_mut();
                 match action {
@@ -1218,6 +1300,9 @@ pub(crate) fn evaluate(source: &str, path: &Path) -> Result<Vec<Entry>, String> 
         )
         .map_err(|e| e.to_string())?;
 
+    // `include` is active in both rounds: the resolve walk needs the
+    // include entries from collect mode to know which files to recurse
+    // into for definitions.
     let s5 = stack.clone();
     lua.globals()
         .set(
@@ -1279,11 +1364,194 @@ pub(crate) fn evaluate(source: &str, path: &Path) -> Result<Vec<Entry>, String> 
         .set("tide", lua.create_table().map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
 
+    Ok(())
+}
+
+/// Compiles and evaluates a Wave file, returning the same [`Entry`] list
+/// the line-based parser produces.
+pub(crate) fn evaluate(source: &str, path: &Path) -> Result<Vec<Entry>, String> {
+    let lua_source = compile(source, path)?;
+    // Sandboxed from creation: only math/string/table, no io/os/package.
+    let lua = Lua::new_with(
+        StdLib::MATH | StdLib::STRING | StdLib::TABLE,
+        mlua::LuaOptions::default(),
+    )
+    .map_err(|e| format!("in file {}: failed to create Lua state: {e}", path.display()))?;
+
+    let stack: EntryStack = Rc::new(RefCell::new(vec![Rc::new(RefCell::new(Vec::new()))]));
+    let collect = Rc::new(Cell::new(false));
+    let statics = Rc::new(RefCell::new(std::collections::HashMap::new()));
+    install_env(&lua, &stack, collect, statics)?;
+
     let chunk = lua.load(&lua_source).set_name(path.display().to_string());
     chunk.exec().map_err(|e| format!("in file {}: {e}", path.display()))?;
 
     let entries = top(&stack).borrow().clone();
     Ok(entries)
+}
+
+/// The recursive include walk shared by both resolve rounds. `collect`
+/// selects the round; entries are merged with the same policy the
+/// line-based grammar uses (`waves::merge_into`), so include order, cycle
+/// detection, and the "including file's own keys win" contract are
+/// identical across formats.
+fn resolve_walk(
+    path: &Path,
+    ancestors: &mut Vec<PathBuf>,
+    warnings: &mut Vec<String>,
+    lua: &Lua,
+    stack: &EntryStack,
+    sym: &mut Symbols,
+    collect: Rc<Cell<bool>>,
+) -> Result<Vec<Entry>, String> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if ancestors.contains(&canonical) {
+        return Err(format!("include cycle detected in file {}", path.display()));
+    }
+    ancestors.push(canonical);
+    let result = resolve_uncycled(path, ancestors, warnings, lua, stack, sym, collect);
+    ancestors.pop();
+    result
+}
+
+fn resolve_uncycled(
+    path: &Path,
+    ancestors: &mut Vec<PathBuf>,
+    warnings: &mut Vec<String>,
+    lua: &Lua,
+    stack: &EntryStack,
+    sym: &mut Symbols,
+    collect: Rc<Cell<bool>>,
+) -> Result<Vec<Entry>, String> {
+    let contents =
+        std::fs::read_to_string(path).map_err(|err| format!("in file {}: {err}", path.display()))?;
+
+    // Each file evaluates as its own chunk; a fresh top-level sink keeps
+    // its entries separate from included files' entries.
+    stack.borrow_mut().push(Rc::new(RefCell::new(Vec::new())));
+    let lua_source = compile_with(&contents, path, sym)?;
+    let chunk = lua.load(&lua_source).set_name(path.display().to_string());
+    let run = || chunk.exec();
+    let exec_result = if sym.lenient {
+        // The collect round is best-effort: a file whose expressions
+        // reference definitions from a file evaluated later may fail
+        // here, and that is fine, round two is authoritative.
+        match run() {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                tracing::warn!(path = %path.display(), %err, "Wave definition-collection pass failed for this file, continuing");
+                Ok(())
+            }
+        }
+    } else {
+        run()
+    };
+    exec_result.map_err(|e| format!("in file {}: {e}", path.display()))?;
+    let file_entries = {
+        let sink = stack.borrow_mut().pop().unwrap();
+        let entries = sink.borrow().clone();
+        entries
+    };
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut merged = Vec::new();
+    let mut own_entries = Vec::with_capacity(file_entries.len());
+    for entry in file_entries {
+        match entry {
+            Entry::Include(include) => {
+                let include_path = super::waves::resolve_include_path(parent, &include);
+                match resolve_walk(&include_path, ancestors, warnings, lua, stack, sym, collect.clone()) {
+                    Ok(included) => super::waves::merge_into(&mut merged, included),
+                    Err(err) => {
+                        tracing::warn!(path = %include_path.display(), %err, "Failed to load included config file, skipping");
+                        warnings.push(format!(
+                            "Failed to load included config file: {err}, skipping"
+                        ));
+                    }
+                }
+            }
+            other => own_entries.push(other),
+        }
+    }
+    super::waves::merge_into(&mut merged, own_entries);
+    Ok(merged)
+}
+
+/// Reads `path` as Wave, resolving `include "..."` statements with the
+/// same merge policy, cycle detection, and include order as the
+/// line-based grammar.
+///
+/// Two rounds over one shared Lua state implement the shared-variable
+/// contract: round one evaluates every reachable file in collect mode so
+/// every `@name = value` definition (from any file, before or after its
+/// use) becomes textually substitutable in every emitter; round two
+/// evaluates with the full environment and the collected symbols, then
+/// merges per-file entry lists in include order.
+pub(crate) fn resolve(path: &Path) -> Result<(Vec<Entry>, Vec<String>), String> {
+    let lua = Lua::new_with(
+        StdLib::MATH | StdLib::STRING | StdLib::TABLE,
+        mlua::LuaOptions::default(),
+    )
+    .map_err(|e| format!("in file {}: failed to create Lua state: {e}", path.display()))?;
+    let stack: EntryStack = Rc::new(RefCell::new(vec![Rc::new(RefCell::new(Vec::new()))]));
+    let statics_out: Rc<RefCell<std::collections::HashMap<String, String>>> =
+        Rc::new(RefCell::new(std::collections::HashMap::new()));
+
+    // Round 1: collect definitions, leniently. Every reachable file
+    // evaluates in collect mode with a lenient emitter, so every
+    // `@name = value` (from any file, before or after its use) becomes
+    // textually substitutable in every round-two emitter.
+    let collect = Rc::new(Cell::new(true));
+    install_env(&lua, &stack, collect.clone(), statics_out.clone())?;
+    let mut ancestors = Vec::new();
+    let mut sym = Symbols {
+        lenient: true,
+        ..Default::default()
+    };
+    resolve_walk(path, &mut ancestors, &mut Vec::new(), &lua, &stack, &mut sym, collect.clone())?;
+
+    // Round 2: evaluate with the collected definitions visible to every
+    // emitter. `compile_with` mutates the shared symbols (loop/`fn`
+    // scopes are balanced per file; `@` re-definitions are idempotent).
+    collect.set(false);
+    sym.lenient = false;
+    sym.statics = statics_out.borrow().clone();
+    let mut warnings = Vec::new();
+    let entries = resolve_walk(path, &mut ancestors, &mut warnings, &lua, &stack, &mut sym, collect)?;
+
+    Ok((entries, warnings))
+}
+
+/// Does this file use constructs that only the new Wave grammar knows?
+///
+/// The dual-mode loader must not fall back to the old line-based grammar
+/// for such files: the old parser silently misparses them as garbage
+/// (`@mod = SUPER` becomes an assignment whose key is `@mod`, and
+/// `terminal = wave(...)` becomes a raw string). The checks are
+/// conservative, biased toward "new-only" so a fallback is never taken
+/// when it could be wrong. `$wave(` in a value is deliberately not a
+/// marker: it is valid in both grammars.
+pub(crate) fn uses_new_only_syntax(contents: &str) -> bool {
+    for raw in contents.lines() {
+        let line = strip_line_comment(raw).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('@') {
+            return true;
+        }
+        if line.starts_with("bind ") && line.contains('{') {
+            return true;
+        }
+        if let Some((_, value)) = line.split_once('=') {
+            let value = value.trim();
+            if value.starts_with('#') || (value.contains(['(', '[']) && !value.contains("$wave("))
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -1359,8 +1627,10 @@ mod tests {
         let lua = compile_str("@mod = SUPER\nbind $mod+Return { spawn:kitty }\n");
         assert!(lua.contains("_vardef(\"mod\", \"SUPER\")"));
         assert!(lua.contains("bind(\"SUPER+Return\", {\"spawn:kitty\"})"));
+        // statically known @variables fold their literal value into
+        // expressions: `extra` is 4, so `8 * extra` compiles to `8 * 4`
         let lua = compile_str("@extra = 4\ngaps = 8 * extra\n");
-        assert!(lua.contains("_leaf(\"gaps\", 8 * extra)"));
+        assert!(lua.contains("_leaf(\"gaps\", 8 * 4)"));
         // runtime variable: reachable as the identifier in expressions
         let lua = compile_str("@mod = SUPER\n@terminal = wave(kitty, sh)\nbind $mod+Return { spawn:$terminal }\n");
         assert!(lua.contains("_vardef(\"terminal\", wave(\"kitty\", \"sh\"))"));
@@ -1555,6 +1825,55 @@ spawn_at_startup = waybar
             .expect("old syntax should parse");
         let new_entries = evaluate(new, Path::new("new.wave")).expect("new syntax should evaluate");
         assert_eq!(old_entries, new_entries);
+    }
+
+    #[test]
+    fn uses_new_only_syntax_detects_new_constructs() {
+        // new-only: @ definitions, bind node forms, expressions, colors
+        assert!(uses_new_only_syntax("@mod = SUPER\n"));
+        assert!(uses_new_only_syntax("bind $mod+Q { close-window }\n"));
+        assert!(uses_new_only_syntax("terminal = wave(kitty, alacritty)\n"));
+        assert!(uses_new_only_syntax("color = #8EDDFF\n"));
+        assert!(uses_new_only_syntax("@mod = SUPER\nterminal = $wave(kitty)\n"));
+        // old-compatible: line-form binds, $wave() values, plain values
+        assert!(!uses_new_only_syntax("$mod = SUPER\nbind $mod+Q = close-window\n"));
+        assert!(!uses_new_only_syntax("terminal = $wave(kitty, alacritty)\n"));
+        assert!(!uses_new_only_syntax("include \"keybinds.wave\"\n# a comment\n"));
+        assert!(!uses_new_only_syntax("spawn_at_startup = sh -c \"echo hi\"\n"));
+    }
+
+    #[test]
+    fn resolve_handles_includes_in_new_syntax() {
+        let dir = std::env::temp_dir().join(format!(
+            "tidewm-wave-resolve-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("keybinds.wave"),
+            "@mod = SUPER\nbind $mod+Q { close-window }\n",
+        )
+        .unwrap();
+        let main = dir.join("config.wave");
+        std::fs::write(
+            &main,
+            "include \"keybinds.wave\"\nterminal = kitty\nbind $mod+Return { spawn:kitty }\n",
+        )
+        .unwrap();
+
+        let (entries, warnings) = resolve(&main).expect("should resolve");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            entries,
+            vec![
+                Entry::VarDef("mod".into(), "SUPER".into()),
+                Entry::Bind("SUPER+Q".into(), "close-window".into()),
+                Entry::Assign("terminal".into(), "kitty".into()),
+                Entry::Bind("SUPER+Return".into(), "spawn:kitty".into()),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

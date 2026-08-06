@@ -14,6 +14,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use smithay::input::keyboard::{xkb, Keysym, ModifiersState, XkbConfig};
 use smithay::reexports::calloop::channel::{self, Channel};
 
+use crate::wave;
 use crate::waves;
 
 /// A parsed, ready-to-match keybind: which modifiers must be held, which base
@@ -3501,16 +3502,47 @@ pub fn spawn_watcher() -> notify::Result<(RecommendedWatcher, Channel<Arc<Atomic
     Ok((watcher, rx))
 }
 
-/// Reads `path` as Waves, resolving `include` statements first (see
+/// Reads `path` as config, resolving `include` statements first (see
 /// `waves::resolve`), then lowers the merged entry list into a
 /// `RawConfig`. The single entry point both `Config::load` and
 /// `Config::reload` use so they stay consistent about how includes are
 /// resolved.
+///
+/// Dual-mode: the Wave engine (the new grammar, `wave::resolve`) is
+/// tried first. If it parses, its result is authoritative. If it fails
+/// and the file uses none of the new-only constructs
+/// (`wave::uses_new_only_syntax`), the old line-based grammar is tried
+/// as a fallback with a deprecation warning, so pre-rewrite configs keep
+/// working until the W8 migration. A file that uses new syntax never
+/// falls back: a parse error in it reports the Wave parser's message.
 fn load_raw_config(path: &Path) -> Result<(RawConfig, Vec<String>), String> {
-    let (entries, include_warnings) = waves::resolve(path)?;
+    let uses_new = std::fs::read_to_string(path)
+        .map(|contents| wave::uses_new_only_syntax(&contents))
+        .unwrap_or(false);
+
+    let (entries, warnings) = if uses_new {
+        wave::resolve(path)?
+    } else {
+        match wave::resolve(path) {
+            Ok(res) => res,
+            Err(wave_err) => match waves::resolve(path) {
+                Ok((entries, legacy_warnings)) => {
+                    // Log-only during the transition: the deprecation
+                    // notice belongs in the log, not in the on-screen
+                    // warning panel, until the W8 migration lands.
+                    tracing::warn!(
+                        "config uses the old line-based grammar; the new Wave syntax is preferred (see WAVE.md). The old grammar stays supported until the migration release."
+                    );
+                    (entries, legacy_warnings)
+                }
+                Err(_) => return Err(wave_err),
+            },
+        }
+    };
+
     let mut raw = lower_entries(&entries);
     substitute_variables_in_raw(&mut raw);
-    Ok((raw, include_warnings))
+    Ok((raw, warnings))
 }
 
 /// Lowers a fully-merged Waves entry list into a `RawConfig`, starting
@@ -7528,6 +7560,85 @@ mod tests {
             Some("toggle-fullscreen")
         );
         assert!(!raw.keybinds.contains_key("Super+Tab"));
+    }
+
+    #[test]
+    fn load_raw_config_accepts_new_wave_syntax_end_to_end() {
+        // The same config in the old line-based grammar and the new Wave
+        // grammar must lower to the same RawConfig.
+        let old = "$mod = SUPER\n\
+                   terminal = kitty\n\
+                   gaps = 8\n\
+                   border {\n\
+                       width = 2\n\
+                   }\n\
+                   input {\n\
+                       xkb_layout = us\n\
+                   }\n\
+                   bind $mod+Q = close-window\n\
+                   spawn_at_startup = waybar\n";
+        let new = "@mod = SUPER\n\
+                   terminal = kitty\n\
+                   gaps = 8\n\
+                   color = #8EDDFF\n\
+                   border {\n\
+                       width = 2\n\
+                   }\n\
+                   input {\n\
+                       xkb_layout = us\n\
+                   }\n\
+                   bind $mod+Q { close-window }\n\
+                   spawn_at_startup = waybar\n";
+
+        let dir_old = TestDir::new("wave-new-syntax-old");
+        let (raw_old, _) = load_raw_config(&dir_old.write("config.wave", old)).expect("old parses");
+        let dir_new = TestDir::new("wave-new-syntax-new");
+        let (raw_new, warnings) =
+            load_raw_config(&dir_new.write("config.wave", new)).expect("new evaluates");
+
+        assert!(warnings.is_empty(), "new syntax should not warn: {warnings:?}");
+        assert_eq!(raw_old.gaps, raw_new.gaps);
+        assert_eq!(raw_old.terminal, raw_new.terminal);
+        assert_eq!(raw_old.spawn_at_startup, raw_new.spawn_at_startup);
+        assert_eq!(
+            raw_new.keybinds.get("SUPER+Q").map(String::as_str),
+            Some("close-window")
+        );
+        assert!(!raw_new.keybinds.contains_key("$mod+Q"));
+    }
+
+    #[test]
+    fn load_raw_config_falls_back_to_old_grammar() {
+        let dir = TestDir::new("wave-old-fallback");
+        let main = dir.write(
+            "config.wave",
+            "$mod = SUPER\n\
+             bind $mod+Q = close-window\n\
+             terminal = $wave(definitely-not-a-real-binary, /bin/sh)\n",
+        );
+        // Old-syntax files load through the line-based grammar; the
+        // deprecation notice is log-only during the transition.
+        let (raw, warnings) = load_raw_config(&main).expect("old grammar should load");
+        assert_eq!(
+            raw.keybinds.get("SUPER+Q").map(String::as_str),
+            Some("close-window")
+        );
+        assert_eq!(raw.terminal, "/bin/sh");
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn load_raw_config_new_syntax_error_is_authoritative() {
+        // @mod is new-only syntax, so the Wave parser's error must
+        // surface. A fallback to the old grammar would silently misparse
+        // `gaps = $extra` as a raw string.
+        let dir = TestDir::new("wave-error-authoritative");
+        let main = dir.write(
+            "config.wave",
+            "@mod = SUPER\nbind $mod+Q { close-window }\ngaps = $extra\n",
+        );
+        let err = load_raw_config(&main).expect_err("new-syntax errors must not fall back");
+        assert!(err.contains("`$extra` is not defined"), "{err}");
     }
 
     #[test]
