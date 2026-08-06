@@ -76,20 +76,35 @@ A block is always multi-line. There are no one-liners: this is what keeps `key =
 
 ### Variables
 
-`$name = value` defines a variable. It substitutes textually inside strings, the Hyprland way:
+Wave separates the two roles a variable can play, with one marker each:
+
+- **`@name = value` defines** a variable. `@` appears only on definition lines, never anywhere else.
+- **`$name` references** it inside a bare string. `$` appears only in strings, never on a definition line.
+- **Expressions use the plain name**: `gaps = 8 * extra`. The `$` and `@` markers are both errors in expressions, with a message pointing at the identifier form.
 
 ```wave
-$mod = SUPER
-bind $mod+Return { spawn:kitty }
+@mod = SUPER
+@terminal = wave(kitty, alacritty, foot)
+
+bind $mod+Return { spawn:$terminal }
 ```
 
-And it is a real Lua global in expressions:
+A statically known definition (`@mod = SUPER`) substitutes its literal text into strings. A runtime definition (`@terminal = wave(...)`) splices through a concatenation, which is why `$terminal` works anywhere after its line.
+
+**Quoted strings are literal.** No substitution, no `$` processing: `"$HOME"` in a spawn command is verbatim text, and an env var can never collide with a config variable. An unquoted `$name` that is not defined is a loud compile error telling you to define it (`@name = value`) or quote it.
+
+Variables live in one shared environment, so a variable defined in an included file is visible to the includer and back. Loop variables and `fn` parameters are referenced the same way in strings: `$i`, `$key`, `$app`.
 
 ```wave
-gaps = 8 + $gap_extra
-```
+for i = 1, 9 do
+    bind $mod+Num$i { workspace:$i }
+end
 
-Variables live in one shared environment, so a variable defined in an included file is visible to the includer and back.
+fn media(key, app) {
+    bind $mod+$key { spawn:$app }
+}
+media(comma, spotify)
+```
 
 ### Lua statements
 
@@ -146,13 +161,14 @@ Same function, same semantics, one registry. The node form is sugar, not a secon
 
 ## Rough edges (honest notes)
 
-- **`$name` does two jobs.** It substitutes textually in strings and acts as a global in expressions. Usually that is the point. Occasionally it surprises: `$mod` inside a quoted string is text, not a value you can add to.
+- **`@` defines, `$` references.** One marker per role, and both are errors where they do not belong. `@mod` in an expression or `$mod` on a definition line tell you what to write instead. The error messages are the teaching tool.
+- **Quotes are literal.** No `$` processing inside `"..."`, so `"$HOME"` is verbatim and env vars can never collide with config variables. A bare `$name` that is not defined is a compile error, never silent text.
 - **Bare tokens are strings.** `spawn:rofi -show drun` needs quotes, because spaces end the token. The old grammar's "rest of the line" rule made that unnecessary; expressions made it impossible. Migration is one pass of quotes.
 - **`#` is a comment unless it starts a color.** `color = #8EDDFF` works, `# hello` is a comment. This is the one place the lexer looks ahead.
 - **Blocks are always multi-line.** The earlier grammar allowed one-line blocks; they were removed because they made `key = value` ambiguous.
 - **Config Lua is sandboxed.** No file, network, or process access from expressions. Config evaluation is deterministic on purpose, because diffing the old and new configs is what makes hot reload safe. Anything that touches the machine goes through TideWM actions (`spawn:...`), never through Lua IO.
 - **Durations need units.** `duration = 600` is an error. `duration = 600ms` is not. The unit is the type.
-- **Loops use `$i`.** A loop variable substitutes textually, the way `$mod` does. It looks like a config variable and is not one.
+- **Loops use `$i`.** A loop variable references through the same `$` in strings. It looks like a config variable and is not one, which is exactly why it uses the same marker.
 - **Aliases warn.** Renamed keys from the old format still parse, with a one-line deprecation warning in the panel. They go away after one release.
 
 ## The desugaring contract (for implementers)
@@ -164,7 +180,7 @@ This section is the exact surface-to-Lua mapping. The rule of thumb: the surface
 | Surface | Emitted Lua | Host behavior |
 | --- | --- | --- |
 | `key = value` (leaf) | `_leaf("key", value)` | Records an assignment entry; value serialized back to its textual form |
-| `$name = value` (variable) | `_vardef("name", value)` | Records a variable entry AND sets the Lua global `name` |
+| `@name = value` (variable) | `_vardef("name", value)` | Records a variable entry AND sets the Lua global `name` |
 | `name { }` (block) | `_block("name", "header", function() ... end)` | Runs the builder, captures produced entries into the block body |
 | `bind X { a b }` | `bind("X", {"a", "b"})` | One binding entry per action |
 | `bind X = action` (deprecated line form) | `bind("X", "action")` | Same registration, value is raw rest-of-line |
@@ -184,8 +200,9 @@ A line, after comment stripping, is dispatched on its first word:
 
 1. `}` alone closes a block. A line ending in `{` (trimmed) opens one: first word is the keyword, the rest is the header (one quoted string or one bare word).
 2. A reserved first word: `bind`, `include`, `fn`, `script`, `on`, `if`, `elseif`, `else`, `for`, `while`, `do`, `end`, `local`, `function`, `return`.
-3. `key = value`: key is a bare identifier, `=` follows, the value is parsed as a value (see below). `bind X = ...` is the deprecated bind line form.
-4. Anything else: an expression statement, which must be a call (`name(...)`). A bare word that is not a call is an error, so a typo reads as an error instead of a silent no-op.
+3. `@name = value`: a variable definition. `@` is the definition marker and appears nowhere else.
+4. `key = value`: key is a bare identifier, `=` follows, the value is parsed as a value (see below). `bind X = ...` is the deprecated bind line form.
+5. Anything else: an expression statement, which must be a call (`name(...)`). A bare word that is not a call is an error, so a typo reads as an error instead of a silent no-op.
 
 Blocks are always multi-line, with one exception: `bind X { a, b }` may be written on one line, actions split on commas. This is the only one-liner in the grammar.
 
@@ -200,14 +217,14 @@ Expression: tokenized on whitespace and the operator/separator characters `( ) [
 - numbers and quoted strings: as-is
 - `true` / `false` / `nil`: as-is
 - Lua keywords (`and`, `or`, `not`, `then`, ...): as-is
-- a word followed by `(` or a known identifier (defined `$name` global, `fn` name, loop variable, `fn` parameter): as-is
+- a word followed by `(` or a known identifier (a defined `@name` variable, `fn` name, loop variable, `fn` parameter): as-is
 - a word containing a dot, whose base is a known identifier: as-is (Lua member access)
 - a color token: `_color("RRGGBB")`
 - a duration token: `_dur(600, "ms")`
 - `$wave(`: `wave(` with the arguments rewritten
-- anything else: a quoted string. This is what makes `wave(kitty, alacrittic)` and `media(comma, spotify)` work without quotes.
+- anything else: a quoted string. This is what makes `wave(kitty, alacritty)` and `media(comma, spotify)` work without quotes.
 
-`$name` substitution: a statically defined `$name` (a `$name = literal` line) substitutes its literal text. An in-scope loop variable or `fn` parameter emits a concatenation (`"SUPER+Num" .. i`). Anything else (`$HOME`, `$PATH`) is left untouched.
+The markers have one role each, enforced with errors: `@` only defines (`@name = value` on its own line), `$` only references in bare strings, and both are compile errors in expressions with a message pointing at the identifier form. A `$name` that is not defined (not a `@name` variable, loop variable, or `fn` parameter) is a compile error, never silent text. A fully quoted string is literal: no `$` processing at all, so `"$HOME"` in a spawn command is verbatim.
 
 ### Strings inside binds
 
