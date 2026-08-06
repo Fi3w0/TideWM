@@ -1965,10 +1965,9 @@ pub(crate) fn evaluate(source: &str, path: &Path) -> Result<Vec<Entry>, String> 
 }
 
 /// The recursive include walk shared by both resolve rounds. `collect`
-/// selects the round; entries are merged with the same policy the
-/// line-based grammar uses (`waves::merge_into`), so include order, cycle
-/// detection, and the "including file's own keys win" contract are
-/// identical across formats.
+/// selects the round; entries are merged with the shared merge policy
+/// (`waves::merge_into`), so include order, cycle detection, and the
+/// "including file's own keys win" contract hold for every file.
 fn resolve_walk(
     path: &Path,
     ancestors: &mut Vec<PathBuf>,
@@ -2052,8 +2051,7 @@ fn resolve_uncycled(
 }
 
 /// Reads `path` as Wave, resolving `include "..."` statements with the
-/// same merge policy, cycle detection, and include order as the
-/// line-based grammar.
+/// shared merge policy, cycle detection, and include order.
 ///
 /// Two rounds over one shared Lua state implement the shared-variable
 /// contract: round one evaluates every reachable file in collect mode so

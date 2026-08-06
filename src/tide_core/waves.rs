@@ -31,8 +31,7 @@ pub(crate) enum Entry {
     /// section.
     Block(String, String, Vec<Entry>),
     /// `on "event" { ... }` -- the event name and the transpiled Lua
-    /// function source (a `function() ... end` literal). Produced only by
-    /// the Wave engine; the line-based grammar has no handlers.
+    /// function source (a `function() ... end` literal).
     Handler(String, String),
 }
 
