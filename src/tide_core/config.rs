@@ -3845,6 +3845,10 @@ fn lower_entries(entries: &[waves::Entry]) -> RawConfig {
             }
             // Already resolved away by `waves::resolve` before this ever runs.
             waves::Entry::Include(_) => {}
+            // Handlers live as live Lua functions in the session state
+            // (`_handlers`, registered by the `_on` environment
+            // function); the entry exists for the model and diagnostics.
+            waves::Entry::Handler(_, _) => {}
             waves::Entry::Assign(key, value) => apply_top_level_assign(&mut raw, key, value),
             waves::Entry::Block(keyword, header, body) => {
                 apply_top_level_block(&mut raw, keyword, header, body)

@@ -190,7 +190,7 @@ This section is the exact surface-to-Lua mapping. The rule of thumb: the surface
 | `if` / `for` / `while` / `do` / `end` / `else` / `elseif` / `local` / `function` / `return` | passed through verbatim | Lua statements; surface lines inside their bodies are still transpiled |
 | `fn name(args) { }` | `local function name(args) ... end` | Macro sugar; params are in scope for `$param` concatenation |
 | `script { }` | body passed through raw | No transpilation, no comment stripping |
-| `on "event" { }` | not yet | Landed in W7 |
+| `on "event" { }` | `_on("event", "function() ... end")` | Compiles the body on the session Lua, registers it under `_handlers[event]`; the compositor runs it when that event fires. `spawn(cmd)` / `action(str)` inside a handler queue an action that runs after the dispatch |
 
 The environment also exposes `math`, `string`, `table`, and a `tide` query table (empty in W1, populated in W7).
 
@@ -248,7 +248,7 @@ The old `bind X = rest-of-line` form parses and registers, with the action taken
 
 ### Deferred
 
-`on "event"` handlers (W7). Duration keys still carrying `_ms` spellings parse unit values (`settle = 400ms`) but keep their names until the W8 rename pass, which also converts the remaining key renames and the shipped default config. Config-level list semantics exist for `spawn = [...]`; other list keys land with their W8 renames.
+Duration keys still carrying `_ms` spellings parse unit values (`settle = 400ms`) but keep their names until the W8 rename pass, which also converts the remaining key renames and the shipped default config. Config-level list semantics exist for `spawn = [...]`; other list keys land with their W8 renames. `tidectl eval` exposes the live session: config globals, section tables, and the refreshed `tide` table.
 
 ## Wave outside TideWM
 

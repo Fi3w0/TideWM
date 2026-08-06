@@ -236,8 +236,9 @@ impl IpcEvent {
 
     /// Fine-grained event string for the JSON `event` field. One per
     /// variant so a widget can route on the specific change without
-    /// re-deriving it from the payload shape.
-    fn event_name(&self) -> &'static str {
+    /// re-deriving it from the payload shape. Also the name Wave `on`
+    /// handlers register under.
+    pub(crate) fn event_name(&self) -> &'static str {
         match self {
             IpcEvent::WindowOpened { .. } => "window-opened",
             IpcEvent::WindowClosed { .. } => "window-closed",

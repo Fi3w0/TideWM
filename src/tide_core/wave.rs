@@ -680,10 +680,8 @@ fn emit_body(
             continue;
         }
         if first == "on" {
-            return Err(format!(
-                "in file {} at line {line_no}: `on \"event\" {{ }}` handlers are not implemented yet (Wave roadmap W7)",
-                path.display()
-            ));
+            emit_on(line, line_no, sym, out, path, lines, pos, depth)?;
+            continue;
         }
 
         // -- variable definitions ---------------------------------------------
@@ -1038,8 +1036,7 @@ fn emit_bind_call(
 }
 
 #[allow(clippy::too_many_arguments)] // the shared surface-parser signature; refactor when W2 wires config.rs in
-fn emit_fn(
-    line: &str,
+fn emit_fn(    line: &str,
     line_no: usize,
     sym: &mut Symbols,
     out: &mut String,
@@ -1129,6 +1126,47 @@ fn emit_script(
         out.push_str(l);
         out.push('\n');
     }
+    Ok(())
+}
+
+/// `on "event" { ... }`: the body is transpiled as a Lua function, its
+/// source is registered via `_on` (which compiles it on the session Lua,
+/// stores it in `_handlers`, and records an `Entry::Handler`), so the
+/// handler runs when the compositor emits that event.
+#[allow(clippy::too_many_arguments)] // the shared surface-parser signature
+fn emit_on(
+    line: &str,
+    line_no: usize,
+    sym: &mut Symbols,
+    out: &mut String,
+    path: &Path,
+    lines: &[&str],
+    pos: &mut usize,
+    depth: &mut usize,
+) -> Result<(), String> {
+    let rest = line["on".len()..].trim();
+    let Some(open) = rest.find('{') else {
+        return Err(format!(
+            "in file {} at line {line_no}: `on` needs an event name and a block, e.g. `on \"workspace-changed\" {{`",
+            path.display()
+        ));
+    };
+    let event = rest[..open].trim();
+    let event = event
+        .strip_prefix('"')
+        .and_then(|e| e.strip_suffix('"'))
+        .unwrap_or(event);
+    if event.is_empty() {
+        return Err(format!(
+            "in file {} at line {line_no}: `on` needs an event name",
+            path.display()
+        ));
+    }
+    let mut body = String::new();
+    *depth += 1;
+    emit_body(lines, pos, sym, &mut body, path, depth)?;
+    let source = format!("function()\n{body}end");
+    out.push_str(&format!("_on({}, {})\n", lua_quote(event), lua_quote(&source)));
     Ok(())
 }
 
@@ -1641,6 +1679,66 @@ fn install_env(
     lua.globals()
         .set("_blocks", lua.create_table().map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
+    lua.globals()
+        .set("_handlers", lua.create_table().map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    lua.globals()
+        .set("_actions", lua.create_table().map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+
+    let c6 = collect.clone();
+    let s6 = stack.clone();
+    lua.globals()
+        .set(
+            "_on",
+            lua.create_function(move |lua, (event, source): (String, String)| {
+                if c6.get() {
+                    return Ok(());
+                }
+                let f: Function = lua.load(&source).eval().map_err(mlua::Error::external)?;
+                let handlers: mlua::Table = lua.globals().get("_handlers")?;
+                let for_event: mlua::Table = match handlers.get::<Value>(event.as_str())? {
+                    Value::Table(t) => t,
+                    _ => {
+                        let t = lua.create_table()?;
+                        handlers.set(event.as_str(), &t)?;
+                        t
+                    }
+                };
+                for_event.set(for_event.raw_len() + 1, f)?;
+                top(&s6).borrow_mut().push(Entry::Handler(event, source));
+                Ok(())
+            })
+            .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+
+    // Inside event handlers, `spawn(cmd)` and `action(string)` queue an
+    // action for the compositor to run after the event dispatch finishes
+    // (queued in `_actions`, drained by the compositor), so a handler
+    // cannot re-enter the event machinery mid-dispatch.
+    lua.globals()
+        .set(
+            "spawn",
+            lua.create_function(|lua, cmd: String| {
+                let actions: mlua::Table = lua.globals().get("_actions")?;
+                actions.set(actions.raw_len() + 1, format!("spawn:{cmd}"))?;
+                Ok(())
+            })
+            .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+    lua.globals()
+        .set(
+            "action",
+            lua.create_function(|lua, action: String| {
+                let actions: mlua::Table = lua.globals().get("_actions")?;
+                actions.set(actions.raw_len() + 1, action)?;
+                Ok(())
+            })
+            .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
 
     Ok(collect)
 }
@@ -2134,10 +2232,60 @@ mod tests {
     fn reserved_or_garbage_lines_error() {
         let err = compile("this is not valid\n", Path::new("test.wave")).unwrap_err();
         assert!(err.contains("line 1"));
-        let err = compile("on \"x\" {}\n", Path::new("test.wave")).unwrap_err();
-        assert!(err.contains("W7"));
+        // `on` without a block still errors
+        let err = compile("on \"x\"\n", Path::new("test.wave")).unwrap_err();
+        assert!(err.contains("needs an event name and a block"));
         let err = compile("}\n", Path::new("test.wave")).unwrap_err();
         assert!(err.contains("unexpected `}`"));
+    }
+
+    #[test]
+    fn on_handler_registers_and_queues_actions() {
+        let lua = Lua::new_with(
+            StdLib::MATH | StdLib::STRING | StdLib::TABLE,
+            mlua::LuaOptions::default(),
+        )
+        .unwrap();
+        let tide = TideInfo {
+            backend: "winit",
+            workspace: 3,
+            ..Default::default()
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "tidewm-wave-on-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let main = dir.join("config.wave");
+        std::fs::write(
+            &main,
+            "on \"workspace-changed\" {\n    if tide.workspace == 3 then\n        spawn(\"kitty\")\n    end\n}\n",
+        )
+        .unwrap();
+
+        let (entries, warnings) = resolve_with_lua(&lua, &tide, &main).expect("should resolve");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(entries.len(), 1);
+        let Entry::Handler(event, source) = &entries[0] else {
+            panic!("expected a handler entry, got {:?}", entries[0]);
+        };
+        assert_eq!(event, "workspace-changed");
+        assert!(source.contains("if tide.workspace == 3 then"), "{source}");
+
+        // The live function sits in the session Lua's _handlers table and
+        // queues a spawn through _actions when it runs.
+        let handlers: mlua::Table = lua.globals().get("_handlers").unwrap();
+        let for_event: mlua::Table = handlers.get("workspace-changed").unwrap();
+        let f: mlua::Function = for_event.get(1).unwrap();
+        f.call::<()>(()).expect("handler should run");
+        let actions: mlua::Table = lua.globals().get("_actions").unwrap();
+        let queued: Vec<String> = actions
+            .sequence_values()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(queued, vec!["spawn:kitty".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -171,6 +171,9 @@ pub struct Smallvil {
     pub(crate) config_lua: mlua::Lua,
     /// Live-compositor facts exposed to config as the `tide` table.
     pub(crate) tide: crate::wave::TideInfo,
+    /// Nesting guard for `on "event"` handlers (an action queued by a
+    /// handler can emit another event, which runs handlers again).
+    handler_depth: u32,
     /// Config parse/apply warnings from the last load or reload, kept so
     /// `tidectl report`'s quick check can show "config has N warnings"
     /// instead of the user having to reproduce them by saving the file.
@@ -2626,6 +2629,8 @@ impl Smallvil {
     /// the attempt is retired via `remove_ipc_subscriber` -- bounded
     /// memory wins over best-effort delivery to a wedged client.
     pub(crate) fn emit_ipc_event(&mut self, event: crate::ipc::IpcEvent) {
+        // Wave `on "event"` handlers run regardless of subscribers.
+        self.run_lua_handlers(&event);
         if self.ipc_subscribers.is_empty() {
             return;
         }
@@ -2946,6 +2951,7 @@ impl Smallvil {
             backend_name: "unknown",
             config_lua,
             tide,
+            handler_depth: 0,
             config_warnings: startup_config_warnings.clone(),
 
             config,
@@ -9805,6 +9811,60 @@ impl Smallvil {
             tracing::warn!(%err, "Failed to register config debounce timer; reloading immediately");
             self.reload_config();
         }
+    }
+
+    /// Runs `on "event"` handlers registered in the session Lua (the
+    /// config's `_handlers` table), then drains the actions they queued
+    /// through `spawn(...)`/`action(...)`. The tide table is refreshed
+    /// first so handlers see the live workspace/outputs. Guarded by a
+    /// nesting cap: a handler whose queued action emits another event
+    /// cannot recurse unboundedly.
+    pub(crate) fn run_lua_handlers(&mut self, event: &crate::ipc::IpcEvent) {
+        if self.handler_depth >= 16 {
+            tracing::warn!("Wave event handler nesting cap reached, skipping");
+            return;
+        }
+        self.handler_depth += 1;
+        self.sync_tide();
+        let name = event.event_name();
+        let run_result = (|| -> Result<(), mlua::Error> {
+            let handlers: mlua::Table = self.config_lua.globals().get("_handlers")?;
+            let mlua::Value::Table(for_event) = handlers.get::<mlua::Value>(name)? else {
+                return Ok(());
+            };
+            for pair in for_event.sequence_values::<mlua::Function>() {
+                let f = pair?;
+                if let Err(e) = f.call::<()>(()) {
+                    tracing::warn!(event = name, error = %e, "Wave event handler failed");
+                }
+            }
+            Ok(())
+        })();
+        if let Err(e) = run_result {
+            tracing::warn!(event = name, error = %e, "Wave event handlers could not run");
+        }
+        let queued: Vec<String> = self
+            .config_lua
+            .globals()
+            .get::<mlua::Table>("_actions")
+            .ok()
+            .and_then(|actions| {
+                actions
+                    .sequence_values::<String>()
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()
+            })
+            .unwrap_or_default();
+        if let Ok(actions) = self.config_lua.globals().get::<mlua::Table>("_actions") {
+            let _ = actions.clear();
+        }
+        for action in queued {
+            match crate::config::parse_action(&action) {
+                Some(parsed) => self.run_action(parsed),
+                None => tracing::warn!(action, "Wave handler queued an unknown action"),
+            }
+        }
+        self.handler_depth -= 1;
     }
 
     /// Refreshes the `tide` table's live facts (outputs and the first

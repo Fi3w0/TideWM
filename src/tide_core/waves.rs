@@ -41,6 +41,10 @@ pub(crate) enum Entry {
     /// "eDP-1", [...])`, or `Block("input", "", [...])` for a header-less
     /// section.
     Block(String, String, Vec<Entry>),
+    /// `on "event" { ... }` -- the event name and the transpiled Lua
+    /// function source (a `function() ... end` literal). Produced only by
+    /// the Wave engine; the line-based grammar has no handlers.
+    Handler(String, String),
 }
 
 /// Strips a `#` comment, but only outside a quoted string -- a spawn
@@ -250,6 +254,10 @@ pub(crate) fn merge_into(target: &mut Vec<Entry>, incoming: Vec<Entry>) {
             }
             Entry::Bind(combo, _) => {
                 target.retain(|e| !matches!(e, Entry::Bind(c, _) if c == combo));
+                target.push(entry);
+            }
+            Entry::Handler(event, _) => {
+                target.retain(|e| !matches!(e, Entry::Handler(ev, _) if ev == event));
                 target.push(entry);
             }
             Entry::Include(_) => {
