@@ -96,6 +96,7 @@ pub(crate) fn strip_line_comment(line: &str) -> &str {
 /// lines get exactly one space around the first `=`, trailing whitespace
 /// is dropped, and everything else (values, one-line binds, comments,
 /// `--[[ ]]` regions) is kept verbatim. Idempotent by construction.
+#[allow(dead_code)] // the wavefmt binary uses this file via #[path]
 pub(crate) fn format_source(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     let mut depth = 0usize;

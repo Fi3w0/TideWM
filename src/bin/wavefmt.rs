@@ -85,9 +85,7 @@ fn main() -> ExitCode {
             print!("{formatted}");
         }
     }
-    if failed {
-        ExitCode::from(1)
-    } else if check && any_unformatted {
+    if failed || (check && any_unformatted) {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS

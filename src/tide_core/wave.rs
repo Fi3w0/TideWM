@@ -21,7 +21,7 @@ use std::rc::Rc;
 
 use mlua::{FromLua, Function, Lua, StdLib, Value, Variadic};
 
-use super::wave_fmt::{split_line_comment, strip_block_comments, strip_line_comment};
+use super::wave_fmt::{strip_block_comments, strip_line_comment};
 
 use super::waves::Entry;
 
