@@ -165,6 +165,12 @@ pub struct Smallvil {
     /// surfaced through the IPC `diagnostics` request so `tidectl report`
     /// can say which code path a bug ran on without guessing from env.
     pub(crate) backend_name: &'static str,
+    /// The session Lua state config evaluates into: config globals and
+    /// section tables persist here after a load, which is what makes
+    /// `tidectl eval` and `on "event"` handlers work.
+    pub(crate) config_lua: mlua::Lua,
+    /// Live-compositor facts exposed to config as the `tide` table.
+    pub(crate) tide: crate::wave::TideInfo,
     /// Config parse/apply warnings from the last load or reload, kept so
     /// `tidectl report`'s quick check can show "config has N warnings"
     /// instead of the user having to reproduce them by saving the file.
@@ -2788,7 +2794,18 @@ impl Smallvil {
 
     pub fn new(event_loop: &mut EventLoop<'static, Smallvil>, display: Display<Self>) -> Self {
         let start_time = std::time::Instant::now();
-        let (config, startup_config_error, startup_config_warnings) = Config::load_with_error();
+        let config_lua = mlua::Lua::new_with(
+            mlua::StdLib::MATH | mlua::StdLib::STRING | mlua::StdLib::TABLE,
+            mlua::LuaOptions::default(),
+        )
+        .expect("creating the config Lua state must not fail");
+        let tide = crate::wave::TideInfo {
+            backend: "unknown", // main.rs sets backend_name after backend init
+            gpu_vendor: crate::wave::detect_gpu_vendor(),
+            ..Default::default()
+        };
+        let (config, startup_config_error, startup_config_warnings) =
+            Config::load_with_error_in(&config_lua, &tide);
         // Copied out before `config` moves into the `Self { config, .. }`
         // field below, so `layout: ...` further down can still read it.
         let default_layout = config.default_layout;
@@ -2927,6 +2944,8 @@ impl Smallvil {
             display_handle: dh,
             xwayland_satellite_pid: None,
             backend_name: "unknown",
+            config_lua,
+            tide,
             config_warnings: startup_config_warnings.clone(),
 
             config,
@@ -9788,11 +9807,57 @@ impl Smallvil {
         }
     }
 
+    /// Refreshes the `tide` table's live facts (outputs and the first
+    /// output's active workspace) from the current scene, then rebuilds
+    /// the Lua `tide` table so `tidectl eval` sees the live session.
+    pub(crate) fn sync_tide(&mut self) {
+        self.tide.backend = self.backend_name;
+        self.tide.outputs = self
+            .space
+            .outputs()
+            .filter_map(|output| {
+                let mode = output.current_mode()?;
+                Some((
+                    output.name().to_string(),
+                    mode.size.w as u32,
+                    mode.size.h as u32,
+                ))
+            })
+            .collect();
+        if let Some(first) = self.space.outputs().next() {
+            let name = first.name().to_string();
+            let workspace = self.layout.active_workspace(&name);
+            self.tide.workspace = i64::from(workspace);
+        }
+        if let Ok(tide_table) = crate::wave::build_tide_table(&self.config_lua, &self.tide) {
+            let _ = self.config_lua.globals().set("tide", tide_table);
+        }
+    }
+
+    /// Evaluates a Wave expression on the session Lua (the `tide` table
+    /// is refreshed first), returning the value as JSON for `tidectl
+    /// eval`. Config globals and section tables are visible, so
+    /// `theme.primary` and `mod` both answer.
+    pub(crate) fn eval_expression(
+        &mut self,
+        expression: &str,
+    ) -> Result<serde_json::Value, String> {
+        self.sync_tide();
+        let value: mlua::Value = self
+            .config_lua
+            .load(expression)
+            .set_name("eval")
+            .eval()
+            .map_err(|e| e.to_string())?;
+        crate::wave::lua_value_to_json(value)
+    }
+
     /// Re-reads the config file and applies what can be applied live
     /// (keybinds, input repeat rate). Shows a toast either way so a reload
     /// is never silent, success or failure.
     pub fn reload_config(&mut self) {
-        match Config::reload() {
+        self.sync_tide();
+        match Config::reload_in(&self.config_lua, &self.tide) {
             Ok((mut new_config, mut warnings)) => {
                 let had_error_overlay = self.config_error_overlay.take().is_some();
                 let diff =

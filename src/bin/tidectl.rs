@@ -345,6 +345,10 @@ fn build_request(args: &[String]) -> Result<Value, String> {
         "windows" => Ok(json!({ "request": "windows" })),
         "focused-window" | "focused" => Ok(json!({ "request": "focused-window" })),
         "active-submap" => Ok(json!({ "request": "active-submap" })),
+        "eval" if !rest.is_empty() => Ok(json!({
+            "request": "eval",
+            "expression": rest.join(" ")
+        })),
         "batch" if !rest.is_empty() => Ok(json!({ "request": "batch", "actions": rest })),
         "action" if !rest.is_empty() => Ok(action_request(&rest.join(" "))),
         "workspace" if !rest.is_empty() => {
@@ -427,6 +431,7 @@ fn print_response(command: &str, data: &Value) {
             Some(name) => println!("{name}"),
             None => println!("(none, base keybinds active)"),
         },
+        "eval" => println!("{}", serde_json::to_string_pretty(data).unwrap_or_default()),
         _ => println!("ok"),
     }
 }

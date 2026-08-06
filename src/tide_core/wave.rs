@@ -1382,13 +1382,53 @@ fn top(stack: &EntryStack) -> EntrySink {
 /// them back (sibling access like `primary.darken(0.35)` inside a
 /// `theme { }` block), and `_block` exposes the finished body as the
 /// block's global (`theme.primary` outside the block).
+/// The live-compositor facts exposed to config evaluation as the `tide`
+/// table: hardware conditionals (`if tide.backend == "udev" and
+/// tide.gpu.vendor == "nvidia"`), output-aware values, and the current
+/// workspace for event handlers and `tidectl eval`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TideInfo {
+    pub backend: &'static str,
+    pub gpu_vendor: &'static str,
+    /// (connector name, width, height) of the connected outputs.
+    pub outputs: Vec<(String, u32, u32)>,
+    /// The active workspace on the first output (0 when not meaningful).
+    pub workspace: i64,
+}
+
+/// The GPU vendor from sysfs: the first DRM card's PCI vendor id, mapped
+/// to a stable lowercase name for `tide.gpu.vendor`. `"unknown"` when
+/// there is no DRM card to read (the nested winit backend).
+pub(crate) fn detect_gpu_vendor() -> &'static str {
+    let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
+        return "unknown";
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with("card") || name.len() != 5 {
+            continue;
+        }
+        let Ok(vendor) = std::fs::read_to_string(entry.path().join("device/vendor")) else {
+            continue;
+        };
+        return match vendor.trim().to_lowercase().as_str() {
+            "0x10de" => "nvidia",
+            "0x1002" | "0x1022" => "amd",
+            "0x8086" => "intel",
+            _ => "unknown",
+        };
+    }
+    "unknown"
+}
+
 fn install_env(
     lua: &Lua,
     stack: &EntryStack,
     collect: Rc<Cell<bool>>,
     statics_out: Rc<RefCell<std::collections::HashMap<String, String>>>,
     bodies: Rc<RefCell<Vec<mlua::Table>>>,
-) -> Result<(), String> {
+    tide: &TideInfo,
+) -> Result<Rc<Cell<bool>>, String> {
     let c1 = collect.clone();
     let s1 = stack.clone();
     let b1 = bodies.clone();
@@ -1418,6 +1458,9 @@ fn install_env(
             lua.create_function(move |lua, (name, value): (String, Value)| {
                 // Always: the global and the textually substitutable form.
                 lua.globals().set(name.clone(), value.clone())?;
+                lua.globals()
+                    .get::<mlua::Table>("_vars")?
+                    .set(name.as_str(), true)?;
                 let s = serialize_value(value).map_err(mlua::Error::external)?;
                 st2.borrow_mut().insert(name.clone(), s.clone());
                 if !c2.get() {
@@ -1454,6 +1497,9 @@ fn install_env(
                     let globals = lua.globals();
                     if globals.get::<Value>(keyword.as_str())?.is_nil() {
                         globals.set(keyword.as_str(), body_table)?;
+                        globals
+                            .get::<mlua::Table>("_blocks")?
+                            .set(keyword.as_str(), true)?;
                     }
                     let body = inner.borrow().clone();
                     top(&s3).borrow_mut().push(Entry::Block(keyword, header, body));
@@ -1475,9 +1521,7 @@ fn install_env(
                         "a block field was referenced outside any block",
                     ));
                 };
-                let v: Value = body.get(name.as_str())?;
-                eprintln!("=== _field({name}) -> {}", v.type_name());
-                Ok(v)
+                body.get::<Value>(name.as_str())
             })
             .map_err(|e| e.to_string())?,
         )
@@ -1586,10 +1630,93 @@ fn install_env(
         .map_err(|e| e.to_string())?;
 
     lua.globals()
-        .set("tide", lua.create_table().map_err(|e| e.to_string())?)
+        .set(
+            "tide",
+            build_tide_table(lua, tide).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+    lua.globals()
+        .set("_vars", lua.create_table().map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    lua.globals()
+        .set("_blocks", lua.create_table().map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
 
-    Ok(())
+    Ok(collect)
+}
+
+/// Builds the `tide` table from the caller's live-compositor facts.
+pub(crate) fn build_tide_table(lua: &Lua, tide: &TideInfo) -> Result<mlua::Table, mlua::Error> {
+    let table = lua.create_table()?;
+    table.set("backend", tide.backend)?;
+    let gpu = lua.create_table()?;
+    gpu.set("vendor", tide.gpu_vendor)?;
+    table.set("gpu", gpu)?;
+    let outputs = lua.create_table()?;
+    for (i, (name, width, height)) in tide.outputs.iter().enumerate() {
+        let output = lua.create_table()?;
+        output.set("name", name.as_str())?;
+        output.set("width", *width)?;
+        output.set("height", *height)?;
+        outputs.set(i + 1, output)?;
+    }
+    table.set("outputs", outputs)?;
+    table.set("workspace", tide.workspace)?;
+    Ok(table)
+}
+
+/// A Lua value as JSON for `tidectl eval`: scalars, durations and colors
+/// as their config strings, lists as arrays, plain tables as objects.
+pub(crate) fn lua_value_to_json(value: Value) -> Result<serde_json::Value, String> {
+    match value {
+        Value::Nil => Ok(serde_json::Value::Null),
+        Value::Boolean(b) => Ok(serde_json::Value::Bool(b)),
+        Value::Integer(i) => Ok(serde_json::Value::from(i)),
+        Value::Number(n) => serde_json::Number::from_f64(n)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| "number could not be represented as JSON".to_string()),
+        Value::String(s) => Ok(serde_json::Value::String(s.to_string_lossy())),
+        Value::UserData(ud) => {
+            if let Ok(d) = ud.borrow::<DurationValue>() {
+                return Ok(serde_json::Value::String(d.serialize()));
+            }
+            if let Ok(c) = ud.borrow::<ColorValue>() {
+                return Ok(serde_json::Value::String(c.serialize()));
+            }
+            Err("unsupported userdata in eval result".to_string())
+        }
+        Value::Table(t) => {
+            // A dense sequence becomes an array; otherwise an object of
+            // scalar fields (nested tables recurse).
+            let mut is_array = true;
+            let n = t.raw_len();
+            for i in 1..=n {
+                if t.raw_get::<Value>(i).is_err() {
+                    is_array = false;
+                    break;
+                }
+            }
+            if is_array && n > 0 {
+                let mut out = Vec::new();
+                for i in 1..=n {
+                    let v: Value = t.raw_get(i).map_err(|e| e.to_string())?;
+                    out.push(lua_value_to_json(v)?);
+                }
+                Ok(serde_json::Value::Array(out))
+            } else {
+                let mut out = serde_json::Map::new();
+                for pair in t.pairs::<mlua::Value, mlua::Value>() {
+                    let (k, v) = pair.map_err(|e| e.to_string())?;
+                    let mlua::Value::String(key) = k else {
+                        continue;
+                    };
+                    out.insert(key.to_string_lossy(), lua_value_to_json(v)?);
+                }
+                Ok(serde_json::Value::Object(out))
+            }
+        }
+        other => Err(format!("unsupported value type in eval result: {}", other.type_name())),
+    }
 }
 
 /// Compiles and evaluates a Wave file, returning the same [`Entry`] list
@@ -1608,7 +1735,7 @@ pub(crate) fn evaluate(source: &str, path: &Path) -> Result<Vec<Entry>, String> 
     let collect = Rc::new(Cell::new(false));
     let statics = Rc::new(RefCell::new(std::collections::HashMap::new()));
     let bodies = Rc::new(RefCell::new(Vec::new()));
-    install_env(&lua, &stack, collect, statics, bodies)?;
+    install_env(&lua, &stack, collect, statics, bodies, &TideInfo::default())?;
 
     let chunk = lua.load(&lua_source).set_name(path.display().to_string());
     chunk.exec().map_err(|e| format!("in file {}: {e}", path.display()))?;
@@ -1714,12 +1841,27 @@ fn resolve_uncycled(
 /// use) becomes textually substitutable in every emitter; round two
 /// evaluates with the full environment and the collected symbols, then
 /// merges per-file entry lists in include order.
+#[cfg(test)]
 pub(crate) fn resolve(path: &Path) -> Result<(Vec<Entry>, Vec<String>), String> {
     let lua = Lua::new_with(
         StdLib::MATH | StdLib::STRING | StdLib::TABLE,
         mlua::LuaOptions::default(),
     )
     .map_err(|e| format!("in file {}: failed to create Lua state: {e}", path.display()))?;
+    resolve_with_lua(&lua, &TideInfo::default(), path)
+}
+
+/// `resolve` on a caller-owned Lua state: the runtime path (Smallvil's
+/// session Lua) so `@name` globals and section tables persist after the
+/// load and stay queryable through `tidectl eval` and `on` handlers.
+/// The environment is re-installed on each call (fresh `tide`, fresh
+/// `_vars`/`_blocks` tracking, and stale user globals from a previous
+/// config are cleared before the real round).
+pub(crate) fn resolve_with_lua(
+    lua: &Lua,
+    tide: &TideInfo,
+    path: &Path,
+) -> Result<(Vec<Entry>, Vec<String>), String> {
     let stack: EntryStack = Rc::new(RefCell::new(vec![Rc::new(RefCell::new(Vec::new()))]));
     let statics_out: Rc<RefCell<std::collections::HashMap<String, String>>> =
         Rc::new(RefCell::new(std::collections::HashMap::new()));
@@ -1730,24 +1872,41 @@ pub(crate) fn resolve(path: &Path) -> Result<(Vec<Entry>, Vec<String>), String> 
     // textually substitutable in every round-two emitter.
     let bodies = Rc::new(RefCell::new(Vec::new()));
     let collect = Rc::new(Cell::new(true));
-    install_env(&lua, &stack, collect.clone(), statics_out.clone(), bodies)?;
+    install_env(lua, &stack, collect.clone(), statics_out.clone(), bodies, tide)?;
     let mut ancestors = Vec::new();
     let mut sym = Symbols {
         lenient: true,
         ..Default::default()
     };
-    resolve_walk(path, &mut ancestors, &mut Vec::new(), &lua, &stack, &mut sym, collect.clone())?;
+    resolve_walk(path, &mut ancestors, &mut Vec::new(), lua, &stack, &mut sym, collect.clone())?;
 
     // Round 2: evaluate with the collected definitions visible to every
     // emitter. `compile_with` mutates the shared symbols (loop/`fn`
     // scopes are balanced per file; `@` re-definitions are idempotent).
+    // Stale globals from a previous config load are dropped first so a
+    // removed `@name` or `name { }` block cannot keep answering evals.
     collect.set(false);
+    clear_user_globals(lua).map_err(|e| format!("in file {}: {e}", path.display()))?;
     sym.lenient = false;
     sym.statics = statics_out.borrow().clone();
     let mut warnings = Vec::new();
-    let entries = resolve_walk(path, &mut ancestors, &mut warnings, &lua, &stack, &mut sym, collect)?;
+    let entries = resolve_walk(path, &mut ancestors, &mut warnings, lua, &stack, &mut sym, collect)?;
 
     Ok((entries, warnings))
+}
+
+/// Nils the Lua globals that user config (not the environment) created:
+/// `@name` variables and section tables, tracked in `_vars`/`_blocks`.
+fn clear_user_globals(lua: &Lua) -> Result<(), mlua::Error> {
+    for table_name in ["_vars", "_blocks"] {
+        let tracked: mlua::Table = lua.globals().get(table_name)?;
+        for pair in tracked.pairs::<String, bool>() {
+            let (name, _) = pair?;
+            lua.globals().set(name.as_str(), mlua::Value::Nil)?;
+        }
+        tracked.clear()?;
+    }
+    Ok(())
 }
 
 /// Does this file use constructs that only the new Wave grammar knows?

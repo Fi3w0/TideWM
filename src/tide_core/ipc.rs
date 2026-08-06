@@ -97,6 +97,13 @@ enum Request {
     Batch {
         actions: Vec<String>,
     },
+    /// Evaluate a Wave expression on the compositor's session Lua and
+    /// return the value as JSON: `{"request": "eval", "expression":
+    /// "theme.primary"}`. Config globals and section tables are visible,
+    /// and the `tide` table is refreshed before evaluation.
+    Eval {
+        expression: String,
+    },
     /// Long-lived subscribe mode -- see the module docs. `events: None`
     /// means "all event kinds"; an explicit list filters server-side so a
     /// bar that only cares about workspace changes doesn't pay for
@@ -819,6 +826,10 @@ fn handle_request(state: &mut Smallvil, request: Request) -> serde_json::Value {
                 Err(err) => json!({ "ok": false, "error": err }),
             },
             None => json!({ "ok": false, "error": format!("unknown action: {action}") }),
+        },
+        Request::Eval { expression } => match state.eval_expression(&expression) {
+            Ok(value) => json!({ "ok": true, "data": value }),
+            Err(err) => json!({ "ok": false, "error": err }),
         },
         Request::Batch { actions } => {
             if actions.is_empty() || actions.len() > MAX_BATCH_ACTIONS {

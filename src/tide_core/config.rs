@@ -1018,10 +1018,26 @@ impl Config {
     /// Callers that only need the old fallback behavior can continue using
     /// `load()`.
     pub fn load_with_error() -> (Self, Option<String>, Vec<String>) {
+        let lua = mlua::Lua::new_with(
+            mlua::StdLib::MATH | mlua::StdLib::STRING | mlua::StdLib::TABLE,
+            mlua::LuaOptions::default(),
+        )
+        .expect("creating the config Lua state must not fail");
+        Self::load_with_error_in(&lua, &wave::TideInfo::default())
+    }
+
+    /// [`Config::load_with_error`] on a caller-owned session Lua with the
+    /// live-compositor facts (`tide` table): the runtime path, so
+    /// hardware conditionals see the real machine and config globals
+    /// persist for `tidectl eval` and `on` handlers.
+    pub(crate) fn load_with_error_in(
+        lua: &mlua::Lua,
+        tide: &wave::TideInfo,
+    ) -> (Self, Option<String>, Vec<String>) {
         let path = config_path();
 
         let (raw, error, include_warnings, entries) = if path.exists() {
-            match load_raw_config(&path) {
+            match load_raw_config_in(lua, tide, &path) {
                 Ok((raw, include_warnings, entries)) => (raw, None, include_warnings, entries),
                 Err(err) => {
                     tracing::warn!(%err, path = %path.display(), "Failed to parse config, using defaults");
@@ -1053,7 +1069,7 @@ impl Config {
             // actually resolves on this very first boot, not just on the
             // next reload.
             let (default, include_warnings, entries) =
-                load_raw_config(&path).unwrap_or_else(|err| {
+                load_raw_config_in(lua, tide, &path).unwrap_or_else(|err| {
                     tracing::error!(%err, "Built-in default Waves config failed to parse");
                     (RawConfig::default(), Vec::new(), Vec::new())
                 });
@@ -1073,7 +1089,17 @@ impl Config {
     /// successful reload is the same dropped-keybind/footgun-lint
     /// diagnostics `from_raw` produces -- empty in the common case.
     pub fn reload() -> Result<(Self, Vec<String>), String> {
-        let (raw, include_warnings, entries) = load_raw_config(&config_path())?;
+        let lua = mlua::Lua::new_with(
+            mlua::StdLib::MATH | mlua::StdLib::STRING | mlua::StdLib::TABLE,
+            mlua::LuaOptions::default(),
+        )
+        .map_err(|e| format!("failed to create config Lua state: {e}"))?;
+        Self::reload_in(&lua, &wave::TideInfo::default())
+    }
+
+    /// [`Config::reload`] on the session Lua with live-compositor facts.
+    pub(crate) fn reload_in(lua: &mlua::Lua, tide: &wave::TideInfo) -> Result<(Self, Vec<String>), String> {
+        let (raw, include_warnings, entries) = load_raw_config_in(lua, tide, &config_path())?;
         let (mut config, mut warnings) = Self::from_raw(raw);
         warnings.extend(include_warnings);
         config.loaded_entries = entries;
@@ -3525,15 +3551,33 @@ pub fn spawn_watcher() -> notify::Result<(RecommendedWatcher, Channel<Arc<Atomic
 /// as a fallback with a deprecation warning, so pre-rewrite configs keep
 /// working until the W8 migration. A file that uses new syntax never
 /// falls back: a parse error in it reports the Wave parser's message.
+#[cfg(test)]
 fn load_raw_config(path: &Path) -> Result<(RawConfig, Vec<String>, Vec<waves::Entry>), String> {
+    let lua = mlua::Lua::new_with(
+        mlua::StdLib::MATH | mlua::StdLib::STRING | mlua::StdLib::TABLE,
+        mlua::LuaOptions::default(),
+    )
+    .map_err(|e| format!("in file {}: failed to create Lua state: {e}", path.display()))?;
+    load_raw_config_in(&lua, &wave::TideInfo::default(), path)
+}
+
+/// [`load_raw_config`] on a caller-owned session Lua with live-compositor
+/// facts: the runtime path, so hardware conditionals
+/// (`if tide.backend == "udev" then ...`) see the real machine and the
+/// resulting globals persist for `tidectl eval` and `on` handlers.
+fn load_raw_config_in(
+    lua: &mlua::Lua,
+    tide: &wave::TideInfo,
+    path: &Path,
+) -> Result<(RawConfig, Vec<String>, Vec<waves::Entry>), String> {
     let uses_new = std::fs::read_to_string(path)
         .map(|contents| wave::uses_new_only_syntax(&contents))
         .unwrap_or(false);
 
     let (entries, warnings) = if uses_new {
-        wave::resolve(path)?
+        wave::resolve_with_lua(lua, tide, path)?
     } else {
-        match wave::resolve(path) {
+        match wave::resolve_with_lua(lua, tide, path) {
             Ok(res) => res,
             Err(wave_err) => match waves::resolve(path) {
                 Ok((entries, legacy_warnings)) => {
@@ -8065,6 +8109,75 @@ mod tests {
         assert_eq!(border.active_to[0], 0x5C as f32 / 255.0);
         assert_eq!(border.active_to[1], 0x90 as f32 / 255.0);
         assert_eq!(border.active_to[2], 0xA6 as f32 / 255.0);
+    }
+
+    #[test]
+    fn hardware_conditionals_see_the_tide_table() {
+        let lua = mlua::Lua::new_with(
+            mlua::StdLib::MATH | mlua::StdLib::STRING | mlua::StdLib::TABLE,
+            mlua::LuaOptions::default(),
+        )
+        .unwrap();
+        let config = "@mod = SUPER\n\
+                      if tide.backend == \"udev\" and tide.gpu.vendor == \"nvidia\" then\n\
+                          udev {\n\
+                              disable_overlay_planes = true\n\
+                          }\n\
+                      end\n\
+                      gaps = 8\n";
+        let dir = TestDir::new("wave-tide");
+        let main = dir.write("config.wave", config);
+
+        // Nvidia on the real backend: the workaround applies.
+        let tide = wave::TideInfo {
+            backend: "udev",
+            gpu_vendor: "nvidia",
+            ..Default::default()
+        };
+        let (raw, warnings, _) = load_raw_config_in(&lua, &tide, &main).expect("should parse");
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        // AMD: the conditional is false, so no udev block and no warning.
+        let tide = wave::TideInfo {
+            backend: "udev",
+            gpu_vendor: "amd",
+            ..Default::default()
+        };
+        let (raw_amd, _, _) = load_raw_config_in(&lua, &tide, &main).expect("should parse");
+        assert_eq!(raw_amd.gaps, raw.gaps);
+    }
+
+    #[test]
+    fn config_globals_persist_on_the_session_lua_for_eval() {
+        let lua = mlua::Lua::new_with(
+            mlua::StdLib::MATH | mlua::StdLib::STRING | mlua::StdLib::TABLE,
+            mlua::LuaOptions::default(),
+        )
+        .unwrap();
+        let tide = wave::TideInfo {
+            backend: "winit",
+            ..Default::default()
+        };
+        let dir = TestDir::new("wave-eval-globals");
+        let main = dir.write(
+            "config.wave",
+            "@mod = SUPER\nterminal = wave(sh)\ntheme {\n    primary = #8EDDFF\n}\n",
+        );
+        load_raw_config_in(&lua, &tide, &main).expect("should parse");
+        // After the load, the session Lua still answers queries:
+        // @mod is a global, theme is a section table, wave() resolved.
+        assert_eq!(
+            lua.load("mod").eval::<String>().expect("mod global"),
+            "SUPER"
+        );
+        // Section tables and colors survive as values on the session Lua.
+        let primary = lua.load("theme.primary").eval::<mlua::Value>().unwrap();
+        assert_eq!(
+            wave::lua_value_to_json(primary).expect("color as JSON"),
+            serde_json::json!("8EDDFF")
+        );
+        // The tide table carries the loader's facts.
+        assert_eq!(lua.load("tide.backend").eval::<String>().unwrap(), "winit");
     }
 
     #[test]
