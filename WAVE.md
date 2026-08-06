@@ -6,6 +6,8 @@ Wave is a config format that is data on the surface and Lua underneath. This fil
 
 Wave is TideWM's config format. The line-based grammar it replaced was removed with the rewrite; `WAVE.md` describes the format as it is, and the rewrite's roadmap lives in `AGENT.md`.
 
+The name "Wave" was already taken by another language, so the standalone, tool-agnostic version of this format is **Scorium**: same grammar, its own parser crate, embeddable in any project that uses YAML or JSON today. TideWM keeps calling its config format Wave; outside TideWM it is Scorium.
+
 ## What Wave is
 
 Every Wave file has two layers.
@@ -249,8 +251,8 @@ The old `bind X = rest-of-line` form parses and registers, with the action taken
 
 Duration keys still carrying `_ms` spellings parse unit values (`settle = 400ms`) but keep their names until the W8 rename pass, which also converts the remaining key renames and the shipped default config. Config-level list semantics exist for `spawn = [...]`; other list keys land with their W8 renames. `tidectl eval` exposes the live session: config globals, section tables, and the refreshed `tide` table.
 
-## Wave outside TideWM
+## Scorium (the format outside TideWM)
 
-Wave is TideWM's format today, but nothing about the grammar is TideWM-shaped. It knows nodes, leaves, statements, and typed values; it does not know workspaces. A config schema is just the set of node and key names an application accepts, so the parser is meant to lift into its own crate and embed anywhere YAML or JSON is used today, with two things those formats do not give you: computation in the file, and typed values your application defines, like colors and durations. `wavefmt` and the error conventions come with it.
+Nothing about the grammar is TideWM-shaped. It knows nodes, leaves, statements, and typed values; it does not know workspaces. A config schema is just the set of node and key names an application accepts, so the parser is meant to lift into its own crate as **Scorium** and embed anywhere YAML or JSON is used today, with two things those formats do not give you: computation in the file, and typed values your application defines, like colors and durations. `wavefmt` and the error conventions come with it. The grammar stays engine-agnostic from the start so the extraction is a move, not a rewrite.
 
 That is the point of the slogan. The surface is a configuration file. Underneath, it is Lua. Make waves with Lua.
