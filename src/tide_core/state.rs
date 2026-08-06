@@ -150,6 +150,16 @@ pub struct Smallvil {
     pub socket_name: OsString,
     pub display_handle: DisplayHandle,
 
+    /// PID of the spawned `xwayland-satellite` child, if xwayland is
+    /// enabled and it started successfully. Every X11 application arrives
+    /// at TideWM as one of satellite's own Wayland surfaces (see the
+    /// `xwayland` module docs), so comparing a surface's client PID
+    /// against this one is how `rule { xwayland = ... }` tells an X11
+    /// window apart from a native Wayland one -- there's no XWayland
+    /// protocol marker to introspect instead. Set once in `main.rs` right
+    /// after `xwayland::setup` returns; never changes afterward.
+    pub(crate) xwayland_satellite_pid: Option<i32>,
+
     /// Which backend is driving this session: `"winit"` (nested) or
     /// `"udev"` (standalone DRM/TTY). Set by `main.rs` after backend init;
     /// surfaced through the IPC `diagnostics` request so `tidectl report`
@@ -1337,8 +1347,10 @@ impl Smallvil {
             return 0.0;
         }
         let (app_id, title) = self.toplevel_identity(surface);
+        let pid = self.client_pid(surface);
+        let is_xwayland = self.is_xwayland_surface(surface);
         self.config
-            .resolve_window_rules(app_id.as_deref(), title.as_deref())
+            .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland)
             .viscosity
             .unwrap_or(self.config.viscosity)
             .clamp(0.0, 4.0)
@@ -1406,8 +1418,10 @@ impl Smallvil {
             return false;
         }
         let (app_id, title) = self.toplevel_identity(surface);
+        let pid = self.client_pid(surface);
+        let is_xwayland = self.is_xwayland_surface(surface);
         self.config
-            .resolve_window_rules(app_id.as_deref(), title.as_deref())
+            .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland)
             .sway
             .unwrap_or(self.config.sway.enabled)
     }
@@ -1417,8 +1431,10 @@ impl Smallvil {
     /// of the global `depth { enabled }` setting.
     fn depth_exempt(&self, surface: &WlSurface) -> bool {
         let (app_id, title) = self.toplevel_identity(surface);
+        let pid = self.client_pid(surface);
+        let is_xwayland = self.is_xwayland_surface(surface);
         self.config
-            .resolve_window_rules(app_id.as_deref(), title.as_deref())
+            .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland)
             .depth
             == Some(false)
     }
@@ -1462,8 +1478,10 @@ impl Smallvil {
             return crate::config::FloatPhysicsTier::Off;
         }
         let (app_id, title) = self.toplevel_identity(surface);
+        let pid = self.client_pid(surface);
+        let is_xwayland = self.is_xwayland_surface(surface);
         self.config
-            .resolve_window_rules(app_id.as_deref(), title.as_deref())
+            .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland)
             .float_physics
             .unwrap_or(self.config.float_physics.tier)
     }
@@ -2556,9 +2574,11 @@ impl Smallvil {
             .iter()
             .filter(|surface| {
                 let (app_id, title) = self.toplevel_identity(surface);
+                let pid = self.client_pid(surface);
+                let is_xwayland = self.is_xwayland_surface(surface);
                 let rule = self
                     .config
-                    .resolve_window_rules(app_id.as_deref(), title.as_deref());
+                    .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
                 let cfg = self.config.resolve_ripple_config(
                     rule.ripple.as_ref(),
                     crate::config::RippleTrigger::Urgent,
@@ -2905,6 +2925,7 @@ impl Smallvil {
         Self {
             start_time,
             display_handle: dh,
+            xwayland_satellite_pid: None,
             backend_name: "unknown",
             config_warnings: startup_config_warnings.clone(),
 
@@ -5094,9 +5115,11 @@ impl Smallvil {
 
     fn frost_config_for_surface(&self, surface: &WlSurface) -> crate::config::FrostConfig {
         let (app_id, title) = self.toplevel_identity(surface);
+        let pid = self.client_pid(surface);
+        let is_xwayland = self.is_xwayland_surface(surface);
         let rule = self
             .config
-            .resolve_window_rules(app_id.as_deref(), title.as_deref());
+            .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
         rule.frost
             .as_ref()
             .map(|overrides| overrides.apply_to(&self.config.frost))
@@ -5105,9 +5128,11 @@ impl Smallvil {
 
     fn shadow_config_for_surface(&self, surface: &WlSurface) -> crate::config::ShadowConfig {
         let (app_id, title) = self.toplevel_identity(surface);
+        let pid = self.client_pid(surface);
+        let is_xwayland = self.is_xwayland_surface(surface);
         let rule = self
             .config
-            .resolve_window_rules(app_id.as_deref(), title.as_deref());
+            .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
         rule.shadow
             .as_ref()
             .map(|overrides| overrides.apply_to(&self.config.shadow))
@@ -5116,9 +5141,11 @@ impl Smallvil {
 
     fn rounding_config_for_surface(&self, surface: &WlSurface) -> crate::config::RoundingConfig {
         let (app_id, title) = self.toplevel_identity(surface);
+        let pid = self.client_pid(surface);
+        let is_xwayland = self.is_xwayland_surface(surface);
         let rule = self
             .config
-            .resolve_window_rules(app_id.as_deref(), title.as_deref());
+            .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
         rule.rounding
             .as_ref()
             .map(|overrides| overrides.apply_to(&self.config.rounding))
@@ -5127,9 +5154,11 @@ impl Smallvil {
 
     fn border_config_for_surface(&self, surface: &WlSurface) -> crate::config::BorderConfig {
         let (app_id, title) = self.toplevel_identity(surface);
+        let pid = self.client_pid(surface);
+        let is_xwayland = self.is_xwayland_surface(surface);
         let rule = self
             .config
-            .resolve_window_rules(app_id.as_deref(), title.as_deref());
+            .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
         rule.border
             .as_ref()
             .map(|overrides| overrides.apply_to(&self.config.border))
@@ -6433,9 +6462,11 @@ impl Smallvil {
         // least one matching rule declared a ripple sub-block (or the
         // `ripple = none` shorthand).
         let (app_id, title) = self.toplevel_identity(surface);
+        let pid = self.client_pid(surface);
+        let is_xwayland = self.is_xwayland_surface(surface);
         let rule = self
             .config
-            .resolve_window_rules(app_id.as_deref(), title.as_deref());
+            .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
         let mut cfg = self
             .config
             .resolve_ripple_config(rule.ripple.as_ref(), trigger);
@@ -9902,9 +9933,11 @@ impl Smallvil {
                     .keys()
                     .filter_map(|surface| {
                         let (app_id, title) = self.toplevel_identity(surface);
+                        let pid = self.client_pid(surface);
+                        let is_xwayland = self.is_xwayland_surface(surface);
                         let rule = self
                             .config
-                            .resolve_window_rules(app_id.as_deref(), title.as_deref());
+                            .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
                         crate::config::WindowOpacity::from_rule(&rule)
                             .map(|opacity| (surface.clone(), opacity))
                     })
@@ -9914,8 +9947,10 @@ impl Smallvil {
                     .keys()
                     .filter_map(|surface| {
                         let (app_id, title) = self.toplevel_identity(surface);
+                        let pid = self.client_pid(surface);
+                        let is_xwayland = self.is_xwayland_surface(surface);
                         self.config
-                            .resolve_window_rules(app_id.as_deref(), title.as_deref())
+                            .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland)
                             .glass
                             .map(|mode| (surface.clone(), mode))
                     })

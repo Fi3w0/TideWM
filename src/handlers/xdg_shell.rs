@@ -672,9 +672,14 @@ pub fn handle_commit(state: &mut Smallvil, surface: &WlSurface) {
     // doesn't emit a spurious `done` event to every bar watching.
     if transition != ToplevelTransition::Unmap && state.foreign_toplevels.contains_key(surface) {
         let (app_id, title) = state.toplevel_identity(surface);
-        let render_rule = state
-            .config
-            .resolve_window_rules(app_id.as_deref(), title.as_deref());
+        let pid = state.client_pid(surface);
+        let is_xwayland = state.is_xwayland_surface(surface);
+        let render_rule = state.config.resolve_window_rules(
+            app_id.as_deref(),
+            title.as_deref(),
+            pid,
+            is_xwayland,
+        );
         if let Some(opacity) = crate::config::WindowOpacity::from_rule(&render_rule) {
             state.window_opacity.insert(surface.clone(), opacity);
         } else {
@@ -1000,9 +1005,14 @@ impl Smallvil {
 
     fn map_toplevel(&mut self, surface: &WlSurface) {
         let (app_id, title) = self.toplevel_identity(surface);
-        let rule = self
-            .config
-            .resolve_window_rules(app_id.as_deref(), title.as_deref());
+        let pid = self.client_pid(surface);
+        let is_xwayland = self.is_xwayland_surface(surface);
+        let rule = self.config.resolve_window_rules(
+            app_id.as_deref(),
+            title.as_deref(),
+            pid,
+            is_xwayland,
+        );
         if let Some(opacity) = crate::config::WindowOpacity::from_rule(&rule) {
             self.window_opacity.insert(surface.clone(), opacity);
         } else {
@@ -1415,9 +1425,14 @@ impl Smallvil {
         // Re-apply identity-derived rule state and re-announce to bars --
         // `detach_mapped_toplevel` cleared both when the window was hidden.
         let (app_id, title) = self.toplevel_identity(&entry.surface);
-        let rule = self
-            .config
-            .resolve_window_rules(app_id.as_deref(), title.as_deref());
+        let pid = self.client_pid(&entry.surface);
+        let is_xwayland = self.is_xwayland_surface(&entry.surface);
+        let rule = self.config.resolve_window_rules(
+            app_id.as_deref(),
+            title.as_deref(),
+            pid,
+            is_xwayland,
+        );
         if let Some(opacity) = crate::config::WindowOpacity::from_rule(&rule) {
             self.window_opacity.insert(entry.surface.clone(), opacity);
         }
@@ -1469,8 +1484,9 @@ impl Smallvil {
                     return None;
                 }
                 let (app_id, title) = self.toplevel_identity(&surface);
+                let is_xwayland = self.is_xwayland_surface(&surface);
                 self.config
-                    .resolve_window_rules(app_id.as_deref(), title.as_deref())
+                    .resolve_window_rules(app_id.as_deref(), title.as_deref(), Some(pid), is_xwayland)
                     .swallow
                     .then_some(surface)
             })
@@ -1478,12 +1494,22 @@ impl Smallvil {
 
     /// The process ID on the other end of `surface`'s client socket
     /// (`SO_PEERCRED`), or `None` for a dead client.
-    fn client_pid(&self, surface: &WlSurface) -> Option<i32> {
+    pub(crate) fn client_pid(&self, surface: &WlSurface) -> Option<i32> {
         surface
             .client()?
             .get_credentials(&self.display_handle)
             .ok()
             .map(|credentials| credentials.pid)
+    }
+
+    /// Whether `surface` belongs to `xwayland-satellite` rather than a
+    /// native Wayland client -- every X11 application arrives at TideWM as
+    /// one of satellite's own Wayland surfaces (see the `xwayland` module
+    /// docs), so a matching client PID is the only way to tell. `false`
+    /// whenever xwayland is disabled, satellite never started, or the
+    /// surface's client is already gone.
+    pub(crate) fn is_xwayland_surface(&self, surface: &WlSurface) -> bool {
+        self.xwayland_satellite_pid.is_some() && self.client_pid(surface) == self.xwayland_satellite_pid
     }
 
     pub(crate) fn preferred_output_for_toplevel(&self, surface: &WlSurface) -> Option<String> {

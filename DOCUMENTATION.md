@@ -1095,10 +1095,12 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 
 | Key | Type | Notes |
 | --- | --- | --- |
-| `app_id` | string, optional | Matches exactly. At least one of `app_id`/`title` is required — a rule with neither never matches anything. |
+| `app_id` | string, optional | Matches exactly. At least one of `app_id`/`title`/`app_id_regex`/`title_regex`/`pid`/`xwayland` is required — a rule with none of these never matches anything. |
 | `title` | string, optional | Matches case-insensitively, anywhere in the string. |
 | `app_id_regex` | regular expression, optional | Rust regex matched against the full app ID string. Combines with other criteria in the same rule. |
 | `title_regex` | regular expression, optional | Rust regex matched against the title. Use `(?i)` for case-insensitive matching. |
+| `pid` | integer, optional | Exact match against the window's real client PID (sway's `[pid=...]`). Never matches a window whose PID couldn't be read (a dead client). |
+| `xwayland` | bool, optional | Tri-state: unset matches either kind of window; `true`/`false` requires the window to be (or not be) an X11 client running through `xwayland-satellite` (Hyprland's `xwayland:1`/`xwayland:0`). `is_xwayland` is an alias. |
 | `workspace` | integer, optional | Initial workspace, same numbering as `workspace:N` keybinds (including `0`, the scratchpad). |
 | `output` | string, optional | Initial output by connector name. Falls back to normal placement if unset or unconnected. |
 | `float` | bool | Default `false`. |
@@ -1149,6 +1151,13 @@ rule {
 rule {
     app_id = Slack
     workspace = 3
+}
+
+rule {
+    # Float every X11 client by default -- most are legacy dialogs/tools
+    # that don't tile well.
+    xwayland = true
+    float = true
 }
 
 rule {

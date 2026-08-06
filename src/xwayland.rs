@@ -22,7 +22,13 @@ use std::process::{Command, Stdio};
 
 const MAX_DISPLAY: u32 = 50;
 
-pub struct Satellite;
+pub struct Satellite {
+    /// PID of the spawned child, kept so the compositor can tell an X11
+    /// window apart from a native Wayland one (`rule { xwayland = ... }`)
+    /// by comparing a surface's client PID against this one -- every X11
+    /// app arrives as one of satellite's own Wayland surfaces.
+    pub pid: u32,
+}
 
 /// Spawn `xwayland-satellite :N` eagerly and export `DISPLAY=:N` for every
 /// process spawned afterward. Fails soft: any problem (binary missing, too
@@ -55,15 +61,12 @@ pub fn setup(path: &str) -> Option<Satellite> {
         }
     };
 
-    tracing::info!(
-        pid = child.id(),
-        display = %display_name,
-        "Spawned xwayland-satellite"
-    );
+    let pid = child.id();
+    tracing::info!(pid, display = %display_name, "Spawned xwayland-satellite");
     crate::track_child(child);
     std::env::set_var("DISPLAY", &display_name);
 
-    Some(Satellite)
+    Some(Satellite { pid })
 }
 
 /// Cheap existence/version check: every `xwayland-satellite` since 0.7

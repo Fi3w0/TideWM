@@ -431,6 +431,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
+    state.xwayland_satellite_pid = _satellite.as_ref().map(|satellite| satellite.pid as i32);
 
     // After backend init, not inside `Smallvil::new`: the DBus service
     // thread needs a real initial output list (for `RecordMonitor`'s
