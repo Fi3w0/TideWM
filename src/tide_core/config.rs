@@ -3560,6 +3560,62 @@ fn load_raw_config(path: &Path) -> Result<(RawConfig, Vec<String>, Vec<waves::En
 /// Unknown keys/blocks warn and are ignored rather than failing the whole
 /// config -- same forgiving convention TOML loading always used (a typo
 /// shouldn't take down a working session).
+/// Parses the Wave engine's serialized list form (`["a", "b"]`) into
+/// items; returns `None` for anything that is not a list.
+fn parse_list_value(value: &str) -> Option<Vec<String>> {
+    let value = value.trim();
+    if !value.starts_with('[') || !value.ends_with(']') {
+        return None;
+    }
+    let inner = &value[1..value.len() - 1];
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => {
+                items.push(current.trim().to_string());
+                current.clear();
+            }
+            '\\' if in_quotes => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            _ => current.push(c),
+        }
+    }
+    items.push(current.trim().to_string());
+    let items: Vec<String> = items.into_iter().filter(|s| !s.is_empty()).collect();
+    if items.is_empty() {
+        None
+    } else {
+        Some(items)
+    }
+}
+
+/// Parses a duration value into milliseconds: a bare number (the legacy
+/// `_ms` key spelling) or a unit-suffixed literal (`600ms`, `1.5s`,
+/// `90m`) as the Wave engine's duration values serialize to. Returns
+/// `None` for zero/negative or unparseable values.
+fn parse_duration_ms(value: &str) -> Option<u32> {
+    let value = value.trim();
+    let (num, scale) = if let Some(num) = value.strip_suffix("ms") {
+        (num, 1.0)
+    } else if let Some(num) = value.strip_suffix('s') {
+        (num, 1000.0)
+    } else if let Some(num) = value.strip_suffix('m') {
+        (num, 60_000.0)
+    } else {
+        (value, 1.0)
+    };
+    let n = num.trim().parse::<f64>().ok()?;
+    let ms = (n * scale).round();
+    u32::try_from(ms as i64).ok().filter(|ms| *ms > 0)
+}
+
 /// What changed between two merged entry lists (W3's reload diff).
 /// Computed at the entry level, so it is grammar-agnostic: old and new
 /// Wave configs produce the same `waves::Entry` shape.
@@ -3771,7 +3827,13 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
             None => tracing::warn!(value, "Expected finite viscosity from 0.0 to 4.0, ignoring"),
         },
         "cursor_always_visible" => set_bool(&mut raw.cursor_always_visible, key, value),
-        "cursor_hide_after_ms" => set_i32(&mut raw.cursor_hide_after_ms, key, value),
+        "cursor_hide_after_ms" | "cursor_hide_after" => {
+            if let Some(ms) = parse_duration_ms(value) {
+                raw.cursor_hide_after_ms = ms as i32;
+            } else {
+                tracing::warn!(value, "Expected a duration like 2s or 2000ms for cursor_hide_after, ignoring");
+            }
+        }
         "workspace_auto_back_and_forth" => {
             set_bool(&mut raw.workspace_auto_back_and_forth, key, value)
         }
@@ -3785,7 +3847,10 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
         // List-shaped, not scalar -- accumulates because `waves::merge_into`
         // already let every occurrence of this one key through instead of
         // deduping to the last (see `waves::assign_is_multi`).
-        "spawn_at_startup" => raw.spawn_at_startup.push(value.to_string()),
+        "spawn_at_startup" | "spawn" => match parse_list_value(value) {
+            Some(items) => raw.spawn_at_startup.extend(items),
+            None => raw.spawn_at_startup.push(value.to_string()),
+        },
         other => tracing::warn!(key = %other, value, "Unknown config key, ignoring"),
     }
 }
@@ -4065,8 +4130,8 @@ fn apply_window_animation_block(cfg: &mut WindowAnimationConfig, body: &[waves::
                     "Expected `true` or `false` for animate_size, ignoring"
                 ),
             },
-            "duration_ms" | "duration" => match value.parse::<u32>() {
-                Ok(value) if (1..=10_000).contains(&value) => cfg.duration_ms = value,
+            "duration_ms" | "duration" => match parse_duration_ms(value) {
+                Some(value) if (1..=10_000).contains(&value) => cfg.duration_ms = value,
                 _ => tracing::warn!(
                     value,
                     "Expected animation duration from 1 to 10000ms, ignoring"
@@ -4080,8 +4145,8 @@ fn apply_window_animation_block(cfg: &mut WindowAnimationConfig, body: &[waves::
                 ),
             },
             "opacity_duration_ms" | "fade_duration_ms" | "opacity_duration" => {
-                match value.parse::<u32>() {
-                    Ok(value) if (1..=10_000).contains(&value) => {
+                match parse_duration_ms(value) {
+                    Some(value) if (1..=10_000).contains(&value) => {
                         cfg.opacity_duration_ms = Some(value)
                     }
                     _ => tracing::warn!(
@@ -4212,8 +4277,8 @@ fn apply_workspace_transition_block(cfg: &mut WorkspaceTransitionConfig, body: &
                     "Expected workspace_transition.style: water glow, ignoring"
                 ),
             },
-            "duration_ms" | "duration" => match value.parse::<u32>() {
-                Ok(value) if (50..=5000).contains(&value) => cfg.duration_ms = value,
+            "duration_ms" | "duration" => match parse_duration_ms(value) {
+                Some(value) if (50..=5000).contains(&value) => cfg.duration_ms = value,
                 _ => tracing::warn!(
                     value,
                     "Expected workspace_transition.duration_ms from 50 to 5000, ignoring"
@@ -4251,8 +4316,8 @@ fn apply_workspace_transition_block(cfg: &mut WorkspaceTransitionConfig, body: &
             "workspace_motion" | "move_workspaces" => {
                 set_bool(&mut cfg.workspace_motion, key, value)
             }
-            "workspace_motion_delay_ms" | "motion_delay_ms" => match value.parse::<u32>() {
-                Ok(value) if value <= 5000 => cfg.workspace_motion_delay_ms = value,
+            "workspace_motion_delay_ms" | "motion_delay_ms" | "workspace_motion_delay" => match parse_duration_ms(value) {
+                Some(value) if value <= 5000 => cfg.workspace_motion_delay_ms = value,
                 _ => tracing::warn!(
                     value,
                     "Expected workspace_transition.workspace_motion_delay_ms from 0 to 5000, ignoring"
@@ -4637,8 +4702,8 @@ fn apply_water_glass_block(cfg: &mut WaterGlassConfig, body: &[waves::Entry]) {
                     )
                 }
             },
-            "settle_ms" | "settle" => match value.parse::<u32>() {
-                Ok(value) => cfg.settle_ms = value.clamp(100, 10_000),
+            "settle_ms" | "settle" => match parse_duration_ms(value) {
+                Some(value) => cfg.settle_ms = value.clamp(100, 10_000),
                 _ => tracing::warn!(
                     value,
                     "Expected water_glass.settle_ms from 100 to 10000, ignoring"
@@ -4659,10 +4724,15 @@ fn parse_u32_list(value: &str) -> Option<Vec<u32>> {
     (!list.is_empty()).then_some(list)
 }
 
-fn parse_u64_list(value: &str) -> Option<Vec<u64>> {
-    let list: Vec<u64> = value
-        .split_whitespace()
-        .map(|token| token.parse::<u64>().ok())
+/// A list of duration values: either the Wave engine's serialized list
+/// form (`[600ms, 1s]`) or the legacy whitespace-separated form. Each
+/// item goes through [`parse_duration_ms`].
+fn parse_duration_list(value: &str) -> Option<Vec<u64>> {
+    let items = parse_list_value(value)
+        .unwrap_or_else(|| value.split_whitespace().map(str::to_string).collect());
+    let list: Vec<u64> = items
+        .iter()
+        .map(|item| parse_duration_ms(item).map(u64::from))
         .collect::<Option<Vec<_>>>()?;
     (!list.is_empty()).then_some(list)
 }
@@ -4702,7 +4772,7 @@ fn apply_caustics_block(cfg: &mut CausticsConfig, body: &[waves::Entry]) {
                     "Expected space-separated integers for caustics.idle_fps, ignoring"
                 ),
             },
-            "idle_after_ms" => match parse_u64_list(value) {
+            "idle_after_ms" | "idle_after" => match parse_duration_list(value) {
                 Some(list) => cfg.idle_after_ms = list,
                 None => tracing::warn!(
                     value,
@@ -4730,8 +4800,8 @@ fn apply_swim_block(cfg: &mut SwimConfig, body: &[waves::Entry]) {
                 Ok(value) if value.is_finite() => cfg.response = value.clamp(0.1, 4.0),
                 _ => tracing::warn!(value, "Expected swim.response from 0.1 to 4, ignoring"),
             },
-            "snap_duration_ms" | "snap_ms" => match value.parse::<u32>() {
-                Ok(value) => cfg.snap_duration_ms = value.min(2000),
+            "snap_duration_ms" | "snap_ms" => match parse_duration_ms(value) {
+                Some(value) => cfg.snap_duration_ms = value.min(2000),
                 _ => tracing::warn!(
                     value,
                     "Expected swim.snap_duration_ms from 0 to 2000, ignoring"
@@ -4857,15 +4927,15 @@ fn apply_depth_block(cfg: &mut DepthConfig, body: &[waves::Entry]) {
         };
         match key.as_str() {
             "enabled" => set_bool(&mut cfg.enabled, key, value),
-            "sink_after_ms" | "delay_ms" => match value.parse::<u32>() {
-                Ok(value) if value <= 86_400_000 => cfg.sink_after_ms = value,
+            "sink_after_ms" | "delay_ms" => match parse_duration_ms(value) {
+                Some(value) if value <= 86_400_000 => cfg.sink_after_ms = value,
                 _ => tracing::warn!(
                     value,
                     "Expected depth.sink_after_ms from 0 to 86400000, ignoring"
                 ),
             },
-            "tier_interval_ms" | "interval_ms" => match value.parse::<u32>() {
-                Ok(value) if (1..=86_400_000).contains(&value) => cfg.tier_interval_ms = value,
+            "tier_interval_ms" | "interval_ms" => match parse_duration_ms(value) {
+                Some(value) if (1..=86_400_000).contains(&value) => cfg.tier_interval_ms = value,
                 _ => tracing::warn!(
                     value,
                     "Expected depth.tier_interval_ms from 1 to 86400000, ignoring"
@@ -4935,8 +5005,8 @@ fn apply_classic_depth_block(cfg: &mut ClassicDepthConfig, body: &[waves::Entry]
         match key.as_str() {
             "enabled" => set_bool(&mut cfg.enabled, key, value),
             "animation" | "animate" => set_bool(&mut cfg.animation, key, value),
-            "animation_duration_ms" | "duration_ms" => match value.parse::<u32>() {
-                Ok(value) if value <= 3000 => cfg.animation_duration_ms = value,
+            "animation_duration_ms" | "duration_ms" => match parse_duration_ms(value) {
+                Some(value) if value <= 3000 => cfg.animation_duration_ms = value,
                 _ => tracing::warn!(
                     value,
                     "Expected classic_depth.animation_duration_ms from 0 to 3000, ignoring"
@@ -5517,8 +5587,8 @@ fn apply_ripple_block(cfg: &mut RippleConfig, body: &[waves::Entry]) {
                 ),
             },
             "urgent_repeat_interval_ms" | "urgent_interval_ms" | "urgent_interval" => {
-                match value.parse::<u32>() {
-                    Ok(v) if v > 0 => cfg.urgent_repeat_interval_ms = Some(v.clamp(100, 60_000)),
+                match parse_duration_ms(value) {
+                    Some(v) if v > 0 => cfg.urgent_repeat_interval_ms = Some(v.clamp(100, 60_000)),
                     _ => tracing::warn!(
                         value,
                         "Expected a positive integer for ripple.urgent_repeat_interval_ms, ignoring"
@@ -5580,8 +5650,8 @@ fn apply_ripple_block(cfg: &mut RippleConfig, body: &[waves::Entry]) {
                 Ok(v) if v.is_finite() && v > 0.0 => cfg.thickness = Some(v),
                 _ => tracing::warn!(value, "Expected a positive number for ripple.thickness, ignoring"),
             },
-            "duration_ms" | "duration" => match value.parse::<u32>() {
-                Ok(v) if v > 0 => cfg.duration_ms = Some(v),
+            "duration_ms" | "duration" => match parse_duration_ms(value) {
+                Some(v) if v > 0 => cfg.duration_ms = Some(v),
                 _ => tracing::warn!(value, "Expected a positive integer for ripple.duration_ms, ignoring"),
             },
             "peak_alpha" | "alpha" => match value.parse::<f32>() {
@@ -7916,6 +7986,85 @@ mod tests {
             diff.keys_changed,
             vec![("gaps".to_string(), "8".to_string(), "12".to_string())]
         );
+    }
+
+    #[test]
+    fn duration_values_parse_to_ms_everywhere() {
+        assert_eq!(parse_duration_ms("600"), Some(600));
+        assert_eq!(parse_duration_ms("600ms"), Some(600));
+        assert_eq!(parse_duration_ms("1.5s"), Some(1500));
+        assert_eq!(parse_duration_ms("2m"), Some(120_000));
+        assert_eq!(parse_duration_ms("0"), None);
+        assert_eq!(parse_duration_ms("nope"), None);
+
+        let dir = TestDir::new("wave-durations");
+        let main = dir.write(
+            "config.wave",
+            "cursor_hide_after = 2s\n\
+             workspace_transition {\n\
+                 duration = 600ms\n\
+                 workspace_motion_delay = 150ms\n\
+             }\n",
+        );
+        let (raw, _, _) = load_raw_config(&main).expect("should parse");
+        assert_eq!(raw.cursor_hide_after_ms, 2000);
+        let transition = &raw.workspace_transition;
+        assert_eq!(transition.duration_ms, 600);
+        assert_eq!(transition.workspace_motion_delay_ms, 150);
+        // legacy spellings still parse
+        let dir = TestDir::new("wave-durations-legacy");
+        let main = dir.write("config.wave", "cursor_hide_after_ms = 3000\n");
+        let (raw, _, _) = load_raw_config(&main).expect("should parse");
+        assert_eq!(raw.cursor_hide_after_ms, 3000);
+    }
+
+    #[test]
+    fn spawn_list_lowers_to_multiple_entries() {
+        let dir = TestDir::new("wave-spawn-list");
+        let main = dir.write(
+            "config.wave",
+            "spawn = [waybar, \"swaybg -i ~/wallpaper.png -m fill\"]\n",
+        );
+        let (raw, _, _) = load_raw_config(&main).expect("should parse");
+        assert_eq!(
+            raw.spawn_at_startup,
+            vec![
+                "waybar".to_string(),
+                "swaybg -i ~/wallpaper.png -m fill".to_string()
+            ]
+        );
+        // legacy scalar spelling still works
+        let dir = TestDir::new("wave-spawn-scalar");
+        let main = dir.write("config.wave", "spawn_at_startup = waybar\n");
+        let (raw, _, _) = load_raw_config(&main).expect("should parse");
+        assert_eq!(raw.spawn_at_startup, vec!["waybar".to_string()]);
+    }
+
+    #[test]
+    fn wave_palette_lowers_end_to_end() {
+        let dir = TestDir::new("wave-palette");
+        let main = dir.write(
+            "config.wave",
+            "theme {\n\
+                 primary = #8EDDFF\n\
+                 deep = primary.darken(0.35)\n\
+                 highlight = primary.lighten(0.15)\n\
+             }\n\
+             border {\n\
+                 active_from = theme.primary\n\
+                 active_to = theme.deep\n\
+             }\n",
+        );
+        let (raw, warnings, _) = load_raw_config(&main).expect("should parse");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let border = &raw.border;
+        assert_eq!(border.active_from[0], 0x8E as f32 / 255.0);
+        assert_eq!(border.active_from[1], 0xDD as f32 / 255.0);
+        assert_eq!(border.active_from[2], 0xFF as f32 / 255.0);
+        // deep = 8EDDFF * 0.65 -> 5C90A6
+        assert_eq!(border.active_to[0], 0x5C as f32 / 255.0);
+        assert_eq!(border.active_to[1], 0x90 as f32 / 255.0);
+        assert_eq!(border.active_to[2], 0xA6 as f32 / 255.0);
     }
 
     #[test]

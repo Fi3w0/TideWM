@@ -212,19 +212,27 @@ A value is one of two things, decided by a single rule: if the trimmed text cont
 
 Single token: a number, `true`/`false`, a color (`#RRGGBB` or `#RRGGBBAA`, serialized back as `RRGGBB`), a duration (`500ms`, `1.5s`, `90m`), or anything else is a bare string (`SUPER+Return`, `spawn:kitty`, `water-drop`).
 
+**Colors are values.** `#8EDDFF` carries real channels, so `primary.darken(0.35)`, `primary.lighten(0.15)`, and `alpha(a)` (accepted, currently dropped) work in expressions.
+
+**Durations are values.** `600ms * 2` is `1200ms`, `1.5s * 2` is `3s`, `90m / 2` is `45m`, `1s + 500ms` keeps the first operand's unit. A bare `600` still parses as the legacy millisecond form.
+
+**Section globals.** A `name { }` block exposes its body as a Lua table under `name`, so `theme.primary` reads as an expression outside the block, and sibling fields resolve inside the block: `deep = primary.darken(0.35)` reads the `primary` leaf defined above it. A block never clobbers an existing global (the `math` library, the registration functions).
+
 Expression: tokenized on whitespace and the operator/separator characters `( ) [ ] { } , + - * / % .. == ~= < > <= >= =`. Dots are part of word tokens, so `theme.primary` is one token. Tokens are then classified:
 
 - numbers and quoted strings: as-is
 - `true` / `false` / `nil`: as-is
 - Lua keywords (`and`, `or`, `not`, `then`, ...): as-is
 - a word followed by `(` or a known identifier (a defined `@name` variable, `fn` name, loop variable, `fn` parameter): as-is
-- a word containing a dot, whose base is a known identifier: as-is (Lua member access)
-- a color token: `_color("RRGGBB")`
-- a duration token: `_dur(600, "ms")`
+- a word containing a dot, whose base is a known identifier, block global, or sibling field: as-is (`theme.primary`), or `_field("primary").rest` for a sibling method
+- a color token: `_color("RRGGBB")`, a value with `darken`/`lighten`/`alpha`
+- a duration token: `_dur(600, "ms")`, a value with arithmetic
 - `$wave(`: `wave(` with the arguments rewritten
 - anything else: a quoted string. This is what makes `wave(kitty, alacritty)` and `media(comma, spotify)` work without quotes.
 
 The markers have one role each, enforced with errors: `@` only defines (`@name = value` on its own line), `$` only references in bare strings, and both are compile errors in expressions with a message pointing at the identifier form. A `$name` that is not defined (not a `@name` variable, loop variable, or `fn` parameter) is a compile error, never silent text. A fully quoted string is literal: no `$` processing at all, so `"$HOME"` in a spawn command is verbatim.
+
+Surface `[a, b]` lists emit as Lua table constructors and serialize back as the `[a, b]` entry form.
 
 ### Strings inside binds
 
@@ -240,7 +248,7 @@ The old `bind X = rest-of-line` form parses and registers, with the action taken
 
 ### Deferred
 
-`on "event"` handlers (W7), section globals so `theme.primary` reads as an expression (W4), list values serialized through entries (W4). The grammar accepts lists (`[a, b]`) and serializes them as `["a", "b"]`; config-level list semantics land with the W4 rename work.
+`on "event"` handlers (W7). Duration keys still carrying `_ms` spellings parse unit values (`settle = 400ms`) but keep their names until the W8 rename pass, which also converts the remaining key renames and the shipped default config. Config-level list semantics exist for `spawn = [...]`; other list keys land with their W8 renames.
 
 ## Wave outside TideWM
 

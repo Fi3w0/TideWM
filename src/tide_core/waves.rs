@@ -204,7 +204,7 @@ fn block_is_keyed(keyword: &str) -> bool {
 fn assign_is_multi(key: &str) -> bool {
     matches!(
         key,
-        "spawn_at_startup" | "workspace_name" | "workspace_gaps"
+        "spawn_at_startup" | "spawn" | "workspace_name" | "workspace_gaps"
     )
 }
 

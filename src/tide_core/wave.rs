@@ -19,7 +19,7 @@ use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use mlua::{Function, Lua, StdLib, Value, Variadic};
+use mlua::{FromLua, Function, Lua, StdLib, Value, Variadic};
 
 use super::waves::Entry;
 
@@ -207,6 +207,14 @@ struct Symbols {
     runtime_vars: std::collections::HashSet<String>,
     fns: std::collections::HashSet<String>,
     scopes: Vec<Option<std::collections::HashSet<String>>>,
+    /// Block keywords seen so far: `theme { }` makes `theme` a Lua
+    /// global table, so `theme.primary` reads as an expression.
+    block_globals: std::collections::HashSet<String>,
+    /// Leaf keys of the currently open blocks, innermost last. A key in
+    /// the innermost set resolves to `_field("key")` (the sibling value
+    /// on the block's body table), which is what makes
+    /// `deep = primary.darken(0.35)` work inside a `theme { }` block.
+    body_fields: Vec<std::collections::HashSet<String>>,
     /// Collect-mode emission: `$name` in strings is left verbatim instead
     /// of erroring, so the resolve pre-pass can evaluate files whose
     /// definitions live in other files. Never used for real configs.
@@ -240,6 +248,12 @@ impl Symbols {
         } else {
             None
         }
+    }
+
+    /// Is `name` a leaf of the innermost open block? (Sibling access
+    /// only: `_field` reads the innermost body table.)
+    fn in_innermost_body(&self, name: &str) -> bool {
+        self.body_fields.last().is_some_and(|f| f.contains(name))
     }
 }
 
@@ -294,16 +308,27 @@ impl<'a> Rewriter<'a> {
             let (num, unit) = split_duration(word).unwrap();
             return Ok(format!("_dur({}, {})", num, lua_quote(unit)));
         }
-        if let Some((base, _)) = word.split_once('.') {
+        if let Some((base, rest)) = word.split_once('.') {
+            if self.sym.in_innermost_body(base) {
+                // sibling field access: `primary.darken(0.35)` inside a
+                // `theme { }` block resolves through the body table
+                return Ok(format!("_field({}).{rest}", lua_quote(base)));
+            }
+            if self.sym.block_globals.contains(base) {
+                return Ok(word.to_string()); // section global: theme.primary
+            }
             if self.sym.in_scope(base) {
                 return Ok(word.to_string()); // member access on a known identifier
             }
         }
         // A statically known @variable folds to its literal value; a
         // runtime variable, fn name, loop var, or fn param stays the
-        // identifier.
+        // identifier; a sibling block field resolves through _field.
         if let Some(text) = self.sym.statics.get(word) {
             return Ok(classify_literal(text));
+        }
+        if self.sym.in_innermost_body(word) {
+            return Ok(format!("_field({})", lua_quote(word)));
         }
         if self.sym.in_scope(word) {
             return Ok(word.to_string());
@@ -325,15 +350,36 @@ impl<'a> Rewriter<'a> {
         let mut it = tokens.iter().peekable();
         while let Some(tok) = it.next() {
             let is_call_name = it.peek() == Some(&&"(".to_string());
-            let text = if is_operator(tok) || is_quoted_string(tok) || is_call_name {
+            let text = if is_operator(tok) || is_quoted_string(tok) {
                 tok.clone()
+            } else if is_call_name {
+                // A call name may be a method on a sibling block field
+                // (`primary.darken(...)` inside a `theme { }` body). The
+                // colon form is required: Lua only prepends `self` for
+                // metatable-provided methods with `a:b(...)`, plain
+                // `a.b(...)` calls with one argument.
+                if let Some((base, rest)) = tok.split_once('.') {
+                    if self.sym.in_innermost_body(base) {
+                        format!("_field({}):{rest}", lua_quote(base))
+                    } else {
+                        tok.clone()
+                    }
+                } else {
+                    tok.clone()
+                }
             } else {
                 self.classify_word(tok)?
             };
             if need_space && !matches!(tok.as_str(), "(" | "[" | "{" | ")" | "]" | "}" | ",") {
                 out.push(' ');
             }
-            out.push_str(&text);
+            // Surface `[...]` lists are Lua `{...}` table constructors:
+            // Lua has no bracket array literal syntax.
+            match tok.as_str() {
+                "[" => out.push('{'),
+                "]" => out.push('}'),
+                _ => out.push_str(&text),
+            }
             match tok.as_str() {
                 "(" | "[" | "{" | ")" | "]" | "}" => need_space = false,
                 "," => {
@@ -782,9 +828,15 @@ fn emit_body(
                     .rewrite_string(rest)
                     .map_err(|e| format!("in file {} at line {line_no}: {e}", path.display()))?
             };
+            // Section globals + sibling field access: the block keyword
+            // becomes a Lua global table, its leaf keys become readable
+            // inside the body via _field.
+            sym.block_globals.insert(keyword.to_string());
+            sym.body_fields.push(std::collections::HashSet::new());
             out.push_str(&format!("_block({}, {}, function()\n", lua_quote(keyword), header_expr));
             *depth += 1;
             emit_body(lines, pos, sym, out, path, depth)?;
+            sym.body_fields.pop();
             out.push_str("end)\n");
             continue;
         }
@@ -797,6 +849,9 @@ fn emit_body(
                     path.display()
                 )
             })?;
+            if let Some(fields) = sym.body_fields.last_mut() {
+                fields.insert(key.to_string());
+            }
             out.push_str(&format!("_leaf({}, {})\n", lua_quote(key), value_expr));
             continue;
         }
@@ -885,6 +940,17 @@ fn rewrite_value(value: &str, sym: &Symbols) -> Result<String, String> {
         }
         if let Some(text) = sym.statics.get(value) {
             return Ok(classify_literal(text));
+        }
+        if let Some((base, _)) = value.split_once('.') {
+            if sym.in_innermost_body(base) {
+                return Ok(format!("_field({}).{}", lua_quote(base), &value[base.len() + 1..]));
+            }
+            if sym.block_globals.contains(base) {
+                return Ok(value.to_string());
+            }
+        }
+        if sym.in_innermost_body(value) {
+            return Ok(format!("_field({})", lua_quote(value)));
         }
         if sym.in_scope(value) {
             // a defined @variable, fn name, loop var, or fn param: the
@@ -1147,6 +1213,15 @@ fn serialize_value(value: Value) -> Result<String, String> {
         Value::Integer(i) => Ok(i.to_string()),
         Value::Number(f) => Ok(format!("{f}")),
         Value::Boolean(b) => Ok(b.to_string()),
+        Value::UserData(ud) => {
+            if let Ok(d) = ud.borrow::<DurationValue>() {
+                return Ok(d.serialize());
+            }
+            if let Ok(c) = ud.borrow::<ColorValue>() {
+                return Ok(c.serialize());
+            }
+            Err(format!("unsupported config value type: {}", ud.type_name().map(|s| s.to_string_lossy()).unwrap_or_else(|_| "?".to_string())))
+        }
         Value::Table(t) => {
             let mut items = Vec::new();
             for v in t.sequence_values() {
@@ -1162,6 +1237,181 @@ fn serialize_value(value: Value) -> Result<String, String> {
             "unsupported config value type: {}",
             other.type_name()
         )),
+    }
+}
+
+/// A duration literal (`600ms`, `1.5s`, `90m`) as a Lua value with real
+/// arithmetic: `600ms * 2` computes, and serializes back to `1200ms`.
+/// Internal storage is milliseconds; the literal's own unit is kept so a
+/// value that never left its unit serializes as the user wrote it.
+#[derive(Clone, Copy, Debug)]
+struct DurationValue {
+    ms: f64,
+    unit: &'static str,
+}
+
+impl DurationValue {
+    fn serialize(&self) -> String {
+        let scaled = match self.unit {
+            "ms" => self.ms,
+            "s" => self.ms / 1000.0,
+            "m" => self.ms / 60_000.0,
+            _ => self.ms,
+        };
+        if scaled.fract() == 0.0 && scaled.abs() < 1e15 {
+            format!("{scaled:.0}{}", self.unit)
+        } else {
+            format!("{scaled}{}", self.unit)
+        }
+    }
+}
+
+impl mlua::FromLua for DurationValue {
+    fn from_lua(value: mlua::Value, _lua: &Lua) -> mlua::Result<Self> {
+        match value {
+            mlua::Value::UserData(ud) => ud.borrow::<DurationValue>().map(|d| *d),
+            other => Err(mlua::Error::FromLuaConversionError {
+                from: other.type_name(),
+                to: "DurationValue".to_string(),
+                message: Some("expected a duration literal such as `600ms`".to_string()),
+            }),
+        }
+    }
+}
+
+impl mlua::UserData for DurationValue {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_method(mlua::MetaMethod::Add, |_, a, b: DurationValue| {
+            Ok(DurationValue {
+                ms: a.ms + b.ms,
+                unit: a.unit,
+            })
+        });
+        methods.add_meta_method(mlua::MetaMethod::Sub, |_, a, b: DurationValue| {
+            Ok(DurationValue {
+                ms: a.ms - b.ms,
+                unit: a.unit,
+            })
+        });
+        // `2 * 600ms` arrives with the operands swapped (Lua tries the
+        // number's metamethod first, then the userdata's with the
+        // operands in original order), so Mul is a meta FUNCTION that
+        // handles either side; Add/Sub/Unm always have the duration on
+        // the left.
+        methods.add_meta_function(
+            mlua::MetaMethod::Mul,
+            |lua, (a, b): (Value, Value)| {
+                if let Ok(d) = DurationValue::from_lua(a.clone(), lua) {
+                    let n = f64::from_lua(b, lua)?;
+                    return Ok(DurationValue {
+                        ms: d.ms * n,
+                        unit: d.unit,
+                    });
+                }
+                let d = DurationValue::from_lua(b, lua)?;
+                let n = f64::from_lua(a, lua)?;
+                Ok(DurationValue {
+                    ms: d.ms * n,
+                    unit: d.unit,
+                })
+            },
+        );
+        methods.add_meta_method(mlua::MetaMethod::Div, |_, a, b: f64| {
+            Ok(DurationValue {
+                ms: a.ms / b,
+                unit: a.unit,
+            })
+        });
+        methods.add_meta_method(mlua::MetaMethod::Unm, |_, a, ()| {
+            Ok(DurationValue {
+                ms: -a.ms,
+                unit: a.unit,
+            })
+        });
+        methods.add_meta_method(mlua::MetaMethod::Eq, |_, a, b: DurationValue| {
+            Ok(a.ms == b.ms)
+        });
+    }
+}
+
+/// A color literal as a Lua value with palette math:
+/// `primary.darken(0.35)` / `primary.lighten(0.15)` / `alpha(a)`.
+/// Serializes back to the bare `RRGGBB` hex the config surface parses.
+#[derive(Clone, Copy, Debug)]
+struct ColorValue {
+    r: f64,
+    g: f64,
+    b: f64,
+}
+
+impl ColorValue {
+    fn from_hex(hex: &str) -> Option<Self> {
+        let hex = hex.strip_prefix('#').unwrap_or(hex);
+        if hex.len() != 6 {
+            return None;
+        }
+        Some(ColorValue {
+            r: u8::from_str_radix(&hex[0..2], 16).ok()? as f64,
+            g: u8::from_str_radix(&hex[2..4], 16).ok()? as f64,
+            b: u8::from_str_radix(&hex[4..6], 16).ok()? as f64,
+        })
+    }
+
+    fn serialize(&self) -> String {
+        format!(
+            "{:02X}{:02X}{:02X}",
+            self.r.round().clamp(0.0, 255.0) as u8,
+            self.g.round().clamp(0.0, 255.0) as u8,
+            self.b.round().clamp(0.0, 255.0) as u8
+        )
+    }
+}
+
+impl mlua::FromLua for ColorValue {
+    fn from_lua(value: mlua::Value, _lua: &Lua) -> mlua::Result<Self> {
+        match value {
+            mlua::Value::UserData(ud) => ud.borrow::<ColorValue>().map(|c| *c),
+            other => Err(mlua::Error::FromLuaConversionError {
+                from: other.type_name(),
+                to: "ColorValue".to_string(),
+                message: Some("expected a color literal such as `#8EDDFF`".to_string()),
+            }),
+        }
+    }
+}
+
+impl mlua::UserData for ColorValue {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        // Methods are registered as plain functions taking the receiver
+        // explicitly: mlua's `add_method` receiver conversion needs the
+        // `macros` feature's generated impls, which this build does not
+        // enable.
+        methods.add_function("darken", |_, (self_v, amount): (mlua::AnyUserData, f64)| {
+            let color = self_v.borrow::<ColorValue>()?;
+            let t = amount.clamp(0.0, 1.0);
+            Ok(ColorValue {
+                r: color.r * (1.0 - t),
+                g: color.g * (1.0 - t),
+                b: color.b * (1.0 - t),
+            })
+        });
+        methods.add_function("lighten", |_, (self_v, amount): (mlua::AnyUserData, f64)| {
+            let color = self_v.borrow::<ColorValue>()?;
+            let t = amount.clamp(0.0, 1.0);
+            Ok(ColorValue {
+                r: color.r + (255.0 - color.r) * t,
+                g: color.g + (255.0 - color.g) * t,
+                b: color.b + (255.0 - color.b) * t,
+            })
+        });
+        // Accepted and dropped, matching the config surface's current
+        // "alpha in the color form is ignored" behavior.
+        methods.add_function("alpha", |_, (self_v, _amount): (mlua::AnyUserData, f64)| {
+            self_v.borrow::<ColorValue>().map(|c| *c)
+        });
+        methods.add_function("with_alpha", |_, (self_v, _amount): (mlua::AnyUserData, f64)| {
+            self_v.borrow::<ColorValue>().map(|c| *c)
+        });
     }
 }
 
@@ -1197,18 +1447,29 @@ fn top(stack: &EntryStack) -> EntrySink {
 /// resolve pre-pass) only `_vardef` has an effect, so `@name = value`
 /// definitions from every reachable file land in `statics_out` without
 /// producing entries.
+///
+/// The `bodies` stack tracks the Lua table each open `_block` builds:
+/// `_leaf` writes raw values into the innermost body, `_field` reads
+/// them back (sibling access like `primary.darken(0.35)` inside a
+/// `theme { }` block), and `_block` exposes the finished body as the
+/// block's global (`theme.primary` outside the block).
 fn install_env(
     lua: &Lua,
     stack: &EntryStack,
     collect: Rc<Cell<bool>>,
     statics_out: Rc<RefCell<std::collections::HashMap<String, String>>>,
+    bodies: Rc<RefCell<Vec<mlua::Table>>>,
 ) -> Result<(), String> {
     let c1 = collect.clone();
     let s1 = stack.clone();
+    let b1 = bodies.clone();
     lua.globals()
         .set(
             "_leaf",
             lua.create_function(move |_, (key, value): (String, Value)| {
+                if let Some(body) = b1.borrow().last() {
+                    let _ = body.set(key.as_str(), value.clone());
+                }
                 if !c1.get() {
                     let s = serialize_value(value).map_err(mlua::Error::external)?;
                     top(&s1).borrow_mut().push(Entry::Assign(key, s));
@@ -1241,20 +1502,53 @@ fn install_env(
 
     let c3 = collect.clone();
     let s3 = stack.clone();
+    let b3 = bodies.clone();
     lua.globals()
         .set(
             "_block",
-            lua.create_function(move |_, (keyword, header, builder): (String, String, Function)| {
-                if c3.get() {
-                    return Ok(());
-                }
-                let inner = Rc::new(RefCell::new(Vec::new()));
-                s3.borrow_mut().push(inner.clone());
-                builder.call::<()>(())?;
-                s3.borrow_mut().pop();
-                let body = inner.borrow().clone();
-                top(&s3).borrow_mut().push(Entry::Block(keyword, header, body));
-                Ok(())
+            lua.create_function(
+                move |lua, (keyword, header, builder): (String, String, Function)| {
+                    if c3.get() {
+                        return Ok(());
+                    }
+                    let body_table = lua.create_table()?;
+                    let inner = Rc::new(RefCell::new(Vec::new()));
+                    s3.borrow_mut().push(inner.clone());
+                    b3.borrow_mut().push(body_table.clone());
+                    builder.call::<()>(())?;
+                    s3.borrow_mut().pop();
+                    b3.borrow_mut().pop();
+                    // Section globals: `theme { }` makes `theme` a Lua
+                    // table so `theme.primary` reads as an expression.
+                    // Never clobber an existing global (math, string, the
+                    // registration functions themselves).
+                    let globals = lua.globals();
+                    if globals.get::<Value>(keyword.as_str())?.is_nil() {
+                        globals.set(keyword.as_str(), body_table)?;
+                    }
+                    let body = inner.borrow().clone();
+                    top(&s3).borrow_mut().push(Entry::Block(keyword, header, body));
+                    Ok(())
+                },
+            )
+            .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+
+    let b4 = bodies.clone();
+    lua.globals()
+        .set(
+            "_field",
+            lua.create_function(move |_, name: String| {
+                let bodies = b4.borrow();
+                let Some(body) = bodies.last() else {
+                    return Err(mlua::Error::external(
+                        "a block field was referenced outside any block",
+                    ));
+                };
+                let v: Value = body.get(name.as_str())?;
+                eprintln!("=== _field({name}) -> {}", v.type_name());
+                Ok(v)
             })
             .map_err(|e| e.to_string())?,
         )
@@ -1336,8 +1630,11 @@ fn install_env(
     lua.globals()
         .set(
             "_color",
-            lua.create_function(|_, hex: String| Ok(hex.chars().take(6).collect::<String>()))
-                .map_err(|e| e.to_string())?,
+            lua.create_function(|_, hex: String| {
+                ColorValue::from_hex(&hex)
+                    .ok_or_else(|| mlua::Error::external(format!("invalid color `{hex}`")))
+            })
+            .map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())?;
 
@@ -1345,12 +1642,15 @@ fn install_env(
         .set(
             "_dur",
             lua.create_function(|_, (n, unit): (f64, String)| {
-                let n = if n.fract() == 0.0 && n.abs() < 1e15 {
-                    format!("{n:.0}")
-                } else {
-                    format!("{n}")
+                let (scale, unit): (f64, &'static str) = match unit.as_str() {
+                    "s" => (1000.0, "s"),
+                    "m" => (60_000.0, "m"),
+                    _ => (1.0, "ms"),
                 };
-                Ok(format!("{n}{unit}"))
+                Ok(DurationValue {
+                    ms: n * scale,
+                    unit,
+                })
             })
             .map_err(|e| e.to_string())?,
         )
@@ -1378,7 +1678,8 @@ pub(crate) fn evaluate(source: &str, path: &Path) -> Result<Vec<Entry>, String> 
     let stack: EntryStack = Rc::new(RefCell::new(vec![Rc::new(RefCell::new(Vec::new()))]));
     let collect = Rc::new(Cell::new(false));
     let statics = Rc::new(RefCell::new(std::collections::HashMap::new()));
-    install_env(&lua, &stack, collect, statics)?;
+    let bodies = Rc::new(RefCell::new(Vec::new()));
+    install_env(&lua, &stack, collect, statics, bodies)?;
 
     let chunk = lua.load(&lua_source).set_name(path.display().to_string());
     chunk.exec().map_err(|e| format!("in file {}: {e}", path.display()))?;
@@ -1498,8 +1799,9 @@ pub(crate) fn resolve(path: &Path) -> Result<(Vec<Entry>, Vec<String>), String> 
     // evaluates in collect mode with a lenient emitter, so every
     // `@name = value` (from any file, before or after its use) becomes
     // textually substitutable in every round-two emitter.
+    let bodies = Rc::new(RefCell::new(Vec::new()));
     let collect = Rc::new(Cell::new(true));
-    install_env(&lua, &stack, collect.clone(), statics_out.clone())?;
+    install_env(&lua, &stack, collect.clone(), statics_out.clone(), bodies)?;
     let mut ancestors = Vec::new();
     let mut sym = Symbols {
         lenient: true,
@@ -1663,7 +1965,7 @@ mod tests {
         let lua = compile_str("border {\n    width = 2\n    gradient = [theme.primary, theme.deep]\n}\n");
         assert!(lua.contains("_block(\"border\", \"\", function()"));
         assert!(lua.contains("_leaf(\"width\", 2)"));
-        assert!(lua.contains("_leaf(\"gradient\", [\"theme.primary\", \"theme.deep\"])"));
+        assert!(lua.contains("_leaf(\"gradient\", {\"theme.primary\", \"theme.deep\"})"));
         assert!(lua.contains("end)"));
     }
 
@@ -1840,6 +2142,63 @@ spawn_at_startup = waybar
     }
 
     #[test]
+    fn duration_math_and_serialization() {
+        // 600ms * 2 -> 1200ms; 1.5s * 2 -> 3s; 90m / 2 -> 45m
+        let entries = evaluate(
+            "a = 600ms * 2\nb = 1.5s * 2\nc = 90m / 2\nd = 2 * 300ms\ne = 1s + 500ms\nf = 1.5s\n",
+            Path::new("test.wave"),
+        )
+        .expect("duration math should evaluate");
+        let values: Vec<String> = entries
+            .iter()
+            .map(|e| match e {
+                Entry::Assign(_, v) => v.clone(),
+                _ => panic!("unexpected entry"),
+            })
+            .collect();
+        assert_eq!(
+            values,
+            vec![
+                "1200ms".to_string(),
+                "3s".to_string(),
+                "45m".to_string(),
+                "600ms".to_string(),
+                // 1s + 500ms keeps the first operand's unit: 1.5s
+                "1.5s".to_string(),
+                "1.5s".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn dbg_chunk() {
+        let src = "theme {\n    primary = #8EDDFF\n    deep = primary.darken(0.35)\n}\n";
+        eprintln!("=== CHUNK:\n{}", compile(src, std::path::Path::new("t.wave")).unwrap());
+    }
+
+    #[test]
+    fn color_palette_with_darken_lighten_and_section_globals() {
+        let entries = evaluate(
+            "theme {\n    primary = #8EDDFF\n    deep = primary.darken(0.35)\n    highlight = primary.lighten(0.15)\n}\nborder {\n    gradient = [theme.primary, theme.deep]\n}\n",
+            Path::new("test.wave"),
+        )
+        .expect("palette should evaluate");
+        // deep = 8EDDFF * 0.65: r=142*0.65=92.3->92=0x5C,
+        // g=221*0.65=143.65->144=0x90, b=255*0.65=165.75->166=0xA6
+        assert_eq!(entries[0], Entry::Block("theme".into(), "".into(), vec![
+            Entry::Assign("primary".into(), "8EDDFF".into()),
+            Entry::Assign("deep".into(), "5C90A6".into()),
+            // lighten(0.15): 142+(255-142)*0.15=159=0x9F, 221+34*.15=226=0xE2, 255=0xFF
+            Entry::Assign("highlight".into(), "9FE2FF".into()),
+        ]));
+        // gradient = [theme.primary, theme.deep]; list items serialize
+        // as bare values (colors as RRGGBB)
+        assert_eq!(entries[1], Entry::Block("border".into(), "".into(), vec![
+            Entry::Assign("gradient".into(), "[8EDDFF, 5C90A6]".into()),
+        ]));
+    }
+
+    #[test]
     fn resolve_handles_includes_in_new_syntax() {
         let dir = std::env::temp_dir().join(format!(
             "tidewm-wave-resolve-test-{}",
@@ -1873,4 +2232,6 @@ spawn_at_startup = waybar
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+
 
