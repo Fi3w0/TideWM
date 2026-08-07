@@ -66,9 +66,9 @@ use smithay::{
     delegate_keyboard_shortcuts_inhibit, delegate_output, delegate_pointer_constraints,
     delegate_pointer_gestures, delegate_presentation, delegate_primary_selection,
     delegate_relative_pointer, delegate_seat, delegate_security_context, delegate_session_lock,
-    delegate_single_pixel_buffer, delegate_text_input_manager, delegate_viewporter,
-    delegate_virtual_keyboard_manager, delegate_xdg_activation, delegate_xdg_decoration,
-    delegate_xdg_toplevel_icon,
+    delegate_single_pixel_buffer, delegate_tablet_manager, delegate_text_input_manager,
+    delegate_viewporter, delegate_virtual_keyboard_manager, delegate_xdg_activation,
+    delegate_xdg_decoration, delegate_xdg_toplevel_icon,
 };
 
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1;
@@ -107,11 +107,25 @@ delegate_seat!(Smallvil);
 
 // `wp_cursor_shape_manager_v1`'s `Dispatch` impl requires `TabletSeatHandler`
 // alongside `SeatHandler` (a `wp_cursor_shape_device_v1` can also be created
-// for a `zwp_tablet_tool_v2`) even though TideWM has no tablet-manager
-// protocol of its own -- the trait's one method already defaults to a no-op,
-// so there's nothing to override here.
-impl smithay::wayland::tablet_manager::TabletSeatHandler for Smallvil {}
+// for a `zwp_tablet_tool_v2`) -- this used to be an empty stub since TideWM
+// had no tablet-manager global to ever hand a client a real tool object.
+// Now that `zwp-tablet-v2` is wired up (`tide_core/input.rs`), a tablet
+// tool's own custom-cursor request routes into the same `cursor_status`
+// the mouse pointer uses -- matches anvil's own precedent (single on-screen
+// cursor, one `TODO: tablet tools should have their own cursors` note left
+// for whenever that's worth the complexity; not scoped here).
+impl smithay::wayland::tablet_manager::TabletSeatHandler for Smallvil {
+    fn tablet_tool_image(
+        &mut self,
+        _tool: &smithay::backend::input::TabletToolDescriptor,
+        image: smithay::input::pointer::CursorImageStatus,
+    ) {
+        self.cursor_status = image;
+        self.request_redraw();
+    }
+}
 delegate_cursor_shape!(Smallvil);
+delegate_tablet_manager!(Smallvil);
 
 //
 // Wl Data Device

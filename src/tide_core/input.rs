@@ -3,11 +3,14 @@
 use smithay::{
     backend::{
         input::{
-            AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, GestureBeginEvent,
-            GestureEndEvent, GesturePinchUpdateEvent as BackendGesturePinchUpdateEvent,
+            AbsolutePositionEvent, Axis, AxisSource, ButtonState, Device as SmithayInputDevice,
+            DeviceCapability, Event, GestureBeginEvent, GestureEndEvent,
+            GesturePinchUpdateEvent as BackendGesturePinchUpdateEvent,
             GestureSwipeUpdateEvent as BackendGestureSwipeUpdateEvent, InputBackend, InputEvent,
             KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
-            Switch, SwitchState, SwitchToggleEvent, TouchEvent,
+            ProximityState, Switch, SwitchState, SwitchToggleEvent, TabletToolButtonEvent,
+            TabletToolEvent, TabletToolProximityEvent, TabletToolTipEvent, TabletToolTipState,
+            TouchEvent,
         },
         session::Session,
     },
@@ -33,7 +36,9 @@ use smithay::{
         compositor::RegionAttributes,
         keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitorSeat,
         pointer_constraints::{with_pointer_constraint, PointerConstraint},
+        seat::WaylandFocus,
         shell::wlr_layer::KeyboardInteractivity,
+        tablet_manager::{TabletDescriptor, TabletSeatTrait},
     },
 };
 
@@ -1907,6 +1912,183 @@ impl Smallvil {
             InputEvent::TouchCancel { .. } => {
                 if let Some(touch) = self.seat.get_touch() {
                     touch.cancel(self);
+                }
+            }
+            // A tablet tool drives the same on-screen pointer a mouse does
+            // (one cursor, one `PointerHandle`), so motion/frame go through
+            // `pointer.motion()` exactly like `PointerMotionAbsolute` --
+            // `zwp_tablet_tool_v2`'s own axis/proximity/tip/button state is
+            // layered on top for clients that understand the tablet
+            // protocol specifically. No synthetic `pointer.button()` on
+            // tip down/up: a client using the tablet protocol expects only
+            // the tablet tip event for that physical contact, not a second
+            // synthesized mouse click for the same action.
+            InputEvent::TabletToolAxis { event, .. } => {
+                self.note_pointer_motion();
+                let tablet_seat = self.seat.tablet_seat();
+                let Some(location) = self.touch_location(&event) else {
+                    return;
+                };
+                let pointer = self.seat.get_pointer().unwrap();
+                let under = self.surface_under(location);
+                let tablet = tablet_seat.get_tablet(&TabletDescriptor::from(&event.device()));
+                let tool = tablet_seat.get_tool(&event.tool());
+
+                pointer.motion(
+                    self,
+                    under.clone(),
+                    &MotionEvent {
+                        location,
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time: event.time_msec(),
+                    },
+                );
+
+                if let (Some(tablet), Some(tool)) = (tablet, tool) {
+                    if event.pressure_has_changed() {
+                        tool.pressure(event.pressure());
+                    }
+                    if event.distance_has_changed() {
+                        tool.distance(event.distance());
+                    }
+                    if event.tilt_has_changed() {
+                        tool.tilt(event.tilt());
+                    }
+                    if event.slider_has_changed() {
+                        tool.slider_position(event.slider_position());
+                    }
+                    if event.rotation_has_changed() {
+                        tool.rotation(event.rotation());
+                    }
+                    if event.wheel_has_changed() {
+                        tool.wheel(event.wheel_delta(), event.wheel_delta_discrete());
+                    }
+                    tool.motion(
+                        location,
+                        under.and_then(|(f, loc)| f.wl_surface().map(|s| (s.into_owned(), loc))),
+                        &tablet,
+                        SERIAL_COUNTER.next_serial(),
+                        event.time_msec(),
+                    );
+                }
+                pointer.frame(self);
+                if self.udev_renderer.is_some() {
+                    self.request_redraw();
+                }
+            }
+            InputEvent::TabletToolProximity { event, .. } => {
+                self.note_pointer_motion();
+                let tablet_seat = self.seat.tablet_seat();
+                let Some(location) = self.touch_location(&event) else {
+                    return;
+                };
+                let tool_desc = event.tool();
+                let dh = self.display_handle.clone();
+                tablet_seat.add_tool::<Smallvil>(self, &dh, &tool_desc);
+
+                let pointer = self.seat.get_pointer().unwrap();
+                let under = self.surface_under(location);
+                let tablet = tablet_seat.get_tablet(&TabletDescriptor::from(&event.device()));
+                let tool = tablet_seat.get_tool(&tool_desc);
+
+                pointer.motion(
+                    self,
+                    under.clone(),
+                    &MotionEvent {
+                        location,
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time: event.time_msec(),
+                    },
+                );
+                pointer.frame(self);
+
+                if let (Some((surface, surface_loc)), Some(tablet), Some(tool)) = (
+                    under.and_then(|(f, loc)| f.wl_surface().map(|s| (s.into_owned(), loc))),
+                    tablet,
+                    tool,
+                ) {
+                    match event.state() {
+                        ProximityState::In => tool.proximity_in(
+                            location,
+                            (surface, surface_loc),
+                            &tablet,
+                            SERIAL_COUNTER.next_serial(),
+                            event.time_msec(),
+                        ),
+                        ProximityState::Out => tool.proximity_out(event.time_msec()),
+                    }
+                }
+                if self.udev_renderer.is_some() {
+                    self.request_redraw();
+                }
+            }
+            InputEvent::TabletToolTip { event, .. } => {
+                let tool = self.seat.tablet_seat().get_tool(&event.tool());
+                let Some(tool) = tool else { return };
+                match event.tip_state() {
+                    TabletToolTipState::Down => {
+                        let serial = SERIAL_COUNTER.next_serial();
+                        tool.tip_down(serial, event.time_msec());
+
+                        // Tip contact is a real activation gesture, same
+                        // treatment TouchDown gives WM focus above: route
+                        // through the centralized window/layer focus
+                        // authority, leaving the tablet protocol's own tip
+                        // event as the only thing the client sees for the
+                        // contact itself.
+                        if matches!(self.session_lock, SessionLock::Unlocked) {
+                            let location = self.seat.get_pointer().unwrap().current_location();
+                            if let Some(layer) = self.layer_under_pointer(location) {
+                                if layer.cached_state().keyboard_interactivity
+                                    != KeyboardInteractivity::None
+                                {
+                                    self.focus_layer(layer.wl_surface().clone(), serial);
+                                }
+                            } else if self.exclusive_layer().is_none() {
+                                if let Some((window, _)) = self.window_under(location) {
+                                    let surface = window.toplevel().unwrap().wl_surface().clone();
+                                    if !self.layout.contains(&surface) {
+                                        self.space.raise_element(&window, false);
+                                    }
+                                    self.focus_window(Some(surface), serial);
+                                }
+                            }
+                        }
+                    }
+                    TabletToolTipState::Up => {
+                        tool.tip_up(event.time_msec());
+                    }
+                }
+            }
+            InputEvent::TabletToolButton { event, .. } => {
+                let tool = self.seat.tablet_seat().get_tool(&event.tool());
+                if let Some(tool) = tool {
+                    tool.button(
+                        event.button(),
+                        event.button_state(),
+                        SERIAL_COUNTER.next_serial(),
+                        event.time_msec(),
+                    );
+                }
+            }
+            InputEvent::DeviceAdded { device } => {
+                if device.has_capability(DeviceCapability::TabletTool) {
+                    let dh = self.display_handle.clone();
+                    self.seat
+                        .tablet_seat()
+                        .add_tablet::<Smallvil>(&dh, &TabletDescriptor::from(&device));
+                }
+            }
+            InputEvent::DeviceRemoved { device } => {
+                if device.has_capability(DeviceCapability::TabletTool) {
+                    let tablet_seat = self.seat.tablet_seat();
+                    tablet_seat.remove_tablet(&TabletDescriptor::from(&device));
+                    // Tools are shared across every tablet on the seat, not
+                    // owned by one specific tablet -- only safe to drop them
+                    // once no tablet is left to have generated them from.
+                    if tablet_seat.count_tablets() == 0 {
+                        tablet_seat.clear_tools();
+                    }
                 }
             }
             InputEvent::PointerAxis { event, .. } => {

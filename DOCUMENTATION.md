@@ -1450,6 +1450,7 @@ Full flag/command list: `tidectl --help`.
 | `zwp-keyboard-shortcuts-inhibit-v1` | Let a client (VM, remote desktop) capture all shortcuts | Done |
 | `zwp-text-input-v3` + `zwp-input-method-v2` + `zwp-virtual-keyboard-v1` | IME support | Done — app-side activation verified live; see CHANGELOG for the exact verification bar per sub-protocol |
 | `wp-cursor-shape-v1` | Named-cursor requests (Qt6/GTK4, QuickShell) | Done |
+| `zwp-tablet-v2` | Drawing tablet/pen support (tools, pressure, tilt, proximity) | Done via Smithay's convenience module — global, per-device hotplug advertisement, and full axis/proximity/tip/button forwarding live in `tide_core/input.rs`. Verified live nested that the global advertises and a real client's `get_tablet_seat` request completes cleanly with no crash; real tablet hardware to exercise actual `DeviceAdded`/axis/pressure/tilt events has not been available to test |
 | `wlr-output-management-unstable-v1` | Runtime output reconfiguration (`wlr-randr`, `kanshi`, `wdisplays`) | Done — position/transform/scale apply live; disabling an output or changing resolution needs real hardware to verify a live modeset |
 | `wlr-output-power-management-unstable-v1` | Display on/off (DPMS) | Protocol + render-loop logic done; real CRTC power toggle unverified on hardware |
 | `zwlr-gamma-control-manager-v1` | Night-light tools (`wlsunset`, `gammastep`) | Protocol + DRM gamma ioctls done; real color-change unverified on hardware |

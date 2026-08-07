@@ -89,6 +89,7 @@ use smithay::{
         shm::ShmState,
         single_pixel_buffer::SinglePixelBufferState,
         socket::ListeningSocketSource,
+        tablet_manager::TabletManagerState,
         text_input::TextInputManagerState,
         viewporter::ViewporterState,
         virtual_keyboard::VirtualKeyboardManagerState,
@@ -708,6 +709,13 @@ pub struct Smallvil {
     /// every commit for us), but `xwayland-satellite` hard-requires the global
     /// to exist -- it panics on startup without it.
     pub viewporter_state: ViewporterState,
+    /// `zwp-tablet-v2`: drawing-tablet/pen support. Real Smithay convenience
+    /// module (unlike `wp-tearing-control-v1`, which had none) -- this just
+    /// registers the global; per-device advertisement and per-event
+    /// forwarding live in `tide_core/input.rs`'s `DeviceAdded`/`TabletTool*`
+    /// handling, and `handlers/mod.rs`'s `TabletSeatHandler` impl.
+    #[allow(dead_code)]
+    pub tablet_manager_state: TabletManagerState,
     /// `ext-image-copy-capture-v1` (screenshot) protocol states, see
     /// `handlers/capture.rs`. Only output sources are supported.
     pub image_capture_source_state: ImageCaptureSourceState,
@@ -2991,6 +2999,7 @@ impl Smallvil {
         let _security_context_state = SecurityContextState::new::<Self, _>(&dh, trusted_client);
         let popups = PopupManager::default();
         let viewporter_state = ViewporterState::new::<Self>(&dh);
+        let tablet_manager_state = TabletManagerState::new::<Self>(&dh);
         let image_capture_source_state = ImageCaptureSourceState::new();
         let output_capture_source_state =
             OutputCaptureSourceState::new_with_filter::<Self, _>(&dh, trusted_client);
@@ -3217,6 +3226,7 @@ impl Smallvil {
             unmapped_toplevels: HashMap::new(),
             unmapped_layer_surfaces: HashSet::new(),
             viewporter_state,
+            tablet_manager_state,
             image_capture_source_state,
             output_capture_source_state,
             toplevel_capture_source_state,
