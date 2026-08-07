@@ -6749,7 +6749,10 @@ fn lower_layer_rule_block(body: &[waves::Entry]) -> LayerRule {
             "dim_around" => set_bool(&mut rule.dim_around, key, value),
             "dim_amount" => match value.parse::<f32>() {
                 Ok(value) if value.is_finite() => rule.dim_amount = Some(value.clamp(0.0, 1.0)),
-                _ => tracing::warn!(value, "Expected layer_rule.dim_amount from 0.0 to 1.0, ignoring"),
+                _ => tracing::warn!(
+                    value,
+                    "Expected layer_rule.dim_amount from 0.0 to 1.0, ignoring"
+                ),
             },
             "above_lock_screen" => set_bool(&mut rule.above_lock_screen, key, value),
             other => tracing::warn!(key = %other, "Unknown key in `layer_rule` block, ignoring"),
@@ -7887,7 +7890,10 @@ mod tests {
             waves::Entry::Assign("namespace".into(), "waybar".into()),
             waves::Entry::Assign("z_order".into(), "not-a-number".into()),
         ]);
-        assert_eq!(bad_z_order.z_order, None, "malformed z_order is ignored, not defaulted to 0");
+        assert_eq!(
+            bad_z_order.z_order, None,
+            "malformed z_order is ignored, not defaulted to 0"
+        );
 
         let dim = lower_layer_rule_block(&[
             waves::Entry::Assign("namespace".into(), "rofi".into()),
@@ -7895,7 +7901,11 @@ mod tests {
             waves::Entry::Assign("dim_amount".into(), "1.4".into()),
         ]);
         assert!(dim.dim_around);
-        assert_eq!(dim.dim_amount, Some(1.0), "out-of-range dim_amount is clamped, not rejected");
+        assert_eq!(
+            dim.dim_amount,
+            Some(1.0),
+            "out-of-range dim_amount is clamped, not rejected"
+        );
 
         let above_lock = lower_layer_rule_block(&[
             waves::Entry::Assign("namespace".into(), "osd".into()),
