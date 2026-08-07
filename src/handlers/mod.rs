@@ -2,6 +2,7 @@ mod capture;
 mod compositor;
 mod layer_shell;
 mod screencopy;
+mod tearing_control;
 pub(crate) mod wlr_foreign_toplevel;
 pub(crate) mod wlr_gamma_control;
 pub(crate) mod wlr_output_management;

@@ -97,6 +97,7 @@ use smithay::{
     },
 };
 
+use smithay::reexports::wayland_protocols::wp::tearing_control::v1::server::wp_tearing_control_manager_v1::WpTearingControlManagerV1;
 use wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
 
 use crate::{
@@ -718,6 +719,11 @@ pub struct Smallvil {
     /// because dropping the `GlobalId` would remove the global.
     #[allow(dead_code)]
     pub wlr_screencopy_global: smithay::reexports::wayland_server::backend::GlobalId,
+    /// `wp-tearing-control-v1` global, hand-rolled in
+    /// `handlers/tearing_control.rs`. Kept for the same reason as
+    /// `wlr_screencopy_global` above.
+    #[allow(dead_code)]
+    pub tearing_control_global: smithay::reexports::wayland_server::backend::GlobalId,
     /// Owned capture sessions. A `Session` stops itself on drop, so it must
     /// be kept as long as the client wants it; dead ones are filtered out on
     /// the backend cleanup ticks (`cleanup_capture`).
@@ -2993,6 +2999,7 @@ impl Smallvil {
         let image_copy_capture_state =
             ImageCopyCaptureState::new_with_filter::<Self, _>(&dh, trusted_client);
         let wlr_screencopy_global = dh.create_global::<Self, ZwlrScreencopyManagerV1, ()>(3, ());
+        let tearing_control_global = dh.create_global::<Self, WpTearingControlManagerV1, ()>(1, ());
 
         // A seat is a group of keyboards, pointer and touch devices.
         // A seat typically has a pointer and maintains a keyboard focus and a pointer focus.
@@ -3215,6 +3222,7 @@ impl Smallvil {
             toplevel_capture_source_state,
             image_copy_capture_state,
             wlr_screencopy_global,
+            tearing_control_global,
             capture_sessions: Vec::new(),
             pending_captures: Vec::new(),
             idle_inhibit_manager_state,

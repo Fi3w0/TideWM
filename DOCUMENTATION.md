@@ -1435,6 +1435,7 @@ Full flag/command list: `tidectl --help`.
 | `wp-viewporter` | Surface scaling/cropping (needed by `xwayland-satellite`) | Done |
 | `wp-presentation-time` | Frame timing feedback to clients | Done |
 | `wp-single-pixel-buffer-v1` | Solid-color buffers without a real allocation | Done |
+| `wp-tearing-control-v1` | Client hint that a surface's content may tear (games, drawing tablets) | Protocol done (global, per-surface double-buffered hint, verified live including the `tearing_control_exists` error path) — no DRM-level effect yet, no config surface. Honoring it means an async/immediate KMS page flip, and the pinned Smithay revision's `AtomicDrmSurface`/`DrmCompositor` hardcode their own atomic-commit flags with no caller override point, confirmed by reading the source. See AGENT.md for the full reasoning |
 | `xdg-toplevel-icon-v1` | Client-provided application/window icons | Done — names and buffers are retained in committed surface state for launchers and future TideWM UI consumers |
 | `ext-session-lock-v1` | Screen lock (`swaylock`, `hyprlock`) | Done — a crashed lock client terminates the compositor session fail-closed so the login manager can recover; it never auto-unlocks |
 | `ext-foreign-toplevel-list-v1` | Read-only toplevel list | Done |
