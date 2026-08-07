@@ -1512,6 +1512,16 @@ impl Config {
             .any(|rule| rule.above_lock_screen && rule.matches(namespace))
     }
 
+    /// Whether any `[[layer_rule]]` matching `namespace` sets `blur` --
+    /// same any-of fold as `layer_blocks_capture`/`layer_above_lock_screen`.
+    /// Callers must still check `self.frost.enabled` separately: this is
+    /// the per-namespace opt-in, not the global decoration master switch.
+    pub(crate) fn layer_blur(&self, namespace: &str) -> bool {
+        self.layer_rules
+            .iter()
+            .any(|rule| rule.blur && rule.matches(namespace))
+    }
+
     /// The `layout` field of every `[[workspace_rule]]` that set one,
     /// keyed by workspace number -- feeds `Layouts::set_workspace_algorithm_overrides`
     /// directly from `Smallvil::new`/`reload_config`, the same "resolve
@@ -3591,6 +3601,29 @@ impl WindowRule {
 ///   else -- Hyprland's `abovelock`. Deliberately render-only: `surface_under`
 ///   never hit-tests anything but the lock surface itself while locked, so
 ///   this cannot be used to route input past the lock.
+/// - `blur`: frost-glass the matched surface's own backdrop -- Hyprland's
+///   `layerrule = blur`. Reuses the same captured-backdrop pipeline R2's
+///   window frost already built (`Smallvil::capture_layer_backdrops`,
+///   `layer_glass_elements`), keyed into the same `backdrop_textures` map
+///   windows use since the key type (`WlSurface`) and namespaces never
+///   collide. Deliberately gated on `frost.enabled`, not `water_effects`:
+///   this is general decoration, the same call the shadow/rounding/border
+///   precedent already makes, not part of the water identity. Always
+///   frost -- there's no water-refraction mode for a bar, matching
+///   Hyprland's own single "blur" effect rather than TideWM windows'
+///   water/frost choice. **No `ignore_alpha`, and this is a real gap, not
+///   a proven non-issue:** the captured frost rect is sized to the
+///   surface's full `layer_geometry` (its negotiated logical rect, e.g. a
+///   whole output for a `width = 100%; height = 100%` anchor), not a
+///   bounding box of its actually-opaque pixels, and it renders behind
+///   the surface unconditionally -- so wherever the surface itself draws
+///   fully transparent, the frost rect shows through in full, same as
+///   Hyprland *without* `ignorealpha`. This only matters for a layer
+///   client whose logical size is much larger than its visibly-drawn
+///   content (Hyprland's own motivating case: an invisible full-output
+///   click-catcher); an ordinary bar/launcher sized to what it draws
+///   isn't affected, which is why this shipped without the knob rather
+///   than blocking on it -- revisit if a real client hits the gap.
 #[derive(Debug, Clone, Default)]
 pub struct LayerRule {
     pub namespace: Option<String>,
@@ -3599,6 +3632,7 @@ pub struct LayerRule {
     pub dim_around: bool,
     pub dim_amount: Option<f32>,
     pub above_lock_screen: bool,
+    pub blur: bool,
 }
 
 impl LayerRule {
@@ -6755,6 +6789,7 @@ fn lower_layer_rule_block(body: &[waves::Entry]) -> LayerRule {
                 ),
             },
             "above_lock_screen" => set_bool(&mut rule.above_lock_screen, key, value),
+            "blur" => set_bool(&mut rule.blur, key, value),
             other => tracing::warn!(key = %other, "Unknown key in `layer_rule` block, ignoring"),
         }
     }
@@ -7879,7 +7914,7 @@ mod tests {
     }
 
     #[test]
-    fn layer_rule_z_order_dim_around_and_above_lock_screen_parse_and_resolve() {
+    fn layer_rule_z_order_dim_around_above_lock_screen_and_blur_parse_and_resolve() {
         let z_order = lower_layer_rule_block(&[
             waves::Entry::Assign("namespace".into(), "waybar".into()),
             waves::Entry::Assign("z_order".into(), "-5".into()),
@@ -7959,6 +7994,21 @@ mod tests {
             ..Default::default()
         });
         assert!(config.layer_above_lock_screen("osd-volume"));
+
+        // blur: same any() fold, parses like every other bare bool key.
+        let blur = lower_layer_rule_block(&[
+            waves::Entry::Assign("namespace".into(), "waybar".into()),
+            waves::Entry::Assign("blur".into(), "true".into()),
+        ]);
+        assert!(blur.blur);
+        assert!(!config.layer_blur("waybar"));
+        config.layer_rules.push(LayerRule {
+            namespace: Some("waybar".to_string()),
+            blur: true,
+            ..Default::default()
+        });
+        assert!(config.layer_blur("waybar"));
+        assert!(!config.layer_blur("some-other-bar"));
     }
 
     #[test]

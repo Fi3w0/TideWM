@@ -178,6 +178,11 @@ impl WlrLayerShellHandler for Smallvil {
 
     fn layer_destroyed(&mut self, surface: LayerSurface) {
         self.unmapped_layer_surfaces.remove(surface.wl_surface());
+        // `layer_rule { blur = true }`'s captured backdrop texture: without
+        // this a layer surface that's opened and closed repeatedly (rofi,
+        // any launcher) leaks one full-rect GLES texture per destroy, since
+        // nothing else ever removes this map's entries for a layer surface.
+        self.backdrop_textures.remove(surface.wl_surface());
 
         // Unmap from whichever output actually has it, then let retile()
         // (which re-tiles every output, re-reading each one's fresh

@@ -1,6 +1,6 @@
 [package]
 name = "tidewm"
-version = "0.90.4"
+version = "0.90.5"
 edition = "2021"
 # Verified floor: wayland-protocols 0.32.13 requires 1.86 (1.85 fails to
 # compile it). The optional `screencast`/`accessibility` features need

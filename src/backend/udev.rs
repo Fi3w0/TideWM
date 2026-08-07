@@ -1318,6 +1318,7 @@ fn render_surface(
     // reuse their existing window texture.
     if !locked {
         state.capture_floating_backdrops(renderer, output);
+        state.capture_layer_backdrops(renderer, output);
     }
     let size = output.current_mode().map(|m| m.size).unwrap_or_default();
     let scale = output.current_scale().fractional_scale();
@@ -1482,7 +1483,9 @@ fn render_surface(
         HashMap::new()
     } else {
         let surfaces = state.glass_eligible_surfaces(&placements);
-        state.glass_layer_elements(renderer, output, &placements, &surfaces)
+        let mut layers = state.glass_layer_elements(renderer, output, &placements, &surfaces);
+        layers.extend(state.layer_glass_elements(renderer, output));
+        layers
     };
     // Glass windows render in their normal z-slot (the walk inserts each
     // glass layer behind its own surface); only depth-replaced windows are

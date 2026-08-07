@@ -2434,11 +2434,14 @@ impl Smallvil {
             }
         }
 
+        #[allow(clippy::too_many_arguments, clippy::mutable_key_type)]
         fn append_layers(
             state: &Smallvil,
             renderer: &mut GlesRenderer,
             output: &Output,
             kinds: &[WlrLayer],
+            skip: &[WlSurface],
+            glass_layers: &mut HashMap<WlSurface, Vec<crate::backend::udev::OutputRenderElements>>,
             result: &mut Vec<crate::backend::udev::OutputRenderElements>,
         ) {
             let output_scale = output.current_scale().fractional_scale();
@@ -2454,7 +2457,9 @@ impl Smallvil {
                     std::cmp::Reverse(state.config.layer_z_order(layer.namespace()).unwrap_or(0))
                 });
                 for layer in layers {
-                    if state.unmapped_layer_surfaces.contains(layer.wl_surface()) {
+                    if state.unmapped_layer_surfaces.contains(layer.wl_surface())
+                        || skip.contains(layer.wl_surface())
+                    {
                         continue;
                     }
                     let Some(geometry) = layer_map.layer_geometry(layer) else {
@@ -2472,6 +2477,14 @@ impl Smallvil {
                             .map(SpaceRenderElements::Surface)
                             .map(crate::backend::udev::OutputRenderElements::Space),
                     );
+                    // The frost layer for `layer_rule { blur = true }` sits
+                    // directly behind the surface's own real per-pixel
+                    // alpha, same "surface, then glass" order windows
+                    // already use -- ordinary GL blending shows it through
+                    // wherever the surface itself is translucent.
+                    if let Some(layers) = glass_layers.remove(layer.wl_surface()) {
+                        result.extend(layers);
+                    }
                 }
             }
         }
@@ -2494,6 +2507,8 @@ impl Smallvil {
             renderer,
             output,
             &[WlrLayer::Overlay, WlrLayer::Top],
+            skip,
+            &mut *glass_layers,
             &mut result,
         );
         if let Some(amount) = self.layer_dim_amount(output) {
@@ -2540,6 +2555,8 @@ impl Smallvil {
             renderer,
             output,
             &[WlrLayer::Bottom, WlrLayer::Background],
+            skip,
+            &mut *glass_layers,
             &mut result,
         );
         Some(result)
@@ -5749,6 +5766,90 @@ impl Smallvil {
         }
     }
 
+    /// The layer-shell analog of `capture_floating_backdrops`: captures a
+    /// backdrop for each currently-mapped layer surface resolving
+    /// `layer_rule { blur = true }`, reusing the exact same
+    /// `backdrop_textures` map windows populate -- keys are `WlSurface`s
+    /// and a layer surface's is never equal to a window's, so there is no
+    /// collision, and no second cache is worth carrying. Deliberately
+    /// gated on `frost.enabled`, not `water_effects`: layer blur is
+    /// general decoration, the same call the shadow/rounding/border
+    /// precedent already makes elsewhere in this file, not part of the
+    /// water identity.
+    pub(crate) fn capture_layer_backdrops(&mut self, renderer: &mut GlesRenderer, output: &Output) {
+        if !self.config.frost.enabled {
+            return;
+        }
+        let Some(placements) = self.render_placements(output) else {
+            return;
+        };
+        let output_scale = output.current_scale().fractional_scale();
+        #[allow(clippy::mutable_key_type)]
+        let surfaces: Vec<(WlSurface, Rectangle<i32, Physical>)> = {
+            let layer_map = layer_map_for_output(output);
+            layer_map
+                .layers()
+                .filter(|layer| !self.unmapped_layer_surfaces.contains(layer.wl_surface()))
+                .filter(|layer| self.config.layer_blur(layer.namespace()))
+                .filter_map(|layer| {
+                    let geometry = layer_map.layer_geometry(layer)?;
+                    Some((
+                        layer.wl_surface().clone(),
+                        geometry.to_physical_precise_round(output_scale),
+                    ))
+                })
+                .collect()
+        };
+
+        let mut captured_first_backdrop = false;
+        for (surface, physical_rect) in surfaces {
+            let Some(space_elements) = self.desktop_render_elements(
+                renderer,
+                output,
+                &placements,
+                std::slice::from_ref(&surface),
+                &mut HashMap::new(),
+                Vec::new(),
+            ) else {
+                continue;
+            };
+            let wallpaper = self.wallpaper_element(output, renderer);
+            let behind: Vec<crate::backend::udev::OutputRenderElements> = space_elements
+                .into_iter()
+                .chain(wallpaper.map(crate::backend::udev::OutputRenderElements::Composited))
+                .collect();
+            let reusable = self
+                .backdrop_textures
+                .get(&surface)
+                .map(|capture| capture.texture.clone());
+            let capture_result =
+                crate::backdrop::capture_backdrop(renderer, physical_rect, behind, reusable);
+            if let Some(texture) = capture_result {
+                let first_capture = !self.backdrop_textures.contains_key(&surface);
+                let (id, mut commit) = match self.backdrop_textures.get(&surface) {
+                    Some(existing) => (existing.id.clone(), existing.commit),
+                    None => (
+                        smithay::backend::renderer::element::Id::new(),
+                        CommitCounter::default(),
+                    ),
+                };
+                commit.increment();
+                self.backdrop_textures.insert(
+                    surface,
+                    crate::backdrop::BackdropCapture {
+                        texture,
+                        id,
+                        commit,
+                    },
+                );
+                captured_first_backdrop |= first_capture;
+            }
+        }
+        if captured_first_backdrop {
+            self.request_redraw();
+        }
+    }
+
     /// Floating windows on `output` eligible for a captured glass layer this
     /// frame: `water_effects` on, either an explicit `glass` mode or the
     /// backward-compatible implicit trigger (`opacity` below 1.0 means
@@ -5953,6 +6054,79 @@ impl Smallvil {
             }
         }
         layers
+    }
+
+    /// The layer-shell analog of `glass_layer_elements`, much smaller:
+    /// layers have no water mode, no per-window opacity/rounding to fold
+    /// in, and no rule-scoped frost override -- just the global `frost { }`
+    /// block, matching how Hyprland's own `layerrule = blur` has no
+    /// per-namespace strength knob either. Callers merge the result into
+    /// the same `glass_layers` map already threaded through
+    /// `desktop_render_elements` for windows -- disjoint `WlSurface` keys,
+    /// so a plain `HashMap::extend` is enough, no new parameter needed
+    /// anywhere in that call chain.
+    #[allow(clippy::mutable_key_type)]
+    pub(crate) fn layer_glass_elements(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+    ) -> HashMap<WlSurface, Vec<crate::backend::udev::OutputRenderElements>> {
+        let mut result = HashMap::new();
+        if !self.config.frost.enabled {
+            return result;
+        }
+        let output_scale = output.current_scale().fractional_scale();
+        let eligible: Vec<(WlSurface, Rectangle<i32, Physical>)> = {
+            let layer_map = layer_map_for_output(output);
+            layer_map
+                .layers()
+                .filter(|layer| !self.unmapped_layer_surfaces.contains(layer.wl_surface()))
+                .filter(|layer| self.config.layer_blur(layer.namespace()))
+                .filter_map(|layer| {
+                    let geometry = layer_map.layer_geometry(layer)?;
+                    Some((
+                        layer.wl_surface().clone(),
+                        geometry.to_physical_precise_round(output_scale),
+                    ))
+                })
+                .collect()
+        };
+        if eligible.is_empty() {
+            return result;
+        }
+        let Some(program) =
+            crate::frost_glass::frost_glass_program(&mut self.frost_glass_program, renderer)
+        else {
+            return result;
+        };
+        let frost = self.config.frost.clone();
+        let scale = output_scale as f32;
+        let corner_radii = [frost.corner_radius * scale; 4];
+        let rounding_power = 2.0;
+        let corner_softness = frost.corner_softness * scale;
+        for (surface, physical_rect) in eligible {
+            let Some(capture) = self.backdrop_textures.get(&surface) else {
+                continue;
+            };
+            let (id, commit, texture) =
+                (capture.id.clone(), capture.commit, capture.texture.clone());
+            result.entry(surface).or_insert_with(Vec::new).push(
+                crate::backend::udev::OutputRenderElements::FrostGlass(
+                    crate::frost_glass::FrostGlassElement::new(
+                        id,
+                        commit,
+                        texture,
+                        physical_rect,
+                        program.clone(),
+                        frost.clone(),
+                        corner_radii,
+                        rounding_power,
+                        corner_softness,
+                    ),
+                ),
+            );
+        }
+        result
     }
 
     fn capture_workspace_desktop(

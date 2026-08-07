@@ -237,6 +237,7 @@ pub fn init_winit(
                 if !locked {
                     let renderer = entry.backend.renderer();
                     state.capture_floating_backdrops(renderer, &entry.output);
+                    state.capture_layer_backdrops(renderer, &entry.output);
                 }
 
                 let render_result = {
@@ -329,6 +330,7 @@ pub fn init_winit(
                             &placements,
                             &glass_surfaces,
                         );
+                        glass_layers.extend(state.layer_glass_elements(renderer, &entry.output));
                         let (depth_elements, depth_surfaces) =
                             state.depth_frame_elements(renderer, &entry.output, &placements);
                         // Only skip from the normal walk what actually got a
