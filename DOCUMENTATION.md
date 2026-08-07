@@ -1200,17 +1200,37 @@ rule {
 
 ### `layer_rule { }`
 
-Excludes a layer-shell surface (a bar, panel, or launcher, not an ordinary app window) from screenshots and screencasts by namespace, without hiding it from your own screen (niri's `layer-rule { block-out-from ... }`) — for something like a password-manager quick-access panel that shouldn't end up in a recording. One block per rule; repeat for more.
+Matches a layer-shell surface (a bar, panel, or launcher, not an ordinary app window) by namespace. One block per rule; repeat for more. Hyprland `layerrule` parity items, from the 2026-08-06 config audit:
 
 | Key | Type | Notes |
 | --- | --- | --- |
 | `namespace` | string, optional | Matches case-sensitively, anywhere in the surface's namespace string (the name the client itself sets — rofi's is `rofi`). Required — a rule with no `namespace` never matches anything. |
-| `block_capture` | bool | Default `false`. When `true`, the matched surface's rect renders as solid black in `wlr-screencopy`/`ext-image-copy-capture` output instead of its real content. |
+| `block_capture` | bool | Default `false`. When `true`, the matched surface's rect renders as solid black in `wlr-screencopy`/`ext-image-copy-capture` output instead of its real content, without hiding it from your own screen (niri's `layer-rule { block-out-from ... }`) — for something like a password-manager quick-access panel that shouldn't end up in a recording. |
+| `z_order` | integer, optional | Reorders the matched namespace within its own layer-shell stratum (Background/Bottom/Top/Overlay) instead of the client's natural mapping-order stacking — Hyprland's `order`. Higher sorts more to the front. Last matching rule that actually sets it wins. |
+| `dim_around` | bool | Default `false`. While a matching surface on the Overlay or Top stratum is mapped, dims everything rendered behind it — every non-fullscreen window, lower layers, and the wallpaper — Hyprland's `dimaround`. |
+| `dim_amount` | float 0.0-1.0, optional | The dim overlay's alpha. Default `0.35` when `dim_around` is on and this is unset. |
+| `above_lock_screen` | bool | Default `false`. Keeps the matched surface rendered on top of the session-lock surface instead of being blanked with everything else — Hyprland's `abovelock`. Render-only: input still never reaches anything but the lock surface itself while locked, so this cannot be used to bypass the lock. Screenshots/screencasts taken while locked still honor `block_capture` for an `above_lock_screen` surface. |
 
 ```
 layer_rule {
     namespace = rofi
     block_capture = true
+}
+
+layer_rule {
+    namespace = waybar
+    z_order = 10
+}
+
+layer_rule {
+    namespace = launcher
+    dim_around = true
+    dim_amount = 0.5
+}
+
+layer_rule {
+    namespace = volume-osd
+    above_lock_screen = true
 }
 ```
 

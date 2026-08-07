@@ -40,6 +40,7 @@ use smithay::{
         renderer::{
             element::{
                 memory::MemoryRenderBufferRenderElement,
+                solid::SolidColorRenderElement,
                 surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
                 Kind,
             },
@@ -156,6 +157,11 @@ smithay::backend::renderer::element::render_elements! {
     /// Captured outgoing workspace peeled away over the live incoming
     /// workspace (Phase R1, see workspace_transition.rs).
     WorkspaceTransition = crate::workspace_transition::WorkspaceTransitionElement,
+    /// Full-output dim fill for a `layer_rule { dim_around = true }` layer
+    /// surface -- Hyprland's `dimaround`. Pushed directly behind the
+    /// Overlay/Top layer pass so it darkens every window and lower layer
+    /// without needing its own capture step.
+    Dim = SolidColorRenderElement,
 }
 
 struct SurfaceData {
@@ -1161,6 +1167,7 @@ fn handle_connector_change(
                     state.space.unmap_output(&surface.output);
                     state.lock_surfaces.remove(&surface.output);
                     state.lock_blank.remove(&surface.output);
+                    state.layer_dim_buffers.remove(&surface.output);
                     #[cfg(feature = "screencast")]
                     if let Some(screencast) = &state.screencast {
                         screencast.refresh_outputs(state.space.outputs());

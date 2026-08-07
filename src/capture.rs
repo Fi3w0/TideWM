@@ -686,7 +686,22 @@ impl Smallvil {
         }
 
         let excluded_rects: Vec<Rectangle<i32, BufferCoords>> = if locked {
-            Vec::new()
+            // Only `above_lock_screen` layers are even rendered while
+            // locked (`lock_render_elements`); `block_capture` still has to
+            // black those specific ones out here or a screenshot could read
+            // a namespace the maintainer explicitly excluded, same hazard
+            // `block_capture` exists for in the unlocked branch below.
+            let scale = output.current_scale().fractional_scale();
+            let layer_map = layer_map_for_output(&output);
+            layer_map
+                .layers()
+                .filter(|layer| {
+                    self.config.layer_above_lock_screen(layer.namespace())
+                        && self.config.layer_blocks_capture(layer.namespace())
+                })
+                .filter_map(|layer| layer_map.layer_geometry(layer))
+                .map(|geo| logical_rect_to_buffer(geo, size, scale, Transform::Normal))
+                .collect()
         } else {
             let scale = output.current_scale().fractional_scale();
             let layer_map = layer_map_for_output(&output);

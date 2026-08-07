@@ -296,6 +296,11 @@ pub struct Smallvil {
     /// `detach_mapped_toplevel` alongside `window_opacity`, or this grows
     /// for the life of the session.
     pub(crate) backdrop_textures: HashMap<WlSurface, crate::backdrop::BackdropCapture>,
+    /// Cached full-output solid fill for `layer_rule { dim_around = true }`,
+    /// one per output -- same "own buffer per output, dedup only bumps its
+    /// commit on real size/color change" shape as `lock_blank`. Pruned on
+    /// output disconnect alongside it.
+    pub(crate) layer_dim_buffers: HashMap<Output, SolidColorBuffer>,
     /// Per-window water-glass animation state (`water_glass::GlassAnim`):
     /// when the distortion was last disturbed and what frame state that
     /// disturbance was derived from. Only populated for windows taking the
@@ -2440,7 +2445,15 @@ impl Smallvil {
             let scale = Scale::from(output_scale);
             let layer_map = layer_map_for_output(output);
             for kind in kinds {
-                for layer in layer_map.layers_on(*kind).rev() {
+                // Natural stacking order (last-mapped topmost) unless a
+                // `layer_rule { z_order = N }` overrides it -- stable sort
+                // so untouched namespaces (the common case, all default 0)
+                // keep exactly the order `.rev()` already gave them.
+                let mut layers: Vec<_> = layer_map.layers_on(*kind).rev().collect();
+                layers.sort_by_key(|layer| {
+                    std::cmp::Reverse(state.config.layer_z_order(layer.namespace()).unwrap_or(0))
+                });
+                for layer in layers {
                     if state.unmapped_layer_surfaces.contains(layer.wl_surface()) {
                         continue;
                     }
@@ -2483,6 +2496,25 @@ impl Smallvil {
             &[WlrLayer::Overlay, WlrLayer::Top],
             &mut result,
         );
+        if let Some(amount) = self.layer_dim_amount(output) {
+            if let Some(size) = self.space.output_geometry(output).map(|geo| geo.size) {
+                let scale = output.current_scale().fractional_scale();
+                let buffer = self
+                    .layer_dim_buffers
+                    .entry(output.clone())
+                    .or_insert_with(|| SolidColorBuffer::new((0, 0), [0.0, 0.0, 0.0, 1.0]));
+                buffer.update(size, [0.0, 0.0, 0.0, 1.0]);
+                result.push(crate::backend::udev::OutputRenderElements::Dim(
+                    SolidColorRenderElement::from_buffer(
+                        buffer,
+                        (0, 0),
+                        Scale::from(scale),
+                        amount,
+                        Kind::Unspecified,
+                    ),
+                ));
+            }
+        }
         append_windows(
             self,
             renderer,
@@ -2511,6 +2543,24 @@ impl Smallvil {
             &mut result,
         );
         Some(result)
+    }
+
+    /// The dim overlay alpha for `output`, if any currently-mapped Overlay
+    /// or Top layer surface resolves `layer_rule { dim_around = true }`.
+    /// Only those two strata: dimming from a Bottom/Background surface
+    /// (already behind everything) has nothing left to darken.
+    fn layer_dim_amount(&self, output: &Output) -> Option<f32> {
+        if !matches!(self.session_lock, SessionLock::Unlocked) {
+            return None;
+        }
+        let layer_map = layer_map_for_output(output);
+        let amount = [WlrLayer::Overlay, WlrLayer::Top]
+            .into_iter()
+            .flat_map(|kind| layer_map.layers_on(kind))
+            .filter(|layer| !self.unmapped_layer_surfaces.contains(layer.wl_surface()))
+            .filter_map(|layer| self.config.layer_dim_around(layer.namespace()))
+            .fold(0.0f32, f32::max);
+        (amount > 0.0).then_some(amount)
     }
 
     fn depth_live_alpha(&self, surface: &WlSurface) -> f32 {
@@ -3052,6 +3102,7 @@ impl Smallvil {
             window_opacity: HashMap::new(),
             window_glass_modes: HashMap::new(),
             backdrop_textures: HashMap::new(),
+            layer_dim_buffers: HashMap::new(),
             water_glass_program: None,
             glass_anim: HashMap::new(),
             frost_glass_program: None,
@@ -4770,6 +4821,35 @@ impl Smallvil {
         let scale = output.current_scale().fractional_scale();
 
         let mut elements = Vec::new();
+        // `layer_rule { above_lock_screen = true }` -- Hyprland's
+        // `abovelock`. Pushed before the lock surface itself so it lands on
+        // top of it (front-to-back, index 0 topmost, see this fn's own doc
+        // comment). Render-only: `surface_under` still only ever hit-tests
+        // the lock surface while locked, so this can't be used to route
+        // input to whatever's behind the lock.
+        {
+            let layer_map = layer_map_for_output(output);
+            for layer in layer_map.layers() {
+                if self.unmapped_layer_surfaces.contains(layer.wl_surface())
+                    || !self.config.layer_above_lock_screen(layer.namespace())
+                {
+                    continue;
+                }
+                let Some(geometry) = layer_map.layer_geometry(layer) else {
+                    continue;
+                };
+                let surface_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                    render_elements_from_surface_tree(
+                        renderer,
+                        layer.wl_surface(),
+                        geometry.loc.to_physical_precise_round(scale),
+                        scale,
+                        1.0,
+                        Kind::Unspecified,
+                    );
+                elements.extend(surface_elements.into_iter().map(LockRenderElement::Surface));
+            }
+        }
         if let Some(lock_surface) = self.lock_surfaces.get(output) {
             let surface_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                 render_elements_from_surface_tree(

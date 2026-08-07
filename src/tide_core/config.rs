@@ -1478,6 +1478,40 @@ impl Config {
         self.layer_rules.iter().any(|rule| rule.block_capture)
     }
 
+    /// Last-match-wins render order for `namespace` within its own wlr
+    /// layer stratum, skipping matches that don't set `z_order` at all
+    /// (so an unrelated later rule matching the same namespace for a
+    /// different effect can't reset it back to the default).
+    pub(crate) fn layer_z_order(&self, namespace: &str) -> Option<i32> {
+        self.layer_rules
+            .iter()
+            .rev()
+            .filter(|rule| rule.matches(namespace))
+            .find_map(|rule| rule.z_order)
+    }
+
+    /// Last matching `dim_around = true` rule for `namespace`, resolved to
+    /// its overlay alpha (its own `dim_amount`, or a fixed default). `None`
+    /// when nothing matching dims. Not an `.any()` fold like
+    /// `layer_blocks_capture`'s bare bool: the amount has to come from one
+    /// authoritative rule, not several that might disagree.
+    pub(crate) fn layer_dim_around(&self, namespace: &str) -> Option<f32> {
+        self.layer_rules
+            .iter()
+            .rev()
+            .find(|rule| rule.dim_around && rule.matches(namespace))
+            .map(|rule| rule.dim_amount.unwrap_or(0.35))
+    }
+
+    /// Whether any `[[layer_rule]]` matching `namespace` sets
+    /// `above_lock_screen` -- same "did any of them say yes" fold as
+    /// `layer_blocks_capture`, since this is a bare bool.
+    pub(crate) fn layer_above_lock_screen(&self, namespace: &str) -> bool {
+        self.layer_rules
+            .iter()
+            .any(|rule| rule.above_lock_screen && rule.matches(namespace))
+    }
+
     /// The `layout` field of every `[[workspace_rule]]` that set one,
     /// keyed by workspace number -- feeds `Layouts::set_workspace_algorithm_overrides`
     /// directly from `Smallvil::new`/`reload_config`, the same "resolve
@@ -3537,15 +3571,34 @@ impl WindowRule {
 /// Matches a layer-shell surface by its `namespace` (the string a client
 /// passes to `get_layer_surface`, e.g. a bar setting `"waybar"`) -- a layer
 /// surface has no app_id/title the way an xdg toplevel does, so namespace
-/// is the only thing to match on. One effect today: `block_capture`, letting
-/// a sensitive layer surface (a password-manager quick-access panel, say)
-/// opt out of screenshots/screencasts without hiding it from the user's own
-/// screen -- niri's `layer-rule { block-out-from ... }`. See
-/// `Smallvil::render_one_capture`'s excluded-rect pass.
+/// is the only thing to match on. Effects today, Hyprland `layerrule`
+/// parity items from the 2026-08-06 config audit:
+/// - `block_capture`: opt a sensitive layer surface (a password-manager
+///   quick-access panel, say) out of screenshots/screencasts without
+///   hiding it from the user's own screen -- niri's
+///   `layer-rule { block-out-from ... }`. See
+///   `Smallvil::render_one_capture`'s excluded-rect pass.
+/// - `z_order`: reorders a namespace within its own wlr layer stratum
+///   (Background/Bottom/Top/Overlay) instead of the client's natural
+///   stacking order -- Hyprland's `order`. Higher sorts more to the front.
+/// - `dim_around` / `dim_amount`: while a matching layer surface on the
+///   Overlay or Top stratum is mapped, dim everything rendered behind it
+///   (lower layers, the wallpaper, and every non-fullscreen window) --
+///   Hyprland's `dimaround`. `dim_amount` (0.0-1.0) is the overlay alpha;
+///   unset defaults to a fixed value at the resolution site.
+/// - `above_lock_screen`: keep a matching layer surface rendered on top
+///   of the session-lock surface instead of being blanked with everything
+///   else -- Hyprland's `abovelock`. Deliberately render-only: `surface_under`
+///   never hit-tests anything but the lock surface itself while locked, so
+///   this cannot be used to route input past the lock.
 #[derive(Debug, Clone, Default)]
 pub struct LayerRule {
     pub namespace: Option<String>,
     pub block_capture: bool,
+    pub z_order: Option<i32>,
+    pub dim_around: bool,
+    pub dim_amount: Option<f32>,
+    pub above_lock_screen: bool,
 }
 
 impl LayerRule {
@@ -6689,6 +6742,16 @@ fn lower_layer_rule_block(body: &[waves::Entry]) -> LayerRule {
         match key.as_str() {
             "namespace" => rule.namespace = Some(value.clone()),
             "block_capture" => set_bool(&mut rule.block_capture, key, value),
+            "z_order" => match value.parse::<i32>() {
+                Ok(value) => rule.z_order = Some(value),
+                _ => tracing::warn!(value, "Expected layer_rule.z_order as an integer, ignoring"),
+            },
+            "dim_around" => set_bool(&mut rule.dim_around, key, value),
+            "dim_amount" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => rule.dim_amount = Some(value.clamp(0.0, 1.0)),
+                _ => tracing::warn!(value, "Expected layer_rule.dim_amount from 0.0 to 1.0, ignoring"),
+            },
+            "above_lock_screen" => set_bool(&mut rule.above_lock_screen, key, value),
             other => tracing::warn!(key = %other, "Unknown key in `layer_rule` block, ignoring"),
         }
     }
@@ -7788,6 +7851,7 @@ mod tests {
         config.layer_rules.push(LayerRule {
             namespace: Some("bitwarden".to_string()),
             block_capture: true,
+            ..Default::default()
         });
         assert!(config.layer_blocks_capture("bitwarden-quick-access"));
         assert!(!config.layer_blocks_capture("waybar"));
@@ -7797,6 +7861,7 @@ mod tests {
         let blank = LayerRule {
             namespace: None,
             block_capture: true,
+            ..Default::default()
         };
         assert!(!blank.matches("anything"));
 
@@ -7805,8 +7870,85 @@ mod tests {
         config.layer_rules.push(LayerRule {
             namespace: Some("waybar".to_string()),
             block_capture: false,
+            ..Default::default()
         });
         assert!(!config.layer_blocks_capture("waybar"));
+    }
+
+    #[test]
+    fn layer_rule_z_order_dim_around_and_above_lock_screen_parse_and_resolve() {
+        let z_order = lower_layer_rule_block(&[
+            waves::Entry::Assign("namespace".into(), "waybar".into()),
+            waves::Entry::Assign("z_order".into(), "-5".into()),
+        ]);
+        assert_eq!(z_order.z_order, Some(-5));
+
+        let bad_z_order = lower_layer_rule_block(&[
+            waves::Entry::Assign("namespace".into(), "waybar".into()),
+            waves::Entry::Assign("z_order".into(), "not-a-number".into()),
+        ]);
+        assert_eq!(bad_z_order.z_order, None, "malformed z_order is ignored, not defaulted to 0");
+
+        let dim = lower_layer_rule_block(&[
+            waves::Entry::Assign("namespace".into(), "rofi".into()),
+            waves::Entry::Assign("dim_around".into(), "true".into()),
+            waves::Entry::Assign("dim_amount".into(), "1.4".into()),
+        ]);
+        assert!(dim.dim_around);
+        assert_eq!(dim.dim_amount, Some(1.0), "out-of-range dim_amount is clamped, not rejected");
+
+        let above_lock = lower_layer_rule_block(&[
+            waves::Entry::Assign("namespace".into(), "osd".into()),
+            waves::Entry::Assign("above_lock_screen".into(), "true".into()),
+        ]);
+        assert!(above_lock.above_lock_screen);
+
+        let mut config = Config {
+            layer_rules: Vec::new(),
+            ..parse_default_config()
+        };
+
+        // z_order: last matching rule that actually sets it wins; a later
+        // rule matching the same namespace for an unrelated effect must not
+        // reset it back to the default.
+        config.layer_rules.push(LayerRule {
+            namespace: Some("waybar".to_string()),
+            z_order: Some(10),
+            ..Default::default()
+        });
+        config.layer_rules.push(LayerRule {
+            namespace: Some("waybar".to_string()),
+            block_capture: true,
+            ..Default::default()
+        });
+        assert_eq!(config.layer_z_order("waybar"), Some(10));
+        assert_eq!(config.layer_z_order("some-other-bar"), None);
+
+        // dim_around: resolves to its own dim_amount, or the fixed default
+        // when unset. No matching rule resolves to None, not 0.0.
+        assert_eq!(config.layer_dim_around("rofi-launcher"), None);
+        config.layer_rules.push(LayerRule {
+            namespace: Some("rofi".to_string()),
+            dim_around: true,
+            ..Default::default()
+        });
+        assert_eq!(config.layer_dim_around("rofi-launcher"), Some(0.35));
+        config.layer_rules.push(LayerRule {
+            namespace: Some("rofi".to_string()),
+            dim_around: true,
+            dim_amount: Some(0.8),
+            ..Default::default()
+        });
+        assert_eq!(config.layer_dim_around("rofi-launcher"), Some(0.8));
+
+        // above_lock_screen: any() fold, same shape as block_capture.
+        assert!(!config.layer_above_lock_screen("osd-volume"));
+        config.layer_rules.push(LayerRule {
+            namespace: Some("osd".to_string()),
+            above_lock_screen: true,
+            ..Default::default()
+        });
+        assert!(config.layer_above_lock_screen("osd-volume"));
     }
 
     #[test]
