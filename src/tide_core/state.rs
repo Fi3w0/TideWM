@@ -898,6 +898,19 @@ pub struct Smallvil {
     /// `depth_last_tick`'s 10Hz gate for `update_window_depths`.
     urgent_pulse_tick: Instant,
 
+    /// (output, workspace) pairs that have already fired their
+    /// `[[workspace_rule]] on_created_empty` command (see
+    /// `apply_workspace_switch`). TideWM's numbered workspaces always
+    /// exist as addressable slots -- there is no real create/destroy
+    /// lifecycle to hook a one-shot event on the way Hyprland can -- so
+    /// this set is what makes the closest honest analog to that a
+    /// once-per-process-lifetime event instead of firing on every later
+    /// visit to an empty workspace. Not pruned: unbounded only in the
+    /// pathological case of visiting extremely many distinct (output,
+    /// workspace) pairs in one session, the same bound `workspace_gaps`/
+    /// `algorithms` accept for config-shaped state.
+    workspace_created_empty_fired: HashSet<(String, u32)>,
+
     /// Most-recently-focused-first order of every window that has ever
     /// held keyboard focus, updated from `reconcile_keyboard_focus`'s own
     /// activation-change block (except while `cycling_focus` is set, see
@@ -2844,6 +2857,7 @@ impl Smallvil {
         let default_layout = config.default_layout;
         let master_orientation = config.master_orientation;
         let bsp_split_bias = config.bsp_split_bias;
+        let workspace_algorithm_overrides = config.workspace_algorithm_overrides();
         let ui_theme = crate::ui_theme::UiTheme::from_config(&config);
         let ocean = if config.spatial_engine == crate::config::SpatialEngine::Ocean {
             crate::ocean::OceanSpace::from_config(&config.ocean)
@@ -3031,6 +3045,7 @@ impl Smallvil {
                 layout.set_default_algorithm(default_layout);
                 layout.set_master_orientation(master_orientation);
                 layout.set_split_bias(bsp_split_bias);
+                layout.set_workspace_algorithm_overrides(workspace_algorithm_overrides);
                 layout
             },
             space,
@@ -3164,6 +3179,7 @@ impl Smallvil {
             urgent: HashSet::new(),
             urgent_pulse_last: HashMap::new(),
             urgent_pulse_tick: Instant::now(),
+            workspace_created_empty_fired: HashSet::new(),
             focus_history: Vec::new(),
             cycling_focus: false,
             is_lid_closed: false,
@@ -5178,28 +5194,55 @@ impl Smallvil {
             .unwrap_or_else(|| self.config.frost.clone())
     }
 
+    /// The workspace a mapped window currently belongs to, tiled or
+    /// floating -- `None` under Ocean (no workspace concept) or for a
+    /// window not currently tracked by either. Feeds `[[workspace_rule]]`
+    /// decoration-base resolution below.
+    fn workspace_of_surface(&self, surface: &WlSurface) -> Option<u32> {
+        self.layout.workspace_of(surface).or_else(|| {
+            self.floating_workspace
+                .get(surface)
+                .map(|tag| tag.workspace)
+        })
+    }
+
     fn shadow_config_for_surface(&self, surface: &WlSurface) -> crate::config::ShadowConfig {
         let rule = self.resolve_window_rules_for(surface);
+        let base = self
+            .workspace_of_surface(surface)
+            .and_then(|ws| self.config.resolve_workspace_rule(ws).shadow)
+            .map(|overrides| overrides.apply_to(&self.config.shadow))
+            .unwrap_or_else(|| self.config.shadow.clone());
         rule.shadow
             .as_ref()
-            .map(|overrides| overrides.apply_to(&self.config.shadow))
-            .unwrap_or_else(|| self.config.shadow.clone())
+            .map(|overrides| overrides.apply_to(&base))
+            .unwrap_or(base)
     }
 
     fn rounding_config_for_surface(&self, surface: &WlSurface) -> crate::config::RoundingConfig {
         let rule = self.resolve_window_rules_for(surface);
+        let base = self
+            .workspace_of_surface(surface)
+            .and_then(|ws| self.config.resolve_workspace_rule(ws).rounding)
+            .map(|overrides| overrides.apply_to(&self.config.rounding))
+            .unwrap_or_else(|| self.config.rounding.clone());
         rule.rounding
             .as_ref()
-            .map(|overrides| overrides.apply_to(&self.config.rounding))
-            .unwrap_or_else(|| self.config.rounding.clone())
+            .map(|overrides| overrides.apply_to(&base))
+            .unwrap_or(base)
     }
 
     fn border_config_for_surface(&self, surface: &WlSurface) -> crate::config::BorderConfig {
         let rule = self.resolve_window_rules_for(surface);
+        let base = self
+            .workspace_of_surface(surface)
+            .and_then(|ws| self.config.resolve_workspace_rule(ws).border)
+            .map(|overrides| overrides.apply_to(&self.config.border))
+            .unwrap_or_else(|| self.config.border.clone());
         rule.border
             .as_ref()
-            .map(|overrides| overrides.apply_to(&self.config.border))
-            .unwrap_or_else(|| self.config.border.clone())
+            .map(|overrides| overrides.apply_to(&base))
+            .unwrap_or(base)
     }
 
     fn rounding_applies(
@@ -7378,6 +7421,7 @@ impl Smallvil {
 
         self.retile();
 
+        self.check_workspace_created_empty(&output_name, workspace);
         self.refocus_after_hide(&output_name);
 
         self.emit_ipc_event(crate::ipc::IpcEvent::WorkspaceChanged {
@@ -7387,6 +7431,46 @@ impl Smallvil {
         });
 
         self.request_redraw();
+    }
+
+    /// Fires `[[workspace_rule]] on_created_empty` the first time this
+    /// (output, workspace) pair is switched into while it has zero
+    /// windows -- see `workspace_created_empty_fired`'s own doc for why
+    /// "first empty switch-into" is the closest honest analog available,
+    /// given TideWM's numbered workspaces have no real create/destroy
+    /// lifecycle to hook a one-shot event on the way Hyprland can. Only
+    /// marks the pair fired once a command actually ran, so a
+    /// `workspace_rule` added after an earlier empty visit still gets its
+    /// chance on the next one.
+    fn check_workspace_created_empty(&mut self, output_name: &str, workspace: u32) {
+        let key = (output_name.to_string(), workspace);
+        if self.workspace_created_empty_fired.contains(&key) {
+            return;
+        }
+        let Some(cmd) = self
+            .config
+            .resolve_workspace_rule(workspace)
+            .on_created_empty
+        else {
+            return;
+        };
+        let has_tiled = !self.layout.windows_in(output_name, workspace).is_empty();
+        let has_floating = self
+            .floating_workspace
+            .values()
+            .any(|tag| tag.output == output_name && tag.workspace == workspace);
+        if has_tiled || has_floating {
+            return;
+        }
+        self.workspace_created_empty_fired.insert(key);
+        if let Err(err) = crate::spawn(&cmd) {
+            tracing::warn!(
+                %err,
+                cmd,
+                workspace,
+                "Failed to spawn workspace_rule on_created_empty command"
+            );
+        }
     }
 
     /// Reassigns keyboard focus to the first mapped window on `output_name`,
@@ -10108,6 +10192,8 @@ impl Smallvil {
                 self.layout
                     .set_master_orientation(self.config.master_orientation);
                 self.layout.set_split_bias(self.config.bsp_split_bias);
+                self.layout
+                    .set_workspace_algorithm_overrides(self.config.workspace_algorithm_overrides());
                 // The DeviceAdded path is the only other place this runs;
                 // an already-connected touchpad (a laptop's built-in one,
                 // which won't see another DeviceAdded short of a restart)

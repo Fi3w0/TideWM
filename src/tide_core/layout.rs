@@ -277,6 +277,15 @@ pub struct Layouts {
     /// nothing left tiled on it.
     algorithms: HashMap<(String, u32), LayoutAlgorithm>,
     default_algorithm: LayoutAlgorithm,
+    /// Per-workspace-number default from `[[workspace_rule]]`, one level
+    /// weaker than an explicit `algorithms` entry (a live `layout:<algo>`
+    /// action on this specific (output, workspace) is the user actively
+    /// choosing something right now, so it should keep winning) but one
+    /// level stronger than the global `default_algorithm`. Set wholesale
+    /// from `Smallvil::new`/`reload_config`, same as `default_algorithm`
+    /// itself -- not pruned per-entry, since it mirrors config state
+    /// rather than runtime state.
+    workspace_algorithm_overrides: HashMap<u32, LayoutAlgorithm>,
     /// Per-(output, workspace) master/stack split fraction (master mode
     /// only; meaningless, and ignored, under BSP). Defaults to 0.5 for any
     /// key not present. Pruned the same way and for the same reason as
@@ -462,12 +471,13 @@ impl Layouts {
     }
 
     /// The tiling algorithm active for `output`'s `workspace`: an explicit
-    /// override if one was ever set (`set_algorithm`), else the configured
-    /// default.
+    /// `set_algorithm` override first, then a `[[workspace_rule]]` default
+    /// for this workspace number, then the global configured default.
     pub fn algorithm(&self, output: &str, workspace: u32) -> LayoutAlgorithm {
         self.algorithms
             .get(&(output.to_string(), workspace))
             .copied()
+            .or_else(|| self.workspace_algorithm_overrides.get(&workspace).copied())
             .unwrap_or(self.default_algorithm)
     }
 
@@ -486,6 +496,15 @@ impl Layouts {
     /// `Config`) is what actually needs it at layout time.
     pub fn set_default_algorithm(&mut self, algorithm: LayoutAlgorithm) {
         self.default_algorithm = algorithm;
+    }
+
+    /// Sets the whole `[[workspace_rule]]`-derived per-workspace-number
+    /// layout map at once (see `algorithm`'s fallback chain and this
+    /// struct's `workspace_algorithm_overrides` field doc). Called once at
+    /// startup and again on every config reload, same as
+    /// `set_default_algorithm`.
+    pub fn set_workspace_algorithm_overrides(&mut self, overrides: HashMap<u32, LayoutAlgorithm>) {
+        self.workspace_algorithm_overrides = overrides;
     }
 
     /// Sets which side the master pane sits on for every workspace under
@@ -2121,6 +2140,28 @@ mod tests {
 
         layouts.set_default_algorithm(LayoutAlgorithm::Master);
         assert_eq!(layouts.algorithm("DP-1", 2), LayoutAlgorithm::Master);
+    }
+
+    #[test]
+    fn workspace_algorithm_override_sits_between_explicit_and_default() {
+        let mut layouts = Layouts::default();
+        layouts.set_default_algorithm(LayoutAlgorithm::Bsp);
+        layouts.set_workspace_algorithm_overrides(HashMap::from([(5, LayoutAlgorithm::Cascade)]));
+
+        // No explicit per-(output, workspace) override: the workspace_rule
+        // default wins over the global default, on any output.
+        assert_eq!(layouts.algorithm("DP-1", 5), LayoutAlgorithm::Cascade);
+        assert_eq!(layouts.algorithm("HDMI-1", 5), LayoutAlgorithm::Cascade);
+        // A workspace number with no workspace_rule falls through to the
+        // global default, same as before this feature existed.
+        assert_eq!(layouts.algorithm("DP-1", 6), LayoutAlgorithm::Bsp);
+
+        // An explicit `layout:<algo>` action on one specific output still
+        // wins over the workspace_rule default -- the user actively chose
+        // something for *this* output's instance of the workspace.
+        layouts.set_algorithm("DP-1", 5, LayoutAlgorithm::Master);
+        assert_eq!(layouts.algorithm("DP-1", 5), LayoutAlgorithm::Master);
+        assert_eq!(layouts.algorithm("HDMI-1", 5), LayoutAlgorithm::Cascade);
     }
 
     #[test]

@@ -1212,6 +1212,30 @@ layer_rule {
 }
 ```
 
+### `workspace_rule { }`
+
+Per-workspace-number overrides — Hyprland's `workspace_rule` block. Matches by raw workspace number on any output, the same convention `workspace_gaps` already uses (no `workspace_name` alias support yet). One block per rule; a later block naming the same number overrides an earlier one field by field, last-match-wins. `default_name` isn't a field here — `workspace_name = <N> <name>` (top-level key) already names a workspace unconditionally, so it isn't duplicated.
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `workspace` | integer, required | The workspace number this rule applies to. A rule with no `workspace` never matches anything. |
+| `layout` | `bsp` \| `master` \| `cascade` | Default tiling algorithm for this workspace number, on any output. Loses to an explicit runtime `layout:<algo>` action already applied to that specific (output, workspace) pair — that's the user actively choosing something right now, not the workspace's resting default. |
+| `border` | bool, or a `border { }` sub-block | Same shorthand/sub-block shape as `rule { border }` above. Acts as the base every matching `[[window_rule]]`'s own `border` builds on for a window living on this workspace, underneath the global `border { }` block. |
+| `rounding` | bool, radii, or a `rounding { }` sub-block | Same shape as `rule { rounding }`, same base-layer role as `border` above. |
+| `shadow` | bool, or a `shadow { }` sub-block | Same shape as `rule { shadow }`, same base-layer role as `border` above. |
+| `on_created_empty` | string, optional | Command run the first time this workspace is switched into while it has zero windows. TideWM's numbered workspaces always exist as addressable slots — there's no real create/destroy lifecycle the way Hyprland has — so this fires once per (output, workspace) pair for the process lifetime, the closest honest analog available, rather than repeating on every later empty visit. |
+
+```
+workspace_rule {
+    workspace = 8
+    layout = master
+    on_created_empty = "discord"
+    border {
+        active_color = #8EDDFF
+    }
+}
+```
+
 ### `bind`
 
 `bind <chord> { <action> }` — one action per line inside the block, or comma-separated on one line. XKB modifiers (`Super`/`Logo`/`Mod4`,

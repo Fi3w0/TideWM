@@ -985,6 +985,9 @@ pub struct Config {
     /// screencasts by namespace (niri's `layer-rule { block-out-from ... }`).
     /// See `LayerRule::matches`, `Config::layer_blocks_capture`.
     pub layer_rules: Vec<LayerRule>,
+    /// Per-workspace-number overrides (layout default, decoration base,
+    /// `on_created_empty`). See `WorkspaceRule`, `Config::resolve_workspace_rule`.
+    pub workspace_rules: Vec<WorkspaceRule>,
     /// Named alternate keybind tables (`[submap.<name>]`), each parsed the
     /// same way `[keybinds]` is. See `Action::EnterSubmap`.
     pub submaps: HashMap<String, Vec<Keybind>>,
@@ -1250,6 +1253,7 @@ impl Config {
             switch_events: SwitchEventsConfig::from_raw(raw.switch_events),
             window_rules: raw.window_rules,
             layer_rules: raw.layer_rules,
+            workspace_rules: raw.workspace_rules,
             submaps,
             env: raw.env,
         };
@@ -1437,6 +1441,49 @@ impl Config {
     pub(crate) fn has_layer_capture_exclusions(&self) -> bool {
         self.layer_rules.iter().any(|rule| rule.block_capture)
     }
+
+    /// The `layout` field of every `[[workspace_rule]]` that set one,
+    /// keyed by workspace number -- feeds `Layouts::set_workspace_algorithm_overrides`
+    /// directly from `Smallvil::new`/`reload_config`, the same "resolve
+    /// once here, not per `retile()`" shape `default_layout` already uses.
+    pub(crate) fn workspace_algorithm_overrides(&self) -> HashMap<u32, LayoutAlgorithm> {
+        let mut map = HashMap::new();
+        for rule in &self.workspace_rules {
+            if let (Some(workspace), Some(algorithm)) = (rule.workspace, rule.layout) {
+                map.insert(workspace, algorithm);
+            }
+        }
+        map
+    }
+
+    /// Folds every `[[workspace_rule]]` naming `workspace` into one
+    /// effective rule, last-match-wins per field -- same fold shape as
+    /// `resolve_window_rules`, just against a single numeric match instead
+    /// of several identity criteria.
+    pub(crate) fn resolve_workspace_rule(&self, workspace: u32) -> WorkspaceRule {
+        let mut effective = WorkspaceRule::default();
+        for rule in &self.workspace_rules {
+            if rule.workspace != Some(workspace) {
+                continue;
+            }
+            if rule.layout.is_some() {
+                effective.layout = rule.layout;
+            }
+            if rule.border.is_some() {
+                effective.border = rule.border.clone();
+            }
+            if rule.rounding.is_some() {
+                effective.rounding = rule.rounding.clone();
+            }
+            if rule.shadow.is_some() {
+                effective.shadow = rule.shadow.clone();
+            }
+            if rule.on_created_empty.is_some() {
+                effective.on_created_empty = rule.on_created_empty.clone();
+            }
+        }
+        effective
+    }
 }
 
 #[derive(Debug)]
@@ -1508,6 +1555,7 @@ struct RawConfig {
     switch_events: SwitchEventsRaw,
     window_rules: Vec<WindowRule>,
     layer_rules: Vec<LayerRule>,
+    workspace_rules: Vec<WorkspaceRule>,
     submaps: HashMap<String, HashMap<String, String>>,
     env: HashMap<String, String>,
 }
@@ -1645,6 +1693,7 @@ impl Default for RawConfig {
             switch_events: SwitchEventsRaw::default(),
             window_rules: Vec::new(),
             layer_rules: Vec::new(),
+            workspace_rules: Vec::new(),
             submaps,
             env: HashMap::new(),
         }
@@ -3466,6 +3515,45 @@ impl LayerRule {
     }
 }
 
+/// Per-workspace overrides, matched by raw workspace number (numeric-only
+/// for now -- `workspace_name` aliases are a possible follow-up, not
+/// wired here). Hyprland's `workspace_rule` block is the closest analog;
+/// TideWM's numbered-per-output model has no discrete create/destroy
+/// lifecycle to hang Hyprland's `default_name` on (`workspace_name`
+/// already covers naming a workspace, unconditionally, so it isn't
+/// duplicated here), which leaves the remaining pieces this covers:
+/// appearance overrides, a default layout algorithm, and
+/// `on_created_empty`. Applies to the workspace number on any output --
+/// same convention `workspace_gaps` already established, not a second
+/// addressing scheme.
+#[derive(Debug, Clone, Default)]
+pub struct WorkspaceRule {
+    pub workspace: Option<u32>,
+    /// Default tiling algorithm for this workspace. Loses to an explicit
+    /// runtime `layout:<algo>` action on the same (output, workspace) --
+    /// see `Layouts::algorithm`'s fallback chain -- since that's the user
+    /// actively choosing something for *this* output's instance of the
+    /// workspace, not the workspace's own resting default.
+    pub layout: Option<LayoutAlgorithm>,
+    /// Layered as a base underneath any matching `[[window_rule]]`
+    /// override for a window that happens to live on this workspace (see
+    /// `Smallvil::border_config_for_surface`), not merged field-by-field
+    /// against other matching `workspace_rule` blocks -- only one
+    /// `workspace_rule` block is expected to name a given workspace
+    /// number, so last-match-wins is the whole story.
+    pub border: Option<BorderOverrides>,
+    pub rounding: Option<RoundingOverrides>,
+    pub shadow: Option<ShadowOverrides>,
+    /// Command run the first time this workspace becomes active while
+    /// having zero windows, once per (output, workspace) pair for the
+    /// process lifetime (`Smallvil::workspace_created_empty_fired`) --
+    /// the closest honest analog to Hyprland's real create/destroy
+    /// lifecycle event given TideWM's workspaces always exist as
+    /// addressable numbers rather than being created on first reference.
+    /// Does not repeat on every later empty-workspace visit.
+    pub on_created_empty: Option<String>,
+}
+
 /// Parses a `mode` string like `"1920x1080"` or `"1920x1080@60"` into
 /// `(width, height, refresh_hz)`.
 pub fn parse_mode_str(s: &str) -> Option<(i32, i32, Option<f64>)> {
@@ -3969,6 +4057,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "output" => raw.outputs.push(lower_output_block(header, body)),
         "rule" => raw.window_rules.push(lower_window_rule_block(body)),
         "layer_rule" => raw.layer_rules.push(lower_layer_rule_block(body)),
+        "workspace_rule" => raw.workspace_rules.push(lower_workspace_rule_block(body)),
         "mode" => {
             let name = header.trim();
             if name.is_empty() {
@@ -6441,6 +6530,102 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
     rule
 }
 
+fn lower_workspace_rule_block(body: &[waves::Entry]) -> WorkspaceRule {
+    let mut rule = WorkspaceRule::default();
+    for entry in body {
+        match entry {
+            waves::Entry::Assign(key, value) => match key.as_str() {
+                "workspace" => match value.parse() {
+                    Ok(n) => rule.workspace = Some(n),
+                    Err(_) => tracing::warn!(value, "Expected a workspace number, ignoring"),
+                },
+                "layout" => match parse_layout_algorithm(value) {
+                    Some(algo) => rule.layout = Some(algo),
+                    None => tracing::warn!(
+                        value,
+                        "Expected a workspace_rule layout: bsp master cascade, ignoring"
+                    ),
+                },
+                "on_created_empty" => rule.on_created_empty = Some(value.clone()),
+                "shadow" => match value.as_str() {
+                    "true" | "on" => {
+                        rule.shadow
+                            .get_or_insert_with(ShadowOverrides::default)
+                            .enabled = Some(true);
+                    }
+                    "false" | "off" | "none" => {
+                        rule.shadow
+                            .get_or_insert_with(ShadowOverrides::default)
+                            .enabled = Some(false);
+                    }
+                    _ => tracing::warn!(
+                        value,
+                        "Expected workspace_rule shadow to be true/false/on/off/none, ignoring"
+                    ),
+                },
+                "rounding" => {
+                    let overrides = rule.rounding.get_or_insert_with(RoundingOverrides::default);
+                    match value.trim().to_ascii_lowercase().as_str() {
+                        "true" | "on" => overrides.enabled = Some(true),
+                        "false" | "off" | "none" => overrides.enabled = Some(false),
+                        _ => match parse_corner_radii(value) {
+                            Some([tl, tr, br, bl]) => {
+                                overrides.enabled = Some(true);
+                                overrides.top_left = Some(tl);
+                                overrides.top_right = Some(tr);
+                                overrides.bottom_right = Some(br);
+                                overrides.bottom_left = Some(bl);
+                            }
+                            None => tracing::warn!(
+                                value,
+                                "Expected workspace_rule rounding on|off or one/four radii, ignoring"
+                            ),
+                        },
+                    }
+                }
+                "border" => match value.as_str() {
+                    "true" | "on" => {
+                        rule.border
+                            .get_or_insert_with(BorderOverrides::default)
+                            .enabled = Some(true);
+                    }
+                    "false" | "off" | "none" => {
+                        rule.border
+                            .get_or_insert_with(BorderOverrides::default)
+                            .enabled = Some(false);
+                    }
+                    _ => tracing::warn!(
+                        value,
+                        "Expected workspace_rule border true/false/on/off/none, ignoring"
+                    ),
+                },
+                other => {
+                    tracing::warn!(key = %other, "Unknown key in `workspace_rule` block, ignoring")
+                }
+            },
+            waves::Entry::Block(keyword, _, shadow_body) if keyword == "shadow" => {
+                let mut overrides = ShadowOverrides::default();
+                apply_shadow_override_block(&mut overrides, shadow_body);
+                rule.shadow = Some(overrides);
+            }
+            waves::Entry::Block(keyword, _, rounding_body)
+                if keyword == "rounding" || keyword == "corners" =>
+            {
+                let mut overrides = RoundingOverrides::default();
+                apply_rounding_override_block(&mut overrides, rounding_body);
+                rule.rounding = Some(overrides);
+            }
+            waves::Entry::Block(keyword, _, border_body) if keyword == "border" => {
+                let mut overrides = BorderOverrides::default();
+                apply_border_override_block(&mut overrides, border_body);
+                rule.border = Some(overrides);
+            }
+            _ => tracing::warn!("Unexpected entry in `workspace_rule` block, ignoring"),
+        }
+    }
+    rule
+}
+
 fn lower_layer_rule_block(body: &[waves::Entry]) -> LayerRule {
     let mut rule = LayerRule::default();
     for entry in body {
@@ -7373,6 +7558,71 @@ mod tests {
     }
 
     #[test]
+    fn workspace_rule_lowering_covers_every_key() {
+        let rule = lower_workspace_rule_block(&[
+            waves::Entry::Assign("workspace".into(), "5".into()),
+            waves::Entry::Assign("layout".into(), "cascade".into()),
+            waves::Entry::Assign("on_created_empty".into(), "kitty".into()),
+            waves::Entry::Assign("border".into(), "true".into()),
+            waves::Entry::Assign("rounding".into(), "false".into()),
+            waves::Entry::Assign("shadow".into(), "true".into()),
+        ]);
+        assert_eq!(rule.workspace, Some(5));
+        assert_eq!(rule.layout, Some(LayoutAlgorithm::Cascade));
+        assert_eq!(rule.on_created_empty.as_deref(), Some("kitty"));
+        assert_eq!(rule.border.unwrap().enabled, Some(true));
+        assert_eq!(rule.rounding.unwrap().enabled, Some(false));
+        assert_eq!(rule.shadow.unwrap().enabled, Some(true));
+
+        // Malformed workspace/layout values warn and leave the field unset
+        // rather than panicking or defaulting to something plausible-looking.
+        let malformed = lower_workspace_rule_block(&[
+            waves::Entry::Assign("workspace".into(), "not-a-number".into()),
+            waves::Entry::Assign("layout".into(), "not-a-layout".into()),
+        ]);
+        assert!(malformed.workspace.is_none());
+        assert!(malformed.layout.is_none());
+    }
+
+    #[test]
+    fn resolve_workspace_rule_folds_last_match_wins_and_ignores_other_workspaces() {
+        let mut config = parse_default_config();
+        config.workspace_rules = vec![
+            WorkspaceRule {
+                workspace: Some(3),
+                layout: Some(LayoutAlgorithm::Master),
+                on_created_empty: Some("first".to_string()),
+                ..Default::default()
+            },
+            WorkspaceRule {
+                workspace: Some(3),
+                on_created_empty: Some("second".to_string()),
+                ..Default::default()
+            },
+            WorkspaceRule {
+                workspace: Some(9),
+                layout: Some(LayoutAlgorithm::Cascade),
+                ..Default::default()
+            },
+        ];
+        let resolved = config.resolve_workspace_rule(3);
+        // Later match's on_created_empty wins; layout survives from the
+        // earlier match since the later one didn't set it.
+        assert_eq!(resolved.layout, Some(LayoutAlgorithm::Master));
+        assert_eq!(resolved.on_created_empty.as_deref(), Some("second"));
+
+        // An unrelated workspace_rule for a different number never leaks in.
+        let unmatched = config.resolve_workspace_rule(4);
+        assert!(unmatched.layout.is_none());
+        assert!(unmatched.on_created_empty.is_none());
+
+        assert_eq!(
+            config.workspace_algorithm_overrides(),
+            HashMap::from([(3, LayoutAlgorithm::Master), (9, LayoutAlgorithm::Cascade)])
+        );
+    }
+
+    #[test]
     fn window_rule_opacity_is_clamped_and_gesture_actions_parse() {
         let low = lower_window_rule_block(&[
             waves::Entry::Assign("app_id".into(), "dimmed".into()),
@@ -7523,6 +7773,7 @@ mod tests {
                 },
             ],
             layer_rules: Vec::new(),
+            workspace_rules: Vec::new(),
         };
         // Only the two "kitty" rules should ever combine; the "firefox"
         // one must not leak in just because it's in the same list.
