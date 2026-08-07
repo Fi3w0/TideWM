@@ -97,6 +97,31 @@ pub enum LayoutAlgorithm {
     Cascade,
 }
 
+/// Adaptive-sync (VRR) preference -- niri's own three-way shape
+/// (`variable-refresh-rate off|on|on-demand`). **Config surface only as
+/// of this landing: the udev backend queries and logs each connector's
+/// real `DrmSurface::vrr_supported` capability but does not yet call
+/// `use_vrr` to actually toggle it.** Smithay's pinned rev exposes a
+/// clean, maintained wrapper for this (not raw property manipulation --
+/// confirmed by reading `backend/drm/surface/atomic.rs` directly), but
+/// Smithay's own source carries a real-hardware caveat next to it
+/// ("setting VRR for HDMI connectors will cause flickering despite not
+/// needing ALLOW_MODESET"), and this codebase's own history (`AGENT.md`'s
+/// Phase C `TileMoveGrab` freeze, the S4.5 Ocean freeze) is that "the
+/// wrapper is safe" and "this specific interaction is safe on real
+/// hardware" are different claims -- the second one needs the
+/// maintainer's own hands-on udev/DRM pass, which this sandbox cannot
+/// provide. `OnDemand` (VRR only while a fullscreen window owns the
+/// output) is expressible without new state -- `Smallvil::fullscreen`
+/// already tracks exactly that -- once the toggle itself is built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AdaptiveSync {
+    #[default]
+    Off,
+    On,
+    OnDemand,
+}
+
 /// Which side the master pane sits on under `LayoutAlgorithm::Master`
 /// (Hyprland master's own `orientation` key, minus its niche `center`
 /// variant -- no analog need surfaced for it, skip outright rather than
@@ -973,6 +998,10 @@ pub struct Config {
     pub input: InputConfig,
     pub xwayland: XwaylandConfig,
     pub spawn_at_startup: Vec<String>,
+    /// Global adaptive-sync default; a `[[output]]`'s own `adaptive_sync`
+    /// beats it, same override shape `gaps`/`scale`/etc. already use. See
+    /// `AdaptiveSync`'s own doc for what actually happens with this today.
+    pub adaptive_sync: AdaptiveSync,
     pub outputs: Vec<OutputConfig>,
     /// Laptop lid / tablet-mode switch bindings, udev backend only. winit
     /// has no host-independent access to libinput's switch capability, so
@@ -1166,6 +1195,12 @@ impl Config {
             }
             LayoutAlgorithm::Bsp
         });
+        let adaptive_sync = parse_adaptive_sync(&raw.adaptive_sync).unwrap_or_else(|| {
+            if !raw.adaptive_sync.is_empty() {
+                tracing::warn!(value = %raw.adaptive_sync, "Unknown adaptive_sync, using off");
+            }
+            AdaptiveSync::Off
+        });
         let master_orientation = parse_master_orientation(&raw.master_orientation).unwrap_or_else(|| {
             if !raw.master_orientation.is_empty() {
                 tracing::warn!(value = %raw.master_orientation, "Unknown master_orientation, using left");
@@ -1241,6 +1276,7 @@ impl Config {
             workspace_gaps,
             gaps: raw.gaps,
             default_layout,
+            adaptive_sync,
             master_orientation,
             bsp_split_bias,
             pseudo_tile_scale: raw.pseudo_tile_scale.clamp(0.05, 1.0),
@@ -1529,6 +1565,9 @@ struct RawConfig {
     /// bad value warns and falls back rather than failing the whole
     /// config parse.
     default_layout: String,
+    /// `"off"`/`"on"`/`"on-demand"`, resolved via `parse_adaptive_sync` --
+    /// same raw-string-then-resolve shape as `default_layout` above.
+    adaptive_sync: String,
     /// `"left"`/`"right"`/`"top"`/`"bottom"`, resolved via
     /// `parse_master_orientation` -- same raw-string-then-resolve shape as
     /// `default_layout` just above, for the same reason.
@@ -1680,6 +1719,7 @@ impl Default for RawConfig {
             workspace_auto_back_and_forth: false,
             gaps: 8,
             default_layout: String::new(),
+            adaptive_sync: String::new(),
             master_orientation: String::new(),
             bsp_split_bias: String::new(),
             workspace_names: Vec::new(),
@@ -1857,6 +1897,9 @@ pub struct OutputConfig {
     /// Per-output gap override; `None` falls back to the global `gaps`.
     /// A `workspace_gaps` entry beats both (see `Smallvil::gaps_for`).
     pub gaps: Option<i32>,
+    /// Per-output adaptive-sync override; `None` falls back to the global
+    /// `adaptive_sync`. See `AdaptiveSync`'s own doc for current scope.
+    pub adaptive_sync: Option<AdaptiveSync>,
 }
 
 impl Default for OutputConfig {
@@ -1869,6 +1912,7 @@ impl Default for OutputConfig {
             scale: 1.0,
             transform: OutputTransformConfig::default(),
             gaps: None,
+            adaptive_sync: None,
         }
     }
 }
@@ -3968,6 +4012,7 @@ fn is_known_top_level_key(key: &str) -> bool {
             | "gaps"
             | "workspace_gaps"
             | "layout"
+            | "adaptive_sync"
             | "master_side"
             | "split_bias"
             | "pseudo_tile_scale"
@@ -4003,6 +4048,7 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
         "auto_back_and_forth" => set_bool(&mut raw.workspace_auto_back_and_forth, key, value),
         "gaps" => set_i32(&mut raw.gaps, key, value),
         "layout" => raw.default_layout = value.to_string(),
+        "adaptive_sync" | "vrr" | "variable_refresh_rate" => raw.adaptive_sync = value.to_string(),
         "master_side" => raw.master_orientation = value.to_string(),
         "split_bias" => raw.bsp_split_bias = value.to_string(),
         "workspace_name" => raw.workspace_names.push(value.to_string()),
@@ -6314,6 +6360,13 @@ fn lower_output_block(header: &str, body: &[waves::Entry]) -> OutputConfig {
                 Ok(n) => cfg.gaps = Some(n),
                 Err(_) => tracing::warn!(value, "Expected a pixel gap value, ignoring"),
             },
+            "adaptive_sync" | "vrr" | "variable_refresh_rate" => match parse_adaptive_sync(value) {
+                Some(mode) => cfg.adaptive_sync = Some(mode),
+                None => tracing::warn!(
+                    value,
+                    "Expected output adaptive_sync: off on on-demand, ignoring"
+                ),
+            },
             other => tracing::warn!(key = %other, "Unknown key in `output` block, ignoring"),
         }
     }
@@ -7025,6 +7078,15 @@ fn parse_layout_algorithm(s: &str) -> Option<LayoutAlgorithm> {
     }
 }
 
+fn parse_adaptive_sync(s: &str) -> Option<AdaptiveSync> {
+    match s {
+        "off" | "false" => Some(AdaptiveSync::Off),
+        "on" | "true" => Some(AdaptiveSync::On),
+        "on-demand" | "on_demand" | "ondemand" => Some(AdaptiveSync::OnDemand),
+        _ => None,
+    }
+}
+
 fn parse_master_orientation(s: &str) -> Option<MasterOrientation> {
     match s {
         "left" => Some(MasterOrientation::Left),
@@ -7558,6 +7620,53 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_sync_parses_global_and_per_output_with_aliases() {
+        assert_eq!(parse_adaptive_sync("off"), Some(AdaptiveSync::Off));
+        assert_eq!(parse_adaptive_sync("false"), Some(AdaptiveSync::Off));
+        assert_eq!(parse_adaptive_sync("on"), Some(AdaptiveSync::On));
+        assert_eq!(parse_adaptive_sync("true"), Some(AdaptiveSync::On));
+        assert_eq!(
+            parse_adaptive_sync("on-demand"),
+            Some(AdaptiveSync::OnDemand)
+        );
+        assert_eq!(
+            parse_adaptive_sync("on_demand"),
+            Some(AdaptiveSync::OnDemand)
+        );
+        assert_eq!(parse_adaptive_sync("nonsense"), None);
+
+        // Global key and its aliases all land in the same raw field.
+        let mut raw = RawConfig::default();
+        apply_top_level_assign(&mut raw, "adaptive_sync", "on");
+        assert_eq!(raw.adaptive_sync, "on");
+        apply_top_level_assign(&mut raw, "vrr", "on-demand");
+        assert_eq!(raw.adaptive_sync, "on-demand");
+        apply_top_level_assign(&mut raw, "variable_refresh_rate", "off");
+        assert_eq!(raw.adaptive_sync, "off");
+
+        // Per-output override, plus its own aliases, plus a malformed
+        // value warning and leaving the field unset rather than guessing.
+        let output = lower_output_block(
+            "DP-1",
+            &[waves::Entry::Assign("adaptive_sync".into(), "on".into())],
+        );
+        assert_eq!(output.adaptive_sync, Some(AdaptiveSync::On));
+        let output = lower_output_block(
+            "DP-1",
+            &[waves::Entry::Assign("vrr".into(), "on-demand".into())],
+        );
+        assert_eq!(output.adaptive_sync, Some(AdaptiveSync::OnDemand));
+        let malformed = lower_output_block(
+            "DP-1",
+            &[waves::Entry::Assign(
+                "adaptive_sync".into(),
+                "not-a-mode".into(),
+            )],
+        );
+        assert!(malformed.adaptive_sync.is_none());
+    }
+
+    #[test]
     fn workspace_rule_lowering_covers_every_key() {
         let rule = lower_workspace_rule_block(&[
             waves::Entry::Assign("workspace".into(), "5".into()),
@@ -7741,6 +7850,7 @@ mod tests {
             workspace_gaps: HashMap::new(),
             gaps: 0,
             default_layout: LayoutAlgorithm::Bsp,
+            adaptive_sync: AdaptiveSync::Off,
             master_orientation: MasterOrientation::Left,
             bsp_split_bias: SplitBias::Auto,
             pseudo_tile_scale: 0.7,

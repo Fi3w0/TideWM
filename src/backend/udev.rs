@@ -949,6 +949,20 @@ fn create_surface(
         }
     };
 
+    // Config surface plus a real-capability query only, for now -- no
+    // `drm_surface.use_vrr()` call yet. See `AdaptiveSync`'s own doc for
+    // why the actual toggle is deliberately deferred to a session where
+    // this can be verified on real hardware, not just compiled.
+    match drm_surface.vrr_supported(connector.handle()) {
+        Ok(support) => tracing::info!(
+            connector_name,
+            configured = ?state.adaptive_sync_for(&connector_name),
+            hardware_support = ?support,
+            "Adaptive-sync (VRR): capability queried, not yet toggled"
+        ),
+        Err(e) => tracing::debug!(%e, connector_name, "Could not query VRR support"),
+    }
+
     let (phys_w, phys_h) = connector.size().unwrap_or((0, 0));
     let output = Output::new(
         connector_name.clone(),

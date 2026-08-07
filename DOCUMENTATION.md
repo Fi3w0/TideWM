@@ -100,6 +100,7 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | `master_side` | `left` \| `right` \| `top` \| `bottom` | `left` | Which side the master pane sits on under `default_layout = master`. `left`/`right` stack the other windows vertically in the remaining strip; `top`/`bottom` stack them horizontally instead. One global setting, not per-workspace. |
 | `split_bias` | `auto` \| `horizontal` \| `vertical` | `auto` | Manual override for `default_layout = bsp`'s per-split axis choice. `auto` is the existing aspect-ratio-driven behavior, unchanged. `horizontal`/`vertical` force every split one way regardless of window/output shape (Hyprland dwindle's `force_split` idea). One global setting, not per-workspace. |
 | `pseudo_tile_scale` | float, `0.05`–`1.0` | `0.7` | Fraction of its tile a pseudo-tiled window keeps, centered within it. Out-of-range values are clamped, not rejected. |
+| `adaptive_sync` (aliases `vrr`, `variable_refresh_rate`) | `off` \| `on` \| `on-demand` | `off` | Global adaptive-sync (VRR) preference; a `[[output]]`'s own `adaptive_sync` beats it. **Config surface only right now** — the udev backend queries and logs each connector's real hardware VRR capability but does not yet actually enable it. See AGENT.md's config-gap-audit section for the full reasoning and what's deferred. |
 | `spawn` | list | none | Commands launched once at startup, as a real list: `spawn = [waybar, "swaybg -i ~/wallpaper.png -m fill"]`. Args split on whitespace — no shell involved, so quoting/globs/pipes aren't supported; wrap in `sh -c "..."` yourself if you need those. |
 
 ### Workspace transitions
@@ -1077,6 +1078,7 @@ Per-connector overrides, **udev backend only** — winit's single simulated outp
 | `scale` | float | `1.0` | |
 | `transform` | string | `normal` | One of `normal`, `90`, `180`, `270`, `flipped`, `flipped-90`, `flipped-180`, `flipped-270`. |
 | `gaps` | integer, optional | global `gaps` | Per-output gap override for every workspace shown on this connector. A `workspace_gaps` entry beats it. |
+| `adaptive_sync` (aliases `vrr`, `variable_refresh_rate`) | `off` \| `on` \| `on-demand`, optional | global `adaptive_sync` | Per-output override. Same config-only scope as the global key — see that row above. |
 
 ```
 output eDP-1 {

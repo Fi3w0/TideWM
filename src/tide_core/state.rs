@@ -7682,6 +7682,19 @@ impl Smallvil {
             .unwrap_or(self.config.gaps)
     }
 
+    /// The effective adaptive-sync preference for `output_name`: its own
+    /// `[[output]]` override if set, else the global `adaptive_sync`
+    /// default. See `AdaptiveSync`'s own doc -- this is config resolution
+    /// only today, not yet wired to a real `DrmSurface::use_vrr` call.
+    pub(crate) fn adaptive_sync_for(&self, output_name: &str) -> crate::config::AdaptiveSync {
+        self.config
+            .outputs
+            .iter()
+            .find(|o| o.name == output_name)
+            .and_then(|o| o.adaptive_sync)
+            .unwrap_or(self.config.adaptive_sync)
+    }
+
     /// The reserved workspace number for scratchpad `name`, allocating one
     /// on first use. `None` (the bare `toggle-scratchpad` action) is the
     /// classic unnamed scratchpad, workspace `SCRATCHPAD_WORKSPACE`.
