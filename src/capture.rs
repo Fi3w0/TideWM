@@ -366,12 +366,7 @@ impl Smallvil {
         // compositor chrome, wallpaper, or pointer.
         if let Some(window_target) = window_target {
             let blocked = window_target.toplevel().is_some_and(|toplevel| {
-                let surface = toplevel.wl_surface();
-                let (app_id, title) = self.toplevel_identity(surface);
-                let pid = self.client_pid(surface);
-                let is_xwayland = self.is_xwayland_surface(surface);
-                self.config
-                    .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland)
+                self.resolve_window_rules_for(toplevel.wl_surface())
                     .block_capture
             });
             let opacity = window_target

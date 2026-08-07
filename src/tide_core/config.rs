@@ -1328,10 +1328,11 @@ impl Config {
         title: Option<&str>,
         pid: Option<i32>,
         is_xwayland: bool,
+        urgent: bool,
     ) -> WindowRule {
         let mut effective = WindowRule::default();
         for rule in &self.window_rules {
-            if !rule.matches(app_id, title, pid, is_xwayland) {
+            if !rule.matches(app_id, title, pid, is_xwayland, urgent) {
                 continue;
             }
             if rule.workspace.is_some() {
@@ -1904,6 +1905,16 @@ pub struct WindowRule {
     /// requires the window to be (or not be) an X11 client running
     /// through `xwayland-satellite`. See `Smallvil::is_xwayland_surface`.
     pub is_xwayland: Option<bool>,
+    /// Tri-state urgent-hint match (sway's `urgent=latest`/Hyprland tag
+    /// idea, narrowed to a plain bool here). Unlike every other field in
+    /// this struct, this one is re-checked live: `Smallvil::mark_urgent`
+    /// and the urgent-clear branch of `reconcile_keyboard_focus` both
+    /// re-resolve rules for the affected surface, so a rule keyed on this
+    /// takes effect immediately when urgency changes, not only at map
+    /// time. See `Smallvil::resolve_window_rules_for`, the one place that
+    /// gathers current urgency (`self.urgent.contains(surface)`) alongside
+    /// every other match fact.
+    pub urgent: Option<bool>,
     /// Initial workspace number -- same numbering `workspace:N` keybinds
     /// use, including 0 (the reserved scratchpad) if you want a window to
     /// always start hidden.
@@ -3371,6 +3382,7 @@ impl WindowRule {
         title: Option<&str>,
         pid: Option<i32>,
         is_xwayland: bool,
+        urgent: bool,
     ) -> bool {
         if self.app_id.is_none()
             && self.title.is_none()
@@ -3378,6 +3390,7 @@ impl WindowRule {
             && self.title_regex.is_none()
             && self.pid.is_none()
             && self.is_xwayland.is_none()
+            && self.urgent.is_none()
         {
             return false;
         }
@@ -3416,6 +3429,11 @@ impl WindowRule {
         }
         if let Some(want) = self.is_xwayland {
             if want != is_xwayland {
+                return false;
+            }
+        }
+        if let Some(want) = self.urgent {
+            if want != urgent {
                 return false;
             }
         }
@@ -6233,6 +6251,7 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                     Err(_) => tracing::warn!(value, "Expected an integer PID, ignoring"),
                 },
                 "xwayland" | "is_xwayland" => set_opt_bool(&mut rule.is_xwayland, key, value),
+                "urgent" => set_opt_bool(&mut rule.urgent, key, value),
                 "workspace" => match value.parse() {
                     Ok(n) => rule.workspace = Some(n),
                     Err(_) => tracing::warn!(value, "Expected a workspace number, ignoring"),
@@ -7238,25 +7257,25 @@ mod tests {
             app_id: Some("firefox".to_string()),
             ..Default::default()
         };
-        assert!(by_app_id.matches(Some("firefox"), None, None, false));
-        assert!(!by_app_id.matches(Some("firefox-nightly"), None, None, false));
-        assert!(!by_app_id.matches(None, Some("Firefox"), None, false));
+        assert!(by_app_id.matches(Some("firefox"), None, None, false, false));
+        assert!(!by_app_id.matches(Some("firefox-nightly"), None, None, false, false));
+        assert!(!by_app_id.matches(None, Some("Firefox"), None, false, false));
 
         let by_title = WindowRule {
             title: Some("Picture-in-Picture".to_string()),
             ..Default::default()
         };
-        assert!(by_title.matches(None, Some("Video - picture-in-picture"), None, false));
-        assert!(!by_title.matches(None, Some("Video"), None, false));
-        assert!(!by_title.matches(None, None, None, false));
+        assert!(by_title.matches(None, Some("Video - picture-in-picture"), None, false, false));
+        assert!(!by_title.matches(None, Some("Video"), None, false, false));
+        assert!(!by_title.matches(None, None, None, false, false));
 
         let both = WindowRule {
             app_id: Some("firefox".to_string()),
             title: Some("pip".to_string()),
             ..Default::default()
         };
-        assert!(!both.matches(Some("firefox"), Some("normal tab"), None, false));
-        assert!(both.matches(Some("firefox"), Some("Video - PIP"), None, false));
+        assert!(!both.matches(Some("firefox"), Some("normal tab"), None, false, false));
+        assert!(both.matches(Some("firefox"), Some("Video - PIP"), None, false, false));
     }
 
     #[test]
@@ -7268,8 +7287,8 @@ mod tests {
             float: true,
             ..Default::default()
         };
-        assert!(!blank.matches(Some("anything"), Some("anything"), None, false));
-        assert!(!blank.matches(None, None, None, false));
+        assert!(!blank.matches(Some("anything"), Some("anything"), None, false, false));
+        assert!(!blank.matches(None, None, None, false, false));
     }
 
     #[test]
@@ -7283,14 +7302,15 @@ mod tests {
             Some("org.mozilla.firefox"),
             Some("Private Browsing"),
             None,
+            false,
             false
         ));
-        assert!(!rule.matches(Some("kitty"), Some("Private Browsing"), None, false));
+        assert!(!rule.matches(Some("kitty"), Some("Private Browsing"), None, false, false));
 
         let invalid =
             lower_window_rule_block(&[waves::Entry::Assign("app_id_regex".into(), "[".into())]);
         assert!(invalid.app_id_regex.is_none());
-        assert!(!invalid.matches(Some("anything"), None, None, false));
+        assert!(!invalid.matches(Some("anything"), None, None, false, false));
     }
 
     #[test]
@@ -7299,19 +7319,19 @@ mod tests {
         // ... }` and `rule { xwayland = ... }` are each a complete,
         // standalone identifying criterion, same as `app_id`/`title`.
         let by_pid = lower_window_rule_block(&[waves::Entry::Assign("pid".into(), "1234".into())]);
-        assert!(by_pid.matches(None, None, Some(1234), false));
-        assert!(!by_pid.matches(None, None, Some(5678), false));
-        assert!(!by_pid.matches(None, None, None, false));
+        assert!(by_pid.matches(None, None, Some(1234), false, false));
+        assert!(!by_pid.matches(None, None, Some(5678), false, false));
+        assert!(!by_pid.matches(None, None, None, false, false));
 
         let xwayland_only =
             lower_window_rule_block(&[waves::Entry::Assign("xwayland".into(), "true".into())]);
-        assert!(xwayland_only.matches(None, None, None, true));
-        assert!(!xwayland_only.matches(None, None, None, false));
+        assert!(xwayland_only.matches(None, None, None, true, false));
+        assert!(!xwayland_only.matches(None, None, None, false, false));
 
         let native_only =
             lower_window_rule_block(&[waves::Entry::Assign("xwayland".into(), "false".into())]);
-        assert!(native_only.matches(None, None, None, false));
-        assert!(!native_only.matches(None, None, None, true));
+        assert!(native_only.matches(None, None, None, false, false));
+        assert!(!native_only.matches(None, None, None, true, false));
 
         // Combines with app_id like any other criterion (AND, not OR).
         let combined = WindowRule {
@@ -7319,9 +7339,37 @@ mod tests {
             pid: Some(42),
             ..Default::default()
         };
-        assert!(combined.matches(Some("firefox"), None, Some(42), false));
-        assert!(!combined.matches(Some("firefox"), None, Some(99), false));
-        assert!(!combined.matches(Some("chromium"), None, Some(42), false));
+        assert!(combined.matches(Some("firefox"), None, Some(42), false, false));
+        assert!(!combined.matches(Some("firefox"), None, Some(99), false, false));
+        assert!(!combined.matches(Some("chromium"), None, Some(42), false, false));
+    }
+
+    #[test]
+    fn window_rule_matches_by_urgent_alone_and_re_resolves_live() {
+        // `rule { urgent = true }` is a complete, standalone identifying
+        // criterion, same as `pid`/`xwayland` above -- and unlike those,
+        // it's meant to flip after map time (see `Smallvil::mark_urgent`
+        // and `reconcile_keyboard_focus`), so this only tests the pure
+        // matching logic itself, not the live re-apply plumbing.
+        let urgent_only =
+            lower_window_rule_block(&[waves::Entry::Assign("urgent".into(), "true".into())]);
+        assert!(urgent_only.matches(None, None, None, false, true));
+        assert!(!urgent_only.matches(None, None, None, false, false));
+
+        let calm_only =
+            lower_window_rule_block(&[waves::Entry::Assign("urgent".into(), "false".into())]);
+        assert!(calm_only.matches(None, None, None, false, false));
+        assert!(!calm_only.matches(None, None, None, false, true));
+
+        // Combines with app_id like any other criterion (AND, not OR).
+        let combined = WindowRule {
+            app_id: Some("firefox".to_string()),
+            urgent: Some(true),
+            ..Default::default()
+        };
+        assert!(combined.matches(Some("firefox"), None, None, false, true));
+        assert!(!combined.matches(Some("firefox"), None, None, false, false));
+        assert!(!combined.matches(Some("chromium"), None, None, false, true));
     }
 
     #[test]
@@ -7478,13 +7526,13 @@ mod tests {
         };
         // Only the two "kitty" rules should ever combine; the "firefox"
         // one must not leak in just because it's in the same list.
-        let effective = config.resolve_window_rules(Some("kitty"), None, None, false);
+        let effective = config.resolve_window_rules(Some("kitty"), None, None, false, false);
         assert_eq!(effective.workspace, Some(5)); // later match overrides earlier
         assert!(effective.float); // set by the first match, not unset by the second
         assert!(effective.pin); // set by the second match
 
         config.window_rules.clear();
-        let none_matched = config.resolve_window_rules(Some("kitty"), None, None, false);
+        let none_matched = config.resolve_window_rules(Some("kitty"), None, None, false, false);
         assert_eq!(none_matched.workspace, None);
         assert!(!none_matched.float);
     }
@@ -8166,13 +8214,13 @@ mod tests {
         assert_eq!(config.viscosity, 1.75);
         assert_eq!(
             config
-                .resolve_window_rules(Some("kitty"), None, None, false)
+                .resolve_window_rules(Some("kitty"), None, None, false, false)
                 .viscosity,
             Some(4.0)
         );
         assert_eq!(
             config
-                .resolve_window_rules(Some("foot"), None, None, false)
+                .resolve_window_rules(Some("foot"), None, None, false, false)
                 .viscosity,
             None
         );
@@ -8245,13 +8293,13 @@ mod tests {
         assert_eq!(config.sway.damping, 20.0);
         assert_eq!(
             config
-                .resolve_window_rules(Some("kitty"), None, None, false)
+                .resolve_window_rules(Some("kitty"), None, None, false, false)
                 .sway,
             Some(false)
         );
         assert_eq!(
             config
-                .resolve_window_rules(Some("foot"), None, None, false)
+                .resolve_window_rules(Some("foot"), None, None, false, false)
                 .sway,
             None
         );
@@ -8306,13 +8354,13 @@ mod tests {
         assert_eq!(config.float_physics.wave.speed, 2000.0);
         assert_eq!(
             config
-                .resolve_window_rules(Some("kitty"), None, None, false)
+                .resolve_window_rules(Some("kitty"), None, None, false, false)
                 .float_physics,
             Some(FloatPhysicsTier::Off)
         );
         assert_eq!(
             config
-                .resolve_window_rules(Some("foot"), None, None, false)
+                .resolve_window_rules(Some("foot"), None, None, false, false)
                 .float_physics,
             None
         );
@@ -8332,7 +8380,7 @@ mod tests {
         assert_eq!(legacy_config.float_physics.tier, FloatPhysicsTier::Light);
         assert_eq!(
             legacy_config
-                .resolve_window_rules(Some("kitty"), None, None, false)
+                .resolve_window_rules(Some("kitty"), None, None, false, false)
                 .float_physics,
             Some(FloatPhysicsTier::Light)
         );
@@ -8411,13 +8459,13 @@ mod tests {
         // fold rule every other Option<bool> rule field uses.
         assert_eq!(
             config
-                .resolve_window_rules(Some("kitty"), None, None, false)
+                .resolve_window_rules(Some("kitty"), None, None, false, false)
                 .depth,
             Some(true)
         );
         assert_eq!(
             config
-                .resolve_window_rules(Some("foot"), None, None, false)
+                .resolve_window_rules(Some("foot"), None, None, false, false)
                 .depth,
             None
         );
@@ -8650,7 +8698,7 @@ mod tests {
         assert_eq!(config.frost.tint_alpha, 0.2);
         assert_eq!(config.frost.corner_radius, 16.0);
         assert_eq!(config.frost.corner_softness, 1.5);
-        let rule = config.resolve_window_rules(Some("kitty"), None, None, false);
+        let rule = config.resolve_window_rules(Some("kitty"), None, None, false, false);
         assert_eq!(rule.opacity, Some(0.7));
         assert_eq!(rule.active_opacity, Some(1.0));
         assert_eq!(rule.inactive_opacity, Some(0.75));
@@ -8741,7 +8789,7 @@ mod tests {
         assert!(config.shadow.floating_only);
         assert!(config.shadow.fullscreen);
 
-        let resolved = config.resolve_window_rules(Some("kitty"), None, None, false);
+        let resolved = config.resolve_window_rules(Some("kitty"), None, None, false, false);
         let shadow = resolved.shadow.unwrap().apply_to(&config.shadow);
         assert!(shadow.enabled);
         assert_eq!(shadow.softness, 24.0);
@@ -8809,7 +8857,7 @@ mod tests {
         assert_eq!(config.border.animation_speed, 42.0);
         assert_eq!(config.border.pulse_amount, 0.2);
 
-        let resolved = config.resolve_window_rules(Some("kitty"), None, None, false);
+        let resolved = config.resolve_window_rules(Some("kitty"), None, None, false, false);
         let rounding = resolved.rounding.unwrap().apply_to(&config.rounding);
         let border = resolved.border.unwrap().apply_to(&config.border);
         assert_eq!(rounding.radii, [18.0, 22.0, 10.0, 6.0]);
@@ -8862,13 +8910,13 @@ mod tests {
 
         assert_eq!(
             config
-                .resolve_window_rules(Some("kitty"), None, None, false)
+                .resolve_window_rules(Some("kitty"), None, None, false, false)
                 .glass,
             Some(GlassMode::Plain)
         );
         assert_eq!(
             config
-                .resolve_window_rules(Some("foot"), None, None, false)
+                .resolve_window_rules(Some("foot"), None, None, false, false)
                 .glass,
             None
         );

@@ -1351,15 +1351,62 @@ impl Smallvil {
         self.config.water_effects && self.config.swim.enabled
     }
 
+    /// Gathers every fact `WindowRule::matches` needs for one surface
+    /// (identity, PID, XWayland-ness, current urgency) and folds the
+    /// matching `[[window_rule]]` entries into one effective rule. The
+    /// single chokepoint every other resolver in this file goes through,
+    /// so a new match criterion only needs wiring here once instead of at
+    /// each call site.
+    pub(crate) fn resolve_window_rules_for(
+        &self,
+        surface: &WlSurface,
+    ) -> crate::config::WindowRule {
+        let (app_id, title) = self.toplevel_identity(surface);
+        let pid = self.client_pid(surface);
+        let is_xwayland = self.is_xwayland_surface(surface);
+        let urgent = self.urgent.contains(surface);
+        self.config.resolve_window_rules(
+            app_id.as_deref(),
+            title.as_deref(),
+            pid,
+            is_xwayland,
+            urgent,
+        )
+    }
+
+    /// Re-derives `window_opacity`/`window_glass_modes` for one window from
+    /// its currently-resolved rule. Shared by the full post-reload battery
+    /// (`reload_config`, one call per mapped window) and by anything that
+    /// needs a single window's opacity/glass to react to a live
+    /// rule-affecting change without a full reload -- currently
+    /// `mark_urgent` and the urgent-clear branch of
+    /// `reconcile_keyboard_focus`, since `rule { urgent = ... }` is the one
+    /// match criterion that can flip after map time.
+    fn refresh_window_opacity_and_glass_for(&mut self, surface: &WlSurface) {
+        let rule = self.resolve_window_rules_for(surface);
+        match crate::config::WindowOpacity::from_rule(&rule) {
+            Some(opacity) => {
+                self.window_opacity.insert(surface.clone(), opacity);
+            }
+            None => {
+                self.window_opacity.remove(surface);
+            }
+        }
+        match rule.glass {
+            Some(mode) => {
+                self.window_glass_modes.insert(surface.clone(), mode);
+            }
+            None => {
+                self.window_glass_modes.remove(surface);
+            }
+        }
+    }
+
     fn viscosity_for_surface(&self, surface: &WlSurface) -> f64 {
         if !self.config.water_effects {
             return 0.0;
         }
-        let (app_id, title) = self.toplevel_identity(surface);
-        let pid = self.client_pid(surface);
-        let is_xwayland = self.is_xwayland_surface(surface);
-        self.config
-            .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland)
+        self.resolve_window_rules_for(surface)
             .viscosity
             .unwrap_or(self.config.viscosity)
             .clamp(0.0, 4.0)
@@ -1426,11 +1473,7 @@ impl Smallvil {
         if !self.config.water_effects {
             return false;
         }
-        let (app_id, title) = self.toplevel_identity(surface);
-        let pid = self.client_pid(surface);
-        let is_xwayland = self.is_xwayland_surface(surface);
-        self.config
-            .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland)
+        self.resolve_window_rules_for(surface)
             .sway
             .unwrap_or(self.config.sway.enabled)
     }
@@ -1439,13 +1482,7 @@ impl Smallvil {
     /// false`), exempting it from the automatic inactivity sink regardless
     /// of the global `depth { enabled }` setting.
     fn depth_exempt(&self, surface: &WlSurface) -> bool {
-        let (app_id, title) = self.toplevel_identity(surface);
-        let pid = self.client_pid(surface);
-        let is_xwayland = self.is_xwayland_surface(surface);
-        self.config
-            .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland)
-            .depth
-            == Some(false)
+        self.resolve_window_rules_for(surface).depth == Some(false)
     }
 
     /// Feeds one horizontal floating-drag delta into the window's lateral
@@ -1486,11 +1523,7 @@ impl Smallvil {
         if !self.config.water_effects {
             return crate::config::FloatPhysicsTier::Off;
         }
-        let (app_id, title) = self.toplevel_identity(surface);
-        let pid = self.client_pid(surface);
-        let is_xwayland = self.is_xwayland_surface(surface);
-        self.config
-            .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland)
+        self.resolve_window_rules_for(surface)
             .float_physics
             .unwrap_or(self.config.float_physics.tier)
     }
@@ -2582,15 +2615,7 @@ impl Smallvil {
             .urgent
             .iter()
             .filter(|surface| {
-                let (app_id, title) = self.toplevel_identity(surface);
-                let pid = self.client_pid(surface);
-                let is_xwayland = self.is_xwayland_surface(surface);
-                let rule = self.config.resolve_window_rules(
-                    app_id.as_deref(),
-                    title.as_deref(),
-                    pid,
-                    is_xwayland,
-                );
+                let rule = self.resolve_window_rules_for(surface);
                 let cfg = self.config.resolve_ripple_config(
                     rule.ripple.as_ref(),
                     crate::config::RippleTrigger::Urgent,
@@ -3785,6 +3810,10 @@ impl Smallvil {
                     if let Some(depth) = self.window_depths.get_mut(&surface) {
                         depth.visual_changed();
                     }
+                    // Mirrors `mark_urgent`'s own refresh on the way in --
+                    // a rule keyed on `urgent = true` must stop applying
+                    // the moment urgency clears, not linger until reload.
+                    self.refresh_window_opacity_and_glass_for(&surface);
                     self.emit_ipc_event(crate::ipc::IpcEvent::UrgentChanged {
                         surface: surface.clone(),
                         urgent: false,
@@ -5142,12 +5171,7 @@ impl Smallvil {
     }
 
     fn frost_config_for_surface(&self, surface: &WlSurface) -> crate::config::FrostConfig {
-        let (app_id, title) = self.toplevel_identity(surface);
-        let pid = self.client_pid(surface);
-        let is_xwayland = self.is_xwayland_surface(surface);
-        let rule =
-            self.config
-                .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
+        let rule = self.resolve_window_rules_for(surface);
         rule.frost
             .as_ref()
             .map(|overrides| overrides.apply_to(&self.config.frost))
@@ -5155,12 +5179,7 @@ impl Smallvil {
     }
 
     fn shadow_config_for_surface(&self, surface: &WlSurface) -> crate::config::ShadowConfig {
-        let (app_id, title) = self.toplevel_identity(surface);
-        let pid = self.client_pid(surface);
-        let is_xwayland = self.is_xwayland_surface(surface);
-        let rule =
-            self.config
-                .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
+        let rule = self.resolve_window_rules_for(surface);
         rule.shadow
             .as_ref()
             .map(|overrides| overrides.apply_to(&self.config.shadow))
@@ -5168,12 +5187,7 @@ impl Smallvil {
     }
 
     fn rounding_config_for_surface(&self, surface: &WlSurface) -> crate::config::RoundingConfig {
-        let (app_id, title) = self.toplevel_identity(surface);
-        let pid = self.client_pid(surface);
-        let is_xwayland = self.is_xwayland_surface(surface);
-        let rule =
-            self.config
-                .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
+        let rule = self.resolve_window_rules_for(surface);
         rule.rounding
             .as_ref()
             .map(|overrides| overrides.apply_to(&self.config.rounding))
@@ -5181,12 +5195,7 @@ impl Smallvil {
     }
 
     fn border_config_for_surface(&self, surface: &WlSurface) -> crate::config::BorderConfig {
-        let (app_id, title) = self.toplevel_identity(surface);
-        let pid = self.client_pid(surface);
-        let is_xwayland = self.is_xwayland_surface(surface);
-        let rule =
-            self.config
-                .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
+        let rule = self.resolve_window_rules_for(surface);
         rule.border
             .as_ref()
             .map(|overrides| overrides.apply_to(&self.config.border))
@@ -6489,12 +6498,7 @@ impl Smallvil {
         // WindowRule whose `ripple` field is `Some(...)` only if at
         // least one matching rule declared a ripple sub-block (or the
         // `ripple = none` shorthand).
-        let (app_id, title) = self.toplevel_identity(surface);
-        let pid = self.client_pid(surface);
-        let is_xwayland = self.is_xwayland_surface(surface);
-        let rule =
-            self.config
-                .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
+        let rule = self.resolve_window_rules_for(surface);
         let mut cfg = self
             .config
             .resolve_ripple_config(rule.ripple.as_ref(), trigger);
@@ -8712,6 +8716,14 @@ impl Smallvil {
         if let Some(depth) = self.window_depths.get_mut(surface) {
             depth.visual_changed();
         }
+        // `rule { urgent = ... }` is the one match criterion that can flip
+        // after map time -- re-resolve this window's opacity/glass now so
+        // a matching rule takes effect immediately rather than waiting for
+        // a reload. Viscosity/sway/depth/border/shadow/rounding/ripple all
+        // already resolve fresh on every use (see
+        // `Smallvil::resolve_window_rules_for`'s call sites), so they need
+        // no equivalent nudge here.
+        self.refresh_window_opacity_and_glass_for(surface);
         // The immediate spawn is the first pulse; `update_urgent_pulses`
         // re-fires it every `urgent_repeat_interval_ms` until the hint
         // clears. A no-op if the window's workspace is hidden, since
@@ -10069,41 +10081,12 @@ impl Smallvil {
                             camera.snap_to_rest();
                         }
                     }
-                    self.window_opacity = self
-                        .foreign_toplevels
-                        .keys()
-                        .filter_map(|surface| {
-                            let (app_id, title) = self.toplevel_identity(surface);
-                            let pid = self.client_pid(surface);
-                            let is_xwayland = self.is_xwayland_surface(surface);
-                            let rule = self.config.resolve_window_rules(
-                                app_id.as_deref(),
-                                title.as_deref(),
-                                pid,
-                                is_xwayland,
-                            );
-                            crate::config::WindowOpacity::from_rule(&rule)
-                                .map(|opacity| (surface.clone(), opacity))
-                        })
-                        .collect();
-                    self.window_glass_modes = self
-                        .foreign_toplevels
-                        .keys()
-                        .filter_map(|surface| {
-                            let (app_id, title) = self.toplevel_identity(surface);
-                            let pid = self.client_pid(surface);
-                            let is_xwayland = self.is_xwayland_surface(surface);
-                            self.config
-                                .resolve_window_rules(
-                                    app_id.as_deref(),
-                                    title.as_deref(),
-                                    pid,
-                                    is_xwayland,
-                                )
-                                .glass
-                                .map(|mode| (surface.clone(), mode))
-                        })
-                        .collect();
+                    self.window_opacity.clear();
+                    self.window_glass_modes.clear();
+                    let surfaces: Vec<WlSurface> = self.foreign_toplevels.keys().cloned().collect();
+                    for surface in surfaces {
+                        self.refresh_window_opacity_and_glass_for(&surface);
+                    }
                     // The mode or frost tuning may have changed. Force the
                     // shared pre-frame pipeline to rebuild against the current
                     // window geometry instead of briefly showing stale content.

@@ -672,14 +672,7 @@ pub fn handle_commit(state: &mut Smallvil, surface: &WlSurface) {
     // doesn't emit a spurious `done` event to every bar watching.
     if transition != ToplevelTransition::Unmap && state.foreign_toplevels.contains_key(surface) {
         let (app_id, title) = state.toplevel_identity(surface);
-        let pid = state.client_pid(surface);
-        let is_xwayland = state.is_xwayland_surface(surface);
-        let render_rule = state.config.resolve_window_rules(
-            app_id.as_deref(),
-            title.as_deref(),
-            pid,
-            is_xwayland,
-        );
+        let render_rule = state.resolve_window_rules_for(surface);
         if let Some(opacity) = crate::config::WindowOpacity::from_rule(&render_rule) {
             state.window_opacity.insert(surface.clone(), opacity);
         } else {
@@ -1004,12 +997,7 @@ impl Smallvil {
     }
 
     fn map_toplevel(&mut self, surface: &WlSurface) {
-        let (app_id, title) = self.toplevel_identity(surface);
-        let pid = self.client_pid(surface);
-        let is_xwayland = self.is_xwayland_surface(surface);
-        let rule =
-            self.config
-                .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
+        let rule = self.resolve_window_rules_for(surface);
         if let Some(opacity) = crate::config::WindowOpacity::from_rule(&rule) {
             self.window_opacity.insert(surface.clone(), opacity);
         } else {
@@ -1421,12 +1409,7 @@ impl Smallvil {
             .insert(&output, workspace, entry.window, Some(surface));
         // Re-apply identity-derived rule state and re-announce to bars --
         // `detach_mapped_toplevel` cleared both when the window was hidden.
-        let (app_id, title) = self.toplevel_identity(&entry.surface);
-        let pid = self.client_pid(&entry.surface);
-        let is_xwayland = self.is_xwayland_surface(&entry.surface);
-        let rule =
-            self.config
-                .resolve_window_rules(app_id.as_deref(), title.as_deref(), pid, is_xwayland);
+        let rule = self.resolve_window_rules_for(&entry.surface);
         if let Some(opacity) = crate::config::WindowOpacity::from_rule(&rule) {
             self.window_opacity.insert(entry.surface.clone(), opacity);
         }
@@ -1477,15 +1460,7 @@ impl Smallvil {
                 if pid == child_pid || !ancestors.contains(&pid) {
                     return None;
                 }
-                let (app_id, title) = self.toplevel_identity(&surface);
-                let is_xwayland = self.is_xwayland_surface(&surface);
-                self.config
-                    .resolve_window_rules(
-                        app_id.as_deref(),
-                        title.as_deref(),
-                        Some(pid),
-                        is_xwayland,
-                    )
+                self.resolve_window_rules_for(&surface)
                     .swallow
                     .then_some(surface)
             })
