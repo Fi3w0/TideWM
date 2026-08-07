@@ -905,10 +905,10 @@ pub struct Smallvil {
     /// lifecycle to hook a one-shot event on the way Hyprland can -- so
     /// this set is what makes the closest honest analog to that a
     /// once-per-process-lifetime event instead of firing on every later
-    /// visit to an empty workspace. Not pruned: unbounded only in the
-    /// pathological case of visiting extremely many distinct (output,
-    /// workspace) pairs in one session, the same bound `workspace_gaps`/
-    /// `algorithms` accept for config-shaped state.
+    /// visit to an empty workspace. Pruned per-output in
+    /// `remove_workspace_transition_output` on disconnect, same
+    /// "connector name might mean something else on replug" reasoning as
+    /// that function's other entries.
     workspace_created_empty_fired: HashSet<(String, u32)>,
 
     /// Most-recently-focused-first order of every window that has ever
@@ -6500,6 +6500,13 @@ impl Smallvil {
         self.compasses.remove(output_name);
         self.swim_cameras.remove(output_name);
         self.caustics.remove(output_name);
+        // Same "connector name might mean something else entirely on
+        // replug" reasoning as the rest of this function: a fired
+        // on_created_empty for this output's workspace numbers shouldn't
+        // silently suppress the command if a different monitor is later
+        // plugged into the same port and gets the same connector name.
+        self.workspace_created_empty_fired
+            .retain(|(o, _)| o != output_name);
         if self
             .minimap_peek
             .as_ref()
