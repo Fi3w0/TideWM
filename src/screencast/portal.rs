@@ -67,13 +67,13 @@ pub(super) struct SessionEntry {
 }
 
 struct PortalStream {
-    _handle: pipewire_thread::StreamHandle,
+    handle: pipewire_thread::StreamHandle,
 }
 
 enum PortalStreamState {
     Idle,
     Starting,
-    Active { _stream: PortalStream },
+    Active { stream: PortalStream },
     Closed,
 }
 
@@ -99,20 +99,31 @@ struct StartReservation {
 
 impl StartReservation {
     fn begin(entry: Arc<SessionEntry>) -> Option<Self> {
-        {
+        let stale = {
             let mut state = entry.stream.lock().unwrap();
-            if !matches!(*state, PortalStreamState::Idle) {
-                return None;
+            match &*state {
+                PortalStreamState::Idle => {
+                    *state = PortalStreamState::Starting;
+                    None
+                }
+                PortalStreamState::Active { stream } if !stream.handle.is_alive() => {
+                    Some(std::mem::replace(&mut *state, PortalStreamState::Starting))
+                }
+                PortalStreamState::Starting
+                | PortalStreamState::Active { .. }
+                | PortalStreamState::Closed => return None,
             }
-            *state = PortalStreamState::Starting;
-        }
+        };
+        // Joining a failed PipeWire worker can still block briefly. Never do
+        // it while holding the session-state mutex used by Close/Start.
+        drop(stale);
         Some(Self { entry, armed: true })
     }
 
     fn complete(mut self, stream: PortalStream) -> Result<(), PortalStream> {
         let mut state = self.entry.stream.lock().unwrap();
         let result = if matches!(*state, PortalStreamState::Starting) {
-            *state = PortalStreamState::Active { _stream: stream };
+            *state = PortalStreamState::Active { stream };
             Ok(())
         } else {
             Err(stream)
@@ -405,7 +416,7 @@ impl Portal {
             }
         };
 
-        if let Err(stream) = start_reservation.complete(PortalStream { _handle: handle }) {
+        if let Err(stream) = start_reservation.complete(PortalStream { handle }) {
             // The session was closed while the picker or PipeWire startup was
             // in flight. Dropping this handle stops the late worker.
             drop(stream);

@@ -6,13 +6,10 @@
 //! copy the newest owned BGRA readback. No GL, Wayland, or `Smallvil` value
 //! crosses into this thread.
 //!
-//! The worker survives a PipeWire daemon restart: a core error event (or
-//! the loop's own fd failing) ends the connection cycle and the worker
-//! reconnects with a fresh core and stream after a one-second backoff, up
-//! to `MAX_RECONNECTS` attempts -- matching xdg-desktop-portal-wlr's
-//! exit-and-restart semantics without the process death. Only after the
-//! retries are exhausted does the worker go dead, which the portal
-//! notices (`is_alive`) and heals on the app's next `Start`.
+//! A daemon loss or incompatible size change ends the worker. Reusing the
+//! same public stream while silently creating a new PipeWire node would
+//! strand consumers on the old node id; callers observe `is_alive == false`
+//! and perform a normal Start that publishes the replacement id.
 
 use std::{
     os::fd::BorrowedFd,
@@ -131,14 +128,6 @@ enum ConnectionOutcome {
     DaemonLost,
 }
 
-/// How many fresh connection attempts a worker makes after the PipeWire
-/// daemon dies before giving up. Each attempt waits a second first, so
-/// the window is ~10 seconds of daemon downtime -- long enough to ride
-/// out a `systemctl --user restart pipewire`, short enough that a dead
-/// session surfaces to the portal (which restarts the stream on the next
-/// `Start`, see `dbus.rs`) instead of retrying forever.
-const MAX_RECONNECTS: u32 = 10;
-
 fn run(
     source: ScreencastSource,
     width: u32,
@@ -150,43 +139,19 @@ fn run(
 ) -> Result<(), String> {
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|err| err.to_string())?;
-    let mut reconnects = 0u32;
-    loop {
-        match run_connection(
-            &mainloop,
-            source.clone(),
-            width,
-            height,
-            draw_cursor,
-            &compositor,
-            &stop,
-            &started,
-        )? {
-            ConnectionOutcome::Stopped => return Ok(()),
-            ConnectionOutcome::DaemonLost => {
-                reconnects += 1;
-                if reconnects > MAX_RECONNECTS {
-                    return Err(format!(
-                        "PipeWire daemon unreachable after {MAX_RECONNECTS} reconnect attempts"
-                    ));
-                }
-                tracing::warn!(
-                    attempt = reconnects,
-                    "PipeWire connection lost; reconnecting screencast stream"
-                );
-                // One-second backoff before reconnecting. The loop is the
-                // only way to notice `stop`, so keep iterating through it.
-                let deadline = Instant::now() + Duration::from_secs(1);
-                while Instant::now() < deadline {
-                    if stop.try_recv().is_ok() {
-                        return Ok(());
-                    }
-                    let wait = deadline
-                        .saturating_duration_since(Instant::now())
-                        .min(Duration::from_millis(50));
-                    mainloop.loop_().iterate(pw::loop_::Timeout::Finite(wait));
-                }
-            }
+    match run_connection(
+        &mainloop,
+        source,
+        width,
+        height,
+        draw_cursor,
+        &compositor,
+        &stop,
+        &started,
+    )? {
+        ConnectionOutcome::Stopped => Ok(()),
+        ConnectionOutcome::DaemonLost => {
+            Err("PipeWire connection lost; start a replacement stream".into())
         }
     }
 }
