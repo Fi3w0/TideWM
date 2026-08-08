@@ -8050,19 +8050,6 @@ impl Smallvil {
                 // pinned is left alone, same as the normal case.
                 self.toggle_floating(surface);
             }
-            if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
-                if wants_pinned {
-                    if let Some(output) = self
-                        .fullscreen
-                        .get(surface)
-                        .map(|entry| entry.output.clone())
-                    {
-                        self.ocean.pin_to_screen(surface, &output);
-                    }
-                } else {
-                    self.ocean.unpin_from_screen(surface);
-                }
-            }
             if let Some(entry) = self.fullscreen.get_mut(surface) {
                 entry.was_pinned = wants_pinned;
                 if !wants_pinned {
@@ -8076,7 +8063,11 @@ impl Smallvil {
             return;
         }
         if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
-            if self.pinned.remove(surface) {
+            // Ocean's viewport anchor is the only pin authority. Drop any
+            // stale Classic marker left by an interrupted migration before
+            // deciding whether this is a pin or unpin operation.
+            self.pinned.remove(surface);
+            if self.ocean.is_screen_pinned(surface) {
                 self.ocean.unpin_from_screen(surface);
             } else {
                 if self.ocean.is_tiled(surface) {
@@ -8093,7 +8084,6 @@ impl Smallvil {
                 if !self.ocean.pin_to_screen(surface, &output.name()) {
                     return;
                 }
-                self.pinned.insert(surface.clone());
             }
             self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
                 surface: surface.clone(),
@@ -8850,6 +8840,17 @@ impl Smallvil {
             self.space.raise_element(&window, false);
         }
         self.request_redraw();
+    }
+
+    /// Pin ownership follows the active spatial engine. Classic keeps its
+    /// workspace exemption in `pinned`; Ocean owns viewport anchoring in
+    /// `screen_pins`. Keeping this query centralized prevents migration from
+    /// leaving two disagreeing sources of truth.
+    pub(crate) fn window_is_pinned(&self, surface: &WlSurface) -> bool {
+        match self.config.spatial_engine {
+            crate::config::SpatialEngine::Classic => self.pinned.contains(surface),
+            crate::config::SpatialEngine::Ocean => self.ocean.is_screen_pinned(surface),
+        }
     }
 
     /// Which group (if any) `surface` is a member of, active or parked.

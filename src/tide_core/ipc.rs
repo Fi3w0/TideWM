@@ -1092,7 +1092,7 @@ fn window_json(
         "output": output,
         "workspace": workspace,
         "floating": is_floating,
-        "pinned": state.pinned.contains(surface),
+        "pinned": state.window_is_pinned(surface),
         "pseudo_tiled": state.pseudo_tiled.contains(surface),
         "fullscreen": state.fullscreen.contains_key(surface),
         "urgent": state.urgent.contains(surface),

@@ -66,10 +66,9 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
         if let Some(mut rect) = data.ocean.floating_rect(surface) {
             rect.loc = new_location;
             data.ocean.set_floating_rect(surface, rect);
-            if data.pinned.contains(surface) {
+            if data.ocean.is_screen_pinned(surface) {
                 if let Some(output) = data.ocean.entry_output(surface).map(str::to_string) {
-                    data.ocean.unpin_from_screen(surface);
-                    data.ocean.pin_to_screen(surface, &output);
+                    data.ocean.refresh_screen_pin(surface, &output);
                 }
             }
             // Live feedback for a floating Ocean drag, mirroring

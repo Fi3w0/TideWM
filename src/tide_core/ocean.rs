@@ -1362,6 +1362,21 @@ impl OceanSpace {
         true
     }
 
+    pub fn is_screen_pinned(&self, surface: &WlSurface) -> bool {
+        self.screen_pins.contains_key(surface)
+    }
+
+    /// Rebuilds an existing screen pin from the floating window's current
+    /// world rectangle. Unlike `unpin_from_screen`, this deliberately does
+    /// not restore the old viewport position first: callers use it after an
+    /// interactive move or rule placement has already authored a new rect.
+    pub fn refresh_screen_pin(&mut self, surface: &WlSurface, output: &str) -> bool {
+        if self.screen_pins.remove(surface).is_none() {
+            return false;
+        }
+        self.pin_to_screen(surface, output)
+    }
+
     pub fn unpin_from_screen(&mut self, surface: &WlSurface) -> bool {
         let Some(pin) = self.screen_pins.remove(surface) else {
             return false;

@@ -436,7 +436,14 @@ impl Smallvil {
                 }
             });
 
-        let was_pinned = previous_was_pinned || self.pinned.remove(&wl_surface);
+        let active_pin = match self.config.spatial_engine {
+            crate::config::SpatialEngine::Classic => self.pinned.remove(&wl_surface),
+            crate::config::SpatialEngine::Ocean => {
+                self.pinned.remove(&wl_surface);
+                self.ocean.unpin_from_screen(&wl_surface)
+            }
+        };
+        let was_pinned = previous_was_pinned || active_pin;
         if was_pinned {
             let active_workspace = self.layout.active_workspace(&output.name());
             if let Some(tag) = self.floating_workspace.get_mut(&wl_surface) {
@@ -1149,14 +1156,14 @@ impl Smallvil {
             if rule.pin {
                 if ocean_engine {
                     self.ocean.pin_to_screen(surface, &output.name());
+                } else {
+                    self.pinned.insert(surface.clone());
                 }
-                self.pinned.insert(surface.clone());
             }
             if rule.position.is_some() || rule.size.is_some() {
                 self.apply_floating_placement(surface, rule.position, rule.size);
                 if rule.pin && ocean_engine {
-                    self.ocean.unpin_from_screen(surface);
-                    self.ocean.pin_to_screen(surface, &output.name());
+                    self.ocean.refresh_screen_pin(surface, &output.name());
                 }
             }
         } else if rule.pseudo_tile {
@@ -1682,8 +1689,14 @@ impl Smallvil {
                 self.space.map_element(window, rect.loc, false);
             }
             if entry.was_pinned {
-                self.pinned.insert(wl_surface.clone());
-                self.ocean.pin_to_screen(wl_surface, &entry.output);
+                match self.config.spatial_engine {
+                    crate::config::SpatialEngine::Classic => {
+                        self.pinned.insert(wl_surface.clone());
+                    }
+                    crate::config::SpatialEngine::Ocean => {
+                        self.ocean.pin_to_screen(wl_surface, &entry.output);
+                    }
+                }
             }
         }
 
