@@ -543,8 +543,13 @@ impl Layouts {
     /// configured default (see `algorithm`'s own doc, and this struct's
     /// `algorithms` field doc for the pruning this participates in).
     pub fn set_algorithm(&mut self, output: &str, workspace: u32, algorithm: LayoutAlgorithm) {
-        self.algorithms
-            .insert((output.to_string(), workspace), algorithm);
+        if self
+            .algorithms
+            .insert((output.to_string(), workspace), algorithm)
+            != Some(algorithm)
+        {
+            self.bump_topology_revision();
+        }
     }
 
     /// Sets the fallback `algorithm` uses for any (output, workspace)
@@ -553,7 +558,10 @@ impl Layouts {
     /// `Config` and read fresh each `retile()`, since `Layouts` (not
     /// `Config`) is what actually needs it at layout time.
     pub fn set_default_algorithm(&mut self, algorithm: LayoutAlgorithm) {
-        self.default_algorithm = algorithm;
+        if self.default_algorithm != algorithm {
+            self.default_algorithm = algorithm;
+            self.bump_topology_revision();
+        }
     }
 
     /// Sets the whole `[[workspace_rule]]`-derived per-workspace-number
@@ -562,7 +570,10 @@ impl Layouts {
     /// startup and again on every config reload, same as
     /// `set_default_algorithm`.
     pub fn set_workspace_algorithm_overrides(&mut self, overrides: HashMap<u32, LayoutAlgorithm>) {
-        self.workspace_algorithm_overrides = overrides;
+        if self.workspace_algorithm_overrides != overrides {
+            self.workspace_algorithm_overrides = overrides;
+            self.bump_topology_revision();
+        }
     }
 
     /// Sets which side the master pane sits on for every workspace under
@@ -743,6 +754,7 @@ impl Layouts {
     /// `set_algorithm` or rely on `default_algorithm`.
     pub(crate) fn insert_migrated_tree(&mut self, output: String, workspace: u32, tree: BspLayout) {
         self.trees.insert((output, workspace), tree);
+        self.bump_topology_revision();
     }
 
     /// Finds the cascade grid boundary nearest `point`, mirroring
@@ -884,6 +896,7 @@ impl Layouts {
     /// can keep driving its own boundary.
     pub fn cascade_hit_is_current(&self, hit: &CascadeHit) -> bool {
         self.active_workspace(&hit.output) == hit.workspace
+            && self.algorithm(&hit.output, hit.workspace) == LayoutAlgorithm::Cascade
             && self.topology_revision == hit.topology_revision
             && self
                 .cascade_state
@@ -1067,6 +1080,7 @@ impl Layouts {
     /// the revision, so the grab can keep driving its own split.
     pub fn split_is_current(&self, hit: &SplitHit) -> bool {
         self.active_workspace(&hit.output) == hit.workspace
+            && self.algorithm(&hit.output, hit.workspace) == LayoutAlgorithm::Bsp
             && self.topology_revision == hit.topology_revision
             && self
                 .trees
@@ -1592,11 +1606,20 @@ fn split(
 /// can apply the same inset `BspLayout::layout` applies per-leaf, without
 /// duplicating the math.
 pub(crate) fn inset(rect: Rectangle<i32, Logical>, gap: i32) -> Rectangle<i32, Logical> {
+    let max_gap = (rect.size.w.saturating_sub(1) / 2)
+        .min(rect.size.h.saturating_sub(1) / 2)
+        .max(0);
+    let gap = gap.clamp(0, max_gap);
+    let doubled = gap.saturating_mul(2);
     Rectangle::new(
-        (rect.loc.x + gap, rect.loc.y + gap).into(),
         (
-            (rect.size.w - gap * 2).max(1),
-            (rect.size.h - gap * 2).max(1),
+            rect.loc.x.saturating_add(gap),
+            rect.loc.y.saturating_add(gap),
+        )
+            .into(),
+        (
+            rect.size.w.saturating_sub(doubled).max(1),
+            rect.size.h.saturating_sub(doubled).max(1),
         )
             .into(),
     )

@@ -3633,6 +3633,16 @@ impl Smallvil {
                                         )),
                                 )
                             })
+                            // A fullscreen FitPlacement can cover its
+                            // compositor-owned visual rect before the
+                            // client commits the matching surface size.
+                            // Keep the topmost root authoritative during
+                            // that interval instead of clicking through.
+                            .or_else(|| {
+                                placement.window.toplevel().map(|toplevel| {
+                                    (toplevel.wl_surface().clone(), rect.loc.to_f64())
+                                })
+                            })
                     })
             });
         }
@@ -5164,10 +5174,11 @@ impl Smallvil {
         self.swim_cameras.retain(|_, camera| !camera.at_rest());
         self.closing_window_animations
             .retain(|closing| !closing.animation.finished());
+        self.ripples.retain(|ripple| !ripple.finished());
         self.toast
             .as_ref()
             .is_some_and(|toast| toast.needs_continued_redraw())
-            || self.ripples.iter().any(|r| !r.finished())
+            || !self.ripples.is_empty()
             || !self.workspace_transitions.is_empty()
             || !self.depth_transitions.is_empty()
             || !self.window_open_animations.is_empty()
@@ -6184,17 +6195,9 @@ impl Smallvil {
                                     Rectangle::new(location - output_geo.loc, placement.rect.size);
                                 let output_name = output.name();
                                 let ripple_passed = self.ripples.iter().any(|ripple| {
-                                    !ripple.finished() && ripple.output == output_name && {
-                                        let rad = ripple.radius() as i32;
-                                        Rectangle::new(
-                                            Point::from((
-                                                ripple.center.x as i32 - rad,
-                                                ripple.center.y as i32 - rad,
-                                            )),
-                                            Size::from((2 * rad, 2 * rad)),
-                                        )
-                                        .overlaps(local_rect)
-                                    }
+                                    !ripple.finished()
+                                        && ripple.output == output_name
+                                        && ripple.element_rect().overlaps(local_rect)
                                 });
                                 let anim =
                                     self.glass_anim.entry(surface.clone()).or_insert_with(|| {
@@ -7173,30 +7176,21 @@ impl Smallvil {
         })
     }
 
-    /// Clamps `pos` into the bounding box of every mapped output. Needed for
+    /// Clamps `pos` into the union of every mapped output. Needed for
     /// relative pointer motion (a real mouse's delta accumulates onto the
     /// last known position with nothing else bounding it) -- absolute motion
     /// doesn't need this, it's already transformed against one output's
-    /// geometry directly. Bounding-box, not per-output containment: an
-    /// L-shaped multi-monitor arrangement could still let the cursor drift
-    /// into a gap between two non-adjacent outputs. Not solved here; the
-    /// single/extended-desktop case this fixes is unaffected.
+    /// geometry directly. Rectangle right/bottom edges are exclusive, so
+    /// the nearest valid representable point is used when motion reaches an
+    /// outer edge or a gap in an L-shaped layout.
     pub(crate) fn clamp_to_outputs(&self, pos: Point<f64, Logical>) -> Point<f64, Logical> {
-        let mut min = Point::<f64, Logical>::from((f64::MAX, f64::MAX));
-        let mut max = Point::<f64, Logical>::from((f64::MIN, f64::MIN));
-        for output in self.space.outputs() {
-            let Some(geo) = self.space.output_geometry(output) else {
-                continue;
-            };
-            min.x = min.x.min(geo.loc.x as f64);
-            min.y = min.y.min(geo.loc.y as f64);
-            max.x = max.x.max((geo.loc.x + geo.size.w) as f64);
-            max.y = max.y.max((geo.loc.y + geo.size.h) as f64);
-        }
-        if min.x > max.x || min.y > max.y {
-            return pos;
-        }
-        (pos.x.clamp(min.x, max.x), pos.y.clamp(min.y, max.y)).into()
+        nearest_point_in_output_rects(
+            pos,
+            self.space
+                .outputs()
+                .filter_map(|output| self.space.output_geometry(output)),
+        )
+        .unwrap_or(pos)
     }
 
     /// Recomputes the tiling layout for every output and applies it: sends
@@ -8770,7 +8764,7 @@ impl Smallvil {
     /// clamped into the output's visible area; screen-pinned windows
     /// re-enter the Classic `pinned` set.
     fn migrate_ocean_to_classic(&mut self) {
-        let (reefs, floating, camera_origins, entry_outputs, pinned_surfaces) =
+        let (reefs, floating, cameras, entry_outputs, pinned_surfaces) =
             self.ocean.drain_for_classic();
 
         let output_viewports: std::collections::HashMap<String, Rectangle<i32, Logical>> = self
@@ -8789,15 +8783,31 @@ impl Smallvil {
         let mut sorted_reefs = reefs;
         sorted_reefs.sort_by_key(|(_, rect, _)| rect.loc.x);
 
-        // Nearest-output helper for one reef.
+        let camera_center = |output: &str| {
+            let camera = cameras.get(output).copied().unwrap_or_default();
+            let viewport = output_viewports
+                .get(output)
+                .map(|rect| rect.size)
+                .unwrap_or_default();
+            crate::ocean::OceanPoint {
+                x: camera.origin.x + viewport.w as f64 / camera.zoom.max(0.05) / 2.0,
+                y: camera.origin.y + viewport.h as f64 / camera.zoom.max(0.05) / 2.0,
+            }
+        };
+
+        // Nearest-output helper for one reef. Ocean is two-dimensional:
+        // vertically separated cameras must not tie solely on X.
         let nearest_output = |rect: &Rectangle<i32, Logical>| -> String {
+            let center_x = rect.loc.x as f64 + rect.size.w as f64 / 2.0;
+            let center_y = rect.loc.y as f64 + rect.size.h as f64 / 2.0;
             output_names
                 .iter()
                 .min_by(|a, b| {
-                    let cam_a = camera_origins.get(a.as_str()).map(|o| o.x).unwrap_or(0.0);
-                    let cam_b = camera_origins.get(b.as_str()).map(|o| o.x).unwrap_or(0.0);
-                    let center = rect.loc.x as f64 + rect.size.w as f64 / 2.0;
-                    (cam_a - center).abs().total_cmp(&(cam_b - center).abs())
+                    let cam_a = camera_center(a);
+                    let cam_b = camera_center(b);
+                    let dist_a = (cam_a.x - center_x).powi(2) + (cam_a.y - center_y).powi(2);
+                    let dist_b = (cam_b.x - center_x).powi(2) + (cam_b.y - center_y).powi(2);
+                    dist_a.total_cmp(&dist_b)
                 })
                 .cloned()
                 .unwrap_or_default()
@@ -8819,11 +8829,9 @@ impl Smallvil {
             self.layout
                 .insert_migrated_tree(target_output.clone(), *ws, tree);
             let center_x = rect.loc.x as f64 + rect.size.w as f64 / 2.0;
-            let cam_x = camera_origins
-                .get(&target_output)
-                .map(|o| o.x)
-                .unwrap_or(0.0);
-            let dist = (cam_x - center_x).abs();
+            let center_y = rect.loc.y as f64 + rect.size.h as f64 / 2.0;
+            let camera = camera_center(&target_output);
+            let dist = (camera.x - center_x).powi(2) + (camera.y - center_y).powi(2);
             match nearest_ws.get(&target_output) {
                 Some((best, _)) if *best <= dist => {}
                 _ => {
@@ -8864,11 +8872,14 @@ impl Smallvil {
                     );
                     continue;
                 };
-                let camera_x = camera_origins.get(&output).map(|p| p.x).unwrap_or(0.0);
+                let camera = cameras.get(&output).copied().unwrap_or_default();
                 (
                     output,
                     1,
-                    Rectangle::new((camera_x as i32, 0).into(), viewport.size),
+                    Rectangle::new(
+                        (camera.origin.x as i32, camera.origin.y as i32).into(),
+                        viewport.size,
+                    ),
                 )
             };
             let Some(output_geometry) = output_viewports.get(&target_output).copied() else {
@@ -11301,6 +11312,40 @@ fn clamp_rect_visible(
     rect.loc.x = rect.loc.x.clamp(min_x.min(max_x), min_x.max(max_x));
     rect.loc.y = rect.loc.y.clamp(min_y.min(max_y), min_y.max(max_y));
     rect
+}
+
+fn nearest_point_in_output_rects(
+    pos: Point<f64, Logical>,
+    rects: impl IntoIterator<Item = Rectangle<i32, Logical>>,
+) -> Option<Point<f64, Logical>> {
+    let mut nearest: Option<(f64, Point<f64, Logical>)> = None;
+    for rect in rects {
+        if rect.size.w <= 0 || rect.size.h <= 0 {
+            continue;
+        }
+        let min_x = f64::from(rect.loc.x);
+        let min_y = f64::from(rect.loc.y);
+        let max_x = (i64::from(rect.loc.x) + i64::from(rect.size.w)) as f64;
+        let max_y = (i64::from(rect.loc.y) + i64::from(rect.size.h)) as f64;
+        if pos.x >= min_x && pos.y >= min_y && pos.x < max_x && pos.y < max_y {
+            return Some(pos);
+        }
+
+        let candidate = Point::from((
+            pos.x.clamp(min_x, max_x.next_down()),
+            pos.y.clamp(min_y, max_y.next_down()),
+        ));
+        let dx = candidate.x - pos.x;
+        let dy = candidate.y - pos.y;
+        let distance = dx * dx + dy * dy;
+        if nearest
+            .as_ref()
+            .is_none_or(|(best, _)| distance.total_cmp(best).is_lt())
+        {
+            nearest = Some((distance, candidate));
+        }
+    }
+    nearest.map(|(_, point)| point)
 }
 
 #[cfg(test)]

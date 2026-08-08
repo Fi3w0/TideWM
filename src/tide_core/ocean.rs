@@ -156,14 +156,14 @@ pub struct OceanReef {
 
 /// Everything `drain_for_classic` hands the engine-migration caller:
 /// reef trees with their world rects, freely-placed windows with world
-/// rects, each output's last camera origin, per-window entry-output
+/// rects, each output's live camera, per-window entry-output
 /// hints, and the surfaces that were pinned to screen. The caller
 /// translates these into Classic workspace trees, floating tags, and pin
 /// membership; the hints have no Classic counterpart and are dropped.
 pub type ClassicMigrationSnapshot = (
     Vec<(String, Rectangle<i32, Logical>, BspLayout)>,
     Vec<(WlSurface, Window, Rectangle<i32, Logical>)>,
-    HashMap<String, OceanPoint>,
+    HashMap<String, OceanCamera>,
     HashMap<WlSurface, String>,
     Vec<WlSurface>,
 );
@@ -689,8 +689,8 @@ impl OceanSpace {
         self.ensure_default_reef(viewport);
         let camera = self.ensure_camera(output);
         let center = OceanPoint {
-            x: camera.origin.x + viewport.w as f64 / 2.0,
-            y: camera.origin.y + viewport.h as f64 / 2.0,
+            x: camera.origin.x + viewport.w as f64 / camera.zoom.max(0.05) / 2.0,
+            y: camera.origin.y + viewport.h as f64 / camera.zoom.max(0.05) / 2.0,
         };
         let reef_index = target
             .and_then(|target| {
@@ -905,10 +905,10 @@ impl OceanSpace {
             .drain()
             .map(|(surface, (window, rect))| (surface, window, rect))
             .collect();
-        let camera_origins = self
+        let cameras = self
             .cameras
-            .iter()
-            .map(|(k, v)| (k.clone(), v.origin))
+            .keys()
+            .map(|name| (name.clone(), self.camera(name)))
             .collect();
         // `WlSurface` keys carry interior-mutable liveness flags, the same
         // reason every other `HashMap<WlSurface, _>` in this codebase
@@ -926,13 +926,7 @@ impl OceanSpace {
         self.drag_override = None;
         self.drag_hint = None;
         self.app_order.clear();
-        (
-            reefs,
-            floating,
-            camera_origins,
-            entry_outputs,
-            pinned_surfaces,
-        )
+        (reefs, floating, cameras, entry_outputs, pinned_surfaces)
     }
     /// Stable world geometry for every Ocean tile. This is also the sizing
     /// authority used to configure clients; camera motion never resizes one.
@@ -2037,7 +2031,7 @@ mod tests {
         assert_eq!(reefs[0].0, "ws-1");
         assert_eq!(reefs[0].1, rect);
         assert!(floating.is_empty());
-        assert_eq!(cameras.get("left"), Some(&OceanPoint { x: 0.0, y: 0.0 }));
+        assert_eq!(cameras.get("left"), Some(&OceanCamera::default()));
         assert!(entries.is_empty());
         assert!(pins.is_empty());
         // Everything was cleared for the destination engine.
@@ -2055,7 +2049,7 @@ mod tests {
         let (reefs, floating, cameras, entries, pins) = ocean.drain_for_classic();
         assert!(reefs.is_empty());
         assert!(floating.is_empty());
-        assert_eq!(cameras.get("left"), Some(&OceanPoint { x: 0.0, y: 0.0 }));
+        assert_eq!(cameras.get("left"), Some(&OceanCamera::default()));
         assert!(entries.is_empty());
         assert!(pins.is_empty());
         assert!(ocean.cameras.is_empty());

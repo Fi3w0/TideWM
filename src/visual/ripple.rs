@@ -254,8 +254,9 @@ pub fn ease_value(ease: RippleEase, t: f32) -> f32 {
             }
         }
         RippleEase::QuadOut => 1.0 - (1.0 - t).powi(2),
-        // A simple exp-out: fast initial jump, smooth asymptotic approach
-        // to 1. The `1 - exp(-5t)` shape reaches ~0.99 by t = 1.
+        // Preserve the analytical exp-out shape between the endpoints,
+        // while landing exactly on the endpoint when the animation ends.
+        RippleEase::ExpOut if t >= 1.0 => 1.0,
         RippleEase::ExpOut => 1.0 - (-5.0 * t).exp(),
     }
 }
@@ -433,11 +434,17 @@ impl Ripple {
     /// Bounding square for the per-frame render element: side `2*radius`,
     /// centered on the impulse. Returned in the same output-local
     /// logical space `center` itself is given in.
-    fn element_rect(&self) -> Rectangle<i32, Logical> {
-        let r = self.radius() as i32;
+    pub(crate) fn element_rect(&self) -> Rectangle<i32, Logical> {
+        // Rectangle dimensions are i32. Derive the largest representable
+        // radius from that type instead of letting an arbitrary configured
+        // float overflow `2 * radius` or the center subtraction.
+        let r = (self.radius() as i32).clamp(0, i32::MAX / 2);
         Rectangle::new(
-            Point::from(((self.center.x as i32) - r, (self.center.y as i32) - r)),
-            Size::from((2 * r, 2 * r)),
+            Point::from((
+                (self.center.x as i32).saturating_sub(r),
+                (self.center.y as i32).saturating_sub(r),
+            )),
+            Size::from((r.saturating_mul(2), r.saturating_mul(2))),
         )
     }
 }
