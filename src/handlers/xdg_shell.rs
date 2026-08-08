@@ -665,7 +665,15 @@ pub fn handle_commit(state: &mut Smallvil, surface: &WlSurface) {
     }
 
     #[cfg(feature = "screencast")]
-    state.refresh_screencast_windows();
+    match transition {
+        ToplevelTransition::Map | ToplevelTransition::Unmap => {
+            state.refresh_screencast_windows();
+        }
+        ToplevelTransition::None if tracking == ToplevelTracking::Mapped => {
+            state.refresh_screencast_window(surface);
+        }
+        ToplevelTransition::None => {}
+    }
 
     // Push title/app_id changes to the foreign-toplevel handle. Compared
     // before sending so an unrelated commit (every frame, potentially)
@@ -1370,11 +1378,13 @@ impl Smallvil {
                 wlr_state.untrack(&handle);
             }
         }
-        self.emit_ipc_event(crate::ipc::IpcEvent::WindowClosed {
-            window_id: closed_window_id,
-            app_id: closed_app_id,
-            title: closed_title,
-        });
+        if window.is_some() {
+            self.emit_ipc_event(crate::ipc::IpcEvent::WindowClosed {
+                window_id: closed_window_id,
+                app_id: closed_app_id,
+                title: closed_title,
+            });
+        }
         window
     }
 

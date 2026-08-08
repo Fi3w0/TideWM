@@ -21,6 +21,7 @@ mod dbus;
 mod pipewire_thread;
 mod portal;
 
+use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -29,6 +30,7 @@ use std::sync::{
 
 use smithay::output::Output;
 use smithay::reexports::calloop::{channel, LoopHandle};
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 
 use crate::state::Smallvil;
 
@@ -148,7 +150,7 @@ pub enum ScreencastEvent {
 pub struct ScreencastState {
     sender: channel::Sender<ScreencastEvent>,
     outputs: Arc<Mutex<Vec<OutputSnapshot>>>,
-    windows: Arc<Mutex<Vec<WindowSnapshot>>>,
+    windows: Arc<Mutex<HashMap<u64, WindowSnapshot>>>,
 }
 
 impl ScreencastState {
@@ -174,8 +176,12 @@ impl ScreencastState {
         *self.outputs.lock().unwrap() = snapshot;
     }
 
-    pub(crate) fn refresh_windows(&self, windows: Vec<WindowSnapshot>) {
+    pub(crate) fn refresh_windows(&self, windows: HashMap<u64, WindowSnapshot>) {
         *self.windows.lock().unwrap() = windows;
+    }
+
+    pub(crate) fn refresh_window(&self, window: WindowSnapshot) {
+        self.windows.lock().unwrap().insert(window.id, window);
     }
 }
 
@@ -184,6 +190,9 @@ impl Smallvil {
     /// Called from the xdg commit lifecycle so map, unmap, and resize all
     /// become visible before a portal starts a stream.
     pub(crate) fn refresh_screencast_windows(&self) {
+        let Some(screencast) = &self.screencast else {
+            return;
+        };
         let windows = self
             .foreign_toplevels
             .keys()
@@ -192,16 +201,43 @@ impl Smallvil {
                 let output = self.capture_output_for_screencast(surface)?;
                 let scale = output.current_scale().fractional_scale();
                 let size = window.geometry().size;
-                Some(WindowSnapshot {
-                    id: *self.foreign_toplevel_numeric_ids.get(surface)?,
-                    width: (size.w as f64 * scale).round().max(1.0) as u32,
-                    height: (size.h as f64 * scale).round().max(1.0) as u32,
-                })
+                let id = *self.foreign_toplevel_numeric_ids.get(surface)?;
+                Some((
+                    id,
+                    WindowSnapshot {
+                        id,
+                        width: (size.w as f64 * scale).round().max(1.0) as u32,
+                        height: (size.h as f64 * scale).round().max(1.0) as u32,
+                    },
+                ))
             })
             .collect();
-        if let Some(screencast) = &self.screencast {
-            screencast.refresh_windows(windows);
-        }
+        screencast.refresh_windows(windows);
+    }
+
+    /// Updates one mapped window after an ordinary surface commit. Map and
+    /// unmap still rebuild the keyed snapshot because membership changed;
+    /// resize/content commits only replace this entry.
+    pub(crate) fn refresh_screencast_window(&self, surface: &WlSurface) {
+        let Some(screencast) = &self.screencast else {
+            return;
+        };
+        let Some(window) = self.mapped_toplevel_window(surface) else {
+            return;
+        };
+        let Some(output) = self.capture_output_for_screencast(surface) else {
+            return;
+        };
+        let Some(&id) = self.foreign_toplevel_numeric_ids.get(surface) else {
+            return;
+        };
+        let scale = output.current_scale().fractional_scale();
+        let size = window.geometry().size;
+        screencast.refresh_window(WindowSnapshot {
+            id,
+            width: (size.w as f64 * scale).round().max(1.0) as u32,
+            height: (size.h as f64 * scale).round().max(1.0) as u32,
+        });
     }
 }
 
@@ -304,7 +340,7 @@ pub fn init<'a>(
     let state = ScreencastState {
         sender,
         outputs: Arc::new(Mutex::new(Vec::new())),
-        windows: Arc::new(Mutex::new(Vec::new())),
+        windows: Arc::new(Mutex::new(HashMap::new())),
     };
     state.refresh_outputs(outputs);
     dbus::spawn(

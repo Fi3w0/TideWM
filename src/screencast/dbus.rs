@@ -80,7 +80,7 @@ impl SessionRegistry {
 /// optional, default-off feature.
 pub(super) fn spawn(
     outputs: Arc<Mutex<Vec<OutputSnapshot>>>,
-    windows: Arc<Mutex<Vec<WindowSnapshot>>>,
+    windows: Arc<Mutex<HashMap<u64, WindowSnapshot>>>,
     compositor: smithay::reexports::calloop::channel::Sender<ScreencastEvent>,
 ) {
     if let Err(err) = std::thread::Builder::new()
@@ -93,7 +93,7 @@ pub(super) fn spawn(
 
 fn run(
     outputs: Arc<Mutex<Vec<OutputSnapshot>>>,
-    windows: Arc<Mutex<Vec<WindowSnapshot>>>,
+    windows: Arc<Mutex<HashMap<u64, WindowSnapshot>>>,
     compositor: smithay::reexports::calloop::channel::Sender<ScreencastEvent>,
 ) {
     let sessions = Arc::new(Mutex::new(SessionRegistry::default()));
@@ -187,7 +187,7 @@ fn run(
 /// asynchronous object-server cleanup from an earlier session completes.
 struct Mutter {
     outputs: Arc<Mutex<Vec<OutputSnapshot>>>,
-    windows: Arc<Mutex<Vec<WindowSnapshot>>>,
+    windows: Arc<Mutex<HashMap<u64, WindowSnapshot>>>,
     compositor: smithay::reexports::calloop::channel::Sender<ScreencastEvent>,
     next_id: Arc<AtomicU64>,
     sessions: Arc<Mutex<SessionRegistry>>,
@@ -282,7 +282,7 @@ impl Mutter {
 
 struct Session {
     outputs: Arc<Mutex<Vec<OutputSnapshot>>>,
-    windows: Arc<Mutex<Vec<WindowSnapshot>>>,
+    windows: Arc<Mutex<HashMap<u64, WindowSnapshot>>>,
     compositor: smithay::reexports::calloop::channel::Sender<ScreencastEvent>,
     next_id: Arc<AtomicU64>,
     owner: OwnedUniqueName,
@@ -429,7 +429,7 @@ impl Session {
             .windows
             .lock()
             .unwrap()
-            .iter()
+            .values()
             .find(|window| window.id == window_id)
             .map(|window| (window.width, window.height))
             .ok_or_else(|| zbus::fdo::Error::InvalidArgs("unknown window-id".into()))?;
@@ -523,7 +523,7 @@ impl Session {
             .windows
             .lock()
             .unwrap()
-            .iter()
+            .values()
             .map(|window| (window.id, (window.width, window.height)))
             .collect();
         let specifications = {
