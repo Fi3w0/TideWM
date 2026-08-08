@@ -73,16 +73,13 @@ impl OceanTileMoveGrab {
         {
             return;
         }
-        let Some(output) = data.output_by_name(&self.output) else {
-            return;
-        };
-        let Some(output_geo) = data.space.output_geometry(&output) else {
+        let Some((output, output_geo)) = self.output_at(data, self.last_location) else {
             return;
         };
         let pointer_view = self.last_location - output_geo.loc.to_f64();
         match data.ocean.tiled_target_at_view(
             &self.surface,
-            &self.output,
+            &output,
             pointer_view,
             data.config.gaps,
             data.config.bsp_split_bias,
@@ -107,16 +104,64 @@ impl OceanTileMoveGrab {
     /// `motion` (to render/hit-test mid-drag) and `commit` (to know where
     /// to place it if the drop floats it instead of swapping).
     fn current_world_rect(&self, data: &Smallvil) -> Rectangle<i32, Logical> {
-        let delta = self.last_location - self.start_data.location;
-        let new_location = (self.initial_location.to_f64()
-            + Point::from((delta.x / self.view_scale, delta.y / self.view_scale)))
-        .to_i32_round();
+        let delta = self
+            .pointer_world(data, self.last_location)
+            .zip(self.pointer_world_on_output(data, &self.output, self.start_data.location))
+            .map(|(current, initial)| current - initial)
+            .unwrap_or_else(|| {
+                let view_delta = self.last_location - self.start_data.location;
+                Point::from((
+                    view_delta.x / self.view_scale,
+                    view_delta.y / self.view_scale,
+                ))
+            });
+        let new_location = (self.initial_location.to_f64() + delta).to_i32_round();
         let size = data
             .ocean
             .world_rect(&self.surface, data.config.gaps, data.config.bsp_split_bias)
             .map(|rect| rect.size)
             .unwrap_or_else(|| self.window.geometry().size);
         Rectangle::new(new_location, size)
+    }
+
+    /// Resolve the camera underneath a recorded event position without
+    /// re-entering the pointer handle from a grab callback.
+    fn output_at(
+        &self,
+        data: &Smallvil,
+        location: Point<f64, Logical>,
+    ) -> Option<(String, Rectangle<i32, Logical>)> {
+        let output = data
+            .output_for_point(location)
+            .or_else(|| data.output_by_name(&self.output))?;
+        let geometry = data.space.output_geometry(&output)?;
+        Some((output.name(), geometry))
+    }
+
+    fn pointer_world_on_output(
+        &self,
+        data: &Smallvil,
+        output: &str,
+        location: Point<f64, Logical>,
+    ) -> Option<Point<f64, Logical>> {
+        let output = data.output_by_name(output)?;
+        let geometry = data.space.output_geometry(&output)?;
+        let camera = data.ocean.camera(&output.name());
+        let local = location - geometry.loc.to_f64();
+        let zoom = camera.zoom.max(0.05);
+        Some(Point::from((
+            camera.origin.x + local.x / zoom,
+            camera.origin.y + local.y / zoom,
+        )))
+    }
+
+    fn pointer_world(
+        &self,
+        data: &Smallvil,
+        location: Point<f64, Logical>,
+    ) -> Option<Point<f64, Logical>> {
+        let (output, _) = self.output_at(data, location)?;
+        self.pointer_world_on_output(data, &output, location)
     }
 }
 
@@ -144,14 +189,13 @@ impl PointerGrab<Smallvil> for OceanTileMoveGrab {
         // swap target for the magnet-highlight border -- see
         // `OceanSpace::set_tile_drag`'s doc comment for why `Space` alone
         // (updated below for hit-testing) isn't enough here.
-        let hint = data
-            .output_by_name(&self.output)
-            .and_then(|output| data.space.output_geometry(&output))
-            .and_then(|output_geo| {
+        let hint = self
+            .output_at(data, self.last_location)
+            .and_then(|(output, output_geo)| {
                 let pointer_view = self.last_location - output_geo.loc.to_f64();
                 data.ocean.tiled_target_at_view(
                     &self.surface,
-                    &self.output,
+                    &output,
                     pointer_view,
                     data.config.gaps,
                     data.config.bsp_split_bias,

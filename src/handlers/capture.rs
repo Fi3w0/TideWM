@@ -170,13 +170,6 @@ impl Smallvil {
         &self,
         surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
     ) -> Option<Output> {
-        if let Some(name) = self.layout.output_of(surface) {
-            return self.output_by_name(name);
-        }
-        if let Some(tag) = self.floating_workspace.get(surface) {
-            return self.output_by_name(&tag.output);
-        }
-        let window = self.mapped_toplevel_window(surface)?;
-        self.space.outputs_for_element(&window).first().cloned()
+        self.rendered_output_for_surface(surface)
     }
 }

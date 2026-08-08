@@ -431,12 +431,7 @@ impl Smallvil {
             && self.config.ocean.smart_tiling
             && self.ocean.is_tiled(&wl_surface)
         {
-            let Some(output) = self
-                .ocean
-                .entry_output(&wl_surface)
-                .map(str::to_string)
-                .or_else(|| self.output_for_window(&window).map(|output| output.name()))
-            else {
+            let Some(output) = self.output_for_point(location).map(|output| output.name()) else {
                 return false;
             };
             let Some(initial_rect) =
@@ -1444,12 +1439,8 @@ impl Smallvil {
                                 && self.ocean.is_tiled(&wl_surface)
                             {
                                 let Some(output) = self
-                                    .ocean
-                                    .entry_output(&wl_surface)
-                                    .map(str::to_string)
-                                    .or_else(|| {
-                                        self.output_for_window(&window).map(|output| output.name())
-                                    })
+                                    .output_for_point(pointer.current_location())
+                                    .map(|output| output.name())
                                 else {
                                     return;
                                 };

@@ -3721,6 +3721,62 @@ impl Smallvil {
             .map(|(output, _)| output)
     }
 
+    /// The live output displaying the largest visible share of `surface`.
+    /// Classic can use its authoritative `Space` geometry directly. Ocean
+    /// must resolve through camera placements because world coordinates and
+    /// physical output coordinates intentionally do not share an origin.
+    pub(crate) fn rendered_output_for_surface(&self, surface: &WlSurface) -> Option<Output> {
+        if self.config.spatial_engine == crate::config::SpatialEngine::Classic {
+            let window = self.mapped_toplevel_window(surface)?;
+            return self.output_for_window(&window);
+        }
+
+        self.space
+            .outputs()
+            .filter_map(|output| {
+                let output_geo = self.space.output_geometry(output)?;
+                let placement = self
+                    .render_placements(output)?
+                    .into_iter()
+                    .find(|placement| {
+                        placement
+                            .surface()
+                            .is_some_and(|candidate| candidate == surface)
+                    })?;
+                let rect = crate::placement::translated_rect(placement.rect, placement.view_offset);
+                let intersection = output_geo.intersection(rect)?;
+                let area = i64::from(intersection.size.w) * i64::from(intersection.size.h);
+                Some((output.clone(), area))
+            })
+            .max_by(|(output_a, area_a), (output_b, area_b)| {
+                area_a
+                    .cmp(area_b)
+                    .then_with(|| output_b.name().cmp(&output_a.name()))
+            })
+            .map(|(output, _)| output)
+    }
+
+    /// Prefer the output where the pointer is interacting with this exact
+    /// toplevel (including one of its subsurfaces). This is intentionally
+    /// stricter than merely using the pointer's output: click-to-focus users
+    /// may leave the pointer on an unrelated monitor after focusing a window.
+    pub(crate) fn pointer_output_for_surface(&self, surface: &WlSurface) -> Option<Output> {
+        let pointer = self.seat.get_pointer()?;
+        let focus = pointer.current_focus()?;
+        if self.surface_root(&focus)? != self.surface_root(surface)? {
+            return None;
+        }
+        let output = self.output_for_point(pointer.current_location())?;
+        self.render_placements(&output)?
+            .into_iter()
+            .any(|placement| {
+                placement
+                    .surface()
+                    .is_some_and(|candidate| candidate == surface)
+            })
+            .then_some(output)
+    }
+
     /// The output a new action without any other spatial hint should
     /// target. Used for "which monitor does this land on" decisions (new
     /// windows, layer surfaces the client didn't pin to a specific output,
@@ -3752,9 +3808,8 @@ impl Smallvil {
     /// output, fill in the remaining fallbacks.
     pub(crate) fn primary_output(&self) -> Option<Output> {
         let intended_output = self.window_focus.as_ref().and_then(|surface| {
-            self.ocean
-                .entry_output(surface)
-                .and_then(|name| self.output_by_name(name))
+            self.pointer_output_for_surface(surface)
+                .or_else(|| self.rendered_output_for_surface(surface))
                 .or_else(|| {
                     self.layout
                         .output_of(surface)
@@ -3769,16 +3824,19 @@ impl Smallvil {
                         .get(surface)
                         .and_then(|tag| self.output_by_name(&tag.output))
                 })
+                .or_else(|| {
+                    self.ocean
+                        .entry_output(surface)
+                        .and_then(|name| self.output_by_name(name))
+                })
         });
         let focused_output = self
             .seat
             .get_keyboard()
             .and_then(|k| k.current_focus())
             .and_then(|surface| {
-                self.space
-                    .elements()
-                    .find(|w| is_window(w, &surface))
-                    .and_then(|w| self.output_for_window(w))
+                let root = self.surface_root(&surface)?;
+                self.rendered_output_for_surface(&root)
             });
         let pointer_output = self
             .seat
@@ -4334,12 +4392,10 @@ impl Smallvil {
         {
             return false;
         }
-        let Some(output_name) = self.ocean.entry_output(surface).map(str::to_string) else {
+        let Some(output) = self.output_for_point(pointer_location) else {
             return false;
         };
-        let Some(output) = self.output_by_name(&output_name) else {
-            return false;
-        };
+        let output_name = output.name();
         let Some(output_geo) = self.space.output_geometry(&output) else {
             return false;
         };

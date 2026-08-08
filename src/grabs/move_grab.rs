@@ -84,13 +84,11 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
             // from a second grab.
             if self.smart_attach_ocean {
                 let hint = data
-                    .ocean
-                    .entry_output(surface)
-                    .map(str::to_string)
+                    .output_for_point(self.last_location)
                     .and_then(|output| {
-                        data.output_by_name(&output)
-                            .and_then(|o| data.space.output_geometry(&o))
-                            .map(|output_geo| (output, output_geo))
+                        data.space
+                            .output_geometry(&output)
+                            .map(|output_geo| (output.name(), output_geo))
                     })
                     .and_then(|(output, output_geo)| {
                         let pointer_view = self.last_location - output_geo.loc.to_f64();

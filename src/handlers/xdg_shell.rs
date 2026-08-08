@@ -136,15 +136,15 @@ impl XdgShellHandler for Smallvil {
             };
 
             let last_location = start_data.location;
+            let view_scale = self
+                .output_for_point(start_data.location)
+                .map(|output| self.ocean.camera(&output.name()).zoom)
+                .unwrap_or(1.0);
             let grab = MoveSurfaceGrab {
                 start_data,
                 window,
                 initial_window_location,
-                view_scale: self
-                    .ocean
-                    .entry_output(wl_surface)
-                    .map(|output| self.ocean.camera(output).zoom)
-                    .unwrap_or(1.0),
+                view_scale,
                 smart_attach_ocean: self.config.spatial_engine
                     == crate::config::SpatialEngine::Ocean
                     && self.config.ocean.smart_tiling,
@@ -203,15 +203,16 @@ impl XdgShellHandler for Smallvil {
 
             surface.send_pending_configure();
 
+            let view_scale = self
+                .output_for_point(start_data.location)
+                .map(|output| self.ocean.camera(&output.name()).zoom)
+                .unwrap_or(1.0);
             let grab = ResizeSurfaceGrab::start(
                 start_data,
                 window,
                 edges.into(),
                 Rectangle::new(initial_window_location, initial_window_size),
-                self.ocean
-                    .entry_output(wl_surface)
-                    .map(|output| self.ocean.camera(output).zoom)
-                    .unwrap_or(1.0),
+                view_scale,
             );
 
             pointer.set_grab(self, grab, serial, Focus::Clear);
@@ -1505,9 +1506,9 @@ impl Smallvil {
     }
 
     pub(crate) fn preferred_output_for_toplevel(&self, surface: &WlSurface) -> Option<String> {
-        self.ocean
-            .entry_output(surface)
-            .map(str::to_string)
+        self.pointer_output_for_surface(surface)
+            .or_else(|| self.rendered_output_for_surface(surface))
+            .map(|output| output.name())
             .or_else(|| self.layout.output_of(surface).map(str::to_string))
             .or_else(|| {
                 self.floating_workspace
@@ -1519,11 +1520,7 @@ impl Smallvil {
                     .entry(surface)
                     .map(|entry| entry.output.clone())
             })
-            .or_else(|| {
-                self.mapped_toplevel_window(surface)
-                    .and_then(|window| self.output_for_window(&window))
-                    .map(|output| output.name())
-            })
+            .or_else(|| self.ocean.entry_output(surface).map(str::to_string))
     }
 
     /// Root can be either a window's toplevel surface or a layer surface's
