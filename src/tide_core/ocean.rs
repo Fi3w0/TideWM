@@ -19,7 +19,7 @@ use smithay::{
 
 use crate::{
     config::{OceanConfig, SplitBias},
-    layout::BspLayout,
+    layout::{Axis, BspLayout},
     placement::{PlacedWindow, PlacementKind},
 };
 
@@ -1274,6 +1274,27 @@ impl OceanSpace {
         };
         *current = rect;
         true
+    }
+
+    /// Applies a keyboard resize to the reef BSP tree that owns `surface`.
+    /// Reef geometry is the authoritative Ocean tiling area; no output-mode
+    /// or camera-space dimensions participate in this world-space update.
+    pub fn resize_tiled_by(
+        &mut self,
+        surface: &WlSurface,
+        axis: Axis,
+        delta_pixels: f64,
+        split_bias: SplitBias,
+    ) -> bool {
+        let Some(reef) = self
+            .reefs
+            .iter_mut()
+            .find(|reef| reef.layout.contains(surface))
+        else {
+            return false;
+        };
+        reef.layout
+            .resize_target_by(surface, reef.rect, split_bias, axis, delta_pixels)
     }
 
     pub fn floating_rect(&self, surface: &WlSurface) -> Option<Rectangle<i32, Logical>> {

@@ -244,6 +244,47 @@ impl BspLayout {
             set_ratio_at(root, path, ratio.clamp(0.05, 0.95));
         }
     }
+
+    /// Resizes the nearest split on `axis` around `target`, interpreting a
+    /// positive pixel delta as growing the target leaf regardless of which
+    /// side of that split owns it. Used by Ocean keyboard resize, whose reef
+    /// trees are `BspLayout`s without Classic's output/workspace registry.
+    pub(crate) fn resize_target_by(
+        &mut self,
+        target: &WlSurface,
+        area: Rectangle<i32, Logical>,
+        bias: SplitBias,
+        axis: Axis,
+        delta_pixels: f64,
+    ) -> bool {
+        let Some(hit) = self
+            .resize_splits(target, area, bias)
+            .into_iter()
+            .find(|hit| hit.axis == axis)
+        else {
+            return false;
+        };
+        let span = match axis {
+            Axis::Horizontal => hit.area.size.w,
+            Axis::Vertical => hit.area.size.h,
+        };
+        let (Some(current), Some(target_side)) = (self.ratio_at(&hit.path), hit.target_side) else {
+            return false;
+        };
+        if span <= 0 {
+            return false;
+        }
+        let sign = if target_side == Side::First {
+            1.0
+        } else {
+            -1.0
+        };
+        self.set_ratio(
+            &hit.path,
+            current + delta_pixels as f32 * sign / span as f32,
+        );
+        true
+    }
 }
 
 /// One independent `BspLayout` tree per (output, workspace) pair, plus which

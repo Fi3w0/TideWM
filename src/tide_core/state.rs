@@ -9824,6 +9824,36 @@ impl Smallvil {
             return;
         };
 
+        if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+            if let Some(mut rect) = self.ocean.floating_rect(&surface) {
+                rect.size = keyboard_resized_size(&window, rect.size, direction, STEP);
+                self.ocean.set_floating_rect(&surface, rect);
+                if let Some(toplevel) = window.toplevel() {
+                    toplevel.with_pending_state(|state| state.size = Some(rect.size));
+                    toplevel.send_pending_configure();
+                }
+                self.retile();
+                return;
+            }
+
+            let axis = match direction {
+                Direction::Left | Direction::Right => crate::layout::Axis::Horizontal,
+                Direction::Up | Direction::Down => crate::layout::Axis::Vertical,
+            };
+            let delta = if matches!(direction, Direction::Right | Direction::Down) {
+                f64::from(STEP)
+            } else {
+                f64::from(-STEP)
+            };
+            if self
+                .ocean
+                .resize_tiled_by(&surface, axis, delta, self.config.bsp_split_bias)
+            {
+                self.retile();
+            }
+            return;
+        }
+
         if !self.layout.contains(&surface) {
             // `Window::geometry().loc` is surface-local (usually 0,0), not
             // the element's global position in `Space`. Reusing it here
@@ -9831,12 +9861,7 @@ impl Smallvil {
             // origin.
             let location = self.space.element_location(&window).unwrap_or_default();
             let mut geometry = window.geometry();
-            match direction {
-                Direction::Right => geometry.size.w = geometry.size.w.saturating_add(STEP),
-                Direction::Down => geometry.size.h = geometry.size.h.saturating_add(STEP),
-                Direction::Left => geometry.size.w = (geometry.size.w - STEP).max(64),
-                Direction::Up => geometry.size.h = (geometry.size.h - STEP).max(48),
-            }
+            geometry.size = keyboard_resized_size(&window, geometry.size, direction, STEP);
             if let Some(toplevel) = window.toplevel() {
                 toplevel.with_pending_state(|state| state.size = Some(geometry.size));
                 toplevel.send_pending_configure();
@@ -10682,6 +10707,39 @@ impl Smallvil {
         // still left the previously-applied config in place.
         self.emit_ipc_event(crate::ipc::IpcEvent::ConfigReloaded);
     }
+}
+
+fn keyboard_resized_size(
+    window: &Window,
+    current: Size<i32, Logical>,
+    direction: Direction,
+    step: i32,
+) -> Size<i32, Logical> {
+    let (min_size, max_size) = window
+        .toplevel()
+        .map(|toplevel| {
+            smithay::wayland::compositor::with_states(toplevel.wl_surface(), |states| {
+                use smithay::wayland::shell::xdg::SurfaceCachedState;
+                let mut guard = states.cached_state.get::<SurfaceCachedState>();
+                let data = guard.current();
+                (data.min_size, data.max_size)
+            })
+        })
+        .unwrap_or_default();
+    let min_w = min_size.w.max(1);
+    let min_h = min_size.h.max(1);
+    let max_w = if max_size.w > 0 { max_size.w } else { i32::MAX };
+    let max_h = if max_size.h > 0 { max_size.h } else { i32::MAX };
+    let mut size = current;
+    match direction {
+        Direction::Right => size.w = size.w.saturating_add(step),
+        Direction::Down => size.h = size.h.saturating_add(step),
+        Direction::Left => size.w = size.w.saturating_sub(step),
+        Direction::Up => size.h = size.h.saturating_sub(step),
+    }
+    size.w = size.w.clamp(min_w, max_w.max(min_w));
+    size.h = size.h.clamp(min_h, max_h.max(min_h));
+    size
 }
 
 fn is_window(window: &Window, surface: &WlSurface) -> bool {
