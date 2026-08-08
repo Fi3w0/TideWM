@@ -1328,10 +1328,14 @@ fn render_surface(
         .map(|geo| geo.loc)
         .unwrap_or_default();
 
-    let toast_element = state
-        .toast
-        .as_ref()
-        .and_then(|toast| toast.render_element(renderer, size));
+    let toast_element = (!locked)
+        .then(|| {
+            state
+                .toast
+                .as_ref()
+                .and_then(|toast| toast.render_element(renderer, size))
+        })
+        .flatten();
     if state.toast.is_some() && toast_element.is_none() {
         state.toast = None;
         #[cfg(feature = "accessibility")]
@@ -1358,7 +1362,13 @@ fn render_surface(
     // arrow, the same as an unrecognized named icon would.
     let forced_visible_status = CursorImageStatus::Named(CursorIcon::Default);
     let hidden_status = CursorImageStatus::Hidden;
-    let effective_cursor_status = if idle_hidden || pointer_locked {
+    // While locked, never reuse a client-provided cursor surface from the
+    // desktop underneath. A compositor-owned default glyph is safe to draw
+    // over the lock and keeps the pointer usable before the lock client sets
+    // its own state.
+    let effective_cursor_status = if locked {
+        &forced_visible_status
+    } else if idle_hidden || pointer_locked {
         &hidden_status
     } else if matches!(state.cursor_status, CursorImageStatus::Hidden)
         && state.config.cursor_always_visible
@@ -1502,8 +1512,12 @@ fn render_surface(
     } else {
         state.ripple_frame_elements(renderer, output)
     };
-    let ocean_canvas = state.ocean_canvas_frame_element(renderer, output);
-    let caustics = state.caustics_frame_element(renderer, output);
+    let ocean_canvas = (!locked)
+        .then(|| state.ocean_canvas_frame_element(renderer, output))
+        .flatten();
+    let caustics = (!locked)
+        .then(|| state.caustics_frame_element(renderer, output))
+        .flatten();
     let backdrop: Vec<OutputRenderElements> = ocean_canvas
         .into_iter()
         .chain(caustics)
@@ -1546,10 +1560,26 @@ fn render_surface(
         state.wallpaper_element(output, renderer)
     };
 
-    let workspace_transition = state.workspace_transition_frame_element(renderer, output);
-    let depth_transition = state.depth_transition_frame_element(renderer, output);
-    let compass_elements = state.compass_frame_elements(renderer, output);
-    let closing_windows = state.closing_window_frame_elements(renderer, output);
+    let workspace_transition = if locked {
+        None
+    } else {
+        state.workspace_transition_frame_element(renderer, output)
+    };
+    let depth_transition = if locked {
+        None
+    } else {
+        state.depth_transition_frame_element(renderer, output)
+    };
+    let compass_elements = if locked {
+        Vec::new()
+    } else {
+        state.compass_frame_elements(renderer, output)
+    };
+    let closing_windows = if locked {
+        Vec::new()
+    } else {
+        state.closing_window_frame_elements(renderer, output)
+    };
     let mut elements: Vec<OutputRenderElements> = ripple_layers.above_all;
     elements.extend(
         picker_element

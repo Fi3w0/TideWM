@@ -300,6 +300,15 @@ impl Smallvil {
             fail!(completion, CaptureFailureReason::Unknown);
             return;
         };
+        let locked = !matches!(self.session_lock, SessionLock::Unlocked);
+        // A toplevel capture has no lock-screen composition of its own. It
+        // must fail closed before resolving or rendering the requested
+        // window, otherwise an existing window stream can continue reading
+        // client pixels after the session locks.
+        if locked && window.is_some() {
+            fail!(completion, CaptureFailureReason::Unknown);
+            return;
+        }
         let window_target = window
             .as_ref()
             .and_then(|surface| self.mapped_toplevel_window(surface));
@@ -400,8 +409,6 @@ impl Smallvil {
             self.finish_capture_readback(renderer, target, size, rect, Vec::new(), completion);
             return;
         }
-
-        let locked = !matches!(self.session_lock, SessionLock::Unlocked);
 
         // What the user sees: space + layer-shell surfaces (both come from
         // `render_output`) plus the toast OSD and any window-group tab

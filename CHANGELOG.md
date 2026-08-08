@@ -4,6 +4,9 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 
 ## [Unreleased]
 
+### Fixed
+- Session-lock composition now fails closed across every capture and udev render path. Per-window screenshots and PipeWire streams are refused as soon as locking starts instead of rendering the target before the shared lock check. The standalone renderer suppresses desktop toasts, close snapshots, transitions, compass/canvas effects, and any pre-lock client cursor surface; only the lock composition and a compositor-owned default cursor can be drawn. Entering the lock also releases in-flight close snapshots so retained client pixels cannot cross the boundary.
+
 ### Changed
 - **The old-format legacy is fully removed from the code.** The substitution pass (`substitute_variables_in_raw`), the `raw.variables` bookkeeping, the deprecated key/block/action aliases (`spatial_engine`, `default_layout`, `pointer_modifier`, `show_welcome_hint`, `show_config_reload_toast`, `workspace_auto_back_and_forth`, `master_orientation`, `bsp_split_bias`, `cursor_hide_after_ms`, `spawn_at_startup`, `workspace_transition`, `connected_vessels`, `water_glass`, `float_physics`, `classic_depth`, `submap`, `exit-submap`, `duration_ms`, `opacity_duration_ms`, `idle_after_ms`), the `bind X = Y` line form, and the legacy value functions (`rgb()`, `rgba()`, `bezier()`) are gone. A legacy spelling is now an unknown-key warning, never applied. Color parsers accept hex only (`RRGGBB` / `RRGGBBAA` / `#RRGGBB` / `0xAARRGGBB` for shadows). Old configs need the migration documented in `DOCUMENTATION.md` (the mechanical changes listed there); the shipped default and the maintainer's live config are already migrated.
 

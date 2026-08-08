@@ -4726,6 +4726,10 @@ impl Smallvil {
         self.pending_workspace_transitions.clear();
         self.workspace_transitions.clear();
         self.depth_transitions.clear();
+        // Closing snapshots contain client pixels and normally render above
+        // the desktop. They are irrelevant once the security boundary is
+        // active and must never survive into a locked composition.
+        self.closing_window_animations.clear();
         self.locked_outputs.clear();
 
         let serial = SERIAL_COUNTER.next_serial();
