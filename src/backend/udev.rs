@@ -1075,6 +1075,7 @@ fn create_surface(
     // mapped `wl_output` global that has no scanout surface behind it.
     let global = output.create_global::<Smallvil>(display_handle);
     state.space.map_output(&output, position);
+    state.adopt_orphaned_output_windows(&output.name());
     #[cfg(feature = "screencast")]
     if let Some(screencast) = &state.screencast {
         screencast.refresh_outputs(state.space.outputs());

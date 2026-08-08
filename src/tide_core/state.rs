@@ -8301,6 +8301,59 @@ impl Smallvil {
         };
         let active_workspace = self.layout.active_workspace(to_output);
 
+        // Fullscreen is exclusive per output. If content from the removed
+        // output is arriving, demote the destination's current owner before
+        // retagging the source; otherwise debug builds trip the invariant and
+        // release builds retain two contradictory protocol owners.
+        let moving_fullscreen = self
+            .fullscreen
+            .iter()
+            .find(|(_, entry)| entry.output == from_output)
+            .map(|(surface, _)| surface.clone());
+        if let Some(moving_surface) = moving_fullscreen.as_ref() {
+            let destination_owner = self
+                .fullscreen
+                .iter()
+                .find(|(surface, entry)| *surface != moving_surface && entry.output == to_output)
+                .map(|(surface, _)| surface.clone());
+            if let Some(surface) = destination_owner {
+                let toplevel = self
+                    .mapped_toplevel_window(&surface)
+                    .and_then(|window| window.toplevel().cloned());
+                if let Some(toplevel) = toplevel {
+                    self.do_unfullscreen(&toplevel);
+                } else {
+                    self.fullscreen.remove(&surface);
+                }
+            }
+        }
+        if let Some(surface) = moving_fullscreen.as_ref() {
+            if let Some(entry) = self.fullscreen.get_mut(surface) {
+                entry.move_to_output(to_output.to_string(), delta);
+                if let (Some(rect), Some(bounds)) = (&mut entry.restore_rect, to_bounds) {
+                    *rect = clamp_rect_visible(*rect, bounds);
+                }
+            }
+        }
+
+        let moving_maximized: Vec<WlSurface> = self
+            .maximized
+            .iter()
+            .filter(|(_, entry)| entry.output == from_output)
+            .map(|(surface, _)| surface.clone())
+            .collect();
+        for surface in &moving_maximized {
+            if let Some(entry) = self.maximized.get_mut(surface) {
+                entry.move_to_output(to_output.to_string(), delta);
+                if let Some(bounds) = to_bounds {
+                    entry.restore_rect = clamp_rect_visible(entry.restore_rect, bounds);
+                }
+            }
+        }
+
+        // A deck entry has neither a Space placement nor a Layouts leaf.
+        self.classic_depth.migrate_output(from_output, to_output);
+
         let workspaces: Vec<u32> = self
             .layout
             .populated_workspaces()
@@ -8316,19 +8369,6 @@ impl Smallvil {
                 self.layout.remove(&surface);
                 self.layout
                     .insert(to_output, workspace, window.clone(), None);
-
-                if let Some(entry) = self.fullscreen.get_mut(&surface) {
-                    entry.move_to_output(to_output.to_string(), delta);
-                    if let (Some(rect), Some(bounds)) = (&mut entry.restore_rect, to_bounds) {
-                        *rect = clamp_rect_visible(*rect, bounds);
-                    }
-                }
-                if let Some(entry) = self.maximized.get_mut(&surface) {
-                    entry.move_to_output(to_output.to_string(), delta);
-                    if let Some(bounds) = to_bounds {
-                        entry.restore_rect = clamp_rect_visible(entry.restore_rect, bounds);
-                    }
-                }
 
                 if workspace == active_workspace {
                     if let Some(output) = &to_output_handle {
@@ -8382,19 +8422,6 @@ impl Smallvil {
                 (tag.window.clone(), tag.workspace, tag.rect.loc)
             };
 
-            if let Some(entry) = self.fullscreen.get_mut(&surface) {
-                entry.move_to_output(to_output.to_string(), delta);
-                if let (Some(rect), Some(bounds)) = (&mut entry.restore_rect, to_bounds) {
-                    *rect = clamp_rect_visible(*rect, bounds);
-                }
-            }
-            if let Some(entry) = self.maximized.get_mut(&surface) {
-                entry.move_to_output(to_output.to_string(), delta);
-                if let Some(bounds) = to_bounds {
-                    entry.restore_rect = clamp_rect_visible(entry.restore_rect, bounds);
-                }
-            }
-
             if self.pinned.contains(&surface) || workspace == active_workspace {
                 self.space.map_element(window.clone(), loc, false);
                 if let Some(output) = &to_output_handle {
@@ -8407,6 +8434,86 @@ impl Smallvil {
 
         self.scratchpad_previous.remove(from_output);
         self.workspace_previous.remove(from_output);
+
+        // Retile reconciles Classic placements. Ocean's camera renderer also
+        // needs the client-side protocol size updated immediately because its
+        // visual fit can otherwise hide the stale buffer size after hotplug.
+        if let (Some(surface), Some(output_geo)) = (moving_fullscreen, to_geometry) {
+            if let Some(toplevel) = self
+                .mapped_toplevel_window(&surface)
+                .and_then(|window| window.toplevel().cloned())
+            {
+                toplevel.with_pending_state(|state| {
+                    state.states.set(xdg_toplevel::State::Fullscreen);
+                    state.states.unset(xdg_toplevel::State::Maximized);
+                    state.states.unset(xdg_toplevel::State::Resizing);
+                    state.size = Some(output_geo.size);
+                });
+                toplevel.send_pending_configure();
+            }
+        }
+        if let Some(area) = to_bounds {
+            let gaps = if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+                self.config.gaps
+            } else {
+                self.gaps_for(to_output, active_workspace)
+            };
+            let rect = crate::layout::inset(area, gaps);
+            for surface in moving_maximized {
+                if self.fullscreen.contains_key(&surface) {
+                    continue;
+                }
+                if let Some(toplevel) = self
+                    .mapped_toplevel_window(&surface)
+                    .and_then(|window| window.toplevel().cloned())
+                {
+                    toplevel.with_pending_state(|state| {
+                        state.states.set(xdg_toplevel::State::Maximized);
+                        state.states.unset(xdg_toplevel::State::Fullscreen);
+                        state.states.unset(xdg_toplevel::State::Resizing);
+                        state.size = Some(rect.size);
+                    });
+                    toplevel.send_pending_configure();
+                }
+            }
+        }
+    }
+
+    /// Adopt durable ownership left behind by a zero-output interval. A
+    /// connector may return under a different kernel name (for example after
+    /// moving the cable), so waiting for the old name would strand the whole
+    /// Classic session indefinitely.
+    pub(crate) fn adopt_orphaned_output_windows(&mut self, to_output: &str) {
+        let live_outputs: HashSet<String> = self.space.outputs().map(Output::name).collect();
+        let mut owned_outputs: HashSet<String> = self
+            .layout
+            .populated_workspaces()
+            .into_iter()
+            .map(|(output, _)| output)
+            .collect();
+        owned_outputs.extend(
+            self.floating_workspace
+                .values()
+                .map(|tag| tag.output.clone()),
+        );
+        owned_outputs.extend(self.classic_depth.output_names().map(str::to_string));
+        owned_outputs.extend(self.fullscreen.values().map(|entry| entry.output.clone()));
+        owned_outputs.extend(self.maximized.values().map(|entry| entry.output.clone()));
+        owned_outputs.extend(self.groups.iter().map(|group| group.output.clone()));
+
+        let mut orphaned: Vec<String> = owned_outputs
+            .into_iter()
+            .filter(|output| output != to_output && !live_outputs.contains(output))
+            .collect();
+        orphaned.sort();
+        for output in orphaned {
+            tracing::info!(
+                from = output,
+                to = to_output,
+                "Adopting orphaned output ownership"
+            );
+            self.migrate_output_windows(&output, to_output);
+        }
     }
 
     // -- Spatial-engine migration (S6) -----------------------------------------

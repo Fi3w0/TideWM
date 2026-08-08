@@ -43,6 +43,27 @@ impl ClassicDepthDeck {
             .collect()
     }
 
+    pub fn output_names(&self) -> impl Iterator<Item = &str> {
+        self.entries.iter().map(|entry| entry.output.as_str())
+    }
+
+    /// Retag parked windows and an open deck view when their output leaves.
+    /// Parked entries have no `Space`/`Layouts` owner, so output migration
+    /// must update this durable tag explicitly.
+    pub fn migrate_output(&mut self, from: &str, to: &str) {
+        for entry in &mut self.entries {
+            if entry.output == from {
+                entry.output = to.to_string();
+            }
+        }
+        if let Some(view) = &mut self.view {
+            if view.output == from {
+                view.output = to.to_string();
+            }
+        }
+        self.clamp_view();
+    }
+
     /// Newest parked window appears first, matching a working-set deck rather
     /// than an archival list. A surface can only occupy one deck slot.
     pub fn park(&mut self, entry: DepthDeckEntry) {
@@ -189,12 +210,27 @@ fn wrap_index(current: usize, count: usize, delta: isize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::wrap_index;
+    use super::{wrap_index, ClassicDepthDeck, DepthDeckView};
 
     #[test]
     fn selection_wraps_in_both_directions() {
         assert_eq!(wrap_index(0, 3, 1), 1);
         assert_eq!(wrap_index(2, 3, 1), 0);
         assert_eq!(wrap_index(0, 3, -1), 2);
+    }
+
+    #[test]
+    fn output_migration_retargets_an_open_empty_view() {
+        let mut deck = ClassicDepthDeck {
+            entries: Vec::new(),
+            view: Some(DepthDeckView {
+                output: "old".to_string(),
+                workspace: 3,
+                selected: 0,
+            }),
+        };
+        deck.migrate_output("old", "new");
+        // An empty view is invalid regardless of its newly valid output.
+        assert!(deck.view().is_none());
     }
 }
