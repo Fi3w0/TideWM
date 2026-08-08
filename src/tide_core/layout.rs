@@ -185,8 +185,8 @@ impl BspLayout {
 
     /// Finds the split boundary nearest `point`, if `point` falls within
     /// `gap` (or 4px, whichever is larger) of one. Boundaries are checked
-    /// from the root down, and recursion only descends into whichever
-    /// child's area contains `point`, so this always finds the *closest*
+    /// from the root down, and the walk follows only whichever child's area
+    /// contains `point`, so this always finds the *closest*
     /// enclosing boundary rather than some arbitrary ancestor's.
     pub fn hit_test_split(
         &self,
@@ -226,7 +226,7 @@ impl BspLayout {
         let mut found = [None, None];
         if let Some(root) = &self.root {
             if node_contains(root, target) {
-                collect_resize_splits(root, target, area, area, bias, Vec::new(), &mut found);
+                collect_resize_splits(root, target, area, area, bias, &mut found);
             }
         }
         found.into_iter().flatten().collect()
@@ -284,6 +284,23 @@ impl BspLayout {
             current + delta_pixels as f32 * sign / span as f32,
         );
         true
+    }
+}
+
+impl Drop for BspLayout {
+    fn drop(&mut self) {
+        // `Box<Node>` would otherwise recursively drop a skewed client-built
+        // tree. Drain it with an explicit heap stack so compositor shutdown
+        // and workspace cleanup have the same bounded call-stack behavior as
+        // the runtime walks below.
+        let Some(root) = self.root.take() else { return };
+        let mut pending = vec![root];
+        while let Some(node) = pending.pop() {
+            if let Node::Split { first, second, .. } = node {
+                pending.push(*first);
+                pending.push(*second);
+            }
+        }
     }
 }
 
@@ -1073,74 +1090,103 @@ fn prune_orphaned<T>(
     overrides.retain(|key, _| live_keys.contains(key));
 }
 
-fn insert_into(root: Node, window: Window, target: Option<&WlSurface>) -> Node {
-    match root {
-        Node::Leaf(existing) => Node::Split {
-            ratio: 0.5,
-            first: Box::new(Node::Leaf(existing)),
-            second: Box::new(Node::Leaf(window)),
-        },
-        Node::Split {
-            ratio,
-            first,
-            second,
-        } => {
-            if target.is_some_and(|t| node_contains(&first, t)) {
-                Node::Split {
-                    ratio,
-                    first: Box::new(insert_into(*first, window, target)),
-                    second,
-                }
-            } else {
-                // Either `second` contains the target, or there is no
-                // target (nothing focused / not tiled): either way, default
-                // to descending into `second` so windows stack predictably.
-                Node::Split {
-                    ratio,
-                    first,
-                    second: Box::new(insert_into(*second, window, target)),
-                }
-            }
-        }
-    }
+fn insert_into(mut root: Node, window: Window, target: Option<&WlSurface>) -> Node {
+    let path = target
+        .and_then(|target| find_path(&root, target))
+        .unwrap_or_else(|| last_leaf_path(&root));
+    let leaf = node_mut_at_path(&mut root, &path).expect("a discovered BSP path must remain valid");
+    let old = std::mem::replace(leaf, Node::Leaf(window.clone()));
+    let Node::Leaf(existing) = old else {
+        unreachable!("BSP insertion paths always terminate at a leaf")
+    };
+    *leaf = Node::Split {
+        ratio: 0.5,
+        first: Box::new(Node::Leaf(existing)),
+        second: Box::new(Node::Leaf(window)),
+    };
+    root
+}
+
+struct RemoveFrame {
+    ratio: f32,
+    descended: Side,
+    sibling: Node,
 }
 
 fn remove_from(node: Node, target: &WlSurface) -> Option<Node> {
-    match node {
-        Node::Leaf(window) => {
-            if is_window(&window, target) {
-                None
-            } else {
-                Some(Node::Leaf(window))
-            }
-        }
-        Node::Split {
+    let Some(path) = find_path(&node, target) else {
+        return Some(node);
+    };
+    if path.is_empty() {
+        return None;
+    }
+
+    let mut frames = Vec::with_capacity(path.len());
+    let mut current = node;
+    for side in path {
+        let Node::Split {
             ratio,
             first,
             second,
-        } => {
-            let first = remove_from(*first, target);
-            let second = remove_from(*second, target);
-            match (first, second) {
-                (Some(first), Some(second)) => Some(Node::Split {
+        } = current
+        else {
+            unreachable!("a discovered BSP path must remain valid")
+        };
+        match side {
+            Side::First => {
+                frames.push(RemoveFrame {
                     ratio,
-                    first: Box::new(first),
-                    second: Box::new(second),
-                }),
-                (Some(surviving), None) | (None, Some(surviving)) => Some(surviving),
-                (None, None) => None,
+                    descended: side,
+                    sibling: *second,
+                });
+                current = *first;
+            }
+            Side::Second => {
+                frames.push(RemoveFrame {
+                    ratio,
+                    descended: side,
+                    sibling: *first,
+                });
+                current = *second;
             }
         }
     }
+    debug_assert!(matches!(current, Node::Leaf(_)));
+
+    let mut rebuilt = None;
+    while let Some(frame) = frames.pop() {
+        rebuilt = Some(match rebuilt {
+            None => frame.sibling,
+            Some(child) => match frame.descended {
+                Side::First => Node::Split {
+                    ratio: frame.ratio,
+                    first: Box::new(child),
+                    second: Box::new(frame.sibling),
+                },
+                Side::Second => Node::Split {
+                    ratio: frame.ratio,
+                    first: Box::new(frame.sibling),
+                    second: Box::new(child),
+                },
+            },
+        });
+    }
+    rebuilt
 }
 
 fn node_contains(node: &Node, target: &WlSurface) -> bool {
-    match node {
-        Node::Leaf(window) => is_window(window, target),
-        Node::Split { first, second, .. } => {
-            node_contains(first, target) || node_contains(second, target)
+    let mut pending = vec![node];
+    while let Some(node) = pending.pop() {
+        match node {
+            Node::Leaf(window) if is_window(window, target) => return true,
+            Node::Leaf(_) => {}
+            Node::Split { first, second, .. } => {
+                pending.push(second);
+                pending.push(first);
+            }
         }
     }
+    false
 }
 
 fn is_window(window: &Window, target: &WlSurface) -> bool {
@@ -1150,13 +1196,75 @@ fn is_window(window: &Window, target: &WlSurface) -> bool {
         .unwrap_or(false)
 }
 
-fn find_window(node: &Node, target: &WlSurface) -> Option<Window> {
-    match node {
-        Node::Leaf(window) => is_window(window, target).then(|| window.clone()),
-        Node::Split { first, second, .. } => {
-            find_window(first, target).or_else(|| find_window(second, target))
+fn find_path(node: &Node, target: &WlSurface) -> Option<Vec<Side>> {
+    let mut pending = vec![(node, 0_usize, None)];
+    let mut path = Vec::new();
+    while let Some((node, parent_depth, side)) = pending.pop() {
+        path.truncate(parent_depth);
+        if let Some(side) = side {
+            path.push(side);
+        }
+        match node {
+            Node::Leaf(window) if is_window(window, target) => return Some(path.clone()),
+            Node::Leaf(_) => {}
+            Node::Split { first, second, .. } => {
+                let depth = path.len();
+                pending.push((second, depth, Some(Side::Second)));
+                pending.push((first, depth, Some(Side::First)));
+            }
         }
     }
+    None
+}
+
+fn last_leaf_path(mut node: &Node) -> Vec<Side> {
+    let mut path = Vec::new();
+    while let Node::Split { second, .. } = node {
+        path.push(Side::Second);
+        node = second;
+    }
+    path
+}
+
+fn node_at_path<'a>(mut node: &'a Node, path: &[Side]) -> Option<&'a Node> {
+    for side in path {
+        let Node::Split { first, second, .. } = node else {
+            return None;
+        };
+        node = match side {
+            Side::First => first,
+            Side::Second => second,
+        };
+    }
+    Some(node)
+}
+
+fn node_mut_at_path<'a>(mut node: &'a mut Node, path: &[Side]) -> Option<&'a mut Node> {
+    for side in path {
+        let Node::Split { first, second, .. } = node else {
+            return None;
+        };
+        node = match side {
+            Side::First => first,
+            Side::Second => second,
+        };
+    }
+    Some(node)
+}
+
+fn find_window(node: &Node, target: &WlSurface) -> Option<Window> {
+    let mut pending = vec![node];
+    while let Some(node) = pending.pop() {
+        match node {
+            Node::Leaf(window) if is_window(window, target) => return Some(window.clone()),
+            Node::Leaf(_) => {}
+            Node::Split { first, second, .. } => {
+                pending.push(second);
+                pending.push(first);
+            }
+        }
+    }
+    None
 }
 
 /// Swaps the two windows in a single tree pass, matching each leaf against
@@ -1172,18 +1280,14 @@ fn swap_leaves(
     b: &WlSurface,
     window_b: &Window,
 ) {
-    match node {
-        Node::Leaf(window) => {
-            if is_window(window, a) {
-                *window = window_b.clone();
-            } else if is_window(window, b) {
-                *window = window_a.clone();
-            }
-        }
-        Node::Split { first, second, .. } => {
-            swap_leaves(first, a, window_a, b, window_b);
-            swap_leaves(second, a, window_a, b, window_b);
-        }
+    let (Some(path_a), Some(path_b)) = (find_path(node, a), find_path(node, b)) else {
+        return;
+    };
+    if let Some(Node::Leaf(window)) = node_mut_at_path(node, &path_a) {
+        *window = window_b.clone();
+    }
+    if let Some(Node::Leaf(window)) = node_mut_at_path(node, &path_b) {
+        *window = window_a.clone();
     }
 }
 
@@ -1191,13 +1295,11 @@ fn swap_leaves(
 /// holding `old` with `new_window`, unconditionally (`new_window` need not
 /// already be part of this tree).
 fn replace_leaf(node: &mut Node, old: &WlSurface, new_window: &Window) {
-    match node {
-        Node::Leaf(window) if is_window(window, old) => *window = new_window.clone(),
-        Node::Leaf(_) => {}
-        Node::Split { first, second, .. } => {
-            replace_leaf(first, old, new_window);
-            replace_leaf(second, old, new_window);
-        }
+    let Some(path) = find_path(node, old) else {
+        return;
+    };
+    if let Some(Node::Leaf(window)) = node_mut_at_path(node, &path) {
+        *window = new_window.clone();
     }
 }
 
@@ -1213,45 +1315,41 @@ struct PathSplit {
 /// grab start, so every connected handle keeps stable pixel-to-ratio math
 /// for the gesture's full lifetime.
 fn collect_split_path(
-    node: &Node,
-    area: Rectangle<i32, Logical>,
+    mut node: &Node,
+    mut area: Rectangle<i32, Logical>,
     bias: SplitBias,
     target_path: &[Side],
-    path: Vec<Side>,
+    mut path: Vec<Side>,
     out: &mut Vec<PathSplit>,
 ) {
-    let Node::Split {
-        ratio,
-        first,
-        second,
-    } = node
-    else {
-        return;
-    };
-    out.push(PathSplit {
-        path: path.clone(),
-        axis: split_axis(area, bias),
-        area,
-        ratio: *ratio,
-    });
-    let Some(side) = target_path.first().copied() else {
-        return;
-    };
-    let (first_area, second_area) = split(area, *ratio, bias);
-    let mut child_path = path;
-    child_path.push(side);
-    match side {
-        Side::First => {
-            collect_split_path(first, first_area, bias, &target_path[1..], child_path, out)
-        }
-        Side::Second => collect_split_path(
+    for next_side in target_path.iter().copied().map(Some).chain([None]) {
+        let Node::Split {
+            ratio,
+            first,
             second,
-            second_area,
-            bias,
-            &target_path[1..],
-            child_path,
-            out,
-        ),
+        } = node
+        else {
+            return;
+        };
+        out.push(PathSplit {
+            path: path.clone(),
+            axis: split_axis(area, bias),
+            area,
+            ratio: *ratio,
+        });
+        let Some(side) = next_side else { return };
+        let (first_area, second_area) = split(area, *ratio, bias);
+        path.push(side);
+        match side {
+            Side::First => {
+                node = first;
+                area = first_area;
+            }
+            Side::Second => {
+                node = second;
+                area = second_area;
+            }
+        }
     }
 }
 
@@ -1275,113 +1373,113 @@ fn signed_resize_weight(magnitude: f32, target_side: Option<Side>) -> f32 {
 fn collect_resize_splits(
     node: &Node,
     target: &WlSurface,
-    area: Rectangle<i32, Logical>,
+    mut area: Rectangle<i32, Logical>,
     root_area: Rectangle<i32, Logical>,
     bias: SplitBias,
-    mut path: Vec<Side>,
     found: &mut [Option<SplitHit>; 2],
 ) {
-    let Node::Split {
-        ratio,
-        first,
-        second,
-    } = node
-    else {
+    let Some(target_path) = find_path(node, target) else {
         return;
     };
-
-    let (first_area, second_area) = split(area, *ratio, bias);
-    let axis = split_axis(area, bias);
-
-    let target_side = if node_contains(first, target) {
-        Some(Side::First)
-    } else if node_contains(second, target) {
-        Some(Side::Second)
-    } else {
-        None
-    };
-    let hit = SplitHit {
-        output: String::new(),
-        workspace: 0,
-        path: path.clone(),
-        axis,
-        area,
-        root_area,
-        target_side,
-        topology_revision: 0,
-    };
-    match axis {
-        Axis::Horizontal => found[0] = Some(hit),
-        Axis::Vertical => found[1] = Some(hit),
-    }
-
-    if target_side == Some(Side::First) {
-        path.push(Side::First);
-        collect_resize_splits(first, target, first_area, root_area, bias, path, found);
-    } else if target_side == Some(Side::Second) {
-        path.push(Side::Second);
-        collect_resize_splits(second, target, second_area, root_area, bias, path, found);
+    let mut node = node;
+    let mut path = Vec::with_capacity(target_path.len());
+    for target_side in target_path {
+        let Node::Split {
+            ratio,
+            first,
+            second,
+        } = node
+        else {
+            return;
+        };
+        let (first_area, second_area) = split(area, *ratio, bias);
+        let axis = split_axis(area, bias);
+        let hit = SplitHit {
+            output: String::new(),
+            workspace: 0,
+            path: path.clone(),
+            axis,
+            area,
+            root_area,
+            target_side: Some(target_side),
+            topology_revision: 0,
+        };
+        match axis {
+            Axis::Horizontal => found[0] = Some(hit),
+            Axis::Vertical => found[1] = Some(hit),
+        }
+        path.push(target_side);
+        match target_side {
+            Side::First => {
+                node = first;
+                area = first_area;
+            }
+            Side::Second => {
+                node = second;
+                area = second_area;
+            }
+        }
     }
 }
 
 fn hit_test(
-    node: &Node,
-    area: Rectangle<i32, Logical>,
+    mut node: &Node,
+    mut area: Rectangle<i32, Logical>,
     root_area: Rectangle<i32, Logical>,
     gap: i32,
     point: Point<f64, Logical>,
     bias: SplitBias,
     mut path: Vec<Side>,
 ) -> Option<SplitHit> {
-    let Node::Split {
-        ratio,
-        first,
-        second,
-    } = node
-    else {
-        return None;
-    };
+    loop {
+        let Node::Split {
+            ratio,
+            first,
+            second,
+        } = node
+        else {
+            return None;
+        };
 
-    let (first_area, second_area) = split(area, *ratio, bias);
-    let axis = split_axis(area, bias);
-    let threshold = (gap as f64).max(4.0);
-
-    let on_border = match axis {
-        Axis::Horizontal => {
-            let boundary = (first_area.loc.x + first_area.size.w) as f64;
-            (point.x - boundary).abs() <= threshold
-                && point.y >= area.loc.y as f64
-                && point.y <= (area.loc.y + area.size.h) as f64
+        let (first_area, second_area) = split(area, *ratio, bias);
+        let axis = split_axis(area, bias);
+        let threshold = (gap as f64).max(4.0);
+        let on_border = match axis {
+            Axis::Horizontal => {
+                let boundary = (first_area.loc.x + first_area.size.w) as f64;
+                (point.x - boundary).abs() <= threshold
+                    && point.y >= area.loc.y as f64
+                    && point.y <= (area.loc.y + area.size.h) as f64
+            }
+            Axis::Vertical => {
+                let boundary = (first_area.loc.y + first_area.size.h) as f64;
+                (point.y - boundary).abs() <= threshold
+                    && point.x >= area.loc.x as f64
+                    && point.x <= (area.loc.x + area.size.w) as f64
+            }
+        };
+        if on_border {
+            return Some(SplitHit {
+                output: String::new(),
+                workspace: 0,
+                path,
+                axis,
+                area,
+                root_area,
+                target_side: None,
+                topology_revision: 0,
+            });
         }
-        Axis::Vertical => {
-            let boundary = (first_area.loc.y + first_area.size.h) as f64;
-            (point.y - boundary).abs() <= threshold
-                && point.x >= area.loc.x as f64
-                && point.x <= (area.loc.x + area.size.w) as f64
-        }
-    };
-    if on_border {
-        // `output`/`workspace` are filled in by `Layouts::hit_test_split`,
-        // the only caller with that context -- a bare `BspLayout` doesn't
-        // know which output or workspace it belongs to.
-        return Some(SplitHit {
-            output: String::new(),
-            workspace: 0,
-            path,
-            axis,
-            area,
-            root_area,
-            target_side: None,
-            topology_revision: 0,
-        });
-    }
 
-    if rect_contains(first_area, point) {
-        path.push(Side::First);
-        hit_test(first, first_area, root_area, gap, point, bias, path)
-    } else {
-        path.push(Side::Second);
-        hit_test(second, second_area, root_area, gap, point, bias, path)
+        if rect_contains(first_area, point) {
+            path.push(Side::First);
+            node = first;
+            area = first_area;
+        } else {
+            path.push(Side::Second);
+            node = second;
+            area = second_area;
+        }
     }
 }
 
@@ -1393,34 +1491,15 @@ fn rect_contains(rect: Rectangle<i32, Logical>, point: Point<f64, Logical>) -> b
 }
 
 fn ratio_at(node: &Node, path: &[Side]) -> Option<f32> {
-    let Node::Split {
-        ratio,
-        first,
-        second,
-    } = node
-    else {
+    let Node::Split { ratio, .. } = node_at_path(node, path)? else {
         return None;
     };
-    match path.first() {
-        None => Some(*ratio),
-        Some(Side::First) => ratio_at(first, &path[1..]),
-        Some(Side::Second) => ratio_at(second, &path[1..]),
-    }
+    Some(*ratio)
 }
 
 fn set_ratio_at(node: &mut Node, path: &[Side], ratio: f32) {
-    let Node::Split {
-        ratio: r,
-        first,
-        second,
-    } = node
-    else {
-        return;
-    };
-    match path.first() {
-        None => *r = ratio,
-        Some(Side::First) => set_ratio_at(first, &path[1..], ratio),
-        Some(Side::Second) => set_ratio_at(second, &path[1..], ratio),
+    if let Some(Node::Split { ratio: current, .. }) = node_mut_at_path(node, path) {
+        *current = ratio;
     }
 }
 
@@ -1430,26 +1509,32 @@ fn collect(
     bias: SplitBias,
     out: &mut Vec<(Window, Rectangle<i32, Logical>)>,
 ) {
-    match node {
-        Node::Leaf(window) => out.push((window.clone(), area)),
-        Node::Split {
-            ratio,
-            first,
-            second,
-        } => {
-            let (first_area, second_area) = split(area, *ratio, bias);
-            collect(first, first_area, bias, out);
-            collect(second, second_area, bias, out);
+    let mut pending = vec![(node, area)];
+    while let Some((node, area)) = pending.pop() {
+        match node {
+            Node::Leaf(window) => out.push((window.clone(), area)),
+            Node::Split {
+                ratio,
+                first,
+                second,
+            } => {
+                let (first_area, second_area) = split(area, *ratio, bias);
+                pending.push((second, second_area));
+                pending.push((first, first_area));
+            }
         }
     }
 }
 
 fn collect_windows(node: &Node, out: &mut Vec<Window>) {
-    match node {
-        Node::Leaf(window) => out.push(window.clone()),
-        Node::Split { first, second, .. } => {
-            collect_windows(first, out);
-            collect_windows(second, out);
+    let mut pending = vec![node];
+    while let Some(node) = pending.pop() {
+        match node {
+            Node::Leaf(window) => out.push(window.clone()),
+            Node::Split { first, second, .. } => {
+                pending.push(second);
+                pending.push(first);
+            }
         }
     }
 }
