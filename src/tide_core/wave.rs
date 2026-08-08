@@ -14,16 +14,31 @@
 //! globals so `theme.primary` reads as an expression (W4), and duration
 //! math (`600ms * 2`, W4's typed values) are deliberately not here yet.
 
-use std::cell::{Cell, RefCell};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashSet,
+    path::{Path, PathBuf},
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
-use std::path::{Path, PathBuf};
-use std::rc::Rc;
-
-use mlua::{FromLua, Function, Lua, StdLib, Value, Variadic};
+use mlua::{FromLua, Function, HookTriggers, Lua, StdLib, Value, Variadic, VmState};
 
 use super::wave_fmt::{strip_block_comments, strip_line_comment};
 
 use super::waves::Entry;
+
+pub(crate) const MAX_QUEUED_ACTIONS: usize = 256;
+
+fn queue_action(lua: &Lua, action: String) -> mlua::Result<()> {
+    let actions: mlua::Table = lua.globals().get("_actions")?;
+    if actions.raw_len() >= MAX_QUEUED_ACTIONS {
+        return Err(mlua::Error::runtime(format!(
+            "Wave handler action queue limit ({MAX_QUEUED_ACTIONS}) exceeded"
+        )));
+    }
+    actions.set(actions.raw_len() + 1, action)
+}
 
 // ---------------------------------------------------------------------------
 // Compile: surface syntax -> Lua source
@@ -1835,23 +1850,15 @@ fn install_env(
     lua.globals()
         .set(
             "spawn",
-            lua.create_function(|lua, cmd: String| {
-                let actions: mlua::Table = lua.globals().get("_actions")?;
-                actions.set(actions.raw_len() + 1, format!("spawn:{cmd}"))?;
-                Ok(())
-            })
-            .map_err(|e| e.to_string())?,
+            lua.create_function(|lua, cmd: String| queue_action(lua, format!("spawn:{cmd}")))
+                .map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())?;
     lua.globals()
         .set(
             "action",
-            lua.create_function(|lua, action: String| {
-                let actions: mlua::Table = lua.globals().get("_actions")?;
-                actions.set(actions.raw_len() + 1, action)?;
-                Ok(())
-            })
-            .map_err(|e| e.to_string())?,
+            lua.create_function(|lua, action: String| queue_action(lua, action))
+                .map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())?;
 
@@ -1878,61 +1885,193 @@ pub(crate) fn build_tide_table(lua: &Lua, tide: &TideInfo) -> Result<mlua::Table
     Ok(table)
 }
 
+/// The three untrusted Wave execution contexts have deliberately separate
+/// limits: loading may legitimately do more work, while handlers and IPC eval
+/// share the compositor thread with interactive input and rendering.
+#[derive(Clone, Copy)]
+pub(crate) enum ExecutionBudget {
+    Load,
+    Handler,
+    Eval,
+}
+
+impl ExecutionBudget {
+    fn limits(self) -> (&'static str, u64, Duration) {
+        match self {
+            Self::Load => ("config load", 5_000_000, Duration::from_millis(500)),
+            Self::Handler => ("event handler", 500_000, Duration::from_millis(50)),
+            Self::Eval => ("IPC eval", 1_000_000, Duration::from_millis(100)),
+        }
+    }
+}
+
+/// Run one Lua entry point with a temporary instruction/deadline hook. Hooks
+/// fire every 1,000 VM instructions to keep ordinary config evaluation cheap;
+/// Rust callbacks exposed by the sandbox are bounded, non-blocking operations.
+pub(crate) fn with_execution_budget<T>(
+    lua: &Lua,
+    budget: ExecutionBudget,
+    run: impl FnOnce() -> mlua::Result<T>,
+) -> mlua::Result<T> {
+    const HOOK_GRANULARITY: u64 = 1_000;
+
+    let (label, instructions, duration) = budget.limits();
+    let remaining = Rc::new(Cell::new(instructions));
+    let hook_remaining = remaining.clone();
+    let deadline = Instant::now() + duration;
+    lua.set_hook(
+        HookTriggers::new().every_nth_instruction(HOOK_GRANULARITY as u32),
+        move |_, _| {
+            let left = hook_remaining.get();
+            if left <= HOOK_GRANULARITY || Instant::now() >= deadline {
+                return Err(mlua::Error::runtime(format!(
+                    "Wave {label} execution budget exceeded"
+                )));
+            }
+            hook_remaining.set(left - HOOK_GRANULARITY);
+            Ok(VmState::Continue)
+        },
+    )?;
+
+    let result = run();
+    lua.remove_hook();
+    result
+}
+
 /// A Lua value as JSON for `tidectl eval`: scalars, durations and colors
 /// as their config strings, lists as arrays, plain tables as objects.
 pub(crate) fn lua_value_to_json(value: Value) -> Result<serde_json::Value, String> {
-    match value {
-        Value::Nil => Ok(serde_json::Value::Null),
-        Value::Boolean(b) => Ok(serde_json::Value::Bool(b)),
-        Value::Integer(i) => Ok(serde_json::Value::from(i)),
-        Value::Number(n) => serde_json::Number::from_f64(n)
-            .map(serde_json::Value::Number)
-            .ok_or_else(|| "number could not be represented as JSON".to_string()),
-        Value::String(s) => Ok(serde_json::Value::String(s.to_string_lossy())),
-        Value::UserData(ud) => {
-            if let Ok(d) = ud.borrow::<DurationValue>() {
-                return Ok(serde_json::Value::String(d.serialize()));
-            }
-            if let Ok(c) = ud.borrow::<ColorValue>() {
-                return Ok(serde_json::Value::String(c.serialize()));
-            }
-            Err("unsupported userdata in eval result".to_string())
-        }
-        Value::Table(t) => {
-            // A dense sequence becomes an array; otherwise an object of
-            // scalar fields (nested tables recurse).
-            let mut is_array = true;
-            let n = t.raw_len();
-            for i in 1..=n {
-                if t.raw_get::<Value>(i).is_err() {
-                    is_array = false;
-                    break;
-                }
-            }
-            if is_array && n > 0 {
-                let mut out = Vec::new();
-                for i in 1..=n {
-                    let v: Value = t.raw_get(i).map_err(|e| e.to_string())?;
-                    out.push(lua_value_to_json(v)?);
-                }
-                Ok(serde_json::Value::Array(out))
-            } else {
-                let mut out = serde_json::Map::new();
-                for pair in t.pairs::<mlua::Value, mlua::Value>() {
-                    let (k, v) = pair.map_err(|e| e.to_string())?;
-                    let mlua::Value::String(key) = k else {
-                        continue;
-                    };
-                    out.insert(key.to_string_lossy(), lua_value_to_json(v)?);
-                }
-                Ok(serde_json::Value::Object(out))
-            }
-        }
-        other => Err(format!(
-            "unsupported value type in eval result: {}",
-            other.type_name()
-        )),
+    const MAX_JSON_DEPTH: usize = 64;
+    const MAX_JSON_NODES: usize = 10_000;
+    const MAX_JSON_BYTES: usize = 1024 * 1024;
+
+    struct ConversionState {
+        ancestors: HashSet<usize>,
+        nodes: usize,
+        string_bytes: usize,
     }
+
+    impl ConversionState {
+        fn count_node(&mut self) -> Result<(), String> {
+            self.nodes += 1;
+            if self.nodes > MAX_JSON_NODES {
+                Err(format!(
+                    "eval result exceeds the {MAX_JSON_NODES}-node limit"
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn count_string(&mut self, len: usize) -> Result<(), String> {
+            self.string_bytes = self
+                .string_bytes
+                .checked_add(len)
+                .ok_or_else(|| "eval result size overflow".to_string())?;
+            if self.string_bytes > MAX_JSON_BYTES {
+                Err(format!(
+                    "eval result exceeds the {MAX_JSON_BYTES}-byte string limit"
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn convert(
+        value: Value,
+        depth: usize,
+        state: &mut ConversionState,
+    ) -> Result<serde_json::Value, String> {
+        state.count_node()?;
+        match value {
+            Value::Nil => Ok(serde_json::Value::Null),
+            Value::Boolean(b) => Ok(serde_json::Value::Bool(b)),
+            Value::Integer(i) => Ok(serde_json::Value::from(i)),
+            Value::Number(n) => serde_json::Number::from_f64(n)
+                .map(serde_json::Value::Number)
+                .ok_or_else(|| "number could not be represented as JSON".to_string()),
+            Value::String(s) => {
+                state.count_string(s.as_bytes().len())?;
+                Ok(serde_json::Value::String(s.to_string_lossy()))
+            }
+            Value::UserData(ud) => {
+                let serialized = if let Ok(d) = ud.borrow::<DurationValue>() {
+                    d.serialize()
+                } else if let Ok(c) = ud.borrow::<ColorValue>() {
+                    c.serialize()
+                } else {
+                    return Err("unsupported userdata in eval result".to_string());
+                };
+                state.count_string(serialized.len())?;
+                Ok(serde_json::Value::String(serialized))
+            }
+            Value::Table(t) => {
+                if depth >= MAX_JSON_DEPTH {
+                    return Err(format!(
+                        "eval result exceeds the {MAX_JSON_DEPTH}-level nesting limit"
+                    ));
+                }
+                let identity = t.to_pointer() as usize;
+                if !state.ancestors.insert(identity) {
+                    return Err("eval result contains a table cycle".to_string());
+                }
+
+                let converted = (|| {
+                    // A dense sequence becomes an array; otherwise an object
+                    // of string-keyed fields (nested tables recurse).
+                    let mut is_array = true;
+                    let n = t.raw_len();
+                    for i in 1..=n {
+                        if t.raw_get::<Value>(i).is_err() {
+                            is_array = false;
+                            break;
+                        }
+                    }
+                    if is_array && n > 0 {
+                        let mut out = Vec::with_capacity(n);
+                        for i in 1..=n {
+                            let child: Value = t.raw_get(i).map_err(|e| e.to_string())?;
+                            out.push(convert(child, depth + 1, state)?);
+                        }
+                        Ok(serde_json::Value::Array(out))
+                    } else {
+                        let mut out = serde_json::Map::new();
+                        for pair in t.pairs::<mlua::Value, mlua::Value>() {
+                            let (key, child) = pair.map_err(|e| e.to_string())?;
+                            let mlua::Value::String(key) = key else {
+                                continue;
+                            };
+                            let key = key.to_string_lossy();
+                            state.count_string(key.len())?;
+                            out.insert(key, convert(child, depth + 1, state)?);
+                        }
+                        Ok(serde_json::Value::Object(out))
+                    }
+                })();
+                state.ancestors.remove(&identity);
+                converted
+            }
+            other => Err(format!(
+                "unsupported value type in eval result: {}",
+                other.type_name()
+            )),
+        }
+    }
+
+    let mut state = ConversionState {
+        ancestors: HashSet::new(),
+        nodes: 0,
+        string_bytes: 0,
+    };
+    let json = convert(value, 0, &mut state)?;
+    let encoded_len = serde_json::to_vec(&json).map_err(|e| e.to_string())?.len();
+    if encoded_len > MAX_JSON_BYTES {
+        return Err(format!(
+            "eval result exceeds the {MAX_JSON_BYTES}-byte response limit"
+        ));
+    }
+    Ok(json)
 }
 
 /// Compiles and evaluates a Wave file, returning the same [`Entry`] list
@@ -1959,8 +2098,7 @@ pub(crate) fn evaluate(source: &str, path: &Path) -> Result<Vec<Entry>, String> 
     install_env(&lua, &stack, collect, statics, bodies, &TideInfo::default())?;
 
     let chunk = lua.load(&lua_source).set_name(path.display().to_string());
-    chunk
-        .exec()
+    with_execution_budget(&lua, ExecutionBudget::Load, || chunk.exec())
         .map_err(|e| format!("in file {}: {e}", path.display()))?;
 
     let entries = top(&stack).borrow().clone();
@@ -2007,7 +2145,7 @@ fn resolve_uncycled(
     stack.borrow_mut().push(Rc::new(RefCell::new(Vec::new())));
     let lua_source = compile_with(&contents, path, sym)?;
     let chunk = lua.load(&lua_source).set_name(path.display().to_string());
-    let run = || chunk.exec();
+    let run = || with_execution_budget(lua, ExecutionBudget::Load, || chunk.exec());
     let exec_result = if sym.lenient {
         // The collect round is best-effort: a file whose expressions
         // reference definitions from a file evaluated later may fail
@@ -2406,6 +2544,81 @@ mod tests {
     }
 
     #[test]
+    fn execution_budget_interrupts_infinite_lua_loop() {
+        let lua = Lua::new();
+        let err = with_execution_budget(&lua, ExecutionBudget::Handler, || {
+            lua.load("while true do end").exec()
+        })
+        .expect_err("infinite handler must be interrupted");
+
+        assert!(
+            err.to_string().contains("execution budget exceeded"),
+            "{err}"
+        );
+        // The scoped hook is removed after the failed execution.
+        lua.load("return 1").exec().expect("Lua remains usable");
+    }
+
+    #[test]
+    fn config_load_path_interrupts_infinite_loop() {
+        let err = evaluate("while true do\nend\n", Path::new("loop.wave"))
+            .expect_err("infinite config must be interrupted");
+
+        assert!(
+            err.contains("config load execution budget exceeded"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn eval_json_rejects_table_cycles() {
+        let lua = Lua::new();
+        let table = lua.create_table().unwrap();
+        table.set("self", table.clone()).unwrap();
+
+        let err = lua_value_to_json(Value::Table(table)).unwrap_err();
+        assert!(err.contains("table cycle"), "{err}");
+    }
+
+    #[test]
+    fn eval_json_allows_shared_noncyclic_table() {
+        let lua = Lua::new();
+        let shared = lua.create_table().unwrap();
+        shared.set("value", 7).unwrap();
+        let root = lua.create_table().unwrap();
+        root.set("left", shared.clone()).unwrap();
+        root.set("right", shared).unwrap();
+
+        let json = lua_value_to_json(Value::Table(root)).unwrap();
+        assert_eq!(json["left"]["value"], 7);
+        assert_eq!(json["right"]["value"], 7);
+    }
+
+    #[test]
+    fn eval_json_rejects_excessive_nesting() {
+        let lua = Lua::new();
+        let root = lua.create_table().unwrap();
+        let mut current = root.clone();
+        for _ in 0..65 {
+            let child = lua.create_table().unwrap();
+            current.set("child", child.clone()).unwrap();
+            current = child;
+        }
+
+        let err = lua_value_to_json(Value::Table(root)).unwrap_err();
+        assert!(err.contains("nesting limit"), "{err}");
+    }
+
+    #[test]
+    fn eval_json_rejects_oversized_string() {
+        let lua = Lua::new();
+        let value = Value::String(lua.create_string(vec![b'x'; 1024 * 1024 + 1]).unwrap());
+
+        let err = lua_value_to_json(value).unwrap_err();
+        assert!(err.contains("byte string limit"), "{err}");
+    }
+
+    #[test]
     fn empty_one_line_blocks_are_allowed() {
         let lua = compile_str("vessels { }\noutput eDP-1 { }\n");
         assert!(lua.contains("_block(\"vessels\", \"\", function()\nend)"));
@@ -2458,6 +2671,15 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(queued, vec!["spawn:kitty".to_string()]);
+        actions.clear().unwrap();
+        let action: mlua::Function = lua.globals().get("action").unwrap();
+        for _ in 0..MAX_QUEUED_ACTIONS {
+            action.call::<()>("close-window").unwrap();
+        }
+        let err = action
+            .call::<()>("close-window")
+            .expect_err("action queue must be bounded");
+        assert!(err.to_string().contains("action queue limit"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

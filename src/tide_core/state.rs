@@ -10229,7 +10229,11 @@ impl Smallvil {
             };
             for pair in for_event.sequence_values::<mlua::Function>() {
                 let f = pair?;
-                if let Err(e) = f.call::<()>(()) {
+                if let Err(e) = crate::wave::with_execution_budget(
+                    &self.config_lua,
+                    crate::wave::ExecutionBudget::Handler,
+                    || f.call::<()>(()),
+                ) {
                     tracing::warn!(event = name, error = %e, "Wave event handler failed");
                 }
             }
@@ -10246,12 +10250,24 @@ impl Smallvil {
             .and_then(|actions| {
                 actions
                     .sequence_values::<String>()
+                    .take(crate::wave::MAX_QUEUED_ACTIONS + 1)
                     .collect::<Result<Vec<_>, _>>()
                     .ok()
             })
             .unwrap_or_default();
+        let queue_overflowed = queued.len() > crate::wave::MAX_QUEUED_ACTIONS;
+        let queued = queued
+            .into_iter()
+            .take(crate::wave::MAX_QUEUED_ACTIONS)
+            .collect::<Vec<_>>();
         if let Ok(actions) = self.config_lua.globals().get::<mlua::Table>("_actions") {
             let _ = actions.clear();
+        }
+        if queue_overflowed {
+            tracing::warn!(
+                limit = crate::wave::MAX_QUEUED_ACTIONS,
+                "Wave handler action queue exceeded its limit; dropping excess actions"
+            );
         }
         for action in queued {
             match crate::config::parse_action(&action) {
@@ -10299,12 +10315,13 @@ impl Smallvil {
     ) -> Result<serde_json::Value, String> {
         self.sync_tide();
         let lua_expr = crate::wave::compile_eval_expression(expression)?;
-        let value: mlua::Value = self
-            .config_lua
-            .load(&lua_expr)
-            .set_name("eval")
-            .eval()
-            .map_err(|e| e.to_string())?;
+        let chunk = self.config_lua.load(&lua_expr).set_name("eval");
+        let value: mlua::Value = crate::wave::with_execution_budget(
+            &self.config_lua,
+            crate::wave::ExecutionBudget::Eval,
+            || chunk.eval(),
+        )
+        .map_err(|e| e.to_string())?;
         crate::wave::lua_value_to_json(value)
     }
 
