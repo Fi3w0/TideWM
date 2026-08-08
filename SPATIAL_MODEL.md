@@ -85,18 +85,22 @@ place instead of restarting:
 
 - **Classic → Ocean:** each output's populated workspace trees move whole into
   reefs (both engines embed the same `BspLayout`, so it is a move, not a
-  rebuild) laid out on the lateral line at `X = (N-1) * (output width +
-  128px)`, `Y = 0`. The camera points at the previously-active workspace's
-  reef. Floating windows translate to world coordinates around their
-  workspace's reef; pinned windows become Ocean screen pins. Depth-deck
-  windows are recalled to their tiles first (the deck's picker overlay is
-  dropped). Tab groups and fullscreen/maximized entries carry across.
+  rebuild). Every output receives a disjoint world island sized from its live
+  logical viewport and populated workspace count; reefs use the configured
+  window gap rather than a fixed resolution or spacing guess. The camera
+  points at the previously-active workspace's reef. Floating windows translate
+  from their output-global position to the corresponding reef-local world
+  position; pinned windows become Ocean screen pins. Depth-deck windows are
+  recalled to their tiles first (the deck's picker overlay is dropped). Tab
+  groups and fullscreen/maximized entries carry across.
 - **Ocean → Classic:** reefs sorted left-to-right become workspaces `1..N` on
   the output whose camera is nearest to each reef; the active workspace is the
   reef each output's camera is looking at. Floating windows land on the
-  workspace of the reef nearest their world rect, clamped into the output's
-  visible area; screen-pinned windows re-enter the `pinned` set. Bookmarks and
-  camera history have no Classic counterpart and are dropped.
+  globally nearest reef (using both axes), translate back through that reef's
+  origin and the live output origin, then clamp into the output's visible area;
+  screen-pinned windows re-enter the `pinned` set. Bookmarks and camera history
+  have no Classic counterpart and are dropped. Migration is deferred if no
+  output currently has geometry; TideWM never invents a fallback resolution.
 
 Ocean-reef-per-workspace Master/Cascade workspaces reflow as BSP under Ocean
 (reefs only run the BSP layout algorithm); migrating back restores each

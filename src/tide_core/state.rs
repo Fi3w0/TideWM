@@ -8294,12 +8294,6 @@ impl Smallvil {
 
     // -- Spatial-engine migration (S6) -----------------------------------------
 
-    /// How much world-space separation sits between adjacent reefs created
-    /// from a Classic workspace stack, in logical pixels. Wide enough to
-    /// read as distinct islands, narrow enough that panning between them
-    /// feels connected.
-    const REEF_GAP: i32 = 128;
-
     /// Migrates every live window's spatial ownership from the current
     /// engine to `target`, in place, without restarting. Replaces the old
     /// startup-only force-revert in `reload_config`.
@@ -8317,15 +8311,35 @@ impl Smallvil {
     /// other side is deliberately dropped: Classic's depth deck is recalled
     /// to the surface first (its parked windows rejoin their trees), and
     /// Ocean's bookmarks and camera history are discarded.
-    fn migrate_spatial_engine(&mut self, target: crate::config::SpatialEngine) {
+    fn migrate_spatial_engine(&mut self, target: crate::config::SpatialEngine) -> bool {
         if target == self.config.spatial_engine {
-            return;
+            return true;
+        }
+        if self
+            .space
+            .outputs()
+            .all(|output| self.space.output_geometry(output).is_none())
+        {
+            tracing::warn!(
+                ?target,
+                "cannot migrate spatial engine without a live output"
+            );
+            return false;
         }
         tracing::info!(
             from = ?self.config.spatial_engine,
             to = ?target,
             "migrating spatial engine"
         );
+        // `Space` is a render/input cache, not the ownership model. Clear
+        // every old-engine placement first so the new engine can rebuild only
+        // what should be visible; Classic retile intentionally does not walk
+        // inactive workspaces to unmap stale Ocean placements.
+        let mapped: Vec<Window> = self.space.elements().cloned().collect();
+        for window in mapped {
+            self.space.unmap_elem(&window);
+        }
+        self.space.refresh();
         match target {
             crate::config::SpatialEngine::Classic => self.migrate_ocean_to_classic(),
             crate::config::SpatialEngine::Ocean => self.migrate_classic_to_ocean(),
@@ -8361,13 +8375,13 @@ impl Smallvil {
             }
         }
         self.request_redraw();
+        true
     }
 
-    /// Classic -> Ocean. Every populated workspace becomes a reef on its
-    /// output's lateral workspace line (workspace N at `X = (N-1) * (W +
-    /// REEF_GAP)`, `Y = 0`), the camera points at the previously-active
-    /// workspace's reef, and floating windows translate to world
-    /// coordinates around their workspace's reef.
+    /// Classic -> Ocean. Every output gets a disjoint world island and each
+    /// populated workspace becomes a reef on that island's lateral line. The
+    /// camera points at the previously-active workspace's reef, and floating
+    /// windows translate from output-global to reef-local world coordinates.
     fn migrate_classic_to_ocean(&mut self) {
         // Depth-deck windows have no Ocean counterpart: recall them to
         // their workspace tiles first so the tree move carries them. The
@@ -8379,10 +8393,10 @@ impl Smallvil {
         self.depth_deck_overlay = None;
         self.classic_depth.close();
 
-        let output_viewports: Vec<(String, smithay::utils::Size<i32, Logical>)> = self
+        let output_viewports: Vec<(String, Rectangle<i32, Logical>)> = self
             .space
             .outputs()
-            .filter_map(|output| Some((output.name(), self.space.output_geometry(output)?.size)))
+            .filter_map(|output| Some((output.name(), self.space.output_geometry(output)?)))
             .collect();
 
         // Snapshot the active workspace per output before draining.
@@ -8394,13 +8408,38 @@ impl Smallvil {
         // Drain the trees first (each is unique per (output, workspace)).
         let mut trees = self.layout.drain_for_migration();
         let floating: Vec<(WlSurface, FloatingTag)> = self.floating_workspace.drain().collect();
+        let reef_gap = self.config.gaps.max(0);
+
+        // Each output gets a disjoint island in the shared Ocean world. The
+        // old per-output `workspace * stride` formula placed every output's
+        // workspace 1 at world X=0, overlapping windows and cameras.
+        let mut max_workspaces = std::collections::HashMap::new();
+        for (output_name, _) in &output_viewports {
+            let max_workspace = trees
+                .iter()
+                .filter(|(name, _, _)| name == output_name)
+                .map(|(_, workspace, _)| *workspace)
+                .chain(
+                    floating
+                        .iter()
+                        .filter(|(_, tag)| &tag.output == output_name)
+                        .map(|(_, tag)| tag.workspace),
+                )
+                .chain(active.get(output_name).copied())
+                .max()
+                .unwrap_or(1);
+            max_workspaces.insert(output_name.clone(), max_workspace);
+        }
+        let island_x = ocean_island_origins(&output_viewports, &max_workspaces, reef_gap);
 
         // Clear remaining Classic-only render state. `pinned` is left
         // alone (harmless under Ocean, preserves round-trip identity) and
         // `groups` ride across per the S6 design decision.
         self.pseudo_tiled.clear();
 
-        for (output_name, viewport) in &output_viewports {
+        for (output_name, geometry) in &output_viewports {
+            let base_x = island_x.get(output_name).copied().unwrap_or(0);
+            let viewport = geometry.size;
             // Move this output's trees into reefs, workspace N at
             // X = (N-1) * stride on the lateral line.
             let mut i = 0;
@@ -8410,8 +8449,8 @@ impl Smallvil {
                     continue;
                 }
                 let (_, workspace, tree) = trees.remove(i);
-                let reef_x = (workspace as i32 - 1) * (viewport.w + Self::REEF_GAP);
-                let reef_rect = Rectangle::new(Point::from((reef_x, 0)), *viewport);
+                let reef_x = ocean_reef_x(base_x, workspace, viewport.w, reef_gap);
+                let reef_rect = Rectangle::new(Point::from((reef_x, 0)), viewport);
                 let reef_name = self
                     .config
                     .workspace_names
@@ -8422,7 +8461,8 @@ impl Smallvil {
             }
             // Point the camera at the previously-active workspace's reef.
             let active_ws = active.get(output_name).copied().unwrap_or(1);
-            let cam_x = (active_ws as f64 - 1.0) * (viewport.w as f64 + Self::REEF_GAP as f64);
+            let cam_x = f64::from(base_x)
+                + (active_ws as f64 - 1.0) * (viewport.w as f64 + f64::from(reef_gap));
             self.ocean
                 .set_camera_origin(output_name, crate::ocean::OceanPoint { x: cam_x, y: 0.0 });
         }
@@ -8433,21 +8473,25 @@ impl Smallvil {
         // cameras were set above, which `pin_to_screen` needs to compute
         // its viewport anchor.
         for (surface, tag) in floating {
-            let viewport_w = output_viewports
+            let output = output_viewports
                 .iter()
-                .find(|(name, _)| name == &tag.output)
-                .map(|(_, size)| size.w)
-                .unwrap_or(1920);
-            let reef_x = (tag.workspace as i32 - 1) * (viewport_w + Self::REEF_GAP);
-            let world_rect = Rectangle::new(
-                Point::from((tag.rect.loc.x + reef_x, tag.rect.loc.y)),
-                tag.rect.size,
-            );
+                .find(|(name, _)| name == &tag.output);
+            let Some((output_name, output_geometry)) = output else {
+                // Preserve real geometry instead of guessing another
+                // output's dimensions if this output disappeared.
+                self.ocean
+                    .push_migrated_floating(surface, tag.window, tag.rect);
+                continue;
+            };
+            let base_x = island_x.get(output_name).copied().unwrap_or(0);
+            let reef_x = ocean_reef_x(base_x, tag.workspace, output_geometry.size.w, reef_gap);
+            let reef_rect = Rectangle::new((reef_x, 0).into(), output_geometry.size);
+            let world_rect = classic_rect_to_ocean(tag.rect, *output_geometry, reef_rect);
             let was_pinned = self.pinned.contains(&surface);
             self.ocean
                 .push_migrated_floating(surface.clone(), tag.window, world_rect);
             if was_pinned {
-                self.ocean.pin_to_screen(&surface, &tag.output);
+                self.ocean.pin_to_screen(&surface, output_name);
             }
         }
         // `pinned` is a Classic-only set; Ocean represents pin status via
@@ -8471,14 +8515,16 @@ impl Smallvil {
         let (reefs, floating, camera_origins, entry_outputs, pinned_surfaces) =
             self.ocean.drain_for_classic();
 
-        let output_names: Vec<String> = self.space.outputs().map(|output| output.name()).collect();
-        let output_viewports: std::collections::HashMap<
-            String,
-            smithay::utils::Size<i32, Logical>,
-        > = self
+        let output_viewports: std::collections::HashMap<String, Rectangle<i32, Logical>> = self
             .space
             .outputs()
-            .filter_map(|output| Some((output.name(), self.space.output_geometry(output)?.size)))
+            .filter_map(|output| Some((output.name(), self.space.output_geometry(output)?)))
+            .collect();
+        let output_names: Vec<String> = self
+            .space
+            .outputs()
+            .filter(|output| output_viewports.contains_key(&output.name()))
+            .map(|output| output.name())
             .collect();
 
         // Sort reefs left-to-right so workspace numbering is stable.
@@ -8539,31 +8585,52 @@ impl Smallvil {
         // Floating windows land on the workspace of the reef nearest their
         // world rect, clamped into the output's visible area.
         for (surface, window, world_rect) in floating {
-            let target_output = nearest_output(&world_rect);
-            let viewport = output_viewports
-                .get(&target_output)
-                .copied()
-                .unwrap_or(smithay::utils::Size::from((1920, 1080)));
-            let ws = reef_slots
+            let nearest_slot = reef_slots
                 .iter()
-                .filter(|(output, _, _)| output == &target_output)
-                .min_by_key(|(_, _, rect)| {
-                    let center = world_rect.loc.x as f64 + world_rect.size.w as f64 / 2.0;
-                    (rect.loc.x as f64 + rect.size.w as f64 / 2.0 - center)
-                        .abs()
-                        .to_bits()
-                })
-                .map(|(_, ws, _)| *ws)
-                .unwrap_or(1);
-            let local_x = world_rect
-                .loc
-                .x
-                .clamp(0, (viewport.w - world_rect.size.w.max(1)).max(0));
-            let local_y = world_rect
-                .loc
-                .y
-                .clamp(0, (viewport.h - world_rect.size.h.max(1)).max(0));
-            let local_rect = Rectangle::new(Point::from((local_x, local_y)), world_rect.size);
+                .min_by_key(|(_, _, rect)| squared_center_distance(world_rect, *rect));
+            let (target_output, ws, reef_rect) = if let Some((output, ws, rect)) = nearest_slot {
+                (output.clone(), *ws, *rect)
+            } else {
+                let output = nearest_output(&world_rect);
+                let Some(viewport) = output_viewports.get(&output).copied() else {
+                    tracing::warn!(%output, "preserving floating world geometry without output geometry");
+                    let output = entry_outputs.get(&surface).cloned().unwrap_or(output);
+                    self.floating_workspace.insert(
+                        surface,
+                        FloatingTag {
+                            window,
+                            output,
+                            workspace: 1,
+                            rect: world_rect,
+                        },
+                    );
+                    continue;
+                };
+                let camera_x = camera_origins.get(&output).map(|p| p.x).unwrap_or(0.0);
+                (
+                    output,
+                    1,
+                    Rectangle::new((camera_x as i32, 0).into(), viewport.size),
+                )
+            };
+            let Some(output_geometry) = output_viewports.get(&target_output).copied() else {
+                tracing::warn!(%target_output, "preserving floating world geometry without output geometry");
+                let output = entry_outputs
+                    .get(&surface)
+                    .cloned()
+                    .unwrap_or(target_output);
+                self.floating_workspace.insert(
+                    surface,
+                    FloatingTag {
+                        window,
+                        output,
+                        workspace: ws,
+                        rect: world_rect,
+                    },
+                );
+                continue;
+            };
+            let local_rect = ocean_rect_to_classic(world_rect, reef_rect, output_geometry);
             self.floating_workspace.insert(
                 surface,
                 FloatingTag {
@@ -8584,9 +8651,7 @@ impl Smallvil {
             }
         }
 
-        // Ocean-only state has no Classic counterpart; `entry_outputs` was
-        // drained and is discarded.
-        let _ = entry_outputs;
+        // Remaining Ocean-only entry-output hints have no Classic counterpart.
     }
 
     /// Runs the udev backend's real DRM power hook (if any -- `None` under
@@ -10348,8 +10413,14 @@ impl Smallvil {
                     // notice goes to a toast, not the persistent warning
                     // panel -- this is the user's intent, not a config
                     // problem.
-                    self.migrate_spatial_engine(new_config.spatial_engine);
-                    migrated_engine = true;
+                    migrated_engine = self.migrate_spatial_engine(new_config.spatial_engine);
+                    if !migrated_engine {
+                        warnings.push(
+                            "Spatial-engine migration needs a live output; keeping the current engine"
+                                .to_string(),
+                        );
+                        new_config.spatial_engine = self.config.spatial_engine;
+                    }
                 }
                 if new_config.ocean.reefs != self.config.ocean.reefs
                     || new_config.ocean.bookmarks != self.config.ocean.bookmarks
@@ -10646,6 +10717,99 @@ fn center(rect: Rectangle<i32, Logical>) -> Point<i32, Logical> {
     (rect.loc.x + rect.size.w / 2, rect.loc.y + rect.size.h / 2).into()
 }
 
+fn ocean_island_origins(
+    outputs: &[(String, Rectangle<i32, Logical>)],
+    max_workspaces: &std::collections::HashMap<String, u32>,
+    gap: i32,
+) -> std::collections::HashMap<String, i32> {
+    let mut next_x = 0_i32;
+    let mut origins = std::collections::HashMap::new();
+    for (name, geometry) in outputs {
+        origins.insert(name.clone(), next_x);
+        let stride = geometry.size.w.saturating_add(gap).max(1);
+        let workspaces = max_workspaces.get(name).copied().unwrap_or(1).max(1);
+        let span = i64::from(stride) * i64::from(workspaces);
+        next_x = i64::from(next_x)
+            .saturating_add(span)
+            .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+    }
+    origins
+}
+
+fn ocean_reef_x(base_x: i32, workspace: u32, width: i32, gap: i32) -> i32 {
+    let stride = i64::from(width.saturating_add(gap).max(1));
+    let offset = i64::from(workspace.saturating_sub(1)).saturating_mul(stride);
+    i64::from(base_x)
+        .saturating_add(offset)
+        .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+}
+
+fn classic_rect_to_ocean(
+    classic: Rectangle<i32, Logical>,
+    output: Rectangle<i32, Logical>,
+    reef: Rectangle<i32, Logical>,
+) -> Rectangle<i32, Logical> {
+    Rectangle::new(
+        (
+            reef.loc
+                .x
+                .saturating_add(classic.loc.x.saturating_sub(output.loc.x)),
+            reef.loc
+                .y
+                .saturating_add(classic.loc.y.saturating_sub(output.loc.y)),
+        )
+            .into(),
+        classic.size,
+    )
+}
+
+fn ocean_rect_to_classic(
+    world: Rectangle<i32, Logical>,
+    reef: Rectangle<i32, Logical>,
+    output: Rectangle<i32, Logical>,
+) -> Rectangle<i32, Logical> {
+    let x = output
+        .loc
+        .x
+        .saturating_add(world.loc.x.saturating_sub(reef.loc.x));
+    let y = output
+        .loc
+        .y
+        .saturating_add(world.loc.y.saturating_sub(reef.loc.y));
+    let max_x = output
+        .loc
+        .x
+        .saturating_add(output.size.w.saturating_sub(world.size.w.max(1)).max(0));
+    let max_y = output
+        .loc
+        .y
+        .saturating_add(output.size.h.saturating_sub(world.size.h.max(1)).max(0));
+    Rectangle::new(
+        (
+            x.clamp(output.loc.x.min(max_x), output.loc.x.max(max_x)),
+            y.clamp(output.loc.y.min(max_y), output.loc.y.max(max_y)),
+        )
+            .into(),
+        world.size,
+    )
+}
+
+fn squared_center_distance(a: Rectangle<i32, Logical>, b: Rectangle<i32, Logical>) -> u128 {
+    let center_x = |rect: Rectangle<i32, Logical>| {
+        i64::from(rect.loc.x)
+            .saturating_mul(2)
+            .saturating_add(i64::from(rect.size.w))
+    };
+    let center_y = |rect: Rectangle<i32, Logical>| {
+        i64::from(rect.loc.y)
+            .saturating_mul(2)
+            .saturating_add(i64::from(rect.size.h))
+    };
+    let dx = center_x(a).abs_diff(center_x(b)) as u128;
+    let dy = center_y(a).abs_diff(center_y(b)) as u128;
+    dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy))
+}
+
 /// Keeps at least a small, grabbable part of a floating window inside the
 /// target working area after an output move. Raw origin translation can put
 /// almost the entire window off-screen when the destination is smaller.
@@ -10672,6 +10836,50 @@ fn clamp_rect_visible(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ocean_islands_do_not_overlap_between_outputs() {
+        let outputs = vec![
+            (
+                "left".to_string(),
+                Rectangle::new((-300, 40).into(), (1111, 777).into()),
+            ),
+            (
+                "right".to_string(),
+                Rectangle::new((811, -90).into(), (937, 613).into()),
+            ),
+        ];
+        let max_workspaces =
+            std::collections::HashMap::from([("left".to_string(), 3), ("right".to_string(), 2)]);
+
+        let gap = 37;
+        let origins = ocean_island_origins(&outputs, &max_workspaces, gap);
+        assert_eq!(origins["left"], 0);
+        assert_eq!(origins["right"], 3 * (1111 + gap));
+    }
+
+    #[test]
+    fn floating_geometry_round_trips_across_offset_output_and_reef() {
+        let output = Rectangle::new((-430, 275).into(), (1373, 829).into());
+        let reef = Rectangle::new((8000, 0).into(), output.size);
+        let classic = Rectangle::new((-310, 355).into(), (641, 479).into());
+
+        let world = classic_rect_to_ocean(classic, output, reef);
+        assert_eq!(world.loc, (8120, 80).into());
+        assert_eq!(ocean_rect_to_classic(world, reef, output), classic);
+    }
+
+    #[test]
+    fn nearest_reef_uses_both_axes() {
+        let window = Rectangle::new((100, 900).into(), (100, 100).into());
+        let same_x_far_y = Rectangle::new((100, 0).into(), (100, 100).into());
+        let near_both = Rectangle::new((300, 800).into(), (100, 100).into());
+
+        assert!(
+            squared_center_distance(window, near_both)
+                < squared_center_distance(window, same_x_far_y)
+        );
+    }
 
     #[test]
     fn fullscreen_restore_rect_keeps_the_original_windowed_geometry() {
