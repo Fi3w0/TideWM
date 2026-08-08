@@ -26,11 +26,11 @@ use smithay::{
             Bind, ExportMem, Offscreen,
         },
     },
-    desktop::{layer_map_for_output, space::SpaceElement},
+    desktop::layer_map_for_output,
     input::pointer::{CursorIcon, CursorImageStatus, CursorImageSurfaceData},
     output::Output,
     reexports::wayland_server::protocol::{wl_buffer::WlBuffer, wl_surface::WlSurface},
-    utils::{Buffer as BufferCoords, IsAlive, Logical, Rectangle, Scale, Size, Transform},
+    utils::{Buffer as BufferCoords, IsAlive, Logical, Point, Rectangle, Scale, Size, Transform},
     wayland::{
         compositor::with_states,
         image_copy_capture::{CaptureFailureReason, Frame},
@@ -49,6 +49,16 @@ const MAX_PENDING_CAPTURES: usize = 64;
 /// still allowing both screencast cursor variants and ordinary screenshots
 /// to make progress together.
 const MAX_CAPTURE_RENDERS_PER_OUTPUT_FRAME: usize = 4;
+
+/// Pixel size of TideWM's upright, output-local offscreen capture target.
+/// A rotated scanout swaps the logical axes; it must not make the capture
+/// renderer and the protocol's region coordinates disagree about width and
+/// height.
+pub(crate) fn output_capture_size(output: &Output) -> Option<Size<i32, BufferCoords>> {
+    let mode = output.current_mode()?;
+    let transformed = output.current_transform().transform_size(mode.size);
+    Some(Size::from((transformed.w.max(1), transformed.h.max(1))))
+}
 
 /// How a drained capture reports completion to its client. Everything up to
 /// this point (render, readback, SHM write) is protocol-independent.
@@ -317,15 +327,24 @@ impl Smallvil {
             return;
         }
         let scale = output.current_scale().fractional_scale();
-        let size: Size<i32, BufferCoords> = if let Some(target) = &window_target {
-            let logical = SpaceElement::geometry(target).size;
-            Size::from((
-                (logical.w as f64 * scale).round().max(1.0) as i32,
-                (logical.h as f64 * scale).round().max(1.0) as i32,
-            ))
-        } else {
-            Size::from((mode.size.w, mode.size.h))
-        };
+        let (size, window_origin): (Size<i32, BufferCoords>, _) =
+            if let Some(target) = &window_target {
+                let logical = target.bbox_with_popups();
+                (
+                    Size::from((
+                        (logical.size.w as f64 * scale).round().max(1.0) as i32,
+                        (logical.size.h as f64 * scale).round().max(1.0) as i32,
+                    )),
+                    Point::from((-logical.loc.x, -logical.loc.y))
+                        .to_physical_precise_round(Scale::from(scale)),
+                )
+            } else {
+                (
+                    output_capture_size(&output)
+                        .unwrap_or_else(|| Size::from((mode.size.w, mode.size.h))),
+                    Point::default(),
+                )
+            };
         let full_rect = Rectangle::from_size(size);
         // Region was already clamped to the output at queue time; re-check
         // against the *current* mode in case it changed since.
@@ -388,7 +407,7 @@ impl Smallvil {
                 AsRenderElements::render_elements(
                     &window_target,
                     renderer,
-                    (0, 0).into(),
+                    window_origin,
                     Scale::from(scale),
                     opacity,
                 )
@@ -1003,11 +1022,50 @@ fn logical_rect_to_buffer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smithay::output::{Mode, PhysicalProperties, Subpixel};
+
+    fn test_output(size: (i32, i32), transform: Transform) -> Output {
+        let output = Output::new(
+            "capture-test".to_string(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "test".to_string(),
+                model: "test".to_string(),
+                serial_number: "test".to_string(),
+            },
+        );
+        output.change_current_state(
+            Some(Mode {
+                size: size.into(),
+                refresh: 73_000,
+            }),
+            Some(transform),
+            None,
+            None,
+        );
+        output
+    }
+
+    #[test]
+    fn output_capture_size_follows_live_mode_and_rotation() {
+        let normal = test_output((113, 71), Transform::Normal);
+        assert_eq!(output_capture_size(&normal), Some((113, 71).into()));
+
+        let rotated = test_output((113, 71), Transform::_90);
+        assert_eq!(output_capture_size(&rotated), Some((71, 113).into()));
+
+        let flipped_rotated = test_output((113, 71), Transform::Flipped270);
+        assert_eq!(
+            output_capture_size(&flipped_rotated),
+            Some((71, 113).into())
+        );
+    }
 
     #[test]
     fn logical_rect_to_buffer_scales_location_and_size_together() {
         let geo = Rectangle::new((10, 20).into(), (100, 50).into());
-        let size = Size::from((1920, 1080));
+        let size = Size::from((137, 89));
 
         let unscaled = logical_rect_to_buffer(geo, size, 1.0, Transform::Normal);
         assert_eq!(unscaled, Rectangle::new((10, 20).into(), (100, 50).into()));

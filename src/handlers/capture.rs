@@ -11,7 +11,7 @@
 use smithay::{
     output::{Output, WeakOutput},
     reexports::wayland_server::protocol::wl_shm,
-    utils::{IsAlive, Transform},
+    utils::IsAlive,
     wayland::{
         image_capture_source::{
             ImageCaptureSource, ImageCaptureSourceHandler, OutputCaptureSourceHandler,
@@ -87,7 +87,7 @@ impl ImageCopyCaptureHandler for Smallvil {
             let window = self.mapped_toplevel_window(surface)?;
             let output = self.capture_output_for_screencast(surface)?;
             let scale = output.current_scale().fractional_scale();
-            let geometry = window.geometry();
+            let geometry = window.bbox_with_popups();
             return Some(BufferConstraints {
                 size: (
                     (geometry.size.w as f64 * scale).round().max(1.0) as i32,
@@ -100,10 +100,8 @@ impl ImageCopyCaptureHandler for Smallvil {
         }
         let weak_output = source.user_data().get::<WeakOutput>()?;
         let output = weak_output.upgrade()?;
-        let mode = output.current_mode()?;
-
         Some(BufferConstraints {
-            size: mode.size.to_logical(1).to_buffer(1, Transform::Normal),
+            size: crate::capture::output_capture_size(&output)?,
             shm: vec![wl_shm::Format::Argb8888, wl_shm::Format::Xrgb8888],
             dma: None,
         })

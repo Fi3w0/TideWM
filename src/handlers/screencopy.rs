@@ -16,7 +16,7 @@ use smithay::{
     reexports::wayland_server::{
         protocol::wl_shm, Client, DataInit, Dispatch, GlobalDispatch, New,
     },
-    utils::{Buffer as BufferCoords, Logical, Rectangle, Size},
+    utils::{Buffer as BufferCoords, Logical, Rectangle, Size, Transform},
     wayland::{dmabuf::get_dmabuf, shm::with_buffer_contents},
 };
 use wayland_protocols_wlr::screencopy::v1::server::{
@@ -25,7 +25,7 @@ use wayland_protocols_wlr::screencopy::v1::server::{
 };
 
 use crate::{
-    capture::{CaptureCompletion, PendingCapture},
+    capture::{output_capture_size, CaptureCompletion, PendingCapture},
     Smallvil,
 };
 
@@ -47,25 +47,23 @@ struct WlrCapture {
 
 /// The buffer-space rectangle of `output` a capture should copy out: the
 /// full output, or `region` (logical, output-local, what slurp reports)
-/// converted through the output's scale and transform, clamped to the
-/// output's bounds. `None` when the output has no mode or the region does
-/// not intersect it.
+/// converted through the output's scale into the same upright coordinate
+/// space as the offscreen capture target, then clamped to its bounds.
+/// `None` when the output has no mode or the region does not intersect it.
 fn output_capture_rect(
     output: &Output,
     region: Option<Rectangle<i32, Logical>>,
 ) -> Option<Rectangle<i32, BufferCoords>> {
-    let mode = output.current_mode()?;
-    let full: Size<i32, BufferCoords> = Size::from((mode.size.w, mode.size.h));
+    let full = output_capture_size(output)?;
     let full_rect = Rectangle::from_size(full);
     let rect = match region {
         None => full_rect,
         Some(logical) => {
             let scale = output.current_scale().fractional_scale();
-            let transform = output.current_transform();
-            let logical_size = full.to_f64().to_logical(scale, transform);
+            let logical_size = full.to_f64().to_logical(scale, Transform::Normal);
             logical
                 .to_f64()
-                .to_buffer(scale, transform, &logical_size)
+                .to_buffer(scale, Transform::Normal, &logical_size)
                 .to_i32_round()
         }
     };
@@ -203,10 +201,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, WlrFrameData> for Smallvil {
         // else fails the frame rather than risking a bad write later.
         let dmabuf = get_dmabuf(&buffer).cloned().ok();
         if let Some(dmabuf) = dmabuf {
-            let full_size: Option<Size<i32, BufferCoords>> = capture
-                .output
-                .current_mode()
-                .map(|mode| (mode.size.w, mode.size.h).into());
+            let full_size: Option<Size<i32, BufferCoords>> = output_capture_size(&capture.output);
             let direct_valid = full_size.is_some_and(|size| {
                 capture.rect.loc == (0, 0).into()
                     && capture.rect.size == size
@@ -257,5 +252,51 @@ impl Dispatch<ZwlrScreencopyFrameV1, WlrFrameData> for Smallvil {
                 report_damage,
             },
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smithay::output::{Mode, PhysicalProperties, Subpixel};
+
+    fn rotated_test_output() -> Output {
+        let output = Output::new(
+            "screencopy-test".to_string(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "test".to_string(),
+                model: "test".to_string(),
+                serial_number: "test".to_string(),
+            },
+        );
+        output.change_current_state(
+            Some(Mode {
+                size: (113, 71).into(),
+                refresh: 73_000,
+            }),
+            Some(Transform::_90),
+            None,
+            None,
+        );
+        output
+    }
+
+    #[test]
+    fn rotated_output_region_uses_upright_capture_coordinates() {
+        let output = rotated_test_output();
+
+        assert_eq!(
+            output_capture_rect(&output, None),
+            Some(Rectangle::from_size((71, 113).into()))
+        );
+        assert_eq!(
+            output_capture_rect(
+                &output,
+                Some(Rectangle::new((5, 7).into(), (11, 13).into()))
+            ),
+            Some(Rectangle::new((5, 7).into(), (11, 13).into()))
+        );
     }
 }
