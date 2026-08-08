@@ -266,7 +266,6 @@ impl GlobalDispatch<ZwlrOutputManagerV1, ()> for Smallvil {
             }
         }
         let mgmt = &mut state.wlr_output_management_state;
-        mgmt.current_serial = mgmt.current_serial.wrapping_add(1);
         manager.done(mgmt.current_serial);
         mgmt.instances.push(manager);
     }
@@ -295,20 +294,24 @@ impl Dispatch<ZwlrOutputManagerV1, ()> for Smallvil {
             }
             zwlr_output_manager_v1::Request::Stop => {
                 manager.finished();
-                state
-                    .wlr_output_management_state
-                    .instances
-                    .retain(|m| m != manager);
+                let mgmt = &mut state.wlr_output_management_state;
+                mgmt.instances.retain(|m| m != manager);
+                for head in &mut mgmt.heads {
+                    head.resources
+                        .retain(|resource| &resource.manager != manager);
+                }
             }
             _ => {}
         }
     }
 
     fn destroyed(state: &mut Self, _client: ClientId, resource: &ZwlrOutputManagerV1, _data: &()) {
-        state
-            .wlr_output_management_state
-            .instances
-            .retain(|m| m != resource);
+        let mgmt = &mut state.wlr_output_management_state;
+        mgmt.instances.retain(|m| m != resource);
+        for head in &mut mgmt.heads {
+            head.resources
+                .retain(|head_resource| &head_resource.manager != resource);
+        }
     }
 }
 

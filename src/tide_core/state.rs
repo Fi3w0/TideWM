@@ -4574,7 +4574,17 @@ impl Smallvil {
             .map(|(surface, _)| surface.clone())
             .collect();
         for surface in surfaces {
-            if self.window_is_visible(&surface) {
+            let output_override =
+                self.fullscreen.contains_key(&surface) || self.maximized.contains_key(&surface);
+            if output_override {
+                // The live Space rect is the fullscreen/maximized override,
+                // not windowed geometry. Retile will derive that override
+                // again from the output's new live geometry; only translate
+                // the durable windowed restore records here.
+                if let Some(tag) = self.floating_workspace.get_mut(&surface) {
+                    tag.rect.loc += delta;
+                }
+            } else if self.window_is_visible(&surface) {
                 let window = self
                     .floating_workspace
                     .get(&surface)
@@ -4589,6 +4599,14 @@ impl Smallvil {
                 self.floating_workspace.get_mut(&surface).unwrap().rect = rect;
             } else if let Some(tag) = self.floating_workspace.get_mut(&surface) {
                 tag.rect.loc += delta;
+            }
+            if let Some(entry) = self.fullscreen.get_mut(&surface) {
+                if let Some(rect) = &mut entry.restore_rect {
+                    rect.loc += delta;
+                }
+            }
+            if let Some(entry) = self.maximized.get_mut(&surface) {
+                entry.restore_rect.loc += delta;
             }
         }
     }
