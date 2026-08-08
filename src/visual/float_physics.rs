@@ -199,6 +199,18 @@ impl FloatBody {
     }
 }
 
+/// Whether a full-tier simulation still needs its complete set of bodies.
+/// Continuous wave forcing keeps every body present; with the wave off, a
+/// kick keeps the set alive only until every body has settled. Keeping this
+/// decision separate from body discovery prevents an idle floating window
+/// from being recreated at rest on every backend timer tick.
+pub(crate) fn bodies_need_simulation<'a>(
+    wave_enabled: bool,
+    bodies: impl IntoIterator<Item = &'a FloatBody>,
+) -> bool {
+    wave_enabled || bodies.into_iter().any(|body| !body.finished())
+}
+
 /// Advances one body by `dt` seconds under a damped-spring pull toward
 /// `target` -- `(0, 0)` when the wave field is off (so the body settles
 /// back to its real logical position), or the current wave height when
@@ -498,6 +510,17 @@ mod tests {
             body.finished(),
             "a kicked body settles back to rest over time"
         );
+    }
+
+    #[test]
+    fn settled_bodies_only_run_under_continuous_wave_forcing() {
+        let settled = FloatBody::at_rest();
+        assert!(!bodies_need_simulation(false, [&settled]));
+        assert!(bodies_need_simulation(true, [&settled]));
+
+        let mut moving = settled;
+        moving.kick((4.0, 0.0), 1.0);
+        assert!(bodies_need_simulation(false, [&settled, &moving]));
     }
 
     #[test]

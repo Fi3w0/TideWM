@@ -1731,29 +1731,16 @@ impl Smallvil {
         self.request_redraw();
     }
 
-    /// Ensures every currently-floating window resolving F1 `full` has a
-    /// body to push on (inserting `FloatBody::at_rest()` for one that
-    /// doesn't yet), and drops any body whose window stopped floating or
-    /// stopped resolving `full` (a rule change, a hot reload,
-    /// `toggle-floating`). Needed because the continuous wave field must
-    /// be able to act on a `full`-tier window even before its first kick --
-    /// unlike `light`, whose record is created lazily on first kick only,
-    /// `full`'s bodies are not purely kick-driven.
+    /// Keeps a complete body set while a full-tier simulation is active and
+    /// drops bodies whose windows stopped qualifying. Continuous wave
+    /// forcing starts the set without a kick; with forcing off, a kick
+    /// creates the first body lazily and the remaining full-tier floaters
+    /// join so collision handling still sees them. Once every body settles,
+    /// the whole set stays absent until the next real disturbance.
     fn sync_float_physics_bodies(&mut self) {
         if !self.config.water_effects {
             self.window_float_bodies.clear();
             return;
-        }
-        let mut candidates: Vec<WlSurface> = self.floating_workspace.keys().cloned().collect();
-        candidates.extend(self.ocean.floating_surfaces().cloned());
-        for surface in candidates {
-            if self.float_physics_tier_for_surface(&surface)
-                == crate::config::FloatPhysicsTier::Full
-            {
-                self.window_float_bodies
-                    .entry(surface)
-                    .or_insert_with(crate::float_physics::FloatBody::at_rest);
-            }
         }
         let stale: Vec<WlSurface> = self
             .window_float_bodies
@@ -1767,6 +1754,24 @@ impl Smallvil {
             .collect();
         for surface in stale {
             self.window_float_bodies.remove(&surface);
+        }
+        if !crate::float_physics::bodies_need_simulation(
+            self.config.float_physics.wave.enabled,
+            self.window_float_bodies.values(),
+        ) {
+            return;
+        }
+
+        let mut candidates: Vec<WlSurface> = self.floating_workspace.keys().cloned().collect();
+        candidates.extend(self.ocean.floating_surfaces().cloned());
+        for surface in candidates {
+            if self.float_physics_tier_for_surface(&surface)
+                == crate::config::FloatPhysicsTier::Full
+            {
+                self.window_float_bodies
+                    .entry(surface)
+                    .or_insert_with(crate::float_physics::FloatBody::at_rest);
+            }
         }
     }
 
@@ -1849,19 +1854,16 @@ impl Smallvil {
         }
         self.request_redraw();
 
-        // A body stays around either while it's still visibly moving, or
-        // while the wave field is actively forcing its window -- the
-        // latter needs `&self` access a `HashMap::retain` closure can't
-        // have alongside its own mutable borrow of the map, so it's
-        // resolved into a plain set first.
-        #[allow(clippy::mutable_key_type)]
-        let wave_active: HashSet<WlSurface> = if self.config.float_physics.wave.enabled {
-            contexts.iter().map(|ctx| ctx.surface.clone()).collect()
-        } else {
-            HashSet::new()
-        };
-        self.window_float_bodies
-            .retain(|surface, body| wave_active.contains(surface) || !body.finished());
+        // Passive at-rest bodies stay present while another body moves so
+        // the collision pass can hit them. Once all motion ends, remove the
+        // set atomically; recreating settled entries one-by-one here was the
+        // source of the permanent idle redraw loop.
+        if !crate::float_physics::bodies_need_simulation(
+            self.config.float_physics.wave.enabled,
+            self.window_float_bodies.values(),
+        ) {
+            self.window_float_bodies.clear();
+        }
     }
 
     /// One fixed `dt` physics substep across every F1 `full` body: wave/
@@ -5003,6 +5005,15 @@ impl Smallvil {
         self.window_sway.retain(|_, sway| !sway.finished());
         self.window_float_physics
             .retain(|_, physics| !physics.finished());
+        let stale_ambient: Vec<WlSurface> = self
+            .window_float_ambient
+            .keys()
+            .filter(|surface| !self.is_floating(surface))
+            .cloned()
+            .collect();
+        for surface in stale_ambient {
+            self.window_float_ambient.remove(&surface);
+        }
         self.swim_cameras.retain(|_, camera| !camera.at_rest());
         self.closing_window_animations
             .retain(|closing| !closing.animation.finished());
@@ -7389,7 +7400,8 @@ impl Smallvil {
     /// tiled window.
     pub fn toggle_floating(&mut self, surface: &WlSurface) {
         if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
-            let changed = if self.ocean.is_tiled(surface) {
+            let was_tiled = self.ocean.is_tiled(surface);
+            let changed = if was_tiled {
                 self.ocean
                     .make_floating(surface, self.config.gaps, self.config.bsp_split_bias)
             } else {
@@ -7410,6 +7422,9 @@ impl Smallvil {
                 )
             };
             if changed {
+                if !was_tiled {
+                    self.window_float_ambient.remove(surface);
+                }
                 self.retile();
                 self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
                     surface: surface.clone(),
@@ -7533,6 +7548,7 @@ impl Smallvil {
                 .insert(&output.name(), workspace, window, focused.as_ref());
             // No longer floating, so no longer needs its own workspace tag.
             self.floating_workspace.remove(surface);
+            self.window_float_ambient.remove(surface);
         }
 
         self.retile();
