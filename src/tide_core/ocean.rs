@@ -772,6 +772,52 @@ impl OceanSpace {
         self.reefs.iter().any(|reef| reef.layout.contains(surface))
     }
 
+    pub(crate) fn tiled_same_reef(&self, first: &WlSurface, second: &WlSurface) -> bool {
+        self.reefs
+            .iter()
+            .any(|reef| reef.layout.contains(first) && reef.layout.contains(second))
+    }
+
+    /// Removes only the BSP leaf used by a window-group member. Lifecycle
+    /// metadata such as app order, entry-output affinity, attached size, and
+    /// screen-pin state remains owned by Ocean while the tab is parked.
+    pub(crate) fn detach_tiled_for_group(&mut self, surface: &WlSurface) -> Option<Window> {
+        let reef = self
+            .reefs
+            .iter_mut()
+            .find(|reef| reef.layout.contains(surface))?;
+        let window = reef.layout.window(surface)?;
+        reef.layout.remove(surface);
+        Some(window)
+    }
+
+    pub(crate) fn replace_tiled_group_leaf(
+        &mut self,
+        old: &WlSurface,
+        new_window: &Window,
+    ) -> bool {
+        let Some(reef) = self.reefs.iter_mut().find(|reef| reef.layout.contains(old)) else {
+            return false;
+        };
+        reef.layout.replace_leaf(old, new_window);
+        true
+    }
+
+    /// Gives an ungrouped tab a new leaf in the same reef as the surviving
+    /// group member. No viewport fallback is needed: a valid group always
+    /// retains at least one active member in its original reef.
+    pub(crate) fn insert_tiled_next_to(&mut self, anchor: &WlSurface, window: Window) -> bool {
+        let Some(reef) = self
+            .reefs
+            .iter_mut()
+            .find(|reef| reef.layout.contains(anchor))
+        else {
+            return false;
+        };
+        reef.layout.insert(window, Some(anchor));
+        true
+    }
+
     pub fn window(&self, surface: &WlSurface) -> Option<Window> {
         self.reefs
             .iter()
@@ -799,7 +845,15 @@ impl OceanSpace {
         name: String,
         rect: Rectangle<i32, Logical>,
         layout: BspLayout,
+        output: &str,
     ) {
+        for surface in layout.windows().into_iter().filter_map(|window| {
+            window
+                .toplevel()
+                .map(|toplevel| toplevel.wl_surface().clone())
+        }) {
+            self.entry_outputs.insert(surface, output.to_string());
+        }
         self.reefs.push(OceanReef {
             _name: name,
             rect,
@@ -816,9 +870,12 @@ impl OceanSpace {
         surface: WlSurface,
         window: Window,
         rect: Rectangle<i32, Logical>,
+        output: &str,
     ) {
         self.floating_stack.retain(|s| s != &surface);
         self.floating_stack.push(surface.clone());
+        self.entry_outputs
+            .insert(surface.clone(), output.to_string());
         self.floating.insert(surface, (window, rect));
     }
 
@@ -1940,7 +1997,7 @@ mod tests {
     fn migrated_reefs_round_trip_through_drain_for_classic() {
         let mut ocean = OceanSpace::default();
         let rect = Rectangle::new((0, 0).into(), (1200, 800).into());
-        ocean.push_migrated_reef("ws-1".to_string(), rect, BspLayout::default());
+        ocean.push_migrated_reef("ws-1".to_string(), rect, BspLayout::default(), "main");
         ocean.set_camera_origin("left", OceanPoint { x: 0.0, y: 0.0 });
 
         let (reefs, floating, cameras, entries, pins) = ocean.drain_for_classic();

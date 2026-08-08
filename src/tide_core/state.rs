@@ -1017,9 +1017,9 @@ pub struct GroupMember {
 
 pub struct WindowGroup {
     pub ui_node_id: u64,
-    /// Which (output, workspace) tree's leaf this group occupies -- needed
-    /// to re-insert a parked member as its own tile again on `ungroup`
-    /// (`Layouts::insert` takes both explicitly).
+    /// Classic tree owner used for activation and reinsertion. Ocean groups
+    /// derive their live reef from the active leaf; these fields are cached
+    /// only for UI affinity and refreshed when migrating back to Classic.
     pub output: String,
     pub workspace: u32,
     /// Tab order. Always at least 2 -- a "group" of one collapses back to a
@@ -8457,7 +8457,8 @@ impl Smallvil {
                     .iter()
                     .find_map(|(name, number)| (*number == workspace).then(|| name.clone()))
                     .unwrap_or_else(|| format!("ws-{workspace}"));
-                self.ocean.push_migrated_reef(reef_name, reef_rect, tree);
+                self.ocean
+                    .push_migrated_reef(reef_name, reef_rect, tree, output_name);
             }
             // Point the camera at the previously-active workspace's reef.
             let active_ws = active.get(output_name).copied().unwrap_or(1);
@@ -8480,7 +8481,7 @@ impl Smallvil {
                 // Preserve real geometry instead of guessing another
                 // output's dimensions if this output disappeared.
                 self.ocean
-                    .push_migrated_floating(surface, tag.window, tag.rect);
+                    .push_migrated_floating(surface, tag.window, tag.rect, &tag.output);
                 continue;
             };
             let base_x = island_x.get(output_name).copied().unwrap_or(0);
@@ -8489,7 +8490,7 @@ impl Smallvil {
             let world_rect = classic_rect_to_ocean(tag.rect, *output_geometry, reef_rect);
             let was_pinned = self.pinned.contains(&surface);
             self.ocean
-                .push_migrated_floating(surface.clone(), tag.window, world_rect);
+                .push_migrated_floating(surface.clone(), tag.window, world_rect, output_name);
             if was_pinned {
                 self.ocean.pin_to_screen(&surface, output_name);
             }
@@ -8648,6 +8649,21 @@ impl Smallvil {
         for surface in pinned_surfaces {
             if self.floating_workspace.contains_key(&surface) {
                 self.pinned.insert(surface);
+            }
+        }
+
+        // Ocean groups identify their reef through the active leaf rather
+        // than a Classic workspace key. Once reefs have been assigned to
+        // Classic trees, refresh the cached owner used for activation,
+        // accessibility, and later ungroup operations.
+        for group in &mut self.groups {
+            let active_surface = &group.members[group.active].surface;
+            if let (Some(output), Some(workspace)) = (
+                self.layout.output_of(active_surface),
+                self.layout.workspace_of(active_surface),
+            ) {
+                group.output = output.to_string();
+                group.workspace = workspace;
             }
         }
 
@@ -8853,6 +8869,56 @@ impl Smallvil {
         }
     }
 
+    fn spatial_is_tiled(&self, surface: &WlSurface) -> bool {
+        match self.config.spatial_engine {
+            crate::config::SpatialEngine::Classic => self.layout.contains(surface),
+            crate::config::SpatialEngine::Ocean => self.ocean.is_tiled(surface),
+        }
+    }
+
+    fn spatial_tiled_window(&self, surface: &WlSurface) -> Option<Window> {
+        match self.config.spatial_engine {
+            crate::config::SpatialEngine::Classic => self.layout.window_of(surface),
+            crate::config::SpatialEngine::Ocean => self.ocean.window(surface),
+        }
+    }
+
+    fn spatial_tiles_share_owner(&self, first: &WlSurface, second: &WlSurface) -> bool {
+        match self.config.spatial_engine {
+            crate::config::SpatialEngine::Classic => {
+                self.layout.output_of(first) == self.layout.output_of(second)
+                    && self.layout.workspace_of(first) == self.layout.workspace_of(second)
+            }
+            crate::config::SpatialEngine::Ocean => self.ocean.tiled_same_reef(first, second),
+        }
+    }
+
+    fn detach_tiled_group_member(&mut self, surface: &WlSurface) -> Option<Window> {
+        match self.config.spatial_engine {
+            crate::config::SpatialEngine::Classic => {
+                let window = self.layout.window_of(surface)?;
+                self.layout.remove(surface);
+                Some(window)
+            }
+            crate::config::SpatialEngine::Ocean => self.ocean.detach_tiled_for_group(surface),
+        }
+    }
+
+    fn replace_tiled_group_leaf(&mut self, old: &WlSurface, new_window: &Window) -> bool {
+        match self.config.spatial_engine {
+            crate::config::SpatialEngine::Classic => {
+                if !self.layout.contains(old) {
+                    return false;
+                }
+                self.layout.replace_leaf(old, new_window);
+                true
+            }
+            crate::config::SpatialEngine::Ocean => {
+                self.ocean.replace_tiled_group_leaf(old, new_window)
+            }
+        }
+    }
+
     /// Which group (if any) `surface` is a member of, active or parked.
     pub fn group_of(&self, surface: &WlSurface) -> Option<usize> {
         self.groups
@@ -8868,7 +8934,7 @@ impl Smallvil {
 
     /// Groups the focused tiled window with its neighbor in `direction` --
     /// i3/sway's "tabbed container" idea: both end up sharing one
-    /// `Layouts` leaf, cycled between via `cycle_tab`. Reuses the same
+    /// Classic-tree or Ocean-reef leaf, cycled via `cycle_tab`. Reuses the same
     /// neighbor lookup `swap_direction` already does, and only ever finds a
     /// *tiled* neighbor (a floating window nearest in that direction isn't
     /// a valid group target, same restriction `swap_direction` applies).
@@ -8880,7 +8946,7 @@ impl Smallvil {
         let Some(focused) = self.focused_window_surface() else {
             return;
         };
-        if !self.layout.contains(&focused)
+        if !self.spatial_is_tiled(&focused)
             || self.fullscreen.contains_key(&focused)
             || self.pseudo_tiled.contains(&focused)
         {
@@ -8900,7 +8966,7 @@ impl Smallvil {
         let Some(neighbor_surface) = neighbor.toplevel().map(|t| t.wl_surface().clone()) else {
             return;
         };
-        if !self.layout.contains(&neighbor_surface)
+        if !self.spatial_is_tiled(&neighbor_surface)
             || self.fullscreen.contains_key(&neighbor_surface)
             || self.pseudo_tiled.contains(&neighbor_surface)
         {
@@ -8910,8 +8976,8 @@ impl Smallvil {
     }
 
     /// Merges `b` into `a`'s tiled slot as a new parked tab. Both must
-    /// already be tiled (checked by `group_direction`); `b`'s former leaf
-    /// collapses exactly like a normal close, since `Layouts::remove`
+    /// already be tiled in the same spatial owner; `b`'s former leaf
+    /// collapses exactly like a normal close, since the BSP removal
     /// removes it from the tree the same way either way. Merging two
     /// windows that are *both* already in (different) groups is out of
     /// scope for now -- no-op rather than picking a side to discard.
@@ -8920,13 +8986,50 @@ impl Smallvil {
             tracing::debug!("group-with: target is itself already grouped, skipping");
             return;
         }
-        let Some(b_window) = self.layout.window_of(b) else {
+        let existing_group = self.group_of(a);
+        let anchor = existing_group
+            .map(|idx| {
+                self.groups[idx].members[self.groups[idx].active]
+                    .surface
+                    .clone()
+            })
+            .unwrap_or_else(|| a.clone());
+        if !self.spatial_is_tiled(&anchor)
+            || !self.spatial_is_tiled(b)
+            || !self.spatial_tiles_share_owner(&anchor, b)
+        {
+            return;
+        }
+        let new_group_owner = if existing_group.is_none() {
+            let owner = match self.config.spatial_engine {
+                crate::config::SpatialEngine::Classic => {
+                    self.layout.output_of(&anchor).map(|output| {
+                        let workspace = self
+                            .layout
+                            .workspace_of(&anchor)
+                            .unwrap_or_else(|| self.layout.active_workspace(output));
+                        (output.to_string(), workspace)
+                    })
+                }
+                crate::config::SpatialEngine::Ocean => {
+                    self.ocean.entry_output(&anchor).map(|name| {
+                        let output = name.to_string();
+                        let workspace = self.layout.active_workspace(&output);
+                        (output, workspace)
+                    })
+                }
+            };
+            let Some(owner) = owner else { return };
+            Some(owner)
+        } else {
+            None
+        };
+        let Some(b_window) = self.detach_tiled_group_member(b) else {
             return;
         };
-        self.layout.remove(b);
         self.space.unmap_elem(&b_window);
 
-        if let Some(idx) = self.group_of(a) {
+        if let Some(idx) = existing_group {
             let ui_node_id = self.allocate_ui_node_id();
             self.groups[idx].members.push(GroupMember {
                 ui_node_id,
@@ -8938,13 +9041,7 @@ impl Smallvil {
             let group_ui_node_id = self.allocate_ui_node_id();
             let a_ui_node_id = self.allocate_ui_node_id();
             let b_ui_node_id = self.allocate_ui_node_id();
-            let Some(output) = self.layout.output_of(a).map(str::to_string) else {
-                return;
-            };
-            let workspace = self
-                .layout
-                .workspace_of(a)
-                .unwrap_or_else(|| self.layout.active_workspace(&output));
+            let (output, workspace) = new_group_owner.expect("new groups resolve an owner");
             self.groups.push(WindowGroup {
                 ui_node_id: group_ui_node_id,
                 output,
@@ -8952,7 +9049,7 @@ impl Smallvil {
                 members: vec![
                     GroupMember {
                         ui_node_id: a_ui_node_id,
-                        surface: a.clone(),
+                        surface: anchor,
                         parked_window: None,
                     },
                     GroupMember {
@@ -8989,7 +9086,13 @@ impl Smallvil {
             .iter()
             .position(|m| &m.surface == surface)?;
         let was_active = pos == self.groups[idx].active;
-        let active_window = was_active.then(|| self.layout.window_of(surface)).flatten();
+        let active_window = was_active
+            .then(|| self.spatial_tiled_window(surface))
+            .flatten();
+        if was_active && active_window.is_none() {
+            tracing::warn!("group active member has no spatial leaf, leaving group unchanged");
+            return None;
+        }
 
         let (new_active, dissolves) =
             group_removal_outcome(self.groups[idx].members.len(), self.groups[idx].active, pos);
@@ -9000,7 +9103,9 @@ impl Smallvil {
             let last_parked = self.groups[idx].members[0].parked_window.take();
             self.groups.remove(idx);
             if let Some(window) = last_parked {
-                self.layout.replace_leaf(surface, &window);
+                if !self.replace_tiled_group_leaf(surface, &window) {
+                    tracing::warn!("group dissolve lost its spatial leaf replacement");
+                }
             }
             self.retile();
             return removed_window;
@@ -9010,7 +9115,9 @@ impl Smallvil {
         self.groups[idx].strip = None;
         if was_active {
             if let Some(window) = self.groups[idx].members[new_active].parked_window.take() {
-                self.layout.replace_leaf(surface, &window);
+                if !self.replace_tiled_group_leaf(surface, &window) {
+                    tracing::warn!("group tab promotion lost its spatial leaf replacement");
+                }
             }
         }
         self.retile();
@@ -9019,29 +9126,44 @@ impl Smallvil {
 
     /// Removes `surface` from its group, if grouped. The window keeps
     /// existing (unlike `leave_group_on_close`), so it becomes its own
-    /// ordinary tile again -- splitting off from the last leaf in tree
-    /// order (`BspLayout::insert`'s own fallback), since "which leaf
-    /// currently has focus" isn't meaningfully derivable here: the group
-    /// this came from may have just dissolved or promoted a different
-    /// member into its old leaf.
+    /// ordinary tile again. Classic uses its tree fallback; Ocean inserts
+    /// beside the surviving member so the tab cannot jump to another reef.
     pub fn ungroup(&mut self, surface: &WlSurface) {
         let Some(idx) = self.group_of(surface) else {
             return;
         };
         let output = self.groups[idx].output.clone();
         let workspace = self.groups[idx].workspace;
+        let anchor = self.groups[idx]
+            .members
+            .iter()
+            .find(|member| &member.surface != surface)
+            .map(|member| member.surface.clone());
         let Some(window) = self.leave_group(idx, surface) else {
             return;
         };
-        self.layout.insert(&output, workspace, window, None);
+        match self.config.spatial_engine {
+            crate::config::SpatialEngine::Classic => {
+                self.layout.insert(&output, workspace, window, None);
+            }
+            crate::config::SpatialEngine::Ocean => {
+                let inserted = anchor
+                    .as_ref()
+                    .is_some_and(|anchor| self.ocean.insert_tiled_next_to(anchor, window));
+                if !inserted {
+                    tracing::warn!("ungroup could not find the surviving Ocean reef");
+                    return;
+                }
+            }
+        }
         self.retile();
         self.request_redraw();
     }
 
     /// If `surface` belongs to a window group, leaves it (promoting the
     /// next tab or dissolving the group, as `leave_group` describes)
-    /// instead of letting `detach_mapped_toplevel`'s ordinary
-    /// `self.layout.remove(surface)` collapse its leaf. No-op for an
+    /// instead of letting `detach_mapped_toplevel`'s ordinary spatial
+    /// removal collapse its leaf. No-op for an
     /// ungrouped window. Treats a temporary (null-buffer) unmap the same as
     /// permanent destruction for group membership -- a deliberate v1
     /// scope-out: a parked member being independently hidden-then-remapped
@@ -9095,14 +9217,17 @@ impl Smallvil {
         }
 
         let old_surface = self.groups[idx].members[old_active].surface.clone();
-        let Some(old_window) = self.layout.window_of(&old_surface) else {
+        let Some(old_window) = self.spatial_tiled_window(&old_surface) else {
             return;
         };
         let Some(new_window) = self.groups[idx].members[new_active].parked_window.take() else {
             return;
         };
 
-        self.layout.replace_leaf(&old_surface, &new_window);
+        if !self.replace_tiled_group_leaf(&old_surface, &new_window) {
+            self.groups[idx].members[new_active].parked_window = Some(new_window);
+            return;
+        }
         self.space.unmap_elem(&old_window);
         self.groups[idx].members[old_active].parked_window = Some(old_window);
         self.groups[idx].active = new_active;
@@ -9226,19 +9351,22 @@ impl Smallvil {
 
         // Where does the window live? A parked group member isn't in any
         // tree under its own surface -- the group owns its slot.
-        let ownership = self
-            .group_of(surface)
-            .map(|idx| (self.groups[idx].output.clone(), self.groups[idx].workspace))
-            .or_else(|| {
-                let name = self.layout.output_of(surface)?;
-                let workspace = self.layout.workspace_of(surface)?;
-                Some((name.to_string(), workspace))
+        let ownership = (self.config.spatial_engine == crate::config::SpatialEngine::Classic)
+            .then(|| {
+                self.group_of(surface)
+                    .map(|idx| (self.groups[idx].output.clone(), self.groups[idx].workspace))
+                    .or_else(|| {
+                        let name = self.layout.output_of(surface)?;
+                        let workspace = self.layout.workspace_of(surface)?;
+                        Some((name.to_string(), workspace))
+                    })
+                    .or_else(|| {
+                        self.floating_workspace
+                            .get(surface)
+                            .map(|tag| (tag.output.clone(), tag.workspace))
+                    })
             })
-            .or_else(|| {
-                self.floating_workspace
-                    .get(surface)
-                    .map(|tag| (tag.output.clone(), tag.workspace))
-            });
+            .flatten();
 
         if let Some((output_name, workspace)) = ownership {
             let hidden = self.layout.active_workspace(&output_name) != workspace
@@ -9306,7 +9434,9 @@ impl Smallvil {
 
         let mut elements = Vec::new();
         for group in &mut self.groups {
-            if group.output != output_name {
+            if self.config.spatial_engine == crate::config::SpatialEngine::Classic
+                && group.output != output_name
+            {
                 continue;
             }
             let active_surface = &group.members[group.active].surface;
