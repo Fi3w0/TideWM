@@ -6844,9 +6844,9 @@ fn set_i32(field: &mut i32, key: &str, value: &str) {
 }
 
 fn set_f64(field: &mut f64, key: &str, value: &str) {
-    match value.parse() {
-        Ok(n) => *field = n,
-        Err(_) => tracing::warn!(key, value, "Expected a number, ignoring"),
+    match value.parse::<f64>() {
+        Ok(n) if n.is_finite() => *field = n,
+        _ => tracing::warn!(key, value, "Expected a finite number, ignoring"),
     }
 }
 
@@ -6859,9 +6859,9 @@ fn parse_viscosity(value: &str) -> Option<f64> {
 }
 
 fn set_opt_f64(field: &mut Option<f64>, key: &str, value: &str) {
-    match value.parse() {
-        Ok(n) => *field = Some(n),
-        Err(_) => tracing::warn!(key, value, "Expected a number, ignoring"),
+    match value.parse::<f64>() {
+        Ok(n) if n.is_finite() => *field = Some(n),
+        _ => tracing::warn!(key, value, "Expected a finite number, ignoring"),
     }
 }
 
@@ -7765,6 +7765,29 @@ mod tests {
             )],
         );
         assert!(malformed.adaptive_sync.is_none());
+    }
+
+    #[test]
+    fn shared_numeric_lowering_rejects_non_finite_values() {
+        let mut required = 0.75;
+        set_f64(&mut required, "scale", "NaN");
+        assert_eq!(required, 0.75);
+        set_f64(&mut required, "scale", "inf");
+        assert_eq!(required, 0.75);
+        set_f64(&mut required, "scale", "1.25");
+        assert_eq!(required, 1.25);
+
+        let mut optional = Some(-0.5);
+        set_opt_f64(&mut optional, "accel_speed", "-inf");
+        assert_eq!(optional, Some(-0.5));
+        set_opt_f64(&mut optional, "accel_speed", "0.25");
+        assert_eq!(optional, Some(0.25));
+
+        let output = lower_output_block(
+            "DP-1",
+            &[waves::Entry::Assign("scale".into(), "NaN".into())],
+        );
+        assert_eq!(output.scale, OutputConfig::default().scale);
     }
 
     #[test]

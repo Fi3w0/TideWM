@@ -529,8 +529,8 @@ impl Dispatch<ZwlrOutputConfigurationHeadV1, ConfigHeadData> for Smallvil {
                     resource.post_error(Error::AlreadySet, "scale already set");
                     return;
                 }
-                if scale <= 0.0 {
-                    resource.post_error(Error::InvalidScale, "scale must be positive");
+                if !scale.is_finite() || scale <= 0.0 {
+                    resource.post_error(Error::InvalidScale, "scale must be finite and positive");
                     return;
                 }
                 cfg.scale_set = true;

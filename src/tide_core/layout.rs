@@ -1745,19 +1745,23 @@ fn cascade_rects_from_state(
     let mut remaining_h = area.size.h;
     for i in 0..rows {
         let row_h = if i + 1 == rows {
-            remaining_h
+            remaining_h.max(0)
         } else {
-            ((state.row_ratios[i] * area.size.h as f32).round() as i32).clamp(1, remaining_h)
+            let available = remaining_h.max(0);
+            let minimum = i32::from(available > 0);
+            ((state.row_ratios[i] * area.size.h as f32).round() as i32).clamp(minimum, available)
         };
         let cols = state.row_counts[i];
         let mut x = area.loc.x;
         let mut remaining_w = area.size.w;
         for j in 0..cols {
             let cell_w = if j + 1 == cols {
-                remaining_w
+                remaining_w.max(0)
             } else {
+                let available = remaining_w.max(0);
+                let minimum = i32::from(available > 0);
                 ((state.cell_ratios[i][j] * area.size.w as f32).round() as i32)
-                    .clamp(1, remaining_w)
+                    .clamp(minimum, available)
             };
             out.push(Rectangle::new((x, y).into(), (cell_w, row_h).into()));
             x += cell_w;
@@ -2102,6 +2106,26 @@ mod tests {
             .map(|r| (r.size.w as i64) * (r.size.h as i64))
             .sum();
         assert_eq!(total, 1000 * 1000);
+    }
+
+    #[test]
+    fn cascade_rects_exhaust_tiny_runtime_area_without_panicking() {
+        let a = area(1, 1);
+        let mut state = resolve_cascade_state(None, 9, 1.0);
+        state.row_counts = vec![3, 3, 3];
+        state.row_ratios = vec![1.0 / 3.0; 3];
+        state.cell_ratios = vec![vec![1.0 / 3.0; 3]; 3];
+
+        let rects = cascade_rects_from_state(&state, a);
+        assert_eq!(rects.len(), 9);
+        assert!(rects
+            .iter()
+            .all(|rect| rect.size.w >= 0 && rect.size.h >= 0));
+        let total: i64 = rects
+            .iter()
+            .map(|rect| i64::from(rect.size.w) * i64::from(rect.size.h))
+            .sum();
+        assert_eq!(total, 1);
     }
 
     #[test]
