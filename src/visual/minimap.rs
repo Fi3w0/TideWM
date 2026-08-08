@@ -203,6 +203,10 @@ pub struct MinimapPeek {
     /// Canvas size in logical pixels: the output size the map was built
     /// for. Stored because `MemoryRenderBuffer` doesn't expose its size.
     canvas_size: Size<i32, Logical>,
+    /// Global logical origin of the output whose local canvas this buffer
+    /// fills. Pointer events arrive globally and must subtract this before
+    /// inverting the canvas transform.
+    output_loc: Point<i32, Logical>,
     /// Small crosshair glyph drawn over the map at the pointer's current
     /// canvas position, so aiming a click doesn't mean guessing. Rebuilt
     /// only when the pointer moves (`set_last_location`), never per frame.
@@ -269,14 +273,14 @@ impl MinimapPeek {
     /// plainer.
     pub fn build(
         output_name: String,
-        output_size: (i32, i32),
+        output_geometry: Rectangle<i32, Logical>,
         pointer_location: Point<f64, Logical>,
         style: MinimapStyle,
         windows: &[(Rectangle<i32, Logical>, String, bool)],
         reef_rects: &[Rectangle<i32, Logical>],
         viewports: &[(String, Rectangle<i32, Logical>)],
     ) -> Self {
-        let (width, height) = output_size;
+        let (width, height) = (output_geometry.size.w, output_geometry.size.h);
 
         let mut extent: Option<Rectangle<f64, Logical>> = None;
         let mut grow = |rect: Rectangle<i32, Logical>| {
@@ -438,6 +442,7 @@ impl MinimapPeek {
             output_name,
             buffer,
             canvas_size: Size::from((width, height)),
+            output_loc: output_geometry.loc,
             cursor_buffer: build_cursor_glyph(),
             world_origin,
             scale,
@@ -508,9 +513,10 @@ impl MinimapPeek {
     /// Inverts `world_to_canvas` at the peek's last known pointer position
     /// -- the world point a click should travel the camera to.
     pub fn world_point_at_last_location(&self) -> Point<f64, Logical> {
+        let local = self.last_location - self.output_loc.to_f64();
         Point::from((
-            self.world_origin.x + self.last_location.x / self.scale,
-            self.world_origin.y + self.last_location.y / self.scale,
+            self.world_origin.x + local.x / self.scale,
+            self.world_origin.y + local.y / self.scale,
         ))
     }
 }
@@ -675,9 +681,10 @@ mod tests {
         viewports: &[(String, Rectangle<i32, Logical>)],
         pointer: Point<f64, Logical>,
     ) -> MinimapPeek {
+        let output_geometry = Rectangle::new((-430, 275).into(), (1111, 777).into());
         MinimapPeek::build(
             "output-1".to_string(),
-            (1920, 1080),
+            output_geometry,
             pointer,
             MinimapPreset::Bioluminescent.base_style(),
             windows,
@@ -704,7 +711,7 @@ mod tests {
 
         // Canvas center is the padded extent's center, which (with only
         // one rect in the world) is the window's own center.
-        peek.set_last_location(Point::from((960.0, 540.0)));
+        peek.set_last_location(Point::from((125.5, 663.5)));
         let world = peek.world_point_at_last_location();
 
         let world_point: Point<i32, Logical> =
@@ -733,7 +740,7 @@ mod tests {
             Point::from((0.0, 0.0)),
         );
 
-        peek.set_last_location(Point::from((960.0, 540.0)));
+        peek.set_last_location(Point::from((125.5, 663.5)));
         let world = peek.world_point_at_last_location();
         let world_point: Point<i32, Logical> =
             Point::from((world.x.round() as i32, world.y.round() as i32));

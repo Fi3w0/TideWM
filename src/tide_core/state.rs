@@ -6612,7 +6612,7 @@ impl Smallvil {
         {
             return;
         }
-        let Some(mode) = output.current_mode() else {
+        let Some(output_geometry) = self.space.output_geometry(output) else {
             return;
         };
         let output_name = output.name();
@@ -6661,7 +6661,7 @@ impl Smallvil {
         );
         self.minimap_peek = Some(crate::minimap::MinimapPeek::build(
             output_name,
-            (mode.size.w, mode.size.h),
+            output_geometry,
             pointer_location,
             style,
             &windows,
@@ -9884,7 +9884,7 @@ impl Smallvil {
         let Some(output) = self.primary_output() else {
             return;
         };
-        let Some(mode) = output.current_mode() else {
+        let Some(output_geometry) = self.space.output_geometry(&output) else {
             return;
         };
         let output_name = output.name();
@@ -9907,8 +9907,8 @@ impl Smallvil {
 
         const CELL_GAP: i32 = 12;
         let cell_count = workspaces.len() as i32;
-        let cell_w = (mode.size.w - CELL_GAP * (cell_count + 1)) / cell_count.max(1);
-        let cell_h = mode.size.h - CELL_GAP * 2;
+        let cell_w = (output_geometry.size.w - CELL_GAP * (cell_count + 1)) / cell_count.max(1);
+        let cell_h = output_geometry.size.h - CELL_GAP * 2;
 
         let cells: Vec<crate::overview::OverviewCell> = workspaces
             .iter()
@@ -9943,7 +9943,7 @@ impl Smallvil {
         self.overview = Some(crate::overview::Overview::build(
             output_name,
             &cells,
-            (mode.size.w, mode.size.h),
+            (output_geometry.size.w, output_geometry.size.h),
         ));
         self.request_redraw();
     }
@@ -10164,7 +10164,7 @@ impl Smallvil {
             self.close_depth_deck();
             return;
         };
-        let Some(mode) = output.current_mode() else {
+        let Some(output_geometry) = self.space.output_geometry(&output) else {
             self.close_depth_deck();
             return;
         };
@@ -10179,7 +10179,7 @@ impl Smallvil {
             view.workspace,
             &titles,
             view.selected,
-            (mode.size.w, mode.size.h),
+            (output_geometry.size.w, output_geometry.size.h),
         ));
     }
 

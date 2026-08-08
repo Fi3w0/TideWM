@@ -171,9 +171,13 @@ pub fn compute_cues(
     let top = viewport.loc.y;
     let bottom = viewport.loc.y + viewport.size.h;
     // Screen-space bounds for clamping the glow fully inside the output.
-    let screen_w = viewport.size.w as f32 * zoom as f32;
-    let screen_h = viewport.size.h as f32 * zoom as f32;
-    let half = params.size / 2.0;
+    let screen_w = (viewport.size.w as f32 * zoom as f32).max(1.0);
+    let screen_h = (viewport.size.h as f32 * zoom as f32).max(1.0);
+    // Treat configured size as a maximum. A cue larger than a small logical
+    // output cannot be clamped fully inside it (`f32::clamp` would receive
+    // inverted bounds), so fit it to the live viewport first.
+    let cue_size = params.size.min(screen_w).min(screen_h).max(1.0);
+    let half = cue_size / 2.0;
 
     let mut cues: Vec<((u8, f32), CompassCue)> = windows
         .iter()
@@ -230,7 +234,7 @@ pub fn compute_cues(
                     angle: dy.atan2(dx) as f32,
                     color,
                     alpha: params.peak_alpha * factor,
-                    size: params.size,
+                    size: cue_size,
                     shape: params.shape.as_f32(),
                 },
             ))
@@ -475,6 +479,18 @@ mod tests {
         let half = params().size / 2.0;
         assert!((cues[0].center[0] - (1920.0 - half)).abs() < 0.5);
         assert!((cues[0].center[1] - 540.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn oversized_cue_fits_small_live_viewport() {
+        let viewport = Rectangle::new(Point::from((0.0, 0.0)), Size::from((31.0, 17.0)));
+        let windows = [(Point::from((100.0, 8.0)), CueKind::Urgent)];
+
+        let cues = compute_cues(viewport, 1.0, &windows, &params());
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].size, 17.0);
+        assert!(cues[0].center[0] >= cues[0].size / 2.0);
+        assert!(cues[0].center[1] >= cues[0].size / 2.0);
     }
 
     #[test]

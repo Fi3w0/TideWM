@@ -25,7 +25,7 @@ use smithay::{
         renderer::gles::GlesRenderer,
     },
     input::keyboard::Keysym,
-    utils::Transform,
+    utils::{Logical, Rectangle, Transform},
 };
 
 use crate::{
@@ -59,8 +59,12 @@ pub(crate) struct SourcePicker {
     /// Row under the pointer, or None. `hover_cancel` is the Cancel button.
     hovered: Option<usize>,
     hover_cancel: bool,
+    /// Output-local panel origin; `output_loc` converts global input into it.
     location: (i32, i32),
+    output_loc: (i32, i32),
     size: (i32, i32),
+    first_visible: usize,
+    visible_rows: usize,
     buffer: MemoryRenderBuffer,
     response: Option<mpsc::SyncSender<Option<SourceChoice>>>,
 }
@@ -68,16 +72,20 @@ pub(crate) struct SourcePicker {
 impl SourcePicker {
     fn new(
         output_name: String,
-        output_size: (i32, i32),
+        output_geometry: Rectangle<i32, Logical>,
         choices: Vec<SourceChoice>,
         response: mpsc::SyncSender<Option<SourceChoice>>,
     ) -> Self {
+        let output_size = (output_geometry.size.w, output_geometry.size.h);
         let rows = choices.len() as i32;
         let height = (PAD + HEADER_HEIGHT + rows * ROW_HEIGHT + FOOTER_HEIGHT + PAD)
             .min(output_size.1.max(1));
         let width = PANEL_WIDTH.min(output_size.0.max(1));
         let location = ((output_size.0 - width) / 2, (output_size.1 - height) / 2);
-        let buffer = build_buffer(width, height, &choices, 0, None, false);
+        let visible_rows =
+            ((height - PAD * 2 - HEADER_HEIGHT - FOOTER_HEIGHT).max(0) / ROW_HEIGHT) as usize;
+        let visible_rows = visible_rows.min(choices.len());
+        let buffer = build_buffer(width, height, &choices[..visible_rows], 0, None, false);
         Self {
             output_name,
             choices,
@@ -85,7 +93,10 @@ impl SourcePicker {
             hovered: None,
             hover_cancel: false,
             location,
+            output_loc: (output_geometry.loc.x, output_geometry.loc.y),
             size: (width, height),
+            first_visible: 0,
+            visible_rows,
             buffer,
             response: Some(response),
         }
@@ -113,11 +124,8 @@ impl SourcePicker {
 
     /// Whether a global logical position is inside the panel.
     pub(crate) fn contains(&self, global: (f64, f64)) -> bool {
-        let (x, y) = global;
-        x >= self.location.0 as f64
-            && x < (self.location.0 + self.size.0) as f64
-            && y >= self.location.1 as f64
-            && y < (self.location.1 + self.size.1) as f64
+        let (x, y) = self.to_local(global);
+        x >= 0.0 && x < self.size.0 as f64 && y >= 0.0 && y < self.size.1 as f64
     }
 
     /// Applies a pointer hover at a global position, returning whether the
@@ -131,14 +139,7 @@ impl SourcePicker {
         }
         self.hovered = row;
         self.hover_cancel = cancel;
-        self.buffer = build_buffer(
-            self.size.0,
-            self.size.1,
-            &self.choices,
-            self.selected,
-            self.hovered,
-            self.hover_cancel,
-        );
+        self.rebuild_buffer();
         true
     }
 
@@ -147,20 +148,20 @@ impl SourcePicker {
     /// every interactive element.
     pub(crate) fn click_at(&mut self, global: (f64, f64)) -> Option<bool> {
         let local = self.to_local(global);
+        if self.cancel_at(local) {
+            return Some(false);
+        }
         if let Some(row) = self.row_at(local) {
             self.selected = row;
             return Some(true);
-        }
-        if self.cancel_at(local) {
-            return Some(false);
         }
         None
     }
 
     fn to_local(&self, global: (f64, f64)) -> (f64, f64) {
         (
-            global.0 - self.location.0 as f64,
-            global.1 - self.location.1 as f64,
+            global.0 - (self.output_loc.0 + self.location.0) as f64,
+            global.1 - (self.output_loc.1 + self.location.1) as f64,
         )
     }
 
@@ -171,7 +172,9 @@ impl SourcePicker {
         }
         let rows_top = (PAD + HEADER_HEIGHT) as f64;
         let row = ((y - rows_top) / ROW_HEIGHT as f64).floor() as isize;
-        (row >= 0 && (row as usize) < self.choices.len()).then_some(row as usize)
+        (row >= 0 && (row as usize) < self.visible_rows)
+            .then_some(self.first_visible + row as usize)
+            .filter(|row| *row < self.choices.len())
     }
 
     fn cancel_at(&self, local: (f64, f64)) -> bool {
@@ -190,18 +193,38 @@ impl SourcePicker {
             return;
         }
         self.selected = (self.selected as isize + delta).rem_euclid(len as isize) as usize;
+        if self.visible_rows > 0 {
+            if self.selected < self.first_visible {
+                self.first_visible = self.selected;
+            } else if self.selected >= self.first_visible + self.visible_rows {
+                self.first_visible = self.selected + 1 - self.visible_rows;
+            }
+        }
+        self.hovered = None;
+        self.rebuild_buffer();
+    }
+
+    fn rebuild_buffer(&mut self) {
+        let end = (self.first_visible + self.visible_rows).min(self.choices.len());
+        let selected = self.selected.saturating_sub(self.first_visible);
+        let hovered = self
+            .hovered
+            .filter(|row| *row >= self.first_visible && *row < end)
+            .map(|row| row - self.first_visible);
         self.buffer = build_buffer(
             self.size.0,
             self.size.1,
-            &self.choices,
-            self.selected,
-            self.hovered,
+            &self.choices[self.first_visible..end],
+            selected,
+            hovered,
             self.hover_cancel,
         );
     }
 
     fn complete(mut self, accepted: bool) {
-        let choice = accepted.then(|| self.choices[self.selected].clone());
+        let choice = (accepted && self.visible_rows > 0)
+            .then(|| self.choices.get(self.selected).cloned())
+            .flatten();
         if let Some(response) = self.response.take() {
             let _ = response.send(choice);
         }
@@ -233,6 +256,10 @@ impl Smallvil {
             return;
         };
         let Some(ui_mode) = ui_output.current_mode() else {
+            let _ = response.send(None);
+            return;
+        };
+        let Some(ui_geometry) = self.space.output_geometry(&ui_output) else {
             let _ = response.send(None);
             return;
         };
@@ -300,7 +327,7 @@ impl Smallvil {
         }
         self.screencast_picker = Some(SourcePicker::new(
             ui_output.name(),
-            (ui_mode.size.w, ui_mode.size.h),
+            ui_geometry,
             choices,
             response,
         ));
@@ -739,5 +766,61 @@ fn draw_text(
         if pen_x >= width - PAD {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn choices(count: usize) -> Vec<SourceChoice> {
+        (0..count)
+            .map(|index| SourceChoice {
+                source: ScreencastSource::Window(index as u64),
+                source_type: WINDOW,
+                width: 1,
+                height: 1,
+                label: format!("source-{index}"),
+            })
+            .collect()
+    }
+
+    fn picker(count: usize) -> SourcePicker {
+        let (tx, _rx) = mpsc::sync_channel(1);
+        SourcePicker::new(
+            "test-output".to_string(),
+            Rectangle::new((-317, 241).into(), (613, 269).into()),
+            choices(count),
+            tx,
+        )
+    }
+
+    #[test]
+    fn global_input_accounts_for_output_origin() {
+        let picker = picker(2);
+        let panel_x = picker.output_loc.0 + picker.location.0;
+        let panel_y = picker.output_loc.1 + picker.location.1;
+
+        assert!(picker.contains((panel_x as f64 + 1.0, panel_y as f64 + 1.0)));
+        assert!(!picker.contains((picker.location.0 as f64, picker.location.1 as f64)));
+    }
+
+    #[test]
+    fn keyboard_scrolls_and_cancel_cannot_hit_clipped_row() {
+        let mut picker = picker(6);
+        assert!(picker.visible_rows < picker.choices.len());
+        for _ in 0..5 {
+            picker.move_selection(1);
+        }
+        assert!(picker.selected >= picker.first_visible);
+        assert!(picker.selected < picker.first_visible + picker.visible_rows);
+
+        let panel_x = picker.output_loc.0 + picker.location.0;
+        let panel_y = picker.output_loc.1 + picker.location.1;
+        let cancel = (
+            (panel_x + picker.size.0 - PAD - 1) as f64,
+            (panel_y + picker.size.1 - PAD - 1) as f64,
+        );
+        assert_eq!(picker.click_at(cancel), Some(false));
     }
 }
