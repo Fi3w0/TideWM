@@ -6,6 +6,97 @@ Scope: the complete Rust source tree, build/package entry points, the Wave confi
 
 This is a static code review, not a claim that every issue below was reproduced on hardware. Each item has a confidence label. No source file was changed, and nothing was committed. This report is the only intended working-tree change.
 
+## Implementation handoff
+
+- Updated: 2026-08-08
+- Implementation branch: `ai/codex/report-fixes`
+- Separate worktree: `/home/fiw/Proyects/TideWM-worktrees/report-fixes`
+- Implementation head before this report-only update: `d9f5fcc`
+- Current TideWM version on the branch: `0.90.39`
+- Push status: local only; nothing from this branch has been pushed.
+
+The finding text below is the original audit evidence. It is intentionally retained even when a finding is closed. Use this handoff ledger as the current status authority, then inspect the named commit and current code before changing a closed area. Do not repeat a fix merely because its original finding still says “confirmed.”
+
+### Current totals
+
+- Critical: all 7 closed.
+- High: H-01 through H-44 closed. H-45 was re-audited as a stale false positive because the current udev path already processes connector `Changed` events and rescans/retries surface creation.
+- Medium explicitly re-audited and closed: M-01, M-02, M-04, M-09, M-10, M-14 through M-21, and M-30.
+- Medium still open or awaiting a fresh audit: M-03, M-05 through M-08, M-11 through M-13, M-22 through M-29, and M-31 through M-74.
+- Performance opportunities P-01 through P-10: not worked in this branch unless a closed correctness fix incidentally reduced the same cost. Treat all ten as open until measured and re-audited.
+- Lower-confidence items U-01 through U-16: not systematically re-audited. Treat them as investigation tasks, not established bugs.
+- Formatter findings F-01 through F-04: open.
+- The dedicated comment/documentation cleanup and the roadmap work are not finished.
+
+### Closed Critical findings
+
+| Findings | Commit | Resolution |
+| --- | --- | --- |
+| C-01, C-02 | `a64dd40` | Isolated session-lock rendering and capture from client content and pre-lock overlays. |
+| C-03 | `f98b62b` | Rejected blocking gamma-control descriptors and enforced the bounded input contract. |
+| C-04, C-07 | `17496f1` | Bounded Wave execution, eval traversal, cycles, and output size. |
+| C-05 | `c833242` | Kept IPC connection leases for long-lived subscribers. |
+| C-06 | `87214f8` | Bound portal sessions to their D-Bus owners and made lifecycle transitions atomic. |
+
+### Closed High findings
+
+| Findings | Commit | Resolution |
+| --- | --- | --- |
+| H-01 through H-03, H-06 | `9fd1621` | Repaired Classic/Ocean migration visibility, per-output island geometry, floating conversions, and overflow-prone workspace math. |
+| H-04 | `c297555` | Routed window-group ownership and lifecycle through Ocean reefs. |
+| H-05 | `c071777` | Made Ocean screen-pin ownership authoritative. |
+| H-07, H-08 | `c83a859` | Prevented settled or stale floating animation state from sustaining redraws. |
+| H-09 | `09cd864` | Stopped reactive glass from treating its own capture commit as new damage. |
+| H-10, H-11 | `c4c63a6` | Delayed output publication until DRM construction succeeds and restored dirty state after transient render/queue failure. |
+| H-12, H-13 | `32a0652` | Corrected XDG lifecycle events and made screencast window snapshots incremental. |
+| H-14, H-24 | `654d685` | Rejected non-finite geometry configuration and made cascade safe for arbitrarily small live layout areas. |
+| H-15 through H-19 | `895fa90` | Derived compositor UI size and coordinates from live logical output geometry and bounded picker/compass layout. |
+| H-20 | `3b41126` | Bounded close-animation snapshot count and memory from live output area. |
+| H-21 | `a1ffa1a` | Updated Ocean floating/tree ownership during keyboard resize. |
+| H-22 | `42837ce` | Evaluated Ocean edge physics in camera/world coordinates using the live viewport. |
+| H-23 | `b98df42` | Pruned empty workspace layout state and rejected meaningless runtime overrides. |
+| H-25 | `5f328a8` | Replaced client-reachable recursive BSP walks and destruction with explicit heap-backed traversal. |
+| H-26 through H-28 | `2cf8484` | Made Wave reload transactional and bounded includes, generated entries, handlers, and deferred actions. |
+| H-29 | `13ddb2d` | Secured the fallback config directory by effective user, ownership, mode, and symlink checks. |
+| H-30 | `0294a04` | Protected explicit IPC socket paths and rediscovered stale automatic sockets safely. |
+| H-31, H-32 | `8748877` | Published replacement screencast nodes and terminated streams after daemon loss or incompatible size changes. |
+| H-33 | `5be4a67` | Paired accessibility releases with the recipients of their matching presses. |
+| H-34 | `90c7e9e` | Replaced the fixed udev redraw poll with damage wakeups, output VBlank pacing, and mode-derived retry periods. |
+| H-35, H-40 | `6d6ee92` | Routed callbacks and presentation feedback through actual per-output rendered placements. |
+| H-36, H-37, H-44 | `48e8d86` | Migrated fullscreen, maximize, Classic depth, and zero-output ownership safely across hotplug. |
+| H-38, H-39, H-41 | `69a9271` | Resolved Ocean interaction, drag, action, and screencast output from the live presenting camera. |
+| H-42, H-43 | `9522858` | Preserved floating restore geometry during output movement and stopped output-manager resources without invalidating other clients. |
+| H-45 | no code change | False positive against the current tree: `UdevEvent::Changed` is handled and connector state is rescanned. |
+
+### Closed Medium findings
+
+| Findings | Commit | Resolution |
+| --- | --- | --- |
+| M-01, M-02 | `5ed7751` | Made output capture dimensions transform-aware while keeping regions in the upright offscreen coordinate space; sized and offset toplevel capture from its popup-inclusive bounds. DMA-BUF validation now uses the same dimensions. |
+| M-04, M-09, M-10 | `d9f5fcc` | Pruned finished ripples without depending on rendering, made exponential easing land exactly on its endpoint, and derived overflow-safe ripple rectangles from the numeric type limits. |
+| M-14, M-16, M-17, M-18 | `d9f5fcc` | Used live zoomed camera centers in both axes for admission/migration, sampled in-flight camera motion, and prevented fullscreen FitPlacement hit-test fall-through. |
+| M-15 | `48e8d86` | Migrated Classic Depth Deck ownership on output disconnect. |
+| M-19, M-20, M-21 | `d9f5fcc` | Clamped the pointer to the union of half-open live output rectangles, bounded gaps from each live slot, and invalidated resize topology after algorithm/tree changes. |
+| M-30 | `9522858` | Removed stopped output-manager head resources without advancing or corrupting shared transaction serials. |
+
+### Validation state
+
+- After `d9f5fcc`, `cargo test --locked --all-features` passed all 356 compositor tests and all 6 `wavefmt` tests outside the restricted IPC socket sandbox.
+- `cargo check --locked --all-features` passed after the final Medium batch.
+- Strict all-target/all-feature Clippy passed at the preceding `0.90.38` capture checkpoint (`5ed7751`). Run it again before merging the eventual complete branch because the final `d9f5fcc` batch was test/check validated but did not receive another Clippy invocation before the work paused.
+- Capture and geometry regression tests use deliberately arbitrary dimensions. No monitor resolution, refresh rate, GPU vendor, input device, or other configurable/hardware property was introduced as a fixed runtime assumption.
+- Nested and real-DRM validation for the complete audit-fix series is still pending. Automated tests cannot prove mixed-output KMS/VBlank behavior, connector hotplug, rotated physical outputs, VRR, real tablet/touch mapping, or visual feel.
+
+### Instructions for the next model
+
+1. Work only in `ai/codex/report-fixes` and the separate worktree above. Confirm it is clean before editing and do not push unless the maintainer explicitly asks.
+2. Start from the open Medium list above. Re-audit each finding against current code before implementing it; High fixes changed many referenced line numbers and may overlap later findings.
+3. Keep hardware and user-configurable values dynamic. Do not hardcode a monitor resolution, refresh rate, output count, scale, transform, GPU, device, connector name, or desktop extent.
+4. Prefer small signed commits. For each shipped milestone, bump the patch version in `Cargo.toml` and the TideWM package entry in `Cargo.lock`, and add a concise `CHANGELOG.md` entry.
+5. Run focused tests while editing, then `cargo fmt --all -- --check`, full locked tests, and strict all-target/all-feature Clippy. Use `env -u NO_COLOR` for nested TideWM sessions.
+6. Ask the maintainer for a visual check only when behavior or appearance cannot be judged from automated output. Record nested versus real-hardware verification separately.
+7. Update this ledger whenever findings close. Do not mark an item complete from compilation alone or because a nearby fix appears related.
+
 ## Executive summary
 
 The codebase compiles cleanly and its test suite is healthy, but the audit found several release-blocking issues concentrated in four areas:
