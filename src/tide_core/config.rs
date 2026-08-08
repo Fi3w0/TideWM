@@ -3,6 +3,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -6890,22 +6891,73 @@ fn config_path() -> PathBuf {
         return PathBuf::from(dir).join("tidewm").join("config.wave");
     }
     let Some(home) = std::env::var_os("HOME") else {
-        // Same last-resort fallback `ipc.rs` uses for a missing
-        // XDG_RUNTIME_DIR: a config that won't persist across reboots
-        // beats a compositor that won't start at all in a stripped
-        // environment (minimal container, restricted PAM session) that
-        // happens to clear both variables.
-        tracing::warn!(
-            "Neither XDG_CONFIG_HOME nor HOME is set; falling back to /tmp for config storage"
-        );
-        return PathBuf::from("/tmp")
-            .join("tidewm-config")
-            .join("config.wave");
+        return match private_temp_config_path() {
+            Ok(path) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    "Neither XDG_CONFIG_HOME nor HOME is set; using private temporary config storage"
+                );
+                path
+            }
+            Err(err) => {
+                // `/dev/null` is a safe read-only empty config. This is the
+                // fail-closed path for a stripped environment where neither
+                // a user identity nor a private temporary directory can be
+                // verified; never load executable Wave from a shared path.
+                tracing::error!(%err, "No private fallback config directory is available; using in-memory defaults");
+                PathBuf::from("/dev/null")
+            }
+        };
     };
     PathBuf::from(home)
         .join(".config")
         .join("tidewm")
         .join("config.wave")
+}
+
+fn private_temp_config_path() -> std::io::Result<PathBuf> {
+    let uid = fs::metadata("/proc/self")?.uid();
+    let dir = std::env::temp_dir().join(format!("tidewm-config-{uid}"));
+    ensure_private_owned_dir(&dir, uid)?;
+    Ok(dir.join("config.wave"))
+}
+
+fn ensure_private_owned_dir(dir: &Path, uid: u32) -> std::io::Result<()> {
+    match fs::symlink_metadata(dir) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_dir() || metadata.uid() != uid {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "temporary config directory {} is not an owned directory",
+                        dir.display()
+                    ),
+                ));
+            }
+            if metadata.permissions().mode() & 0o077 != 0 {
+                fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            fs::DirBuilder::new().mode(0o700).create(dir)?;
+        }
+        Err(err) => return Err(err),
+    }
+
+    let metadata = fs::symlink_metadata(dir)?;
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != uid
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "temporary config directory {} failed ownership/privacy verification",
+                dir.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Parses a keybind key like `"Super+Shift+Q"` into modifiers plus a base
@@ -8677,6 +8729,26 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn fallback_config_directory_is_owned_private_and_not_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = TestDir::new("private-config-fallback");
+        let uid = fs::metadata("/proc/self").unwrap().uid();
+        let private = root.0.join("private");
+        fs::create_dir(&private).unwrap();
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o777)).unwrap();
+
+        ensure_private_owned_dir(&private, uid).unwrap();
+        let metadata = fs::symlink_metadata(&private).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        assert_eq!(metadata.uid(), uid);
+
+        let link = root.0.join("link");
+        symlink(&private, &link).unwrap();
+        assert!(ensure_private_owned_dir(&link, uid).is_err());
     }
 
     #[test]
