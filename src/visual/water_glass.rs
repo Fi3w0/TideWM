@@ -43,45 +43,31 @@ pub struct GlassAnim {
     /// window becoming glass mid-session doesn't jump to some arbitrary
     /// shared angle; continuity only has to hold per window.
     epoch: Instant,
-    /// Last time the glass was disturbed: the window moved, the backdrop
-    /// behind it was recaptured, or a ripple passed underneath.
+    /// Last time the glass was disturbed: the window moved or a ripple
+    /// passed underneath.
     last_kick: Instant,
-    /// What the last rendered frame looked like, so the next frame can
-    /// tell whether anything it draws from actually changed. Disturbances
-    /// are derived from state deltas here in the render walk rather than
-    /// hooked at N call sites -- one authoritative compare, no drift
-    /// between "who kicks" and "what's drawn" (the same lesson as
-    /// `urgent_pulse_last`'s reconcile-at-the-tick).
     last_rect: Rectangle<i32, Physical>,
-    last_commit: CommitCounter,
 }
 
 impl GlassAnim {
     /// A freshly appeared glass window starts kicked: mapping disturbs
     /// the water it lands on, same premise as the map ripple.
-    pub fn new(rect: Rectangle<i32, Physical>, commit: CommitCounter) -> Self {
+    pub fn new(rect: Rectangle<i32, Physical>) -> Self {
         let now = Instant::now();
         Self {
             epoch: now,
             last_kick: now,
             last_rect: rect,
-            last_commit: commit,
         }
     }
 
-    /// Returns true (and re-stamps the disturbance clock) when the frame
-    /// state the glass is drawn from changed since the last call, or when
-    /// `ripple_passed` says an active ripple's bounding square intersects
-    /// this window's rect this frame.
-    pub fn observe(
-        &mut self,
-        rect: Rectangle<i32, Physical>,
-        commit: CommitCounter,
-        ripple_passed: bool,
-    ) -> bool {
-        let changed = rect != self.last_rect || commit != self.last_commit;
+    /// Returns true (and re-stamps the disturbance clock) when the glass
+    /// rectangle changes or an active ripple intersects it. Backdrop
+    /// recaptures do not restart the settle tail; otherwise the tail
+    /// manufactures its own next kick.
+    pub fn observe(&mut self, rect: Rectangle<i32, Physical>, ripple_passed: bool) -> bool {
+        let changed = rect != self.last_rect;
         self.last_rect = rect;
-        self.last_commit = commit;
         if changed || ripple_passed {
             self.last_kick = Instant::now();
             true
@@ -383,7 +369,7 @@ mod tests {
     #[test]
     fn envelope_decays_from_one_to_zero_over_settle() {
         let rect = Rectangle::new((0, 0).into(), (100, 100).into());
-        let anim = GlassAnim::new(rect, CommitCounter::default());
+        let anim = GlassAnim::new(rect);
         assert!(anim.envelope(1200) > 0.99);
         std::thread::sleep(std::time::Duration::from_millis(30));
         let mid = anim.envelope(60);
@@ -393,24 +379,22 @@ mod tests {
     }
 
     #[test]
-    fn observe_kicks_on_rect_commit_or_ripple_change_only() {
+    fn observe_ignores_self_generated_capture_commits() {
         let rect = Rectangle::new((0, 0).into(), (100, 100).into());
-        let mut anim = GlassAnim::new(rect, CommitCounter::default());
+        let mut anim = GlassAnim::new(rect);
         std::thread::sleep(std::time::Duration::from_millis(20));
         let before = anim.envelope(40);
-        assert!(!anim.observe(rect, CommitCounter::default(), false));
+        assert!(!anim.observe(rect, false));
 
-        let mut commit = CommitCounter::default();
-        commit.increment();
-        assert!(anim.observe(rect, commit, false));
-        assert!(anim.envelope(40) > before);
+        assert!(!anim.observe(rect, false));
+        assert!(anim.envelope(40) <= before);
 
         std::thread::sleep(std::time::Duration::from_millis(20));
         let settled = anim.envelope(40);
-        assert!(anim.observe(rect, commit, true));
+        assert!(anim.observe(rect, true));
         assert!(anim.envelope(40) > settled);
 
         let moved = Rectangle::new((10, 0).into(), (100, 100).into());
-        assert!(anim.observe(moved, commit, false));
+        assert!(anim.observe(moved, false));
     }
 }

@@ -6051,12 +6051,9 @@ impl Smallvil {
                                 });
                                 let anim =
                                     self.glass_anim.entry(surface.clone()).or_insert_with(|| {
-                                        crate::water_glass::GlassAnim::new(
-                                            physical_rect,
-                                            capture_commit,
-                                        )
+                                        crate::water_glass::GlassAnim::new(physical_rect)
                                     });
-                                anim.observe(physical_rect, capture_commit, ripple_passed);
+                                anim.observe(physical_rect, ripple_passed);
                                 let envelope = match mode {
                                     crate::config::GlassAnimation::Ambient => 1.0,
                                     _ => anim.envelope(anim_cfg.settle_ms),
