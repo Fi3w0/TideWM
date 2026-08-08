@@ -121,6 +121,10 @@ struct KeyboardGrabs {
     /// Keys currently down that were grabbed on press, so the matching
     /// release is also suppressed instead of leaking through.
     suppressed_keys: HashSet<Keysym>,
+    /// DBus clients that received each key's press. Modifier state may
+    /// change before release, so recomputing recipients at release time can
+    /// otherwise deliver an unmatched press with no corresponding release.
+    pressed_recipients: HashMap<Keysym, HashSet<OwnedUniqueName>>,
 }
 
 impl KeyboardGrabs {
@@ -179,33 +183,49 @@ impl AccessibilityState {
         let mut data = self.grabs.lock().unwrap();
         let mut delivery_failed = false;
 
-        for (name, client) in &data.clients {
-            if client.should_watch_keypress(&data.suppressed_keys, mods, keysym) {
-                let message = KeyEventMsg {
-                    destination: name.clone(),
-                    released,
-                    mods,
-                    keysym: keysym.raw(),
-                    unichar,
-                    keycode,
-                };
-                match self.to_dbus.try_send(message) {
-                    Ok(()) => {
-                        if self.dbus_backpressured.swap(false, Ordering::AcqRel) {
-                            tracing::info!("Accessibility DBus key-event queue recovered");
-                        }
+        let current_recipients: HashSet<OwnedUniqueName> = data
+            .clients
+            .iter()
+            .filter(|(_, client)| client.should_watch_keypress(&data.suppressed_keys, mods, keysym))
+            .map(|(name, _)| name.clone())
+            .collect();
+        let recipients = if released {
+            data.pressed_recipients
+                .remove(&keysym)
+                .unwrap_or(current_recipients)
+        } else {
+            data.pressed_recipients
+                .entry(keysym)
+                .or_default()
+                .extend(current_recipients.iter().cloned());
+            current_recipients
+        };
+
+        for name in recipients {
+            let message = KeyEventMsg {
+                destination: name,
+                released,
+                mods,
+                keysym: keysym.raw(),
+                unichar,
+                keycode,
+            };
+            match self.to_dbus.try_send(message) {
+                Ok(()) => {
+                    if self.dbus_backpressured.swap(false, Ordering::AcqRel) {
+                        tracing::info!("Accessibility DBus key-event queue recovered");
                     }
-                    Err(TrySendError::Full(_)) => {
-                        delivery_failed = true;
-                        if !self.dbus_backpressured.swap(true, Ordering::AcqRel) {
-                            tracing::warn!(
-                                capacity = KEY_EVENT_QUEUE_CAPACITY,
-                                "Accessibility DBus key-event queue full; dropping events"
-                            );
-                        }
-                    }
-                    Err(TrySendError::Disconnected(_)) => delivery_failed = true,
                 }
+                Err(TrySendError::Full(_)) => {
+                    delivery_failed = true;
+                    if !self.dbus_backpressured.swap(true, Ordering::AcqRel) {
+                        tracing::warn!(
+                            capacity = KEY_EVENT_QUEUE_CAPACITY,
+                            "Accessibility DBus key-event queue full; dropping events"
+                        );
+                    }
+                }
+                Err(TrySendError::Disconnected(_)) => delivery_failed = true,
             }
         }
 
@@ -217,6 +237,7 @@ impl AccessibilityState {
             data.clients.clear();
             data.rebuild_grabbed_mods();
             data.suppressed_keys.clear();
+            data.pressed_recipients.clear();
             return KbMonBlock::Pass;
         }
 
@@ -357,6 +378,48 @@ mod tests {
             state.process_key(DELAY, Duration::from_millis(60), true, 0, sym, 0, 30),
             KbMonBlock::Pass
         );
+    }
+
+    #[test]
+    fn grabbed_key_release_keeps_press_recipients_after_modifier_release() {
+        let (state, receiver) = state();
+        let client = OwnedUniqueName::try_from(":1.1").unwrap();
+        let control = Keysym::Control_L;
+        let key = Keysym::a;
+        {
+            let mut grabs = state.grabs.lock().unwrap();
+            grabs.clients.insert(
+                client.clone(),
+                ClientGrab {
+                    modifiers: HashSet::from([control]),
+                    ..Default::default()
+                },
+            );
+            grabs.rebuild_grabbed_mods();
+        }
+
+        assert_eq!(
+            state.process_key(DELAY, Duration::from_secs(1), false, 0, control, 0, 29),
+            KbMonBlock::ModifierFirstPress
+        );
+        assert_eq!(
+            state.process_key(DELAY, Duration::from_secs(1), false, 4, key, 97, 30),
+            KbMonBlock::Block
+        );
+        assert_eq!(
+            state.process_key(DELAY, Duration::from_secs(2), true, 0, control, 0, 29),
+            KbMonBlock::ModifierFirstPress
+        );
+        assert_eq!(
+            state.process_key(DELAY, Duration::from_secs(2), true, 0, key, 97, 30),
+            KbMonBlock::Block
+        );
+
+        let messages: Vec<_> = receiver.try_iter().collect();
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[3].destination, client);
+        assert!(messages[3].released);
+        assert_eq!(messages[3].keysym, key.raw());
     }
 
     #[test]
