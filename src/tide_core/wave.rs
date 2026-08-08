@@ -29,8 +29,76 @@ use super::wave_fmt::{strip_block_comments, strip_line_comment};
 use super::waves::Entry;
 
 pub(crate) const MAX_QUEUED_ACTIONS: usize = 256;
+const HANDLER_ACTIVE_REGISTRY_KEY: &str = "tidewm-handler-active";
+const MAX_INCLUDE_DEPTH: usize = 64;
+const MAX_INCLUDED_FILES: usize = 256;
+const MAX_TOTAL_SOURCE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_GENERATED_ENTRIES: usize = 100_000;
+
+#[derive(Default)]
+struct ResolveBudget {
+    files: usize,
+    source_bytes: usize,
+    entries: usize,
+}
+
+impl ResolveBudget {
+    fn enter_file(&mut self, path: &Path, depth: usize, bytes: usize) -> Result<(), String> {
+        if depth >= MAX_INCLUDE_DEPTH {
+            return Err(format!(
+                "include depth limit ({MAX_INCLUDE_DEPTH}) exceeded in file {}",
+                path.display()
+            ));
+        }
+        self.files = self.files.saturating_add(1);
+        if self.files > MAX_INCLUDED_FILES {
+            return Err(format!(
+                "included-file limit ({MAX_INCLUDED_FILES}) exceeded in file {}",
+                path.display()
+            ));
+        }
+        self.source_bytes = self.source_bytes.saturating_add(bytes);
+        if self.source_bytes > MAX_TOTAL_SOURCE_BYTES {
+            return Err(format!(
+                "aggregate Wave source limit ({MAX_TOTAL_SOURCE_BYTES} bytes) exceeded in file {}",
+                path.display()
+            ));
+        }
+        Ok(())
+    }
+
+    fn add_entries(&mut self, path: &Path, count: usize) -> Result<(), String> {
+        self.entries = self.entries.saturating_add(count);
+        if self.entries > MAX_GENERATED_ENTRIES {
+            return Err(format!(
+                "generated-entry limit ({MAX_GENERATED_ENTRIES}) exceeded in file {}",
+                path.display()
+            ));
+        }
+        Ok(())
+    }
+
+    fn add_source_bytes(&mut self, path: &Path, bytes: usize) -> Result<(), String> {
+        self.source_bytes = self.source_bytes.saturating_add(bytes);
+        if self.source_bytes > MAX_TOTAL_SOURCE_BYTES {
+            return Err(format!(
+                "aggregate Wave source limit ({MAX_TOTAL_SOURCE_BYTES} bytes) exceeded in file {}",
+                path.display()
+            ));
+        }
+        Ok(())
+    }
+}
 
 fn queue_action(lua: &Lua, action: String) -> mlua::Result<()> {
+    if !lua
+        .named_registry_value::<bool>(HANDLER_ACTIVE_REGISTRY_KEY)
+        .unwrap_or(false)
+    {
+        return Err(mlua::Error::runtime(
+            "spawn() and action() are available only inside an event handler",
+        ));
+    }
     let actions: mlua::Table = lua.globals().get("_actions")?;
     if actions.raw_len() >= MAX_QUEUED_ACTIONS {
         return Err(mlua::Error::runtime(format!(
@@ -38,6 +106,18 @@ fn queue_action(lua: &Lua, action: String) -> mlua::Result<()> {
         )));
     }
     actions.set(actions.raw_len() + 1, action)
+}
+
+pub(crate) fn set_handler_active(lua: &Lua, active: bool) -> mlua::Result<()> {
+    lua.set_named_registry_value(HANDLER_ACTIVE_REGISTRY_KEY, active)
+}
+
+pub(crate) fn new_lua() -> Result<Lua, String> {
+    Lua::new_with(
+        StdLib::MATH | StdLib::STRING | StdLib::TABLE,
+        mlua::LuaOptions::default(),
+    )
+    .map_err(|e| format!("failed to create config Lua state: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1815,6 +1895,7 @@ fn install_env(
     lua.globals()
         .set("_actions", lua.create_table().map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
+    set_handler_active(lua, false).map_err(|e| e.to_string())?;
 
     let c6 = collect.clone();
     let s6 = stack.clone();
@@ -2105,6 +2186,14 @@ pub(crate) fn evaluate(source: &str, path: &Path) -> Result<Vec<Entry>, String> 
     Ok(entries)
 }
 
+struct ResolveContext<'a> {
+    warnings: &'a mut Vec<String>,
+    lua: &'a Lua,
+    stack: &'a EntryStack,
+    sym: &'a mut Symbols,
+    budget: &'a mut ResolveBudget,
+}
+
 /// The recursive include walk shared by both resolve rounds. `collect`
 /// selects the round; entries are merged with the shared merge policy
 /// (`waves::merge_into`), so include order, cycle detection, and the
@@ -2112,18 +2201,21 @@ pub(crate) fn evaluate(source: &str, path: &Path) -> Result<Vec<Entry>, String> 
 fn resolve_walk(
     path: &Path,
     ancestors: &mut Vec<PathBuf>,
-    warnings: &mut Vec<String>,
-    lua: &Lua,
-    stack: &EntryStack,
-    sym: &mut Symbols,
-    collect: Rc<Cell<bool>>,
+    context: &mut ResolveContext<'_>,
 ) -> Result<Vec<Entry>, String> {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if ancestors.contains(&canonical) {
         return Err(format!("include cycle detected in file {}", path.display()));
     }
+    let source_len = std::fs::metadata(path)
+        .ok()
+        .and_then(|metadata| usize::try_from(metadata.len()).ok())
+        .unwrap_or(0);
+    context
+        .budget
+        .enter_file(path, ancestors.len(), source_len)?;
     ancestors.push(canonical);
-    let result = resolve_uncycled(path, ancestors, warnings, lua, stack, sym, collect);
+    let result = resolve_uncycled(path, ancestors, context, source_len);
     ancestors.pop();
     result
 }
@@ -2131,41 +2223,48 @@ fn resolve_walk(
 fn resolve_uncycled(
     path: &Path,
     ancestors: &mut Vec<PathBuf>,
-    warnings: &mut Vec<String>,
-    lua: &Lua,
-    stack: &EntryStack,
-    sym: &mut Symbols,
-    collect: Rc<Cell<bool>>,
+    context: &mut ResolveContext<'_>,
+    accounted_source_len: usize,
 ) -> Result<Vec<Entry>, String> {
     let contents = std::fs::read_to_string(path)
         .map_err(|err| format!("in file {}: {err}", path.display()))?;
 
     // Each file evaluates as its own chunk; a fresh top-level sink keeps
     // its entries separate from included files' entries.
-    stack.borrow_mut().push(Rc::new(RefCell::new(Vec::new())));
-    let lua_source = compile_with(&contents, path, sym)?;
-    let chunk = lua.load(&lua_source).set_name(path.display().to_string());
-    let run = || with_execution_budget(lua, ExecutionBudget::Load, || chunk.exec());
-    let exec_result = if sym.lenient {
-        // The collect round is best-effort: a file whose expressions
-        // reference definitions from a file evaluated later may fail
-        // here, and that is fine, round two is authoritative.
-        match run() {
-            Ok(()) => Ok(()),
-            Err(err) => {
+    if contents.len() > accounted_source_len {
+        context
+            .budget
+            .add_source_bytes(path, contents.len() - accounted_source_len)?;
+    }
+
+    let sink = Rc::new(RefCell::new(Vec::new()));
+    context.stack.borrow_mut().push(sink.clone());
+    let exec_result = (|| -> Result<(), String> {
+        let lua_source = compile_with(&contents, path, context.sym)?;
+        let chunk = context
+            .lua
+            .load(&lua_source)
+            .set_name(path.display().to_string());
+        let run = || with_execution_budget(context.lua, ExecutionBudget::Load, || chunk.exec());
+        if context.sym.lenient {
+            // The collect round is best-effort: a file whose expressions
+            // reference definitions from a file evaluated later may fail
+            // here, and that is fine, round two is authoritative.
+            if let Err(err) = run() {
                 tracing::warn!(path = %path.display(), %err, "Wave definition-collection pass failed for this file, continuing");
-                Ok(())
             }
+            Ok(())
+        } else {
+            run().map_err(|e| format!("in file {}: {e}", path.display()))
         }
-    } else {
-        run()
-    };
-    exec_result.map_err(|e| format!("in file {}: {e}", path.display()))?;
-    let file_entries = {
-        let sink = stack.borrow_mut().pop().unwrap();
-        let entries = sink.borrow().clone();
-        entries
-    };
+    })();
+    let popped = context.stack.borrow_mut().pop();
+    debug_assert!(popped
+        .as_ref()
+        .is_some_and(|entry| Rc::ptr_eq(entry, &sink)));
+    exec_result?;
+    let file_entries = sink.borrow().clone();
+    context.budget.add_entries(path, file_entries.len())?;
 
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let mut merged = Vec::new();
@@ -2174,19 +2273,11 @@ fn resolve_uncycled(
         match entry {
             Entry::Include(include) => {
                 let include_path = super::waves::resolve_include_path(parent, &include);
-                match resolve_walk(
-                    &include_path,
-                    ancestors,
-                    warnings,
-                    lua,
-                    stack,
-                    sym,
-                    collect.clone(),
-                ) {
+                match resolve_walk(&include_path, ancestors, context) {
                     Ok(included) => super::waves::merge_into(&mut merged, included),
                     Err(err) => {
                         tracing::warn!(path = %include_path.display(), %err, "Failed to load included config file, skipping");
-                        warnings.push(format!(
+                        context.warnings.push(format!(
                             "Failed to load included config file: {err}, skipping"
                         ));
                     }
@@ -2257,14 +2348,18 @@ pub(crate) fn resolve_with_lua(
         lenient: true,
         ..Default::default()
     };
+    let mut collect_budget = ResolveBudget::default();
+    let mut collect_warnings = Vec::new();
     resolve_walk(
         path,
         &mut ancestors,
-        &mut Vec::new(),
-        lua,
-        &stack,
-        &mut sym,
-        collect.clone(),
+        &mut ResolveContext {
+            warnings: &mut collect_warnings,
+            lua,
+            stack: &stack,
+            sym: &mut sym,
+            budget: &mut collect_budget,
+        },
     )?;
 
     // Round 2: evaluate with the collected definitions visible to every
@@ -2277,14 +2372,17 @@ pub(crate) fn resolve_with_lua(
     sym.lenient = false;
     sym.statics = statics_out.borrow().clone();
     let mut warnings = Vec::new();
+    let mut evaluation_budget = ResolveBudget::default();
     let entries = resolve_walk(
         path,
         &mut ancestors,
-        &mut warnings,
-        lua,
-        &stack,
-        &mut sym,
-        collect,
+        &mut ResolveContext {
+            warnings: &mut warnings,
+            lua,
+            stack: &stack,
+            sym: &mut sym,
+            budget: &mut evaluation_budget,
+        },
     )?;
 
     Ok((entries, warnings))
@@ -2311,6 +2409,31 @@ mod tests {
 
     fn compile_str(s: &str) -> String {
         compile(s, Path::new("test.wave")).expect("compile should succeed")
+    }
+
+    #[test]
+    fn resolve_budget_bounds_files_source_and_generated_entries() {
+        let path = Path::new("config.wave");
+
+        let mut depth = ResolveBudget::default();
+        let err = depth
+            .enter_file(path, MAX_INCLUDE_DEPTH, 0)
+            .expect_err("include nesting must be bounded");
+        assert!(err.contains("include depth limit"), "{err}");
+
+        let mut files = ResolveBudget::default();
+        for _ in 0..MAX_INCLUDED_FILES {
+            files.enter_file(path, 0, 0).unwrap();
+        }
+        assert!(files.enter_file(path, 0, 0).is_err());
+
+        let mut bytes = ResolveBudget::default();
+        bytes.enter_file(path, 0, MAX_TOTAL_SOURCE_BYTES).unwrap();
+        assert!(bytes.add_source_bytes(path, 1).is_err());
+
+        let mut entries = ResolveBudget::default();
+        entries.add_entries(path, MAX_GENERATED_ENTRIES).unwrap();
+        assert!(entries.add_entries(path, 1).is_err());
     }
 
     #[test]
@@ -2664,6 +2787,7 @@ mod tests {
         let handlers: mlua::Table = lua.globals().get("_handlers").unwrap();
         let for_event: mlua::Table = handlers.get("workspace-changed").unwrap();
         let f: mlua::Function = for_event.get(1).unwrap();
+        set_handler_active(&lua, true).unwrap();
         f.call::<()>(()).expect("handler should run");
         let actions: mlua::Table = lua.globals().get("_actions").unwrap();
         let queued: Vec<String> = actions
@@ -2680,6 +2804,15 @@ mod tests {
             .call::<()>("close-window")
             .expect_err("action queue must be bounded");
         assert!(err.to_string().contains("action queue limit"), "{err}");
+        set_handler_active(&lua, false).unwrap();
+        lua.globals().set("_handler_active", true).unwrap();
+        let err = action
+            .call::<()>("quit")
+            .expect_err("a script global must not bypass the handler-only action boundary");
+        assert!(
+            err.to_string().contains("only inside an event handler"),
+            "{err}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

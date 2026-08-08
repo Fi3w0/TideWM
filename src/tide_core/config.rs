@@ -1050,11 +1050,7 @@ impl Config {
     /// Callers that only need the old fallback behavior can continue using
     /// `load()`.
     pub fn load_with_error() -> (Self, Option<String>, Vec<String>) {
-        let lua = mlua::Lua::new_with(
-            mlua::StdLib::MATH | mlua::StdLib::STRING | mlua::StdLib::TABLE,
-            mlua::LuaOptions::default(),
-        )
-        .expect("creating the config Lua state must not fail");
+        let lua = wave::new_lua().expect("creating the config Lua state must not fail");
         Self::load_with_error_in(&lua, &wave::TideInfo::default())
     }
 
@@ -1121,11 +1117,7 @@ impl Config {
     /// successful reload is the same dropped-keybind/footgun-lint
     /// diagnostics `from_raw` produces -- empty in the common case.
     pub fn reload() -> Result<(Self, Vec<String>), String> {
-        let lua = mlua::Lua::new_with(
-            mlua::StdLib::MATH | mlua::StdLib::STRING | mlua::StdLib::TABLE,
-            mlua::LuaOptions::default(),
-        )
-        .map_err(|e| format!("failed to create config Lua state: {e}"))?;
+        let lua = wave::new_lua()?;
         Self::reload_in(&lua, &wave::TideInfo::default())
     }
 
@@ -1139,6 +1131,28 @@ impl Config {
         warnings.extend(include_warnings);
         config.loaded_entries = entries;
         Ok((config, warnings))
+    }
+
+    /// Evaluates a reload in a fresh Lua sandbox and returns the complete
+    /// runtime alongside its lowered config. The caller swaps both only on
+    /// success, keeping the active handlers/globals intact after any parse,
+    /// include, or evaluation failure.
+    pub(crate) fn reload_staged(
+        tide: &wave::TideInfo,
+    ) -> Result<(mlua::Lua, Self, Vec<String>), String> {
+        Self::reload_staged_from(&config_path(), tide)
+    }
+
+    fn reload_staged_from(
+        path: &Path,
+        tide: &wave::TideInfo,
+    ) -> Result<(mlua::Lua, Self, Vec<String>), String> {
+        let lua = wave::new_lua()?;
+        let (raw, include_warnings, entries) = load_raw_config_in(&lua, tide, path)?;
+        let (mut config, mut warnings) = Self::from_raw(raw);
+        warnings.extend(include_warnings);
+        config.loaded_entries = entries;
+        Ok((lua, config, warnings))
     }
 
     /// The path being watched/loaded, so callers can set up a file watcher on it.
@@ -3780,16 +3794,7 @@ pub fn spawn_watcher() -> notify::Result<(RecommendedWatcher, Channel<Arc<Atomic
 /// parser's message with file/line detail.
 #[cfg(test)]
 fn load_raw_config(path: &Path) -> Result<(RawConfig, Vec<String>, Vec<waves::Entry>), String> {
-    let lua = mlua::Lua::new_with(
-        mlua::StdLib::MATH | mlua::StdLib::STRING | mlua::StdLib::TABLE,
-        mlua::LuaOptions::default(),
-    )
-    .map_err(|e| {
-        format!(
-            "in file {}: failed to create Lua state: {e}",
-            path.display()
-        )
-    })?;
+    let lua = wave::new_lua().map_err(|e| format!("in file {}: {e}", path.display()))?;
     load_raw_config_in(&lua, &wave::TideInfo::default(), path)
 }
 
@@ -8513,6 +8518,52 @@ mod tests {
         );
         // The tide table carries the loader's facts.
         assert_eq!(lua.load("tide.backend").eval::<String>().unwrap(), "winit");
+    }
+
+    #[test]
+    fn staged_reload_preserves_old_lua_on_failure_and_drops_removed_script_globals() {
+        let tide = wave::TideInfo {
+            backend: "winit",
+            ..Default::default()
+        };
+        let dir = TestDir::new("wave-transactional-reload");
+        let main = dir.write(
+            "config.wave",
+            "terminal = kitty\nscript {\n    script_state = { value = \"old\" }\n}\n",
+        );
+
+        let (active_lua, active, _) =
+            Config::reload_staged_from(&main, &tide).expect("initial config should stage");
+        assert_eq!(active.terminal, "kitty");
+        assert_eq!(
+            active_lua
+                .load("script_state.value")
+                .eval::<String>()
+                .unwrap(),
+            "old"
+        );
+
+        fs::write(&main, "script {\n    this is not valid lua\n}\n").unwrap();
+        assert!(
+            Config::reload_staged_from(&main, &tide).is_err(),
+            "a broken candidate must fail before the active runtime is swapped"
+        );
+        assert_eq!(
+            active_lua
+                .load("script_state.value")
+                .eval::<String>()
+                .expect("the old runtime must remain intact"),
+            "old"
+        );
+
+        fs::write(&main, "terminal = sh\n").unwrap();
+        let (replacement_lua, replacement, _) = Config::reload_staged_from(&main, &tide)
+            .expect("corrected config should stage in a fresh runtime");
+        assert_eq!(replacement.terminal, "sh");
+        assert!(matches!(
+            replacement_lua.globals().get::<mlua::Value>("script_state"),
+            Ok(mlua::Value::Nil)
+        ));
     }
 
     #[test]

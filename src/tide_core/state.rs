@@ -2923,11 +2923,8 @@ impl Smallvil {
 
     pub fn new(event_loop: &mut EventLoop<'static, Smallvil>, display: Display<Self>) -> Self {
         let start_time = std::time::Instant::now();
-        let config_lua = mlua::Lua::new_with(
-            mlua::StdLib::MATH | mlua::StdLib::STRING | mlua::StdLib::TABLE,
-            mlua::LuaOptions::default(),
-        )
-        .expect("creating the config Lua state must not fail");
+        let config_lua =
+            crate::wave::new_lua().expect("creating the config Lua state must not fail");
         let tide = crate::wave::TideInfo {
             backend: "unknown", // main.rs sets backend_name after backend init
             gpu_vendor: crate::wave::detect_gpu_vendor(),
@@ -10338,11 +10335,14 @@ impl Smallvil {
             };
             for pair in for_event.sequence_values::<mlua::Function>() {
                 let f = pair?;
-                if let Err(e) = crate::wave::with_execution_budget(
+                crate::wave::set_handler_active(&self.config_lua, true)?;
+                let result = crate::wave::with_execution_budget(
                     &self.config_lua,
                     crate::wave::ExecutionBudget::Handler,
                     || f.call::<()>(()),
-                ) {
+                );
+                crate::wave::set_handler_active(&self.config_lua, false)?;
+                if let Err(e) = result {
                     tracing::warn!(event = name, error = %e, "Wave event handler failed");
                 }
             }
@@ -10439,8 +10439,13 @@ impl Smallvil {
     /// is never silent, success or failure.
     pub fn reload_config(&mut self) {
         self.sync_tide();
-        match Config::reload_in(&self.config_lua, &self.tide) {
-            Ok((mut new_config, mut warnings)) => {
+        match Config::reload_staged(&self.tide) {
+            Ok((staged_lua, mut new_config, mut warnings)) => {
+                // The staged runtime is complete and valid. Swap it in as
+                // one transaction so a failed parse/evaluation can never
+                // clear or partially replace the handlers and globals from
+                // the configuration that remains active.
+                self.config_lua = staged_lua;
                 let had_error_overlay = self.config_error_overlay.take().is_some();
                 let diff = crate::config::diff_entries(
                     &self.config.loaded_entries,
