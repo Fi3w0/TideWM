@@ -191,7 +191,14 @@ separate 400ms `easeInOut` clock, and layout motion uses 400ms `easeInOut`.
 Explicit values in the same block always override the preset, even when
 `preset` appears later. The top-level `enabled` disables all three transitions.
 `slowdown` multiplies both geometry and opacity durations (`0.5` is twice as
-fast, `2` twice as slow). Each `open`, `close`, and `movement` sub-block
+fast, `2` twice as slow). `max_closing_snapshots` (default `64`) caps detached
+windows retained for close animation, while `close_snapshot_output_budget`
+(default `2.0`) caps their estimated physical pixels to that multiple of the
+live outputs' aggregate mode area. These are complementary: the count protects
+against floods of tiny windows, and the output-relative area budget scales with
+the actual nested, HiDPI, or multi-monitor session without assuming a screen
+resolution. Setting either to `0` disables detached close snapshots. Each
+`open`, `close`, and `movement` sub-block
 supports:
 
 | Key | Type | Default | Notes |
@@ -216,6 +223,8 @@ animations {
     preset = tide
     enabled = true
     slowdown = 1.0
+    max_closing_snapshots = 64
+    close_snapshot_output_budget = 2.0
 
     open {
         duration = 190ms

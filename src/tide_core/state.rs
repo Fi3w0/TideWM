@@ -2080,11 +2080,28 @@ impl Smallvil {
         let Some(snapshot) = self.window_frame_snapshots.remove(surface) else {
             return;
         };
+        let pixel_budget = self.close_snapshot_pixel_budget();
+        let snapshot_pixels = snapshot.estimated_pixels();
+        let count_budget = animations.max_closing_snapshots;
         self.window_open_animations.remove(surface);
         self.window_move_animations.remove(surface);
         self.window_viscosity.remove(surface);
         self.closing_window_animations
-            .retain(|closing| closing.surface != *surface);
+            .retain(|closing| closing.surface != *surface && !closing.animation.finished());
+        let retained_pixels: Vec<u64> = self
+            .closing_window_animations
+            .iter()
+            .map(|closing| closing.snapshot.estimated_pixels())
+            .collect();
+        let Some(evictions) = crate::window_animation::close_snapshot_evictions(
+            &retained_pixels,
+            snapshot_pixels,
+            count_budget,
+            pixel_budget,
+        ) else {
+            return;
+        };
+        self.closing_window_animations.drain(..evictions);
         self.closing_window_animations
             .push(crate::window_animation::ClosingWindowAnimation::new(
                 surface.clone(),
@@ -2096,6 +2113,25 @@ impl Smallvil {
                 ),
             ));
         self.request_redraw();
+    }
+
+    /// Converts the configured output-area multiple into a live physical
+    /// pixel budget. Mode sizes come from Smithay's current outputs, so this
+    /// scales with nested, HiDPI, rotated, and multi-output sessions without
+    /// assuming any particular monitor resolution.
+    fn close_snapshot_pixel_budget(&self) -> u64 {
+        let output_pixels =
+            self.space
+                .outputs()
+                .filter_map(Output::current_mode)
+                .fold(0_u64, |total, mode| {
+                    let width = u64::try_from(mode.size.w.max(0)).unwrap_or(u64::MAX);
+                    let height = u64::try_from(mode.size.h.max(0)).unwrap_or(u64::MAX);
+                    total.saturating_add(width.saturating_mul(height))
+                });
+        ((output_pixels as f64) * f64::from(self.config.animations.close_snapshot_output_budget))
+            .round()
+            .clamp(0.0, u64::MAX as f64) as u64
     }
 
     pub(crate) fn closing_window_frame_elements(

@@ -2961,6 +2961,12 @@ pub struct WindowAnimationConfig {
 pub struct WindowAnimationsConfig {
     pub enabled: bool,
     pub slowdown: f32,
+    /// Maximum detached close snapshots retained at once. This limits tiny
+    /// client windows that would otherwise evade an area-only budget.
+    pub max_closing_snapshots: usize,
+    /// Total retained close-snapshot pixels as a multiple of the live
+    /// outputs' aggregate physical pixel area.
+    pub close_snapshot_output_budget: f32,
     pub open: WindowAnimationConfig,
     pub close: WindowAnimationConfig,
     pub movement: WindowAnimationConfig,
@@ -2977,6 +2983,8 @@ impl WindowAnimationsConfig {
         Self {
             enabled: true,
             slowdown: 1.0,
+            max_closing_snapshots: 64,
+            close_snapshot_output_budget: 2.0,
             open: WindowAnimationConfig {
                 enabled: true,
                 animate_size: false,
@@ -3035,6 +3043,8 @@ impl WindowAnimationsConfig {
         Self {
             enabled: true,
             slowdown: 1.0,
+            max_closing_snapshots: 64,
+            close_snapshot_output_budget: 2.0,
             open: WindowAnimationConfig {
                 enabled: true,
                 animate_size: false,
@@ -4389,6 +4399,24 @@ fn apply_animations_block(cfg: &mut WindowAnimationsConfig, body: &[waves::Entry
                         "Expected animations.slowdown from 0.1 to 10, ignoring"
                     ),
                 },
+                "max_closing_snapshots" | "max-close-snapshots" => match value.parse::<usize>() {
+                    Ok(value) if value <= 4096 => cfg.max_closing_snapshots = value,
+                    _ => tracing::warn!(
+                        value,
+                        "Expected max_closing_snapshots from 0 to 4096, ignoring"
+                    ),
+                },
+                "close_snapshot_output_budget" | "close-snapshot-output-budget" => {
+                    match value.parse::<f32>() {
+                        Ok(value) if value.is_finite() && (0.0..=16.0).contains(&value) => {
+                            cfg.close_snapshot_output_budget = value
+                        }
+                        _ => tracing::warn!(
+                            value,
+                            "Expected close_snapshot_output_budget from 0 to 16, ignoring"
+                        ),
+                    }
+                }
                 other => tracing::warn!(
                     key = %other,
                     "Unknown assignment in `animations` block, ignoring"
@@ -9300,6 +9328,8 @@ mod tests {
              preset = wave\n\
              enabled = true\n\
              slowdown = 1.5\n\
+             max_closing_snapshots = 12\n\
+             close_snapshot_output_budget = 1.25\n\
              open {\n\
              duration = 240ms\n\
              curve = \"cubic-bezier(0.1,0.8,0.2,1.1)\"\n\
@@ -9329,6 +9359,8 @@ mod tests {
 
         assert!(animations.enabled);
         assert_eq!(animations.slowdown, 1.5);
+        assert_eq!(animations.max_closing_snapshots, 12);
+        assert_eq!(animations.close_snapshot_output_budget, 1.25);
         assert_eq!(animations.open.duration_ms, 240);
         assert_eq!(
             animations.open.curve,

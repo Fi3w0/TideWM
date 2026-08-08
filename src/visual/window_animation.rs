@@ -316,6 +316,18 @@ impl WindowFrameSnapshot {
         })
     }
 
+    /// Conservative retained-texture footprint proxy. Surface parts can
+    /// share a backing buffer, so summing their physical geometry may
+    /// over-count; that is preferable for an admission budget whose job is
+    /// to prevent client-driven retention from growing without bound.
+    pub fn estimated_pixels(&self) -> u64 {
+        self.parts.iter().fold(0_u64, |total, part| {
+            let width = u64::try_from(part.relative_geometry.size.w.max(0)).unwrap_or(u64::MAX);
+            let height = u64::try_from(part.relative_geometry.size.h.max(0)).unwrap_or(u64::MAX);
+            total.saturating_add(width.saturating_mul(height))
+        })
+    }
+
     fn elements(
         &self,
         scale: Scale<f64>,
@@ -421,6 +433,30 @@ pub struct ClosingWindowAnimation {
     commit: CommitCounter,
 }
 
+/// Number of oldest retained snapshots to evict before admitting `incoming`.
+/// `None` means the incoming snapshot cannot fit even by itself.
+pub(crate) fn close_snapshot_evictions(
+    retained_pixels: &[u64],
+    incoming: u64,
+    max_count: usize,
+    pixel_budget: u64,
+) -> Option<usize> {
+    if max_count == 0 || pixel_budget == 0 || incoming > pixel_budget {
+        return None;
+    }
+    let mut pixels = retained_pixels
+        .iter()
+        .fold(0_u64, |total, pixels| total.saturating_add(*pixels));
+    let mut evictions = 0;
+    while retained_pixels.len() - evictions >= max_count
+        || pixels.saturating_add(incoming) > pixel_budget
+    {
+        pixels = pixels.saturating_sub(retained_pixels[evictions]);
+        evictions += 1;
+    }
+    Some(evictions)
+}
+
 impl ClosingWindowAnimation {
     pub fn new(
         surface: WlSurface,
@@ -463,6 +499,14 @@ mod tests {
             wave_cycles: 1.0,
             wave_decay: 1.5,
         }
+    }
+
+    #[test]
+    fn close_snapshot_budget_evicts_oldest_by_count_and_live_output_area() {
+        assert_eq!(close_snapshot_evictions(&[30, 30, 30], 20, 3, 100), Some(1));
+        assert_eq!(close_snapshot_evictions(&[60, 30], 40, 8, 100), Some(1));
+        assert_eq!(close_snapshot_evictions(&[10], 101, 8, 100), None);
+        assert_eq!(close_snapshot_evictions(&[], 1, 0, 100), None);
     }
 
     #[test]
