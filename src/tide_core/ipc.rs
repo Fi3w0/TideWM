@@ -323,6 +323,10 @@ fn snapshot_window(state: &Smallvil, surface: &WlSurface) -> Option<serde_json::
 /// A long-lived subscribe connection. One per `subscribe` request, stored
 /// in `Smallvil::ipc_subscribers` keyed by a process-unique `usize` id.
 pub(crate) struct IpcSubscriber {
+    /// Keeps this long-lived connection included in `MAX_CONNECTIONS`.
+    /// The request-side lease is transferred here when a subscribe request
+    /// is converted, then released automatically when the subscriber drops.
+    _connection_lease: ConnectionLease,
     /// Write handle. Distinct FD from `read_source`'s owned stream (both
     /// are `dup()`s of the original socket), so a write here doesn't
     /// disturb calloop's read-side readiness tracking.
@@ -478,7 +482,7 @@ fn register_connection(
 ) {
     let mut buf = Vec::new();
     active_connections.fetch_add(1, Ordering::AcqRel);
-    let lease = ConnectionLease(active_connections.clone());
+    let mut lease = Some(ConnectionLease(active_connections.clone()));
     let timeout_token = Rc::new(Cell::new(None));
     let source_token = Rc::new(Cell::new(None));
     let timeout_for_connection = timeout_token.clone();
@@ -488,7 +492,6 @@ fn register_connection(
     let result = loop_handle.insert_source(
         Generic::new(stream, Interest::READ, Mode::Level),
         move |_readiness, stream, state: &mut Smallvil| {
-            let _keep_lease_alive = &lease;
             macro_rules! finish {
                 () => {{
                     if let Some(token) = timeout_for_connection.take() {
@@ -526,10 +529,18 @@ fn register_connection(
                                         .unwrap_or_default()
                                         .into_iter()
                                         .collect();
+                                    // This callback is removed immediately
+                                    // afterwards, so transfer its existing
+                                    // connection slot to the long-lived
+                                    // subscriber instead of dropping it.
+                                    let subscriber_lease = lease
+                                        .take()
+                                        .expect("IPC request lease must exist until conversion");
                                     register_subscriber(
                                         &connection_handle,
                                         stream,
                                         filter,
+                                        subscriber_lease,
                                         state,
                                     );
                                     finish!();
@@ -610,6 +621,7 @@ fn register_subscriber(
     loop_handle: &LoopHandle<Smallvil>,
     stream: &UnixStream,
     filter: HashSet<EventKind>,
+    connection_lease: ConnectionLease,
     state: &mut Smallvil,
 ) {
     let write_stream = match stream.try_clone() {
@@ -633,6 +645,7 @@ fn register_subscriber(
     state.ipc_subscribers.insert(
         id,
         IpcSubscriber {
+            _connection_lease: connection_lease,
             stream: write_stream,
             filter: filter.clone(),
             pending: VecDeque::new(),
@@ -1362,6 +1375,7 @@ mod tests {
         peer_end.set_nonblocking(true).unwrap();
 
         let mut sub = IpcSubscriber {
+            _connection_lease: ConnectionLease(Arc::new(AtomicUsize::new(1))),
             stream: subscriber_end,
             filter: HashSet::new(),
             pending: VecDeque::from(b"hello\n".to_vec()),
@@ -1389,6 +1403,7 @@ mod tests {
         drop(peer_end);
 
         let mut sub = IpcSubscriber {
+            _connection_lease: ConnectionLease(Arc::new(AtomicUsize::new(1))),
             stream: subscriber_end,
             filter: HashSet::new(),
             pending: VecDeque::from(b"never-delivered\n".to_vec()),
@@ -1412,6 +1427,23 @@ mod tests {
         panic!(
             "try_flush never reported peer-closed after 16 attempts; kernel is buffering forever?"
         );
+    }
+
+    #[test]
+    fn subscriber_holds_connection_slot_until_drop() {
+        let active = Arc::new(AtomicUsize::new(1));
+        let (subscriber_end, _peer_end) = UnixStream::pair().unwrap();
+        let subscriber = IpcSubscriber {
+            _connection_lease: ConnectionLease(active.clone()),
+            stream: subscriber_end,
+            filter: HashSet::new(),
+            pending: VecDeque::new(),
+            read_token: None,
+        };
+
+        assert_eq!(active.load(Ordering::Acquire), 1);
+        drop(subscriber);
+        assert_eq!(active.load(Ordering::Acquire), 0);
     }
 
     #[test]
