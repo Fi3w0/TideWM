@@ -74,7 +74,7 @@ fn main() {
 
     // Long-lived subscribe mode: takes over the process, never returns.
     if args[0] == "subscribe" {
-        cmd_subscribe(&socket, &args[1..]);
+        cmd_subscribe(&socket, socket_override.is_none(), &args[1..]);
     }
 
     let request = build_request(&args).unwrap_or_else(|msg| fail(&msg));
@@ -264,24 +264,29 @@ fn fail(msg: &str) -> ! {
 /// connection. Event names are the IPC `events` array entries (`window`,
 /// `workspace`, `focus`, `urgent`, `depth`, `config`); with no arguments
 /// every kind is subscribed. A stale socket file (TideWM gone without a
-/// clean drop) is removed and retried once, same as the one-shot path.
-fn cmd_subscribe(socket_path: &Path, events: &[String]) -> ! {
+/// clean drop) is removed and auto-discovery runs again, same as the
+/// one-shot path. An explicit `--socket` is never removed or replaced.
+fn cmd_subscribe(socket_path: &Path, auto_discovered: bool, events: &[String]) -> ! {
     let request = if events.is_empty() {
         json!({ "request": "subscribe" })
     } else {
         json!({ "request": "subscribe", "events": events })
     };
-    let stream = match UnixStream::connect(socket_path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
-            // Mirrors the one-shot path's stale-socket dance.
+    let (stream, connected_path) = match UnixStream::connect(socket_path) {
+        Ok(stream) => (stream, socket_path.to_path_buf()),
+        Err(e) if auto_discovered && e.kind() == std::io::ErrorKind::ConnectionRefused => {
+            // Mirrors the one-shot path's stale-socket dance: remove only
+            // an auto-discovered stale entry, then discover again because
+            // another live TideWM instance may use a different path.
             let _ = std::fs::remove_file(socket_path);
-            UnixStream::connect(socket_path).unwrap_or_else(|e| {
+            let retry_path = find_socket().unwrap_or_else(|msg| fail(&msg));
+            let stream = UnixStream::connect(&retry_path).unwrap_or_else(|e| {
                 fail(&format!(
                     "failed to connect to {}: {e}",
-                    socket_path.display()
+                    retry_path.display()
                 ))
-            })
+            });
+            (stream, retry_path)
         }
         Err(e) => fail(&format!(
             "failed to connect to {}: {e}",
@@ -322,7 +327,7 @@ fn cmd_subscribe(socket_path: &Path, events: &[String]) -> ! {
         line.clear();
         let read = reader
             .read_line(&mut line)
-            .unwrap_or_else(|e| fail(&format!("read error on {}: {e}", socket_path.display())));
+            .unwrap_or_else(|e| fail(&format!("read error on {}: {e}", connected_path.display())));
         if read == 0 {
             break;
         }
