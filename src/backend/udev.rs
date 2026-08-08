@@ -1023,13 +1023,6 @@ fn create_surface(
         Some(position.into()),
     );
     output.set_preferred(output_mode);
-    let global = output.create_global::<Smallvil>(display_handle);
-    state.space.map_output(&output, position);
-    #[cfg(feature = "screencast")]
-    if let Some(screencast) = &state.screencast {
-        screencast.refresh_outputs(state.space.outputs());
-    }
-    state.wlr_output_management_state.refresh(&state.space);
 
     let mut planes = match drm.planes(&crtc) {
         Ok(p) => p,
@@ -1076,6 +1069,17 @@ fn create_surface(
             return None;
         }
     };
+
+    // Publish the output only after every fallible DRM setup step succeeds.
+    // A failed plane query or compositor construction must not leave a
+    // mapped `wl_output` global that has no scanout surface behind it.
+    let global = output.create_global::<Smallvil>(display_handle);
+    state.space.map_output(&output, position);
+    #[cfg(feature = "screencast")]
+    if let Some(screencast) = &state.screencast {
+        screencast.refresh_outputs(state.space.outputs());
+    }
+    state.wlr_output_management_state.refresh(&state.space);
 
     Some(SurfaceData {
         compositor,
@@ -1663,12 +1667,14 @@ fn render_surface(
                 Err(FrameError::EmptyFrame) => Some(output_refresh_period(output)),
                 Err(e) => {
                     tracing::warn!(%e, "Failed to queue DRM frame");
+                    surface.dirty = true;
                     None
                 }
             }
         }
         Err(e) => {
             tracing::warn!(%e, "Failed to render DRM frame");
+            surface.dirty = true;
             None
         }
     };

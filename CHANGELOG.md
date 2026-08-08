@@ -5,6 +5,7 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 ## [Unreleased]
 
 ### Fixed
+- Udev output setup now publishes/maps a `wl_output` only after plane discovery and `DrmCompositor` construction succeed, so a transient connector/DRM failure cannot leave a client-visible ghost output. Non-empty DRM render or queue failures also restore the surface's dirty bit, causing the next backend tick to retry instead of leaving that CRTC frozen until unrelated damage arrives.
 - Reactive water glass no longer treats its own backdrop recapture as a fresh disturbance. The settle tail still damages the reused capture texture while it decays, but only window movement or an intersecting ripple restarts the envelope, so an idle glass window cannot manufacture an endless capture/redraw loop.
 - Ocean keyboard resize now updates the authoritative world-space owner: floating windows write their Ocean rect and tiled windows adjust the nearest split in their owning reef, so the next retile no longer discards the result. Floating resize in both engines now derives minimum and maximum dimensions from the client's current XDG constraints rather than fixed fallback window sizes.
 - `tidectl subscribe` now treats a refused auto-discovered socket like the one-shot command: it removes only that stale discovery result, searches again, and connects to the newly discovered live path. An explicit `--socket` is never deleted, and subscribe no longer retries the same path immediately after removing it.
