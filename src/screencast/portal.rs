@@ -32,7 +32,7 @@
 //! See CHANGELOG for the exact verification breakdown.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
@@ -57,17 +57,111 @@ const CURSOR_MODES: u32 = 1 | 2;
 
 pub(super) struct SessionEntry {
     owner: OwnedUniqueName,
+    /// False while the path is only reserved in `SessionMap`; callers cannot
+    /// use the session until object-server registration has succeeded.
+    registered: AtomicBool,
     /// `None` until `SelectSources` runs; `Start` requires it.
     draw_cursor: Mutex<Option<bool>>,
     source_types: Mutex<Option<u32>>,
-    stream: Mutex<Option<PortalStream>>,
+    stream: Mutex<PortalStreamState>,
 }
 
 struct PortalStream {
     _handle: pipewire_thread::StreamHandle,
 }
 
+enum PortalStreamState {
+    Idle,
+    Starting,
+    Active { _stream: PortalStream },
+    Closed,
+}
+
+impl SessionEntry {
+    fn close(&self) {
+        // Drop a live PipeWire handle after releasing the state mutex: its
+        // destructor stops and joins the worker thread.
+        let previous = {
+            let mut state = self.stream.lock().unwrap();
+            std::mem::replace(&mut *state, PortalStreamState::Closed)
+        };
+        drop(previous);
+    }
+}
+
+/// Owns the atomic `Starting` reservation across the picker/PipeWire awaits.
+/// Any early return resets it to `Idle`; a concurrent close changes it to
+/// `Closed`, causing `complete` to reject and drop the newly started stream.
+struct StartReservation {
+    entry: Arc<SessionEntry>,
+    armed: bool,
+}
+
+impl StartReservation {
+    fn begin(entry: Arc<SessionEntry>) -> Option<Self> {
+        {
+            let mut state = entry.stream.lock().unwrap();
+            if !matches!(*state, PortalStreamState::Idle) {
+                return None;
+            }
+            *state = PortalStreamState::Starting;
+        }
+        Some(Self { entry, armed: true })
+    }
+
+    fn complete(mut self, stream: PortalStream) -> Result<(), PortalStream> {
+        let mut state = self.entry.stream.lock().unwrap();
+        let result = if matches!(*state, PortalStreamState::Starting) {
+            *state = PortalStreamState::Active { _stream: stream };
+            Ok(())
+        } else {
+            Err(stream)
+        };
+        self.armed = false;
+        result
+    }
+}
+
+impl Drop for StartReservation {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut state = self.entry.stream.lock().unwrap();
+        if matches!(*state, PortalStreamState::Starting) {
+            *state = PortalStreamState::Idle;
+        }
+    }
+}
+
 pub(super) type SessionMap = HashMap<OwnedObjectPath, Arc<SessionEntry>>;
+
+fn reserve_session(
+    sessions: &mut SessionMap,
+    path: OwnedObjectPath,
+    entry: Arc<SessionEntry>,
+) -> bool {
+    if sessions.len() >= MAX_PORTAL_SESSIONS || sessions.contains_key(&path) {
+        return false;
+    }
+    sessions.insert(path, entry);
+    true
+}
+
+fn remove_session_if_same(
+    sessions: &mut SessionMap,
+    path: &OwnedObjectPath,
+    expected: &Arc<SessionEntry>,
+) -> bool {
+    if !sessions
+        .get(path)
+        .is_some_and(|current| Arc::ptr_eq(current, expected))
+    {
+        return false;
+    }
+    sessions.remove(path);
+    true
+}
 
 pub(super) struct Portal {
     compositor: smithay::reexports::calloop::channel::Sender<ScreencastEvent>,
@@ -153,26 +247,27 @@ impl Portal {
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> zbus::fdo::Result<(u32, HashMap<String, OwnedValue>)> {
         let owner = sender_of(&header)?;
+        let entry = Arc::new(SessionEntry {
+            owner,
+            registered: AtomicBool::new(false),
+            draw_cursor: Mutex::new(None),
+            source_types: Mutex::new(None),
+            stream: Mutex::new(PortalStreamState::Idle),
+        });
 
         {
             let mut sessions = self.sessions.lock().unwrap();
-            if sessions.len() >= MAX_PORTAL_SESSIONS {
+            if !reserve_session(&mut sessions, session_handle.clone(), entry.clone()) {
                 return Ok((RESPONSE_OTHER_ERROR, HashMap::new()));
             }
-            sessions.insert(
-                session_handle.clone(),
-                Arc::new(SessionEntry {
-                    owner,
-                    draw_cursor: Mutex::new(None),
-                    source_types: Mutex::new(None),
-                    stream: Mutex::new(None),
-                }),
-            );
+            // Reserve atomically before awaiting object registration. A
+            // duplicate caller can no longer replace an existing session.
         }
 
         let session_object = SessionObject {
             path: session_handle.clone(),
             sessions: self.sessions.clone(),
+            entry: entry.clone(),
         };
         if let Err(err) = emitter
             .connection()
@@ -180,10 +275,12 @@ impl Portal {
             .at(&session_handle, session_object)
             .await
         {
-            self.sessions.lock().unwrap().remove(&session_handle);
+            let mut sessions = self.sessions.lock().unwrap();
+            remove_session_if_same(&mut sessions, &session_handle, &entry);
             tracing::warn!(%err, "Failed to register portal screencast session object");
             return Ok((RESPONSE_OTHER_ERROR, HashMap::new()));
         }
+        entry.registered.store(true, Ordering::Release);
 
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let token = format!("tidewm{id}");
@@ -268,9 +365,9 @@ impl Portal {
         let Some(source_types) = *entry.source_types.lock().unwrap() else {
             return Ok((RESPONSE_OTHER_ERROR, HashMap::new()));
         };
-        if entry.stream.lock().unwrap().is_some() {
+        let Some(start_reservation) = StartReservation::begin(entry.clone()) else {
             return Ok((RESPONSE_OTHER_ERROR, HashMap::new()));
-        }
+        };
 
         let (choice_tx, choice_rx) = mpsc::sync_channel(1);
         if self
@@ -308,7 +405,12 @@ impl Portal {
             }
         };
 
-        *entry.stream.lock().unwrap() = Some(PortalStream { _handle: handle });
+        if let Err(stream) = start_reservation.complete(PortalStream { _handle: handle }) {
+            // The session was closed while the picker or PipeWire startup was
+            // in flight. Dropping this handle stops the late worker.
+            drop(stream);
+            return Ok((RESPONSE_OTHER_ERROR, HashMap::new()));
+        }
 
         let mut stream_props: HashMap<String, OwnedValue> = HashMap::new();
         stream_props.insert(
@@ -346,9 +448,10 @@ impl Portal {
     ) -> zbus::fdo::Result<Option<Arc<SessionEntry>>> {
         let owner = sender_of(header)?;
         let sessions = self.sessions.lock().unwrap();
-        Ok(sessions
-            .get(session_handle)
-            .and_then(|entry| (entry.owner == owner).then(|| entry.clone())))
+        Ok(sessions.get(session_handle).and_then(|entry| {
+            (entry.registered.load(Ordering::Acquire) && entry.owner == owner)
+                .then(|| entry.clone())
+        }))
     }
 }
 
@@ -360,6 +463,7 @@ impl Portal {
 struct SessionObject {
     path: OwnedObjectPath,
     sessions: Arc<Mutex<SessionMap>>,
+    entry: Arc<SessionEntry>,
 }
 
 #[interface(name = "org.freedesktop.impl.portal.Session")]
@@ -373,11 +477,23 @@ impl SessionObject {
 
     async fn close(
         &self,
+        #[zbus(header)] header: Header<'_>,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> zbus::fdo::Result<()> {
-        // Dropping the removed entry drops its `PortalStream`, whose
-        // `StreamHandle` stops and joins the PipeWire worker thread.
-        self.sessions.lock().unwrap().remove(&self.path);
+        let caller = sender_of(&header)?;
+        if caller != self.entry.owner {
+            return Err(zbus::fdo::Error::AccessDenied(
+                "portal session belongs to another D-Bus client".into(),
+            ));
+        }
+
+        // Mark closed before unlinking so an in-flight Start cannot publish a
+        // worker after this call. Remove only this exact reservation; a stale
+        // object can never tear down a newer entry at the same path.
+        self.entry.close();
+        let mut sessions = self.sessions.lock().unwrap();
+        remove_session_if_same(&mut sessions, &self.path, &self.entry);
+        drop(sessions);
 
         // Matches `dbus.rs`'s `Session::stop`: this method call holds the
         // object server's read lock on `self`, so removing the interface
@@ -422,19 +538,20 @@ pub(super) async fn watch_disconnects(
             continue;
         };
         let owner = OwnedUniqueName::from(name.to_owned());
-        let stale: Vec<OwnedObjectPath> = {
+        let stale: Vec<(OwnedObjectPath, Arc<SessionEntry>)> = {
             let mut sessions = sessions.lock().unwrap();
             let stale: Vec<_> = sessions
                 .iter()
                 .filter(|(_, entry)| entry.owner == owner)
-                .map(|(path, _)| path.clone())
+                .map(|(path, entry)| (path.clone(), entry.clone()))
                 .collect();
-            for path in &stale {
+            for (path, _) in &stale {
                 sessions.remove(path);
             }
             stale
         };
-        for path in stale {
+        for (path, entry) in stale {
+            entry.close();
             let _ = connection
                 .object_server()
                 .remove::<SessionObject, _>(&path)
@@ -443,4 +560,57 @@ pub(super) async fn watch_disconnects(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session_entry() -> Arc<SessionEntry> {
+        Arc::new(SessionEntry {
+            owner: OwnedUniqueName::try_from(":1.42").unwrap(),
+            registered: AtomicBool::new(true),
+            draw_cursor: Mutex::new(Some(false)),
+            source_types: Mutex::new(Some(SOURCE_TYPE_MONITOR)),
+            stream: Mutex::new(PortalStreamState::Idle),
+        })
+    }
+
+    #[test]
+    fn start_reservation_is_exclusive_and_rolls_back() {
+        let entry = session_entry();
+        let first = StartReservation::begin(entry.clone()).expect("first start reserves");
+        assert!(StartReservation::begin(entry.clone()).is_none());
+
+        drop(first);
+        assert!(StartReservation::begin(entry).is_some());
+    }
+
+    #[test]
+    fn close_prevents_late_or_new_start() {
+        let entry = session_entry();
+        let in_flight = StartReservation::begin(entry.clone()).expect("start reserves");
+        entry.close();
+        drop(in_flight);
+
+        assert!(StartReservation::begin(entry).is_none());
+    }
+
+    #[test]
+    fn duplicate_path_reservation_does_not_replace_original() {
+        let path = OwnedObjectPath::try_from("/org/freedesktop/portal/session/test").unwrap();
+        let original = session_entry();
+        let duplicate = session_entry();
+        let mut sessions = SessionMap::new();
+        assert!(reserve_session(
+            &mut sessions,
+            path.clone(),
+            original.clone()
+        ));
+        let accepted = reserve_session(&mut sessions, path.clone(), duplicate.clone());
+
+        assert!(!accepted);
+        assert!(!remove_session_if_same(&mut sessions, &path, &duplicate));
+        assert!(Arc::ptr_eq(sessions.get(&path).unwrap(), &original));
+    }
 }
