@@ -234,6 +234,10 @@ pub struct Smallvil {
     last_config_event: Instant,
     config_reload_timer_armed: bool,
     needs_redraw: bool,
+    /// Optional backend wake-up used by native DRM to propagate damage as
+    /// an event instead of waiting for a fixed polling interval. The winit
+    /// backend keeps its host-refresh timer and leaves this unset.
+    redraw_wakeup: Option<smithay::reexports::calloop::ping::Ping>,
     /// Timestamp of the last real pointer motion (absolute or relative),
     /// updated from `Smallvil::note_pointer_motion`. Drives
     /// `config.cursor_hide_after_ms`'s auto-hide check at render time
@@ -3162,6 +3166,7 @@ impl Smallvil {
             last_activity: Instant::now(),
             cursor_idle_timer_armed: false,
             needs_redraw: true,
+            redraw_wakeup: None,
             active_submap: None,
             rescue_keybinds_active: false,
             helper_keys_down: HashSet::new(),
@@ -5110,8 +5115,18 @@ impl Smallvil {
     /// rather than redrawing every frame regardless of damage.
     pub fn request_redraw(&mut self) {
         self.needs_redraw = true;
+        if let Some(wakeup) = &self.redraw_wakeup {
+            wakeup.ping();
+        }
         #[cfg(feature = "accessibility")]
         self.schedule_accessibility_sync();
+    }
+
+    pub(crate) fn install_redraw_wakeup(
+        &mut self,
+        wakeup: smithay::reexports::calloop::ping::Ping,
+    ) {
+        self.redraw_wakeup = Some(wakeup);
     }
 
     /// Whether something is still mid-animation and needs another frame

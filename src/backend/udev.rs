@@ -55,6 +55,7 @@ use smithay::{
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
         calloop::{
+            ping::make_ping,
             timer::{TimeoutAction, Timer},
             EventLoop, LoopHandle,
         },
@@ -475,6 +476,33 @@ pub fn init_udev(
         next_empty_frame_retry_generation: 0,
     }));
 
+    // Damage propagation is event-driven on DRM. `request_redraw()` writes
+    // this coalescing eventfd; the callback marks every CRTC dirty and renders
+    // any one that is not already waiting for VBlank. A render which keeps an
+    // animation alive pings again, but the pending flag prevents a second KMS
+    // submission until that output's own VBlank, independently pacing mixed
+    // refresh-rate outputs from their advertised modes.
+    let (redraw_wakeup, redraw_source) = make_ping()?;
+    let device_for_redraw = Rc::clone(&device);
+    let loop_handle_for_redraw = event_loop.handle();
+    event_loop
+        .handle()
+        .insert_source(redraw_source, move |(), _, state: &mut Smallvil| {
+            state.update_window_depths();
+            state.update_urgent_pulses();
+            state.update_float_physics_full();
+            let retries = render_requested_surfaces(state, &device_for_redraw);
+            for (crtc, delay) in retries {
+                schedule_empty_frame_retry(
+                    &loop_handle_for_redraw,
+                    Rc::clone(&device_for_redraw),
+                    crtc,
+                    delay,
+                );
+            }
+        })?;
+    state.install_redraw_wakeup(redraw_wakeup);
+
     // wlr-output-power-management-v1's real backend hook (see
     // `Smallvil::set_output_power`, `handlers/wlr_output_power_management.rs`).
     // Off: `GbmDrmCompositor::clear()` -- DPMS off, planes disabled, no
@@ -625,6 +653,9 @@ pub fn init_udev(
                     // frame is exactly the kind of timing this guard is
                     // cheap insurance against.
                     if surface.dirty && !surface.powered_off {
+                        state.update_window_depths();
+                        state.update_urgent_pulses();
+                        state.update_float_physics_full();
                         render_surface(state, surface, &mut renderer.borrow_mut())
                             .map(|delay| (crtc, delay))
                     } else {
@@ -757,85 +788,20 @@ pub fn init_udev(
         })?;
 
     // Same bounded ~60Hz poll as the winit backend (see winit.rs): a Timer
-    // physically can't fire faster than its re-arm duration. It exists to
-    // notice `Smallvil::needs_redraw` going true from any of the many
-    // call-sites that set it (client commits, grabs, config reload, ...);
-    // real per-CRTC pacing after that point comes from VBlank, via the
-    // pending/dirty pair on `SurfaceData`.
+    // Slow maintenance fallback for clocks which can become actionable with
+    // no external event (urgent repeats, automatic depth, cleanup). Rendering
+    // itself is driven by the redraw eventfd above and each CRTC's VBlank.
+    // While an animation is active, derive the wake period from the fastest
+    // live mode; at idle, one maintenance pass per second avoids a permanent
+    // refresh-rate wakeup without delaying ordinary client/input damage.
     let device_for_timer = Rc::clone(&device);
-    let loop_handle_for_timer = event_loop.handle();
     event_loop
         .handle()
         .insert_source(Timer::immediate(), move |_, _, state: &mut Smallvil| {
             state.update_window_depths();
             state.update_urgent_pulses();
             state.update_float_physics_full();
-            if state.take_needs_redraw() {
-                let mut dev = device_for_timer.borrow_mut();
-                for surface in dev.surfaces.values_mut() {
-                    surface.dirty = true;
-                }
-            }
-
-            let mut retries = Vec::new();
-            let mut dev = device_for_timer.borrow_mut();
-            // While VT-switched away (session paused, dev.drm.pause()
-            // called) render_frame just errors with DeviceInactive every
-            // tick -- skip it entirely rather than spin logging that. The
-            // ActivateSession handler below marks every surface dirty
-            // again on resume, so nothing gets lost by skipping here.
-            if dev.drm.is_active() {
-                let DeviceData {
-                    surfaces, renderer, ..
-                } = &mut *dev;
-                let mut renderer = renderer.borrow_mut();
-                for (&crtc, surface) in surfaces.iter_mut() {
-                    // Powered off via wlr-output-power-management-v1: no
-                    // scanout to render into or capture from until turned
-                    // back on (see `Smallvil::set_output_power`).
-                    if surface.powered_off {
-                        state.fail_captures_for_output(&surface.output);
-                        continue;
-                    }
-                    let rendered_visible_frame = surface.dirty && !surface.pending;
-                    if rendered_visible_frame {
-                        if let Some(delay) = render_surface(state, surface, &mut renderer) {
-                            retries.push((crtc, delay));
-                        }
-                    }
-                    // Screen captures drain here, the only place a renderer
-                    // with a current EGL context is available. Cursor
-                    // compositing is honored for clients that request it
-                    // (see capture.rs).
-                    state.render_pending_captures(&mut renderer, &surface.output, true);
-                    state.capture_pending_workspace_transition(&mut renderer, &surface.output);
-                }
-            }
-            drop(dev);
-
-            for (crtc, delay) in retries {
-                schedule_empty_frame_retry(
-                    &loop_handle_for_timer,
-                    Rc::clone(&device_for_timer),
-                    crtc,
-                    delay,
-                );
-            }
-
-            // An active animation (caustics at fps>0, a toast fading, a
-            // ripple in flight, ...) needs another frame even though nothing
-            // else marked itself dirty in the meantime. Checked here in the
-            // main loop rather than inside render_surface: with the check
-            // only in the render path, an idle desktop never renders, so a
-            // rate-gated effect (caustics' 1/fps) never gets re-evaluated
-            // and starves to a few frames per second. The effect's own gate
-            // still throttles actual renders to its configured fps; this
-            // only guarantees the pump keeps asking. Goes through the
-            // request_redraw -> take_needs_redraw path, so every output is
-            // re-dirtied, not just the one(s) that just rendered.
-            if state.has_active_animation() {
-                state.request_redraw();
-            }
+            let active = state.has_active_animation();
 
             state.space.refresh();
             state.popups.cleanup();
@@ -844,10 +810,65 @@ pub fn init_udev(
             state.cleanup_wlr_foreign_toplevels();
             let _ = state.display_handle.flush_clients();
 
-            TimeoutAction::ToDuration(Duration::from_millis(16))
+            let next = if active {
+                device_for_timer
+                    .borrow()
+                    .surfaces
+                    .values()
+                    .filter(|surface| !surface.powered_off)
+                    .map(|surface| output_refresh_period(&surface.output))
+                    .min()
+                    .unwrap_or_else(|| Duration::from_secs(1))
+            } else {
+                Duration::from_secs(1)
+            };
+            TimeoutAction::ToDuration(next)
         })?;
 
     Ok(())
+}
+
+/// Consume the compositor-wide damage bit and render every ready CRTC once.
+/// A CRTC already waiting for VBlank keeps its own `dirty` bit and is picked
+/// up by the DRM event handler, so a slow output never blocks a faster one.
+fn render_requested_surfaces(
+    state: &mut Smallvil,
+    device: &Rc<RefCell<DeviceData>>,
+) -> Vec<(crtc::Handle, Duration)> {
+    let mut dev = device.borrow_mut();
+    if state.take_needs_redraw() {
+        for surface in dev.surfaces.values_mut() {
+            surface.dirty = true;
+        }
+    }
+
+    // While VT-switched away, preserve dirty state for ActivateSession's
+    // reset/re-render path instead of logging DeviceInactive in a loop.
+    if !dev.drm.is_active() {
+        return Vec::new();
+    }
+
+    let DeviceData {
+        surfaces, renderer, ..
+    } = &mut *dev;
+    let mut renderer = renderer.borrow_mut();
+    let mut retries = Vec::new();
+    for (&crtc, surface) in surfaces.iter_mut() {
+        if surface.powered_off {
+            state.fail_captures_for_output(&surface.output);
+            continue;
+        }
+        if surface.dirty && !surface.pending {
+            if let Some(delay) = render_surface(state, surface, &mut renderer) {
+                retries.push((crtc, delay));
+            }
+        }
+        // Capture requests use the same redraw wakeup and need the active EGL
+        // renderer even if scanout damage collapsed to an empty frame.
+        state.render_pending_captures(&mut renderer, &surface.output, true);
+        state.capture_pending_workspace_transition(&mut renderer, &surface.output);
+    }
+    retries
 }
 
 fn gpu_has_connected_display(drm: &DrmDevice) -> bool {
@@ -1690,22 +1711,49 @@ fn render_surface(
         state.send_layer_frames(output, state.start_time.elapsed());
     }
 
-    // An active animation (a toast still fading, caustics at fps>0, a
-    // ripple in flight, ...) needs another frame even though nothing else
-    // marked itself dirty in the meantime. Checked here in the main loop --
-    // not inside render_surface -- so a request happens every tick even
-    // when the previous render stamped the animation's last-advance clock
-    // and the frame gate (e.g. caustics' 1/fps) is currently quiet: with
-    // the check only inside the render path, an idle desktop never renders,
-    // so the gate never gets re-evaluated and the effect starves to a
-    // few frames per second. Goes through the normal request_redraw() ->
-    // take_needs_redraw() path (checked at the top of *next* tick), which
-    // re-dirties every output, not just whichever one(s) just rendered.
-    // The effect's own rate gate still throttles actual renders to its
-    // configured fps; this only guarantees the pump keeps asking.
+    // Keep this CRTC's animation chain local to its own VBlank cadence. A
+    // successful queue leaves `pending` set until that VBlank; an empty
+    // frame uses the mode-derived retry timer. Going through the global
+    // redraw eventfd here would immediately retry an EmptyFrame and turn an
+    // otherwise damage-free animation gate into a busy loop.
     if state.has_active_animation() {
-        state.request_redraw();
+        surface.dirty = true;
     }
 
     empty_frame_retry
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refresh_retry_period_comes_from_the_live_mode() {
+        let output = Output::new(
+            "test".to_string(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "test".to_string(),
+                model: "test".to_string(),
+                serial_number: "test".to_string(),
+            },
+        );
+        output.change_current_state(
+            Some(Mode {
+                // Deliberately arbitrary: scheduling must not depend on a
+                // familiar monitor resolution.
+                size: (37, 23).into(),
+                refresh: 165_000,
+            }),
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            output_refresh_period(&output),
+            Duration::from_nanos(1_000_000_000_000 / 165_000)
+        );
+    }
 }
