@@ -4965,6 +4965,20 @@ impl Smallvil {
         elements
     }
 
+    /// Send frame callbacks only to windows which this output actually rendered.
+    pub(crate) fn send_window_frames(&self, output: &Output, time: Duration) {
+        let Some(placements) = self.render_placements(output) else {
+            return;
+        };
+        for placement in placements {
+            placement
+                .window
+                .send_frame(output, time, Some(Duration::ZERO), |_, _| {
+                    Some(output.clone())
+                });
+        }
+    }
+
     /// Collects the wp_presentation feedback callbacks every visible
     /// window and layer surface on `output` registered since its last
     /// frame. The backend calls `presented` on the returned value once the
@@ -4980,9 +4994,9 @@ impl Smallvil {
     ) -> OutputPresentationFeedback {
         let mut feedback = OutputPresentationFeedback::new(output);
 
-        self.space.elements().for_each(|window| {
-            if self.space.outputs_for_element(window).contains(output) {
-                window.take_presentation_feedback(
+        if let Some(placements) = self.render_placements(output) {
+            for placement in placements {
+                placement.window.take_presentation_feedback(
                     &mut feedback,
                     surface_primary_scanout_output,
                     |surface, _| {
@@ -4994,7 +5008,7 @@ impl Smallvil {
                     },
                 );
             }
-        });
+        }
 
         let map = layer_map_for_output(output);
         for layer in map.layers() {

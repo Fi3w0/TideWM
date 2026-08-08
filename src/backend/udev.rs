@@ -1685,14 +1685,7 @@ fn render_surface(
     if locked {
         state.send_lock_frames(output, state.start_time.elapsed());
     } else {
-        state.space.elements().for_each(|window| {
-            window.send_frame(
-                output,
-                state.start_time.elapsed(),
-                Some(Duration::ZERO),
-                |_, _| Some(output.clone()),
-            )
-        });
+        state.send_window_frames(output, state.start_time.elapsed());
         state.send_layer_frames(output, state.start_time.elapsed());
     }
 
