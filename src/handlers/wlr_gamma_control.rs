@@ -11,7 +11,7 @@
 //! winit is refused outright with `failed`, matching the protocol's own
 //! "the output doesn't support gamma tables" reason.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, os::fd::AsFd};
 
 use smithay::output::Output;
 use smithay::reexports::rustix;
@@ -65,6 +65,54 @@ fn identity_ramp(size: u32) -> Vec<u16> {
     (0..size)
         .map(|i| ((i as u64 * u16::MAX as u64) / last) as u16)
         .collect()
+}
+
+#[derive(Debug)]
+enum GammaTableReadError {
+    InvalidSource,
+    InvalidLength,
+    Io(rustix::io::Errno),
+}
+
+/// Read a protocol gamma table without ever treating the client-provided fd
+/// as a stream. The protocol requires a memory-mappable object whose length is
+/// exactly three `gamma_size` arrays of native-endian u16 values. Accepting a
+/// pipe/socket here would let an untrusted client leave the compositor's event
+/// loop blocked waiting for bytes that never arrive.
+fn read_gamma_table(fd: impl AsFd, gamma_size: u32) -> Result<Vec<u8>, GammaTableReadError> {
+    let expected_len = usize::try_from(gamma_size)
+        .ok()
+        .and_then(|size| size.checked_mul(3))
+        .and_then(|size| size.checked_mul(std::mem::size_of::<u16>()))
+        .ok_or(GammaTableReadError::InvalidLength)?;
+
+    let stat = rustix::fs::fstat(&fd).map_err(GammaTableReadError::Io)?;
+    if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile {
+        return Err(GammaTableReadError::InvalidSource);
+    }
+    if u64::try_from(stat.st_size).ok() != Some(expected_len as u64) {
+        return Err(GammaTableReadError::InvalidLength);
+    }
+
+    let mut buf = vec![0; expected_len];
+    let mut filled = 0;
+    while filled < expected_len {
+        let read = rustix::io::pread(&fd, &mut buf[filled..], filled as u64)
+            .map_err(GammaTableReadError::Io)?;
+        if read == 0 {
+            return Err(GammaTableReadError::InvalidLength);
+        }
+        filled += read;
+    }
+
+    // Catch ordinary truncate/extend races as invalid input. `pread` also
+    // leaves the shared file offset untouched, as expected for passed fds.
+    let final_stat = rustix::fs::fstat(fd).map_err(GammaTableReadError::Io)?;
+    if u64::try_from(final_stat.st_size).ok() != Some(expected_len as u64) {
+        return Err(GammaTableReadError::InvalidLength);
+    }
+
+    Ok(buf)
 }
 
 impl GlobalDispatch<ZwlrGammaControlManagerV1, ()> for Smallvil {
@@ -138,26 +186,26 @@ impl Dispatch<ZwlrGammaControlV1, ControlData> for Smallvil {
             return;
         };
 
-        let size = *size as usize;
-        let mut buf = vec![0u8; size * 3 * std::mem::size_of::<u16>()];
-        let mut filled = 0;
-        while filled < buf.len() {
-            match rustix::io::read(&fd, &mut buf[filled..]) {
-                Ok(0) => break, // short: client sent less than size*3 u16s
-                Ok(n) => filled += n,
-                Err(e) => {
-                    tracing::warn!(%e, "Failed to read gamma table fd");
-                    break;
+        let buf = match read_gamma_table(&fd, *size) {
+            Ok(buf) => buf,
+            Err(error) => {
+                match error {
+                    GammaTableReadError::Io(error) => {
+                        tracing::warn!(%error, "Failed to read gamma table fd");
+                    }
+                    GammaTableReadError::InvalidSource => {
+                        tracing::warn!("Rejected non-file gamma table fd");
+                    }
+                    GammaTableReadError::InvalidLength => {}
                 }
+                resource.post_error(
+                    zwlr_gamma_control_v1::Error::InvalidGamma,
+                    "gamma table fd must be a regular file containing exactly size*3 u16 values",
+                );
+                return;
             }
-        }
-        if filled != buf.len() {
-            resource.post_error(
-                zwlr_gamma_control_v1::Error::InvalidGamma,
-                "gamma table fd did not contain exactly size*3 u16 values",
-            );
-            return;
-        }
+        };
+        let size = *size as usize;
 
         let channel = |bytes: &[u8]| -> Vec<u16> {
             bytes
@@ -207,7 +255,11 @@ impl Dispatch<ZwlrGammaControlV1, ControlData> for Smallvil {
 
 #[cfg(test)]
 mod tests {
-    use super::identity_ramp;
+    use std::os::unix::net::UnixStream;
+
+    use smithay::reexports::rustix;
+
+    use super::{identity_ramp, read_gamma_table, GammaTableReadError};
 
     #[test]
     fn identity_ramp_spans_full_range_monotonically() {
@@ -222,5 +274,41 @@ mod tests {
     fn identity_ramp_handles_degenerate_sizes() {
         assert_eq!(identity_ramp(0), Vec::<u16>::new());
         assert_eq!(identity_ramp(1), vec![0]);
+    }
+
+    #[test]
+    fn gamma_table_accepts_exact_sized_memfd() {
+        let fd = rustix::fs::memfd_create("tidewm-gamma-test", rustix::fs::MemfdFlags::CLOEXEC)
+            .expect("create memfd");
+        let bytes = [1_u8, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0];
+        rustix::fs::ftruncate(&fd, bytes.len() as u64).expect("size memfd");
+        assert_eq!(
+            rustix::io::pwrite(&fd, &bytes, 0).expect("populate memfd"),
+            bytes.len()
+        );
+
+        assert_eq!(read_gamma_table(&fd, 2).expect("valid table"), bytes);
+    }
+
+    #[test]
+    fn gamma_table_rejects_wrong_sized_memfd() {
+        let fd = rustix::fs::memfd_create("tidewm-gamma-test", rustix::fs::MemfdFlags::CLOEXEC)
+            .expect("create memfd");
+        rustix::fs::ftruncate(&fd, 10).expect("size memfd");
+
+        assert!(matches!(
+            read_gamma_table(&fd, 2),
+            Err(GammaTableReadError::InvalidLength)
+        ));
+    }
+
+    #[test]
+    fn gamma_table_rejects_stream_without_reading() {
+        let (reader, _writer) = UnixStream::pair().expect("create socket pair");
+
+        assert!(matches!(
+            read_gamma_table(&reader, 2),
+            Err(GammaTableReadError::InvalidSource)
+        ));
     }
 }

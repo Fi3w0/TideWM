@@ -5,6 +5,7 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 ## [Unreleased]
 
 ### Fixed
+- Gamma-control clients can no longer freeze the single-threaded compositor by passing a pipe or socket and withholding ramp bytes. TideWM now enforces the protocol's exact-sized, memory-mappable-file contract before reading, uses positional file reads, and rejects non-regular or concurrently resized inputs as `invalid_gamma`.
 - Session-lock composition now fails closed across every capture and udev render path. Per-window screenshots and PipeWire streams are refused as soon as locking starts instead of rendering the target before the shared lock check. The standalone renderer suppresses desktop toasts, close snapshots, transitions, compass/canvas effects, and any pre-lock client cursor surface; only the lock composition and a compositor-owned default cursor can be drawn. Entering the lock also releases in-flight close snapshots so retained client pixels cannot cross the boundary.
 
 ### Changed
