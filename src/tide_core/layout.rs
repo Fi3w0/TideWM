@@ -641,10 +641,14 @@ impl Layouts {
         window_count: usize,
         target_aspect: f32,
     ) {
+        let key = (output.to_string(), workspace);
+        if window_count == 0 {
+            self.cascade_state.remove(&key);
+            return;
+        }
         if self.algorithm(output, workspace) != LayoutAlgorithm::Cascade {
             return;
         }
-        let key = (output.to_string(), workspace);
         let state =
             resolve_cascade_state(self.cascade_state.get(&key), window_count, target_aspect);
         self.cascade_state.insert(key, state);
@@ -2164,6 +2168,19 @@ mod tests {
 
         layouts.set_default_algorithm(LayoutAlgorithm::Master);
         assert_eq!(layouts.algorithm("DP-1", 2), LayoutAlgorithm::Master);
+    }
+
+    #[test]
+    fn empty_cascade_refresh_does_not_retain_workspace_state() {
+        let mut layouts = Layouts::default();
+        let key = ("DP-1".to_string(), u32::MAX);
+        layouts
+            .cascade_state
+            .insert(key.clone(), resolve_cascade_state(None, 4, 1.0));
+
+        layouts.refresh_cascade_state("DP-1", u32::MAX, 0, 1.0);
+
+        assert!(!layouts.cascade_state.contains_key(&key));
     }
 
     #[test]

@@ -9785,6 +9785,9 @@ impl Smallvil {
             return;
         };
         let workspace = self.layout.active_workspace(&output.name());
+        if self.layout.window_count(&output.name(), workspace) == 0 {
+            return;
+        }
         self.layout
             .set_algorithm(&output.name(), workspace, algorithm);
         self.retile();
@@ -9800,6 +9803,9 @@ impl Smallvil {
             return;
         };
         let workspace = self.layout.active_workspace(&output.name());
+        if self.layout.window_count(&output.name(), workspace) == 0 {
+            return;
+        }
         self.layout
             .adjust_master_ratio(&output.name(), workspace, delta);
         self.retile();
