@@ -1393,6 +1393,21 @@ impl OceanSpace {
         Point::from((delta.x / zoom, delta.y / zoom))
     }
 
+    pub(crate) fn viewport_world_bounds(
+        &self,
+        output: &str,
+        viewport: Size<i32, Logical>,
+    ) -> (f64, f64, f64, f64) {
+        let camera = self.camera(output);
+        let zoom = camera.zoom.max(0.05);
+        (
+            camera.origin.x,
+            camera.origin.y,
+            viewport.w.max(0) as f64 / zoom,
+            viewport.h.max(0) as f64 / zoom,
+        )
+    }
+
     pub fn pin_to_screen(&mut self, surface: &WlSurface, output: &str) -> bool {
         if self.screen_pins.contains_key(surface) {
             return true;
@@ -1663,6 +1678,23 @@ mod tests {
         assert_eq!(
             ocean.camera("right").origin,
             OceanPoint { x: -75.0, y: 900.0 }
+        );
+    }
+
+    #[test]
+    fn viewport_bounds_are_expressed_in_camera_world_coordinates() {
+        let mut ocean = OceanSpace::from_config(&OceanConfig::default());
+        ocean.cameras.insert(
+            "nested".to_string(),
+            OceanCamera {
+                origin: OceanPoint { x: 125.0, y: -40.0 },
+                zoom: 2.0,
+            },
+        );
+
+        assert_eq!(
+            ocean.viewport_world_bounds("nested", Size::from((1000, 700))),
+            (125.0, -40.0, 500.0, 350.0)
         );
     }
 

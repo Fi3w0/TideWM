@@ -1777,9 +1777,8 @@ impl Smallvil {
 
     /// Anchor rect (window's own logical position/size, unaffected by its
     /// current cosmetic offset), mass (area-derived per the design
-    /// conversation -- a big window shoves a small one), and home-output
-    /// bounds (for edge bouncing, `self.output_for_window`'s existing
-    /// per-output resolution) for one F1 `full` body. Resolved once per
+    /// conversation -- a big window shoves a small one), and edge bounds in
+    /// the anchor's own coordinate space for one F1 `full` body. Resolved once per
     /// outer tick in `update_float_physics_full`, reused across every
     /// substep -- a floating window's own logical position doesn't move
     /// mid-tick, only its cosmetic offset does, which `step_float_physics_
@@ -1794,16 +1793,28 @@ impl Smallvil {
         );
         const MIN_MASS: f64 = 1.0;
         let mass = (anchor.2 * anchor.3).max(MIN_MASS);
-        let output_bounds = self.mapped_toplevel_window(surface).and_then(|window| {
-            let output = self.output_for_window(&window)?;
-            let geo = self.space.output_geometry(&output)?;
-            Some((
-                geo.loc.x as f64,
-                geo.loc.y as f64,
-                geo.size.w as f64,
-                geo.size.h as f64,
-            ))
-        });
+        let output_bounds = match self.config.spatial_engine {
+            crate::config::SpatialEngine::Classic => {
+                self.mapped_toplevel_window(surface).and_then(|window| {
+                    let output = self.output_for_window(&window)?;
+                    let geo = self.space.output_geometry(&output)?;
+                    Some((
+                        geo.loc.x as f64,
+                        geo.loc.y as f64,
+                        geo.size.w as f64,
+                        geo.size.h as f64,
+                    ))
+                })
+            }
+            crate::config::SpatialEngine::Ocean => self
+                .ocean
+                .entry_output(surface)
+                .and_then(|name| self.output_by_name(name).map(|output| (name, output)))
+                .and_then(|(name, output)| {
+                    let viewport = self.space.output_geometry(&output)?.size;
+                    Some(self.ocean.viewport_world_bounds(name, viewport))
+                }),
+        };
         Some(FloatBodyContext {
             surface: surface.clone(),
             anchor,
