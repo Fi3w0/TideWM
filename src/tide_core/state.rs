@@ -216,6 +216,12 @@ pub struct Smallvil {
     /// trigger is an ordinary key, not a modifier -- mirrors
     /// `helper_keys_down`'s own press/release bookkeeping shape.
     pub(crate) minimap_trigger_down: bool,
+    /// Mouse presses consumed by compositor-owned modal UI whose matching
+    /// release must not be delivered to a client after that UI closes and
+    /// pointer focus is restored. Entries are button codes, not device-
+    /// specific assumptions; a fresh press clears a stale entry if a
+    /// release was lost across a backend/session transition.
+    pub(crate) suppressed_pointer_buttons: HashSet<u32>,
     /// Structural parked-window state for Classic workspaces. This remains
     /// empty unless the opt-in `classic_depth` feature is used.
     pub classic_depth: crate::classic_depth::ClassicDepthDeck,
@@ -3150,6 +3156,7 @@ impl Smallvil {
             overview: None,
             minimap_peek: None,
             minimap_trigger_down: false,
+            suppressed_pointer_buttons: HashSet::new(),
             classic_depth: crate::classic_depth::ClassicDepthDeck::default(),
             ocean,
             depth_deck_overlay: None,
@@ -6897,6 +6904,7 @@ impl Smallvil {
     /// in `minimap_click_travel` may call this for the same peek.
     pub(crate) fn close_minimap_peek(&mut self) {
         if self.minimap_peek.take().is_some() {
+            self.refresh_pointer_focus();
             self.request_redraw();
         }
     }
@@ -6928,6 +6936,7 @@ impl Smallvil {
             .and_then(|candidate| self.space.output_geometry(candidate))
             .map(|geo| geo.size)
         else {
+            self.refresh_pointer_focus();
             self.request_redraw();
             return;
         };
@@ -6942,6 +6951,7 @@ impl Smallvil {
             Duration::from_millis(self.config.ocean.camera_animation_ms),
             self.config.ocean.camera_sway,
         );
+        self.refresh_pointer_focus();
         self.request_redraw();
     }
 
