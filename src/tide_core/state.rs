@@ -440,13 +440,9 @@ pub struct Smallvil {
     /// `water_effects` plus `caustics.enabled`. The phase only advances
     /// inside `caustics_frame_element`, so damage-driven idle desktops
     /// freeze the pattern at zero extra frames; `caustics.fps > 0` opts
-    /// into constant motion via `has_active_animation`'s gate.
+    /// into deadline-driven constant motion.
     pub(crate) caustics: HashMap<String, crate::caustics::Caustics>,
     pub(crate) caustics_program: Option<GlesPixelProgram>,
-    /// Last time any caustics phase advanced, for the `fps` constant-motion
-    /// gate. Global rather than per-output so a single display's tick
-    /// bootstraps entries on outputs that haven't rendered yet.
-    pub(crate) caustics_last_advance: Instant,
     /// Per-output compass state and one shared compiled shader (spatial
     /// roadmap S5). Ocean-only and gated by `water_effects`; no element is
     /// produced when nothing sits off-screen.
@@ -3229,7 +3225,6 @@ impl Smallvil {
             ocean_canvas_program: None,
             caustics: HashMap::new(),
             caustics_program: None,
-            caustics_last_advance: Instant::now(),
             compasses: HashMap::new(),
             compass_program: None,
             loop_handle,
@@ -6603,24 +6598,35 @@ impl Smallvil {
         let area = Rectangle::from_size(self.space.output_geometry(output)?.size);
         let output_scale = output.current_scale().fractional_scale();
         let program = crate::caustics::caustics_program(&mut self.caustics_program, renderer)?;
+        let effective_fps = self.caustics_effective_fps();
+        let output_name = output.name();
+        let advance = if self.config.caustics.fps == 0 {
+            true
+        } else if effective_fps == 0 {
+            false
+        } else {
+            self.caustics
+                .get(&output_name)
+                .and_then(|caustics| caustics.next_frame_in(effective_fps))
+                .is_none_or(|delay| delay.is_zero())
+        };
         let element = self
             .caustics
-            .entry(output.name())
+            .entry(output_name)
             .or_default()
-            .frame_element(renderer, program, area, output_scale, &self.config.caustics)?;
-        self.caustics_last_advance = Instant::now();
+            .frame_element(
+                renderer,
+                program,
+                area,
+                output_scale,
+                &self.config.caustics,
+                advance,
+            )?;
         Some(crate::backend::udev::OutputRenderElements::Caustics(
             element,
         ))
     }
 
-    /// Whether the configured `caustics.fps` says the frame pump should be
-    /// kept alive for constant caustic motion. `fps = 0` (piggyback mode)
-    /// never returns true here -- in that mode caustics advance only on
-    /// frames already being rendered for some other reason, which is the
-    /// whole point of leaving it at zero. Honors the configured rate by
-    /// gating on the time since the last advance, so a `fps = 15` value
-    /// doesn't actually redraw at the display's full refresh.
     /// The frame rate the caustics overlay should currently run at:
     /// `caustics.fps` when the user is active, stepping down through the
     /// configured idle tiers as minutes pass without input. Empty tier
@@ -6643,16 +6649,36 @@ impl Smallvil {
         fps
     }
 
-    fn caustics_active(&self) -> bool {
+    pub(crate) fn caustics_redraw_delay(&self) -> Option<Duration> {
         let cfg = &self.config.caustics;
-        // `speed = 0` with `fps > 0` would pump frames whose sample never
-        // changes: no commit increment, no damage, an EmptyFrame retry
-        // churn every vblank. Nothing to animate, so don't ask for frames.
-        if !self.config.water_effects || !cfg.enabled || cfg.fps == 0 || cfg.speed <= 0.0 {
-            return false;
+        if !matches!(self.session_lock, SessionLock::Unlocked)
+            || !self.config.water_effects
+            || !cfg.enabled
+            || cfg.intensity <= 0.0
+            || cfg.fps == 0
+            || cfg.speed <= 0.0
+        {
+            return None;
         }
         let fps = self.caustics_effective_fps();
-        fps > 0 && self.caustics_last_advance.elapsed() >= Duration::from_secs_f32(1.0 / fps as f32)
+        if fps == 0 {
+            return None;
+        }
+        let period = Duration::from_secs_f64(1.0 / f64::from(fps));
+        self.space
+            .outputs()
+            .map(|output| {
+                self.caustics
+                    .get(&output.name())
+                    .and_then(|caustics| caustics.next_frame_in(fps))
+                    .unwrap_or(period)
+            })
+            .min()
+    }
+
+    fn caustics_active(&self) -> bool {
+        self.caustics_redraw_delay()
+            .is_some_and(|delay| delay.is_zero())
     }
 
     /// Off-screen urgent/deep compass cues for the Ocean engine (spatial

@@ -787,13 +787,11 @@ pub fn init_udev(
             }
         })?;
 
-    // Same bounded ~60Hz poll as the winit backend (see winit.rs): a Timer
     // Slow maintenance fallback for clocks which can become actionable with
     // no external event (urgent repeats, automatic depth, cleanup). Rendering
     // itself is driven by the redraw eventfd above and each CRTC's VBlank.
-    // While an animation is active, derive the wake period from the fastest
-    // live mode; at idle, one maintenance pass per second avoids a permanent
-    // refresh-rate wakeup without delaying ordinary client/input damage.
+    // Continuous animation derives its wake period from the fastest live mode;
+    // scheduled caustics uses its configured deadline directly.
     let device_for_timer = Rc::clone(&device);
     event_loop
         .handle()
@@ -801,6 +799,10 @@ pub fn init_udev(
             state.update_window_depths();
             state.update_urgent_pulses();
             state.update_float_physics_full();
+            let caustics_delay = state.caustics_redraw_delay();
+            if caustics_delay.is_some_and(|delay| delay.is_zero()) {
+                state.request_redraw();
+            }
             let active = state.has_active_animation();
 
             state.space.refresh();
@@ -820,7 +822,7 @@ pub fn init_udev(
                     .min()
                     .unwrap_or_else(|| Duration::from_secs(1))
             } else {
-                Duration::from_secs(1)
+                caustics_delay.unwrap_or_else(|| Duration::from_secs(1))
             };
             TimeoutAction::ToDuration(next)
         })?;
@@ -858,7 +860,11 @@ fn render_requested_surfaces(
             state.fail_captures_for_output(&surface.output);
             continue;
         }
-        if surface.dirty && !surface.pending {
+        if surface_redraw_ready(
+            surface.dirty,
+            surface.pending,
+            surface.empty_frame_retry_pending.is_some(),
+        ) {
             if let Some(delay) = render_surface(state, surface, &mut renderer) {
                 retries.push((crtc, delay));
             }
@@ -1216,17 +1222,22 @@ fn handle_connector_change(
     }
 }
 
-/// Estimate one retrace from the output's millihertz refresh value. Keep a
-/// conservative 60 Hz fallback for outputs whose mode is temporarily absent
-/// (for example, during a modeset).
+/// Estimate one retrace from the output's live millihertz refresh value. If a
+/// mode is temporarily absent, retry slowly instead of assuming hardware.
 fn output_refresh_period(output: &Output) -> Duration {
     output
         .current_mode()
-        // Clamp before casting so an invalid negative refresh cannot wrap to
-        // a huge `u64` and produce an effectively zero-duration busy loop.
-        .map(|mode| mode.refresh.max(1_000) as u64)
+        .and_then(|mode| {
+            u64::try_from(mode.refresh)
+                .ok()
+                .filter(|refresh| *refresh > 0)
+        })
         .map(|refresh_millihz| Duration::from_nanos(1_000_000_000_000 / refresh_millihz))
-        .unwrap_or_else(|| Duration::from_micros(16_667))
+        .unwrap_or_else(|| Duration::from_secs(1))
+}
+
+fn surface_redraw_ready(dirty: bool, pending: bool, retry_pending: bool) -> bool {
+    dirty && !pending && !retry_pending
 }
 
 /// `FrameError::EmptyFrame` does not produce a page flip, and therefore no
@@ -1757,5 +1768,13 @@ mod tests {
             output_refresh_period(&output),
             Duration::from_nanos(1_000_000_000_000 / 165_000)
         );
+    }
+
+    #[test]
+    fn estimated_vblank_wait_blocks_immediate_redraw() {
+        assert!(surface_redraw_ready(true, false, false));
+        assert!(!surface_redraw_ready(true, true, false));
+        assert!(!surface_redraw_ready(true, false, true));
+        assert!(!surface_redraw_ready(false, false, false));
     }
 }

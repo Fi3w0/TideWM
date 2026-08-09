@@ -149,6 +149,19 @@ impl Default for Caustics {
 }
 
 impl Caustics {
+    /// Time until a configured constant-motion frame is due. `None` means
+    /// piggyback mode; an uninitialized output is immediately due once.
+    pub fn next_frame_in(&self, fps: u32) -> Option<Duration> {
+        if fps == 0 {
+            return None;
+        }
+        if self.last_sample.is_none() {
+            return Some(Duration::ZERO);
+        }
+        let period = Duration::from_secs_f64(1.0 / f64::from(fps));
+        Some(period.saturating_sub(self.last_advance.elapsed()))
+    }
+
     /// Advances the phase, re-renders the low-res pattern texture if the
     /// sample changed (or the texture is missing), and returns the blit
     /// element for this output's frame. `None` on a render failure or an
@@ -160,18 +173,28 @@ impl Caustics {
         area: Rectangle<i32, Logical>,
         output_scale: f64,
         cfg: &CausticsConfig,
+        advance: bool,
     ) -> Option<CausticsElement> {
-        // Cap the per-frame advance so a stall (VT switch, suspend, a
-        // blocked render loop) doesn't turn into a visible pattern jump
-        // on the next frame.
-        let dt = self.last_advance.elapsed().min(Duration::from_millis(100));
-        self.last_advance = Instant::now();
-        self.phase += dt.as_secs_f32() * cfg.speed;
-        let sample = CausticsSample {
-            time: self.phase,
-            intensity: cfg.intensity,
-            color: cfg.color,
-            scale: cfg.scale,
+        // A failed offscreen render leaves the last sample in place. Retry
+        // only on the next scheduled advance, not on every unrelated frame.
+        if !advance && self.texture.is_none() {
+            return None;
+        }
+        let sample = if advance || self.last_sample.is_none() {
+            // Cap the per-frame advance so a stall (VT switch, suspend, a
+            // blocked render loop) doesn't turn into a visible pattern jump
+            // on the next frame.
+            let dt = self.last_advance.elapsed().min(Duration::from_millis(100));
+            self.last_advance = Instant::now();
+            self.phase += dt.as_secs_f32() * cfg.speed;
+            CausticsSample {
+                time: self.phase,
+                intensity: cfg.intensity,
+                color: cfg.color,
+                scale: cfg.scale,
+            }
+        } else {
+            self.last_sample?
         };
         let dirty = self.last_sample != Some(sample);
         if dirty {
@@ -417,5 +440,26 @@ mod tests {
             .elapsed()
             .min(Duration::from_millis(100));
         assert!(dt <= Duration::from_millis(100));
+    }
+
+    #[test]
+    fn scheduled_frame_deadline_comes_from_configured_fps() {
+        let fps = 37;
+        let mut caustics = Caustics {
+            last_sample: Some(CausticsSample {
+                time: 0.0,
+                intensity: 0.4,
+                color: [0.2, 0.5, 0.8],
+                scale: 1.3,
+            }),
+            ..Caustics::default()
+        };
+        let period = Duration::from_secs_f64(1.0 / f64::from(fps));
+
+        assert!(caustics.next_frame_in(fps).unwrap() <= period);
+        assert_eq!(caustics.next_frame_in(0), None);
+
+        caustics.last_advance = Instant::now() - period.saturating_mul(2);
+        assert_eq!(caustics.next_frame_in(fps), Some(Duration::ZERO));
     }
 }
