@@ -9599,13 +9599,9 @@ impl Smallvil {
         self.request_redraw();
     }
 
-    /// Whether an xdg-activation token's originating serial (if any) is
-    /// still fresh enough to steal focus outright. `None` (no serial at
-    /// all) is always fresh -- see `handlers/mod.rs`'s `token_created` for
-    /// why xwayland-satellite/notification-daemon tokens have to stay
-    /// unconditionally trusted here. Shared by `token_created` (whether to
-    /// mint the token) and `request_activation` (whether to grant focus or
-    /// downgrade to `mark_urgent` once it's actually consumed).
+    /// Whether an xdg-activation token carries a fresh serial from our seat.
+    /// Serial-less tokens remain mintable for compatibility, but this returns
+    /// false so consumption takes the urgency path instead of granting focus.
     pub(crate) fn activation_serial_is_fresh(
         &self,
         serial: &Option<(
@@ -9614,7 +9610,7 @@ impl Smallvil {
         )>,
     ) -> bool {
         let Some((serial, seat)) = serial else {
-            return true;
+            return false;
         };
         if Seat::from_resource(seat).as_ref() != Some(&self.seat) {
             return false;
@@ -9638,6 +9634,9 @@ impl Smallvil {
     /// urgency only means something for a window the user could plausibly
     /// switch to.
     pub(crate) fn mark_urgent(&mut self, surface: &WlSurface) {
+        if self.intended_window_surface().as_ref() == Some(surface) {
+            return;
+        }
         if self.mapped_toplevel_window(surface).is_none() {
             return;
         }

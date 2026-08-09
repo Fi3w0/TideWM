@@ -413,15 +413,31 @@ delegate_kde_decoration!(Smallvil);
 //
 // Token policy follows niri's shape: a token carrying a seat serial is
 // valid only if the serial is no older than the last keyboard or pointer
-// enter on our seat (it derives from a real recent user interaction, and
-// pointer is checked too because a KeyboardInteractivity::None layer
-// never holds keyboard focus). A serial-less token is accepted outright:
-// niri downgrades those to "urgency only", but TideWM has no urgency
-// indicator anywhere, so there is nothing else useful to do with them --
-// and rejecting them would break exactly the cases this protocol is for
-// here (xwayland-satellite can't produce a Wayland serial on an X11
-// client's behalf; notification daemons hand out tokens without one).
+// enter on our seat. Serial-less tokens are still minted for XWayland and
+// notification compatibility, but consumption requests attention rather
+// than granting an untrusted client focus.
 //
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActivationDisposition {
+    Focus,
+    Urgent,
+    IgnoreExpired,
+}
+
+fn activation_disposition(
+    expired: bool,
+    has_serial: bool,
+    serial_is_fresh: bool,
+) -> ActivationDisposition {
+    if expired {
+        ActivationDisposition::IgnoreExpired
+    } else if has_serial && serial_is_fresh {
+        ActivationDisposition::Focus
+    } else {
+        ActivationDisposition::Urgent
+    }
+}
 
 impl XdgActivationHandler for Smallvil {
     fn activation_state(&mut self) -> &mut XdgActivationState {
@@ -432,12 +448,9 @@ impl XdgActivationHandler for Smallvil {
         // Only refuses to mint a token at all for a serial that names a
         // foreign seat -- a present-but-*stale* serial still mints the
         // token (unlike this used to work): `request_activation` re-checks
-        // freshness once the token is actually consumed and downgrades to
-        // `mark_urgent` instead of refusing outright, the one case where
-        // "urgent" genuinely applies. A missing serial altogether is always
-        // accepted outright, never downgraded -- see
-        // `Smallvil::activation_serial_is_fresh`'s own doc comment for why
-        // (xwayland-satellite/notification-daemon tokens depend on it).
+        // freshness once the token is actually consumed. A missing serial
+        // is also minted so XWayland/notification flows keep an attention
+        // request, but it is urgency-only and cannot grant focus.
         match &data.serial {
             None => true,
             Some((_, seat)) => Seat::from_resource(seat).as_ref() == Some(&self.seat),
@@ -456,14 +469,48 @@ impl XdgActivationHandler for Smallvil {
         self.xdg_activation_state.remove_token(&token);
 
         // Same 10s freshness window anvil and niri both use.
-        if token_data.timestamp.elapsed().as_secs() >= 10 {
-            return;
+        match activation_disposition(
+            token_data.timestamp.elapsed().as_secs() >= 10,
+            token_data.serial.is_some(),
+            self.activation_serial_is_fresh(&token_data.serial),
+        ) {
+            ActivationDisposition::Focus => self.activate_toplevel(&surface),
+            ActivationDisposition::Urgent => self.mark_urgent(&surface),
+            ActivationDisposition::IgnoreExpired => {}
         }
-        if self.activation_serial_is_fresh(&token_data.serial) {
-            self.activate_toplevel(&surface);
-        } else {
-            self.mark_urgent(&surface);
-        }
+    }
+}
+
+#[cfg(test)]
+mod activation_tests {
+    use super::{activation_disposition, ActivationDisposition};
+
+    #[test]
+    fn activation_focus_requires_a_fresh_present_serial() {
+        assert_eq!(
+            activation_disposition(false, true, true),
+            ActivationDisposition::Focus
+        );
+        assert_eq!(
+            activation_disposition(false, false, true),
+            ActivationDisposition::Urgent
+        );
+        assert_eq!(
+            activation_disposition(false, true, false),
+            ActivationDisposition::Urgent
+        );
+    }
+
+    #[test]
+    fn expired_activation_is_ignored_regardless_of_serial() {
+        assert_eq!(
+            activation_disposition(true, true, true),
+            ActivationDisposition::IgnoreExpired
+        );
+        assert_eq!(
+            activation_disposition(true, false, false),
+            ActivationDisposition::IgnoreExpired
+        );
     }
 }
 
