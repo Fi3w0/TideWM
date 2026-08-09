@@ -1,7 +1,8 @@
 //! TideWM's deliberately small built-in fallback wallpaper.
 //!
 //! Fi3w0's canonical 4K artwork is embedded so installs do not depend on a
-//! loose runtime file and decoded once at startup at its native resolution.
+//! loose runtime file. It is decoded lazily, uploaded once per GLES context,
+//! and then released from CPU memory while the GPU texture remains alive.
 //! A layer-shell background from swaybg/swww/awww/hyprpaper naturally renders
 //! above it, so richer tools need no TideWM-specific integration.
 
@@ -9,12 +10,15 @@ use std::io::Cursor;
 
 use smithay::{
     backend::allocator::Fourcc,
-    backend::renderer::element::{
-        memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
-        Kind,
+    backend::renderer::{
+        element::{
+            texture::{TextureBuffer, TextureRenderElement},
+            Kind,
+        },
+        gles::{GlesRenderer, GlesTexture},
+        ContextId, Renderer,
     },
-    backend::renderer::gles::GlesRenderer,
-    utils::{Logical, Physical, Rectangle, Size, Transform},
+    utils::{Logical, Rectangle, Size, Transform},
 };
 
 const WIDTH: i32 = 3840;
@@ -22,54 +26,123 @@ const HEIGHT: i32 = 2160;
 const WALLPAPER_PNG: &[u8] = include_bytes!("../../assets/tide-aqua-4k.png");
 
 pub struct BuiltinWallpaper {
-    buffer: MemoryRenderBuffer,
+    imported: Option<ImportedWallpaper>,
+    pending_pixels: Option<Vec<u8>>,
+    failed_context: Option<ContextId<GlesTexture>>,
+}
+
+struct ImportedWallpaper {
+    context: ContextId<GlesTexture>,
+    buffer: TextureBuffer<GlesTexture>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ImportDecision {
+    Reuse,
+    Import,
+    SkipFailedContext,
+}
+
+fn import_decision(
+    imported: Option<&ContextId<GlesTexture>>,
+    failed: Option<&ContextId<GlesTexture>>,
+    current: &ContextId<GlesTexture>,
+) -> ImportDecision {
+    if imported.is_some_and(|imported| imported == current) {
+        ImportDecision::Reuse
+    } else if failed.is_some_and(|failed| failed == current) {
+        ImportDecision::SkipFailedContext
+    } else {
+        ImportDecision::Import
+    }
 }
 
 impl BuiltinWallpaper {
     pub fn build() -> Self {
-        let pixels = match decode_canonical_wallpaper() {
-            Ok(pixels) => pixels,
-            Err(err) => {
-                // The bytes are compile-time-owned, not user input, but a bad
-                // asset must still not make the compositor fail to start.
-                tracing::warn!(%err, "Built-in wallpaper decode failed; using procedural fallback");
-                procedural_fallback()
-            }
-        };
-
-        let buffer = MemoryRenderBuffer::from_slice(
-            &pixels,
-            Fourcc::Argb8888,
-            (WIDTH, HEIGHT),
-            1,
-            Transform::Normal,
-            None,
-        );
-        Self { buffer }
+        Self {
+            imported: None,
+            pending_pixels: None,
+            failed_context: None,
+        }
     }
 
     pub fn render_element(
-        &self,
+        &mut self,
         renderer: &mut GlesRenderer,
-        physical_size: Size<i32, Physical>,
-        scale: f64,
-    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
-        let logical_size: Size<i32, Logical> = (
-            (physical_size.w as f64 / scale).round() as i32,
-            (physical_size.h as f64 / scale).round() as i32,
-        )
-            .into();
+        logical_size: Size<i32, Logical>,
+    ) -> Option<TextureRenderElement<GlesTexture>> {
+        self.ensure_imported(renderer)?;
+        let buffer = &self.imported.as_ref()?.buffer;
         let source = cover_source_rect(logical_size);
-        MemoryRenderBufferRenderElement::from_buffer(
-            renderer,
+        Some(TextureRenderElement::from_texture_buffer(
             (0.0, 0.0),
-            &self.buffer,
+            buffer,
             None,
             Some(source),
             Some(logical_size),
             Kind::Unspecified,
-        )
-        .ok()
+        ))
+    }
+
+    fn ensure_imported(&mut self, renderer: &mut GlesRenderer) -> Option<()> {
+        let context = renderer.context_id();
+        match import_decision(
+            self.imported.as_ref().map(|imported| &imported.context),
+            self.failed_context.as_ref(),
+            &context,
+        ) {
+            ImportDecision::Reuse => return Some(()),
+            ImportDecision::SkipFailedContext => return None,
+            ImportDecision::Import => {}
+        }
+
+        // A renderer replacement cannot consume a texture owned by the old
+        // context. Re-decode only at that boundary; successful imports never
+        // retain the full native artwork in CPU memory.
+        if self.imported.take().is_some() {
+            self.pending_pixels = None;
+        }
+
+        // Import failure is normally persistent for the current GLES
+        // context (unsupported format or resource exhaustion). Suppress
+        // frame-rate retries and try again if the backend creates a new
+        // context. The decoded pixels stay available for that retry.
+        self.failed_context = None;
+
+        if self.pending_pixels.is_none() {
+            self.pending_pixels = Some(match decode_canonical_wallpaper() {
+                Ok(pixels) => pixels,
+                Err(err) => {
+                    // The bytes are compile-time-owned, not user input, but
+                    // a bad asset must not make the compositor fail to start.
+                    tracing::warn!(%err, "Built-in wallpaper decode failed; using procedural fallback");
+                    procedural_fallback()
+                }
+            });
+        }
+
+        let pixels = self.pending_pixels.as_deref()?;
+        let buffer = match TextureBuffer::from_memory(
+            renderer,
+            pixels,
+            Fourcc::Argb8888,
+            (WIDTH, HEIGHT),
+            false,
+            1,
+            Transform::Normal,
+            None,
+        ) {
+            Ok(buffer) => buffer,
+            Err(err) => {
+                tracing::warn!(%err, "Built-in wallpaper GPU import failed");
+                self.failed_context = Some(context);
+                return None;
+            }
+        };
+
+        self.imported = Some(ImportedWallpaper { context, buffer });
+        self.pending_pixels = None;
+        Some(())
     }
 }
 
@@ -110,10 +183,13 @@ fn decode_canonical_wallpaper() -> Result<Vec<u8>, String> {
         .next_frame(&mut source)
         .map_err(|err| err.to_string())?;
 
-    if info.width != 3840 || info.height != 2160 || info.color_type != png::ColorType::Rgb {
+    if info.width != WIDTH as u32
+        || info.height != HEIGHT as u32
+        || info.color_type != png::ColorType::Rgb
+    {
         return Err(format!(
-            "expected 3840x2160 RGB8, got {}x{} {:?}",
-            info.width, info.height, info.color_type
+            "expected {WIDTH}x{HEIGHT} RGB8, got {}x{} {:?}",
+            info.width, info.height, info.color_type,
         ));
     }
 
@@ -189,8 +265,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wallpaper_keeps_the_native_4k_backing_buffer() {
-        assert_eq!(WIDTH * HEIGHT * 4, 33_177_600);
+    fn wallpaper_build_is_lazy() {
+        let wallpaper = BuiltinWallpaper::build();
+        assert!(wallpaper.imported.is_none());
+        assert!(wallpaper.pending_pixels.is_none());
+        assert!(wallpaper.failed_context.is_none());
+    }
+
+    #[test]
+    fn texture_import_policy_is_context_aware_and_suppresses_failure_retries() {
+        let first = ContextId::<GlesTexture>::new();
+        let replacement = ContextId::<GlesTexture>::new();
+
+        assert_eq!(
+            import_decision(Some(&first), None, &first),
+            ImportDecision::Reuse
+        );
+        assert_eq!(
+            import_decision(None, Some(&first), &first),
+            ImportDecision::SkipFailedContext
+        );
+        assert_eq!(
+            import_decision(None, Some(&first), &replacement),
+            ImportDecision::Import
+        );
+        assert_eq!(
+            import_decision(Some(&first), None, &replacement),
+            ImportDecision::Import
+        );
     }
 
     #[test]

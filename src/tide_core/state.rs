@@ -5445,16 +5445,14 @@ impl Smallvil {
     }
 
     pub(crate) fn wallpaper_element(
-        &self,
+        &mut self,
         output: &Output,
         renderer: &mut GlesRenderer,
-    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
-        let mode = output.current_mode()?;
-        self.builtin_wallpaper.render_element(
-            renderer,
-            mode.size,
-            output.current_scale().fractional_scale(),
-        )
+    ) -> Option<smithay::backend::renderer::element::texture::TextureRenderElement<GlesTexture>>
+    {
+        let logical_size = self.space.output_geometry(output)?.size;
+        self.builtin_wallpaper
+            .render_element(renderer, logical_size)
     }
 
     /// The output-local physical rectangle produced by the shared placement
@@ -5949,7 +5947,7 @@ impl Smallvil {
                 .into_iter()
                 .chain(
                     self.wallpaper_element(output, renderer)
-                        .map(crate::backend::udev::OutputRenderElements::Composited),
+                        .map(crate::backend::udev::OutputRenderElements::Wallpaper),
                 )
                 .collect();
 
@@ -6039,7 +6037,7 @@ impl Smallvil {
             let wallpaper = self.wallpaper_element(output, renderer);
             let behind: Vec<crate::backend::udev::OutputRenderElements> = space_elements
                 .into_iter()
-                .chain(wallpaper.map(crate::backend::udev::OutputRenderElements::Composited))
+                .chain(wallpaper.map(crate::backend::udev::OutputRenderElements::Wallpaper))
                 .collect();
             let reusable = self
                 .backdrop_textures
@@ -6378,7 +6376,7 @@ impl Smallvil {
             .chain(space_elements)
             .chain(
                 self.wallpaper_element(output, renderer)
-                    .map(crate::backend::udev::OutputRenderElements::Composited),
+                    .map(crate::backend::udev::OutputRenderElements::Wallpaper),
             )
             .collect();
         crate::backdrop::capture_backdrop(renderer, geometry, elements, None)
