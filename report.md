@@ -8,11 +8,11 @@ This is a static code review, not a claim that every issue below was reproduced 
 
 ## Implementation handoff
 
-- Updated: 2026-08-08
+- Updated: 2026-08-09
 - Implementation branch: `ai/codex/report-fixes`
 - Separate worktree: `/home/fiw/Proyects/TideWM-worktrees/report-fixes`
-- Current implementation head: `bf39982`
-- Current TideWM version on the branch: `0.90.40`
+- Current implementation head: `1089450`
+- Current TideWM version on the branch: `0.90.41`
 - Push status: local only; nothing from this branch has been pushed.
 
 The finding text below is the original audit evidence. It is intentionally retained even when a finding is closed. Use this handoff ledger as the current status authority, then inspect the named commit and current code before changing a closed area. Do not repeat a fix merely because its original finding still says “confirmed.”
@@ -21,9 +21,9 @@ The finding text below is the original audit evidence. It is intentionally retai
 
 - Critical: all 7 closed.
 - High: H-01 through H-44 closed. H-45 was re-audited as a stale false positive because the current udev path already processes connector `Changed` events and rescans/retries surface creation.
-- Medium explicitly re-audited and closed: M-01, M-02, M-04, M-09, M-10, M-14 through M-21, M-23, and M-30. M-07 was reclassified as an intentional documented wallpaper-memory tradeoff rather than a correctness bug or leak.
-- Medium still open or awaiting a fresh audit: M-03, M-05, M-06, M-08, M-11 through M-13, M-22, M-24 through M-29, and M-31 through M-74.
-- Performance opportunities P-01 through P-10: not worked in this branch unless a closed correctness fix incidentally reduced the same cost. Treat all ten as open until measured and re-audited. P-11 was added 2026-08-08 from real-hardware measurement (not static review) after merging through `d9f5fcc`; open, not yet root-caused.
+- Medium explicitly re-audited and closed: M-01, M-02, M-04, M-09, M-10, M-14 through M-21, M-23, and M-30.
+- Medium still open or awaiting a fresh audit: M-03, M-05 through M-08, M-11 through M-13, M-22, M-24 through M-29, and M-31 through M-74. M-07 is an avoidable resource cost rather than a leak: a Smithay `TextureBuffer` can retain the imported GPU texture while releasing the decoded CPU pixels, provided renderer-context changes reimport it safely.
+- Performance opportunities P-01 through P-10: not worked in this branch unless a closed correctness fix incidentally reduced the same cost. Treat all ten as open until measured and re-audited. P-11 is now narrowed to border damage and no-damage callback pacing; it still needs real-DRM measurement. P-12 has a code fix in `1089450` and awaits real-DRM verification.
 - Lower-confidence items U-01 through U-16: not systematically re-audited. Treat them as investigation tasks, not established bugs.
 - Formatter findings F-01 through F-04: closed.
 - The dedicated comment/documentation cleanup and the roadmap work are not finished.
@@ -80,24 +80,26 @@ The finding text below is the original audit evidence. It is intentionally retai
 | M-23 | `87214f8` | Portal close, disconnect, and stale replacement now release the shared session map and per-entry state mutex before dropping or joining a PipeWire stream. Synchronous worker teardown remains separately tracked by M-24. |
 | M-30 | `9522858` | Removed stopped output-manager head resources without advancing or corrupting shared transaction serials. |
 
-### Reclassified Medium findings
-
-| Finding | Status | Reason |
-| --- | --- | --- |
-| M-07 | Accepted performance tradeoff | The permanent 3840×2160 CPU backing is documented and required by Smithay's `MemoryRenderBuffer` for context reimport. Avoiding it requires an explicit fallback-wallpaper product/visual decision, not a correctness repair. |
-
 ### Closed formatter findings
 
 | Findings | Commit | Resolution |
 | --- | --- | --- |
 | F-01 through F-04 | `bf39982` | Preserved block-comment offsets/newlines, made quote scanning escape-aware, kept block-comment contents out of formatter state, and made `wavefmt -w` an atomic permission-preserving rewrite. |
 
+### Performance remediation status
+
+| Finding | Commit | Status |
+| --- | --- | --- |
+| P-11 | `1089450` (partial) | Estimated-VBlank waiting now suppresses immediate retries and accumulates dirty state until the live output-derived retry deadline. Animated-border damage remains under investigation, and real-DRM idle GPU measurement is still required. |
+| P-12 | `1089450` | Caustics now requests redraws from a per-output deadline derived from the configured effective FPS, and its phase advances only when that deadline is due. This repairs the client-commit-dependent starvation and prevents unrelated animation from overdriving caustics; real-DRM cadence verification is pending. |
+
 ### Validation state
 
-- After `bf39982`, `cargo test --locked --all-features` passed all 358 compositor tests and all 9 `wavefmt` tests outside the restricted IPC socket sandbox. Strict `cargo clippy --locked --all-targets --all-features -- -D warnings` and `cargo fmt --all -- --check` also passed.
+- After `1089450`, `cargo test --locked --all-features` passed all 360 compositor tests and all 9 `wavefmt` tests outside the restricted IPC socket sandbox. Strict `cargo clippy --locked --all-targets --all-features -- -D warnings` and `cargo fmt --all -- --check` also passed.
+- After `bf39982`, `cargo test --locked --all-features` passed all 358 compositor tests and all 9 `wavefmt` tests outside the restricted IPC socket sandbox. Strict Clippy and formatting checks also passed.
 - After `d9f5fcc`, `cargo test --locked --all-features` passed all 356 compositor tests and all 6 `wavefmt` tests outside the restricted IPC socket sandbox.
 - `cargo check --locked --all-features` passed after the final Medium batch.
-- Strict all-target/all-feature Clippy passed at the preceding `0.90.38` capture checkpoint (`5ed7751`). Run it again before merging the eventual complete branch because the final `d9f5fcc` batch was test/check validated but did not receive another Clippy invocation before the work paused.
+- Strict all-target/all-feature Clippy has passed through the current `0.90.41` implementation head.
 - Capture and geometry regression tests use deliberately arbitrary dimensions. No monitor resolution, refresh rate, GPU vendor, input device, or other configurable/hardware property was introduced as a fixed runtime assumption.
 - Nested and real-DRM validation for the complete audit-fix series is still pending. Automated tests cannot prove mixed-output KMS/VBlank behavior, connector hotplug, rotated physical outputs, VRR, real tablet/touch mapping, or visual feel.
 
@@ -686,9 +688,13 @@ These are not all bugs, but they are concrete places where the code can be short
 - **P-09 — Source picker rebuilds its CPU buffer on each hover-row change.** `source_picker.rs:125-142`; retain static pixels and repaint only changed rows if profiling shows it matters.
 - **P-10 — `lua_value_to_json` silently drops mixed table keys.** When `raw_len > 0`, numeric sequence handling can ignore string keys. Define mixed-table semantics or return an error.
 - **P-11 — Idle GPU floor is ~40-45% on real hardware and is not caused by `water_effects`.** Measured live on real AMD/amdgpu hardware (Renoir iGPU) at `d9f5fcc`, genuinely idle (pointer/window/workspace untouched, confirmed by flat PSS and flat VRAM across a 15s sampled window in both states): `water_effects = true` idled at 43-45% `gpu_busy_percent`, `water_effects = false` idled at 40-43% — a 2-3 point difference, not the ~20+ point gap the always-on caustics/water-glass/ripple loop would predict if it were the cause. A same-machine, same-config-tier comparison against a Hyprland session idled flat at 20-23% GPU busy for reference. RAM was not the problem either: TideWM PSS (~106-117 MB) stayed below Hyprland's (~147 MB) throughout. This points at something in the base render loop that costs GPU regardless of the water toggle — most likely full-scene redraw on frames with no real damage, since nothing in the merged H-34 fix (`90c7e9e`, damage/VBlank-driven udev redraw pacing) verified that an undamaged frame is actually skipped rather than just correctly *scheduled*. Not yet root-caused: no line number pinned, no confirmed control-flow path read. Fix direction: instrument or trace `render_output`/the udev per-CRTC render path (`backend/udev.rs`) at genuine idle and confirm whether it renders/submits a full frame when no output, client, or effect has pending damage; if so, add or fix an early skip.
+
+  Current status: the original unconditional-full-render hypothesis was not confirmed. The udev path does skip undamaged frames. Two narrower costs were found. First, the animated border changes its commit counter while Smithay's default element damage covers the full rectangular element rather than its thin visible ring. Second, the empty-frame retry flag did not prevent an immediate render before the estimated VBlank deadline. Commit `1089450` closes the second path using the refresh period derived from the live output mode. Border-ring damage remains open, as does a same-hardware idle GPU remeasurement.
 - **P-12 — Live-reported: startup and ambient caustics rendering appear throttled/stuck until a window is opened; fullscreen-in-Ocean and workspace-switch re-trigger it.** Confidence: reported live on real hardware at this branch's head, not yet reproduced under tooling or read against code. On real hardware with `water_effects = true`: at compositor startup the WM visibly lags and autostart-spawned apps (wallpaper daemon, quickshell) appear noticeably later than the user's prior experience running TideWM. The ambient caustics effect (configured `fps = 24` in the live `water.wave`) visibly renders at roughly 3 fps instead, well below even the first `idle_fps` step-down tier (20 fps, meant to only apply after 60s of idle). Opening any application window fixes both symptoms back to normal speed. The degraded state can be re-triggered afterward by fullscreening a window in Ocean mode, or by switching workspace, and again resolves only after opening a new app or switching back.
 
   Suspected relation to P-11: the trigger/reset pattern (broken at startup and by fullscreen/workspace-switch, fixed by any window-map/commit event) is consistent with the same redraw-scheduling area as P-11 — plausibly the H-34 damage/VBlank-driven redraw rewrite (`90c7e9e`) not correctly driving frames for periodic/non-client-damage sources (the caustics timer, first-frame autostart rendering), only reaching normal cadence once a real client commit generates damage through what may now be the primary/only reliably-driven path. This is a hypothesis, not a finding: no code has been read for this entry, and it needs reproduction with an actual frame-timing trace (e.g. instrumenting the udev per-CRTC render/queue path and the caustics timer source, and logging when each requests vs. actually gets a frame) before attributing it to a specific function or commit.
+
+  Current status: the suspected scheduling regression was confirmed. The maintenance timer stopped requesting redraw when caustics became due, so a client commit or another animation accidentally supplied the missing clock. Caustics could also advance at output cadence whenever another animation was active, ignoring its configured FPS. Commit `1089450` gives each output a deadline derived from the configured effective caustics FPS, requests redraw when due, and advances the effect only on that cadence. Unit tests cover nonstandard arbitrary timing fixtures; the live configured cadence and startup/fullscreen/workspace symptoms still need real-DRM verification before this is marked fully closed.
 
 ## Lower-confidence and defensive findings to investigate
 
