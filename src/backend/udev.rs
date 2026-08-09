@@ -1214,6 +1214,9 @@ fn handle_connector_change(
                     state
                         .wlr_output_power_management_state
                         .output_removed(&surface.output);
+                    state
+                        .wlr_gamma_control_state
+                        .output_removed(&surface.output);
                     state.retile();
                     state.repair_keyboard_focus(
                         fallback.as_deref(),

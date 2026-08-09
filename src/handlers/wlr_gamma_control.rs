@@ -11,9 +11,9 @@
 //! winit is refused outright with `failed`, matching the protocol's own
 //! "the output doesn't support gamma tables" reason.
 
-use std::{collections::HashMap, os::fd::AsFd};
+use std::{collections::HashMap, os::fd::AsFd, sync::Mutex};
 
-use smithay::output::Output;
+use smithay::output::{Output, WeakOutput};
 use smithay::reexports::rustix;
 use smithay::reexports::wayland_server::{
     backend::{ClientId, GlobalId},
@@ -26,11 +26,36 @@ use wayland_protocols_wlr::gamma_control::v1::server::{
 
 use crate::Smallvil;
 
-/// `Some((output, gamma_size))` once resolved at creation; `None` if the
-/// `wl_output` never resolved to a live `Output`, or the backend has no
-/// gamma support -- either way `failed` was already sent at creation, so
-/// every request on the resource after that is a harmless no-op.
-struct ControlData(Option<(Output, u32)>);
+/// Weak output identity plus the gamma size while this control is valid.
+/// Invalidating takes the target out, making every later request and the
+/// eventual destructor a harmless no-op. Keeping this weak is important:
+/// a client is only required to destroy the object after receiving `failed`,
+/// so its resource data must not keep a disconnected Smithay `Output` alive.
+struct ControlData(Mutex<Option<(WeakOutput, u32)>>);
+
+impl ControlData {
+    fn new(target: Option<(WeakOutput, u32)>) -> Self {
+        Self(Mutex::new(target))
+    }
+
+    fn target(&self) -> Option<(WeakOutput, u32)> {
+        self.0.lock().expect("gamma control data poisoned").clone()
+    }
+
+    fn invalidate(&self) -> Option<(WeakOutput, u32)> {
+        self.0.lock().expect("gamma control data poisoned").take()
+    }
+}
+
+fn fail_control(control: &ZwlrGammaControlV1) {
+    let was_valid = control
+        .data::<ControlData>()
+        .and_then(ControlData::invalidate)
+        .is_some();
+    if was_valid {
+        control.failed();
+    }
+}
 
 /// At most one live control per output. A second `get_gamma_control` for
 /// an already-controlled output transfers control to the new client,
@@ -41,7 +66,7 @@ struct ControlData(Option<(Output, u32)>);
 pub struct WlrGammaControlState {
     #[allow(dead_code)]
     global: GlobalId,
-    controls: HashMap<Output, ZwlrGammaControlV1>,
+    controls: HashMap<WeakOutput, ZwlrGammaControlV1>,
 }
 
 impl WlrGammaControlState {
@@ -50,6 +75,23 @@ impl WlrGammaControlState {
         Self {
             global,
             controls: HashMap::new(),
+        }
+    }
+
+    fn remove_if_current(&mut self, output: &WeakOutput, resource: &ZwlrGammaControlV1) -> bool {
+        if self.controls.get(output) != Some(resource) {
+            return false;
+        }
+        self.controls.remove(output);
+        true
+    }
+
+    /// Invalidates the exclusive control for a disconnected output. The
+    /// protocol resource can outlive `failed` if its client ignores the event,
+    /// so both its target and the map key are weak references.
+    pub fn output_removed(&mut self, output: &Output) {
+        if let Some(control) = self.controls.remove(&output.downgrade()) {
+            fail_control(&control);
         }
     }
 }
@@ -151,16 +193,20 @@ impl Dispatch<ZwlrGammaControlManagerV1, ()> for Smallvil {
             .as_ref()
             .and_then(|o| state.gamma_size.as_mut().and_then(|hook| hook(o)));
 
-        let control = data_init.init(id, ControlData(target.clone().zip(size)));
+        let control_target = target
+            .as_ref()
+            .zip(size)
+            .map(|(output, size)| (output.downgrade(), size));
+        let control = data_init.init(id, ControlData::new(control_target));
 
         match (target, size) {
             (Some(output), Some(size)) => {
                 if let Some(old) = state
                     .wlr_gamma_control_state
                     .controls
-                    .insert(output, control.clone())
+                    .insert(output.downgrade(), control.clone())
                 {
-                    old.failed();
+                    fail_control(&old);
                 }
                 control.gamma_size(size);
             }
@@ -179,14 +225,21 @@ impl Dispatch<ZwlrGammaControlV1, ControlData> for Smallvil {
         _dh: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
-        let Some((output, size)) = &data.0 else {
-            return;
-        };
         let zwlr_gamma_control_v1::Request::SetGamma { fd } = request else {
             return;
         };
+        let Some((output, size)) = data.target() else {
+            return;
+        };
+        let Some(live_output) = output.upgrade() else {
+            state
+                .wlr_gamma_control_state
+                .remove_if_current(&output, resource);
+            fail_control(resource);
+            return;
+        };
 
-        let buf = match read_gamma_table(&fd, *size) {
+        let buf = match read_gamma_table(&fd, size) {
             Ok(buf) => buf,
             Err(error) => {
                 match error {
@@ -205,7 +258,7 @@ impl Dispatch<ZwlrGammaControlV1, ControlData> for Smallvil {
                 return;
             }
         };
-        let size = *size as usize;
+        let size = size as usize;
 
         let channel = |bytes: &[u8]| -> Vec<u16> {
             bytes
@@ -220,10 +273,13 @@ impl Dispatch<ZwlrGammaControlV1, ControlData> for Smallvil {
         let applied = state
             .set_gamma
             .as_mut()
-            .map(|hook| hook(output, &red, &green, &blue))
+            .map(|hook| hook(&live_output, &red, &green, &blue))
             .unwrap_or(false);
         if !applied {
-            resource.failed();
+            state
+                .wlr_gamma_control_state
+                .remove_if_current(&output, resource);
+            fail_control(resource);
         }
     }
 
@@ -233,7 +289,7 @@ impl Dispatch<ZwlrGammaControlV1, ControlData> for Smallvil {
         resource: &ZwlrGammaControlV1,
         data: &ControlData,
     ) {
-        let Some((output, size)) = &data.0 else {
+        let Some((output, size)) = data.invalidate() else {
             return;
         };
         // Only reset gamma if this resource is still the tracked owner --
@@ -241,14 +297,18 @@ impl Dispatch<ZwlrGammaControlV1, ControlData> for Smallvil {
         // `GetGammaControl` above), the map entry no longer points at
         // `resource`, and resetting here would incorrectly clobber
         // whatever the new owner has already set.
-        let is_current_owner = state.wlr_gamma_control_state.controls.get(output) == Some(resource);
-        if !is_current_owner {
+        if !state
+            .wlr_gamma_control_state
+            .remove_if_current(&output, resource)
+        {
             return;
         }
-        state.wlr_gamma_control_state.controls.remove(output);
+        let Some(output) = output.upgrade() else {
+            return;
+        };
         if let Some(hook) = state.set_gamma.as_mut() {
-            let ramp = identity_ramp(*size);
-            hook(output, &ramp, &ramp, &ramp);
+            let ramp = identity_ramp(size);
+            hook(&output, &ramp, &ramp, &ramp);
         }
     }
 }
@@ -257,9 +317,49 @@ impl Dispatch<ZwlrGammaControlV1, ControlData> for Smallvil {
 mod tests {
     use std::os::unix::net::UnixStream;
 
-    use smithay::reexports::rustix;
+    use smithay::{
+        output::{Output, PhysicalProperties, Subpixel},
+        reexports::rustix,
+    };
 
-    use super::{identity_ramp, read_gamma_table, GammaTableReadError};
+    use super::{identity_ramp, read_gamma_table, ControlData, GammaTableReadError};
+
+    fn test_output() -> Output {
+        Output::new(
+            "gamma-control-test".to_string(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "test".to_string(),
+                model: "test".to_string(),
+                serial_number: "test".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn control_data_does_not_keep_output_alive() {
+        let output = test_output();
+        let weak = output.downgrade();
+        let data = ControlData::new(Some((weak.clone(), 37)));
+
+        drop(output);
+
+        assert!(weak.upgrade().is_none());
+        assert!(data
+            .target()
+            .is_some_and(|(output, size)| output.upgrade().is_none() && size == 37));
+    }
+
+    #[test]
+    fn control_data_invalidation_is_idempotent() {
+        let output = test_output();
+        let data = ControlData::new(Some((output.downgrade(), 19)));
+
+        assert!(data.invalidate().is_some());
+        assert!(data.invalidate().is_none());
+        assert!(data.target().is_none());
+    }
 
     #[test]
     fn identity_ramp_spans_full_range_monotonically() {
