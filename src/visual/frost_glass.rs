@@ -22,6 +22,8 @@ use smithay::{
 
 use crate::config::FrostConfig;
 
+use std::hash::{Hash, Hasher};
+
 const FROST_GLASS_FRAGMENT_SHADER: &str = r#"
 #version 100
 
@@ -211,6 +213,46 @@ pub fn frost_glass_program(
     }
 }
 
+/// Rendered-value fingerprint for the frost element's damage identity, the
+/// same equality-only contract as `water_glass::water_glass_commit` (and
+/// `decoration::border_commit` before it): the backdrop capture's content
+/// `version` plus every uniform drawn from the config. Frost has no
+/// animation clock, so an unchanged config over an unchanged capture yields
+/// an unchanged commit and the visible frame stops redrawing the layer.
+pub fn frost_glass_commit(
+    capture_version: usize,
+    config: &FrostConfig,
+    corner_radii: [f32; 4],
+    rounding_power: f32,
+    corner_softness: f32,
+) -> CommitCounter {
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    capture_version.hash(&mut hash);
+    for value in [
+        config.radius,
+        config.strength,
+        config.saturation,
+        config.contrast,
+        config.brightness,
+        config.noise,
+        config.noise_scale,
+        config.vibrancy,
+        config.vibrancy_darkness,
+        config.tint_alpha,
+    ] {
+        value.to_bits().hash(&mut hash);
+    }
+    for channel in config.tint_color {
+        channel.to_bits().hash(&mut hash);
+    }
+    for radius in corner_radii {
+        radius.to_bits().hash(&mut hash);
+    }
+    rounding_power.to_bits().hash(&mut hash);
+    corner_softness.to_bits().hash(&mut hash);
+    CommitCounter::from(hash.finish() as usize)
+}
+
 pub struct FrostGlassElement {
     id: Id,
     commit: CommitCounter,
@@ -348,5 +390,36 @@ mod tests {
                 .count(),
             26
         );
+    }
+
+    #[test]
+    fn frost_glass_commit_is_stable_when_the_scene_is_static() {
+        // Frost has no animation clock, so an unchanged config over an
+        // unchanged capture must hash to the same value across frames --
+        // that stability is what stops the visible output redrawing a frosted
+        // bar or window every frame while nothing behind it changed.
+        let config = FrostConfig::default();
+        let baseline = frost_glass_commit(2, &config, [6.0; 4], 2.0, 1.0);
+        assert_eq!(baseline, frost_glass_commit(2, &config, [6.0; 4], 2.0, 1.0));
+    }
+
+    #[test]
+    fn frost_glass_commit_advances_when_the_capture_re_renders() {
+        let config = FrostConfig::default();
+        let before = frost_glass_commit(2, &config, [6.0; 4], 2.0, 1.0);
+        let after = frost_glass_commit(3, &config, [6.0; 4], 2.0, 1.0);
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn frost_glass_commit_advances_on_strength_change() {
+        // A `layer_rule` / window-rule strength override applied via
+        // hot-reload has to invalidate the frost layer the same frame.
+        let config = FrostConfig::default();
+        let mut changed = config.clone();
+        changed.strength = 0.25;
+        let before = frost_glass_commit(2, &config, [6.0; 4], 2.0, 1.0);
+        let after = frost_glass_commit(2, &changed, [6.0; 4], 2.0, 1.0);
+        assert_ne!(before, after);
     }
 }
