@@ -867,11 +867,12 @@ impl Smallvil {
                             data.rescue_keybinds_active = true;
                             data.active_submap = None;
                             data.helper_keys_down.clear();
-                            data.toast = Some(Toast::new(
+                            data.toast = Toast::new(
                                 "Rescue keybinds active until config reload",
                                 ToastKind::Info,
                                 crate::ui_theme::UiTheme::from_config(&data.config),
-                            ));
+                                data.toast_output_width(),
+                            );
                             data.request_redraw();
                             return FilterResult::Intercept(());
                         }
@@ -2535,11 +2536,17 @@ impl Smallvil {
             Action::Spawn(cmd) => {
                 if let Err(err) = crate::spawn(&cmd) {
                     tracing::warn!(%err, cmd, "Failed to spawn command");
-                    self.toast = Some(Toast::new(
-                        &format!("Failed to spawn: {cmd}"),
+                    let message = crate::text::bounded_prefixed(
+                        "Failed to spawn: ",
+                        &cmd,
+                        crate::ipc::MAX_REQUEST_BYTES,
+                    );
+                    self.toast = Toast::new(
+                        &message,
                         ToastKind::Error,
                         crate::ui_theme::UiTheme::from_config(&self.config),
-                    ));
+                        self.toast_output_width(),
+                    );
                     self.request_redraw();
                 }
             }

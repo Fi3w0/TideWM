@@ -243,7 +243,6 @@ impl RenderElement<GlesRenderer> for DepthOverlayElement {
 
 pub struct DepthSchematic {
     size: (i32, i32),
-    title: String,
     tier: u8,
     background: [u8; 3],
     background_alpha: u8,
@@ -252,16 +251,15 @@ pub struct DepthSchematic {
 }
 
 impl DepthSchematic {
-    pub fn matches(&self, size: (i32, i32), title: &str, tier: u8, cfg: &DepthConfig) -> bool {
+    pub fn matches(&self, size: (i32, i32), tier: u8, cfg: &DepthConfig) -> bool {
         self.size == size
-            && self.title == title
             && self.tier == tier
             && self.background == rgb8(cfg.schematic_color)
             && self.background_alpha == alpha8(cfg.schematic_alpha)
             && self.border == rgb8(cfg.border_color)
     }
 
-    pub fn build(size: (i32, i32), title: String, tier: u8, cfg: &DepthConfig) -> Self {
+    pub fn build(size: (i32, i32), title: &str, tier: u8, cfg: &DepthConfig) -> Self {
         let width = size.0.max(1);
         let height = size.1.max(1);
         let background = rgb8(cfg.schematic_color);
@@ -316,7 +314,7 @@ impl DepthSchematic {
             (width - border_width, 0, border_width, height),
             (border[0], border[1], border[2], 255),
         );
-        draw_label(&mut pixels, width, height, crate::toast::font(), &title);
+        draw_label(&mut pixels, width, height, crate::toast::font(), title);
 
         let buffer = MemoryRenderBuffer::from_slice(
             &pixels,
@@ -328,7 +326,6 @@ impl DepthSchematic {
         );
         Self {
             size: (width, height),
-            title,
             tier,
             background: rgb8(cfg.schematic_color),
             background_alpha,
@@ -388,16 +385,15 @@ fn draw_label(pixels: &mut [u8], width: i32, height: i32, font: &Font, title: &s
     let baseline = PAD + FONT_SIZE as i32;
     let mut pen_x = PAD;
     let clip_right = width - PAD;
-    for ch in title.chars() {
-        if pen_x >= clip_right {
-            break;
-        }
-        let (metrics, bitmap) = font.rasterize(ch, FONT_SIZE);
+    let line =
+        crate::text::rasterize_line(font, title, FONT_SIZE, clip_right.saturating_sub(pen_x));
+    for glyph in line.glyphs {
+        let metrics = glyph.metrics;
         let glyph_x0 = pen_x + metrics.xmin;
         let glyph_y0 = baseline - metrics.ymin - metrics.height as i32;
         for gy in 0..metrics.height {
             for gx in 0..metrics.width {
-                let coverage = bitmap[gy * metrics.width + gx];
+                let coverage = glyph.bitmap[gy * metrics.width + gx];
                 if coverage == 0 {
                     continue;
                 }

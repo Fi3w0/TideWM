@@ -462,11 +462,7 @@ impl Smallvil {
             {
                 elements.push(OutputRenderElements::Composited(overview_element));
             }
-            if let Some(toast_element) = self
-                .toast
-                .as_ref()
-                .and_then(|toast| toast.render_element(renderer, mode.size))
-            {
+            if let Some(toast_element) = self.toast_element(&output, renderer) {
                 elements.push(OutputRenderElements::Composited(toast_element));
             }
             if let Some(error_element) = self.config_error_element(&output, renderer) {

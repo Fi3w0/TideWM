@@ -5,12 +5,8 @@
 //! frame -- see `Smallvil::tab_strip_elements`, the only caller, for when a
 //! group's cached buffer actually gets rebuilt.
 //!
-//! Titles are read fresh at rasterize time rather than cached per member:
-//! a title changing while its window sits parked in a background tab will
-//! only show up next time the strip is rebuilt for some other reason
-//! (regrouping, cycling, a resize) rather than immediately -- a deliberate
-//! v1 simplification. Hooking every client's `title_changed` into this
-//! cache is more plumbing than a first pass warrants.
+//! Title commits invalidate the owning group's cache, including parked
+//! background tabs, so the next frame rebuilds the strip with current text.
 
 use fontdue::Font;
 use smithay::{
@@ -32,10 +28,16 @@ const ACTIVE_BG: (u8, u8, u8) = (28, 94, 116); // same water-palette tint as Toa
 const INACTIVE_BG: (u8, u8, u8) = (46, 46, 46);
 const TEXT_RGB: (u8, u8, u8) = (230, 230, 230);
 
+fn display_title(title: Option<String>) -> String {
+    title
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| "(untitled)".to_string())
+}
+
 /// The title a client has set for `surface`, or a placeholder if it hasn't
 /// (or unset it) -- same accessor `ipc.rs`'s `window_json` already uses.
 pub fn window_title(surface: &WlSurface) -> String {
-    with_states(surface, |states| {
+    display_title(with_states(surface, |states| {
         states
             .data_map
             .get::<XdgToplevelSurfaceData>()?
@@ -43,15 +45,21 @@ pub fn window_title(surface: &WlSurface) -> String {
             .ok()?
             .title
             .clone()
-    })
-    .unwrap_or_else(|| "(untitled)".to_string())
+    }))
 }
 
 /// Builds the cached render buffer for a strip `width` wide, one segment
 /// per entry in `titles`, `active` highlighted.
-pub fn build_buffer(titles: &[String], active: usize, width: i32) -> (MemoryRenderBuffer, i32) {
+pub fn build_buffer(
+    titles: &[String],
+    active: usize,
+    width: i32,
+) -> Option<(MemoryRenderBuffer, i32)> {
     let width = width.max(1);
-    let mut pixels = vec![0u8; (width * HEIGHT * 4) as usize];
+    let pixel_len = crate::text::checked_argb_len(width, HEIGHT)?;
+    let mut pixels = Vec::new();
+    pixels.try_reserve_exact(pixel_len).ok()?;
+    pixels.resize(pixel_len, 0);
     if !titles.is_empty() {
         let font = crate::toast::font();
         let segment_w = width / titles.len() as i32;
@@ -80,24 +88,26 @@ pub fn build_buffer(titles: &[String], active: usize, width: i32) -> (MemoryRend
         Transform::Normal,
         None,
     );
-    (buffer, width)
+    Some((buffer, width))
 }
 
-/// Draws `title` inside the segment spanning `[x0, x0 + seg_w)`, clipped to
-/// it -- overflowing glyphs are simply cut off rather than measured and
-/// pre-truncated, same effect with far less code.
+/// Draws `title` inside the segment spanning `[x0, x0 + seg_w)`. Layout stops
+/// at the live segment width and adds an ellipsis instead of rasterizing text
+/// that cannot become visible.
 fn draw_label(pixels: &mut [u8], width: i32, font: &Font, title: &str, x0: i32, seg_w: i32) {
     let baseline = HEIGHT - (HEIGHT - FONT_SIZE as i32) / 2 - 3;
     let mut pen_x = x0 + LABEL_PAD;
+    let line =
+        crate::text::rasterize_line(font, title, FONT_SIZE, seg_w.saturating_sub(LABEL_PAD * 2));
 
-    for ch in title.chars() {
-        let (metrics, bitmap) = font.rasterize(ch, FONT_SIZE);
+    for glyph in line.glyphs {
+        let metrics = glyph.metrics;
         let glyph_x0 = pen_x + metrics.xmin;
         let glyph_y0 = baseline - metrics.ymin - metrics.height as i32;
 
         for gy in 0..metrics.height {
             for gx in 0..metrics.width {
-                let coverage = bitmap[gy * metrics.width + gx];
+                let coverage = glyph.bitmap[gy * metrics.width + gx];
                 if coverage == 0 {
                     continue;
                 }
@@ -109,11 +119,6 @@ fn draw_label(pixels: &mut [u8], width: i32, font: &Font, title: &str, x0: i32, 
                 blend_text_pixel(pixels, width, x, y, coverage);
             }
         }
-        // See overview.rs's identical guard for why: a 0-advance-width
-        // glyph (zero-width joiners, combining marks, .notdef fallback)
-        // would otherwise stall `pen_x` while `glyph_y0` still varies per
-        // character, stacking glyphs near the same column instead of a
-        // horizontal line.
         pen_x += metrics.advance_width.round().max(1.0) as i32;
     }
 }
@@ -152,4 +157,21 @@ pub fn render_element(
         Kind::Unspecified,
     )
     .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absent_and_empty_titles_share_the_untitled_display() {
+        assert_eq!(display_title(None), "(untitled)");
+        assert_eq!(display_title(Some(String::new())), "(untitled)");
+        assert_eq!(display_title(Some("Tide".into())), "Tide");
+    }
+
+    #[test]
+    fn strip_rejects_geometry_that_overflows_smithays_i32_stride() {
+        assert!(build_buffer(&[], 0, i32::MAX).is_none());
+    }
 }

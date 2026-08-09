@@ -272,12 +272,8 @@ pub fn init_winit(
                         )
                     } else {
                         let error_element = state.config_error_element(&entry.output, renderer);
-                        let toast_element = state
-                            .toast
-                            .as_ref()
-                            .and_then(|toast| toast.render_element(renderer, size));
-                        if state.toast.is_some() && toast_element.is_none() {
-                            // Fully faded out.
+                        let toast_element = state.toast_element(&entry.output, renderer);
+                        if state.toast.as_ref().is_some_and(|toast| toast.expired()) {
                             state.toast = None;
                             #[cfg(feature = "accessibility")]
                             state.sync_accessibility_tree();

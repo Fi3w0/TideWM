@@ -1366,14 +1366,9 @@ fn render_surface(
         .unwrap_or_default();
 
     let toast_element = (!locked)
-        .then(|| {
-            state
-                .toast
-                .as_ref()
-                .and_then(|toast| toast.render_element(renderer, size))
-        })
+        .then(|| state.toast_element(output, renderer))
         .flatten();
-    if state.toast.is_some() && toast_element.is_none() {
+    if state.toast.as_ref().is_some_and(|toast| toast.expired()) {
         state.toast = None;
         #[cfg(feature = "accessibility")]
         state.sync_accessibility_tree();
