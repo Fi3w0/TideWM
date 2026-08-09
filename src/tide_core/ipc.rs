@@ -67,7 +67,7 @@ use crate::{config, state::Smallvil};
 /// A client that never completes a request line within this many bytes
 /// gets disconnected rather than growing the per-connection buffer
 /// unbounded -- there's no legitimate request anywhere near this size.
-const MAX_REQUEST_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_CONNECTIONS: usize = 64;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 

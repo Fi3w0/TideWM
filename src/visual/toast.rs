@@ -67,20 +67,31 @@ impl ToastKind {
 }
 
 pub struct Toast {
-    #[cfg(feature = "accessibility")]
     message: String,
-    #[cfg(feature = "accessibility")]
     kind: ToastKind,
+    theme: crate::ui_theme::UiTheme,
     buffer: MemoryRenderBuffer,
     size: (i32, i32),
+    layout_output_width: Option<i32>,
     shown_at: Instant,
     /// `None` means this toast never fades on its own -- see `persistent`.
     visible_for: Option<Duration>,
 }
 
 impl Toast {
-    pub fn new(message: &str, kind: ToastKind, theme: crate::ui_theme::UiTheme) -> Self {
-        Self::with_duration(message, kind, theme, Some(VISIBLE_FOR))
+    pub fn new(
+        message: &str,
+        kind: ToastKind,
+        theme: crate::ui_theme::UiTheme,
+        narrowest_output_width: Option<i32>,
+    ) -> Option<Self> {
+        Self::with_duration(
+            message,
+            kind,
+            theme,
+            Some(VISIBLE_FOR),
+            narrowest_output_width,
+        )
     }
 
     /// Never fades or times out -- stays exactly as shown until its owner
@@ -89,8 +100,13 @@ impl Toast {
     /// natural "you're done with this" signal is the *next* reload attempt
     /// replacing it, not a fixed timer someone may not finish reading
     /// before it's gone.
-    pub fn persistent(message: &str, kind: ToastKind, theme: crate::ui_theme::UiTheme) -> Self {
-        Self::with_duration(message, kind, theme, None)
+    pub fn persistent(
+        message: &str,
+        kind: ToastKind,
+        theme: crate::ui_theme::UiTheme,
+        narrowest_output_width: Option<i32>,
+    ) -> Option<Self> {
+        Self::with_duration(message, kind, theme, None, narrowest_output_width)
     }
 
     fn with_duration(
@@ -98,8 +114,11 @@ impl Toast {
         kind: ToastKind,
         theme: crate::ui_theme::UiTheme,
         visible_for: Option<Duration>,
-    ) -> Self {
-        let (pixels, width, height) = rasterize_toast(message, kind, theme);
+        narrowest_output_width: Option<i32>,
+    ) -> Option<Self> {
+        let message = crate::text::bounded_text(message, crate::ipc::MAX_REQUEST_BYTES);
+        let (pixels, width, height) =
+            rasterize_toast_for_output(&message, kind, theme, narrowest_output_width)?;
         let buffer = MemoryRenderBuffer::from_slice(
             &pixels,
             Fourcc::Argb8888,
@@ -108,16 +127,16 @@ impl Toast {
             Transform::Normal,
             None,
         );
-        Self {
-            #[cfg(feature = "accessibility")]
-            message: message.to_owned(),
-            #[cfg(feature = "accessibility")]
+        Some(Self {
+            message,
             kind,
+            theme,
             buffer,
             size: (width, height),
+            layout_output_width: narrowest_output_width,
             shown_at: Instant::now(),
             visible_for,
-        }
+        })
     }
 
     /// Text and urgency retained alongside the render buffer so optional
@@ -146,15 +165,41 @@ impl Toast {
         self.visible_for.is_some()
     }
 
-    /// The render element for this toast, anchored to the top-right of
-    /// `output_size`, or `None` once it has fully faded out (the caller
-    /// should drop the `Toast` at that point) -- never for a `persistent`
-    /// one, which has no fade to reach.
+    pub fn expired(&self) -> bool {
+        self.visible_for.is_some_and(|visible_for| {
+            self.shown_at.elapsed() >= visible_for.saturating_add(FADE_FOR)
+        })
+    }
+
+    /// The render element for this toast, anchored to the top-right of the
+    /// live logical output geometry. `None` can mean expired, temporarily too
+    /// narrow, or an import failure; callers use `expired()` to decide whether
+    /// to drop the toast globally.
     pub fn render_element(
-        &self,
+        &mut self,
         renderer: &mut GlesRenderer,
-        output_size: Size<i32, Physical>,
+        logical_output_width: i32,
+        narrowest_output_width: Option<i32>,
+        scale: f64,
     ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        if self.layout_output_width != narrowest_output_width {
+            let (pixels, width, height) = rasterize_toast_for_output(
+                &self.message,
+                self.kind,
+                self.theme,
+                narrowest_output_width,
+            )?;
+            self.buffer = MemoryRenderBuffer::from_slice(
+                &pixels,
+                Fourcc::Argb8888,
+                (width, height),
+                1,
+                Transform::Normal,
+                None,
+            );
+            self.size = (width, height);
+            self.layout_output_width = narrowest_output_width;
+        }
         let alpha = match self.visible_for {
             None => 1.0,
             Some(visible_for) => {
@@ -169,8 +214,8 @@ impl Toast {
             }
         };
 
-        let location: Point<f64, Physical> =
-            ((output_size.w - self.size.0 - MARGIN) as f64, MARGIN as f64).into();
+        let (x, y) = toast_location(logical_output_width, self.size.0, scale)?;
+        let location: Point<f64, Physical> = (x, y).into();
 
         match MemoryRenderBufferRenderElement::from_buffer(
             renderer,
@@ -190,27 +235,58 @@ impl Toast {
     }
 }
 
+fn toast_location(logical_output_width: i32, toast_width: i32, scale: f64) -> Option<(f64, f64)> {
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    let right_inset = toast_width.checked_add(MARGIN)?;
+    let logical_x = logical_output_width.checked_sub(right_inset)?;
+    if logical_x < MARGIN {
+        return None;
+    }
+    Some((f64::from(logical_x) * scale, f64::from(MARGIN) * scale))
+}
+
 /// Composites the toast into a straight-alpha ARGB8888 buffer: a rounded-rect
 /// background with a 1px antialiased edge, then the message text on top.
+#[cfg(test)]
 fn rasterize_toast(
     message: &str,
     kind: ToastKind,
     theme: crate::ui_theme::UiTheme,
-) -> (Vec<u8>, i32, i32) {
+) -> Option<(Vec<u8>, i32, i32)> {
+    rasterize_toast_for_output(message, kind, theme, None)
+}
+
+fn rasterize_toast_for_output(
+    message: &str,
+    kind: ToastKind,
+    theme: crate::ui_theme::UiTheme,
+    narrowest_output_width: Option<i32>,
+) -> Option<(Vec<u8>, i32, i32)> {
     let font = font();
     let font_size = kind.font_size();
-    let mut glyphs = Vec::with_capacity(message.len());
-    let mut text_width = 0.0f32;
-    for ch in message.chars() {
-        let (metrics, bitmap) = font.rasterize(ch, font_size);
-        text_width += metrics.advance_width;
-        glyphs.push((metrics, bitmap));
-    }
-
-    let width =
-        (text_width.ceil() as i32 + ICON_WIDTH + TEXT_RIGHT_PAD + CARD_INSET * 2).max(MIN_WIDTH);
     let height = CARD_HEIGHT + CARD_INSET * 2;
-    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    let chrome_width = ICON_WIDTH + TEXT_RIGHT_PAD + CARD_INSET * 2;
+    let available_width = narrowest_output_width
+        .map(|width| width.saturating_sub(MARGIN * 2))
+        .unwrap_or(MIN_WIDTH);
+    if available_width < chrome_width {
+        return None;
+    }
+    let width_limit = available_width;
+    crate::text::checked_argb_len(width_limit, height)?;
+    let text_limit = width_limit.saturating_sub(chrome_width);
+    let line = crate::text::rasterize_line(font, message, font_size, text_limit);
+    let width = line
+        .advance
+        .saturating_add(chrome_width)
+        .max(MIN_WIDTH.min(width_limit))
+        .min(width_limit);
+    let pixel_len = crate::text::checked_argb_len(width, height)?;
+    let mut pixels = Vec::new();
+    pixels.try_reserve_exact(pixel_len).ok()?;
+    pixels.resize(pixel_len, 0);
 
     let card_x = CARD_INSET;
     let card_y = CARD_INSET;
@@ -294,13 +370,14 @@ fn rasterize_toast(
     let baseline = card_y + 48;
     let mut pen_x = card_x + ICON_WIDTH;
 
-    for (metrics, bitmap) in &glyphs {
+    for glyph in line.glyphs {
+        let metrics = glyph.metrics;
         let glyph_x0 = pen_x + metrics.xmin;
         let glyph_y0 = baseline - metrics.ymin - metrics.height as i32;
 
         for gy in 0..metrics.height {
             for gx in 0..metrics.width {
-                let coverage = bitmap[gy * metrics.width + gx];
+                let coverage = glyph.bitmap[gy * metrics.width + gx];
                 if coverage == 0 {
                     continue;
                 }
@@ -319,7 +396,7 @@ fn rasterize_toast(
         pen_x += metrics.advance_width.round().max(1.0) as i32;
     }
 
-    (pixels, width, height)
+    Some((pixels, width, height))
 }
 
 /// 1.0 fully inside, 0.0 fully outside, feathered over ~1px at the rounded
@@ -424,8 +501,12 @@ mod tests {
     #[test]
     fn only_timed_toasts_request_animation_frames() {
         let theme = crate::ui_theme::UiTheme::for_test();
-        assert!(Toast::new("ok", ToastKind::Info, theme).needs_continued_redraw());
-        assert!(!Toast::persistent("error", ToastKind::Error, theme).needs_continued_redraw());
+        assert!(Toast::new("ok", ToastKind::Info, theme, None)
+            .unwrap()
+            .needs_continued_redraw());
+        assert!(!Toast::persistent("error", ToastKind::Error, theme, None)
+            .unwrap()
+            .needs_continued_redraw());
     }
 
     #[test]
@@ -434,10 +515,53 @@ mod tests {
             "Configuration reloaded",
             ToastKind::Info,
             crate::ui_theme::UiTheme::for_test(),
-        );
+        )
+        .unwrap();
         assert!(width >= MIN_WIDTH);
         assert_eq!(height, CARD_HEIGHT + CARD_INSET * 2);
         let visible = pixels.chunks_exact(4).filter(|pixel| pixel[3] > 0).count();
         assert!(visible > (width * CARD_HEIGHT / 2) as usize);
+    }
+
+    #[test]
+    fn multi_megabyte_toast_is_bounded_by_live_logical_width() {
+        let message = "current ".repeat(256 * 1024);
+        let output_width = 911;
+        let (pixels, width, height) = rasterize_toast_for_output(
+            &message,
+            ToastKind::Error,
+            crate::ui_theme::UiTheme::for_test(),
+            Some(output_width),
+        )
+        .unwrap();
+
+        assert!(width <= output_width - MARGIN * 2);
+        assert_eq!(pixels.len(), (width * height * 4) as usize);
+    }
+
+    #[test]
+    fn toast_position_scales_from_logical_geometry() {
+        let logical_width = 913;
+        let toast_width = 271;
+        let logical = toast_location(logical_width, toast_width, 1.0).unwrap();
+        let scaled = toast_location(logical_width, toast_width, 1.75).unwrap();
+
+        assert_eq!(scaled.0, logical.0 * 1.75);
+        assert_eq!(scaled.1, logical.1 * 1.75);
+        assert!(scaled.0 >= 0.0);
+    }
+
+    #[test]
+    fn toast_skips_geometry_too_narrow_for_its_chrome() {
+        let chrome_width = ICON_WIDTH + TEXT_RIGHT_PAD + CARD_INSET * 2;
+        let output_width = MARGIN * 2 + chrome_width - 1;
+        assert!(rasterize_toast_for_output(
+            "message",
+            ToastKind::Info,
+            crate::ui_theme::UiTheme::for_test(),
+            Some(output_width),
+        )
+        .is_none());
+        assert!(toast_location(output_width, chrome_width, 1.0).is_none());
     }
 }

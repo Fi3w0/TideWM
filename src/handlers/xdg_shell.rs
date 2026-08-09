@@ -701,8 +701,12 @@ pub fn handle_commit(state: &mut Smallvil, surface: &WlSurface) {
         }
         let title = title.unwrap_or_default();
         let app_id = app_id.unwrap_or_default();
+        let title_changed = state.foreign_toplevels[surface].title() != title;
+        if title_changed {
+            state.invalidate_window_title_ui(surface);
+        }
         let handle = &state.foreign_toplevels[surface];
-        if handle.title() != title || handle.app_id() != app_id {
+        if title_changed || handle.app_id() != app_id {
             handle.send_title(&title);
             handle.send_app_id(&app_id);
             handle.send_done();

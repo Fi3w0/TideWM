@@ -2949,16 +2949,16 @@ impl Smallvil {
                 continue;
             }
 
-            let title = crate::tab_strip::window_title(&surface);
             let size = (area.size.w.max(1), area.size.h.max(1));
             let rebuild = self
                 .depth_schematics
                 .get(&surface)
-                .is_none_or(|schematic| !schematic.matches(size, &title, tier, &self.config.depth));
+                .is_none_or(|schematic| !schematic.matches(size, tier, &self.config.depth));
             if rebuild {
+                let title = crate::tab_strip::window_title(&surface);
                 self.depth_schematics.insert(
                     surface.clone(),
-                    crate::depth::DepthSchematic::build(size, title, tier, &self.config.depth),
+                    crate::depth::DepthSchematic::build(size, &title, tier, &self.config.depth),
                 );
             }
             let Some(element) = self.depth_schematics.get(&surface).and_then(|schematic| {
@@ -5134,6 +5134,34 @@ impl Smallvil {
         }
         #[cfg(feature = "accessibility")]
         self.schedule_accessibility_sync();
+    }
+
+    /// Smallest live logical width used by every currently mapped output.
+    /// A shared toast is rasterized once, so sizing it for the narrowest
+    /// transformed/scaled geometry keeps the same buffer on-screen everywhere.
+    pub(crate) fn toast_output_width(&self) -> Option<i32> {
+        self.space
+            .outputs()
+            .filter_map(|output| {
+                self.space
+                    .output_geometry(output)
+                    .map(|geometry| geometry.size.w)
+            })
+            .filter(|width| *width > 0)
+            .min()
+    }
+
+    pub(crate) fn toast_element(
+        &mut self,
+        output: &Output,
+        renderer: &mut GlesRenderer,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        let logical_width = self.space.output_geometry(output)?.size.w;
+        let narrowest_output_width = self.toast_output_width();
+        let scale = output.current_scale().fractional_scale();
+        self.toast
+            .as_mut()?
+            .render_element(renderer, logical_width, narrowest_output_width, scale)
     }
 
     pub(crate) fn install_redraw_wakeup(
@@ -9738,6 +9766,22 @@ impl Smallvil {
         self.focus_window(Some(surface.clone()), SERIAL_COUNTER.next_serial());
     }
 
+    /// Invalidates every compositor-owned texture whose pixels include this
+    /// toplevel's title. Called only when the authoritative xdg-shell title
+    /// differs from the value already announced to foreign-toplevel clients.
+    pub(crate) fn invalidate_window_title_ui(&mut self, surface: &WlSurface) {
+        self.depth_schematics.remove(surface);
+        for group in &mut self.groups {
+            if group
+                .members
+                .iter()
+                .any(|member| &member.surface == surface)
+            {
+                group.strip = None;
+            }
+        }
+    }
+
     /// Render elements for every relevant group's tab strip, anchored to the
     /// top edge of its active member's current or swim-neighbor rect. Called
     /// by both backends' `render_surface`, same as `toast`'s render element -- a
@@ -9785,15 +9829,18 @@ impl Smallvil {
             };
 
             if group.strip.is_none() || group.strip_width != rect.size.w {
+                group.strip = None;
                 let titles: Vec<String> = group
                     .members
                     .iter()
                     .map(|m| crate::tab_strip::window_title(&m.surface))
                     .collect();
-                let (buffer, width) =
-                    crate::tab_strip::build_buffer(&titles, group.active, rect.size.w);
-                group.strip = Some(buffer);
-                group.strip_width = width;
+                if let Some((buffer, width)) =
+                    crate::tab_strip::build_buffer(&titles, group.active, rect.size.w)
+                {
+                    group.strip = Some(buffer);
+                    group.strip_width = width;
+                }
             }
 
             if let Some(buffer) = &group.strip {
@@ -11113,6 +11160,7 @@ impl Smallvil {
                     "Config reloaded"
                 );
                 let ui_theme = crate::ui_theme::UiTheme::from_config(&self.config);
+                let toast_output_width = self.toast_output_width();
                 // Unlike a hard parse failure, these diagnostics don't mean
                 // the reload was rejected -- `new_config` above is already
                 // in effect. Still worth a persistent nudge instead of a
@@ -11136,10 +11184,18 @@ impl Smallvil {
                             crate::config::SpatialEngine::Ocean => "ocean",
                         }
                     );
-                    Some(Toast::new(&message, ToastKind::Info, ui_theme))
+                    Toast::new(&message, ToastKind::Info, ui_theme, toast_output_width)
                 } else {
                     (self.config.show_config_reload_toast && warnings.is_empty())
-                        .then(|| Toast::new("Configuration reloaded", ToastKind::Info, ui_theme))
+                        .then(|| {
+                            Toast::new(
+                                "Configuration reloaded",
+                                ToastKind::Info,
+                                ui_theme,
+                                toast_output_width,
+                            )
+                        })
+                        .flatten()
                 };
                 self.toast = migration_toast;
                 if !warnings.is_empty() {

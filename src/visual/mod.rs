@@ -25,6 +25,7 @@ pub(crate) mod source_picker;
 pub(crate) mod sway;
 pub(crate) mod swim;
 pub(crate) mod tab_strip;
+pub(crate) mod text;
 pub(crate) mod toast;
 pub(crate) mod ui_theme;
 pub(crate) mod viscosity;
