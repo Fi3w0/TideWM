@@ -628,6 +628,19 @@ fn finish_configuration(
                 }
             }
         }
+        // Applying a new live scale switches cursor asset/cache keys. Drop
+        // prepared buffers for scales no output advertises anymore so
+        // repeated output-management changes cannot accumulate CPU buffers
+        // or per-renderer textures. Connector removal performs the same
+        // reconciliation after unmapping its output in the udev backend.
+        let space = &state.space;
+        if let Some(theme) = state.cursor_theme.as_mut() {
+            theme.retain_scales(|scale| {
+                space
+                    .outputs()
+                    .any(|output| output.current_scale().integer_scale() == scale)
+            });
+        }
         state.retile();
         state.wlr_output_management_state.refresh(&state.space);
     }

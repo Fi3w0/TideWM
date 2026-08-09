@@ -12,8 +12,7 @@
 //! client content to it), so drawing one here would just overlay a second,
 //! redundant cursor.
 
-use std::collections::HashMap;
-use std::time::Duration;
+use std::{collections::HashMap, sync::OnceLock, time::Duration};
 
 use smithay::{
     backend::allocator::Fourcc,
@@ -23,6 +22,7 @@ use smithay::{
     },
     backend::renderer::gles::GlesRenderer,
     input::pointer::CursorIcon,
+    output::Scale as OutputScale,
     utils::{Physical, Point, Transform},
 };
 use xcursor::{
@@ -33,47 +33,53 @@ use xcursor::{
 const SIZE: i32 = 14;
 const RADIUS: f32 = 5.0;
 
-/// Rebuilt fresh on every call rather than cached: the glyph is a handful
-/// of pixels, and this only runs when the fallback cursor is actually
-/// being rendered (not every frame -- see `backend/udev.rs`).
+/// The fallback never changes, so keep one stable buffer for the process.
+/// `MemoryRenderBuffer` handles one lazy texture import per renderer context;
+/// rebuilding it here used to discard that cache on every rendered frame.
+fn fallback_glyph_buffer() -> &'static MemoryRenderBuffer {
+    static BUFFER: OnceLock<MemoryRenderBuffer> = OnceLock::new();
+
+    BUFFER.get_or_init(|| {
+        let mut pixels = vec![0u8; (SIZE * SIZE * 4) as usize];
+        let center = SIZE as f32 / 2.0;
+
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+                let dist = ((fx - center).powi(2) + (fy - center).powi(2)).sqrt();
+                let coverage = (RADIUS - dist + 0.5).clamp(0.0, 1.0);
+                if coverage <= 0.0 {
+                    continue;
+                }
+                let i = ((y * SIZE + x) * 4) as usize;
+                let a = (255.0 * coverage) as u8;
+                // Fourcc::Argb8888 in memory (little-endian) is B, G, R, A.
+                pixels[i] = 255;
+                pixels[i + 1] = 255;
+                pixels[i + 2] = 255;
+                pixels[i + 3] = a;
+            }
+        }
+
+        MemoryRenderBuffer::from_slice(
+            &pixels,
+            Fourcc::Argb8888,
+            (SIZE, SIZE),
+            1,
+            Transform::Normal,
+            None,
+        )
+    })
+}
+
 pub fn fallback_glyph_element(
     renderer: &mut GlesRenderer,
     location: (f64, f64),
 ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
-    let mut pixels = vec![0u8; (SIZE * SIZE * 4) as usize];
-    let center = SIZE as f32 / 2.0;
-
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            let dist = ((fx - center).powi(2) + (fy - center).powi(2)).sqrt();
-            let coverage = (RADIUS - dist + 0.5).clamp(0.0, 1.0);
-            if coverage <= 0.0 {
-                continue;
-            }
-            let i = ((y * SIZE + x) * 4) as usize;
-            let a = (255.0 * coverage) as u8;
-            // Fourcc::Argb8888 in memory (little-endian) is B, G, R, A.
-            pixels[i] = 255;
-            pixels[i + 1] = 255;
-            pixels[i + 2] = 255;
-            pixels[i + 3] = a;
-        }
-    }
-
-    let buffer = MemoryRenderBuffer::from_slice(
-        &pixels,
-        Fourcc::Argb8888,
-        (SIZE, SIZE),
-        1,
-        Transform::Normal,
-        None,
-    );
-
     MemoryRenderBufferRenderElement::from_buffer(
         renderer,
         location,
-        &buffer,
+        fallback_glyph_buffer(),
         None,
         None,
         None,
@@ -95,6 +101,101 @@ pub struct Theme {
     theme: CursorTheme,
     size: u32,
     cache: HashMap<&'static str, Option<Vec<Image>>>,
+    prepared: PreparedCache,
+}
+
+struct PreparedFrame {
+    buffer: MemoryRenderBuffer,
+    xhot: u32,
+    yhot: u32,
+    delay: u32,
+}
+
+struct PreparedCursor {
+    asset_scale: i32,
+    frames: Vec<PreparedFrame>,
+    total_delay: u128,
+}
+
+impl PreparedCursor {
+    fn new(frames: &[Image], size: u32, asset_scale: i32) -> Option<Self> {
+        let scale = u64::try_from(asset_scale).ok().filter(|scale| *scale > 0)?;
+        let target = u64::from(size) * scale;
+        let nearest = frames
+            .iter()
+            .min_by_key(|image| target.abs_diff(u64::from(image.size)))?;
+
+        let frames: Vec<PreparedFrame> = frames
+            .iter()
+            .filter(|image| image.width == nearest.width && image.height == nearest.height)
+            .filter_map(|image| {
+                let width = i32::try_from(image.width).ok()?;
+                let height = i32::try_from(image.height).ok()?;
+                // Fourcc::Argb8888 is B,G,R,A per pixel in memory
+                // (little-endian); xcursor gives R,G,B,A, so convert once
+                // before the stable buffer enters the renderer cache.
+                let mut bgra = image.pixels_rgba.clone();
+                for pixel in bgra.chunks_exact_mut(4) {
+                    pixel.swap(0, 2);
+                }
+                Some(PreparedFrame {
+                    buffer: MemoryRenderBuffer::from_slice(
+                        &bgra,
+                        Fourcc::Argb8888,
+                        (width, height),
+                        asset_scale,
+                        Transform::Normal,
+                        None,
+                    ),
+                    xhot: image.xhot,
+                    yhot: image.yhot,
+                    delay: image.delay.max(1),
+                })
+            })
+            .collect();
+        if frames.is_empty() {
+            return None;
+        }
+        let total_delay = frames.iter().map(|frame| u128::from(frame.delay)).sum();
+        Some(Self {
+            asset_scale,
+            frames,
+            total_delay,
+        })
+    }
+
+    fn frame(&self, time: Duration) -> &PreparedFrame {
+        let mut millis = time.as_millis() % self.total_delay;
+        for frame in &self.frames {
+            let delay = u128::from(frame.delay);
+            if millis < delay {
+                return frame;
+            }
+            millis -= delay;
+        }
+        &self.frames[0]
+    }
+}
+
+#[derive(Default)]
+struct PreparedCache(HashMap<(&'static str, i32), PreparedCursor>);
+
+impl PreparedCache {
+    #[cfg(test)]
+    fn get_or_insert_with(
+        &mut self,
+        key: (&'static str, i32),
+        prepare: impl FnOnce() -> Option<PreparedCursor>,
+    ) -> Option<&PreparedCursor> {
+        if let std::collections::hash_map::Entry::Vacant(entry) = self.0.entry(key) {
+            entry.insert(prepare()?);
+        }
+        self.0.get(&key)
+    }
+
+    fn retain_scales(&mut self, mut is_live: impl FnMut(i32) -> bool) {
+        self.0.retain(|(_, scale), _| is_live(*scale));
+    }
 }
 
 impl Theme {
@@ -109,6 +210,7 @@ impl Theme {
             theme: CursorTheme::load(&name),
             size,
             cache: HashMap::new(),
+            prepared: PreparedCache::default(),
         };
         // Confirms the theme is actually usable at all before returning
         // Some -- matches the previous behavior of only ever loading
@@ -135,6 +237,13 @@ impl Theme {
         self.cache.get(icon.name())?.as_deref()
     }
 
+    /// Releases prepared frames for scales no live output uses. Parsed theme
+    /// images stay lazy-cached per icon; the heavier BGRA buffers and their
+    /// per-renderer textures are bounded by the live output-scale set.
+    pub fn retain_scales(&mut self, is_live: impl FnMut(i32) -> bool) {
+        self.prepared.retain_scales(is_live);
+    }
+
     /// `local` is the pointer's output-local physical position (hotspot not
     /// yet subtracted -- the chosen frame's own `xhot`/`yhot` is what gets
     /// subtracted here, since it's specific to that frame's bitmap).
@@ -142,11 +251,18 @@ impl Theme {
         &mut self,
         renderer: &mut GlesRenderer,
         local: Point<f64, Physical>,
-        scale: u32,
+        output_scale: OutputScale,
         time: Duration,
         icon: CursorIcon,
     ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
-        let size = self.size;
+        let fractional_scale = output_scale.fractional_scale();
+        if !fractional_scale.is_finite() || fractional_scale <= 0.0 {
+            return None;
+        }
+        let asset_scale = output_scale.integer_scale();
+        if asset_scale <= 0 {
+            return None;
+        }
         // Falls back to the theme's default arrow if this specific shape
         // isn't shipped -- a wrong-but-present pointer beats an invisible
         // one, same reasoning `fallback_glyph_element` exists for below.
@@ -159,32 +275,30 @@ impl Theme {
         } else {
             CursorIcon::Default
         };
-        let frames = self.frames(icon)?;
-        let frame = pick_frame(frames, size, scale, time);
-
-        // Fourcc::Argb8888 is B,G,R,A per pixel in memory (little-endian;
-        // confirmed against Smithay's own fourcc_to_gl_formats, which maps
-        // it to GL_BGRA_EXT). xcursor's `pixels_rgba` is R,G,B,A per pixel
-        // -- the two don't match, so swap R/B rather than assume they do.
-        let mut bgra = frame.pixels_rgba.clone();
-        for px in bgra.chunks_exact_mut(4) {
-            px.swap(0, 2);
+        let key = (icon.name(), asset_scale);
+        if !self.prepared.0.contains_key(&key) {
+            let size = self.size;
+            let prepared = {
+                let frames = self.frames(icon)?;
+                PreparedCursor::new(frames, size, asset_scale)?
+            };
+            self.prepared.0.insert(key, prepared);
         }
-
-        let buffer = MemoryRenderBuffer::from_slice(
-            &bgra,
-            Fourcc::Argb8888,
-            (frame.width as i32, frame.height as i32),
-            1,
-            Transform::Normal,
-            None,
+        let cursor = self.prepared.0.get(&key)?;
+        let frame = cursor.frame(time);
+        // The selected xcursor bitmap is tagged with its integer asset scale,
+        // while pointer placement stays at the output's precise fractional
+        // scale. Convert the bitmap-pixel hotspot through logical space before
+        // subtracting it from the already-physical pointer coordinate.
+        let hotspot_scale = fractional_scale / f64::from(cursor.asset_scale);
+        let location = (
+            local.x - f64::from(frame.xhot) * hotspot_scale,
+            local.y - f64::from(frame.yhot) * hotspot_scale,
         );
-
-        let location = (local.x - frame.xhot as f64, local.y - frame.yhot as f64);
         MemoryRenderBufferRenderElement::from_buffer(
             renderer,
             location,
-            &buffer,
+            &frame.buffer,
             None,
             None,
             None,
@@ -192,35 +306,6 @@ impl Theme {
         )
         .ok()
     }
-}
-
-/// Picks the animation frame for `time`, nearest to `size * scale` the same
-/// way libXcursor resolves a nominal size to the closest bitmap the theme
-/// actually ships. A free function rather than a `Theme` method: it only
-/// needs one icon's already-resolved frame list, not the cache lookup that
-/// produced it, and keeping it that way avoids a self-borrow that would
-/// otherwise have to span the whole `render_element` body above.
-fn pick_frame(frames: &[Image], size: u32, scale: u32, time: Duration) -> &Image {
-    let target = size * scale;
-    let nearest = frames
-        .iter()
-        .min_by_key(|i| (target as i32 - i.size as i32).abs())
-        .expect("frames is never empty: only Some(frames) from parse_xcursor is cached");
-    let same_size: Vec<&Image> = frames
-        .iter()
-        .filter(|i| i.width == nearest.width && i.height == nearest.height)
-        .collect();
-
-    let total: u32 = same_size.iter().map(|i| i.delay.max(1)).sum();
-    let mut millis = (time.as_millis() as u32) % total;
-    for icon in &same_size {
-        let delay = icon.delay.max(1);
-        if millis < delay {
-            return icon;
-        }
-        millis -= delay;
-    }
-    same_size[0]
 }
 
 #[cfg(test)]
@@ -248,27 +333,79 @@ mod tests {
             icon(24, 24, 200), // frame 1: [100, 300)
         ];
 
-        assert_eq!(
-            pick_frame(&frames, 24, 1, Duration::from_millis(0)).delay,
-            100
-        );
-        assert_eq!(
-            pick_frame(&frames, 24, 1, Duration::from_millis(50)).delay,
-            100
-        );
-        assert_eq!(
-            pick_frame(&frames, 24, 1, Duration::from_millis(150)).delay,
-            200
-        );
+        let cursor = PreparedCursor::new(&frames, 24, 1).unwrap();
+        assert_eq!(cursor.frame(Duration::from_millis(0)).delay, 100);
+        assert_eq!(cursor.frame(Duration::from_millis(50)).delay, 100);
+        assert_eq!(cursor.frame(Duration::from_millis(150)).delay, 200);
         // Wraps past the 300ms total back to frame 0.
-        assert_eq!(
-            pick_frame(&frames, 24, 1, Duration::from_millis(350)).delay,
-            100
-        );
+        assert_eq!(cursor.frame(Duration::from_millis(350)).delay, 100);
         // Nearest to size*scale = 48 picks the other size group entirely.
+        let scaled = PreparedCursor::new(&frames, 24, 2).unwrap();
+        assert_eq!(scaled.frames.len(), 1);
+        assert_eq!(scaled.asset_scale, 2);
+    }
+
+    #[test]
+    fn fractional_output_uses_integer_asset_scale_and_fractional_hotspot() {
+        let scale = OutputScale::Fractional(1.5);
+        assert_eq!(scale.integer_scale(), 2);
+        let mut image = icon(48, 48, 1);
+        image.xhot = 8;
+        image.yhot = 4;
+        let cursor = PreparedCursor::new(&[image], 24, scale.integer_scale()).unwrap();
+        let frame = cursor.frame(Duration::ZERO);
+        let hotspot_scale = scale.fractional_scale() / f64::from(cursor.asset_scale);
+
+        assert_eq!(f64::from(frame.xhot) * hotspot_scale, 6.0);
+        assert_eq!(f64::from(frame.yhot) * hotspot_scale, 3.0);
+        assert_eq!(OutputScale::Fractional(1.25).integer_scale(), 2);
+        assert_eq!(OutputScale::Fractional(2.0).integer_scale(), 2);
         assert_eq!(
-            pick_frame(&frames, 24, 2, Duration::from_millis(0)).width,
-            48
+            OutputScale::Custom {
+                advertised_integer: 3,
+                fractional: 1.5,
+            }
+            .integer_scale(),
+            3
         );
+    }
+
+    #[test]
+    fn prepared_cache_reuses_entries_and_prunes_non_live_scales() {
+        let frames = [icon(24, 24, 1), icon(48, 48, 1)];
+        let mut cache = PreparedCache::default();
+        let mut builds = 0;
+        let key = (CursorIcon::Default.name(), 2);
+        let first = cache
+            .get_or_insert_with(key, || {
+                builds += 1;
+                PreparedCursor::new(&frames, 24, 2)
+            })
+            .unwrap() as *const PreparedCursor;
+        let second = cache
+            .get_or_insert_with(key, || {
+                builds += 1;
+                PreparedCursor::new(&frames, 24, 2)
+            })
+            .unwrap() as *const PreparedCursor;
+
+        assert_eq!(first, second);
+        assert_eq!(builds, 1);
+        cache
+            .get_or_insert_with((CursorIcon::Default.name(), 1), || {
+                PreparedCursor::new(&frames, 24, 1)
+            })
+            .unwrap();
+        cache.retain_scales(|scale| scale == 1);
+        assert_eq!(cache.0.len(), 1);
+        assert!(cache.0.contains_key(&(CursorIcon::Default.name(), 1)));
+    }
+
+    #[test]
+    fn fallback_buffer_is_stable() {
+        assert!(std::ptr::eq(
+            fallback_glyph_buffer(),
+            fallback_glyph_buffer()
+        ));
     }
 }

@@ -503,7 +503,8 @@ impl Smallvil {
             } else {
                 &self.cursor_status
             };
-            let scale = output.current_scale().fractional_scale();
+            let output_scale = output.current_scale();
+            let scale = output_scale.fractional_scale();
             let output_loc = self
                 .space
                 .output_geometry(&output)
@@ -545,7 +546,7 @@ impl Smallvil {
                         .cursor_theme
                         .as_mut()
                         .and_then(|theme| {
-                            theme.render_element(renderer, local, scale as u32, elapsed, *icon)
+                            theme.render_element(renderer, local, output_scale, elapsed, *icon)
                         })
                         .or_else(|| crate::cursor::fallback_glyph_element(renderer, local.into()));
                     if let Some(glyph) = glyph {
