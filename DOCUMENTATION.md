@@ -1002,7 +1002,7 @@ caustics {
 
 ### `env { }`
 
-`KEY = VALUE` pairs, applied to TideWM's own process before the backend starts (so e.g. `XCURSOR_THEME` here actually changes the cursor theme TideWM itself loads, not just what child processes see) and folded into the systemd/D-Bus session-activation environment alongside `WAYLAND_DISPLAY`, so anything session-activated (a portal backend, a polkit agent) sees them too.
+`KEY = VALUE` pairs, applied to TideWM's own process before the backend starts (so e.g. `XCURSOR_THEME` here actually changes the cursor theme TideWM itself loads, not just what child processes see) and folded into the systemd/D-Bus session-activation environment alongside `WAYLAND_DISPLAY`, so anything session-activated (a portal backend, a polkit agent) sees them too. Invalid Unix environment names/values are ignored with a config warning; values are never repeated in that diagnostic because they may contain secrets.
 
 ```
 env {
