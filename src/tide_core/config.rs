@@ -1264,6 +1264,17 @@ impl Config {
             .filter_map(|(combo, action)| parse_keybind(combo, action, false, &mut Vec::new()))
             .filter(|bind| !matches!(bind.action, Action::EnterSubmap(_)))
             .collect();
+        let env = raw
+            .env
+            .into_iter()
+            .filter_map(|(key, value)| match validate_env_entry(&key, &value) {
+                Ok(()) => Some((key, value)),
+                Err(reason) => {
+                    warnings.push(format!("Invalid env key {key:?}: {reason}; entry ignored"));
+                    None
+                }
+            })
+            .collect();
 
         let config = Self {
             loaded_entries: Vec::new(),
@@ -1317,7 +1328,7 @@ impl Config {
             layer_rules: raw.layer_rules,
             workspace_rules: raw.workspace_rules,
             submaps,
-            env: raw.env,
+            env,
         };
         (config, warnings)
     }
@@ -6874,6 +6885,27 @@ fn parse_transform(s: &str) -> Option<OutputTransformConfig> {
     }
 }
 
+/// Validates the platform-independent subset accepted by Unix `setenv`.
+/// Keeping this beside config lowering turns malformed Wave entries into a
+/// visible diagnostic instead of letting `std::env::set_var` panic during
+/// compositor startup. Values are deliberately not included in diagnostics:
+/// environment variables can carry secrets.
+pub(crate) fn validate_env_entry(key: &str, value: &str) -> Result<(), &'static str> {
+    if key.is_empty() {
+        return Err("name must not be empty");
+    }
+    if key.contains('=') {
+        return Err("name must not contain '='");
+    }
+    if key.contains('\0') {
+        return Err("name must not contain NUL");
+    }
+    if value.contains('\0') {
+        return Err("value must not contain NUL");
+    }
+    Ok(())
+}
+
 /// Mutates `field` only on a successful parse -- a bad value logs a
 /// warning and leaves whatever was already there (the default, or an
 /// earlier include's value) rather than silently resetting it.
@@ -10230,5 +10262,36 @@ mod tests {
         // the Hyprland-style rgb()/rgba() text forms are gone with the
         // old grammar
         assert_eq!(parse("rgb(0,255,255)"), None);
+    }
+
+    #[test]
+    fn environment_validation_matches_setenv_preconditions() {
+        assert!(validate_env_entry("XCURSOR_THEME", "Tide").is_ok());
+        assert!(validate_env_entry("", "value").is_err());
+        assert!(validate_env_entry("BAD=NAME", "value").is_err());
+        assert!(validate_env_entry("BAD\0NAME", "value").is_err());
+        assert!(validate_env_entry("GOOD_NAME", "bad\0value").is_err());
+    }
+
+    #[test]
+    fn malformed_environment_entries_become_redacted_warnings() {
+        let mut raw = RawConfig::default();
+        raw.env.insert("VALID_NAME".into(), "visible".into());
+        raw.env.insert("BAD=NAME".into(), "top-secret".into());
+        raw.env
+            .insert("NUL_VALUE".into(), "top-secret\0tail".into());
+
+        let (config, warnings) = Config::from_raw(raw);
+
+        assert_eq!(
+            config.env.get("VALID_NAME").map(String::as_str),
+            Some("visible")
+        );
+        assert!(!config.env.contains_key("BAD=NAME"));
+        assert!(!config.env.contains_key("NUL_VALUE"));
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings
+            .iter()
+            .all(|warning| !warning.contains("top-secret")));
     }
 }

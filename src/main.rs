@@ -90,6 +90,13 @@ pub(crate) fn spawn(cmd: &str) -> std::io::Result<()> {
 /// `WAYLAND_DISPLAY` the backend sets up and so can only run afterward.
 fn apply_user_env(env: &std::collections::HashMap<String, String>) {
     for (key, value) in env {
+        if let Err(reason) = crate::config::validate_env_entry(key, value) {
+            // Config lowering already filters these and emits a user-facing
+            // warning. Keep this guard at the mutation boundary as defense
+            // in depth for programmatically constructed Config values.
+            tracing::error!(key = ?key, reason, "Skipping invalid environment entry");
+            continue;
+        }
         std::env::set_var(key, value);
     }
 }
