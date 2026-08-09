@@ -79,6 +79,24 @@ fn matching_keybind<'a>(
         .max_by_key(|bind| bind.held_keysyms.len())
 }
 
+/// Applies the paired-release suppression used when compositor-owned UI
+/// consumes a pointer press and then disappears before that button is
+/// released. A new press clears a stale entry so a release lost during a
+/// device/session transition cannot poison a later click.
+fn suppress_consumed_pointer_release(
+    suppressed: &mut HashSet<u32>,
+    button: u32,
+    state: ButtonState,
+) -> bool {
+    match state {
+        ButtonState::Pressed => {
+            suppressed.remove(&button);
+            false
+        }
+        ButtonState::Released => suppressed.remove(&button),
+    }
+}
+
 /// Applies `[input.touchpad]` to a libinput device libinput just reported
 /// (device-add at startup enumeration, or hotplug), if it's touchpad-class
 /// (`config_tap_finger_count() > 0` -- the same check sway/Hyprland use; a
@@ -1265,6 +1283,14 @@ impl Smallvil {
 
                 let button_state = event.state();
 
+                if suppress_consumed_pointer_release(
+                    &mut self.suppressed_pointer_buttons,
+                    button,
+                    button_state,
+                ) {
+                    return;
+                }
+
                 // Locked: forward the click to whatever `surface_under`
                 // already resolved (the lock surface, via the motion path
                 // that ran before this button event) and skip every WM
@@ -1307,6 +1333,7 @@ impl Smallvil {
                 // only pointer-position read this path needs.
                 if self.minimap_peek.is_some() {
                     if button_state == ButtonState::Pressed {
+                        self.suppressed_pointer_buttons.insert(button);
                         self.minimap_click_travel();
                     }
                     return;
@@ -3281,5 +3308,44 @@ mod tests {
             Some(Direction::Down)
         );
         assert_eq!(completed_swipe_direction(199.0, 0.0, 200.0), None);
+    }
+
+    #[test]
+    fn consumed_pointer_press_suppresses_only_its_paired_release() {
+        let mut suppressed = HashSet::new();
+        let consumed = 0x110;
+        let other = 0x111;
+
+        suppressed.insert(consumed);
+        assert!(!suppress_consumed_pointer_release(
+            &mut suppressed,
+            other,
+            ButtonState::Released,
+        ));
+        assert!(suppress_consumed_pointer_release(
+            &mut suppressed,
+            consumed,
+            ButtonState::Released,
+        ));
+        assert!(!suppress_consumed_pointer_release(
+            &mut suppressed,
+            consumed,
+            ButtonState::Released,
+        ));
+    }
+
+    #[test]
+    fn fresh_pointer_press_clears_stale_release_suppression() {
+        let mut suppressed = HashSet::from([0x110]);
+        assert!(!suppress_consumed_pointer_release(
+            &mut suppressed,
+            0x110,
+            ButtonState::Pressed,
+        ));
+        assert!(!suppress_consumed_pointer_release(
+            &mut suppressed,
+            0x110,
+            ButtonState::Released,
+        ));
     }
 }

@@ -34,15 +34,11 @@
 //! this is the one residual staleness case, not a general "goes stale"
 //! problem.
 //!
-//! **Pointer focus isn't explicitly restored on close.** Every motion
-//! event while the peek is open moves the cursor with no focus target
-//! (`pointer.motion(self, None, ..)`), which sends whatever surface was
-//! under it a real Wayland `leave`. Closing the peek doesn't re-enter
-//! anything itself -- the very next ordinary motion event re-runs
-//! `surface_under` and re-enters normally, so this self-heals on the next
-//! pointer move, but a click landing before any further motion (pointer
-//! perfectly still since the peek closed) goes to focus `None` and is
-//! lost. Narrow enough not to be worth a dedicated re-focus call for.
+//! Closing re-resolves pointer focus at the cursor's unchanged location,
+//! matching Smithay's own post-grab focus restoration. A click-to-travel
+//! press is compositor-consumed, so its paired release is suppressed after
+//! the minimap disappears rather than leaking half a click to the newly
+//! re-entered client.
 
 use smithay::{
     backend::allocator::Fourcc,
