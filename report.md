@@ -28,6 +28,12 @@ The finding text below is the original audit evidence. It is intentionally retai
 - Formatter findings F-01 through F-04: closed.
 - The dedicated comment/documentation cleanup and the roadmap work are not finished.
 
+### Open finding re-audit notes
+
+- **M-37:** the pinned Smithay `ff5fa7d` implementation logs DRM-master reacquisition failure inside `DrmDevice::activate(false)`, marks the device active anyway, and returns success, so TideWM's existing error branch is unreachable. Upstream `85f83ab6` propagates that failure, but pinning it directly also crosses Smithay's broad Dispatch2 protocol-delegation refactor and currently produces 101 TideWM compile errors. Do not land only the Tide-side libinput rollback: first either backport the upstream five-line DRM fix on a maintained compatibility pin/fork or plan the full delegation migration, then suspend libinput again on input/DRM activation failure before any surface reset/render work.
+- **M-38:** confirmed against TideWM's explicit single-GPU backend. Removal of the driven DRM device currently logs and leaves a permanently black live session; the bounded recovery is to stop `state.loop_signal` only for the matching device and let normal teardown return control to the login/session manager. Dynamic GPU replacement requires a separate per-GPU backend architecture.
+- **M-39:** confirmed. A lock requested with zero outputs confirms immediately, but removing the final output while already `Locking` does not re-run the confirmation predicate. Re-evaluate lock confirmation after disconnect removes that output's lock surface/buffer; the remaining-output predicate is intentionally vacuously true at zero, matching current niri behavior.
+
 ### Closed Critical findings
 
 | Findings | Commit | Resolution |
