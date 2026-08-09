@@ -26,7 +26,7 @@ use smithay::{
 
 use crate::{
     grabs::{resize_grab, GrabCompletion, MoveSurfaceGrab, ResizeSurfaceGrab},
-    state::{FullscreenEntry, MaximizedEntry, PopupGrabState},
+    state::{FullscreenEntry, LifecycleFlutter, MaximizedEntry, PopupGrabState},
     Smallvil,
 };
 
@@ -59,6 +59,7 @@ impl XdgShellHandler for Smallvil {
         self.restore_swallowed(surface.wl_surface());
         self.unmapped_toplevels.remove(surface.wl_surface());
         self.detach_mapped_toplevel(surface.wl_surface());
+        self.forget_toplevel_flutter(surface.wl_surface());
         self.forget_window_focus(surface.wl_surface());
         self.retile();
         self.repair_keyboard_focus(preferred_output.as_deref(), SERIAL_COUNTER.next_serial());
@@ -787,6 +788,29 @@ fn lifecycle_transition(tracking: ToplevelTracking, has_buffer: bool) -> Topleve
     }
 }
 
+const FLUTTER_WINDOW: std::time::Duration = std::time::Duration::from_millis(1000);
+const FLUTTER_FLOPS: u32 = 3;
+
+fn retain_flutter_record(
+    record: &LifecycleFlutter,
+    floated: bool,
+    now: std::time::Instant,
+) -> bool {
+    floated
+        || record
+            .last_unmapped_at
+            .is_some_and(|at| now.saturating_duration_since(at) <= FLUTTER_WINDOW)
+}
+
+fn remove_flutter_tracking<K: Eq + std::hash::Hash>(
+    lifecycle: &mut std::collections::HashMap<K, LifecycleFlutter>,
+    floated: &mut std::collections::HashSet<K>,
+    key: &K,
+) {
+    lifecycle.remove(key);
+    floated.remove(key);
+}
+
 /// Whether `map_toplevel`'s placement/state conversion below is guaranteed
 /// to send its own protocol configure, making the earlier tiled-size
 /// configure `retile()` sends redundant (and, for a client like a terminal,
@@ -893,8 +917,6 @@ impl Smallvil {
     /// that ends the storm (the window gets its natural size, nothing to
     /// refuse). One real minimize is a single flip and never trips this.
     fn note_toplevel_flutter(&mut self, surface: &WlSurface, mapping: bool) {
-        const FLUTTER_WINDOW: std::time::Duration = std::time::Duration::from_millis(1000);
-        const FLUTTER_FLOPS: u32 = 3;
         let now = std::time::Instant::now();
         if mapping {
             let record = self.lifecycle_flutter.entry(surface.clone()).or_default();
@@ -918,28 +940,27 @@ impl Smallvil {
                 .or_default()
                 .last_unmapped_at = Some(now);
         }
-        // Bound the tracking to windows the compositor still knows about:
-        // drop records (and float flags) for surfaces that are neither
-        // mapped nor waiting in the unmapped set.
-        #[allow(clippy::mutable_key_type)] // WlSurface-keyed tracking set
-        let tracked: std::collections::HashSet<WlSurface> = self
-            .unmapped_toplevels
-            .keys()
-            .cloned()
-            .chain(
-                self.space
-                    .elements()
-                    .filter_map(|window| window.toplevel().map(|t| t.wl_surface().clone())),
-            )
-            .collect();
+
+        // Expired counters have no value until another unmap starts a new
+        // window. A floated flag, however, belongs to the live XDG role and
+        // must survive hidden workspaces, parked groups, and null-buffer
+        // unmap/remap -- none of those are reliably represented in `Space`.
+        // `toplevel_destroyed` is the authoritative lifetime boundary and
+        // removes both collections explicitly.
         self.lifecycle_flutter.retain(|surface, record| {
-            record.flips >= FLUTTER_FLOPS
-                || record
-                    .last_unmapped_at
-                    .is_some_and(|at| now.saturating_duration_since(at) <= FLUTTER_WINDOW)
-                || tracked.contains(surface)
+            retain_flutter_record(record, self.flutter_floated.contains(surface), now)
         });
-        self.flutter_floated.retain(|s| tracked.contains(s));
+    }
+
+    /// Ends flutter policy with the XDG toplevel role. Null-buffer unmap is
+    /// deliberately not a cleanup point: its following remap is the event
+    /// the storm detector needs to count.
+    fn forget_toplevel_flutter(&mut self, surface: &WlSurface) {
+        remove_flutter_tracking(
+            &mut self.lifecycle_flutter,
+            &mut self.flutter_floated,
+            surface,
+        );
     }
 
     /// Detects the other half of the tiling-averse-client class: a client
@@ -1851,9 +1872,11 @@ fn is_dimension_pinned(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_dimension_pinned, lifecycle_transition, skips_first_tile_configure, ToplevelTracking,
-        ToplevelTransition,
+        is_dimension_pinned, lifecycle_transition, remove_flutter_tracking, retain_flutter_record,
+        skips_first_tile_configure, ToplevelTracking, ToplevelTransition, FLUTTER_WINDOW,
     };
+    use crate::state::LifecycleFlutter;
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn role_without_buffer_stays_unmapped() {
@@ -1889,6 +1912,40 @@ mod tests {
             lifecycle_transition(ToplevelTracking::Unmapped, true),
             ToplevelTransition::Map
         );
+    }
+
+    #[test]
+    fn recent_unmap_history_survives_for_a_remap() {
+        let now = std::time::Instant::now();
+        let record = LifecycleFlutter {
+            last_unmapped_at: now.checked_sub(FLUTTER_WINDOW / 2),
+            flips: 1,
+        };
+
+        assert!(retain_flutter_record(&record, false, now));
+    }
+
+    #[test]
+    fn floated_role_survives_expiry_until_authoritative_destruction() {
+        let now = std::time::Instant::now();
+        let record = LifecycleFlutter {
+            last_unmapped_at: now.checked_sub(FLUTTER_WINDOW + std::time::Duration::from_millis(1)),
+            flips: 3,
+        };
+
+        assert!(retain_flutter_record(&record, true, now));
+        assert!(!retain_flutter_record(&record, false, now));
+    }
+
+    #[test]
+    fn role_destruction_clears_all_flutter_state() {
+        let mut lifecycle = HashMap::from([(7_u32, LifecycleFlutter::default())]);
+        let mut floated = HashSet::from([7_u32]);
+
+        remove_flutter_tracking(&mut lifecycle, &mut floated, &7);
+
+        assert!(!lifecycle.contains_key(&7));
+        assert!(!floated.contains(&7));
     }
 
     #[test]
