@@ -11,8 +11,8 @@ This is a static code review, not a claim that every issue below was reproduced 
 - Updated: 2026-08-08
 - Implementation branch: `ai/codex/report-fixes`
 - Separate worktree: `/home/fiw/Proyects/TideWM-worktrees/report-fixes`
-- Implementation head before this report-only update: `d9f5fcc`
-- Current TideWM version on the branch: `0.90.39`
+- Current implementation head: `bf39982`
+- Current TideWM version on the branch: `0.90.40`
 - Push status: local only; nothing from this branch has been pushed.
 
 The finding text below is the original audit evidence. It is intentionally retained even when a finding is closed. Use this handoff ledger as the current status authority, then inspect the named commit and current code before changing a closed area. Do not repeat a fix merely because its original finding still says “confirmed.”
@@ -21,11 +21,11 @@ The finding text below is the original audit evidence. It is intentionally retai
 
 - Critical: all 7 closed.
 - High: H-01 through H-44 closed. H-45 was re-audited as a stale false positive because the current udev path already processes connector `Changed` events and rescans/retries surface creation.
-- Medium explicitly re-audited and closed: M-01, M-02, M-04, M-09, M-10, M-14 through M-21, and M-30.
-- Medium still open or awaiting a fresh audit: M-03, M-05 through M-08, M-11 through M-13, M-22 through M-29, and M-31 through M-74.
+- Medium explicitly re-audited and closed: M-01, M-02, M-04, M-09, M-10, M-14 through M-21, M-23, and M-30. M-07 was reclassified as an intentional documented wallpaper-memory tradeoff rather than a correctness bug or leak.
+- Medium still open or awaiting a fresh audit: M-03, M-05, M-06, M-08, M-11 through M-13, M-22, M-24 through M-29, and M-31 through M-74.
 - Performance opportunities P-01 through P-10: not worked in this branch unless a closed correctness fix incidentally reduced the same cost. Treat all ten as open until measured and re-audited. P-11 was added 2026-08-08 from real-hardware measurement (not static review) after merging through `d9f5fcc`; open, not yet root-caused.
 - Lower-confidence items U-01 through U-16: not systematically re-audited. Treat them as investigation tasks, not established bugs.
-- Formatter findings F-01 through F-04: open.
+- Formatter findings F-01 through F-04: closed.
 - The dedicated comment/documentation cleanup and the roadmap work are not finished.
 
 ### Closed Critical findings
@@ -77,10 +77,24 @@ The finding text below is the original audit evidence. It is intentionally retai
 | M-14, M-16, M-17, M-18 | `d9f5fcc` | Used live zoomed camera centers in both axes for admission/migration, sampled in-flight camera motion, and prevented fullscreen FitPlacement hit-test fall-through. |
 | M-15 | `48e8d86` | Migrated Classic Depth Deck ownership on output disconnect. |
 | M-19, M-20, M-21 | `d9f5fcc` | Clamped the pointer to the union of half-open live output rectangles, bounded gaps from each live slot, and invalidated resize topology after algorithm/tree changes. |
+| M-23 | `87214f8` | Portal close, disconnect, and stale replacement now release the shared session map and per-entry state mutex before dropping or joining a PipeWire stream. Synchronous worker teardown remains separately tracked by M-24. |
 | M-30 | `9522858` | Removed stopped output-manager head resources without advancing or corrupting shared transaction serials. |
+
+### Reclassified Medium findings
+
+| Finding | Status | Reason |
+| --- | --- | --- |
+| M-07 | Accepted performance tradeoff | The permanent 3840×2160 CPU backing is documented and required by Smithay's `MemoryRenderBuffer` for context reimport. Avoiding it requires an explicit fallback-wallpaper product/visual decision, not a correctness repair. |
+
+### Closed formatter findings
+
+| Findings | Commit | Resolution |
+| --- | --- | --- |
+| F-01 through F-04 | `bf39982` | Preserved block-comment offsets/newlines, made quote scanning escape-aware, kept block-comment contents out of formatter state, and made `wavefmt -w` an atomic permission-preserving rewrite. |
 
 ### Validation state
 
+- After `bf39982`, `cargo test --locked --all-features` passed all 358 compositor tests and all 9 `wavefmt` tests outside the restricted IPC socket sandbox. Strict `cargo clippy --locked --all-targets --all-features -- -D warnings` and `cargo fmt --all -- --check` also passed.
 - After `d9f5fcc`, `cargo test --locked --all-features` passed all 356 compositor tests and all 6 `wavefmt` tests outside the restricted IPC socket sandbox.
 - `cargo check --locked --all-features` passed after the final Medium batch.
 - Strict all-target/all-feature Clippy passed at the preceding `0.90.38` capture checkpoint (`5ed7751`). Run it again before merging the eventual complete branch because the final `d9f5fcc` batch was test/check validated but did not receive another Clippy invocation before the work paused.
