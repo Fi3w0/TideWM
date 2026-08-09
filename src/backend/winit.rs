@@ -521,7 +521,6 @@ pub fn init_winit(
             state.popups.cleanup();
             state.refresh_popup_grab();
             state.cleanup_capture();
-            state.cleanup_wlr_foreign_toplevels();
             let _ = state.display_handle.flush_clients();
 
             // Re-arm at the host panel's real frame period (the mode
