@@ -25,7 +25,7 @@ use smithay::{
 };
 
 use crate::{
-    grabs::{resize_grab, MoveSurfaceGrab, ResizeSurfaceGrab},
+    grabs::{resize_grab, GrabCompletion, MoveSurfaceGrab, ResizeSurfaceGrab},
     state::{FullscreenEntry, MaximizedEntry, PopupGrabState},
     Smallvil,
 };
@@ -149,6 +149,7 @@ impl XdgShellHandler for Smallvil {
                     == crate::config::SpatialEngine::Ocean
                     && self.config.ocean.smart_tiling,
                 last_location,
+                completion: GrabCompletion::default(),
             };
 
             pointer.set_grab(self, grab, serial, Focus::Clear);

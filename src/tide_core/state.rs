@@ -104,6 +104,7 @@ use wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_manager_v1::Z
 use crate::{
     capture::PendingCapture,
     config::{Config, Direction, WorkspaceRef},
+    grabs::GrabCompletion,
     layout::Layouts,
     toast::{Toast, ToastKind},
 };
@@ -1140,6 +1141,7 @@ pub(crate) enum CompositorGesture {
     /// release. See `Smallvil::start_gesture_modifier_move`.
     ModifierMove {
         last_location: Point<f64, Logical>,
+        completion: GrabCompletion,
     },
 }
 

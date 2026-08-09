@@ -1,4 +1,4 @@
-use crate::Smallvil;
+use crate::{grabs::GrabCompletion, Smallvil};
 use smithay::{
     desktop::Window,
     input::pointer::{
@@ -18,6 +18,7 @@ pub struct MoveSurfaceGrab {
     pub view_scale: f64,
     pub smart_attach_ocean: bool,
     pub(crate) last_location: Point<f64, Logical>,
+    pub(crate) completion: GrabCompletion,
 }
 
 impl PointerGrab<Smallvil> for MoveSurfaceGrab {
@@ -139,6 +140,7 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
 
         if !handle.current_pressed().contains(&self.start_data.button) {
             // The button that started the grab was released; release the grab.
+            self.completion.mark_complete();
             handle.unset_grab(self, data, event.serial, event.time, true);
         }
     }
@@ -233,12 +235,13 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
     }
 
     fn unset(&mut self, data: &mut Smallvil) {
-        if self.smart_attach_ocean {
+        let completed = self.completion.take_complete();
+        if self.smart_attach_ocean && completed {
             if let Some(surface) = self.window.toplevel().map(|toplevel| toplevel.wl_surface()) {
                 data.smart_attach_ocean_floating(surface, self.last_location);
             }
-            data.ocean.clear_tile_drag();
         }
+        data.ocean.clear_tile_drag();
         data.sync_visible_floating_window(&self.window);
     }
 }

@@ -25,7 +25,7 @@
 //! Re-enabled (wired back into `input.rs`) for a real-hardware retest --
 //! see AGENT.md/CHANGELOG.md for the retest result.
 
-use crate::Smallvil;
+use crate::{grabs::GrabCompletion, Smallvil};
 use smithay::{
     desktop::Window,
     input::pointer::{
@@ -46,6 +46,7 @@ pub struct TileMoveGrab {
     workspace: u32,
     initial_location: Point<i32, Logical>,
     last_location: Point<f64, Logical>,
+    completion: GrabCompletion,
 }
 
 impl TileMoveGrab {
@@ -67,7 +68,13 @@ impl TileMoveGrab {
             workspace,
             initial_location,
             last_location,
+            completion: GrabCompletion::default(),
         }
+    }
+
+    pub(crate) fn with_completion(mut self, completion: GrabCompletion) -> Self {
+        self.completion = completion;
+        self
     }
 
     /// Hit-tests wherever the pointer is *now* against the tiling layout
@@ -85,12 +92,9 @@ impl TileMoveGrab {
     /// it there, just snaps it back; that's a deliberate first-pass scope
     /// limit (see `AGENT.md`), not an oversight.
     ///
-    /// Runs from `unset()`, not `button()`'s release detection, so it
-    /// fires exactly once whenever this grab ends -- a real button
-    /// release, a gesture-driven `unset_grab` (see
-    /// `Smallvil::start_gesture_modifier_move`), or any other teardown
-    /// path -- rather than only the one Smithay happens to reach it
-    /// through.
+    /// Runs from `unset()` only after a real initiating-button release or
+    /// a successful gesture end marks the shared completion token. Forced
+    /// teardown still snaps the visual drag back without mutating the tree.
     fn commit(&self, data: &mut Smallvil) {
         if !data.window_is_visible(&self.surface)
             || !data.layout.contains(&self.surface)
@@ -119,7 +123,6 @@ impl TileMoveGrab {
                 data.layout.swap(&self.surface, &target);
             }
         }
-        data.retile_viscous();
     }
 }
 
@@ -177,6 +180,7 @@ impl PointerGrab<Smallvil> for TileMoveGrab {
         handle.button(data, event);
 
         if !handle.current_pressed().contains(&self.start_data.button) {
+            self.completion.mark_complete();
             handle.unset_grab(self, data, event.serial, event.time, true);
         }
     }
@@ -271,8 +275,11 @@ impl PointerGrab<Smallvil> for TileMoveGrab {
     }
 
     fn unset(&mut self, data: &mut Smallvil) {
-        // Runs whenever this grab ends, however it ends -- see `commit`'s
-        // own doc comment.
-        self.commit(data);
+        if self.completion.take_complete() {
+            self.commit(data);
+        }
+        // Motion moved only the visual Space element. Always snap it back
+        // to authoritative tiling, including on cancellation.
+        data.retile_viscous();
     }
 }
