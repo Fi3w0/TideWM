@@ -42,9 +42,10 @@ use smithay::{
                 memory::MemoryRenderBufferRenderElement,
                 solid::SolidColorRenderElement,
                 surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
+                texture::TextureRenderElement,
                 Kind,
             },
-            gles::GlesRenderer,
+            gles::{GlesRenderer, GlesTexture},
             ImportDma,
         },
         session::{libseat::LibSeatSession, Event as SessionEvent, Session},
@@ -111,6 +112,9 @@ smithay::backend::renderer::element::render_elements! {
     /// cursor.rs) are both single CPU-composited memory buffers -- no need
     /// for two variants wrapping the same underlying element type.
     Composited = MemoryRenderBufferRenderElement<GlesRenderer>,
+    /// Static GPU copy of the built-in wallpaper. Unlike `Composited`, this
+    /// does not retain the native artwork in CPU memory after import.
+    Wallpaper = TextureRenderElement<GlesTexture>,
     /// `state::LockRenderElement<R>` (blank fill + lock-surface content)
     /// nested as its own variant rather than two separate ones -- avoids
     /// an ambiguous `From<WaylandSurfaceRenderElement<R>>` with `Cursor`
@@ -1638,7 +1642,7 @@ fn render_surface(
     elements.extend(closing_windows);
     elements.extend(depth_elements);
     elements.extend(space_elements);
-    elements.extend(wallpaper_element.map(OutputRenderElements::Composited));
+    elements.extend(wallpaper_element.map(OutputRenderElements::Wallpaper));
     elements.extend(lock_elements.into_iter().map(OutputRenderElements::Lock));
     elements.extend(ripple_layers.below_all);
 

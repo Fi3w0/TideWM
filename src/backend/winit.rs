@@ -421,7 +421,7 @@ pub fn init_winit(
                         elements.extend(space_elements);
                         elements.extend(
                             wallpaper_element
-                                .map(crate::backend::udev::OutputRenderElements::Composited),
+                                .map(crate::backend::udev::OutputRenderElements::Wallpaper),
                         );
                         elements.extend(ripple_layers.below_all);
 

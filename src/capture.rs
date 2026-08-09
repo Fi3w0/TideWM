@@ -639,7 +639,7 @@ impl Smallvil {
                     elements.extend(depth_elements);
                     elements.extend(space_elements);
                     if let Some(wallpaper) = self.wallpaper_element(&output, renderer) {
-                        elements.push(OutputRenderElements::Composited(wallpaper));
+                        elements.push(OutputRenderElements::Wallpaper(wallpaper));
                     }
                     elements.extend(ripple_layers.below_all);
                     damage_tracker.render_output(
