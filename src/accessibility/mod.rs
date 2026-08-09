@@ -76,6 +76,10 @@ struct ClientGrab {
 }
 
 impl ClientGrab {
+    fn is_empty(&self) -> bool {
+        !self.watched && !self.grabbed && self.modifiers.is_empty() && self.keystrokes.is_empty()
+    }
+
     fn should_grab_keypress(
         &self,
         suppressed_keys: &HashSet<Keysym>,
@@ -135,6 +139,31 @@ impl KeyboardGrabs {
         }
         self.grabbed_mod_last_press
             .retain(|keysym, _| self.grabbed_mods.contains(keysym));
+    }
+
+    /// Removes every piece of state addressed to one DBus connection.
+    /// `suppressed_keys` deliberately remains intact: if this client caused
+    /// a physical press to be suppressed, its matching release must remain
+    /// suppressed even after the client unsubscribes or disconnects.
+    fn remove_client(&mut self, name: &OwnedUniqueName) -> bool {
+        if self.clients.remove(name).is_none() {
+            return false;
+        }
+
+        self.pressed_recipients.retain(|_, recipients| {
+            recipients.remove(name);
+            !recipients.is_empty()
+        });
+        self.rebuild_grabbed_mods();
+        true
+    }
+
+    fn prune_client_if_empty(&mut self, name: &OwnedUniqueName) -> bool {
+        if self.clients.get(name).is_some_and(ClientGrab::is_empty) {
+            self.remove_client(name)
+        } else {
+            false
+        }
     }
 }
 
@@ -497,6 +526,102 @@ mod tests {
             .insert(Keysym::Super_L, Duration::from_secs(1));
         grabs.rebuild_grabbed_mods();
         assert!(grabs.grabbed_mod_last_press.is_empty());
+    }
+
+    #[test]
+    fn empty_client_state_is_reclaimed_without_touching_suppression() {
+        let departing = OwnedUniqueName::try_from(":1.1").unwrap();
+        let remaining = OwnedUniqueName::try_from(":1.2").unwrap();
+        let key = Keysym::a;
+        let other_key = Keysym::b;
+        let mut grabs = KeyboardGrabs::default();
+        grabs
+            .clients
+            .insert(departing.clone(), ClientGrab::default());
+        grabs.clients.insert(
+            remaining.clone(),
+            ClientGrab {
+                watched: true,
+                ..Default::default()
+            },
+        );
+        grabs.suppressed_keys.insert(key);
+        grabs
+            .pressed_recipients
+            .insert(key, HashSet::from([departing.clone(), remaining.clone()]));
+        grabs
+            .pressed_recipients
+            .insert(other_key, HashSet::from([departing.clone()]));
+
+        assert!(grabs.prune_client_if_empty(&departing));
+        assert!(!grabs.clients.contains_key(&departing));
+        assert_eq!(
+            grabs.pressed_recipients.get(&key),
+            Some(&HashSet::from([remaining]))
+        );
+        assert!(!grabs.pressed_recipients.contains_key(&other_key));
+        assert!(grabs.suppressed_keys.contains(&key));
+    }
+
+    #[test]
+    fn active_client_state_is_not_pruned() {
+        let cases = [
+            ClientGrab {
+                watched: true,
+                ..Default::default()
+            },
+            ClientGrab {
+                grabbed: true,
+                ..Default::default()
+            },
+            ClientGrab {
+                modifiers: HashSet::from([Keysym::Super_L]),
+                ..Default::default()
+            },
+            ClientGrab {
+                keystrokes: vec![(Keysym::a, 0)],
+                ..Default::default()
+            },
+        ];
+
+        for (index, client) in cases.into_iter().enumerate() {
+            let name = OwnedUniqueName::try_from(format!(":1.{}", index + 1)).unwrap();
+            let mut grabs = KeyboardGrabs::default();
+            grabs.clients.insert(name.clone(), client);
+            assert!(!grabs.prune_client_if_empty(&name));
+            assert!(grabs.clients.contains_key(&name));
+        }
+    }
+
+    #[test]
+    fn unsubscribing_after_press_still_blocks_release_without_delivery() {
+        let (state, receiver) = state();
+        let client = OwnedUniqueName::try_from(":1.1").unwrap();
+        let key = Keysym::a;
+        state.grabs.lock().unwrap().clients.insert(
+            client.clone(),
+            ClientGrab {
+                grabbed: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            state.process_key(DELAY, Duration::ZERO, false, 0, key, 0, 30),
+            KbMonBlock::Block
+        );
+        receiver.try_recv().unwrap();
+        {
+            let mut grabs = state.grabs.lock().unwrap();
+            grabs.clients.get_mut(&client).unwrap().grabbed = false;
+            assert!(grabs.prune_client_if_empty(&client));
+        }
+
+        assert_eq!(
+            state.process_key(DELAY, Duration::from_millis(1), true, 0, key, 0, 30),
+            KbMonBlock::Block
+        );
+        assert!(receiver.try_recv().is_err());
     }
 
     #[test]

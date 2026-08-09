@@ -167,6 +167,7 @@ impl KeyboardMonitor {
         if let Some(client) = data.clients.get_mut(&sender) {
             client.grabbed = false;
         }
+        data.prune_client_if_empty(&sender);
         Ok(())
     }
 
@@ -190,6 +191,7 @@ impl KeyboardMonitor {
         if let Some(client) = data.clients.get_mut(&sender) {
             client.watched = false;
         }
+        data.prune_client_if_empty(&sender);
         Ok(())
     }
 
@@ -214,18 +216,7 @@ impl KeyboardMonitor {
         }
         tracing::debug!(%sender, ?modifiers, ?keystrokes, "a11y: SetKeyGrabs");
         let mut data = self.grabs.lock().unwrap();
-        ensure_client_slot(&data, &sender)?;
-        let client = data.clients.entry(sender).or_default();
-        client.modifiers = modifiers
-            .into_iter()
-            .map(smithay::input::keyboard::Keysym::new)
-            .collect();
-        client.keystrokes = keystrokes
-            .into_iter()
-            .map(|(k, mods)| (smithay::input::keyboard::Keysym::new(k), mods))
-            .collect();
-        data.rebuild_grabbed_mods();
-        Ok(())
+        replace_key_grabs(&mut data, sender, modifiers, keystrokes)
     }
 
     /// Emitted for every key press/release a client is grabbing or
@@ -240,6 +231,30 @@ impl KeyboardMonitor {
         unichar: u32,
         keycode: u16,
     ) -> zbus::Result<()>;
+}
+
+fn replace_key_grabs(
+    data: &mut KeyboardGrabs,
+    sender: OwnedUniqueName,
+    modifiers: Vec<u32>,
+    keystrokes: Vec<(u32, u32)>,
+) -> fdo::Result<()> {
+    if modifiers.is_empty() && keystrokes.is_empty() && !data.clients.contains_key(&sender) {
+        return Ok(());
+    }
+    ensure_client_slot(data, &sender)?;
+    let client = data.clients.entry(sender.clone()).or_default();
+    client.modifiers = modifiers
+        .into_iter()
+        .map(smithay::input::keyboard::Keysym::new)
+        .collect();
+    client.keystrokes = keystrokes
+        .into_iter()
+        .map(|(key, mods)| (smithay::input::keyboard::Keysym::new(key), mods))
+        .collect();
+    data.rebuild_grabbed_mods();
+    data.prune_client_if_empty(&sender);
+    Ok(())
 }
 
 fn sender_of(hdr: &Header<'_>) -> fdo::Result<OwnedUniqueName> {
@@ -267,11 +282,53 @@ async fn watch_disconnects(
         // one that merely changed which name it owns.
         let name = OwnedUniqueName::from(name.to_owned());
         let mut data = grabs.lock().unwrap();
-        if data.clients.remove(&name).is_some() {
+        if data.remove_client(&name) {
             tracing::trace!(%name, "Accessibility DBus client disconnected, dropping its grabs");
-            data.rebuild_grabbed_mods();
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::accessibility::ClientGrab;
+
+    fn name(index: usize) -> OwnedUniqueName {
+        OwnedUniqueName::try_from(format!(":1.{}", index + 1)).unwrap()
+    }
+
+    #[test]
+    fn unknown_empty_key_grabs_do_not_consume_or_require_a_slot() {
+        let mut data = KeyboardGrabs::default();
+        for index in 0..MAX_CLIENTS {
+            data.clients.insert(
+                name(index),
+                ClientGrab {
+                    watched: true,
+                    ..Default::default()
+                },
+            );
+        }
+
+        replace_key_grabs(&mut data, name(MAX_CLIENTS), Vec::new(), Vec::new()).unwrap();
+        assert_eq!(data.clients.len(), MAX_CLIENTS);
+    }
+
+    #[test]
+    fn clearing_specific_grabs_reclaims_only_fully_empty_clients() {
+        let empty_after_clear = name(0);
+        let still_watched = name(1);
+        let mut data = KeyboardGrabs::default();
+        replace_key_grabs(&mut data, empty_after_clear.clone(), vec![1], vec![]).unwrap();
+        replace_key_grabs(&mut data, still_watched.clone(), vec![2], vec![]).unwrap();
+        data.clients.get_mut(&still_watched).unwrap().watched = true;
+
+        replace_key_grabs(&mut data, empty_after_clear.clone(), Vec::new(), Vec::new()).unwrap();
+        replace_key_grabs(&mut data, still_watched.clone(), Vec::new(), Vec::new()).unwrap();
+
+        assert!(!data.clients.contains_key(&empty_after_clear));
+        assert!(data.clients.contains_key(&still_watched));
+    }
 }
