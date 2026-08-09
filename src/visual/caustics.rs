@@ -25,14 +25,13 @@ use std::time::{Duration, Instant};
 use smithay::backend::{
     allocator::Fourcc,
     renderer::{
-        damage::OutputDamageTracker,
         element::{Element, Id, Kind, RenderElement},
         gles::{
             GlesError, GlesFrame, GlesPixelProgram, GlesRenderer, GlesTexture, Uniform,
             UniformName, UniformType,
         },
         utils::CommitCounter,
-        Bind, Offscreen, Texture,
+        Bind, Color32F, ContextId, Frame, Offscreen, Renderer, Texture,
     },
 };
 use smithay::utils::{
@@ -47,6 +46,10 @@ use crate::config::CausticsConfig;
 /// (the shader works in output-relative coordinates), so the blit reads
 /// the same as a direct full-output pass.
 const CAUSTICS_DOWNSCALE: i32 = 4;
+
+/// Maximum exponential recovery interval in units of the live configured or
+/// output refresh cadence. This bounds retries without assuming a frame rate.
+const MAX_FAILURE_BACKOFF_MULTIPLIER: u32 = 1024;
 
 /// Caustic interference from a few rotated, drifting sine fields,
 /// sharpened into light-web ridges. Deliberately evoking the wave
@@ -84,12 +87,74 @@ void main() {
 }
 "#;
 
+#[derive(Default)]
+struct FailureBackoff {
+    failures: u32,
+    last_failure: Option<Instant>,
+}
+
+impl FailureBackoff {
+    fn retry_delay(&self, cadence: Duration) -> Duration {
+        if self.failures == 0 {
+            return Duration::ZERO;
+        }
+        let shift = self.failures.saturating_sub(1).min(10);
+        cadence.saturating_mul((1_u32 << shift).min(MAX_FAILURE_BACKOFF_MULTIPLIER))
+    }
+
+    fn retry_in_at(&self, now: Instant, cadence: Duration) -> Duration {
+        let Some(last_failure) = self.last_failure else {
+            return Duration::ZERO;
+        };
+        self.retry_delay(cadence)
+            .saturating_sub(now.saturating_duration_since(last_failure))
+    }
+
+    fn ready_at(&self, now: Instant, cadence: Duration) -> bool {
+        self.retry_in_at(now, cadence).is_zero()
+    }
+
+    fn record_failure(&mut self, now: Instant) {
+        self.failures = self.failures.saturating_add(1);
+        self.last_failure = Some(now);
+    }
+
+    fn clear(&mut self) {
+        self.failures = 0;
+        self.last_failure = None;
+    }
+}
+
+#[derive(Default)]
+pub struct CausticsProgramCache {
+    program: Option<GlesPixelProgram>,
+    context: Option<ContextId<GlesTexture>>,
+    failures: FailureBackoff,
+}
+
+impl CausticsProgramCache {
+    pub fn retry_in(&self, cadence: Duration) -> Duration {
+        self.failures.retry_in_at(Instant::now(), cadence)
+    }
+}
+
 pub fn caustics_program(
-    cache: &mut Option<GlesPixelProgram>,
+    cache: &mut CausticsProgramCache,
     renderer: &mut GlesRenderer,
+    cadence: Duration,
 ) -> Option<GlesPixelProgram> {
-    if let Some(program) = cache {
+    let context = renderer.context_id();
+    if cache.context.as_ref() != Some(&context) {
+        cache.program = None;
+        cache.failures.clear();
+        cache.context = Some(context);
+    }
+    if let Some(program) = &cache.program {
         return Some(program.clone());
+    }
+    let now = Instant::now();
+    if !cache.failures.ready_at(now, cadence) {
+        return None;
     }
     match renderer.compile_custom_pixel_shader(
         CAUSTICS_SHADER,
@@ -101,10 +166,12 @@ pub fn caustics_program(
         ],
     ) {
         Ok(program) => {
-            *cache = Some(program.clone());
+            cache.failures.clear();
+            cache.program = Some(program.clone());
             Some(program)
         }
         Err(err) => {
+            cache.failures.record_failure(Instant::now());
             tracing::warn!(%err, "Failed to compile caustics shader");
             None
         }
@@ -128,11 +195,16 @@ pub struct CausticsSample {
 pub struct Caustics {
     id: Id,
     commit: CommitCounter,
+    context: Option<ContextId<GlesTexture>>,
     phase: f32,
     last_advance: Instant,
     last_sample: Option<CausticsSample>,
-    /// Cached 1/4-resolution pattern texture, reused across frames.
+    /// Last successfully rendered 1/4-resolution pattern texture.
     texture: Option<GlesTexture>,
+    /// Alternate target used for transactional updates. The visible texture
+    /// is never rendered into, so a failed pass cannot corrupt it in place.
+    scratch_texture: Option<GlesTexture>,
+    render_failures: FailureBackoff,
 }
 
 impl Default for Caustics {
@@ -140,12 +212,26 @@ impl Default for Caustics {
         Self {
             id: Id::new(),
             commit: CommitCounter::default(),
+            context: None,
             phase: 0.0,
             last_advance: Instant::now(),
             last_sample: None,
             texture: None,
+            scratch_texture: None,
+            render_failures: FailureBackoff::default(),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CausticsCandidate {
+    phase: f32,
+    sample: CausticsSample,
+}
+
+pub struct CausticsFrameTiming {
+    pub advance: bool,
+    pub retry_cadence: Duration,
 }
 
 impl Caustics {
@@ -156,10 +242,45 @@ impl Caustics {
             return None;
         }
         if self.last_sample.is_none() {
-            return Some(Duration::ZERO);
+            return Some(self.render_failures.retry_in_at(
+                Instant::now(),
+                Duration::from_secs_f64(1.0 / f64::from(fps)),
+            ));
         }
         let period = Duration::from_secs_f64(1.0 / f64::from(fps));
-        Some(period.saturating_sub(self.last_advance.elapsed()))
+        let cadence = period.saturating_sub(self.last_advance.elapsed());
+        Some(cadence.max(self.render_failures.retry_in_at(Instant::now(), period)))
+    }
+
+    fn candidate(&self, cfg: &CausticsConfig, advance: bool, now: Instant) -> CausticsCandidate {
+        let phase = if advance {
+            // Cap the per-frame advance so a stall (VT switch, suspend, a
+            // blocked render loop) doesn't turn into a visible pattern jump
+            // on the next frame.
+            let dt = now
+                .saturating_duration_since(self.last_advance)
+                .min(Duration::from_millis(100));
+            self.phase + dt.as_secs_f32() * cfg.speed
+        } else {
+            self.phase
+        };
+        CausticsCandidate {
+            phase,
+            sample: CausticsSample {
+                time: phase,
+                intensity: cfg.intensity,
+                color: cfg.color,
+                scale: cfg.scale,
+            },
+        }
+    }
+
+    fn accept_candidate(&mut self, candidate: CausticsCandidate, now: Instant) {
+        self.phase = candidate.phase;
+        self.last_advance = now;
+        self.last_sample = Some(candidate.sample);
+        self.commit.increment();
+        self.render_failures.clear();
     }
 
     /// Advances the phase, re-renders the low-res pattern texture if the
@@ -173,48 +294,63 @@ impl Caustics {
         area: Rectangle<i32, Logical>,
         output_scale: f64,
         cfg: &CausticsConfig,
-        advance: bool,
+        timing: CausticsFrameTiming,
     ) -> Option<CausticsElement> {
-        // A failed offscreen render leaves the last sample in place. Retry
-        // only on the next scheduled advance, not on every unrelated frame.
-        if !advance && self.texture.is_none() {
-            return None;
-        }
-        let sample = if advance || self.last_sample.is_none() {
-            // Cap the per-frame advance so a stall (VT switch, suspend, a
-            // blocked render loop) doesn't turn into a visible pattern jump
-            // on the next frame.
-            let dt = self.last_advance.elapsed().min(Duration::from_millis(100));
-            self.last_advance = Instant::now();
-            self.phase += dt.as_secs_f32() * cfg.speed;
-            CausticsSample {
-                time: self.phase,
-                intensity: cfg.intensity,
-                color: cfg.color,
-                scale: cfg.scale,
-            }
-        } else {
-            self.last_sample?
-        };
-        let dirty = self.last_sample != Some(sample);
-        if dirty {
-            self.last_sample = Some(sample);
-            self.commit.increment();
-        }
         if area.size.w <= 0 || area.size.h <= 0 {
             return None;
         }
+        let context = renderer.context_id();
+        if self.context.as_ref() != Some(&context) {
+            self.context = Some(context);
+            self.texture = None;
+            self.scratch_texture = None;
+            self.last_sample = None;
+            self.render_failures.clear();
+        }
+        let now = Instant::now();
+        let candidate = self.candidate(cfg, timing.advance, now);
         let physical: Rectangle<i32, Physical> = area.to_physical_precise_round(output_scale);
         let low_w: i32 = (physical.size.w / CAUSTICS_DOWNSCALE).max(1);
         let low_h: i32 = (physical.size.h / CAUSTICS_DOWNSCALE).max(1);
         let low = Size::<i32, Physical>::from((low_w, low_h));
+        let buffer_size: Size<i32, Buffer> = Size::from((low.w, low.h));
+        let dirty = self.last_sample != Some(candidate.sample)
+            || self
+                .texture
+                .as_ref()
+                .is_none_or(|texture| texture.size() != buffer_size);
         // Re-render the pattern only when it actually changed; a static
         // sample (speed = 0, or an untouched piggyback frame) reuses the
         // cached texture and the unchanged commit lets the damage tracker
         // skip the blit entirely.
-        if dirty || self.texture.is_none() {
-            self.texture = render_pattern(renderer, &program, sample, low, self.texture.take());
-            self.texture.as_ref()?;
+        if dirty {
+            if self.render_failures.ready_at(now, timing.retry_cadence) {
+                match render_pattern(
+                    renderer,
+                    &program,
+                    candidate.sample,
+                    low,
+                    self.scratch_texture.take(),
+                ) {
+                    Ok(texture) => {
+                        self.scratch_texture = self.texture.replace(texture);
+                        self.accept_candidate(candidate, Instant::now());
+                    }
+                    Err(_) => {
+                        // The failed target may be incompatible after a GL
+                        // reset. Keep the distinct visible texture, but make
+                        // the next bounded attempt allocate a clean target.
+                        self.scratch_texture = None;
+                        self.render_failures.record_failure(Instant::now());
+                    }
+                }
+            }
+        } else if timing.advance {
+            // No visible f32 sample changed, but this scheduled opportunity
+            // was still consumed. Keep the configured deadline from becoming
+            // an immediate retry loop.
+            self.phase = candidate.phase;
+            self.last_advance = now;
         }
         Some(CausticsElement {
             id: self.id.clone(),
@@ -225,109 +361,65 @@ impl Caustics {
     }
 }
 
-/// Renders one frame of the analytical pattern into `reusable` (reallocated
-/// if its size no longer matches), returning the upscale-blit source.
-/// `None` on any GL failure, logged by the caller's absence of drama.
+struct PatternRenderFailure;
+
+/// Renders one full frame of the analytical pattern into `reusable`
+/// (reallocated if its size no longer matches). This target is the caller's
+/// scratch texture, never the texture currently on screen, so any failure
+/// leaves the last good frame untouched.
 fn render_pattern(
     renderer: &mut GlesRenderer,
     program: &GlesPixelProgram,
     sample: CausticsSample,
     size: Size<i32, Physical>,
     reusable: Option<GlesTexture>,
-) -> Option<GlesTexture> {
+) -> Result<GlesTexture, PatternRenderFailure> {
     let buffer_size: Size<i32, Buffer> = Size::from((size.w, size.h));
     let mut texture = match reusable.filter(|texture| texture.size() == buffer_size) {
         Some(texture) => texture,
-        None => renderer
-            .create_buffer(Fourcc::Argb8888, buffer_size)
-            .map_err(|err| tracing::warn!(%err, "Failed to allocate caustics pattern texture"))
-            .ok()?,
+        None => match renderer.create_buffer(Fourcc::Argb8888, buffer_size) {
+            Ok(texture) => texture,
+            Err(err) => {
+                tracing::warn!(%err, "Failed to allocate caustics pattern texture");
+                return Err(PatternRenderFailure);
+            }
+        },
     };
-    let mut target = renderer
-        .bind(&mut texture)
-        .map_err(|err| tracing::warn!(%err, "Failed to bind caustics pattern target"))
-        .ok()?;
-    let mut tracker = OutputDamageTracker::new((size.w, size.h), 1.0, Transform::Normal);
-    let element = PatternElement {
-        id: Id::new(),
-        area: Rectangle::from_size(Size::<i32, Logical>::from((size.w, size.h))),
-        program: program.clone(),
-        sample,
-    };
-    if let Err(err) =
-        tracker.render_output(renderer, &mut target, 0, &[element], [0.0, 0.0, 0.0, 0.0])
-    {
-        tracing::warn!(%err, "Failed to render caustics pattern");
-        return None;
+    let full = Rectangle::from_size(size);
+    let render_result = (|| -> Result<(), GlesError> {
+        let mut target = renderer.bind(&mut texture)?;
+        let mut frame = renderer.render(&mut target, size, Transform::Normal)?;
+        let damage = [full];
+        let clear_result = frame.clear(Color32F::TRANSPARENT, &damage);
+        let draw_result = if clear_result.is_ok() {
+            frame.render_pixel_shader_to(
+                program,
+                Rectangle::from_size(buffer_size.to_f64()),
+                full,
+                buffer_size,
+                Some(&damage),
+                1.0,
+                &[
+                    Uniform::new("u_time", sample.time),
+                    Uniform::new("u_intensity", sample.intensity),
+                    Uniform::new("u_color", sample.color),
+                    Uniform::new("u_scale", sample.scale),
+                ],
+            )
+        } else {
+            Ok(())
+        };
+        let finish_result = frame.finish();
+        clear_result?;
+        draw_result?;
+        let _ = finish_result?;
+        Ok(())
+    })();
+    if let Err(err) = render_result {
+        tracing::warn!(%err, "Failed to update caustics pattern texture");
+        return Err(PatternRenderFailure);
     }
-    drop(target);
-    Some(texture)
-}
-
-/// The offscreen pass: draws the procedural pattern into the low-res
-/// target. Same shader and uniforms the old direct full-output element
-/// used; the tracker runs at scale 1.0 over the low-res rect, so the
-/// pattern density (which is relative to the drawn rect) is unchanged.
-struct PatternElement {
-    id: Id,
-    area: Rectangle<i32, Logical>,
-    program: GlesPixelProgram,
-    sample: CausticsSample,
-}
-
-impl Element for PatternElement {
-    fn id(&self) -> &Id {
-        // Fresh per offscreen pass, which is fine: the tracker this id
-        // feeds is discarded with the pass.
-        &self.id
-    }
-
-    fn current_commit(&self) -> CommitCounter {
-        CommitCounter::default()
-    }
-
-    fn src(&self) -> Rectangle<f64, Buffer> {
-        Rectangle::from_size(self.area.size.to_f64().to_buffer(1.0, Transform::Normal))
-    }
-
-    fn geometry(&self, scale: Scale<f64>) -> Rectangle<i32, Physical> {
-        self.area.to_physical_precise_round(scale)
-    }
-
-    fn alpha(&self) -> f32 {
-        1.0
-    }
-
-    fn kind(&self) -> Kind {
-        Kind::Unspecified
-    }
-}
-
-impl RenderElement<GlesRenderer> for PatternElement {
-    fn draw(
-        &self,
-        frame: &mut GlesFrame<'_, '_>,
-        src: Rectangle<f64, Buffer>,
-        dst: Rectangle<i32, Physical>,
-        damage: &[Rectangle<i32, Physical>],
-        _opaque_regions: &[Rectangle<i32, Physical>],
-        _cache: Option<&UserDataMap>,
-    ) -> Result<(), GlesError> {
-        frame.render_pixel_shader_to(
-            &self.program,
-            src,
-            dst,
-            self.area.size.to_buffer(1, Transform::Normal),
-            Some(damage),
-            1.0,
-            &[
-                Uniform::new("u_time", self.sample.time),
-                Uniform::new("u_intensity", self.sample.intensity),
-                Uniform::new("u_color", self.sample.color),
-                Uniform::new("u_scale", self.sample.scale),
-            ],
-        )
-    }
+    Ok(texture)
 }
 
 /// The on-screen element: upscale-blits the cached low-res pattern over
@@ -411,22 +503,21 @@ mod tests {
     }
 
     #[test]
-    fn phase_only_advances_when_frames_build() {
+    fn candidate_state_is_committed_only_after_success() {
         let mut caustics = Caustics::default();
-        let before = caustics.phase;
-        std::thread::sleep(Duration::from_millis(20));
-        // No frame_element call: phase is frozen.
-        assert_eq!(caustics.phase, before);
+        let start = caustics.last_advance;
+        let now = start + Duration::from_millis(20);
+        let cfg = CausticsConfig::default();
+        let candidate = caustics.candidate(&cfg, true, now);
 
-        // Advancing requires a program handle, which needs a live EGL
-        // context unit tests don't have -- so the accumulation itself is
-        // exercised through the same dt math frame_element uses.
-        let dt = caustics
-            .last_advance
-            .elapsed()
-            .min(Duration::from_millis(100));
-        caustics.phase += dt.as_secs_f32();
-        assert!(caustics.phase > before);
+        assert!(candidate.phase > caustics.phase);
+        assert_eq!(caustics.phase, 0.0);
+        assert!(caustics.last_sample.is_none());
+
+        caustics.accept_candidate(candidate, now);
+        assert_eq!(caustics.phase, candidate.phase);
+        assert_eq!(caustics.last_sample, Some(candidate.sample));
+        assert_eq!(caustics.last_advance, now);
     }
 
     #[test]
@@ -435,11 +526,34 @@ mod tests {
             last_advance: Instant::now() - Duration::from_secs(60),
             ..Caustics::default()
         };
-        let dt = caustics
-            .last_advance
-            .elapsed()
-            .min(Duration::from_millis(100));
-        assert!(dt <= Duration::from_millis(100));
+        let candidate = caustics.candidate(&CausticsConfig::default(), true, Instant::now());
+        assert!(candidate.phase <= Duration::from_millis(100).as_secs_f32());
+    }
+
+    #[test]
+    fn repeated_failures_back_off_from_runtime_cadence_and_cap() {
+        let cadence = Duration::from_secs_f64(1.0 / 37.0);
+        let mut backoff = FailureBackoff::default();
+        let mut now = Instant::now();
+        assert!(backoff.ready_at(now, cadence));
+
+        backoff.record_failure(now);
+        assert_eq!(backoff.retry_in_at(now, cadence), cadence);
+        now += cadence;
+        assert!(backoff.ready_at(now, cadence));
+
+        backoff.record_failure(now);
+        assert_eq!(backoff.retry_in_at(now, cadence), cadence.saturating_mul(2));
+        for _ in 0..32 {
+            backoff.record_failure(now);
+        }
+        assert_eq!(
+            backoff.retry_delay(cadence),
+            cadence.saturating_mul(MAX_FAILURE_BACKOFF_MULTIPLIER)
+        );
+
+        backoff.clear();
+        assert!(backoff.ready_at(now, cadence));
     }
 
     #[test]
@@ -461,5 +575,8 @@ mod tests {
 
         caustics.last_advance = Instant::now() - period.saturating_mul(2);
         assert_eq!(caustics.next_frame_in(fps), Some(Duration::ZERO));
+
+        caustics.render_failures.record_failure(Instant::now());
+        assert!(caustics.next_frame_in(fps).unwrap() > Duration::ZERO);
     }
 }

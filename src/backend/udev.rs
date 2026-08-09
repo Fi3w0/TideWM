@@ -1229,6 +1229,12 @@ fn handle_connector_change(
 /// Estimate one retrace from the output's live millihertz refresh value. If a
 /// mode is temporarily absent, retry slowly instead of assuming hardware.
 fn output_refresh_period(output: &Output) -> Duration {
+    live_output_refresh_period(output).unwrap_or_else(|| Duration::from_secs(1))
+}
+
+/// One retrace derived from the output's advertised live mode. Callers which
+/// cannot proceed without a real cadence use `None` rather than inventing one.
+pub(crate) fn live_output_refresh_period(output: &Output) -> Option<Duration> {
     output
         .current_mode()
         .and_then(|mode| {
@@ -1237,7 +1243,6 @@ fn output_refresh_period(output: &Output) -> Duration {
                 .filter(|refresh| *refresh > 0)
         })
         .map(|refresh_millihz| Duration::from_nanos(1_000_000_000_000 / refresh_millihz))
-        .unwrap_or_else(|| Duration::from_secs(1))
 }
 
 fn surface_redraw_ready(dirty: bool, pending: bool, retry_pending: bool) -> bool {
