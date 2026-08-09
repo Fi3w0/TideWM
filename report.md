@@ -11,8 +11,8 @@ This is a static code review, not a claim that every issue below was reproduced 
 - Updated: 2026-08-09
 - Implementation branch: `ai/codex/report-fixes`
 - Separate worktree: `/home/fiw/Proyects/TideWM-worktrees/report-fixes`
-- Current implementation head: `7068220`
-- Current TideWM version on the branch: `0.90.46`
+- Current implementation head: `ce81736`
+- Current TideWM version on the branch: `0.90.47`
 - Push status: local only; nothing from this branch has been pushed.
 
 The finding text below is the original audit evidence. It is intentionally retained even when a finding is closed. Use this handoff ledger as the current status authority, then inspect the named commit and current code before changing a closed area. Do not repeat a fix merely because its original finding still says “confirmed.”
@@ -21,8 +21,8 @@ The finding text below is the original audit evidence. It is intentionally retai
 
 - Critical: all 7 closed.
 - High: H-01 through H-44 closed. H-45 was re-audited as a stale false positive because the current udev path already processes connector `Changed` events and rescans/retries surface creation.
-- Medium explicitly re-audited and closed: M-01, M-02, M-04 through M-10, M-13 through M-21, M-23, and M-30.
-- Medium still open or awaiting a fresh audit: M-03, M-11, M-12, M-22, M-24 through M-29, and M-31 through M-74.
+- Medium explicitly re-audited and closed: M-01, M-02, M-04 through M-10, M-12 through M-21, M-23, and M-30.
+- Medium still open or awaiting a fresh audit: M-03, M-11, M-22, M-24 through M-29, and M-31 through M-74.
 - Performance opportunities P-01 through P-10: not worked in this branch unless a closed correctness fix incidentally reduced the same cost. Treat all ten as open until measured and re-audited. P-11 has code fixes in `1089450` and `0f74459` but still needs real-DRM measurement. P-12 has a code fix in `1089450` and awaits real-DRM verification.
 - Lower-confidence items U-01 through U-16: not systematically re-audited. Treat them as investigation tasks, not established bugs.
 - Formatter findings F-01 through F-04: closed.
@@ -77,6 +77,7 @@ The finding text below is the original audit evidence. It is intentionally retai
 | M-05, M-06 | `a828c37` | Bounded compositor text layout to the live logical clip, added ellipses, checked buffer arithmetic, and sized/rebuilt toasts from the narrowest transformed/scaled output geometry. Title commits now invalidate tab/depth caches, and AT-SPI retention reuses the existing IPC request bound. Nested visual approval remains pending. |
 | M-07 | `94e3b4e` | Replaced the permanent CPU-backed wallpaper buffer with a lazy Smithay static texture, dropping decoded pixels after upload and reimporting safely after renderer-context replacement. Import failure is retained and suppressed for the same context instead of retrying at frame cadence. Destination size now comes from live transformed/scaled logical output geometry. Nested release PSS and crop/sharpness verification remain pending. |
 | M-08 | `de2d958` | Replaced the disposable offscreen damage tracker with a full-target Smithay render and transactional scratch/current textures. Phase, sample, and commit advance only after draw and finish succeed; failures preserve the last good texture, discard the failed target, and exponentially back off from the effective configured or live output cadence. Shader and texture caches invalidate on renderer-context replacement. Nested caustics animation-parity and failure-injection checks remain pending. |
+| M-12 | `ce81736` | Added an explicit one-shot completion token because Smithay's reason-blind `PointerGrab::unset` is used for both success and cancellation. Classic/Ocean tile mutation and floating smart attach now require a real initiating-button release or a non-cancelled unlocked gesture end; forced teardown performs only unconditional snap, hint cleanup, and visible floating synchronization. Live mouse and real touchpad cancellation checks remain pending. |
 | M-13 | `7068220` | Re-resolved pointer focus at the unchanged cursor location whenever the Ocean minimap closes. Click-to-travel records the compositor-consumed button and suppresses only its paired release after focus restoration; a fresh press clears stale suppression after a lost backend/device release. Nested no-motion click verification remains pending. |
 | M-14, M-16, M-17, M-18 | `d9f5fcc` | Used live zoomed camera centers in both axes for admission/migration, sampled in-flight camera motion, and prevented fullscreen FitPlacement hit-test fall-through. |
 | M-15 | `48e8d86` | Migrated Classic Depth Deck ownership on output disconnect. |
@@ -99,6 +100,7 @@ The finding text below is the original audit evidence. It is intentionally retai
 
 ### Validation state
 
+- After `ce81736`, `cargo test --all-features --all-targets` passed all 382 compositor tests and all 9 `wavefmt` tests. Strict `cargo clippy --all-targets --all-features -- -D warnings` and `cargo fmt --all -- --check` also passed.
 - After `7068220`, `cargo test --all-features --all-targets` passed all 380 compositor tests and all 9 `wavefmt` tests; `cargo fmt --all -- --check` passed.
 - After `de2d958`, `cargo test --all-features` passed all 378 compositor tests and all 9 `wavefmt` tests. Strict `cargo clippy --all-targets --all-features -- -D warnings` and `cargo fmt --all -- --check` also passed.
 - After `94e3b4e`, `cargo test --all-features` passed all 377 compositor tests and all 9 `wavefmt` tests. The default build passed all 359 compositor tests and all 9 formatter tests before the final context-policy regression was added; its focused four-test wallpaper suite then passed. Strict `cargo clippy --all-targets --all-features -- -D warnings` and `cargo fmt --all -- --check` also passed.
@@ -108,7 +110,7 @@ The finding text below is the original audit evidence. It is intentionally retai
 - After `bf39982`, `cargo test --locked --all-features` passed all 358 compositor tests and all 9 `wavefmt` tests outside the restricted IPC socket sandbox. Strict Clippy and formatting checks also passed.
 - After `d9f5fcc`, `cargo test --locked --all-features` passed all 356 compositor tests and all 6 `wavefmt` tests outside the restricted IPC socket sandbox.
 - `cargo check --locked --all-features` passed after the final Medium batch.
-- Strict all-target/all-feature Clippy has passed through the current `0.90.45` implementation head.
+- Strict all-target/all-feature Clippy has passed through the current `0.90.47` implementation head.
 - Capture and geometry regression tests use deliberately arbitrary dimensions. No monitor resolution, refresh rate, GPU vendor, input device, or other configurable/hardware property was introduced as a fixed runtime assumption.
 - Nested and real-DRM validation for the complete audit-fix series is still pending. Automated tests cannot prove mixed-output KMS/VBlank behavior, connector hotplug, rotated physical outputs, VRR, real tablet/touch mapping, or visual feel.
 
@@ -808,7 +810,7 @@ Additional dense/historical targets:
 - `src/visual/error_overlay.rs:325-335`, `:346-354`, `:387-393` — retain formula/invariant, delete bug-story prose.
 - `src/visual/water_glass.rs:1-15`, `:107-119`, `:236-242`, `:316-324` — keep shader inputs, animation condition, and opacity rule.
 - `src/visual/backdrop.rs:1-14`, `:31-39`, `:46-52`; `compass.rs:1-12`; `welcome.rs:1-17`; `workspace_transition.rs:1-14`; `tab_strip.rs:1-13`; `swim.rs:1-15`, `:30-37`, `:140-147` — compress module histories into current responsibility.
-- `src/grabs/ocean_tile_move_grab.rs:1-13`, `:58-68`, `:278-283` — remove the “fridge magnet needs a light” metaphor and teardown narrative. Do not claim every teardown should commit until M-12 is fixed.
+- `src/grabs/ocean_tile_move_grab.rs:1-13`, `:58-68`, `:278-283` — the “fridge magnet needs a light” metaphor and incorrect teardown narrative were removed with M-12; retain only the completion-token and unconditional-cleanup invariant.
 - `src/screencast/dbus.rs:1-24`, `:136-174`; `portal.rs` above; `pipewire_thread.rs:267-286`, `:329-344`, `:491-500` — keep D-Bus thread ownership, transport limitation, and DRIVER requirement; move experiment logs.
 - `src/backend/udev.rs:167-216`, `:1590-1608` — one sentence per field/invariant; move freeze history.
 - `src/backend/udev.rs:987-994` — “Place unconfigured hotplug outputs after the current maximum right edge; summing widths overlaps after disconnect/replug.”
