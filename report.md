@@ -11,8 +11,8 @@ This is a static code review, not a claim that every issue below was reproduced 
 - Updated: 2026-08-09
 - Implementation branch: `ai/codex/report-fixes`
 - Separate worktree: `/home/fiw/Proyects/TideWM-worktrees/report-fixes`
-- Current implementation head: `10d9901`
-- Current TideWM version on the branch: `0.90.55`
+- Current implementation head: `298a949`
+- Current TideWM version on the branch: `0.90.57`
 - Push status: local only; nothing from this branch has been pushed.
 
 The finding text below is the original audit evidence. It is intentionally retained even when a finding is closed. Use this handoff ledger as the current status authority, then inspect the named commit and current code before changing a closed area. Do not repeat a fix merely because its original finding still says “confirmed.”
@@ -21,8 +21,8 @@ The finding text below is the original audit evidence. It is intentionally retai
 
 - Critical: all 7 closed.
 - High: H-01 through H-44 closed. H-45 was re-audited as a stale false positive because the current udev path already processes connector `Changed` events and rescans/retries surface creation.
-- Medium explicitly re-audited and closed: M-01, M-02, M-04 through M-10, M-12 through M-23, M-25 through M-30, and M-32 through M-34.
-- Medium still open or awaiting a fresh audit: M-03, M-11, M-24, M-31, and M-35 through M-74.
+- Medium explicitly re-audited and closed: M-01, M-02, M-04 through M-10, M-12 through M-23, M-25 through M-30, and M-32 through M-36.
+- Medium still open or awaiting a fresh audit: M-03, M-11, M-24, M-31, and M-37 through M-74.
 - Performance opportunities P-01 through P-10: not worked in this branch unless a closed correctness fix incidentally reduced the same cost. Treat all ten as open until measured and re-audited. P-11 has code fixes in `1089450` and `0f74459` but still needs real-DRM measurement. P-12 has a code fix in `1089450` and awaits real-DRM verification.
 - Lower-confidence items U-01 through U-16: not systematically re-audited. Treat them as investigation tasks, not established bugs.
 - Formatter findings F-01 through F-04: closed.
@@ -92,6 +92,8 @@ The finding text below is the original audit evidence. It is intentionally retai
 | M-32 | `3c7d9c7` | Validated Wave environment entries before process mutation, turning names or values that Unix `setenv` rejects into visible config warnings instead of startup panics. Values are redacted from diagnostics, and the mutation boundary repeats the guard for programmatically constructed configs. |
 | M-33 | `10d9901` | Moved the ordered standalone session-environment export, foreign-variable cleanup, portal inspection, and conditional restart sequence to one named worker. Missing or wedged helpers can delay only best-effort session-manager propagation, not compositor readiness, input, autostarts, or shutdown; no arbitrary timeout was introduced. |
 | M-34 | `0802e99` | Reclaimed bounded accessibility client slots whenever grab/watch/specific-key state becomes empty. Explicit unsubscribe and disconnect also remove only that client from paired-release recipients while keeping physical suppression through the matching release, preventing slot exhaustion without leaking unmatched events. |
+| M-35 | `56a1148` | Removed winit/udev maintenance-tick scans of every wlr foreign-toplevel handle. The existing mapped-lifecycle `untrack` path now documents its authoritative synchronous close/removal contract; bind-time filtering remains as an event-driven safety check. |
+| M-36 | `298a949` | Replaced per-root-commit identity polling/rule resolution with Smithay's immediate title/app-id callbacks. Mapped identity changes now refresh only live opacity/glass caches, update ext/wlr handles and IPC without requiring a surface commit, schedule redraw/accessibility synchronization, and invalidate title rasters only for title changes; map-only rules are not replayed. |
 
 ### Closed formatter findings
 
@@ -108,6 +110,7 @@ The finding text below is the original audit evidence. It is intentionally retai
 
 ### Validation state
 
+- After `298a949`, `cargo test --all-features --all-targets` passed all 406 compositor tests and all 9 `wavefmt` tests outside the restricted socket sandbox. Strict all-target/all-feature Clippy, formatting, and diff checks passed; the same run covers M-35.
 - After `10d9901`, `cargo test --all-features --all-targets` passed all 405 compositor tests and all 9 `wavefmt` tests outside the restricted socket sandbox. Strict all-target/all-feature Clippy, formatting, and diff checks passed.
 - After `29ef215`, `cargo test --all-features --all-targets` passed all 401 compositor tests and all 9 `wavefmt` tests outside the restricted socket sandbox. Strict all-target/all-feature Clippy, formatting, and diff checks passed; this full run also covers M-34.
 - After `0802e99`, all 14 focused accessibility tests passed, including empty-slot reclamation and unsubscribe-during-keypress coverage; formatting and diff checks passed. The later `29ef215` full run covers this milestone too.
@@ -126,7 +129,7 @@ The finding text below is the original audit evidence. It is intentionally retai
 - After `bf39982`, `cargo test --locked --all-features` passed all 358 compositor tests and all 9 `wavefmt` tests outside the restricted IPC socket sandbox. Strict Clippy and formatting checks also passed.
 - After `d9f5fcc`, `cargo test --locked --all-features` passed all 356 compositor tests and all 6 `wavefmt` tests outside the restricted IPC socket sandbox.
 - `cargo check --locked --all-features` passed after the final Medium batch.
-- Strict all-target/all-feature Clippy has passed through the current `0.90.55` implementation head.
+- Strict all-target/all-feature Clippy has passed through the current `0.90.57` implementation head.
 - Capture and geometry regression tests use deliberately arbitrary dimensions. No monitor resolution, refresh rate, GPU vendor, input device, or other configurable/hardware property was introduced as a fixed runtime assumption.
 - Nested and real-DRM validation for the complete audit-fix series is still pending. Automated tests cannot prove mixed-output KMS/VBlank behavior, connector hotplug, rotated physical outputs, VRR, real tablet/touch mapping, or visual feel.
 
