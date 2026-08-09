@@ -16,9 +16,9 @@ use smithay::{
             GlesError, GlesFrame, GlesPixelProgram, GlesRenderer, GlesTexProgram, Uniform,
             UniformName, UniformType, UniformValue,
         },
-        utils::CommitCounter,
+        utils::{CommitCounter, DamageSet},
     },
-    utils::{user_data::UserDataMap, Buffer, Physical, Rectangle, Scale, Transform},
+    utils::{user_data::UserDataMap, Buffer, Physical, Rectangle, Scale, Size, Transform},
 };
 
 use crate::config::{BorderConfig, BorderPlacement, RoundingConfig};
@@ -414,6 +414,80 @@ pub struct BorderElement {
     opacity: f32,
 }
 
+fn border_commit(angle: f32, opacity: f32) -> CommitCounter {
+    // This is a rendered-value fingerprint. BorderElement::damage_since only
+    // compares it for equality and never treats it as a chronological counter.
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    angle.to_bits().hash(&mut hash);
+    opacity.to_bits().hash(&mut hash);
+    CommitCounter::from(hash.finish() as usize)
+}
+
+fn border_damage(
+    size: Size<i32, Physical>,
+    inner_origin: [f32; 2],
+    inner_size: [f32; 2],
+    inner_radii: [f32; 4],
+) -> DamageSet<i32, Physical> {
+    let full = Rectangle::from_size(size);
+    if size.w <= 0
+        || size.h <= 0
+        || inner_origin.iter().any(|value| !value.is_finite())
+        || inner_size.iter().any(|value| !value.is_finite())
+        || inner_radii.iter().any(|value| !value.is_finite())
+    {
+        return DamageSet::from_slice(&[full]);
+    }
+
+    // The inner rounded rectangle is fully opaque between its left and
+    // right corner zones. Excluding only that guaranteed-transparent core
+    // keeps every curved/antialiased border pixel in the damage set.
+    let left_radius = inner_radii[0].max(inner_radii[3]).max(0.0);
+    let right_radius = inner_radii[1].max(inner_radii[2]).max(0.0);
+    let hole = [
+        (inner_origin[0] + left_radius).ceil(),
+        inner_origin[1].ceil(),
+        (inner_origin[0] + inner_size[0] - right_radius).floor(),
+        (inner_origin[1] + inner_size[1]).floor(),
+    ];
+    if hole.iter().any(|value| !value.is_finite()) {
+        return DamageSet::from_slice(&[full]);
+    }
+
+    let left = hole[0].clamp(0.0, size.w as f32) as i32;
+    let top = hole[1].clamp(0.0, size.h as f32) as i32;
+    let right = hole[2].clamp(0.0, size.w as f32) as i32;
+    let bottom = hole[3].clamp(0.0, size.h as f32) as i32;
+    if right <= left || bottom <= top {
+        return DamageSet::from_slice(&[full]);
+    }
+
+    [
+        Rectangle::new((0, 0).into(), (size.w, top).into()),
+        Rectangle::new((0, top).into(), (left, bottom - top).into()),
+        Rectangle::new((right, top).into(), (size.w - right, bottom - top).into()),
+        Rectangle::new((0, bottom).into(), (size.w, size.h - bottom).into()),
+    ]
+    .into_iter()
+    .filter(|rect| !rect.is_empty())
+    .collect()
+}
+
+fn border_damage_since(
+    current: CommitCounter,
+    previous: Option<CommitCounter>,
+    size: Size<i32, Physical>,
+    inner_origin: [f32; 2],
+    inner_size: [f32; 2],
+    inner_radii: [f32; 4],
+) -> DamageSet<i32, Physical> {
+    match previous {
+        None => DamageSet::from_slice(&[Rectangle::from_size(size)]),
+        Some(previous) if previous == current => DamageSet::default(),
+        Some(_) => border_damage(size, inner_origin, inner_size, inner_radii),
+    }
+}
+
 impl BorderElement {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -517,11 +591,8 @@ impl BorderElement {
         state_animate.hash(&mut hash);
         border.placement.hash(&mut hash);
         let id = base_id.clone().namespaced(hash.finish() as usize);
-        let commit = if state_animate {
-            CommitCounter::from((elapsed_secs * 120.0) as usize)
-        } else {
-            CommitCounter::default()
-        };
+        let rendered_opacity = opacity * pulse;
+        let commit = border_commit(angle, rendered_opacity);
         Self {
             id,
             commit,
@@ -538,7 +609,7 @@ impl BorderElement {
             from,
             to,
             angle,
-            opacity: opacity * pulse,
+            opacity: rendered_opacity,
         }
     }
 }
@@ -558,6 +629,21 @@ impl Element for BorderElement {
 
     fn geometry(&self, _scale: Scale<f64>) -> Rectangle<i32, Physical> {
         self.area
+    }
+
+    fn damage_since(
+        &self,
+        _scale: Scale<f64>,
+        commit: Option<CommitCounter>,
+    ) -> DamageSet<i32, Physical> {
+        border_damage_since(
+            self.commit,
+            commit,
+            self.area.size,
+            self.inner_origin,
+            self.inner_size,
+            self.inner_radii,
+        )
     }
 
     fn kind(&self) -> Kind {
@@ -603,6 +689,101 @@ impl RenderElement<GlesRenderer> for BorderElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn damage_area(damage: &DamageSet<i32, Physical>) -> i64 {
+        damage
+            .iter()
+            .map(|rect| i64::from(rect.size.w) * i64::from(rect.size.h))
+            .sum()
+    }
+
+    #[test]
+    fn border_damage_omits_only_the_guaranteed_inner_core() {
+        // Deliberately arbitrary geometry: this describes an element-local
+        // shape, not an output mode or a runtime hardware assumption.
+        let size = Size::from((347, 211));
+        let damage = border_damage(
+            size,
+            [4.25, 3.75],
+            [338.5, 203.25],
+            [13.5, 27.25, 9.75, 18.5],
+        );
+
+        assert_eq!(damage.len(), 4);
+        assert!(damage_area(&damage) < i64::from(size.w) * i64::from(size.h));
+        assert!(damage.iter().all(|rect| {
+            rect.loc.x >= 0
+                && rect.loc.y >= 0
+                && rect.loc.x + rect.size.w <= size.w
+                && rect.loc.y + rect.size.h <= size.h
+        }));
+        let core = (100, 100);
+        assert!(damage.iter().all(|rect| !rect.contains(core)));
+        for edge in [
+            (0, 0),
+            (size.w - 1, 0),
+            (0, size.h - 1),
+            (size.w - 1, size.h - 1),
+        ] {
+            assert!(damage.iter().any(|rect| rect.contains(edge)));
+        }
+        for (index, rect) in damage.iter().enumerate() {
+            assert!(damage
+                .iter()
+                .skip(index + 1)
+                .all(|other| rect.intersection(*other).is_none()));
+        }
+    }
+
+    #[test]
+    fn border_damage_falls_back_to_full_for_no_safe_core() {
+        let size = Size::from((31, 19));
+        let damage = border_damage(size, [2.0, 2.0], [27.0, 15.0], [18.0; 4]);
+
+        assert_eq!(&*damage, &[Rectangle::from_size(size)]);
+    }
+
+    #[test]
+    fn square_border_damage_is_the_outer_box_minus_the_inner_box() {
+        let size = Size::from((47, 33));
+        let damage = border_damage(size, [3.0, 5.0], [41.0, 23.0], [0.0; 4]);
+
+        let full_area = i64::from(size.w) * i64::from(size.h);
+        let inner_area = 41_i64 * 23_i64;
+        assert_eq!(damage_area(&damage), full_area - inner_area);
+    }
+
+    #[test]
+    fn border_damage_since_preserves_unknown_history_semantics() {
+        let size = Size::from((79, 53));
+        let current = CommitCounter::from(17);
+        let args = ([3.0, 3.0], [73.0, 47.0], [8.0, 11.0, 5.0, 9.0]);
+
+        let unknown = border_damage_since(current, None, size, args.0, args.1, args.2);
+        assert_eq!(&*unknown, &[Rectangle::from_size(size)]);
+
+        let unchanged = border_damage_since(current, Some(current), size, args.0, args.1, args.2);
+        assert!(unchanged.is_empty());
+
+        let changed = border_damage_since(
+            current,
+            Some(CommitCounter::from(16)),
+            size,
+            args.0,
+            args.1,
+            args.2,
+        );
+        assert!(!changed.is_empty());
+        assert!(damage_area(&changed) < i64::from(size.w) * i64::from(size.h));
+    }
+
+    #[test]
+    fn border_commit_tracks_rendered_values_without_a_frame_rate() {
+        let base = border_commit(0.25, 0.8);
+        assert_eq!(base, border_commit(0.25, 0.8));
+        assert_ne!(base, border_commit(0.5, 0.8));
+        assert_ne!(base, border_commit(0.25, 0.6));
+    }
 
     #[test]
     fn shaders_keep_fixed_cost_contracts() {
