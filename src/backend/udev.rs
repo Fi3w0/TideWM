@@ -1201,6 +1201,14 @@ fn handle_connector_change(
                         state.migrate_output_windows(&disconnected_name, fallback);
                     }
                     state.space.unmap_output(&surface.output);
+                    let space = &state.space;
+                    if let Some(theme) = state.cursor_theme.as_mut() {
+                        theme.retain_scales(|scale| {
+                            space
+                                .outputs()
+                                .any(|output| output.current_scale().integer_scale() == scale)
+                        });
+                    }
                     state.lock_surfaces.remove(&surface.output);
                     state.lock_blank.remove(&surface.output);
                     state.layer_dim_buffers.remove(&surface.output);
@@ -1370,7 +1378,8 @@ fn render_surface(
         state.capture_layer_backdrops(renderer, output);
     }
     let size = output.current_mode().map(|m| m.size).unwrap_or_default();
-    let scale = output.current_scale().fractional_scale();
+    let output_scale = output.current_scale();
+    let scale = output_scale.fractional_scale();
     let output_loc = state
         .space
         .output_geometry(output)
@@ -1463,7 +1472,7 @@ fn render_surface(
                 .cursor_theme
                 .as_mut()
                 .and_then(|theme| {
-                    theme.render_element(renderer, local, scale as u32, elapsed, icon)
+                    theme.render_element(renderer, local, output_scale, elapsed, icon)
                 })
                 .or_else(|| cursor::fallback_glyph_element(renderer, local.into()));
             (Vec::new(), glyph)
