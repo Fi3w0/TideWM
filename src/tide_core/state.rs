@@ -442,7 +442,7 @@ pub struct Smallvil {
     /// freeze the pattern at zero extra frames; `caustics.fps > 0` opts
     /// into deadline-driven constant motion.
     pub(crate) caustics: HashMap<String, crate::caustics::Caustics>,
-    pub(crate) caustics_program: Option<GlesPixelProgram>,
+    pub(crate) caustics_program: crate::caustics::CausticsProgramCache,
     /// Per-output compass state and one shared compiled shader (spatial
     /// roadmap S5). Ocean-only and gated by `water_effects`; no element is
     /// produced when nothing sits off-screen.
@@ -3216,7 +3216,7 @@ impl Smallvil {
             ocean_canvases: HashMap::new(),
             ocean_canvas_program: None,
             caustics: HashMap::new(),
-            caustics_program: None,
+            caustics_program: crate::caustics::CausticsProgramCache::default(),
             compasses: HashMap::new(),
             compass_program: None,
             loop_handle,
@@ -6614,8 +6614,14 @@ impl Smallvil {
         }
         let area = Rectangle::from_size(self.space.output_geometry(output)?.size);
         let output_scale = output.current_scale().fractional_scale();
-        let program = crate::caustics::caustics_program(&mut self.caustics_program, renderer)?;
         let effective_fps = self.caustics_effective_fps();
+        let retry_cadence = if effective_fps == 0 {
+            crate::backend::udev::live_output_refresh_period(output)?
+        } else {
+            Duration::from_secs_f64(1.0 / f64::from(effective_fps))
+        };
+        let program =
+            crate::caustics::caustics_program(&mut self.caustics_program, renderer, retry_cadence)?;
         let output_name = output.name();
         let advance = if self.config.caustics.fps == 0 {
             true
@@ -6637,7 +6643,10 @@ impl Smallvil {
                 area,
                 output_scale,
                 &self.config.caustics,
-                advance,
+                crate::caustics::CausticsFrameTiming {
+                    advance,
+                    retry_cadence,
+                },
             )?;
         Some(crate::backend::udev::OutputRenderElements::Caustics(
             element,
@@ -6682,6 +6691,7 @@ impl Smallvil {
             return None;
         }
         let period = Duration::from_secs_f64(1.0 / f64::from(fps));
+        let program_retry = self.caustics_program.retry_in(period);
         self.space
             .outputs()
             .map(|output| {
@@ -6689,6 +6699,7 @@ impl Smallvil {
                     .get(&output.name())
                     .and_then(|caustics| caustics.next_frame_in(fps))
                     .unwrap_or(period)
+                    .max(program_retry)
             })
             .min()
     }
