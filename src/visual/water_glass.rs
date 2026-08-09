@@ -27,6 +27,7 @@ use smithay::{
     utils::{user_data::UserDataMap, Buffer, Physical, Rectangle, Scale, Transform},
 };
 
+use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
 /// Base phase drift rate, radians per second at `speed = 1.0`. Slow
@@ -219,6 +220,38 @@ pub fn water_glass_program(
     }
 }
 
+/// Rendered-value fingerprint for the glass element's damage identity, the
+/// same contract `decoration::border_commit` already documents: the damage
+/// tracker only ever compares it for equality, never treats it as a
+/// chronological counter. Folds in everything that changes the drawn result
+/// without moving the element: the backdrop capture's content `version`,
+/// the wave `phase`/`amp`, and the corner uniforms. `phase` only counts
+/// while it can visibly distort (`amp > 0`) -- a settled reactive tail or
+/// static mode holds a constant commit even though the phase clock keeps
+/// running, which is what lets a static desktop stop redrawing the glass
+/// layer at all.
+pub fn water_glass_commit(
+    capture_version: usize,
+    phase: f32,
+    amp: f32,
+    corner_radii: [f32; 4],
+    rounding_power: f32,
+    antialias: f32,
+) -> CommitCounter {
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    capture_version.hash(&mut hash);
+    amp.to_bits().hash(&mut hash);
+    if amp > 0.0 {
+        phase.to_bits().hash(&mut hash);
+    }
+    for radius in corner_radii {
+        radius.to_bits().hash(&mut hash);
+    }
+    rounding_power.to_bits().hash(&mut hash);
+    antialias.to_bits().hash(&mut hash);
+    CommitCounter::from(hash.finish() as usize)
+}
+
 /// One window's water-glass layer for one frame: the captured backdrop
 /// texture run through the refraction shader, drawn at the window's own
 /// rect. `id`/`commit` are the *stable* per-window identity kept in
@@ -396,5 +429,59 @@ mod tests {
 
         let moved = Rectangle::new((10, 0).into(), (100, 100).into());
         assert!(anim.observe(moved, false));
+    }
+
+    #[test]
+    fn water_glass_commit_is_stable_when_the_scene_is_static() {
+        // The damage-driven capture only bumps `version` when it actually
+        // re-rendered; the element's commit is built from it, so a static
+        // desktop (same capture, same geometry/config/animation) must hash
+        // to the same value across frames or the visible output never stops
+        // redrawing the glass layer.
+        let baseline = water_glass_commit(3, 1.42, 0.0, [4.0; 4], 2.0, 1.5);
+        assert_eq!(
+            baseline,
+            water_glass_commit(3, 1.42, 0.0, [4.0; 4], 2.0, 1.5)
+        );
+    }
+
+    #[test]
+    fn water_glass_commit_advances_when_the_capture_re_renders() {
+        // `version` is what connects a recapture to the visible frame's
+        // decision to redraw the glass: a behind-scene change that produced
+        // a new texture has to flip the commit so the new pixels are drawn.
+        let before = water_glass_commit(3, 1.42, 0.0, [4.0; 4], 2.0, 1.5);
+        let after = water_glass_commit(4, 1.42, 0.0, [4.0; 4], 2.0, 1.5);
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn water_glass_commit_advances_while_the_wave_is_animating() {
+        // Ambient and reactive tails advance the phase every frame while the
+        // distortion is visible; the commit has to follow so the wave keeps
+        // moving on screen instead of freezing after the first frame.
+        let first = water_glass_commit(3, 1.42, 0.5, [4.0; 4], 2.0, 1.5);
+        let second = water_glass_commit(3, 1.43, 0.5, [4.0; 4], 2.0, 1.5);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn water_glass_commit_ignores_phase_once_settled() {
+        // Reactive mode keeps the phase clock running forever, but once the
+        // settle envelope drives amplitude to zero the phase can no longer
+        // change the image. Holding the commit constant at that point is
+        // exactly what stops the static-tail from self-sustaining redraws.
+        let settled = water_glass_commit(3, 5.0, 0.0, [4.0; 4], 2.0, 1.5);
+        assert_eq!(settled, water_glass_commit(3, 9.9, 0.0, [4.0; 4], 2.0, 1.5));
+    }
+
+    #[test]
+    fn water_glass_commit_advances_on_corner_config_change() {
+        // A config hot-reload that changes only the rounded-corner uniforms
+        // has to redraw, and `damage_since` compares the commit for that;
+        // geometry/alpha/z changes are caught by the tracker separately.
+        let before = water_glass_commit(3, 0.0, 0.5, [4.0; 4], 2.0, 1.5);
+        let after = water_glass_commit(3, 0.0, 0.5, [8.0; 4], 2.0, 1.5);
+        assert_ne!(before, after);
     }
 }

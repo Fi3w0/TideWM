@@ -20,7 +20,6 @@ use smithay::{
                 AsRenderElements, Kind, RenderElementStates,
             },
             gles::{GlesPixelProgram, GlesRenderer, GlesTexProgram, GlesTexture},
-            utils::CommitCounter,
             ImportAll, ImportMem,
         },
         session::libseat::LibSeatSession,
@@ -5926,7 +5925,42 @@ impl Smallvil {
                 .then(|| surface.clone())
             })
             .collect();
+        if surfaces.is_empty() {
+            return;
+        }
 
+        // One shared behind-list per output, not one rebuild per glass
+        // window: `capture` translates it into each window's own texture
+        // space itself. Every glass surface is skipped, so a window never
+        // captures itself -- and two overlapping glass windows now read
+        // what's below the pair rather than each other's raw surfaces,
+        // which is the trade that makes the shared list possible.
+        let Some(space_elements) = self.desktop_render_elements(
+            renderer,
+            output,
+            &placements,
+            &surfaces,
+            &mut HashMap::new(),
+            Vec::new(),
+        ) else {
+            return;
+        };
+        // Front-to-back, index 0 topmost: the windows come first and the
+        // wallpaper goes last, the same order the visible frame uses.
+        // Pushing the wallpaper first put it *on top of* every window in
+        // the captured texture -- the glass then sampled a texture that
+        // was nothing but wallpaper, which read as "the aqua wave only
+        // shows the background and ignores everything else."
+        let behind: Vec<crate::backend::udev::OutputRenderElements> = space_elements
+            .into_iter()
+            .chain(
+                self.wallpaper_element(output, renderer)
+                    .map(crate::backend::udev::OutputRenderElements::Wallpaper),
+            )
+            .collect();
+
+        let mut rendered = 0usize;
+        let mut skipped = 0usize;
         let mut captured_first_backdrop = false;
         for surface in surfaces {
             let Some(placement) = placements.iter().find(|placement| {
@@ -5939,57 +5973,33 @@ impl Smallvil {
                 continue;
             };
 
-            let Some(space_elements) = self.desktop_render_elements(
-                renderer,
-                output,
-                &placements,
-                std::slice::from_ref(&surface),
-                &mut HashMap::new(),
-                Vec::new(),
-            ) else {
+            let first_capture = !self.backdrop_textures.contains_key(&surface);
+            if first_capture {
+                let Some(capture) =
+                    crate::backdrop::BackdropCapture::new(renderer, physical_rect.size)
+                else {
+                    continue;
+                };
+                self.backdrop_textures.insert(surface.clone(), capture);
+            }
+            let Some(capture) = self.backdrop_textures.get_mut(&surface) else {
                 continue;
             };
-            // Front-to-back, index 0 topmost: the windows come first and the
-            // wallpaper goes last, the same order the visible frame uses.
-            // Pushing the wallpaper first put it *on top of* every window in
-            // the captured texture -- the glass then sampled a texture that
-            // was nothing but wallpaper, which read as "the aqua wave only
-            // shows the background and ignores everything else."
-            let behind: Vec<crate::backend::udev::OutputRenderElements> = space_elements
-                .into_iter()
-                .chain(
-                    self.wallpaper_element(output, renderer)
-                        .map(crate::backend::udev::OutputRenderElements::Wallpaper),
-                )
-                .collect();
-
-            let reusable = self
-                .backdrop_textures
-                .get(&surface)
-                .map(|capture| capture.texture.clone());
-            if let Some(texture) =
-                crate::backdrop::capture_backdrop(renderer, physical_rect, behind, reusable)
-            {
-                let first_capture = !self.backdrop_textures.contains_key(&surface);
-                let (id, mut commit) = match self.backdrop_textures.get(&surface) {
-                    Some(existing) => (existing.id.clone(), existing.commit),
-                    None => (
-                        smithay::backend::renderer::element::Id::new(),
-                        CommitCounter::default(),
-                    ),
-                };
-                commit.increment();
-                self.backdrop_textures.insert(
-                    surface,
-                    crate::backdrop::BackdropCapture {
-                        texture,
-                        id,
-                        commit,
-                    },
-                );
-                captured_first_backdrop |= first_capture;
+            match capture.capture(renderer, physical_rect, &behind) {
+                Some(true) => {
+                    rendered += 1;
+                    captured_first_backdrop |= first_capture;
+                }
+                Some(false) => skipped += 1,
+                None => {}
             }
         }
+        tracing::debug!(
+            output = output.name(),
+            rendered,
+            skipped,
+            "Floating backdrop captures"
+        );
         // The frame that triggered the first capture could otherwise be the
         // last dirty frame on a static desktop. Schedule exactly one more so
         // the newly available texture is actually consumed; later capture
@@ -6033,51 +6043,65 @@ impl Smallvil {
                 })
                 .collect()
         };
+        if surfaces.is_empty() {
+            return;
+        }
 
+        // Same shared-list shape as the floating-window pass above: blurred
+        // layers are all excluded from the list, so one build serves every
+        // layer's capture and no blurred layer ever captures itself or a
+        // sibling blurred layer.
+        let skip: Vec<WlSurface> = surfaces
+            .iter()
+            .map(|(surface, _)| surface.clone())
+            .collect();
+        let Some(space_elements) = self.desktop_render_elements(
+            renderer,
+            output,
+            &placements,
+            &skip,
+            &mut HashMap::new(),
+            Vec::new(),
+        ) else {
+            return;
+        };
+        let wallpaper = self.wallpaper_element(output, renderer);
+        let behind: Vec<crate::backend::udev::OutputRenderElements> = space_elements
+            .into_iter()
+            .chain(wallpaper.map(crate::backend::udev::OutputRenderElements::Wallpaper))
+            .collect();
+
+        let mut rendered = 0usize;
+        let mut skipped = 0usize;
         let mut captured_first_backdrop = false;
         for (surface, physical_rect) in surfaces {
-            let Some(space_elements) = self.desktop_render_elements(
-                renderer,
-                output,
-                &placements,
-                std::slice::from_ref(&surface),
-                &mut HashMap::new(),
-                Vec::new(),
-            ) else {
+            let first_capture = !self.backdrop_textures.contains_key(&surface);
+            if first_capture {
+                let Some(capture) =
+                    crate::backdrop::BackdropCapture::new(renderer, physical_rect.size)
+                else {
+                    continue;
+                };
+                self.backdrop_textures.insert(surface.clone(), capture);
+            }
+            let Some(capture) = self.backdrop_textures.get_mut(&surface) else {
                 continue;
             };
-            let wallpaper = self.wallpaper_element(output, renderer);
-            let behind: Vec<crate::backend::udev::OutputRenderElements> = space_elements
-                .into_iter()
-                .chain(wallpaper.map(crate::backend::udev::OutputRenderElements::Wallpaper))
-                .collect();
-            let reusable = self
-                .backdrop_textures
-                .get(&surface)
-                .map(|capture| capture.texture.clone());
-            let capture_result =
-                crate::backdrop::capture_backdrop(renderer, physical_rect, behind, reusable);
-            if let Some(texture) = capture_result {
-                let first_capture = !self.backdrop_textures.contains_key(&surface);
-                let (id, mut commit) = match self.backdrop_textures.get(&surface) {
-                    Some(existing) => (existing.id.clone(), existing.commit),
-                    None => (
-                        smithay::backend::renderer::element::Id::new(),
-                        CommitCounter::default(),
-                    ),
-                };
-                commit.increment();
-                self.backdrop_textures.insert(
-                    surface,
-                    crate::backdrop::BackdropCapture {
-                        texture,
-                        id,
-                        commit,
-                    },
-                );
-                captured_first_backdrop |= first_capture;
+            match capture.capture(renderer, physical_rect, &behind) {
+                Some(true) => {
+                    rendered += 1;
+                    captured_first_backdrop |= first_capture;
+                }
+                Some(false) => skipped += 1,
+                None => {}
             }
         }
+        tracing::debug!(
+            output = output.name(),
+            rendered,
+            skipped,
+            "Layer backdrop captures"
+        );
         if captured_first_backdrop {
             self.request_redraw();
         }
@@ -6160,10 +6184,10 @@ impl Smallvil {
             return layers;
         };
         for surface in surfaces {
-            let Some((capture_id, capture_commit, capture_texture)) = self
+            let Some((capture_id, capture_version, capture_texture)) = self
                 .backdrop_textures
                 .get(surface)
-                .map(|capture| (capture.id.clone(), capture.commit, capture.texture.clone()))
+                .map(|capture| (capture.id.clone(), capture.version, capture.texture.clone()))
             else {
                 continue;
             };
@@ -6202,7 +6226,13 @@ impl Smallvil {
                             crate::backend::udev::OutputRenderElements::FrostGlass(
                                 crate::frost_glass::FrostGlassElement::new(
                                     capture_id.clone(),
-                                    capture_commit,
+                                    crate::frost_glass::frost_glass_commit(
+                                        capture_version,
+                                        &frost,
+                                        corner_radii,
+                                        rounding_power,
+                                        corner_softness,
+                                    ),
                                     capture_texture.clone(),
                                     physical_rect,
                                     program.clone(),
@@ -6253,18 +6283,26 @@ impl Smallvil {
                                 (anim.phase(anim_cfg.speed), anim_cfg.amplitude * envelope)
                             }
                         };
+                        let antialias =
+                            rounding.antialias * output.current_scale().fractional_scale() as f32;
                         layers.entry(surface.clone()).or_default().push(
                             crate::backend::udev::OutputRenderElements::WaterGlass(
                                 crate::water_glass::WaterGlassElement::new(
                                     capture_id.clone(),
-                                    capture_commit,
+                                    crate::water_glass::water_glass_commit(
+                                        capture_version,
+                                        phase,
+                                        amp,
+                                        corner_radii,
+                                        rounding.power,
+                                        antialias,
+                                    ),
                                     capture_texture.clone(),
                                     physical_rect,
                                     program.clone(),
                                     corner_radii,
                                     rounding.power,
-                                    rounding.antialias
-                                        * output.current_scale().fractional_scale() as f32,
+                                    antialias,
                                     visual.opacity,
                                     phase,
                                     amp,
@@ -6330,13 +6368,19 @@ impl Smallvil {
             let Some(capture) = self.backdrop_textures.get(&surface) else {
                 continue;
             };
-            let (id, commit, texture) =
-                (capture.id.clone(), capture.commit, capture.texture.clone());
+            let (id, version, texture) =
+                (capture.id.clone(), capture.version, capture.texture.clone());
             result.entry(surface).or_insert_with(Vec::new).push(
                 crate::backend::udev::OutputRenderElements::FrostGlass(
                     crate::frost_glass::FrostGlassElement::new(
                         id,
-                        commit,
+                        crate::frost_glass::frost_glass_commit(
+                            version,
+                            &frost,
+                            corner_radii,
+                            rounding_power,
+                            corner_softness,
+                        ),
                         texture,
                         physical_rect,
                         program.clone(),
@@ -6391,7 +6435,7 @@ impl Smallvil {
                     .map(crate::backend::udev::OutputRenderElements::Wallpaper),
             )
             .collect();
-        crate::backdrop::capture_backdrop(renderer, geometry, elements, None)
+        crate::backdrop::capture_once(renderer, geometry, &elements)
     }
 
     /// Captures the currently-visible desktop for a queued workspace
