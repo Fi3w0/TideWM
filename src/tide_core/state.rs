@@ -1430,11 +1430,9 @@ impl Smallvil {
     /// its currently-resolved rule. Shared by the full post-reload battery
     /// (`reload_config`, one call per mapped window) and by anything that
     /// needs a single window's opacity/glass to react to a live
-    /// rule-affecting change without a full reload -- currently
-    /// `mark_urgent` and the urgent-clear branch of
-    /// `reconcile_keyboard_focus`, since `rule { urgent = ... }` is the one
-    /// match criterion that can flip after map time.
-    fn refresh_window_opacity_and_glass_for(&mut self, surface: &WlSurface) {
+    /// rule-affecting change without a full reload: urgency transitions and
+    /// Smithay's authoritative xdg-toplevel title/app-id callbacks.
+    pub(crate) fn refresh_window_opacity_and_glass_for(&mut self, surface: &WlSurface) {
         let rule = self.resolve_window_rules_for(surface);
         match crate::config::WindowOpacity::from_rule(&rule) {
             Some(opacity) => {

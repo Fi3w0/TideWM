@@ -65,6 +65,14 @@ impl XdgShellHandler for Smallvil {
         self.repair_keyboard_focus(preferred_output.as_deref(), SERIAL_COUNTER.next_serial());
     }
 
+    fn app_id_changed(&mut self, surface: ToplevelSurface) {
+        self.handle_toplevel_identity_changed(surface.wl_surface(), ToplevelIdentityChange::AppId);
+    }
+
+    fn title_changed(&mut self, surface: ToplevelSurface) {
+        self.handle_toplevel_identity_changed(surface.wl_surface(), ToplevelIdentityChange::Title);
+    }
+
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
         self.unconstrain_popup(&surface);
         self.unmapped_popup_surfaces
@@ -685,43 +693,6 @@ pub fn handle_commit(state: &mut Smallvil, surface: &WlSurface) {
         ToplevelTransition::None => {}
     }
 
-    // Push title/app_id changes to the foreign-toplevel handle. Compared
-    // before sending so an unrelated commit (every frame, potentially)
-    // doesn't emit a spurious `done` event to every bar watching.
-    if transition != ToplevelTransition::Unmap && state.foreign_toplevels.contains_key(surface) {
-        let (app_id, title) = state.toplevel_identity(surface);
-        let render_rule = state.resolve_window_rules_for(surface);
-        if let Some(opacity) = crate::config::WindowOpacity::from_rule(&render_rule) {
-            state.window_opacity.insert(surface.clone(), opacity);
-        } else {
-            state.window_opacity.remove(surface);
-        }
-        if let Some(mode) = render_rule.glass {
-            state.window_glass_modes.insert(surface.clone(), mode);
-        } else {
-            state.window_glass_modes.remove(surface);
-        }
-        let title = title.unwrap_or_default();
-        let app_id = app_id.unwrap_or_default();
-        let title_changed = state.foreign_toplevels[surface].title() != title;
-        if title_changed {
-            state.invalidate_window_title_ui(surface);
-        }
-        let handle = &state.foreign_toplevels[surface];
-        if title_changed || handle.app_id() != app_id {
-            handle.send_title(&title);
-            handle.send_app_id(&app_id);
-            handle.send_done();
-        }
-        // Mirror into the older wlr- protocol -- independent client set.
-        if let Some(wlr_handle) = state.wlr_foreign_toplevels.get(surface) {
-            if wlr_handle.title() != title || wlr_handle.app_id() != app_id {
-                wlr_handle.send_title(&title);
-                wlr_handle.send_app_id(&app_id);
-            }
-        }
-    }
-
     // Only a commit that *started* in the unmapped state can be the empty
     // initial commit. The null-buffer commit which just produced `Unmap`
     // ends the old mapped lifetime; the client must make a subsequent empty
@@ -778,6 +749,18 @@ enum ToplevelTransition {
     None,
     Map,
     Unmap,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToplevelIdentityChange {
+    AppId,
+    Title,
+}
+
+impl ToplevelIdentityChange {
+    fn invalidates_title_ui(self) -> bool {
+        self == Self::Title
+    }
 }
 
 fn lifecycle_transition(tracking: ToplevelTracking, has_buffer: bool) -> ToplevelTransition {
@@ -1272,6 +1255,66 @@ impl Smallvil {
         }
 
         self.announce_foreign_toplevel(surface);
+    }
+
+    /// Applies one authoritative xdg-toplevel identity change to live
+    /// compositor state. Smithay calls this directly from `set_title` /
+    /// `set_app_id`; neither request is double-buffered or requires a later
+    /// `wl_surface.commit`.
+    ///
+    /// A foreign-toplevel entry is the protocol-mapped lifetime marker here,
+    /// rather than presence in `Space`: hidden-workspace and parked group
+    /// members must still update rules and bars. Before first map, or after
+    /// unmap, `map_toplevel` reads the latest role state and initializes all
+    /// of this from scratch.
+    fn handle_toplevel_identity_changed(
+        &mut self,
+        surface: &WlSurface,
+        change: ToplevelIdentityChange,
+    ) {
+        let Some(handle) = self.foreign_toplevels.get(surface).cloned() else {
+            return;
+        };
+
+        // Placement and other map-only policy must not be replayed here.
+        // Opacity and glass are the two live resolved-rule caches; every
+        // other live visual rule is resolved at its point of use.
+        self.refresh_window_opacity_and_glass_for(surface);
+        if change.invalidates_title_ui() {
+            self.invalidate_window_title_ui(surface);
+        }
+
+        let (app_id, title) = self.toplevel_identity(surface);
+        let app_id = app_id.unwrap_or_default();
+        let title = title.unwrap_or_default();
+        match change {
+            ToplevelIdentityChange::AppId => {
+                if handle.app_id() != app_id {
+                    handle.send_app_id(&app_id);
+                    handle.send_done();
+                }
+                if let Some(wlr_handle) = self.wlr_foreign_toplevels.get(surface) {
+                    wlr_handle.send_app_id(&app_id);
+                }
+            }
+            ToplevelIdentityChange::Title => {
+                if handle.title() != title {
+                    handle.send_title(&title);
+                    handle.send_done();
+                }
+                if let Some(wlr_handle) = self.wlr_foreign_toplevels.get(surface) {
+                    wlr_handle.send_title(&title);
+                }
+            }
+        }
+
+        self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
+            surface: surface.clone(),
+        });
+        // Identity requests do not imply a surface commit. Schedule the rule
+        // and compositor-owned title pixels ourselves instead of waiting for
+        // unrelated client damage.
+        self.request_redraw();
     }
 
     /// Announces `surface` to both foreign-toplevel protocols (the newer
@@ -1884,8 +1927,8 @@ fn is_dimension_pinned(
 mod tests {
     use super::{
         is_dimension_pinned, lifecycle_transition, remove_flutter_tracking, retain_flutter_record,
-        skips_first_tile_configure, swallowed_restore_destination, ToplevelTracking,
-        ToplevelTransition, FLUTTER_WINDOW,
+        skips_first_tile_configure, swallowed_restore_destination, ToplevelIdentityChange,
+        ToplevelTracking, ToplevelTransition, FLUTTER_WINDOW,
     };
     use crate::state::LifecycleFlutter;
     use std::collections::{HashMap, HashSet};
@@ -1924,6 +1967,12 @@ mod tests {
             lifecycle_transition(ToplevelTracking::Unmapped, true),
             ToplevelTransition::Map
         );
+    }
+
+    #[test]
+    fn only_title_identity_changes_invalidate_title_rasters() {
+        assert!(ToplevelIdentityChange::Title.invalidates_title_ui());
+        assert!(!ToplevelIdentityChange::AppId.invalidates_title_ui());
     }
 
     #[test]
