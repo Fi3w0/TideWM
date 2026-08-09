@@ -811,6 +811,14 @@ fn remove_flutter_tracking<K: Eq + std::hash::Hash>(
     floated.remove(key);
 }
 
+fn swallowed_restore_destination(
+    child_owner: Option<(String, u32)>,
+    live_fallback: Option<(String, u32)>,
+    stored_owner: (String, u32),
+) -> (String, u32) {
+    child_owner.or(live_fallback).unwrap_or(stored_owner)
+}
+
 /// Whether `map_toplevel`'s placement/state conversion below is guaranteed
 /// to send its own protocol configure, making the earlier tiled-size
 /// configure `retile()` sends redundant (and, for a client like a terminal,
@@ -1168,6 +1176,8 @@ impl Smallvil {
                     crate::state::SwallowedWindow {
                         surface: swallower,
                         window: hidden,
+                        output: output.name(),
+                        workspace,
                     },
                 );
                 self.retile();
@@ -1432,23 +1442,24 @@ impl Smallvil {
         let Some(entry) = self.swallowed.remove(surface) else {
             return;
         };
-        let (output, workspace) = match (
-            self.layout.output_of(surface).map(str::to_string),
-            self.layout.workspace_of(surface),
-        ) {
-            (Some(output), Some(workspace)) => (output, workspace),
-            // The child left the tiled tree since the swallow (floated or
-            // fullscreened into a different shape of teardown) -- restore
-            // somewhere sensible instead of guessing its old slot.
-            _ => {
-                let Some(output) = self.primary_output() else {
-                    return;
-                };
-                let name = output.name();
-                let workspace = self.layout.active_workspace(&name);
-                (name, workspace)
-            }
-        };
+        let child_owner = self
+            .layout
+            .output_of(surface)
+            .zip(self.layout.workspace_of(surface))
+            .map(|(output, workspace)| (output.to_string(), workspace));
+        // If the child left its tile, prefer a live active workspace as
+        // before. With zero outputs, restore to the retained original owner;
+        // output adoption migrates that dormant tree when a connector returns.
+        let live_fallback = self.primary_output().map(|output| {
+            let output = output.name();
+            let workspace = self.layout.active_workspace(&output);
+            (output, workspace)
+        });
+        let (output, workspace) = swallowed_restore_destination(
+            child_owner,
+            live_fallback,
+            (entry.output, entry.workspace),
+        );
         self.layout
             .insert(&output, workspace, entry.window, Some(surface));
         // Re-apply identity-derived rule state and re-announce to bars --
@@ -1873,7 +1884,8 @@ fn is_dimension_pinned(
 mod tests {
     use super::{
         is_dimension_pinned, lifecycle_transition, remove_flutter_tracking, retain_flutter_record,
-        skips_first_tile_configure, ToplevelTracking, ToplevelTransition, FLUTTER_WINDOW,
+        skips_first_tile_configure, swallowed_restore_destination, ToplevelTracking,
+        ToplevelTransition, FLUTTER_WINDOW,
     };
     use crate::state::LifecycleFlutter;
     use std::collections::{HashMap, HashSet};
@@ -1946,6 +1958,30 @@ mod tests {
 
         assert!(!lifecycle.contains_key(&7));
         assert!(!floated.contains(&7));
+    }
+
+    #[test]
+    fn swallowed_restore_keeps_dormant_owner_when_no_output_is_live() {
+        let stored = ("remembered".to_string(), 23);
+        assert_eq!(
+            swallowed_restore_destination(None, None, stored.clone()),
+            stored
+        );
+    }
+
+    #[test]
+    fn swallowed_restore_prefers_child_then_live_fallback() {
+        let stored = ("remembered".to_string(), 23);
+        let live = ("live".to_string(), 7);
+        let child = ("child".to_string(), 11);
+        assert_eq!(
+            swallowed_restore_destination(Some(child.clone()), Some(live.clone()), stored.clone()),
+            child
+        );
+        assert_eq!(
+            swallowed_restore_destination(None, Some(live.clone()), stored),
+            live
+        );
     }
 
     #[test]

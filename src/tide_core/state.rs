@@ -1217,6 +1217,11 @@ pub(crate) fn is_scratchpad_workspace(workspace: u32) -> bool {
 pub struct SwallowedWindow {
     pub surface: WlSurface,
     pub window: Window,
+    /// Last authoritative Classic owner before the window was hidden. If
+    /// the child closes while no output is live, restoring into this
+    /// dormant tree lets output adoption recover it on reconnect.
+    pub output: String,
+    pub workspace: u32,
 }
 
 /// Per-surface map/unmap flutter tracking (see `Smallvil::lifecycle_flutter`).
