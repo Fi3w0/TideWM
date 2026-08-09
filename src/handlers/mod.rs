@@ -1,5 +1,6 @@
 mod capture;
 mod compositor;
+pub(crate) mod ext_workspace;
 mod layer_shell;
 mod screencopy;
 mod tearing_control;

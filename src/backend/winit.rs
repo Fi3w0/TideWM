@@ -123,6 +123,7 @@ pub fn init_winit(
 
         state.space.map_output(&output, (x_offset, 0));
         state.wlr_output_management_state.refresh(&state.space);
+        state.refresh_ext_workspaces();
         x_offset += mode.size.w;
 
         let damage_tracker = OutputDamageTracker::from_output(&output);

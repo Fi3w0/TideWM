@@ -1102,6 +1102,7 @@ fn create_surface(
         screencast.refresh_outputs(state.space.outputs());
     }
     state.wlr_output_management_state.refresh(&state.space);
+    state.refresh_ext_workspaces();
 
     Some(SurfaceData {
         compositor,
@@ -1199,6 +1200,7 @@ fn handle_connector_change(
                         screencast.refresh_outputs(state.space.outputs());
                     }
                     state.wlr_output_management_state.refresh(&state.space);
+                    state.refresh_ext_workspaces();
                     state
                         .wlr_output_power_management_state
                         .output_removed(&surface.output);

@@ -960,6 +960,16 @@ pub struct Config {
     /// immediately before it, instead of no-opping. Off by default --
     /// matches the existing plain-no-op behavior unless opted into.
     pub workspace_auto_back_and_forth: bool,
+    /// When set, `1..=N` are advertised as existing on every output even
+    /// while empty -- by the IPC `workspaces` query and the
+    /// `ext-workspace-v1` protocol (`Smallvil::advertised_workspaces`,
+    /// the shared definition both use). `None` (the default) keeps the
+    /// original behavior: only a workspace with a window, or the one
+    /// currently active, is reported. Workspaces themselves stay lazily
+    /// created either way -- this only affects what gets *advertised* to
+    /// external tooling like a waybar workspace strip, not `Layouts`'
+    /// own on-demand tree creation.
+    pub workspace_count: Option<u32>,
     /// Persistent `name -> workspace number` aliases, from repeatable
     /// `workspace_name = <N> <name>` config lines (see `WorkspaceRef`,
     /// `Smallvil::resolve_workspace_ref`). A workspace's real identity
@@ -1287,6 +1297,7 @@ impl Config {
             cursor_always_visible: raw.cursor_always_visible,
             cursor_hide_after_ms: raw.cursor_hide_after_ms,
             workspace_auto_back_and_forth: raw.workspace_auto_back_and_forth,
+            workspace_count: raw.workspace_count,
             workspace_names,
             workspace_gaps,
             gaps: raw.gaps,
@@ -1617,6 +1628,7 @@ struct RawConfig {
     cursor_always_visible: bool,
     cursor_hide_after_ms: i32,
     workspace_auto_back_and_forth: bool,
+    workspace_count: Option<u32>,
     gaps: i32,
     /// `"bsp"`/`"master"`, resolved via `parse_layout_algorithm` in
     /// `Config::from_raw`. Raw string (not `LayoutAlgorithm` itself) for
@@ -1776,6 +1788,7 @@ impl Default for RawConfig {
             cursor_always_visible: false,
             cursor_hide_after_ms: 0,
             workspace_auto_back_and_forth: false,
+            workspace_count: None,
             gaps: 8,
             default_layout: String::new(),
             adaptive_sync: String::new(),
@@ -4111,6 +4124,7 @@ fn is_known_top_level_key(key: &str) -> bool {
             | "cursor_always_visible"
             | "cursor_hide_after"
             | "auto_back_and_forth"
+            | "workspace_count"
             | "workspace_name"
             | "gaps"
             | "workspace_gaps"
@@ -4149,6 +4163,15 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
             }
         }
         "auto_back_and_forth" => set_bool(&mut raw.workspace_auto_back_and_forth, key, value),
+        "workspace_count" => match value.parse::<u32>() {
+            Ok(0) => raw.workspace_count = None,
+            Ok(n @ 1..=64) => raw.workspace_count = Some(n),
+            Ok(_) => tracing::warn!(
+                value,
+                "workspace_count must be 0 (off) or 1 to 64, ignoring"
+            ),
+            Err(err) => tracing::warn!(value, %err, "Expected an integer, ignoring"),
+        },
         "gaps" => set_i32(&mut raw.gaps, key, value),
         "layout" => raw.default_layout = value.to_string(),
         "adaptive_sync" | "vrr" | "variable_refresh_rate" => raw.adaptive_sync = value.to_string(),
@@ -8156,6 +8179,7 @@ mod tests {
             cursor_always_visible: false,
             cursor_hide_after_ms: 0,
             workspace_auto_back_and_forth: false,
+            workspace_count: None,
             workspace_names: HashMap::new(),
             workspace_gaps: HashMap::new(),
             gaps: 0,

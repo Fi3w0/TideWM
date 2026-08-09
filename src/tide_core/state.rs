@@ -640,6 +640,13 @@ pub struct Smallvil {
         Option<crate::handlers::wlr_foreign_toplevel::WlrForeignToplevelState>,
     pub(crate) wlr_foreign_toplevels:
         HashMap<WlSurface, crate::handlers::wlr_foreign_toplevel::WlrForeignToplevelHandle>,
+    /// `ext-workspace-v1`: workspace listing/activation for bars (waybar
+    /// has no compositor-specific TideWM module, so this is the
+    /// protocol-native alternative to polling `tidectl`). Hand-rolled,
+    /// same reason as the toplevel/output-management protocols above --
+    /// no Smithay module exists for it. See `handlers/ext_workspace.rs`
+    /// for the object model and this first pass's deliberate scope.
+    pub(crate) ext_workspace_state: crate::handlers::ext_workspace::ExtWorkspaceState,
     /// `wlr-output-management-unstable-v1`: kanshi/`wlr-randr`/wdisplays read
     /// output layout and can push position/transform/scale changes back.
     /// Hand-rolled, same reason as the toplevel-management protocol above --
@@ -3038,6 +3045,7 @@ impl Smallvil {
             crate::handlers::wlr_output_power_management::WlrOutputPowerManagementState::new(&dh);
         let wlr_gamma_control_state =
             crate::handlers::wlr_gamma_control::WlrGammaControlState::new(&dh);
+        let ext_workspace_state = crate::handlers::ext_workspace::ExtWorkspaceState::new(&dh);
         let keyboard_shortcuts_inhibit_state = KeyboardShortcutsInhibitState::new::<Self>(&dh);
         let pointer_gestures_state = PointerGesturesState::new::<Self>(&dh);
         let cursor_shape_manager_state = CursorShapeManagerState::new::<Self>(&dh);
@@ -3258,6 +3266,7 @@ impl Smallvil {
             foreign_toplevel_numeric_ids: HashMap::new(),
             next_foreign_toplevel_numeric_id: 1,
             wlr_foreign_toplevel_state: Some(wlr_foreign_toplevel_state),
+            ext_workspace_state,
             wlr_output_management_state,
             wlr_output_power_management_state,
             set_output_power: None,
@@ -7723,6 +7732,39 @@ impl Smallvil {
     /// hidden, never re-shown, since they're already visible regardless.
     /// This is also how the scratchpad works: it's just workspace
     /// `SCRATCHPAD_WORKSPACE` under the hood, switched to like any other.
+    /// Workspace numbers to report for `output`, via the IPC `workspaces`
+    /// query and the `ext-workspace-v1` protocol -- one shared definition
+    /// so both describe the same set (see `handlers/ext_workspace.rs`).
+    /// Always includes every workspace with a window (tiled or floating)
+    /// plus whichever one is currently active, regardless of
+    /// `workspace_count`, so a manual switch past the configured count is
+    /// still reported truthfully. `workspace_count`, when set, adds the
+    /// full `1..=N` range on top so idle/empty workspaces show up too;
+    /// left unset, this is exactly the original populated-or-active-only
+    /// behavior.
+    pub(crate) fn advertised_workspaces(&self, output: &str) -> Vec<u32> {
+        let mut numbers: Vec<u32> = self
+            .layout
+            .populated_workspaces()
+            .into_iter()
+            .filter(|(o, _)| o == output)
+            .map(|(_, w)| w)
+            .chain(std::iter::once(self.layout.active_workspace(output)))
+            .chain(
+                self.floating_workspace
+                    .values()
+                    .filter(|tag| tag.output == output)
+                    .map(|tag| tag.workspace),
+            )
+            .collect();
+        if let Some(count) = self.config.workspace_count {
+            numbers.extend(1..=count);
+        }
+        numbers.sort_unstable();
+        numbers.dedup();
+        numbers
+    }
+
     pub fn switch_workspace(&mut self, output: &Output, workspace: u32) {
         if self.exclusive_layer().is_some() {
             return;
@@ -7861,6 +7903,7 @@ impl Smallvil {
         self.check_workspace_created_empty(&output_name, workspace);
         self.refocus_after_hide(&output_name);
 
+        self.refresh_ext_workspaces();
         self.emit_ipc_event(crate::ipc::IpcEvent::WorkspaceChanged {
             output: output_name,
             from: current,
@@ -10908,6 +10951,11 @@ impl Smallvil {
                 self.config = new_config;
                 self.rescue_keybinds_active = false;
                 self.helper_keys_down.clear();
+                // A live `workspace_count` change should show up in the
+                // ext-workspace-v1/IPC workspace listing immediately, same
+                // as everything else hot-reloadable. Cheap no-op diff when
+                // nothing actually changed.
+                self.refresh_ext_workspaces();
                 if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
                     if self.config.ocean.zoom_enabled {
                         self.ocean

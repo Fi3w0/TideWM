@@ -935,18 +935,20 @@ fn workspaces_json(state: &Smallvil) -> serde_json::Value {
     if state.config.spatial_engine == crate::config::SpatialEngine::Ocean {
         return json!([]);
     }
-    let mut keys: HashSet<(String, u32)> =
-        state.layout.populated_workspaces().into_iter().collect();
-    for output in state.space.outputs() {
-        let name = output.name();
-        keys.insert((name.clone(), state.layout.active_workspace(&name)));
-    }
-    for tag in state.floating_workspace.values() {
-        keys.insert((tag.output.clone(), tag.workspace));
-    }
-
-    let workspaces: Vec<_> = keys
-        .into_iter()
+    // `advertised_workspaces` is the shared populated-or-active(-or-`workspace_count`)
+    // definition the `ext-workspace-v1` protocol also uses -- see its doc
+    // comment on `Smallvil` for why a manual switch past a configured
+    // `workspace_count` is still reported truthfully.
+    let workspaces: Vec<_> = state
+        .space
+        .outputs()
+        .flat_map(|output| {
+            let name = output.name();
+            state
+                .advertised_workspaces(&name)
+                .into_iter()
+                .map(move |workspace| (name.clone(), workspace))
+        })
         .map(|(output, workspace)| {
             let tiled = state.layout.windows_in(&output, workspace).len();
             let floating = state
