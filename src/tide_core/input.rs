@@ -47,7 +47,7 @@ use std::{collections::HashSet, time::Duration};
 use crate::{
     config::{Action, Direction, Keybind, Mods, TouchpadConfig},
     grabs::{
-        resize_grab::ResizeEdge, CascadeResizeGrab, MoveSurfaceGrab, OceanPanGrab,
+        resize_grab::ResizeEdge, CascadeResizeGrab, GrabCompletion, MoveSurfaceGrab, OceanPanGrab,
         OceanTileMoveGrab, ResizeSurfaceGrab, TileMoveGrab, TileResizeGrab, TileWindowResizeGrab,
     },
     state::{CompositorGesture, SessionLock, Smallvil},
@@ -95,6 +95,10 @@ fn suppress_consumed_pointer_release(
         }
         ButtonState::Released => suppressed.remove(&button),
     }
+}
+
+fn modifier_move_completed(cancelled: bool, unlocked: bool) -> bool {
+    !cancelled && unlocked
 }
 
 /// Applies `[input.touchpad]` to a libinput device libinput just reported
@@ -403,21 +407,20 @@ impl Smallvil {
     /// tile-swap, and floating reattachment logic live in one place only),
     /// then `InputEvent::GestureSwipeUpdate`/`GestureSwipeEnd` drive it with
     /// synthetic `MotionEvent`s and a direct `unset_grab` instead of a real
-    /// button release. Returns `false` when there's nothing to grab (a
+    /// button release. Returns `None` when there's nothing to grab (a
     /// fullscreen/maximized window, or empty canvas outside Ocean), leaving
     /// the gesture free to forward to the focused client as usual.
-    fn start_gesture_modifier_move(&mut self) -> bool {
+    fn start_gesture_modifier_move(&mut self) -> Option<GrabCompletion> {
         let pointer = self.seat.get_pointer().unwrap();
         let location = pointer.current_location();
         let serial = SERIAL_COUNTER.next_serial();
+        let completion = GrabCompletion::default();
 
         let Some((window, loc)) = self.window_under(location) else {
             if self.config.spatial_engine != crate::config::SpatialEngine::Ocean {
-                return false;
+                return None;
             }
-            let Some(output) = self.output_for_point(location) else {
-                return false;
-            };
+            let output = self.output_for_point(location)?;
             let start_data = PointerGrabStartData {
                 focus: None,
                 button: BTN_LEFT,
@@ -429,13 +432,13 @@ impl Smallvil {
                 serial,
                 Focus::Clear,
             );
-            return true;
+            return Some(completion);
         };
 
         let wl_surface = window.toplevel().unwrap().wl_surface().clone();
         if self.fullscreen.contains_key(&wl_surface) || self.maximized.contains_key(&wl_surface) {
             // Output-owned placements; same exclusion the mouse path uses.
-            return false;
+            return None;
         }
 
         self.focus_window(Some(wl_surface.clone()), serial);
@@ -449,15 +452,12 @@ impl Smallvil {
             && self.config.ocean.smart_tiling
             && self.ocean.is_tiled(&wl_surface)
         {
-            let Some(output) = self.output_for_point(location).map(|output| output.name()) else {
-                return false;
-            };
-            let Some(initial_rect) =
+            let output = self
+                .output_for_point(location)
+                .map(|output| output.name())?;
+            let initial_rect =
                 self.ocean
-                    .world_rect(&wl_surface, self.config.gaps, self.config.bsp_split_bias)
-            else {
-                return false;
-            };
+                    .world_rect(&wl_surface, self.config.gaps, self.config.bsp_split_bias)?;
             let view_scale = self.ocean.camera(&output).zoom;
             let grab = OceanTileMoveGrab::start(
                 start_data,
@@ -466,9 +466,10 @@ impl Smallvil {
                 output,
                 initial_rect.loc,
                 view_scale,
-            );
+            )
+            .with_completion(completion.clone());
             pointer.set_grab(self, grab, serial, Focus::Clear);
-            return true;
+            return Some(completion);
         }
 
         if self.config.spatial_engine == crate::config::SpatialEngine::Ocean
@@ -476,9 +477,7 @@ impl Smallvil {
             && self.ocean.is_tiled(&wl_surface)
         {
             self.toggle_floating(&wl_surface);
-            let Some(model_rect) = self.ocean.floating_rect(&wl_surface) else {
-                return false;
-            };
+            let model_rect = self.ocean.floating_rect(&wl_surface)?;
             self.ocean.raise_floating(&wl_surface);
             self.space.raise_element(&window, false);
             let view_scale = self
@@ -495,11 +494,12 @@ impl Smallvil {
                     view_scale,
                     smart_attach_ocean: self.config.ocean.smart_tiling,
                     last_location,
+                    completion: completion.clone(),
                 },
                 serial,
                 Focus::Clear,
             );
-            return true;
+            return Some(completion);
         }
 
         if !self.layout.contains(&wl_surface) && !self.ocean.is_tiled(&wl_surface) {
@@ -526,21 +526,23 @@ impl Smallvil {
                         == crate::config::SpatialEngine::Ocean
                         && self.config.ocean.smart_tiling,
                     last_location,
+                    completion: completion.clone(),
                 },
                 serial,
                 Focus::Clear,
             );
-            return true;
+            return Some(completion);
         }
 
         let output = self.layout.output_of(&wl_surface).map(str::to_string);
         let workspace = self.layout.workspace_of(&wl_surface);
         let (Some(output), Some(workspace)) = (output, workspace) else {
-            return false;
+            return None;
         };
-        let grab = TileMoveGrab::start(start_data, window, wl_surface, output, workspace, loc);
+        let grab = TileMoveGrab::start(start_data, window, wl_surface, output, workspace, loc)
+            .with_completion(completion.clone());
         pointer.set_grab(self, grab, serial, Focus::Clear);
-        true
+        Some(completion)
     }
 
     /// Maps a touch (or any other absolute-position) event's normalized
@@ -1533,6 +1535,7 @@ impl Smallvil {
                                             view_scale,
                                             smart_attach_ocean: self.config.ocean.smart_tiling,
                                             last_location,
+                                            completion: GrabCompletion::default(),
                                         },
                                         serial,
                                         Focus::Clear,
@@ -1585,6 +1588,7 @@ impl Smallvil {
                                             == crate::config::SpatialEngine::Ocean
                                             && self.config.ocean.smart_tiling,
                                         last_location,
+                                        completion: GrabCompletion::default(),
                                     };
                                     pointer.set_grab(self, grab, serial, Focus::Clear);
                                 } else {
@@ -2303,13 +2307,10 @@ impl Smallvil {
                 // swipe actions/workspace navigation, matching how those
                 // already take priority over everything below them.
                 // `!is_grabbed()` mirrors the same guard every mouse-driven
-                // `set_grab` call in the button handler above uses: without
-                // it, an unrelated concurrent mouse drag could be
-                // superseded by this gesture starting mid-flight, and
-                // `set_grab` unconditionally calls the superseded grab's
-                // own `unset()` -- which now commits a tile swap/reattach
-                // (see `OceanTileMoveGrab`/`TileMoveGrab`'s `commit`) based
-                // on whatever position it last saw, not a real release.
+                // `set_grab` call in the button handler above uses: it keeps
+                // distinct interactions from cancelling one another. The
+                // grabs also carry an explicit completion token, so any
+                // forced teardown remains cleanup-only.
                 let modifier_pan = matches!(self.session_lock, SessionLock::Unlocked)
                     && self.exclusive_layer().is_none()
                     && !self.seat.get_pointer().unwrap().is_grabbed()
@@ -2323,9 +2324,13 @@ impl Smallvil {
                         .config
                         .pointer_modifier
                         .is_held_by(self.held_modifiers());
-                if modifier_pan && self.start_gesture_modifier_move() {
+                if let Some(completion) = modifier_pan
+                    .then(|| self.start_gesture_modifier_move())
+                    .flatten()
+                {
                     self.compositor_gesture = Some(CompositorGesture::ModifierMove {
                         last_location: self.seat.get_pointer().unwrap().current_location(),
+                        completion,
                     });
                     return;
                 }
@@ -2342,14 +2347,18 @@ impl Smallvil {
             InputEvent::GestureSwipeUpdate { event, .. } => {
                 let delta = BackendGestureSwipeUpdateEvent::delta(&event);
                 let modifier_move_from = match &self.compositor_gesture {
-                    Some(CompositorGesture::ModifierMove { last_location }) => Some(*last_location),
+                    Some(CompositorGesture::ModifierMove { last_location, .. }) => {
+                        Some(*last_location)
+                    }
                     _ => None,
                 };
                 if let Some(last_location) = modifier_move_from {
                     let new_location = self.clamp_to_outputs(last_location + delta);
-                    self.compositor_gesture = Some(CompositorGesture::ModifierMove {
-                        last_location: new_location,
-                    });
+                    if let Some(CompositorGesture::ModifierMove { last_location, .. }) =
+                        &mut self.compositor_gesture
+                    {
+                        *last_location = new_location;
+                    }
                     let pointer = self.seat.get_pointer().unwrap();
                     pointer.motion(
                         self,
@@ -2404,7 +2413,17 @@ impl Smallvil {
                     &self.compositor_gesture,
                     Some(CompositorGesture::ModifierMove { .. })
                 ) {
-                    self.compositor_gesture = None;
+                    let Some(CompositorGesture::ModifierMove { completion, .. }) =
+                        self.compositor_gesture.take()
+                    else {
+                        unreachable!();
+                    };
+                    if modifier_move_completed(
+                        GestureEndEvent::cancelled(&event),
+                        matches!(self.session_lock, SessionLock::Unlocked),
+                    ) {
+                        completion.mark_complete();
+                    }
                     let pointer = self.seat.get_pointer().unwrap();
                     pointer.unset_grab(
                         self,
@@ -3347,5 +3366,13 @@ mod tests {
             0x110,
             ButtonState::Released,
         ));
+    }
+
+    #[test]
+    fn modifier_move_commits_only_on_an_unlocked_successful_end() {
+        assert!(modifier_move_completed(false, true));
+        assert!(!modifier_move_completed(true, true));
+        assert!(!modifier_move_completed(false, false));
+        assert!(!modifier_move_completed(true, false));
     }
 }

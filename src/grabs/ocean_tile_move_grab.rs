@@ -8,11 +8,10 @@
 //! `OceanSpace::set_tile_drag` overrides its rendered rectangle for the
 //! gesture's duration, since Ocean's renderer reads placement from the reef
 //! tree, not from `Space` (`Space` is still updated here, but only for
-//! hit-testing). The current swap target gets a magnet-style border
-//! highlight for the same reason a fridge magnet needs a light: so dropping
-//! is a decision, not a guess.
+//! hit-testing). The current swap target gets a border highlight so the
+//! pending drop is explicit.
 
-use crate::Smallvil;
+use crate::{grabs::GrabCompletion, Smallvil};
 use smithay::{
     desktop::Window,
     input::pointer::{
@@ -33,6 +32,7 @@ pub struct OceanTileMoveGrab {
     initial_location: Point<i32, Logical>,
     last_location: Point<f64, Logical>,
     view_scale: f64,
+    completion: GrabCompletion,
 }
 
 impl OceanTileMoveGrab {
@@ -52,7 +52,13 @@ impl OceanTileMoveGrab {
             output,
             initial_location,
             view_scale: view_scale.max(0.05),
+            completion: GrabCompletion::default(),
         }
+    }
+
+    pub(crate) fn with_completion(mut self, completion: GrabCompletion) -> Self {
+        self.completion = completion;
+        self
     }
 
     /// Commits the drag: a drop over another tile swaps the two; a drop
@@ -61,11 +67,9 @@ impl OceanTileMoveGrab {
     /// `smart_attach_ocean_floating` uses in the opposite direction, so
     /// moving a window out of the tiling area is how you float it and
     /// moving one in is how you tile it, with no separate keybind needed
-    /// for either. Runs from `unset()`, not `button()`'s release detection,
-    /// so it fires exactly once whenever this grab ends -- a real button
-    /// release, a gesture-driven `unset_grab` (see
-    /// `Smallvil::start_gesture_modifier_move`), or any other teardown path
-    /// -- rather than only the one Smithay happens to reach it through.
+    /// for either. `unset()` calls this only after a real initiating-button
+    /// release or successful gesture end marks completion; forced teardown
+    /// clears the visual drag and snaps back without changing reef state.
     fn commit(&self, data: &mut Smallvil) {
         if !data.window_is_visible(&self.surface)
             || !data.ocean.is_tiled(&self.surface)
@@ -97,7 +101,6 @@ impl OceanTileMoveGrab {
                 data.ocean.set_floating_rect(&self.surface, world_rect);
             }
         }
-        data.retile_viscous();
     }
 
     /// The window's live dragged rectangle in world space, shared by
@@ -226,6 +229,7 @@ impl PointerGrab<Smallvil> for OceanTileMoveGrab {
     ) {
         handle.button(data, event);
         if !handle.current_pressed().contains(&self.start_data.button) {
+            self.completion.mark_complete();
             handle.unset_grab(self, data, event.serial, event.time, true);
         }
     }
@@ -320,12 +324,10 @@ impl PointerGrab<Smallvil> for OceanTileMoveGrab {
     }
 
     fn unset(&mut self, data: &mut Smallvil) {
-        // Runs whenever this grab ends, however it ends -- a real button
-        // release, `unset_grab` called directly (the gesture-driven path),
-        // window death, or a competing `set_grab` elsewhere -- so `commit`
-        // always fires exactly once and the drag override never outlives
-        // the gesture it was created for.
-        self.commit(data);
+        if self.completion.take_complete() {
+            self.commit(data);
+        }
         data.ocean.clear_tile_drag();
+        data.retile_viscous();
     }
 }
