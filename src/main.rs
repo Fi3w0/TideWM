@@ -26,7 +26,13 @@ pub(crate) use visual::{
     window_animation, workspace_transition,
 };
 
-use std::{process::Child, sync::Mutex};
+use std::{
+    collections::HashMap,
+    path::Path,
+    process::{Child, Command, ExitStatus, Output},
+    sync::Mutex,
+    thread::{self, JoinHandle},
+};
 
 use smithay::reexports::{
     calloop::{
@@ -154,29 +160,86 @@ fn configure_session_environment() {
     }
 }
 
-/// Exports TideWM's graphical-session variables plus any `[env]` entries
-/// into the systemd user session and the D-Bus
-/// session-activation environment, so anything activated by either (a
-/// portal backend, a polkit agent) sees a real graphical session instead of
-/// whatever it inherited from before TideWM started (nothing, on a bare
-/// TTY login). `set_var` alone only affects this process's own children,
-/// not something already running or activated on demand later -- these two
-/// external commands are how sway, Hyprland, and niri all actually get
-/// this to the rest of the session (matches Hyprland's own autostart.conf,
-/// which does the same `dbus-update-activation-environment --systemd` call
-/// listing its `env =` keys alongside `WAYLAND_DISPLAY`).
-///
-/// `XDG_CURRENT_DESKTOP=tidewm` is a real decision, not a formality: no
-/// portal backend ships a matching profile for a brand-new compositor
-/// name out of the box, so screen-sharing/file-picker portals still need
-/// the user's own `xdg-desktop-portal` backend configured (same situation
-/// niri and sway users are in) -- see README.
-///
-/// Both commands are missing on plenty of distros (no systemd, or a
-/// minimal systemd without the user session bus) -- logged at `debug`
-/// and otherwise ignored, never fatal, per this project's any-distro
-/// requirement.
-fn export_session_environment(env: &std::collections::HashMap<String, String>) {
+// Exports TideWM's graphical-session variables plus any `[env]` entries
+// into the systemd user session and the D-Bus session-activation environment,
+// so anything activated by either (a portal backend, a polkit agent) sees a
+// real graphical session instead of whatever it inherited from before TideWM
+// started (nothing, on a bare TTY login). `set_var` alone only affects this
+// process's own children, not something already running or activated on demand
+// later. These external commands are how sway, Hyprland, and niri get this to
+// the rest of the session.
+//
+// `XDG_CURRENT_DESKTOP=tidewm` is a real decision, not a formality: no portal
+// backend ships a matching profile for a brand-new compositor name out of the
+// box, so screen-sharing/file-picker portals still need the user's own
+// `xdg-desktop-portal` backend configured (same situation niri and sway users
+// are in). Missing helpers are logged at `debug` and otherwise ignored, per
+// this project's any-distro requirement.
+trait SessionEnvironmentRunner: Send + 'static {
+    fn status(&self, program: &str, args: &[String]) -> std::io::Result<ExitStatus>;
+    fn output(&self, program: &str, args: &[String]) -> std::io::Result<Output>;
+    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>>;
+}
+
+struct ProcessSessionEnvironmentRunner;
+
+impl SessionEnvironmentRunner for ProcessSessionEnvironmentRunner {
+    fn status(&self, program: &str, args: &[String]) -> std::io::Result<ExitStatus> {
+        Command::new(program).args(args).status()
+    }
+
+    fn output(&self, program: &str, args: &[String]) -> std::io::Result<Output> {
+        Command::new(program).args(args).output()
+    }
+
+    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        std::fs::read(path)
+    }
+}
+
+fn validated_session_environment_keys(env: &HashMap<String, String>) -> Vec<String> {
+    let mut keys: Vec<String> = env
+        .iter()
+        .filter(|(key, value)| crate::config::validate_env_entry(key, value).is_ok())
+        .map(|(key, _)| key.clone())
+        .collect();
+    keys.sort_unstable();
+    keys
+}
+
+fn start_session_environment_worker(
+    env: &HashMap<String, String>,
+) -> std::io::Result<JoinHandle<()>> {
+    start_session_environment_worker_with_runner(
+        validated_session_environment_keys(env),
+        ProcessSessionEnvironmentRunner,
+    )
+}
+
+fn start_session_environment_worker_with_runner<R>(
+    env_keys: Vec<String>,
+    runner: R,
+) -> std::io::Result<JoinHandle<()>>
+where
+    R: SessionEnvironmentRunner,
+{
+    thread::Builder::new()
+        .name("tidewm-session-environment".to_string())
+        .spawn(move || run_session_environment_tasks(&env_keys, &runner))
+}
+
+fn run_session_environment_tasks<R>(env_keys: &[String], runner: &R)
+where
+    R: SessionEnvironmentRunner,
+{
+    export_session_environment(env_keys, runner);
+    restart_stale_portal_frontend(runner);
+}
+
+fn export_session_environment<R>(env_keys: &[String], runner: &R)
+where
+    R: SessionEnvironmentRunner,
+{
     let mut vars: Vec<&str> = vec![
         "WAYLAND_DISPLAY",
         "XDG_CURRENT_DESKTOP",
@@ -185,14 +248,15 @@ fn export_session_environment(env: &std::collections::HashMap<String, String>) {
         "XDG_SESSION_TYPE",
         "TIDEWM_VERSION",
     ];
-    vars.extend(env.keys().map(String::as_str));
+    vars.extend(env_keys.iter().map(String::as_str));
 
     for (program, mut args) in [
         ("dbus-update-activation-environment", vec!["--systemd"]),
         ("systemctl", vec!["--user", "import-environment"]),
     ] {
         args.extend_from_slice(&vars);
-        match std::process::Command::new(program).args(&args).status() {
+        let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+        match runner.status(program, &args) {
             Ok(status) if status.success() => {}
             Ok(status) => tracing::debug!(
                 program,
@@ -214,10 +278,7 @@ fn export_session_environment(env: &std::collections::HashMap<String, String>) {
         .iter()
         .map(|key| format!("{key}="))
         .collect();
-    match std::process::Command::new("dbus-update-activation-environment")
-        .args(&empty_foreign_vars)
-        .status()
-    {
+    match runner.status("dbus-update-activation-environment", &empty_foreign_vars) {
         Ok(status) if status.success() => {}
         Ok(status) => tracing::debug!(
             ?status,
@@ -227,11 +288,12 @@ fn export_session_environment(env: &std::collections::HashMap<String, String>) {
             tracing::debug!(%err, "Foreign compositor DBus environment cleanup unavailable")
         }
     }
-    match std::process::Command::new("systemctl")
-        .args(["--user", "unset-environment"])
-        .args(FOREIGN_COMPOSITOR_ENV)
-        .status()
-    {
+    let systemd_cleanup_args: Vec<String> = ["--user", "unset-environment"]
+        .into_iter()
+        .chain(FOREIGN_COMPOSITOR_ENV.iter().copied())
+        .map(str::to_string)
+        .collect();
+    match runner.status("systemctl", &systemd_cleanup_args) {
         Ok(status) if status.success() => {}
         Ok(status) => tracing::debug!(
             ?status,
@@ -256,22 +318,28 @@ fn export_session_environment(env: &std::collections::HashMap<String, String>) {
 /// see -- it just looked like screencasting was broken. Restarting only
 /// the frontend is enough: backends are re-resolved fresh, from the
 /// now-correct activation environment, the next time it starts.
-fn restart_stale_portal_frontend() {
-    let has_fresh_env = std::process::Command::new("systemctl")
-        .args([
-            "--user",
-            "show",
-            "-p",
-            "MainPID",
-            "--value",
-            "xdg-desktop-portal.service",
-        ])
-        .output()
+fn restart_stale_portal_frontend<R>(runner: &R)
+where
+    R: SessionEnvironmentRunner,
+{
+    let show_args: Vec<String> = [
+        "--user",
+        "show",
+        "-p",
+        "MainPID",
+        "--value",
+        "xdg-desktop-portal.service",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    let has_fresh_env = runner
+        .output("systemctl", &show_args)
         .ok()
         .and_then(|output| String::from_utf8(output.stdout).ok())
         .and_then(|pid| pid.trim().parse::<u32>().ok())
         .filter(|&pid| pid != 0)
-        .and_then(|pid| std::fs::read(format!("/proc/{pid}/environ")).ok())
+        .and_then(|pid| runner.read(Path::new(&format!("/proc/{pid}/environ"))).ok())
         .map(|environ| {
             environ
                 .split(|&byte| byte == 0)
@@ -290,10 +358,16 @@ fn restart_stale_portal_frontend() {
     // switch) on a real SDDM login. The restart's outcome only matters for
     // screencast requests minutes later, so enqueueing the job is enough.
     if has_fresh_env == Some(false) {
-        match std::process::Command::new("systemctl")
-            .args(["--user", "--no-block", "restart", "xdg-desktop-portal.service"])
-            .status()
-        {
+        let restart_args: Vec<String> = [
+            "--user",
+            "--no-block",
+            "restart",
+            "xdg-desktop-portal.service",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        match runner.status("systemctl", &restart_args) {
             Ok(status) if status.success() => tracing::info!(
                 "Restarting xdg-desktop-portal.service: it was still carrying another desktop's identity"
             ),
@@ -426,10 +500,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // session. Importing wayland-N there would redirect subsequently
     // activated host services into this disposable test window. Standalone
     // TideWM owns the graphical session and should publish it normally.
-    if !nested {
-        export_session_environment(&state.config.env);
-        restart_stale_portal_frontend();
-    }
+    // Session-manager helpers can block on a wedged user bus. Keep their
+    // exact ordering in one worker, but never make compositor readiness,
+    // autostarts, or shutdown wait for them. Dropping this handle detaches
+    // the worker; it is intentionally never joined.
+    let _session_environment_worker = if !nested {
+        match start_session_environment_worker(&state.config.env) {
+            Ok(worker) => Some(worker),
+            Err(err) => {
+                tracing::debug!(%err, "Failed to start session environment export worker");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // Bound so it stays alive for the process lifetime, same idiom as
     // `_config_watcher` below.
@@ -521,4 +606,255 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod session_environment_tests {
+    use super::*;
+    use std::{
+        os::unix::process::ExitStatusExt,
+        path::PathBuf,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Barrier,
+        },
+    };
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Call {
+        Status(String, Vec<String>),
+        Output(String, Vec<String>),
+        Read(PathBuf),
+    }
+
+    #[derive(Clone)]
+    struct RecordingRunner {
+        calls: Arc<Mutex<Vec<Call>>>,
+        portal_environment: Vec<u8>,
+        status_error: bool,
+    }
+
+    impl RecordingRunner {
+        fn new(portal_environment: &[u8]) -> Self {
+            Self {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                portal_environment: portal_environment.to_vec(),
+                status_error: false,
+            }
+        }
+
+        fn calls(&self) -> Vec<Call> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl SessionEnvironmentRunner for RecordingRunner {
+        fn status(&self, program: &str, args: &[String]) -> std::io::Result<ExitStatus> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(Call::Status(program.to_string(), args.to_vec()));
+            if self.status_error {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "test helper unavailable",
+                ))
+            } else {
+                Ok(ExitStatus::from_raw(0))
+            }
+        }
+
+        fn output(&self, program: &str, args: &[String]) -> std::io::Result<Output> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(Call::Output(program.to_string(), args.to_vec()));
+            Ok(Output {
+                status: ExitStatus::from_raw(0),
+                stdout: b"4242\n".to_vec(),
+                stderr: Vec::new(),
+            })
+        }
+
+        fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(Call::Read(path.to_path_buf()));
+            Ok(self.portal_environment.clone())
+        }
+    }
+
+    #[test]
+    fn session_environment_tasks_keep_order_and_restart_only_stale_portal() {
+        let runner = RecordingRunner::new(b"XDG_CURRENT_DESKTOP=Hyprland\0");
+        run_session_environment_tasks(&["CUSTOM_SESSION_KEY".to_string()], &runner);
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 7);
+
+        let expected_export_vars = [
+            "WAYLAND_DISPLAY",
+            "XDG_CURRENT_DESKTOP",
+            "XDG_SESSION_DESKTOP",
+            "DESKTOP_SESSION",
+            "XDG_SESSION_TYPE",
+            "TIDEWM_VERSION",
+            "CUSTOM_SESSION_KEY",
+        ];
+        assert_eq!(
+            calls[0],
+            Call::Status(
+                "dbus-update-activation-environment".to_string(),
+                std::iter::once("--systemd")
+                    .chain(expected_export_vars)
+                    .map(str::to_string)
+                    .collect(),
+            )
+        );
+        assert_eq!(
+            calls[1],
+            Call::Status(
+                "systemctl".to_string(),
+                ["--user", "import-environment"]
+                    .into_iter()
+                    .chain(expected_export_vars)
+                    .map(str::to_string)
+                    .collect(),
+            )
+        );
+        assert_eq!(
+            calls[2],
+            Call::Status(
+                "dbus-update-activation-environment".to_string(),
+                FOREIGN_COMPOSITOR_ENV
+                    .iter()
+                    .map(|key| format!("{key}="))
+                    .collect(),
+            )
+        );
+        assert_eq!(
+            calls[3],
+            Call::Status(
+                "systemctl".to_string(),
+                ["--user", "unset-environment"]
+                    .into_iter()
+                    .chain(FOREIGN_COMPOSITOR_ENV.iter().copied())
+                    .map(str::to_string)
+                    .collect(),
+            )
+        );
+        assert!(matches!(&calls[4], Call::Output(program, _) if program == "systemctl"));
+        assert_eq!(calls[5], Call::Read(PathBuf::from("/proc/4242/environ")));
+        assert_eq!(
+            calls[6],
+            Call::Status(
+                "systemctl".to_string(),
+                [
+                    "--user",
+                    "--no-block",
+                    "restart",
+                    "xdg-desktop-portal.service",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            )
+        );
+
+        let fresh_runner = RecordingRunner::new(b"XDG_CURRENT_DESKTOP=tidewm\0");
+        run_session_environment_tasks(&[], &fresh_runner);
+        assert_eq!(fresh_runner.calls().len(), 6);
+        assert!(!fresh_runner.calls().iter().any(|call| {
+            matches!(call, Call::Status(program, args) if program == "systemctl" && args.iter().any(|arg| arg == "restart"))
+        }));
+    }
+
+    #[test]
+    fn unavailable_helpers_do_not_stop_later_environment_steps() {
+        let mut runner = RecordingRunner::new(b"XDG_CURRENT_DESKTOP=tidewm\0");
+        runner.status_error = true;
+
+        run_session_environment_tasks(&[], &runner);
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 6);
+        assert!(
+            matches!(&calls[0], Call::Status(program, _) if program == "dbus-update-activation-environment")
+        );
+        assert!(matches!(&calls[1], Call::Status(program, _) if program == "systemctl"));
+        assert!(
+            matches!(&calls[2], Call::Status(program, _) if program == "dbus-update-activation-environment")
+        );
+        assert!(matches!(&calls[3], Call::Status(program, _) if program == "systemctl"));
+        assert!(matches!(&calls[4], Call::Output(program, _) if program == "systemctl"));
+        assert!(matches!(&calls[5], Call::Read(_)));
+    }
+
+    #[test]
+    fn worker_returns_while_a_helper_is_blocked() {
+        struct BlockingRunner {
+            blocked_once: AtomicBool,
+            entered: Arc<Barrier>,
+            release: Arc<Barrier>,
+            worker_name: Arc<Mutex<Option<String>>>,
+        }
+
+        impl SessionEnvironmentRunner for BlockingRunner {
+            fn status(&self, _program: &str, _args: &[String]) -> std::io::Result<ExitStatus> {
+                if !self.blocked_once.swap(true, Ordering::SeqCst) {
+                    *self.worker_name.lock().unwrap() =
+                        thread::current().name().map(str::to_string);
+                    self.entered.wait();
+                    self.release.wait();
+                }
+                Ok(ExitStatus::from_raw(0))
+            }
+
+            fn output(&self, _program: &str, _args: &[String]) -> std::io::Result<Output> {
+                Ok(Output {
+                    status: ExitStatus::from_raw(0),
+                    stdout: b"0\n".to_vec(),
+                    stderr: Vec::new(),
+                })
+            }
+
+            fn read(&self, _path: &Path) -> std::io::Result<Vec<u8>> {
+                unreachable!("PID zero must skip the portal environment read")
+            }
+        }
+
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let worker_name = Arc::new(Mutex::new(None));
+        let runner = BlockingRunner {
+            blocked_once: AtomicBool::new(false),
+            entered: entered.clone(),
+            release: release.clone(),
+            worker_name: worker_name.clone(),
+        };
+
+        let worker = start_session_environment_worker_with_runner(Vec::new(), runner).unwrap();
+        entered.wait();
+        assert_eq!(
+            worker_name.lock().unwrap().as_deref(),
+            Some("tidewm-session-environment")
+        );
+        release.wait();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn worker_clones_only_validated_environment_keys() {
+        let env = HashMap::from([
+            ("VALID_KEY".to_string(), "value".to_string()),
+            ("INVALID=KEY".to_string(), "value".to_string()),
+            ("INVALID_VALUE".to_string(), "nul\0value".to_string()),
+        ]);
+
+        assert_eq!(
+            validated_session_environment_keys(&env),
+            vec!["VALID_KEY".to_string()]
+        );
+    }
 }
