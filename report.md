@@ -11,8 +11,8 @@ This is a static code review, not a claim that every issue below was reproduced 
 - Updated: 2026-08-09
 - Implementation branch: `ai/codex/report-fixes`
 - Separate worktree: `/home/fiw/Proyects/TideWM-worktrees/report-fixes`
-- Current implementation head: `5e0e741`
-- Current TideWM version on the branch: `0.90.48`
+- Current implementation head: `16b86dc`
+- Current TideWM version on the branch: `0.90.49`
 - Push status: local only; nothing from this branch has been pushed.
 
 The finding text below is the original audit evidence. It is intentionally retained even when a finding is closed. Use this handoff ledger as the current status authority, then inspect the named commit and current code before changing a closed area. Do not repeat a fix merely because its original finding still says “confirmed.”
@@ -21,8 +21,8 @@ The finding text below is the original audit evidence. It is intentionally retai
 
 - Critical: all 7 closed.
 - High: H-01 through H-44 closed. H-45 was re-audited as a stale false positive because the current udev path already processes connector `Changed` events and rescans/retries surface creation.
-- Medium explicitly re-audited and closed: M-01, M-02, M-04 through M-10, M-12 through M-23, and M-30.
-- Medium still open or awaiting a fresh audit: M-03, M-11, M-24 through M-29, and M-31 through M-74.
+- Medium explicitly re-audited and closed: M-01, M-02, M-04 through M-10, M-12 through M-23, M-25, and M-30.
+- Medium still open or awaiting a fresh audit: M-03, M-11, M-24, M-26 through M-29, and M-31 through M-74.
 - Performance opportunities P-01 through P-10: not worked in this branch unless a closed correctness fix incidentally reduced the same cost. Treat all ten as open until measured and re-audited. P-11 has code fixes in `1089450` and `0f74459` but still needs real-DRM measurement. P-12 has a code fix in `1089450` and awaits real-DRM verification.
 - Lower-confidence items U-01 through U-16: not systematically re-audited. Treat them as investigation tasks, not established bugs.
 - Formatter findings F-01 through F-04: closed.
@@ -84,6 +84,7 @@ The finding text below is the original audit evidence. It is intentionally retai
 | M-19, M-20, M-21 | `d9f5fcc` | Clamped the pointer to the union of half-open live output rectangles, bounded gaps from each live slot, and invalidated resize topology after algorithm/tree changes. |
 | M-22 | `5e0e741` | Bound flutter history to the authoritative XDG toplevel-role lifetime. Null-buffer unmap/remap retains storm detection, but role destruction clears timing and permanent-float state; expired counters no longer use `Space` visibility as a liveness proxy that could misclassify hidden live windows. |
 | M-23 | `87214f8` | Portal close, disconnect, and stale replacement now release the shared session map and per-entry state mutex before dropping or joining a PipeWire stream. Synchronous worker teardown remains separately tracked by M-24. |
+| M-25 | `16b86dc` | Replaced strong gamma-control output ownership with Smithay `WeakOutput`, invalidated and failed the current resource on disconnect/transfer/backend failure, and prevented stale requests or destruction from reading FDs, touching hardware, or resetting a newer owner's ramp. Real udev hotplug/gamma-client verification remains pending. |
 | M-30 | `9522858` | Removed stopped output-manager head resources without advancing or corrupting shared transaction serials. |
 
 ### Closed formatter findings
@@ -101,7 +102,8 @@ The finding text below is the original audit evidence. It is intentionally retai
 
 ### Validation state
 
-- After `5e0e741`, all 11 focused XDG-shell lifecycle tests passed, including new flutter retention/destruction policy coverage; formatting and diff checks passed. Full strict validation is queued with the next non-concurrent milestone.
+- After `16b86dc`, `cargo test --all-features --all-targets` passed all 387 compositor tests and all 9 `wavefmt` tests outside the restricted Unix-socket sandbox. The expected sandbox-only IPC failures were rerun successfully with normal socket permissions. Strict `cargo clippy --all-targets --all-features -- -D warnings` and formatting also passed; this full run includes M-22.
+- After `5e0e741`, all 11 focused XDG-shell lifecycle tests passed, including new flutter retention/destruction policy coverage; formatting and diff checks passed. The later `16b86dc` full run covers this milestone too.
 - After `ce81736`, `cargo test --all-features --all-targets` passed all 382 compositor tests and all 9 `wavefmt` tests. Strict `cargo clippy --all-targets --all-features -- -D warnings` and `cargo fmt --all -- --check` also passed.
 - After `7068220`, `cargo test --all-features --all-targets` passed all 380 compositor tests and all 9 `wavefmt` tests; `cargo fmt --all -- --check` passed.
 - After `de2d958`, `cargo test --all-features` passed all 378 compositor tests and all 9 `wavefmt` tests. Strict `cargo clippy --all-targets --all-features -- -D warnings` and `cargo fmt --all -- --check` also passed.
@@ -112,7 +114,7 @@ The finding text below is the original audit evidence. It is intentionally retai
 - After `bf39982`, `cargo test --locked --all-features` passed all 358 compositor tests and all 9 `wavefmt` tests outside the restricted IPC socket sandbox. Strict Clippy and formatting checks also passed.
 - After `d9f5fcc`, `cargo test --locked --all-features` passed all 356 compositor tests and all 6 `wavefmt` tests outside the restricted IPC socket sandbox.
 - `cargo check --locked --all-features` passed after the final Medium batch.
-- Strict all-target/all-feature Clippy has passed through the current `0.90.47` implementation head.
+- Strict all-target/all-feature Clippy has passed through the current `0.90.49` implementation head.
 - Capture and geometry regression tests use deliberately arbitrary dimensions. No monitor resolution, refresh rate, GPU vendor, input device, or other configurable/hardware property was introduced as a fixed runtime assumption.
 - Nested and real-DRM validation for the complete audit-fix series is still pending. Automated tests cannot prove mixed-output KMS/VBlank behavior, connector hotplug, rotated physical outputs, VRR, real tablet/touch mapping, or visual feel.
 
