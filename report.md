@@ -11,8 +11,8 @@ This is a static code review, not a claim that every issue below was reproduced 
 - Updated: 2026-08-09
 - Implementation branch: `ai/codex/report-fixes`
 - Separate worktree: `/home/fiw/Proyects/TideWM-worktrees/report-fixes`
-- Current implementation head: `0802e99`
-- Current TideWM version on the branch: `0.90.53`
+- Current implementation head: `29ef215`
+- Current TideWM version on the branch: `0.90.54`
 - Push status: local only; nothing from this branch has been pushed.
 
 The finding text below is the original audit evidence. It is intentionally retained even when a finding is closed. Use this handoff ledger as the current status authority, then inspect the named commit and current code before changing a closed area. Do not repeat a fix merely because its original finding still says “confirmed.”
@@ -21,8 +21,8 @@ The finding text below is the original audit evidence. It is intentionally retai
 
 - Critical: all 7 closed.
 - High: H-01 through H-44 closed. H-45 was re-audited as a stale false positive because the current udev path already processes connector `Changed` events and rescans/retries surface creation.
-- Medium explicitly re-audited and closed: M-01, M-02, M-04 through M-10, M-12 through M-23, M-25 through M-27, M-30, M-32, and M-34.
-- Medium still open or awaiting a fresh audit: M-03, M-11, M-24, M-28, M-29, M-31, M-33, and M-35 through M-74.
+- Medium explicitly re-audited and closed: M-01, M-02, M-04 through M-10, M-12 through M-23, M-25 through M-30, M-32, and M-34.
+- Medium still open or awaiting a fresh audit: M-03, M-11, M-24, M-31, M-33, and M-35 through M-74.
 - Performance opportunities P-01 through P-10: not worked in this branch unless a closed correctness fix incidentally reduced the same cost. Treat all ten as open until measured and re-audited. P-11 has code fixes in `1089450` and `0f74459` but still needs real-DRM measurement. P-12 has a code fix in `1089450` and awaits real-DRM verification.
 - Lower-confidence items U-01 through U-16: not systematically re-audited. Treat them as investigation tasks, not established bugs.
 - Formatter findings F-01 through F-04: closed.
@@ -87,6 +87,7 @@ The finding text below is the original audit evidence. It is intentionally retai
 | M-25 | `16b86dc` | Replaced strong gamma-control output ownership with Smithay `WeakOutput`, invalidated and failed the current resource on disconnect/transfer/backend failure, and prevented stale requests or destruction from reading FDs, touching hardware, or resetting a newer owner's ramp. Real udev hotplug/gamma-client verification remains pending. |
 | M-26 | `ae0bd4a` | Kept serial-less XDG activation tokens mintable for XWayland/notification compatibility but made them urgency-only. Only fresh same-seat serials grant focus; stale valid-seat requests remain urgent, expired tokens are ignored, and the already active logical window is not marked urgent. This follows current niri and the default Sway/Hyprland policy. |
 | M-27 | `12c95a0` | Retained a swallowed parent's authoritative Classic output/workspace while hidden. If its child closes outside the tree during a zero-output interval, the parent now returns to that dormant owner and is picked up by the existing orphan-output adoption path on reconnect instead of losing its sole `Window` handle. Live child and live fallback ownership keep precedence. |
+| M-28, M-29 | `29ef215` | Prepared stable named-cursor buffers by resolved icon and live Smithay integer asset scale, and made the fallback buffer process-stable, allowing Smithay to reuse renderer imports and element identity. Selection/buffer scale use `Scale::integer_scale()` while placement and bitmap-hotspot conversion retain the exact fractional scale; stale scale variants are pruned on output-management changes and disconnect. Real-udev fractional sharpness, logical-size, and click-hotspot verification remains pending. |
 | M-30 | `9522858` | Removed stopped output-manager head resources without advancing or corrupting shared transaction serials. |
 | M-32 | `3c7d9c7` | Validated Wave environment entries before process mutation, turning names or values that Unix `setenv` rejects into visible config warnings instead of startup panics. Values are redacted from diagnostics, and the mutation boundary repeats the guard for programmatically constructed configs. |
 | M-34 | `0802e99` | Reclaimed bounded accessibility client slots whenever grab/watch/specific-key state becomes empty. Explicit unsubscribe and disconnect also remove only that client from paired-release recipients while keeping physical suppression through the matching release, preventing slot exhaustion without leaking unmatched events. |
@@ -106,7 +107,8 @@ The finding text below is the original audit evidence. It is intentionally retai
 
 ### Validation state
 
-- After `0802e99`, all 14 focused accessibility tests passed, including empty-slot reclamation and unsubscribe-during-keypress coverage; formatting and diff checks passed. The next full all-feature run will cover this milestone.
+- After `29ef215`, `cargo test --all-features --all-targets` passed all 401 compositor tests and all 9 `wavefmt` tests outside the restricted socket sandbox. Strict all-target/all-feature Clippy, formatting, and diff checks passed; this full run also covers M-34.
+- After `0802e99`, all 14 focused accessibility tests passed, including empty-slot reclamation and unsubscribe-during-keypress coverage; formatting and diff checks passed. The later `29ef215` full run covers this milestone too.
 - After `3c7d9c7`, `cargo test --all-features --all-targets` passed all 393 compositor tests and all 9 `wavefmt` tests outside the restricted socket sandbox. Strict all-target/all-feature Clippy, formatting, and diff checks passed.
 - After `ae0bd4a`, `cargo test --all-features --all-targets` passed all 391 compositor tests and all 9 `wavefmt` tests outside the restricted socket sandbox. Strict all-target/all-feature Clippy and formatting passed.
 - After `12c95a0`, `cargo test --all-features --all-targets` passed all 389 compositor tests and all 9 `wavefmt` tests outside the restricted socket sandbox. Strict all-target/all-feature Clippy and formatting passed.
@@ -122,7 +124,7 @@ The finding text below is the original audit evidence. It is intentionally retai
 - After `bf39982`, `cargo test --locked --all-features` passed all 358 compositor tests and all 9 `wavefmt` tests outside the restricted IPC socket sandbox. Strict Clippy and formatting checks also passed.
 - After `d9f5fcc`, `cargo test --locked --all-features` passed all 356 compositor tests and all 6 `wavefmt` tests outside the restricted IPC socket sandbox.
 - `cargo check --locked --all-features` passed after the final Medium batch.
-- Strict all-target/all-feature Clippy has passed through `0.90.52`; the current `0.90.53` accessibility milestone has focused test and formatting coverage and awaits the next full strict run.
+- Strict all-target/all-feature Clippy has passed through the current `0.90.54` implementation head.
 - Capture and geometry regression tests use deliberately arbitrary dimensions. No monitor resolution, refresh rate, GPU vendor, input device, or other configurable/hardware property was introduced as a fixed runtime assumption.
 - Nested and real-DRM validation for the complete audit-fix series is still pending. Automated tests cannot prove mixed-output KMS/VBlank behavior, connector hotplug, rotated physical outputs, VRR, real tablet/touch mapping, or visual feel.
 
