@@ -35,7 +35,7 @@ Underneath the water is a real tiling window manager: fast keyboard-driven layou
 
 - **It actually looks like something.** Ripples on open, wave transitions between workspaces, glass and shadow on your windows, floating windows that drift like they're sitting on water. Every bit of it is a config toggle, and none of it costs you performance you'll notice.
 - **Two ways to work.** Stick with classic numbered workspaces, or switch to Ocean: one endless zoomable canvas where every window lives in real 2D space instead of a workspace number. Switch between them live, no restart.
-- **Runs on what you already own.** As little as ~600MB of RAM with the effects off, scaling up only as far as you actually turn things on.
+- **Runs on what you already own.** Measured at ~60-70MB PSS at idle with the full water stack on, ~63MB with nine frosted-glass windows -- about half of Hyprland on the same hardware -- and it only climbs past that if you turn on more than the defaults.
 - **Genuinely yours.** Every ripple, wave, border, and shadow is a value in a config file, hot-reloaded on save. Nothing about how it looks is hardcoded.
 
 ## Try it
