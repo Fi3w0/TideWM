@@ -873,6 +873,21 @@ pub struct Config {
     /// larger values settle more slowly. `water_effects` is the master
     /// bypass. Matching window rules may override this per app.
     pub viscosity: f64,
+    /// Linear downscale factor for the per-window backdrop capture that
+    /// feeds frost glass, water glass, and layer-shell blur (`backdrop.rs`,
+    /// shared by every reader of `backdrop_textures`). `1` (default)
+    /// captures at the window's native physical size, unchanged from
+    /// before this knob existed. `2` or `4` allocate a texture with
+    /// 1/4 or 1/16 the area -- real VRAM savings on a machine running many
+    /// glass windows at once (see report.md's P-13/P-14 audit entries) --
+    /// at the cost of a softer captured image once magnified back up to
+    /// the window's size. This changes how the identity features look, so
+    /// it defaults to the unchanged behavior rather than picking a value;
+    /// see AGENT.md's render-roadmap note on agreeing feel changes with
+    /// the maintainer before shipping a new default. Clamped to `1..=4`,
+    /// the same range `caustics.rs`'s own precedent (`CAUSTICS_DOWNSCALE`)
+    /// uses for its pattern texture.
+    pub backdrop_capture_scale: i32,
     /// BSP resize pressure propagated through parallel ancestor splits.
     /// `water_effects` is the master bypass; this block can independently
     /// restore the legacy one-split resize path.
@@ -1286,6 +1301,7 @@ impl Config {
             show_config_reload_toast: raw.show_config_reload_toast,
             water_effects: raw.water_effects,
             viscosity: raw.viscosity.clamp(0.0, 4.0),
+            backdrop_capture_scale: raw.backdrop_capture_scale.clamp(1, 4),
             connected_vessels: raw.connected_vessels,
             sway: raw.sway,
             float_physics: raw.float_physics,
@@ -1615,6 +1631,7 @@ struct RawConfig {
     show_config_reload_toast: bool,
     water_effects: bool,
     viscosity: f64,
+    backdrop_capture_scale: i32,
     connected_vessels: ConnectedVesselsConfig,
     sway: SwayConfig,
     float_physics: FloatPhysicsConfig,
@@ -1767,6 +1784,7 @@ impl Default for RawConfig {
             spatial_engine: "classic".to_string(),
             ocean: OceanConfig::default(),
             pointer_modifier: "super".to_string(),
+            backdrop_capture_scale: 1,
             // Deliberately false, not true: a real config.wave always ships
             // with `show_welcome_hint = true` written explicitly (see
             // DEFAULT_CONFIG_WAVE), so this default is only ever consulted
@@ -4132,6 +4150,7 @@ fn is_known_top_level_key(key: &str) -> bool {
             | "reload_toast"
             | "water_effects"
             | "viscosity"
+            | "backdrop_capture_scale"
             | "cursor_always_visible"
             | "cursor_hide_after"
             | "auto_back_and_forth"
@@ -4162,6 +4181,7 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
             Some(value) => raw.viscosity = value,
             None => tracing::warn!(value, "Expected finite viscosity from 0.0 to 4.0, ignoring"),
         },
+        "backdrop_capture_scale" => set_i32(&mut raw.backdrop_capture_scale, key, value),
         "cursor_always_visible" => set_bool(&mut raw.cursor_always_visible, key, value),
         "cursor_hide_after" => {
             if let Some(ms) = parse_duration_ms(value) {
@@ -7451,6 +7471,8 @@ reload_toast = true
 # DOCUMENTATION.md, not repeated here.
 water_effects = true
 viscosity = 1.0                  # 0 turns off drag/resize settling, higher settles slower
+# backdrop_capture_scale = 2     # 1 (default, full detail) to 4; lower the frost/water-glass
+                                  # capture texture's resolution to cut VRAM on many glass windows
 
 # ~~~~~~~~~~~~~~~~~ the layout ~~~~~~~~~~~~~~~~~
 
@@ -8189,6 +8211,7 @@ mod tests {
             show_config_reload_toast: true,
             water_effects: true,
             viscosity: 1.0,
+            backdrop_capture_scale: 1,
             connected_vessels: ConnectedVesselsConfig::default(),
             sway: SwayConfig::default(),
             float_physics: FloatPhysicsConfig::default(),

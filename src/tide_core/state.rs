@@ -5973,11 +5973,14 @@ impl Smallvil {
                 continue;
             };
 
+            let capture_scale = self.config.backdrop_capture_scale;
             let first_capture = !self.backdrop_textures.contains_key(&surface);
             if first_capture {
-                let Some(capture) =
-                    crate::backdrop::BackdropCapture::new(renderer, physical_rect.size)
-                else {
+                let Some(capture) = crate::backdrop::BackdropCapture::new(
+                    renderer,
+                    physical_rect.size,
+                    capture_scale,
+                ) else {
                     continue;
                 };
                 self.backdrop_textures.insert(surface.clone(), capture);
@@ -5985,7 +5988,7 @@ impl Smallvil {
             let Some(capture) = self.backdrop_textures.get_mut(&surface) else {
                 continue;
             };
-            match capture.capture(renderer, physical_rect, &behind) {
+            match capture.capture(renderer, physical_rect, &behind, capture_scale) {
                 Some(true) => {
                     rendered += 1;
                     captured_first_backdrop |= first_capture;
@@ -6075,11 +6078,14 @@ impl Smallvil {
         let mut skipped = 0usize;
         let mut captured_first_backdrop = false;
         for (surface, physical_rect) in surfaces {
+            let capture_scale = self.config.backdrop_capture_scale;
             let first_capture = !self.backdrop_textures.contains_key(&surface);
             if first_capture {
-                let Some(capture) =
-                    crate::backdrop::BackdropCapture::new(renderer, physical_rect.size)
-                else {
+                let Some(capture) = crate::backdrop::BackdropCapture::new(
+                    renderer,
+                    physical_rect.size,
+                    capture_scale,
+                ) else {
                     continue;
                 };
                 self.backdrop_textures.insert(surface.clone(), capture);
@@ -6087,7 +6093,7 @@ impl Smallvil {
             let Some(capture) = self.backdrop_textures.get_mut(&surface) else {
                 continue;
             };
-            match capture.capture(renderer, physical_rect, &behind) {
+            match capture.capture(renderer, physical_rect, &behind, capture_scale) {
                 Some(true) => {
                     rendered += 1;
                     captured_first_backdrop |= first_capture;
