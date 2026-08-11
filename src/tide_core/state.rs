@@ -1453,6 +1453,13 @@ impl Smallvil {
                 self.window_glass_modes.remove(surface);
             }
         }
+        if self
+            .glass_mode_for_surface(surface, self.fullscreen.contains_key(surface))
+            .is_none()
+        {
+            self.backdrop_textures.remove(surface);
+            self.glass_anim.remove(surface);
+        }
     }
 
     fn viscosity_for_surface(&self, surface: &WlSurface) -> f64 {
@@ -7750,6 +7757,8 @@ impl Smallvil {
             if changed {
                 if !was_tiled {
                     self.window_float_ambient.remove(surface);
+                    self.backdrop_textures.remove(surface);
+                    self.glass_anim.remove(surface);
                 }
                 self.retile();
                 self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
@@ -7875,6 +7884,8 @@ impl Smallvil {
             // No longer floating, so no longer needs its own workspace tag.
             self.floating_workspace.remove(surface);
             self.window_float_ambient.remove(surface);
+            self.backdrop_textures.remove(surface);
+            self.glass_anim.remove(surface);
         }
 
         self.retile();
