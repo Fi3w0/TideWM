@@ -926,7 +926,8 @@ pub struct Config {
     pub classic_depth: ClassicDepthConfig,
     /// Shared frosted-glass appearance. A window opts into this shader with
     /// `glass = frost` in its rule; water remains the compatibility default
-    /// for translucent floating windows with no explicit glass choice.
+    /// for translucent windows with no explicit glass choice. Tiled and
+    /// floating placements share the same rule semantics.
     pub frost: FrostConfig,
     /// Water-glass refraction motion: static, disturbance-reactive
     /// (default), or constant ambient drift.
@@ -2261,6 +2262,9 @@ impl WindowOpacity {
 #[derive(Debug, Clone)]
 pub struct FrostConfig {
     pub enabled: bool,
+    /// Optical edge treatment: inward refraction plus a directional glass
+    /// rim. Zero keeps the pre-liquid flat frost treatment.
+    pub liquid: f32,
     /// Sampling radius in physical pixels. Zero keeps the color treatment
     /// but bypasses diffusion.
     pub radius: f32,
@@ -2289,18 +2293,19 @@ impl Default for FrostConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            radius: 12.0,
+            liquid: 0.6,
+            radius: 16.0,
             strength: 1.0,
             opacity: 1.0,
             saturation: 1.0,
-            contrast: 1.0,
-            brightness: 1.0,
-            noise: 0.0,
+            contrast: 0.92,
+            brightness: 1.04,
+            noise: 0.008,
             noise_scale: 1.0,
-            vibrancy: 0.0,
-            vibrancy_darkness: 0.0,
+            vibrancy: 0.16,
+            vibrancy_darkness: 0.35,
             tint_color: [142.0 / 255.0, 221.0 / 255.0, 1.0],
-            tint_alpha: 0.0,
+            tint_alpha: 0.04,
             corner_radius: 0.0,
             corner_softness: 1.0,
         }
@@ -2357,6 +2362,7 @@ impl Default for CausticsConfig {
 #[derive(Debug, Clone, Default)]
 pub struct FrostOverrides {
     pub enabled: Option<bool>,
+    pub liquid: Option<f32>,
     pub radius: Option<f32>,
     pub strength: Option<f32>,
     pub opacity: Option<f32>,
@@ -2377,6 +2383,7 @@ impl FrostOverrides {
     pub fn merge_over(&self, other: &Self) -> Self {
         Self {
             enabled: other.enabled.or(self.enabled),
+            liquid: other.liquid.or(self.liquid),
             radius: other.radius.or(self.radius),
             strength: other.strength.or(self.strength),
             opacity: other.opacity.or(self.opacity),
@@ -2397,6 +2404,7 @@ impl FrostOverrides {
     pub fn apply_to(&self, base: &FrostConfig) -> FrostConfig {
         FrostConfig {
             enabled: self.enabled.unwrap_or(base.enabled),
+            liquid: self.liquid.unwrap_or(base.liquid),
             radius: self.radius.unwrap_or(base.radius),
             strength: self.strength.unwrap_or(base.strength),
             opacity: self.opacity.unwrap_or(base.opacity),
@@ -5688,6 +5696,10 @@ fn apply_frost_override_block(cfg: &mut FrostOverrides, body: &[waves::Entry]) {
                     value,
                     "Expected frost.enabled to be true or false, ignoring"
                 ),
+            },
+            "liquid" | "liquid_strength" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.liquid = Some(value.clamp(0.0, 1.0)),
+                _ => tracing::warn!(value, "Expected frost.liquid from 0 to 1, ignoring"),
             },
             "radius" | "blur_radius" => match value.parse::<f32>() {
                 Ok(value) if value.is_finite() => cfg.radius = Some(value.clamp(0.0, 64.0)),
@@ -9471,6 +9483,7 @@ mod tests {
         let entries = wave_entries(
             "frost {\n\
              enabled = false\n\
+             liquid = 0.7\n\
              radius = 24\n\
              strength = 0.75\n\
              opacity = 0.8\n\
@@ -9504,6 +9517,7 @@ mod tests {
         let config = Config::from_raw(lower_entries(&entries)).0;
 
         assert!(!config.frost.enabled);
+        assert_eq!(config.frost.liquid, 0.7);
         assert_eq!(config.frost.radius, 24.0);
         assert_eq!(config.frost.strength, 0.75);
         assert_eq!(config.frost.opacity, 0.8);

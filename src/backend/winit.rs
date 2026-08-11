@@ -236,7 +236,7 @@ pub fn init_winit(
                 // behind. Same-sized recaptures reuse their window texture.
                 if !locked {
                     let renderer = entry.backend.renderer();
-                    state.capture_floating_backdrops(renderer, &entry.output);
+                    state.capture_window_backdrops(renderer, &entry.output);
                     state.capture_layer_backdrops(renderer, &entry.output);
                 }
 

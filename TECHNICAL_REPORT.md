@@ -14,7 +14,7 @@ Current release: **0.90.0**, second major pre-release. 1.0 is intentionally rese
 - **Two spatial engines**, chosen with `spatial_engine = classic|ocean` and switchable live on a config hot reload, migrating every window in place with no restart.
 - **XWayland** via a spawned [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite) process rather than an embedded X11 window manager, so X11 clients arrive as ordinary `xdg_shell` surfaces.
 - **Render pipeline**: one shared backdrop-capture pipeline feeds water-glass/frost glass, then shadow, then rounding/borders, then window-open/close/move animation. The same element walk feeds live rendering on both backends, screenshots, screencasts, and workspace-transition captures, so effects don't need parallel implementations per output path.
-- **RAM target**: well under 1.5GB in normal use, 3GB is the hard ceiling. Real measurements come in far below that: ~50MB PSS for a plain tiling setup (effects off), ~60-70MB PSS idle and ~63MB with nine glass windows with the full water stack on (real AMD, 0.90.59) -- roughly half of same-machine Hyprland.
+- **RAM target**: effect-scaled with a 2GB absolute ceiling. Real measurements come in far below that: ~50MB PSS for a plain tiling setup (effects off), ~60-70MB PSS idle and ~63MB with nine glass windows with the full water stack on (real AMD, 0.90.59) -- roughly half of same-machine Hyprland.
 
 ## Feature status
 
@@ -30,7 +30,7 @@ Current release: **0.90.0**, second major pre-release. 1.0 is intentionally rese
 | PipeWire screencasting | Done (`--features screencast`), verified end to end via real OBS and Discord on standalone hardware |
 | IPC: request/response plus an event-stream subscribe mode | Done |
 | `tidectl` CLI, including `doctor`/`report` for bug triage | Done |
-| Water/decoration render stack: impulse ripples, wave workspace transitions, water-glass, per-app frosted glass, analytical shadows, animated gradient borders, rounded clipping, configurable window animations, move/resize viscosity, connected-vessel BSP resizing, opt-in floating sway, automatic depth/buoyancy, ambient caustics | Done, nested-verified and standalone-AMD-verified |
+| Water/decoration render stack: impulse ripples, wave workspace transitions, tiled/floating water-glass and per-app liquid frost glass, analytical shadows, animated gradient borders, rounded clipping, configurable window animations, move/resize viscosity, connected-vessel BSP resizing, opt-in floating sway, automatic depth/buoyancy, ambient caustics | Done; tiled/liquid frost is release-GLES nested-verified in Classic/Ocean, standalone AMD remains, and the earlier stack is standalone-AMD-verified |
 | Classic Depth Deck (tiled-window park/swap recall) | Done, standalone-AMD-verified |
 | Ocean spatial engine: reefs, per-output cameras, sink/dredge/surface depth, bookmarks, freeform window detach, smart tiling, live Classic↔Ocean migration | Done, standalone-AMD-verified |
 | Ocean compass (off-screen urgent/deep glow cues) and whole-world overview minimap | Done, nested-verified only |

@@ -659,43 +659,47 @@ depth {
 
 ### `frost { }`
 
-Configures Phase R2 frosted glass. A floating window selects it with `glass = frost` in a matching `rule { }`. The preferred path is client-provided background transparency (for example Kitty’s `background_opacity`): the client keeps text/foreground pixels opaque while TideWM blurs what its transparent background reveals. A TideWM `opacity` rule remains available, but it multiplies the entire surface, including text. For backward compatibility, an `opacity` below `1.0` with no explicit glass mode still selects water refraction. `glass = none` keeps ordinary compositor transparency without a captured-backdrop shader. `water_effects = false` bypasses both modes.
+Configures Phase R2 frosted glass. A tiled or floating window selects it with `glass = frost` in a matching `rule { }`. The preferred path is client-provided background transparency (for example Kitty’s `background_opacity`): the client keeps text/foreground pixels opaque while TideWM blurs what its transparent background reveals. A TideWM `opacity` rule remains available, but it multiplies the entire surface, including text. For backward compatibility, an `opacity` below `1.0` with no explicit glass mode still selects water refraction. `glass = none` keeps ordinary compositor transparency without a captured-backdrop shader. `water_effects = false` bypasses both modes.
 
-The frost shader uses a fixed-cost 25-tap Gaussian kernel over the existing window-sized backdrop capture, followed by adjustable strength, saturation, vibrancy, contrast, brightness, noise, and tint treatment. Changing these values does not allocate more buffers or increase the tap count. Capture runs immediately before the visible output bind so interactive moves sample the current window geometry in the same frame; one reusable ARGB8888 texture is kept per eligible floating window and resized only when the window dimensions change. Every key in this table also works inside a matching `rule { frost { } }` sub-block; omitted per-app keys inherit the global value.
+The frost shader uses a fixed-cost 25-tap Gaussian kernel over the existing window-sized backdrop capture, followed by adjustable strength, saturation, vibrancy, contrast, brightness, noise, and tint treatment. Its `liquid` control adds edge-local inward refraction, a soft top-left highlight, and restrained opposite-edge shade so the material reads as a pane with optical thickness rather than a flat blur. This treatment is inspired by Apple's Liquid Glass material and Hyprland's practical contrast/vibrancy/noise blur controls, but remains a static, bounded shader: changing these values does not allocate more buffers, increase the tap count, or keep an idle output repainting.
+
+Capture runs immediately before the visible output bind so interactive moves sample the current window geometry in the same frame; one reusable ARGB8888 texture is kept per eligible window and resized only when the visible dimensions change. Tiled glass samples the shared behind-scene inside its tile while configured gaps remain untouched. Classic and Ocean use the same placement-aware path, including Ocean camera transforms. Every key in this table also works inside a matching `rule { frost { } }` sub-block; omitted per-app keys inherit the global value.
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | Disables frost windows without changing water glass or their opacity rules. |
-| `radius` | float, `0`–`64` | `12` | Maximum blur reach in physical pixels. `blur_radius` is an alias. Zero disables diffusion. |
+| `liquid` | float, `0`–`1` | `0.6` | Optical edge thickness: local refraction plus directional highlight/shade. `0` disables the liquid rim while retaining ordinary frost. `liquid_strength` is an alias. |
+| `radius` | float, `0`–`64` | `16` | Maximum blur reach in physical pixels. `blur_radius` is an alias. Zero disables diffusion. |
 | `strength` | float, `0`–`1` | `1.0` | Mix of sharp capture to fully diffused result. `blur_strength` and `frost` are aliases. |
 | `opacity` | float, `0`–`1` | `1.0` | Opacity of the processed backdrop layer. Lower values mix the frost with the real, sharp desktop beneath it. `glass_opacity` and `background_opacity` are aliases. This does not change client text/content opacity. |
 | `saturation` | float, `0`–`2` | `1.0` | `0` is grayscale, `1` preserves the captured color, values above `1` increase color. |
-| `contrast` | float, `0`–`2` | `1.0` | Contrast modulation; inspired by Hyprland blur tuning. |
-| `brightness` | float, `0`–`2` | `1.0` | Multiplier applied after saturation. |
-| `noise` | float, `0`–`0.25` | `0.0` | Static grain that can hide banding in smooth blurred gradients. `grain` is an alias. |
+| `contrast` | float, `0`–`2` | `0.92` | Contrast modulation; the slightly softened default follows the practical Hyprland-style material treatment. |
+| `brightness` | float, `0`–`2` | `1.04` | Multiplier applied after saturation. |
+| `noise` | float, `0`–`0.25` | `0.008` | Static grain that can hide banding in smooth blurred gradients. `grain` is an alias. |
 | `noise_scale` | float, `0.25`–`16` | `1.0` | Physical size of the noise cells. `grain_scale` is an alias. |
-| `vibrancy` | float, `0`–`1` | `0.0` | Extra saturation beyond the base `saturation`. |
-| `vibrancy_darkness` | float, `0`–`1` | `0.0` | Biases extra vibrancy toward darker pixels. |
+| `vibrancy` | float, `0`–`1` | `0.16` | Extra saturation beyond the base `saturation`. |
+| `vibrancy_darkness` | float, `0`–`1` | `0.35` | Biases extra vibrancy toward darker pixels. |
 | `tint_color` | color | `8EDDFF` | Optional frost tint. `color` is an alias. It has no effect while `tint_alpha = 0`. |
-| `tint_alpha` | float, `0`–`1` | `0.0` | Strength of the tint mix. The neutral default adds no color layer. |
+| `tint_alpha` | float, `0`–`1` | `0.04` | Strength of the tint mix. The default adds a very light aqua cast; set `0` for neutral glass. |
 | `corner_radius` | float, `0`–`256` | `0` | Rounded clipping radius in physical pixels. `rounding` is an alias. |
 | `corner_softness` | float, `0.25`–`8` | `1.0` | Antialias/feather width at the rounded edge, in physical pixels. |
 
 ```wave
 frost {
     enabled = true
-    radius = 12
+    liquid = 0.6
+    radius = 16
     strength = 1.0
     opacity = 1.0
     saturation = 1.0
-    contrast = 1.0
-    brightness = 1.0
-    noise = 0.0
+    contrast = 0.92
+    brightness = 1.04
+    noise = 0.008
     noise_scale = 1.0
-    vibrancy = 0.0
-    vibrancy_darkness = 0.0
+    vibrancy = 0.16
+    vibrancy_darkness = 0.35
     tint_color = 8EDDFF
-    tint_alpha = 0.0
+    tint_alpha = 0.04
     corner_radius = 0
     corner_softness = 1.0
 }
@@ -1148,7 +1152,7 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 | `active_opacity` | float | Extra multiplier while the window is focused. `focused_opacity` is an alias. |
 | `inactive_opacity` | float | Extra multiplier while the window is unfocused. `unfocused_opacity` is an alias. |
 | `fullscreen_opacity` | float | Extra multiplier while fullscreen; takes priority over active/inactive state. |
-| `glass` | `water`, `frost`, or `none` | Captured-backdrop treatment for a floating window. Explicit `water`/`frost` works with client-provided alpha; when unset, a TideWM `opacity` below `1.0` implicitly selects `water`. `none` preserves plain transparency. `glass_mode` is an alias. |
+| `glass` | `water`, `frost`, or `none` | Captured-backdrop treatment for tiled and floating windows. Explicit `water`/`frost` works with client-provided alpha; when unset, a TideWM `opacity` below `1.0` implicitly selects `water`. `none` preserves plain transparency. Gaps stay unblurred. `glass_mode` is an alias. |
 | `viscosity` | float, `0`–`4` | Per-app interactive move/resize damping. Last matching rule wins; `0` disables it for the matched app. |
 | `sway` | bool | Per-app opt-in/out for floating sway. Last matching rule wins; unset falls back to `sway.enabled`. |
 | `depth` | bool | Per-app buoyancy override for the automatic depth/attention system. `false` pins the window at tier 0 forever (never dims/sinks); `true` affirms the normal automatic behavior. Last matching rule wins; unset falls back to `depth.enabled`. |

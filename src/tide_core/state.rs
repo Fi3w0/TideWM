@@ -5945,18 +5945,17 @@ impl Smallvil {
         ))
     }
 
-    /// Captures the backdrop behind every currently-visible floating window
-    /// on `output` into `backdrop_textures` immediately before the visible
-    /// output bind. Gated on `water_effects`, the master toggle for this
-    /// whole roadmap. Water and frost glass sample the stored texture while
-    /// building that same visible frame.
+    /// Captures the backdrop behind every currently-visible window whose
+    /// resolved rule selects water/frost glass (or whose compositor opacity
+    /// implicitly selects water glass). This includes tiled placements in
+    /// both Classic and Ocean: a tile samples the wallpaper and below-window
+    /// effects inside its own visible rect. The gaps remain untouched.
     ///
-    /// Tiled windows are deliberately out of scope here: they tile edge to
-    /// edge, so "what's behind" one is either another tile (visually
-    /// uninteresting to refract) or nothing this pass has a reason to
-    /// capture yet. Floating windows overlapping other content are the
-    /// case this effect is actually for.
-    pub(crate) fn capture_floating_backdrops(
+    /// Eligibility is config-driven rather than placement-driven, so an
+    /// ordinary opaque tile allocates no capture. Gated on `water_effects`,
+    /// the master toggle for this whole roadmap. Water and frost glass
+    /// sample the stored texture while building that same visible frame.
+    pub(crate) fn capture_window_backdrops(
         &mut self,
         renderer: &mut GlesRenderer,
         output: &Output,
@@ -5970,7 +5969,7 @@ impl Smallvil {
         };
         let surfaces: Vec<WlSurface> = placements
             .iter()
-            .filter(|placement| placement.replacement_eligible() && placement.is_floating())
+            .filter(|placement| placement.replacement_eligible())
             .filter_map(|placement| {
                 let surface = placement.surface()?;
                 (self
@@ -5990,9 +5989,9 @@ impl Smallvil {
         // One shared behind-list per output, not one rebuild per glass
         // window: `capture` translates it into each window's own texture
         // space itself. Every glass surface is skipped, so a window never
-        // captures itself -- and two overlapping glass windows now read
-        // what's below the pair rather than each other's raw surfaces,
-        // which is the trade that makes the shared list possible.
+        // captures itself -- and two overlapping glass windows read what's
+        // below the pair rather than each other's raw surfaces, which is
+        // the trade that makes the shared list possible.
         let Some(space_elements) = self.desktop_render_elements(
             renderer,
             output,
@@ -6003,12 +6002,6 @@ impl Smallvil {
         ) else {
             return;
         };
-        // Front-to-back, index 0 topmost: the windows come first and the
-        // wallpaper goes last, the same order the visible frame uses.
-        // Pushing the wallpaper first put it *on top of* every window in
-        // the captured texture -- the glass then sampled a texture that
-        // was nothing but wallpaper, which read as "the aqua wave only
-        // shows the background and ignores everything else."
         let behind: Vec<crate::backend::udev::OutputRenderElements> = space_elements
             .into_iter()
             .chain(
@@ -6059,7 +6052,7 @@ impl Smallvil {
             output = output.name(),
             rendered,
             skipped,
-            "Floating backdrop captures"
+            "Window backdrop captures"
         );
         // The frame that triggered the first capture could otherwise be the
         // last dirty frame on a static desktop. Schedule exactly one more so
@@ -6070,7 +6063,7 @@ impl Smallvil {
         }
     }
 
-    /// The layer-shell analog of `capture_floating_backdrops`: captures a
+    /// The layer-shell analog of `capture_window_backdrops`: captures a
     /// backdrop for each currently-mapped layer surface resolving
     /// `layer_rule { blur = true }`, reusing the exact same
     /// `backdrop_textures` map windows populate -- keys are `WlSurface`s
@@ -6171,13 +6164,13 @@ impl Smallvil {
         }
     }
 
-    /// Floating windows on `output` eligible for a captured glass layer this
-    /// frame: `water_effects` on, either an explicit `glass` mode or the
+    /// Windows on `output` eligible for a captured glass layer this frame:
+    /// `water_effects` on, either an explicit `glass` mode or the
     /// backward-compatible implicit trigger (`opacity` below 1.0 means
-    /// water), and a backdrop already captured for them. Callers pass this
-    /// list to `desktop_render_elements`'s `skip`
-    /// so these windows are pulled out of their normal z-slot, then use
-    /// `glass_frame_elements` to build what replaces them.
+    /// water), and a backdrop already captured for them. Tiled and floating
+    /// placements share this path; ordinary opaque tiles never enter it.
+    /// Callers use this list to build glass layers that are inserted directly
+    /// behind each surface in its normal z-slot.
     pub(crate) fn glass_eligible_surfaces(
         &self,
         placements: &[crate::placement::PlacedWindow],
@@ -6187,7 +6180,7 @@ impl Smallvil {
         }
         placements
             .iter()
-            .filter(|placement| placement.replacement_eligible() && placement.is_floating())
+            .filter(|placement| placement.replacement_eligible())
             .filter_map(|placement| {
                 let surface = placement.surface()?;
                 (self
@@ -7757,8 +7750,6 @@ impl Smallvil {
             if changed {
                 if !was_tiled {
                     self.window_float_ambient.remove(surface);
-                    self.backdrop_textures.remove(surface);
-                    self.glass_anim.remove(surface);
                 }
                 self.retile();
                 self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
@@ -7884,8 +7875,6 @@ impl Smallvil {
             // No longer floating, so no longer needs its own workspace tag.
             self.floating_workspace.remove(surface);
             self.window_float_ambient.remove(surface);
-            self.backdrop_textures.remove(surface);
-            self.glass_anim.remove(surface);
         }
 
         self.retile();

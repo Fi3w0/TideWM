@@ -3,9 +3,11 @@
 //! Unlike water glass, which offsets one sharp sample, frost diffuses the
 //! captured backdrop with a bounded 25-tap Gaussian kernel and then applies
 //! adjustable strength, opacity, saturation, contrast, brightness, grain,
-//! vibrancy, tint, and rounded clipping. The capture is window-sized and
-//! reused from `backdrop.rs`; this pass allocates no additional textures per
-//! frame.
+//! vibrancy, tint, and rounded clipping. A bounded liquid treatment adds
+//! edge-local refraction and a directional luminous rim, giving the blurred
+//! material optical thickness without another texture or animation clock.
+//! The capture is window-sized and reused from `backdrop.rs`; this pass
+//! allocates no additional textures per frame.
 
 use smithay::{
     backend::renderer::{
@@ -43,6 +45,7 @@ uniform sampler2D tex;
 uniform float alpha;
 uniform vec2 u_texel;
 uniform vec2 u_size;
+uniform float u_liquid;
 uniform float u_radius;
 uniform float u_strength;
 uniform float u_saturation;
@@ -63,8 +66,8 @@ varying vec2 v_coords;
 uniform float tint;
 #endif
 
-vec4 sample_clamped(vec2 offset) {
-    return texture2D(tex, clamp(v_coords + offset, 0.0, 1.0));
+vec4 sample_clamped(vec2 origin, vec2 offset) {
+    return texture2D(tex, clamp(origin + offset, 0.0, 1.0));
 }
 
 float grain(vec2 point) {
@@ -104,10 +107,34 @@ float rounded_mask() {
 }
 
 void main() {
+    vec2 point = v_coords * u_size;
+    vec2 edge_pair = min(point, u_size - point);
+    float edge_distance = min(edge_pair.x, edge_pair.y);
+    float rim_width = clamp(min(u_size.x, u_size.y) * 0.04, 4.0, 18.0);
+    float rim = 1.0 - smoothstep(0.0, rim_width, edge_distance);
+
+    // Pick the closest outward edge normal. Near a corner both axes
+    // contribute, producing a diagonal normal instead of a hard seam.
+    float corner_mix = 1.0 - smoothstep(0.0, rim_width, abs(edge_pair.x - edge_pair.y));
+    vec2 horizontal = vec2(point.x < u_size.x * 0.5 ? -1.0 : 1.0, 0.0);
+    vec2 vertical = vec2(0.0, point.y < u_size.y * 0.5 ? -1.0 : 1.0);
+    vec2 primary = edge_pair.x < edge_pair.y ? horizontal : vertical;
+    vec2 diagonal = normalize(horizontal + vertical);
+    vec2 edge_normal = normalize(mix(primary, diagonal, corner_mix));
+
+    // An inward sample shift makes the rim behave like a thicker curved
+    // pane. It is confined to the edge, so text-area blur remains calm and
+    // the effect costs no persistent animation redraw.
+    vec2 refracted_coords = clamp(
+        v_coords - edge_normal * u_texel * (2.0 + 4.0 * u_liquid) * rim * u_liquid,
+        0.0,
+        1.0
+    );
+
     // The outer axial taps sit at 2x step, so half-radius here keeps the
     // configured value equal to the kernel's maximum physical reach.
     vec2 step_uv = u_texel * u_radius * 0.5;
-    vec4 original = texture2D(tex, v_coords);
+    vec4 original = texture2D(tex, refracted_coords);
     vec4 blurred;
     if (u_radius < 0.01) {
         blurred = original;
@@ -115,35 +142,35 @@ void main() {
         // Separable [1 4 6 4 1] Gaussian weights expanded into one fixed
         // 5x5 pass. Unlike a sparse radial kernel, adjacent samples overlap
         // across both axes instead of producing visible duplicate images.
-        blurred  = sample_clamped(vec2(-2.0 * step_uv.x, -2.0 * step_uv.y)) * 0.00390625;
-        blurred += sample_clamped(vec2(-1.0 * step_uv.x, -2.0 * step_uv.y)) * 0.015625;
-        blurred += sample_clamped(vec2( 0.0,              -2.0 * step_uv.y)) * 0.0234375;
-        blurred += sample_clamped(vec2( 1.0 * step_uv.x, -2.0 * step_uv.y)) * 0.015625;
-        blurred += sample_clamped(vec2( 2.0 * step_uv.x, -2.0 * step_uv.y)) * 0.00390625;
+        blurred  = sample_clamped(refracted_coords, vec2(-2.0 * step_uv.x, -2.0 * step_uv.y)) * 0.00390625;
+        blurred += sample_clamped(refracted_coords, vec2(-1.0 * step_uv.x, -2.0 * step_uv.y)) * 0.015625;
+        blurred += sample_clamped(refracted_coords, vec2( 0.0,              -2.0 * step_uv.y)) * 0.0234375;
+        blurred += sample_clamped(refracted_coords, vec2( 1.0 * step_uv.x, -2.0 * step_uv.y)) * 0.015625;
+        blurred += sample_clamped(refracted_coords, vec2( 2.0 * step_uv.x, -2.0 * step_uv.y)) * 0.00390625;
 
-        blurred += sample_clamped(vec2(-2.0 * step_uv.x, -1.0 * step_uv.y)) * 0.015625;
-        blurred += sample_clamped(vec2(-1.0 * step_uv.x, -1.0 * step_uv.y)) * 0.0625;
-        blurred += sample_clamped(vec2( 0.0,              -1.0 * step_uv.y)) * 0.09375;
-        blurred += sample_clamped(vec2( 1.0 * step_uv.x, -1.0 * step_uv.y)) * 0.0625;
-        blurred += sample_clamped(vec2( 2.0 * step_uv.x, -1.0 * step_uv.y)) * 0.015625;
+        blurred += sample_clamped(refracted_coords, vec2(-2.0 * step_uv.x, -1.0 * step_uv.y)) * 0.015625;
+        blurred += sample_clamped(refracted_coords, vec2(-1.0 * step_uv.x, -1.0 * step_uv.y)) * 0.0625;
+        blurred += sample_clamped(refracted_coords, vec2( 0.0,              -1.0 * step_uv.y)) * 0.09375;
+        blurred += sample_clamped(refracted_coords, vec2( 1.0 * step_uv.x, -1.0 * step_uv.y)) * 0.0625;
+        blurred += sample_clamped(refracted_coords, vec2( 2.0 * step_uv.x, -1.0 * step_uv.y)) * 0.015625;
 
-        blurred += sample_clamped(vec2(-2.0 * step_uv.x, 0.0)) * 0.0234375;
-        blurred += sample_clamped(vec2(-1.0 * step_uv.x, 0.0)) * 0.09375;
-        blurred += sample_clamped(vec2( 0.0,              0.0)) * 0.140625;
-        blurred += sample_clamped(vec2( 1.0 * step_uv.x, 0.0)) * 0.09375;
-        blurred += sample_clamped(vec2( 2.0 * step_uv.x, 0.0)) * 0.0234375;
+        blurred += sample_clamped(refracted_coords, vec2(-2.0 * step_uv.x, 0.0)) * 0.0234375;
+        blurred += sample_clamped(refracted_coords, vec2(-1.0 * step_uv.x, 0.0)) * 0.09375;
+        blurred += sample_clamped(refracted_coords, vec2( 0.0,              0.0)) * 0.140625;
+        blurred += sample_clamped(refracted_coords, vec2( 1.0 * step_uv.x, 0.0)) * 0.09375;
+        blurred += sample_clamped(refracted_coords, vec2( 2.0 * step_uv.x, 0.0)) * 0.0234375;
 
-        blurred += sample_clamped(vec2(-2.0 * step_uv.x, 1.0 * step_uv.y)) * 0.015625;
-        blurred += sample_clamped(vec2(-1.0 * step_uv.x, 1.0 * step_uv.y)) * 0.0625;
-        blurred += sample_clamped(vec2( 0.0,              1.0 * step_uv.y)) * 0.09375;
-        blurred += sample_clamped(vec2( 1.0 * step_uv.x, 1.0 * step_uv.y)) * 0.0625;
-        blurred += sample_clamped(vec2( 2.0 * step_uv.x, 1.0 * step_uv.y)) * 0.015625;
+        blurred += sample_clamped(refracted_coords, vec2(-2.0 * step_uv.x, 1.0 * step_uv.y)) * 0.015625;
+        blurred += sample_clamped(refracted_coords, vec2(-1.0 * step_uv.x, 1.0 * step_uv.y)) * 0.0625;
+        blurred += sample_clamped(refracted_coords, vec2( 0.0,              1.0 * step_uv.y)) * 0.09375;
+        blurred += sample_clamped(refracted_coords, vec2( 1.0 * step_uv.x, 1.0 * step_uv.y)) * 0.0625;
+        blurred += sample_clamped(refracted_coords, vec2( 2.0 * step_uv.x, 1.0 * step_uv.y)) * 0.015625;
 
-        blurred += sample_clamped(vec2(-2.0 * step_uv.x, 2.0 * step_uv.y)) * 0.00390625;
-        blurred += sample_clamped(vec2(-1.0 * step_uv.x, 2.0 * step_uv.y)) * 0.015625;
-        blurred += sample_clamped(vec2( 0.0,              2.0 * step_uv.y)) * 0.0234375;
-        blurred += sample_clamped(vec2( 1.0 * step_uv.x, 2.0 * step_uv.y)) * 0.015625;
-        blurred += sample_clamped(vec2( 2.0 * step_uv.x, 2.0 * step_uv.y)) * 0.00390625;
+        blurred += sample_clamped(refracted_coords, vec2(-2.0 * step_uv.x, 2.0 * step_uv.y)) * 0.00390625;
+        blurred += sample_clamped(refracted_coords, vec2(-1.0 * step_uv.x, 2.0 * step_uv.y)) * 0.015625;
+        blurred += sample_clamped(refracted_coords, vec2( 0.0,              2.0 * step_uv.y)) * 0.0234375;
+        blurred += sample_clamped(refracted_coords, vec2( 1.0 * step_uv.x, 2.0 * step_uv.y)) * 0.015625;
+        blurred += sample_clamped(refracted_coords, vec2( 2.0 * step_uv.x, 2.0 * step_uv.y)) * 0.00390625;
     }
 
     vec4 color = mix(original, blurred, u_strength);
@@ -155,6 +182,15 @@ void main() {
     color.rgb *= u_brightness;
     color.rgb += vec3((grain(gl_FragCoord.xy) - 0.5) * 2.0 * u_noise);
     color.rgb = mix(color.rgb, u_tint_color, u_tint_alpha);
+
+    // A stationary top-left key light and a restrained opposite-edge shade
+    // make the refracted band readable as a glass rim. Because both are
+    // geometry-derived, a static desktop remains damage-idle.
+    vec2 light_direction = normalize(vec2(-0.72, -0.69));
+    float highlight = pow(max(dot(edge_normal, light_direction), 0.0), 1.5);
+    float shade = pow(max(dot(edge_normal, -light_direction), 0.0), 1.5);
+    color.rgb += vec3(rim * u_liquid * (0.025 + 0.16 * highlight));
+    color.rgb *= 1.0 - rim * u_liquid * 0.055 * shade;
     color.rgb = clamp(color.rgb, 0.0, 1.0);
 
 #if defined(NO_ALPHA)
@@ -186,6 +222,7 @@ pub fn frost_glass_program(
         &[
             UniformName::new("u_texel", UniformType::_2f),
             UniformName::new("u_size", UniformType::_2f),
+            UniformName::new("u_liquid", UniformType::_1f),
             UniformName::new("u_radius", UniformType::_1f),
             UniformName::new("u_strength", UniformType::_1f),
             UniformName::new("u_saturation", UniformType::_1f),
@@ -230,6 +267,7 @@ pub fn frost_glass_commit(
     capture_version.hash(&mut hash);
     for value in [
         config.radius,
+        config.liquid,
         config.strength,
         config.saturation,
         config.contrast,
@@ -351,6 +389,7 @@ impl RenderElement<GlesRenderer> for FrostGlassElement {
                     ],
                 ),
                 Uniform::new("u_radius", self.config.radius),
+                Uniform::new("u_liquid", self.config.liquid),
                 Uniform::new("u_strength", self.config.strength),
                 Uniform::new("u_saturation", self.config.saturation),
                 Uniform::new("u_contrast", self.config.contrast),
@@ -380,6 +419,7 @@ mod tests {
         assert!(FROST_GLASS_FRAGMENT_SHADER.contains("uniform float alpha"));
         assert!(FROST_GLASS_FRAGMENT_SHADER.contains("uniform vec2 u_texel"));
         assert!(FROST_GLASS_FRAGMENT_SHADER.contains("uniform float u_strength"));
+        assert!(FROST_GLASS_FRAGMENT_SHADER.contains("uniform float u_liquid"));
         assert!(FROST_GLASS_FRAGMENT_SHADER.contains("uniform float u_noise"));
         assert!(FROST_GLASS_FRAGMENT_SHADER.contains("uniform vec4 u_corner_radii"));
         assert!(FROST_GLASS_FRAGMENT_SHADER.contains("uniform float u_rounding_power"));
@@ -418,6 +458,16 @@ mod tests {
         let config = FrostConfig::default();
         let mut changed = config.clone();
         changed.strength = 0.25;
+        let before = frost_glass_commit(2, &config, [6.0; 4], 2.0, 1.0);
+        let after = frost_glass_commit(2, &changed, [6.0; 4], 2.0, 1.0);
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn frost_glass_commit_advances_on_liquid_change() {
+        let config = FrostConfig::default();
+        let mut changed = config.clone();
+        changed.liquid = 0.0;
         let before = frost_glass_commit(2, &config, [6.0; 4], 2.0, 1.0);
         let after = frost_glass_commit(2, &changed, [6.0; 4], 2.0, 1.0);
         assert_ne!(before, after);

@@ -1374,7 +1374,7 @@ fn render_surface(
     // made interactive moves visibly trail and flicker. Same-sized captures
     // reuse their existing window texture.
     if !locked {
-        state.capture_floating_backdrops(renderer, output);
+        state.capture_window_backdrops(renderer, output);
         state.capture_layer_backdrops(renderer, output);
     }
     let size = output.current_mode().map(|m| m.size).unwrap_or_default();
