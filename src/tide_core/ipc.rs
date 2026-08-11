@@ -354,13 +354,12 @@ pub(crate) struct IpcSubscriber {
 /// delivery to a wedged client, see AGENT.md's RAM constraint.
 pub(crate) const SUBSCRIBER_PENDING_CAP: usize = 256 * 1024;
 
-/// Periodic flush interval. Matches the frame budget (60Hz) so a bar
+/// Retry flush interval. Matches the frame budget (60Hz) so a bar
 /// widget reacting to a workspace switch lands its update in the same
 /// frame the user sees the new workspace. Fast subscribers (the common
-/// case) are already drained inline by `emit_ipc_event` -- this timer is
-/// the retry path for subscribers whose kernel write buffer was full at
-/// emit time.
-const FLUSH_INTERVAL: Duration = Duration::from_millis(16);
+/// case) are already drained inline by `emit_ipc_event`; the one-shot timer
+/// is armed only when a subscriber's kernel write buffer was full.
+pub(crate) const FLUSH_INTERVAL: Duration = Duration::from_millis(16);
 
 impl IpcSubscriber {
     /// Non-blocking write of as much of `pending` as the kernel will take.
@@ -448,24 +447,6 @@ pub fn init(event_loop: &mut EventLoop<Smallvil>) -> std::io::Result<SocketGuard
                 // whole calloop dispatch (and with it, the compositor)
                 // over a single bad IPC accept.
                 Ok(PostAction::Continue)
-            },
-        )
-        .map_err(|err| std::io::Error::other(err.to_string()))?;
-
-    // Periodic subscriber flush. The fast path (write buffer not full at
-    // emit time) is already handled inline inside `emit_ipc_event`; this
-    // timer is the retry path for subscribers whose kernel write buffer
-    // was momentarily full, and also the probe that retires a wedged
-    // subscriber once its pending cap is exceeded. Re-arms itself on the
-    // same interval rather than using `Timer::immediate()` so an idle
-    // compositor with no subscribers costs one short wakeup per frame --
-    // the same cost both backends' own redraw-timer already pays.
-    loop_handle
-        .insert_source(
-            Timer::from_duration(FLUSH_INTERVAL),
-            |_, _, state: &mut Smallvil| {
-                state.flush_ipc_subscribers();
-                TimeoutAction::ToDuration(FLUSH_INTERVAL)
             },
         )
         .map_err(|err| std::io::Error::other(err.to_string()))?;
@@ -677,6 +658,7 @@ fn register_subscriber(
         // timer is the retry path if the kernel buffer was full.
         sub.try_flush();
     }
+    state.arm_ipc_flush_timer();
 
     // EOF watcher on the cloned read side. Any data the client sends after
     // the initial subscribe request is silently drained -- the protocol is

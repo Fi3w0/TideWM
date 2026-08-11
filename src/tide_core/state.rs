@@ -43,7 +43,7 @@ use smithay::{
         calloop::{
             generic::Generic,
             timer::{TimeoutAction, Timer},
-            EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction,
+            EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction, RegistrationToken,
         },
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{
@@ -287,6 +287,10 @@ pub struct Smallvil {
     /// early-return on every state change. See `ipc::IpcSubscriber` for
     /// the per-connection fields and lifecycle.
     pub(crate) ipc_subscribers: HashMap<usize, crate::ipc::IpcSubscriber>,
+    /// One-shot retry timer for subscriber bytes that did not fit in the
+    /// kernel socket buffer. `None` during the normal fully-drained state, so
+    /// IPC adds no periodic wakeup to an idle compositor.
+    pub(crate) ipc_flush_token: Option<RegistrationToken>,
     /// Next subscriber id. Monotonic across the process lifetime rather
     /// than recycled, so a stale reference inside an in-flight calloop
     /// callback can't accidentally target a fresh subscriber that reused
@@ -2812,7 +2816,7 @@ impl Smallvil {
     /// (the borrow-checker-friendly shared-borrow path through
     /// `IpcEvent::to_json_line`), then appended to each subscriber's
     /// `pending` deque with an inline `try_flush` so a healthy subscriber
-    /// gets sub-millisecond latency without waiting on the periodic timer.
+    /// gets sub-millisecond latency without waiting on the retry timer.
     /// A subscriber whose `pending` exceeds `SUBSCRIBER_PENDING_CAP` after
     /// the attempt is retired via `remove_ipc_subscriber` -- bounded
     /// memory wins over best-effort delivery to a wedged client.
@@ -2851,12 +2855,12 @@ impl Smallvil {
         for id in to_drop {
             self.remove_ipc_subscriber(id);
         }
+        self.arm_ipc_flush_timer();
     }
 
-    /// Periodic retry path for subscribers whose kernel write buffer was
-    /// full at `emit_ipc_event` time. Registered as a recurring 16ms
-    /// `Timer` in `ipc::init`. Also retires any subscriber flagged for
-    /// removal mid-emit (peer-closed or cap-exceeded).
+    /// Retry path for subscribers whose kernel write buffer was full at
+    /// `emit_ipc_event` time. Also retires any subscriber flagged for removal
+    /// mid-emit (peer-closed or cap-exceeded).
     pub(crate) fn flush_ipc_subscribers(&mut self) {
         if self.ipc_subscribers.is_empty() {
             return;
@@ -2873,6 +2877,41 @@ impl Smallvil {
         }
         for id in to_drop {
             self.remove_ipc_subscriber(id);
+        }
+    }
+
+    /// Arms the subscriber retry timer only while at least one socket has
+    /// unwritten bytes. Healthy subscribers flush inline and never reach this
+    /// path, keeping the compositor event loop quiescent when IPC is idle.
+    pub(crate) fn arm_ipc_flush_timer(&mut self) {
+        if self.ipc_flush_token.is_some()
+            || !self
+                .ipc_subscribers
+                .values()
+                .any(|subscriber| !subscriber.pending.is_empty())
+        {
+            return;
+        }
+
+        let loop_handle = self.loop_handle.clone();
+        match loop_handle.insert_source(
+            Timer::from_duration(crate::ipc::FLUSH_INTERVAL),
+            |_, _, state: &mut Smallvil| {
+                state.flush_ipc_subscribers();
+                if state
+                    .ipc_subscribers
+                    .values()
+                    .any(|subscriber| !subscriber.pending.is_empty())
+                {
+                    TimeoutAction::ToDuration(crate::ipc::FLUSH_INTERVAL)
+                } else {
+                    state.ipc_flush_token = None;
+                    TimeoutAction::Drop
+                }
+            },
+        ) {
+            Ok(token) => self.ipc_flush_token = Some(token),
+            Err(err) => tracing::warn!(%err, "Failed to arm IPC subscriber flush timer"),
         }
     }
 
@@ -3187,6 +3226,7 @@ impl Smallvil {
             helper_keys_down: HashSet::new(),
 
             ipc_subscribers: HashMap::new(),
+            ipc_flush_token: None,
             next_ipc_subscriber_id: 1,
 
             layout: {
