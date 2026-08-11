@@ -496,6 +496,7 @@ pub fn init_udev(
             state.update_urgent_pulses();
             state.update_float_physics_full();
             state.update_currents();
+            state.update_buoyancy();
             let retries = render_requested_surfaces(state, &device_for_redraw);
             for (crtc, delay) in retries {
                 schedule_empty_frame_retry(
@@ -662,6 +663,7 @@ pub fn init_udev(
                         state.update_urgent_pulses();
                         state.update_float_physics_full();
                         state.update_currents();
+                        state.update_buoyancy();
                         render_surface(state, surface, &mut renderer.borrow_mut())
                             .map(|delay| (crtc, delay))
                     } else {
@@ -806,6 +808,7 @@ pub fn init_udev(
             state.update_urgent_pulses();
             state.update_float_physics_full();
             state.update_currents();
+            state.update_buoyancy();
             let caustics_delay = state.caustics_redraw_delay();
             if caustics_delay.is_some_and(|delay| delay.is_zero()) {
                 state.request_redraw();

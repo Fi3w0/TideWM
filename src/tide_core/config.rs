@@ -354,6 +354,35 @@ impl Default for CurrentsConfig {
     }
 }
 
+/// Render-only apparent weight for floating windows in both spatial engines.
+/// Stable windows consume no frames: a small per-window transition exists
+/// only while focus/direct manipulation changes how far the floater sinks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BuoyancyConfig {
+    pub enabled: bool,
+    /// Weight inherited by a window without a matching `rule { weight }`.
+    pub default_weight: f32,
+    /// Downward screen-space displacement at weight 1, logical pixels.
+    pub max_sink: f32,
+    /// Approximate time for focus/drag transitions to settle.
+    pub settle_ms: u32,
+    /// Ocean-only reduction applied to currents and floating physics at
+    /// weight 1. A value of 1 removes all flow response; 0 changes none.
+    pub flow_reduction: f32,
+}
+
+impl Default for BuoyancyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default_weight: 0.35,
+            max_sink: 18.0,
+            settle_ms: 240,
+            flow_reduction: 0.65,
+        }
+    }
+}
+
 /// How the water-glass refraction distortion moves over time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GlassAnimation {
@@ -928,6 +957,9 @@ pub struct Config {
     /// Ocean-only downstream drift for unfocused floating windows. Opt-in,
     /// render-only, and paused while a window is focused or dragged.
     pub currents: CurrentsConfig,
+    /// Apparent weight for floating windows in Classic and Ocean. Opt-in and
+    /// render-only; Ocean additionally attenuates currents/physics by weight.
+    pub buoyancy: BuoyancyConfig,
     /// Continuous lateral "swim" between workspaces (spatial roadmap S0).
     /// Bypassed by the `water_effects` master toggle; when off, workspace
     /// navigation is the ordinary discrete switch.
@@ -1339,6 +1371,7 @@ impl Config {
             sway: raw.sway,
             float_physics: raw.float_physics,
             currents: raw.currents,
+            buoyancy: raw.buoyancy,
             swim: raw.swim,
             compass: raw.compass,
             minimap: raw.minimap,
@@ -1508,6 +1541,9 @@ impl Config {
             if rule.float_physics.is_some() {
                 effective.float_physics = rule.float_physics;
             }
+            if rule.weight.is_some() {
+                effective.weight = rule.weight;
+            }
             if rule.depth.is_some() {
                 effective.depth = rule.depth;
             }
@@ -1671,6 +1707,7 @@ struct RawConfig {
     sway: SwayConfig,
     float_physics: FloatPhysicsConfig,
     currents: CurrentsConfig,
+    buoyancy: BuoyancyConfig,
     swim: SwimConfig,
     compass: CompassConfig,
     minimap: MinimapConfig,
@@ -1836,6 +1873,7 @@ impl Default for RawConfig {
             sway: SwayConfig::default(),
             float_physics: FloatPhysicsConfig::default(),
             currents: CurrentsConfig::default(),
+            buoyancy: BuoyancyConfig::default(),
             swim: SwimConfig::default(),
             compass: CompassConfig::default(),
             minimap: MinimapConfig::default(),
@@ -2217,6 +2255,9 @@ pub struct WindowRule {
     /// `float_physics { tier }` value. When resolved `light` or `full`, it
     /// takes over from `sway` for that window -- the two never stack.
     pub float_physics: Option<FloatPhysicsTier>,
+    /// Apparent render-only weight for a floating window, from fully light
+    /// (`0`) to fully heavy (`1`). Last matching rule wins.
+    pub weight: Option<f32>,
     /// Per-app buoyancy override for the automatic depth/attention system
     /// (Phase R1). `Some(false)` pins the matched window at tier zero
     /// forever -- it never dims or sinks regardless of inactivity, useful
@@ -4315,6 +4356,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "sway" => apply_sway_block(&mut raw.sway, body),
         "physics" => apply_float_physics_block(&mut raw.float_physics, body),
         "currents" => apply_currents_block(&mut raw.currents, body),
+        "buoyancy" => apply_buoyancy_block(&mut raw.buoyancy, body),
         "swim" => apply_swim_block(&mut raw.swim, body),
         "compass" => apply_compass_block(&mut raw.compass, body),
         "minimap" => apply_minimap_block(&mut raw.minimap, body),
@@ -5233,6 +5275,41 @@ fn apply_currents_block(cfg: &mut CurrentsConfig, body: &[waves::Entry]) {
                 _ => tracing::warn!(value, "Expected currents.period from 1s to 120s, ignoring"),
             },
             other => tracing::warn!(key = %other, "Unknown key in `currents` block, ignoring"),
+        }
+    }
+}
+
+fn apply_buoyancy_block(cfg: &mut BuoyancyConfig, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `buoyancy` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "enabled" => set_bool(&mut cfg.enabled, key, value),
+            "default_weight" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.default_weight = value.clamp(0.0, 1.0),
+                _ => tracing::warn!(
+                    value,
+                    "Expected buoyancy.default_weight from 0 to 1, ignoring"
+                ),
+            },
+            "max_sink" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.max_sink = value.clamp(0.0, 64.0),
+                _ => tracing::warn!(value, "Expected buoyancy.max_sink from 0 to 64, ignoring"),
+            },
+            "settle" => match parse_duration_ms(value) {
+                Some(value) if value <= 5_000 => cfg.settle_ms = value,
+                _ => tracing::warn!(value, "Expected buoyancy.settle from 0ms to 5s, ignoring"),
+            },
+            "flow_reduction" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.flow_reduction = value.clamp(0.0, 1.0),
+                _ => tracing::warn!(
+                    value,
+                    "Expected buoyancy.flow_reduction from 0 to 1, ignoring"
+                ),
+            },
+            other => tracing::warn!(key = %other, "Unknown key in `buoyancy` block, ignoring"),
         }
     }
 }
@@ -6822,6 +6899,10 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                         "Expected a rule float_physics tier: off light full, ignoring"
                     ),
                 },
+                "weight" => match value.parse::<f32>() {
+                    Ok(value) if value.is_finite() => rule.weight = Some(value.clamp(0.0, 1.0)),
+                    _ => tracing::warn!(value, "Expected rule weight from 0 to 1, ignoring"),
+                },
                 "depth" => set_opt_bool(&mut rule.depth, key, value),
                 "shadow" => match value.as_str() {
                     "true" | "on" => {
@@ -8401,6 +8482,7 @@ mod tests {
             sway: SwayConfig::default(),
             float_physics: FloatPhysicsConfig::default(),
             currents: CurrentsConfig::default(),
+            buoyancy: BuoyancyConfig::default(),
             swim: SwimConfig::default(),
             compass: CompassConfig::default(),
             minimap: MinimapConfig::default(),
@@ -9333,6 +9415,46 @@ mod tests {
         assert_eq!(numeric.currents.direction_degrees, 315.0);
 
         assert_eq!(parse_default_config().currents, CurrentsConfig::default());
+    }
+
+    #[test]
+    fn buoyancy_block_parses_clamps_rules_and_matches_generated_defaults() {
+        let entries = wave_entries(
+            "buoyancy {\n\
+             enabled = true\n\
+             default_weight = 2\n\
+             max_sink = 999\n\
+             settle = 320ms\n\
+             flow_reduction = -1\n\
+             }\n\
+             rule {\n\
+             app_id = kitty\n\
+             weight = 0.8\n\
+             }\n\
+             rule {\n\
+             app_id = kitty\n\
+             weight = 0.6\n\
+             }\n",
+        );
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        assert!(config.buoyancy.enabled);
+        assert_eq!(config.buoyancy.default_weight, 1.0);
+        assert_eq!(config.buoyancy.max_sink, 64.0);
+        assert_eq!(config.buoyancy.settle_ms, 320);
+        assert_eq!(config.buoyancy.flow_reduction, 0.0);
+        assert_eq!(
+            config
+                .resolve_window_rules(Some("kitty"), None, None, false, false)
+                .weight,
+            Some(0.6)
+        );
+        assert_eq!(
+            config
+                .resolve_window_rules(Some("foot"), None, None, false, false)
+                .weight,
+            None
+        );
+        assert_eq!(parse_default_config().buoyancy, BuoyancyConfig::default());
     }
 
     #[test]

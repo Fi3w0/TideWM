@@ -37,6 +37,7 @@ Current release: **0.90.0**, second major pre-release. 1.0 is intentionally rese
 | Continuous swim navigation (trackpad swipe between workspaces) | Done, real-touchpad-verified |
 | Floating-window ocean physics (`float_physics { tier = light|full }`): disturbance-driven bob/drift, `full` adds mass/collisions/a traveling wave field | Done, nested-verified only |
 | Ocean currents: bounded render-only downstream drift for visible unfocused floating windows, with focus/drag pause | Done, release-GLES nested-verified on AMD |
+| Weighted buoyancy: per-app render-only mass/sink for Classic and Ocean floaters, with Ocean flow attenuation | Done, release-GLES nested-verified on AMD under Ocean; Classic shares the validated render path |
 | Nvidia support | Nested (EGL/GLES) verified on a real RTX 3060; standalone DRM backend not yet run natively on Nvidia |
 | AUR package | Not yet |
 
@@ -119,7 +120,7 @@ sudo cp share/xdg-desktop-portal/tidewm-portals.conf /usr/share/xdg-desktop-port
 - **Standalone hardware pass** for what's still nested-only: the Ocean compass/overview, and both floating-window ocean physics tiers.
 - **Nvidia native run**: the standalone DRM backend and its overlay-plane workaround still need a real TTY session on Nvidia.
 - **AUR package**: build from source for now.
-- **Design-pending identity features** (parking lot, needs a design conversation before pickup): weighted buoyancy sort, tide contexts, and workspace depth-moods. Currents and Cascade's pour/drain visual are implemented with their approved contracts.
+- **Design-pending identity features** (parking lot, needs a design conversation before pickup): tide contexts and workspace depth-moods. Currents, Cascade's pour/drain visual, and non-sorting weighted buoyancy are implemented with their approved contracts.
 
 ## Docs map
 

@@ -413,7 +413,14 @@ pub struct Smallvil {
     /// Floating move grabs currently under direct manipulation. Kept
     /// separately from viscosity because viscosity may be disabled or may
     /// keep settling briefly after the physical grab ends.
-    pub(crate) current_dragging: HashSet<WlSurface>,
+    pub(crate) floating_dragging: HashSet<WlSurface>,
+    /// Render-only apparent weight, retained only for visible eligible
+    /// floaters. Stable entries request no frames; `buoyancy_dirty` avoids
+    /// rebuilding placements on idle backend maintenance ticks.
+    pub(crate) window_buoyancy: HashMap<WlSurface, crate::buoyancy::BuoyancyState>,
+    pub(crate) buoyancy_dirty: bool,
+    pub(crate) buoyancy_camera_revision: u64,
+    pub(crate) buoyancy_camera_was_moving: bool,
     /// Continuous lateral swim camera, one entry per output that has ever
     /// swum. The offset is purely visual (the logical workspace identity is
     /// still `Layouts::active`'s `u32`); at rest it is zero and the entry
@@ -1313,6 +1320,21 @@ impl Smallvil {
     ) -> crate::window_animation::VisualSample {
         let mut sample = crate::window_animation::VisualSample::default();
         if let Some(surface) = surface {
+            let (buoyancy_sink, buoyancy_flow_scale) = self
+                .window_buoyancy
+                .get(surface)
+                .map(|state| {
+                    let config = self.config.buoyancy;
+                    state.sample(config.max_sink as f64, config.flow_reduction as f64)
+                })
+                .unwrap_or((0.0, 1.0));
+            // Weight changes flow only in Ocean. Classic deliberately keeps
+            // its existing physics feel and receives just the visual sink.
+            let flow_scale = if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+                buoyancy_flow_scale
+            } else {
+                1.0
+            };
             if let Some(open) = self.window_open_animations.get(surface) {
                 let current = open.sample();
                 sample.offset += current.offset;
@@ -1340,12 +1362,12 @@ impl Smallvil {
             }
             if let Some(physics) = self.window_float_physics.get(surface) {
                 let (ox, oy) = physics.sample();
-                sample.offset.x += ox;
-                sample.offset.y += oy;
+                sample.offset.x += ox * flow_scale;
+                sample.offset.y += oy * flow_scale;
             }
             if let Some(body) = self.window_float_bodies.get(surface) {
-                sample.offset.x += body.offset.0;
-                sample.offset.y += body.offset.1;
+                sample.offset.x += body.offset.0 * flow_scale;
+                sample.offset.y += body.offset.1 * flow_scale;
             }
             // Ambient sway is a continuous function of elapsed time, not a
             // pruned/decaying record like the two above -- sampled fresh
@@ -1361,8 +1383,8 @@ impl Smallvil {
                         config.max_offset as f64,
                         config.ambient_period_s as f64,
                     );
-                    sample.offset.x += ax;
-                    sample.offset.y += ay;
+                    sample.offset.x += ax * flow_scale;
+                    sample.offset.y += ay * flow_scale;
                 }
             }
             if self.config.water_effects
@@ -1376,10 +1398,11 @@ impl Smallvil {
                         config.strength as f64,
                         config.period_ms as f64 / 1000.0,
                     );
-                    sample.offset.x += cx;
-                    sample.offset.y += cy;
+                    sample.offset.x += cx * flow_scale;
+                    sample.offset.y += cy * flow_scale;
                 }
             }
+            sample.offset.y += buoyancy_sink;
         }
         sample
     }
@@ -1464,6 +1487,10 @@ impl Smallvil {
     /// Smithay's authoritative xdg-toplevel title/app-id callbacks.
     pub(crate) fn refresh_window_opacity_and_glass_for(&mut self, surface: &WlSurface) {
         let rule = self.resolve_window_rules_for(surface);
+        // Identity and urgency participate in rule matching, including the
+        // per-app weight. Re-resolve on the next sync; the retained record
+        // lets a changed weight settle smoothly rather than snapping.
+        self.buoyancy_dirty = true;
         match crate::config::WindowOpacity::from_rule(&rule) {
             Some(opacity) => {
                 self.window_opacity.insert(surface.clone(), opacity);
@@ -1943,12 +1970,13 @@ impl Smallvil {
     /// grabs call this from their own motion/unset callbacks; it does not
     /// query the pointer or seat, avoiding the re-entrant grab deadlock class
     /// documented elsewhere in this state module.
-    pub(crate) fn set_current_dragging(&mut self, surface: &WlSurface, dragging: bool) {
+    pub(crate) fn set_floating_dragging(&mut self, surface: &WlSurface, dragging: bool) {
         if dragging {
-            self.current_dragging.insert(surface.clone());
+            self.floating_dragging.insert(surface.clone());
         } else {
-            self.current_dragging.remove(surface);
+            self.floating_dragging.remove(surface);
         }
+        self.buoyancy_dirty = true;
         self.request_redraw();
     }
 
@@ -1959,7 +1987,6 @@ impl Smallvil {
     pub(crate) fn update_currents(&mut self) {
         if !self.currents_enabled() {
             self.window_currents.clear();
-            self.current_dragging.clear();
             return;
         }
 
@@ -2000,21 +2027,114 @@ impl Smallvil {
 
         self.window_currents
             .retain(|surface, _| seen.contains(surface));
-        self.current_dragging
-            .retain(|surface| seen.contains(surface));
-
         let focused = self.focused_window_surface();
         let now = Instant::now();
         let mut needs_redraw = false;
         for (surface, phase) in visible {
             let paused =
-                focused.as_ref() == Some(&surface) || self.current_dragging.contains(&surface);
+                focused.as_ref() == Some(&surface) || self.floating_dragging.contains(&surface);
             let drift = self
                 .window_currents
                 .entry(surface)
                 .or_insert_with(|| crate::currents::CurrentDrift::new(now, phase, paused));
             drift.tick(now, paused);
             needs_redraw |= drift.needs_frame();
+        }
+        if needs_redraw {
+            self.request_redraw();
+        }
+    }
+
+    fn buoyancy_enabled(&self) -> bool {
+        self.config.water_effects && self.config.buoyancy.enabled
+    }
+
+    /// Synchronizes visible floating windows only when ownership/config/focus
+    /// changed, then ticks just the short focus/drag transitions. A stable
+    /// weighted desktop therefore performs no placement walk and asks for no
+    /// frames on idle maintenance ticks.
+    #[allow(clippy::mutable_key_type)] // WlSurface-keyed bounded visibility set
+    pub(crate) fn update_buoyancy(&mut self) {
+        if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+            let revision = self.ocean.camera_revision();
+            let moving = self.ocean.has_active_camera_motion();
+            self.buoyancy_dirty |= revision != self.buoyancy_camera_revision
+                || moving
+                || moving != self.buoyancy_camera_was_moving;
+            self.buoyancy_camera_revision = revision;
+            self.buoyancy_camera_was_moving = moving;
+        }
+        if !self.buoyancy_enabled() {
+            self.window_buoyancy.clear();
+            self.buoyancy_dirty = false;
+            return;
+        }
+
+        let transitioning = self
+            .window_buoyancy
+            .values()
+            .any(crate::buoyancy::BuoyancyState::needs_frame);
+        if !self.buoyancy_dirty && !transitioning {
+            return;
+        }
+
+        if self.buoyancy_dirty {
+            let outputs: Vec<Output> = self.space.outputs().cloned().collect();
+            let mut candidates = HashSet::new();
+            for output in outputs {
+                let Some(placements) = self.render_placements(&output) else {
+                    continue;
+                };
+                for placement in placements {
+                    if !placement.replacement_eligible() || !placement.is_floating() {
+                        continue;
+                    }
+                    let Some(surface) = placement.surface() else {
+                        continue;
+                    };
+                    if self.fullscreen.contains_key(surface) || self.window_is_pinned(surface) {
+                        continue;
+                    }
+                    candidates.insert(surface.clone());
+                }
+            }
+
+            let mut eligible = HashSet::new();
+            let now = Instant::now();
+            for surface in candidates {
+                let weight = self
+                    .resolve_window_rules_for(&surface)
+                    .weight
+                    .unwrap_or(self.config.buoyancy.default_weight)
+                    .clamp(0.0, 1.0) as f64;
+                if weight <= f64::EPSILON {
+                    continue;
+                }
+                eligible.insert(surface.clone());
+                self.window_buoyancy
+                    .entry(surface)
+                    .and_modify(|state| state.set_configured_weight(weight))
+                    .or_insert_with(|| crate::buoyancy::BuoyancyState::new(now, weight));
+            }
+            self.window_buoyancy
+                .retain(|surface, _| eligible.contains(surface));
+            self.buoyancy_dirty = false;
+        }
+
+        let focused = self.focused_window_surface();
+        let now = Instant::now();
+        let settle = self.config.buoyancy.settle_ms as f64 / 1000.0;
+        let mut needs_redraw = false;
+        for (surface, state) in &mut self.window_buoyancy {
+            let paused =
+                focused.as_ref() == Some(surface) || self.floating_dragging.contains(surface);
+            let target = if paused {
+                0.0
+            } else {
+                state.configured_weight()
+            };
+            state.tick(now, target, settle);
+            needs_redraw |= state.needs_frame();
         }
         if needs_redraw {
             self.request_redraw();
@@ -3440,7 +3560,11 @@ impl Smallvil {
             float_physics_last_tick: Instant::now(),
             float_physics_wave_clock: Instant::now(),
             window_currents: HashMap::new(),
-            current_dragging: HashSet::new(),
+            floating_dragging: HashSet::new(),
+            window_buoyancy: HashMap::new(),
+            buoyancy_dirty: true,
+            buoyancy_camera_revision: 0,
+            buoyancy_camera_was_moving: false,
             swim_cameras: HashMap::new(),
             window_frame_snapshots: HashMap::new(),
             closing_window_animations: Vec::new(),
@@ -4289,6 +4413,7 @@ impl Smallvil {
             self.emit_ipc_event(crate::ipc::IpcEvent::FocusChanged {
                 surface: new_window_for_event,
             });
+            self.buoyancy_dirty = true;
         }
 
         if let Some(keyboard) = self.seat.get_keyboard() {
@@ -5478,6 +5603,10 @@ impl Smallvil {
                 .window_currents
                 .values()
                 .any(crate::currents::CurrentDrift::needs_frame)
+            || self
+                .window_buoyancy
+                .values()
+                .any(crate::buoyancy::BuoyancyState::needs_frame)
             || !self.swim_cameras.is_empty()
             || self.ocean.has_active_camera_motion()
             || (self.config.spatial_engine == crate::config::SpatialEngine::Ocean
@@ -7677,6 +7806,7 @@ impl Smallvil {
     }
 
     fn retile_with_viscosity(&mut self, interactive: bool, skip_configure_for: Option<&WlSurface>) {
+        self.buoyancy_dirty = true;
         if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
             self.retile_ocean(skip_configure_for);
             return;
@@ -7944,10 +8074,12 @@ impl Smallvil {
                 )
             };
             if changed {
+                self.buoyancy_dirty = true;
                 if !was_tiled {
                     self.window_float_ambient.remove(surface);
                     self.window_currents.remove(surface);
-                    self.current_dragging.remove(surface);
+                    self.floating_dragging.remove(surface);
+                    self.window_buoyancy.remove(surface);
                 }
                 self.retile();
                 self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
@@ -8074,9 +8206,12 @@ impl Smallvil {
             self.floating_workspace.remove(surface);
             self.window_float_ambient.remove(surface);
             self.window_currents.remove(surface);
-            self.current_dragging.remove(surface);
+            self.floating_dragging.remove(surface);
+            self.window_buoyancy.remove(surface);
+            self.buoyancy_dirty = true;
         }
 
+        self.buoyancy_dirty = true;
         self.retile();
         self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
             surface: surface.clone(),
@@ -8582,6 +8717,7 @@ impl Smallvil {
     /// Unpinning doesn't re-tile it back; it just stays floating in place,
     /// matching Hyprland's own pin behavior.
     pub fn toggle_pin(&mut self, surface: &WlSurface) {
+        self.buoyancy_dirty = true;
         if let Some(was_pinned) = self.fullscreen.get(surface).map(|entry| entry.was_pinned) {
             // Fullscreen temporarily suspends pinning. A toggle changes the
             // mode to restore on exit without making two placement owners
@@ -11428,8 +11564,8 @@ impl Smallvil {
                     self.sync_float_physics_bodies();
                     if !self.currents_enabled() {
                         self.window_currents.clear();
-                        self.current_dragging.clear();
                     }
+                    self.buoyancy_dirty = true;
                     let ordinary_close =
                         self.config.animations.enabled && self.config.animations.close.enabled;
                     let cascade_close = self.config.water_effects

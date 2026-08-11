@@ -6,6 +6,7 @@
 
 pub(crate) mod animation;
 pub(crate) mod backdrop;
+pub(crate) mod buoyancy;
 pub(crate) mod cascade_transition;
 pub(crate) mod caustics;
 pub(crate) mod compass;

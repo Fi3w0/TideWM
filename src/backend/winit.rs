@@ -161,6 +161,7 @@ pub fn init_winit(
             state.update_urgent_pulses();
             state.update_float_physics_full();
             state.update_currents();
+            state.update_buoyancy();
             let mut closing = false;
             for entry in &mut outputs {
                 let output = &entry.output;

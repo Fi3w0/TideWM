@@ -1254,6 +1254,8 @@ impl Smallvil {
             }
         }
 
+        self.buoyancy_dirty = true;
+
         self.announce_foreign_toplevel(surface);
     }
 
@@ -1445,7 +1447,9 @@ impl Smallvil {
         self.window_float_ambient.remove(surface);
         self.window_float_bodies.remove(surface);
         self.window_currents.remove(surface);
-        self.current_dragging.remove(surface);
+        self.floating_dragging.remove(surface);
+        self.window_buoyancy.remove(surface);
+        self.buoyancy_dirty = true;
         self.window_frame_snapshots.remove(surface);
         self.backdrop_textures.remove(surface);
         self.glass_anim.remove(surface);

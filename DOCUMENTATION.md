@@ -412,6 +412,43 @@ currents {
 }
 ```
 
+### `buoyancy { }`
+
+Weighted buoyancy gives floating windows an apparent mass without moving their
+real rectangles. An unfocused floater sinks by its configured weight; focus or
+direct dragging eases it back to zero so the drawn window meets its input
+geometry while it is being used. Classic and Ocean both get the sink. In Ocean,
+weight also reduces the render-only contribution from currents and floating
+physics, so a heavy window follows the same flow less than a light one.
+
+The effect is opt-in, floating-only, and excludes fullscreen and pinned
+windows. Tiled placement remains owned by the layout. At rest it consumes no
+frames: only the short focus/drag transition animates. `water_effects = false`
+is the master bypass.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Enables weighted buoyancy in both Classic and Ocean. |
+| `default_weight` | float, `0`–`1` | `0.35` | Weight inherited by floaters without a matching `rule { weight }`. `0` opts a window out. |
+| `max_sink` | float, `0`–`64` | `18.0` | Downward render offset at weight `1`, in logical pixels. |
+| `settle` | duration, `0ms`–`5s` | `240ms` | Approximate focus/drag transition duration. `0ms` changes immediately. |
+| `flow_reduction` | float, `0`–`1` | `0.65` | Ocean-only reduction of currents/physics at weight `1`; `0` preserves full response. |
+
+```wave
+buoyancy {
+    enabled = true
+    default_weight = 0.35
+    max_sink = 18
+    settle = 240ms
+    flow_reduction = 0.65
+}
+
+rule {
+    app_id = pavucontrol
+    weight = 0.85
+}
+```
+
 ### `swim { }`
 
 Continuous lateral navigation between workspaces: a horizontal trackpad swipe
@@ -1221,6 +1258,7 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 | `glass` | `water`, `frost`, or `none` | Captured-backdrop treatment for tiled and floating windows. Explicit `water`/`frost` works with client-provided alpha; when unset, a TideWM `opacity` below `1.0` implicitly selects `water`. `none` preserves plain transparency. Gaps stay unblurred. `glass_mode` is an alias. |
 | `viscosity` | float, `0`–`4` | Per-app interactive move/resize damping. Last matching rule wins; `0` disables it for the matched app. |
 | `sway` | bool | Per-app opt-in/out for floating sway. Last matching rule wins; unset falls back to `sway.enabled`. |
+| `weight` | float, `0`–`1` | Per-app apparent weight for `buoyancy { }`. Last matching rule wins; unset falls back to `buoyancy.default_weight`; `0` opts the matched floater out. |
 | `depth` | bool | Per-app buoyancy override for the automatic depth/attention system. `false` pins the window at tier 0 forever (never dims/sinks); `true` affirms the normal automatic behavior. Last matching rule wins; unset falls back to `depth.enabled`. |
 | `frost { }` | sub-block | Per-app overrides for every global frost field. Unspecified fields inherit the global block; multiple matching rules merge field by field. |
 | `shadow` | bool / `on`, `off`, `none` | Shorthand to enable or disable compositor shadows for matching windows. |

@@ -201,6 +201,10 @@ pub struct OceanSpace {
     reefs: Vec<OceanReef>,
     cameras: HashMap<String, OceanCamera>,
     camera_motions: HashMap<String, OceanCameraMotion>,
+    /// Monotonic invalidation marker for consumers caching visible camera
+    /// contents. Animation progress is tracked separately because it does
+    /// not mutate this value each frame.
+    camera_revision: u64,
     bookmarks: HashMap<String, OceanPoint>,
     runtime_bookmarks: HashSet<String>,
     /// Output where a window entered the world. This is an input/focus hint,
@@ -288,6 +292,7 @@ impl OceanSpace {
             reefs,
             cameras: HashMap::new(),
             camera_motions: HashMap::new(),
+            camera_revision: 0,
             bookmarks,
             runtime_bookmarks: HashSet::new(),
             entry_outputs: HashMap::new(),
@@ -403,6 +408,7 @@ impl OceanSpace {
         sway_screen: f64,
         anchored: Option<AnchoredZoom>,
     ) {
+        self.camera_revision = self.camera_revision.wrapping_add(1);
         let current = self.ensure_camera(output);
         self.cameras.insert(output.to_string(), target);
         if duration.is_zero() || current == target {
@@ -424,6 +430,10 @@ impl OceanSpace {
 
     pub fn has_active_camera_motion(&self) -> bool {
         self.camera_motions.values().any(OceanCameraMotion::active)
+    }
+
+    pub fn camera_revision(&self) -> u64 {
+        self.camera_revision
     }
 
     pub fn clamp_zooms(&mut self, min_zoom: f64, max_zoom: f64) {
@@ -480,6 +490,7 @@ impl OceanSpace {
             },
         );
         self.camera_motions.remove(output);
+        self.camera_revision = self.camera_revision.wrapping_add(1);
         true
     }
 
@@ -882,6 +893,7 @@ impl OceanSpace {
     /// Sets a camera's origin directly. Used by engine migration to point
     /// each output's camera at the reef that was its active workspace.
     pub fn set_camera_origin(&mut self, output: &str, origin: OceanPoint) {
+        self.camera_revision = self.camera_revision.wrapping_add(1);
         self.ensure_camera(output);
         if let Some(cam) = self.cameras.get_mut(output) {
             cam.origin = origin;
