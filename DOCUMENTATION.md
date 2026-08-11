@@ -88,7 +88,7 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | `drag_modifier` | modifier or `+`-joined modifiers | `super` | Modifier physically held for compositor mouse actions: left-drag moves floating windows or drag-swaps tiles; right-drag resizes floating or tiled windows. Accepts `super`/`logo`/`mod4`, `alt`/`mod1`, `ctrl`/`control`, and `shift`. The shipped config sets it to `mod`. |
 | `welcome_hint` | bool | `true` | Shows a persistent empty-desktop card reminding you to use your configured terminal bind. Disappears when a real window maps; delete this key (or set it `false`) to stop it returning. |
 | `reload_toast` | bool | `true` | Shows the short compositor card after a successful hot reload. `false` hides that confirmation only; parse errors and configuration warnings remain visible so a bad config cannot silently lock itself in. |
-| `water_effects` | bool | `true` | Master toggle for TideWM's water/aqua render identity. Disables water-glass, backdrop capture, impulse ripples, wave workspace transitions, automatic depth/buoyancy, interactive viscosity, connected-vessel resize, and floating sway when `false`. |
+| `water_effects` | bool | `true` | Master toggle for TideWM's water/aqua render identity. Disables water-glass, backdrop capture, impulse ripples, wave workspace transitions, Cascade pour/drain, automatic depth/buoyancy, interactive viscosity, connected-vessel resize, and floating sway when `false`. |
 | `viscosity` | float, `0`–`4` | `1.0` | Interactive window move/resize damping. `0` follows the pointer immediately; higher values settle more slowly. Render-only: logical geometry and hit-testing stay at the pointer target. Disabled by `water_effects = false`. |
 | `backdrop_capture_scale` | int, `1`–`4` | `1` | Linear downscale for the per-window backdrop capture that feeds frost glass, water glass, and layer-shell blur. `1` captures at native resolution (unchanged look). `2`/`4` allocate a texture with 1/4 or 1/16 the area — real VRAM/GPU savings with several glass windows open at once — at the cost of a visibly softer captured image once magnified back up to the window's size. Changes how the water identity looks, so it defaults to the unchanged behavior rather than a pre-picked value; see `report.md`'s P-13/P-14 entries for the measurements behind this knob. |
 | `cursor_always_visible` | bool | `false` | Forces the udev backend's software cursor to stay visible even when a client asks to hide it (e.g. a terminal hiding its own pointer glyph after inactivity). Off by default — respecting a client's own hide request is correct behavior; this is an opt-in override. |
@@ -168,6 +168,42 @@ transition {
 ```
 
 To retain the earlier boundary-only animation, set `style = glow`; the shared timing, direction, color, and geometry fields continue to apply, while the `wave_alpha`, `glow_size`, and `glow_alpha` fields control that style’s appearance.
+
+### `cascade { }`
+
+Adds a liquid lifecycle to the specific tiled window opening or closing in a
+Classic workspace whose active layout is `cascade`. Other cells keep their
+ordinary geometry reflow; floating windows, BSP/master workspaces, and Ocean
+placements are unaffected. The effect samples each existing client texture
+directly, including subsurfaces, using whole-window coordinates. Closing uses
+the same bounded retained texture handles as `animations.close`, so it adds no
+framebuffer or copied window texture.
+
+The `wave` preset is the default balanced crest. `trickle` is narrower and
+calmer; `splash` uses a larger turbulent front and sparse droplets; `none`
+disables that lifecycle leg. The crest/noise functions are shared with the
+full-output water transition, while the window mask remains a much cheaper
+single surface pass. `water_effects = false` bypasses both legs.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `pour` | `wave` \| `trickle` \| `splash` \| `none` | `wave` | Reveal applied to a newly opened Cascade tile. |
+| `drain` | `wave` \| `trickle` \| `splash` \| `none` | `wave` | Recede applied to the bounded close snapshot. |
+| `replace_motion` | bool | `false` | `false` layers liquid over ordinary open/close geometry and opacity. `true` makes liquid the lifecycle motion; neighboring reflow animations are unchanged. |
+| `pour_duration` | duration, `50ms`–`5s` | `240ms` | Pour lifetime. |
+| `drain_duration` | duration, `50ms`–`5s` | `210ms` | Drain lifetime and snapshot retention time. |
+| `curve` | enum | `cubic-out` | Progress easing: `linear`, `cubic-out`, `cubic-in-out`, `quad-out`, or `exp-out`; `ease` is an alias. |
+
+```wave
+cascade {
+    pour = wave
+    drain = wave
+    replace_motion = false
+    pour_duration = 240ms
+    drain_duration = 210ms
+    curve = cubic-out
+}
+```
 
 ### `animations { }`
 

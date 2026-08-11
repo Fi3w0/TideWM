@@ -352,6 +352,10 @@ pub struct Smallvil {
     /// input move immediately; these maps only interpolate what is drawn.
     pub(crate) window_open_animations:
         HashMap<WlSurface, crate::window_animation::WindowVisualAnimation>,
+    /// Cascade-only mapped-window pour clocks. Closing clocks move into the
+    /// bounded snapshot records below so unmapping never retains a client.
+    pub(crate) cascade_window_animations:
+        HashMap<WlSurface, crate::cascade_transition::CascadeTransition>,
     pub(crate) window_move_animations:
         HashMap<WlSurface, crate::window_animation::WindowVisualAnimation>,
     /// Short-lived render-only followers for interactive move/resize.
@@ -2011,9 +2015,26 @@ impl Smallvil {
     pub(crate) fn start_window_open_animation(&mut self, surface: &WlSurface) {
         self.closing_window_animations
             .retain(|closing| closing.surface != *surface);
+        let cascade = self
+            .cascade_liquid_applies(surface)
+            .then(|| crate::cascade_transition::CascadeTransition::pour(&self.config.cascade))
+            .flatten();
+        if let Some(cascade) = cascade {
+            self.cascade_window_animations
+                .insert(surface.clone(), cascade);
+        } else {
+            self.cascade_window_animations.remove(surface);
+        }
         let animations = self.config.animations.clone();
-        if !animations.enabled || !animations.open.enabled {
+        let ordinary = animations.enabled
+            && animations.open.enabled
+            && !(self.cascade_window_animations.contains_key(surface)
+                && self.config.cascade.replace_motion);
+        if !ordinary {
             self.window_open_animations.remove(surface);
+            if self.cascade_window_animations.contains_key(surface) {
+                self.request_redraw();
+            }
             return;
         }
         let offset = self
@@ -2033,6 +2054,21 @@ impl Smallvil {
             ),
         );
         self.request_redraw();
+    }
+
+    fn cascade_liquid_applies(&self, surface: &WlSurface) -> bool {
+        if !self.config.water_effects
+            || self.config.spatial_engine != crate::config::SpatialEngine::Classic
+        {
+            return false;
+        }
+        let (Some(output), Some(workspace)) = (
+            self.layout.output_of(surface),
+            self.layout.workspace_of(surface),
+        ) else {
+            return false;
+        };
+        self.layout.algorithm(output, workspace) == crate::config::LayoutAlgorithm::Cascade
     }
 
     fn window_lifecycle_offset(
@@ -2105,7 +2141,14 @@ impl Smallvil {
     /// animation. Smithay's null-buffer commit still proceeds normally.
     pub(crate) fn start_window_close_animation(&mut self, surface: &WlSurface) {
         let animations = self.config.animations.clone();
-        if !animations.enabled || !animations.close.enabled {
+        let cascade = self
+            .cascade_liquid_applies(surface)
+            .then(|| crate::cascade_transition::CascadeTransition::drain(&self.config.cascade))
+            .flatten();
+        let ordinary_enabled = animations.enabled
+            && animations.close.enabled
+            && !(cascade.is_some() && self.config.cascade.replace_motion);
+        if !ordinary_enabled && cascade.is_none() {
             return;
         }
         let offset = self
@@ -2123,10 +2166,11 @@ impl Smallvil {
         let snapshot_pixels = snapshot.estimated_pixels();
         let count_budget = animations.max_closing_snapshots;
         self.window_open_animations.remove(surface);
+        self.cascade_window_animations.remove(surface);
         self.window_move_animations.remove(surface);
         self.window_viscosity.remove(surface);
         self.closing_window_animations
-            .retain(|closing| closing.surface != *surface && !closing.animation.finished());
+            .retain(|closing| closing.surface != *surface && !closing.finished());
         let retained_pixels: Vec<u64> = self
             .closing_window_animations
             .iter()
@@ -2145,11 +2189,14 @@ impl Smallvil {
             .push(crate::window_animation::ClosingWindowAnimation::new(
                 surface.clone(),
                 snapshot,
-                crate::window_animation::WindowVisualAnimation::close(
-                    &animations.close,
-                    animations.slowdown,
-                    offset,
-                ),
+                ordinary_enabled.then(|| {
+                    crate::window_animation::WindowVisualAnimation::close(
+                        &animations.close,
+                        animations.slowdown,
+                        offset,
+                    )
+                }),
+                cascade,
             ));
         self.request_redraw();
     }
@@ -2175,11 +2222,23 @@ impl Smallvil {
 
     pub(crate) fn closing_window_frame_elements(
         &mut self,
-        _renderer: &mut GlesRenderer,
+        renderer: &mut GlesRenderer,
         output: &Output,
     ) -> Vec<crate::backend::udev::OutputRenderElements> {
         let output_scale = output.current_scale().fractional_scale();
         let scale = Scale::from(output_scale);
+        let needs_cascade = self
+            .closing_window_animations
+            .iter()
+            .any(|closing| closing.snapshot.output == output.name() && closing.cascade.is_some());
+        let cascade_program = needs_cascade
+            .then(|| {
+                crate::decoration::rounded_surface_program(
+                    &mut self.rounded_surface_program,
+                    renderer,
+                )
+            })
+            .flatten();
         let mut result = Vec::new();
         for closing in self
             .closing_window_animations
@@ -2188,7 +2247,7 @@ impl Smallvil {
         {
             result.extend(
                 closing
-                    .frame_elements(scale)
+                    .frame_elements(scale, cascade_program.clone())
                     .into_iter()
                     .map(crate::backend::udev::OutputRenderElements::WindowSnapshot),
             );
@@ -2406,7 +2465,7 @@ impl Smallvil {
             .then(|| crate::shadow::shadow_program(&mut self.shadow_program, renderer))
             .flatten();
         let rounded_program = self
-            .rounding_possible()
+            .rounding_or_cascade_shader_possible()
             .then(|| {
                 crate::decoration::rounded_surface_program(
                     &mut self.rounded_surface_program,
@@ -3258,6 +3317,7 @@ impl Smallvil {
             ripples: Vec::new(),
             ripple_program: None,
             window_open_animations: HashMap::new(),
+            cascade_window_animations: HashMap::new(),
             window_move_animations: HashMap::new(),
             window_viscosity: HashMap::new(),
             window_sway: HashMap::new(),
@@ -5257,6 +5317,8 @@ impl Smallvil {
             .retain(|_, transition| !transition.finished());
         self.window_open_animations
             .retain(|_, animation| !animation.finished());
+        self.cascade_window_animations
+            .retain(|_, animation| !animation.finished());
         self.window_move_animations
             .retain(|_, animation| !animation.finished());
         self.window_viscosity.retain(|_, motion| !motion.finished());
@@ -5274,7 +5336,7 @@ impl Smallvil {
         }
         self.swim_cameras.retain(|_, camera| !camera.at_rest());
         self.closing_window_animations
-            .retain(|closing| !closing.animation.finished());
+            .retain(|closing| !closing.finished());
         self.ripples.retain(|ripple| !ripple.finished());
         self.toast
             .as_ref()
@@ -5283,6 +5345,7 @@ impl Smallvil {
             || !self.workspace_transitions.is_empty()
             || !self.depth_transitions.is_empty()
             || !self.window_open_animations.is_empty()
+            || !self.cascade_window_animations.is_empty()
             || !self.window_move_animations.is_empty()
             || !self.window_viscosity.is_empty()
             || !self.window_sway.is_empty()
@@ -5654,6 +5717,15 @@ impl Smallvil {
             })
     }
 
+    fn rounding_or_cascade_shader_possible(&self) -> bool {
+        self.rounding_possible()
+            || !self.cascade_window_animations.is_empty()
+            || self
+                .closing_window_animations
+                .iter()
+                .any(|closing| closing.cascade.is_some())
+    }
+
     fn borders_possible(&self) -> bool {
         self.config.border.enabled
             || self.config.window_rules.iter().any(|rule| {
@@ -5749,10 +5821,8 @@ impl Smallvil {
 
         let rounding = self.rounding_config_for_surface(surface);
         let clip = self.rounding_applies(&rounding, floating, fullscreen);
-        let physical_rect = Some(
-            Rectangle::new(render_location + window.geometry().loc, natural_size)
-                .to_physical_precise_round(output_scale),
-        );
+        let physical_rect = Rectangle::new(render_location + window.geometry().loc, natural_size)
+            .to_physical_precise_round(output_scale);
         let radii = rounding.radii.map(|radius| radius * output_scale as f32);
         let raw_main = render_elements_from_surface_tree(
             renderer,
@@ -5762,10 +5832,19 @@ impl Smallvil {
             alpha,
             Kind::Unspecified,
         );
-        if self.config.animations.enabled && self.config.animations.close.enabled {
+        let cascade = self
+            .cascade_window_animations
+            .get(surface)
+            .map(crate::cascade_transition::CascadeTransition::sample);
+        let retain_close_snapshot = (self.config.animations.enabled
+            && self.config.animations.close.enabled)
+            || (self.cascade_liquid_applies(surface)
+                && self.config.cascade.drain != crate::config::CascadeLiquidPreset::None);
+        if retain_close_snapshot {
             if let Some(snapshot) = crate::window_animation::WindowFrameSnapshot::capture(
                 output.name(),
                 physical_anchor,
+                physical_rect,
                 scale,
                 resize_scale,
                 &raw_main,
@@ -5776,17 +5855,16 @@ impl Smallvil {
         }
         let mut main = Vec::with_capacity(raw_main.len());
         for element in raw_main {
-            if let (true, Some(program), Some(geometry)) =
-                (clip, rounded_program.clone(), physical_rect)
-            {
+            if let (true, Some(program)) = (clip || cascade.is_some(), rounded_program.clone()) {
                 let rounded = crate::decoration::RoundedSurfaceElement::new(
                     element,
                     program,
-                    geometry,
-                    radii,
+                    physical_rect,
+                    if clip { radii } else { [0.0; 4] },
                     rounding.power,
                     rounding.antialias * output_scale as f32,
                     scale,
+                    cascade,
                 );
                 if resize_active {
                     main.push(
@@ -11170,6 +11248,11 @@ impl Smallvil {
                 if !self.config.animations.enabled || !self.config.animations.open.enabled {
                     self.window_open_animations.clear();
                 }
+                if !self.config.water_effects
+                    || self.config.cascade.pour == crate::config::CascadeLiquidPreset::None
+                {
+                    self.cascade_window_animations.clear();
+                }
                 if !self.config.animations.enabled || !self.config.animations.movement.enabled {
                     self.window_move_animations.clear();
                 }
@@ -11221,9 +11304,24 @@ impl Smallvil {
                         self.window_float_ambient.remove(&surface);
                     }
                     self.sync_float_physics_bodies();
-                    if !self.config.animations.enabled || !self.config.animations.close.enabled {
+                    let ordinary_close =
+                        self.config.animations.enabled && self.config.animations.close.enabled;
+                    let cascade_close = self.config.water_effects
+                        && self.config.cascade.drain != crate::config::CascadeLiquidPreset::None;
+                    if !ordinary_close {
+                        for closing in &mut self.closing_window_animations {
+                            closing.animation = None;
+                        }
+                    }
+                    if !cascade_close {
+                        for closing in &mut self.closing_window_animations {
+                            closing.cascade = None;
+                        }
+                    }
+                    self.closing_window_animations
+                        .retain(|closing| !closing.finished());
+                    if !ordinary_close && !cascade_close {
                         self.window_frame_snapshots.clear();
-                        self.closing_window_animations.clear();
                     }
                     self.depth_schematics.clear();
                     self.depth_last_tick = Instant::now() - Duration::from_millis(100);

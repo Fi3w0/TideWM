@@ -913,6 +913,9 @@ pub struct Config {
     /// Window lifecycle and layout-motion animation timing. Logical state
     /// changes immediately; this controls only visual settling.
     pub animations: WindowAnimationsConfig,
+    /// Cascade-layout window lifecycle water. Pour/drain run only for tiled
+    /// windows owned by a Cascade workspace and obey `water_effects`.
+    pub cascade: CascadeLiquidConfig,
     /// Directional captured workspace wipe. Kept separate from the master
     /// `water_effects` toggle so the transition can be disabled or tuned
     /// without suppressing water-glass and ripples.
@@ -1310,6 +1313,7 @@ impl Config {
             compass: raw.compass,
             minimap: raw.minimap,
             animations: raw.animations,
+            cascade: raw.cascade,
             workspace_transition: raw.workspace_transition,
             depth: raw.depth,
             classic_depth: raw.classic_depth,
@@ -1640,6 +1644,7 @@ struct RawConfig {
     compass: CompassConfig,
     minimap: MinimapConfig,
     animations: WindowAnimationsConfig,
+    cascade: CascadeLiquidConfig,
     workspace_transition: WorkspaceTransitionConfig,
     depth: DepthConfig,
     classic_depth: ClassicDepthConfig,
@@ -1803,6 +1808,7 @@ impl Default for RawConfig {
             compass: CompassConfig::default(),
             minimap: MinimapConfig::default(),
             animations: WindowAnimationsConfig::default(),
+            cascade: CascadeLiquidConfig::default(),
             workspace_transition: WorkspaceTransitionConfig::default(),
             depth: DepthConfig::default(),
             classic_depth: ClassicDepthConfig::default(),
@@ -3274,6 +3280,44 @@ pub enum WorkspaceTransitionDirectionMode {
     RightToLeft,
 }
 
+/// Shape of Cascade's per-window water front. `None` can disable pour and
+/// drain independently without turning off the rest of TideWM's water
+/// identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CascadeLiquidPreset {
+    None,
+    #[default]
+    Wave,
+    Trickle,
+    Splash,
+}
+
+/// Liquid lifecycle applied only to tiled windows in Cascade workspaces.
+/// Ordinary geometry/opacity animation remains enabled by default and may
+/// be replaced explicitly when a pure reveal/recede is preferred.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CascadeLiquidConfig {
+    pub pour: CascadeLiquidPreset,
+    pub drain: CascadeLiquidPreset,
+    pub replace_motion: bool,
+    pub pour_duration_ms: u32,
+    pub drain_duration_ms: u32,
+    pub curve: RippleEase,
+}
+
+impl Default for CascadeLiquidConfig {
+    fn default() -> Self {
+        Self {
+            pour: CascadeLiquidPreset::Wave,
+            drain: CascadeLiquidPreset::Wave,
+            replace_motion: false,
+            pour_duration_ms: 240,
+            drain_duration_ms: 210,
+            curve: RippleEase::CubicOut,
+        }
+    }
+}
+
 impl Default for WorkspaceTransitionConfig {
     fn default() -> Self {
         Self {
@@ -4243,6 +4287,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "minimap" => apply_minimap_block(&mut raw.minimap, body),
         "ocean" => apply_ocean_block(&mut raw.ocean, body),
         "animations" => apply_animations_block(&mut raw.animations, body),
+        "cascade" => apply_cascade_liquid_block(&mut raw.cascade, body),
         "depth" => apply_depth_block(&mut raw.depth, body),
         "depth_deck" => apply_classic_depth_block(&mut raw.classic_depth, body),
         "frost" => apply_frost_block(&mut raw.frost, body),
@@ -4657,6 +4702,64 @@ fn parse_window_animation_curve(value: &str) -> Option<WindowAnimationCurve> {
     Some(WindowAnimationCurve::CubicBezier([
         values[0], values[1], values[2], values[3],
     ]))
+}
+
+fn apply_cascade_liquid_block(cfg: &mut CascadeLiquidConfig, body: &[waves::Entry]) {
+    fn preset(value: &str) -> Option<CascadeLiquidPreset> {
+        match value {
+            "none" => Some(CascadeLiquidPreset::None),
+            "wave" => Some(CascadeLiquidPreset::Wave),
+            "trickle" => Some(CascadeLiquidPreset::Trickle),
+            "splash" => Some(CascadeLiquidPreset::Splash),
+            _ => None,
+        }
+    }
+
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `cascade` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "pour" => match preset(value) {
+                Some(value) => cfg.pour = value,
+                None => tracing::warn!(
+                    value,
+                    "Expected cascade.pour: wave trickle splash none, ignoring"
+                ),
+            },
+            "drain" => match preset(value) {
+                Some(value) => cfg.drain = value,
+                None => tracing::warn!(
+                    value,
+                    "Expected cascade.drain: wave trickle splash none, ignoring"
+                ),
+            },
+            "replace_motion" => set_bool(&mut cfg.replace_motion, key, value),
+            "pour_duration" => match parse_duration_ms(value) {
+                Some(value) if (50..=5000).contains(&value) => cfg.pour_duration_ms = value,
+                _ => tracing::warn!(
+                    value,
+                    "Expected cascade.pour_duration from 50 to 5000ms, ignoring"
+                ),
+            },
+            "drain_duration" => match parse_duration_ms(value) {
+                Some(value) if (50..=5000).contains(&value) => cfg.drain_duration_ms = value,
+                _ => tracing::warn!(
+                    value,
+                    "Expected cascade.drain_duration from 50 to 5000ms, ignoring"
+                ),
+            },
+            "curve" | "ease" => match parse_ease(value) {
+                Some(value) => cfg.curve = value,
+                None => tracing::warn!(
+                    value,
+                    "Expected one of: linear cubic-out cubic-in-out quad-out exp-out, ignoring"
+                ),
+            },
+            other => tracing::warn!(key = %other, "Unknown key in `cascade` block, ignoring"),
+        }
+    }
 }
 
 fn apply_workspace_transition_block(cfg: &mut WorkspaceTransitionConfig, body: &[waves::Entry]) {
@@ -8231,6 +8334,7 @@ mod tests {
             compass: CompassConfig::default(),
             minimap: MinimapConfig::default(),
             animations: WindowAnimationsConfig::default(),
+            cascade: CascadeLiquidConfig::default(),
             workspace_transition: WorkspaceTransitionConfig::default(),
             depth: DepthConfig::default(),
             classic_depth: ClassicDepthConfig::default(),
@@ -9410,6 +9514,31 @@ mod tests {
         assert_eq!(transition.foam_alpha, 0.88);
         assert_eq!(transition.spray_amount, 0.6);
         assert_eq!(transition.turbulence, 1.2);
+    }
+
+    #[test]
+    fn cascade_liquid_block_parses_presets_timing_and_motion_policy() {
+        let entries = wave_entries(
+            "cascade {\n\
+             pour = trickle\n\
+             drain = splash\n\
+             replace_motion = true\n\
+             pour_duration = 310ms\n\
+             drain_duration = 180ms\n\
+             curve = cubic-in-out\n\
+             }\n",
+        );
+        let config = Config::from_raw(lower_entries(&entries)).0.cascade;
+        assert_eq!(config.pour, CascadeLiquidPreset::Trickle);
+        assert_eq!(config.drain, CascadeLiquidPreset::Splash);
+        assert!(config.replace_motion);
+        assert_eq!(config.pour_duration_ms, 310);
+        assert_eq!(config.drain_duration_ms, 180);
+        assert_eq!(config.curve, RippleEase::CubicInOut);
+        assert_eq!(
+            parse_default_config().cascade,
+            CascadeLiquidConfig::default()
+        );
     }
 
     #[test]

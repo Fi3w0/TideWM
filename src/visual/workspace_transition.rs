@@ -33,7 +33,7 @@ use crate::{
     config::{RippleEase, WorkspaceTransitionConfig, WorkspaceTransitionStyle},
 };
 
-const WORKSPACE_TRANSITION_FRAGMENT_SHADER: &str = r#"
+const WORKSPACE_TRANSITION_FRAGMENT_SHADER_PREFIX: &str = r#"
 #version 100
 
 //_DEFINES_
@@ -75,13 +75,9 @@ varying vec2 v_coords;
 #if defined(DEBUG_FLAGS)
 uniform float tint;
 #endif
+"#;
 
-float hash21(vec2 value) {
-    value = fract(value * vec2(123.34, 456.21));
-    value += dot(value, value + 45.32);
-    return fract(value.x * value.y);
-}
-
+const WORKSPACE_TRANSITION_FRAGMENT_SHADER_BODY: &str = r#"
 void main() {
     vec4 sampled = texture2D(tex, v_coords);
 
@@ -94,16 +90,14 @@ void main() {
         float travel_coordinate = direction < 0.0 ? v_coords.x : 1.0 - v_coords.x;
         float margin = max(water_depth, wave_amplitude + foam_size * 3.0);
         float travel = mix(-margin, 1.0 + margin, phase);
-        float phase_angle = v_coords.y * 6.2831853 * wave_frequency
-            - phase * 4.712389;
-        float crest = sin(phase_angle) * wave_amplitude;
-        crest += sin(phase_angle * 2.17 + 1.3)
-            * wave_amplitude
-            * 0.32
-            * turbulence;
-        crest += pow(max(0.0, sin(phase_angle * 0.51 - 0.8)), 3.0)
-            * wave_size
-            * turbulence;
+        float crest = tide_liquid_crest(
+            v_coords.y,
+            phase,
+            wave_amplitude,
+            wave_frequency,
+            wave_size,
+            turbulence
+        );
         float boundary = travel + crest;
         float water_distance = entering > 0.5
             ? boundary - travel_coordinate
@@ -156,8 +150,8 @@ void main() {
         spray_position.y += progress * 7.0;
         vec2 spray_cell = floor(spray_position);
         vec2 spray_local = fract(spray_position) - 0.5;
-        float spray_random = hash21(spray_cell);
-        float drop_radius = mix(0.055, 0.19, hash21(spray_cell + 7.3));
+        float spray_random = tide_hash21(spray_cell);
+        float drop_radius = mix(0.055, 0.19, tide_hash21(spray_cell + 7.3));
         float drop = 1.0 - smoothstep(
             drop_radius,
             drop_radius + 0.055,
@@ -226,6 +220,15 @@ void main() {
 }
 "#;
 
+fn workspace_transition_fragment_shader() -> String {
+    [
+        WORKSPACE_TRANSITION_FRAGMENT_SHADER_PREFIX,
+        crate::cascade_transition::LIQUID_FRONT_GLSL,
+        WORKSPACE_TRANSITION_FRAGMENT_SHADER_BODY,
+    ]
+    .concat()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkspaceTransitionDirection {
     LeftToRight,
@@ -277,7 +280,8 @@ pub fn workspace_transition_program(
         UniformName::new("turbulence", UniformType::_1f),
         UniformName::new("water_alpha", UniformType::_1f),
     ];
-    match renderer.compile_custom_texture_shader(WORKSPACE_TRANSITION_FRAGMENT_SHADER, &uniforms) {
+    let shader = workspace_transition_fragment_shader();
+    match renderer.compile_custom_texture_shader(&shader, &uniforms) {
         Ok(program) => {
             *cache = Some(program.clone());
             Some(program)
@@ -561,30 +565,32 @@ mod tests {
 
     #[test]
     fn shader_source_keeps_smithays_contract_and_transition_uniforms() {
-        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("//_DEFINES_"));
-        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform sampler2D tex"));
-        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float alpha"));
-        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float progress"));
-        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float direction"));
-        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float motion_enabled"));
-        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float style"));
-        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float output_aspect"));
-        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float wave_amplitude"));
-        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float wave_frequency"));
-        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float edge_width"));
-        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform vec3 wave_color"));
-        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float wave_size"));
-        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float wave_alpha"));
-        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float glow_size"));
-        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float glow_alpha"));
-        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float water_depth"));
-        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform vec3 foam_color"));
-        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float foam_size"));
-        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float foam_alpha"));
-        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float spray_amount"));
-        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float turbulence"));
-        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("uniform float water_alpha"));
-        assert!(WORKSPACE_TRANSITION_FRAGMENT_SHADER.contains("varying vec2 v_coords"));
+        let shader = workspace_transition_fragment_shader();
+        assert!(shader.contains("//_DEFINES_"));
+        assert!(shader.contains("uniform sampler2D tex"));
+        assert!(shader.contains("uniform float alpha"));
+        assert!(shader.contains("uniform float progress"));
+        assert!(shader.contains("uniform float direction"));
+        assert!(shader.contains("uniform float motion_enabled"));
+        assert!(shader.contains("uniform float style"));
+        assert!(shader.contains("uniform float output_aspect"));
+        assert!(shader.contains("uniform float wave_amplitude"));
+        assert!(shader.contains("uniform float wave_frequency"));
+        assert!(shader.contains("uniform float edge_width"));
+        assert!(shader.contains("uniform vec3 wave_color"));
+        assert!(shader.contains("uniform float wave_size"));
+        assert!(shader.contains("uniform float wave_alpha"));
+        assert!(shader.contains("uniform float glow_size"));
+        assert!(shader.contains("uniform float glow_alpha"));
+        assert!(shader.contains("uniform float water_depth"));
+        assert!(shader.contains("uniform vec3 foam_color"));
+        assert!(shader.contains("uniform float foam_size"));
+        assert!(shader.contains("uniform float foam_alpha"));
+        assert!(shader.contains("uniform float spray_amount"));
+        assert!(shader.contains("uniform float turbulence"));
+        assert!(shader.contains("uniform float water_alpha"));
+        assert!(shader.contains("varying vec2 v_coords"));
+        assert!(shader.contains("tide_liquid_crest"));
     }
 
     #[test]

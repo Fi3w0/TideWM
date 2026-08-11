@@ -1437,6 +1437,7 @@ impl Smallvil {
         self.window_opacity.remove(surface);
         self.window_glass_modes.remove(surface);
         self.window_open_animations.remove(surface);
+        self.cascade_window_animations.remove(surface);
         self.window_move_animations.remove(surface);
         self.window_viscosity.remove(surface);
         self.window_sway.remove(surface);

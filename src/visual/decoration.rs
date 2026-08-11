@@ -21,9 +21,12 @@ use smithay::{
     utils::{user_data::UserDataMap, Buffer, Physical, Rectangle, Scale, Size, Transform},
 };
 
-use crate::config::{BorderConfig, BorderPlacement, RoundingConfig};
+use crate::{
+    cascade_transition::CascadeSample,
+    config::{BorderConfig, BorderPlacement, RoundingConfig},
+};
 
-const ROUNDED_SURFACE_FRAGMENT_SHADER: &str = r#"
+const ROUNDED_SURFACE_FRAGMENT_SHADER_PREFIX: &str = r#"
 #version 100
 
 //_DEFINES_
@@ -51,7 +54,13 @@ uniform vec4 u_corner_radii;
 uniform float u_rounding_power;
 uniform float u_antialias;
 uniform mat3 u_input_to_geometry;
+uniform float u_cascade_active;
+uniform float u_cascade_progress;
+uniform float u_cascade_direction;
+uniform float u_cascade_preset;
+"#;
 
+const ROUNDED_SURFACE_FRAGMENT_SHADER_BODY: &str = r#"
 float corner_coverage(vec2 point, vec2 size, vec4 radii) {
     vec2 center;
     float radius;
@@ -90,8 +99,94 @@ void main() {
 #endif
     if (mapped.x < 0.0 || mapped.x > 1.0 || mapped.y < 0.0 || mapped.y > 1.0)
         color = vec4(0.0);
-    else
+    else {
         color *= corner_coverage(point, u_geometry_size, u_corner_radii);
+        if (u_cascade_active > 0.5) {
+            float trickle = step(1.5, u_cascade_preset) * (1.0 - step(2.5, u_cascade_preset));
+            float splash = step(2.5, u_cascade_preset);
+            float amplitude = mix(0.040, 0.018, trickle);
+            amplitude = mix(amplitude, 0.075, splash);
+            float frequency = mix(2.6, 1.45, trickle);
+            frequency = mix(frequency, 4.1, splash);
+            float lobe = mix(0.022, 0.010, trickle);
+            lobe = mix(lobe, 0.055, splash);
+            float turbulence = mix(0.68, 0.28, trickle);
+            turbulence = mix(turbulence, 1.15, splash);
+            float boundary = u_cascade_direction > 0.0
+                ? mix(-0.12, 1.12, u_cascade_progress)
+                : mix(1.12, -0.12, u_cascade_progress);
+            boundary += tide_liquid_crest(
+                mapped.x,
+                u_cascade_progress,
+                amplitude,
+                frequency,
+                lobe,
+                turbulence
+            );
+            float signed_distance = boundary - mapped.y;
+            float edge = max(1.25 / max(u_geometry_size.y, 1.0), 0.0025);
+            float reveal = smoothstep(-edge, edge, signed_distance);
+            color *= reveal;
+
+            float body_reach = mix(0.24, 0.12, trickle);
+            body_reach = mix(body_reach, 0.34, splash);
+            float body_zone = reveal
+                * (1.0 - smoothstep(0.0, body_reach, max(signed_distance, 0.0)));
+            float streak_a = sin(
+                mapped.x * 43.0
+                + mapped.y * 18.0
+                - u_cascade_progress * 18.0
+                + sin(mapped.x * 31.0 + u_cascade_progress * 9.0)
+            );
+            float streak_b = sin(
+                mapped.x * 21.0
+                - mapped.y * 37.0
+                + u_cascade_progress * 13.0
+            );
+            float caustic = smoothstep(
+                0.72,
+                1.0,
+                (streak_a * 0.55 + streak_b * 0.45) * 0.5 + 0.5
+            );
+            float body_envelope = sin(u_cascade_progress * 3.1415927);
+            float body_alpha = body_zone * body_envelope * mix(0.12, 0.07, trickle);
+            body_alpha = mix(body_alpha, body_zone * body_envelope * 0.18, splash);
+            vec3 body_rgb = mix(
+                vec3(0.24, 0.66, 0.86),
+                vec3(0.76, 0.96, 1.0),
+                caustic * 0.48
+            );
+            vec4 body = vec4(body_rgb * body_alpha, body_alpha);
+            color = body + color * (1.0 - body.a);
+
+            float foam_width = mix(0.025, 0.012, trickle);
+            foam_width = mix(foam_width, 0.045, splash);
+            float foam_noise = sin(mapped.x * 91.0 + u_cascade_progress * 19.0) * foam_width * 0.18;
+            float foam = 1.0 - smoothstep(
+                foam_width * 0.30,
+                foam_width,
+                abs(signed_distance + foam_noise)
+            );
+            foam *= mix(0.78, 0.52, trickle);
+            foam = mix(foam, min(1.0, foam * 1.18), splash);
+
+            // Splash adds sparse droplets immediately ahead of the crest;
+            // the other presets pay only the same fixed arithmetic and
+            // multiply it away.
+            vec2 cell = floor(vec2(mapped.x * 28.0, mapped.y * 28.0));
+            vec2 local = fract(vec2(mapped.x * 28.0, mapped.y * 28.0)) - 0.5;
+            float droplet = 1.0 - smoothstep(0.08, 0.14, length(local));
+            droplet *= step(0.84, tide_hash21(cell));
+            float ahead = step(signed_distance, 0.0)
+                * (1.0 - smoothstep(0.0, 0.16, -signed_distance));
+            foam = max(foam, droplet * ahead * splash * 0.72);
+
+            vec3 water_rgb = mix(vec3(0.34, 0.76, 0.94), vec3(0.80, 0.97, 1.0), foam);
+            float water_alpha = foam * mix(0.78, 0.62, trickle);
+            vec4 water = vec4(water_rgb * water_alpha, water_alpha);
+            color = water + color * (1.0 - water.a);
+        }
+    }
     color *= alpha;
 #if defined(DEBUG_FLAGS)
     if (tint == 1.0)
@@ -100,6 +195,15 @@ void main() {
     gl_FragColor = color;
 }
 "#;
+
+fn rounded_surface_fragment_shader() -> String {
+    [
+        ROUNDED_SURFACE_FRAGMENT_SHADER_PREFIX,
+        crate::cascade_transition::LIQUID_FRONT_GLSL,
+        ROUNDED_SURFACE_FRAGMENT_SHADER_BODY,
+    ]
+    .concat()
+}
 
 const BORDER_FRAGMENT_SHADER: &str = r#"
 precision highp float;
@@ -187,8 +291,13 @@ pub fn rounded_surface_program(
         UniformName::new("u_rounding_power", UniformType::_1f),
         UniformName::new("u_antialias", UniformType::_1f),
         UniformName::new("u_input_to_geometry", UniformType::Matrix3x3),
+        UniformName::new("u_cascade_active", UniformType::_1f),
+        UniformName::new("u_cascade_progress", UniformType::_1f),
+        UniformName::new("u_cascade_direction", UniformType::_1f),
+        UniformName::new("u_cascade_preset", UniformType::_1f),
     ];
-    match renderer.compile_custom_texture_shader(ROUNDED_SURFACE_FRAGMENT_SHADER, &uniforms) {
+    let shader = rounded_surface_fragment_shader();
+    match renderer.compile_custom_texture_shader(&shader, &uniforms) {
         Ok(program) => {
             *cache = Some(program.clone());
             Some(program)
@@ -233,7 +342,7 @@ pub fn border_program(
     }
 }
 
-fn matrix_uniform(name: &'static str, matrix: Matrix3<f32>) -> Uniform<'static> {
+pub(crate) fn matrix_uniform(name: &'static str, matrix: Matrix3<f32>) -> Uniform<'static> {
     let columns = [
         matrix.x.x, matrix.x.y, matrix.x.z, matrix.y.x, matrix.y.y, matrix.y.z, matrix.z.x,
         matrix.z.y, matrix.z.z,
@@ -247,6 +356,89 @@ fn matrix_uniform(name: &'static str, matrix: Matrix3<f32>) -> Uniform<'static> 
     )
 }
 
+/// Maps Smithay's sampled texture coordinates into normalized coordinates
+/// of the complete toplevel geometry. Niri uses the same whole-window
+/// coordinate contract for custom open/close shaders; exposing it here lets
+/// TideWM keep one mapping for live surface trees and retained close parts.
+pub(crate) fn surface_input_to_geometry(
+    inner: &smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<GlesRenderer>,
+    geometry: Rectangle<i32, Physical>,
+    scale: Scale<f64>,
+) -> Matrix3<f32> {
+    let elem = inner.geometry(scale);
+    let elem_size = [elem.size.w.max(1) as f32, elem.size.h.max(1) as f32];
+    let geo_size = [geometry.size.w.max(1) as f32, geometry.size.h.max(1) as f32];
+    let buffer_size = inner.buffer_size();
+    let view = inner.view();
+    let src_size = [
+        view.src.size.w.max(f64::EPSILON) as f32,
+        view.src.size.h.max(f64::EPSILON) as f32,
+    ];
+    let mut transform = inner.transform();
+    if transform == Transform::_90 {
+        transform = Transform::_270;
+    } else if transform == Transform::_270 {
+        transform = Transform::_90;
+    }
+    let transform_matrix = Matrix3::from_translation(Vector2::new(0.5, 0.5))
+        * transform.matrix()
+        * Matrix3::from_translation(Vector2::new(-0.5, -0.5));
+    let y_invert = if buffer_y_inverted(inner.buffer()).unwrap_or(false) {
+        Matrix3::from_nonuniform_scale(1.0, -1.0)
+    } else {
+        Matrix3::from_scale(1.0)
+    };
+    transform_matrix
+        * Matrix3::from_nonuniform_scale(elem_size[0] / geo_size[0], elem_size[1] / geo_size[1])
+        * Matrix3::from_translation(Vector2::new(
+            (elem.loc.x - geometry.loc.x) as f32 / elem_size[0],
+            (elem.loc.y - geometry.loc.y) as f32 / elem_size[1],
+        ))
+        * Matrix3::from_nonuniform_scale(
+            buffer_size.w.max(1) as f32 / src_size[0],
+            buffer_size.h.max(1) as f32 / src_size[1],
+        )
+        * Matrix3::from_translation(Vector2::new(
+            -(view.src.loc.x as f32) / buffer_size.w.max(1) as f32,
+            -(view.src.loc.y as f32) / buffer_size.h.max(1) as f32,
+        ))
+        * y_invert
+}
+
+pub(crate) fn window_surface_uniforms(
+    geometry_size: Size<i32, Physical>,
+    radii: [f32; 4],
+    power: f32,
+    antialias: f32,
+    input_to_geometry: Matrix3<f32>,
+    cascade: Option<CascadeSample>,
+) -> Vec<Uniform<'static>> {
+    let geo_size = [geometry_size.w.max(1) as f32, geometry_size.h.max(1) as f32];
+    vec![
+        Uniform::new("u_geometry_size", geo_size),
+        Uniform::new("u_corner_radii", radii),
+        Uniform::new("u_rounding_power", power),
+        Uniform::new("u_antialias", antialias),
+        matrix_uniform("u_input_to_geometry", input_to_geometry),
+        Uniform::new(
+            "u_cascade_active",
+            if cascade.is_some() { 1.0 } else { 0.0 },
+        ),
+        Uniform::new(
+            "u_cascade_progress",
+            cascade.map(|sample| sample.progress).unwrap_or(1.0),
+        ),
+        Uniform::new(
+            "u_cascade_direction",
+            cascade.map(CascadeSample::direction_uniform).unwrap_or(1.0),
+        ),
+        Uniform::new(
+            "u_cascade_preset",
+            cascade.map(CascadeSample::preset_uniform).unwrap_or(0.0),
+        ),
+    ]
+}
+
 /// A Wayland surface element clipped to its parent toplevel's visual
 /// geometry. Popups are intentionally rendered normally by the caller.
 pub struct RoundedSurfaceElement {
@@ -258,9 +450,11 @@ pub struct RoundedSurfaceElement {
     power: f32,
     antialias: f32,
     scale: Scale<f64>,
+    cascade: Option<CascadeSample>,
 }
 
 impl RoundedSurfaceElement {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         inner: smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<
             GlesRenderer,
@@ -271,6 +465,7 @@ impl RoundedSurfaceElement {
         power: f32,
         antialias: f32,
         scale: Scale<f64>,
+        cascade: Option<CascadeSample>,
     ) -> Self {
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         for value in radii {
@@ -278,6 +473,11 @@ impl RoundedSurfaceElement {
         }
         power.to_bits().hash(&mut hash);
         antialias.to_bits().hash(&mut hash);
+        if let Some(cascade) = cascade {
+            cascade.progress.to_bits().hash(&mut hash);
+            cascade.direction_uniform().to_bits().hash(&mut hash);
+            cascade.preset_uniform().to_bits().hash(&mut hash);
+        }
         let id = inner.id().clone().namespaced(hash.finish() as usize);
         Self {
             id,
@@ -288,61 +488,20 @@ impl RoundedSurfaceElement {
             power,
             antialias,
             scale,
+            cascade,
         }
     }
 
     fn uniforms(&self) -> Vec<Uniform<'static>> {
-        let elem = self.inner.geometry(self.scale);
-        let elem_size = [elem.size.w.max(1) as f32, elem.size.h.max(1) as f32];
-        let geo_size = [
-            self.geometry.size.w.max(1) as f32,
-            self.geometry.size.h.max(1) as f32,
-        ];
-        let buffer_size = self.inner.buffer_size();
-        let view = self.inner.view();
-        let src_size = [
-            view.src.size.w.max(f64::EPSILON) as f32,
-            view.src.size.h.max(f64::EPSILON) as f32,
-        ];
-        let mut transform = self.inner.transform();
-        if transform == Transform::_90 {
-            transform = Transform::_270;
-        } else if transform == Transform::_270 {
-            transform = Transform::_90;
-        }
-        let transform_matrix = Matrix3::from_translation(Vector2::new(0.5, 0.5))
-            * transform.matrix()
-            * Matrix3::from_translation(Vector2::new(-0.5, -0.5));
-        let y_invert = if buffer_y_inverted(self.inner.buffer()).unwrap_or(false) {
-            Matrix3::from_nonuniform_scale(1.0, -1.0)
-        } else {
-            Matrix3::from_scale(1.0)
-        };
-        let matrix = transform_matrix
-            * Matrix3::from_nonuniform_scale(
-                elem_size[0] / geo_size[0],
-                elem_size[1] / geo_size[1],
-            )
-            * Matrix3::from_translation(Vector2::new(
-                (elem.loc.x - self.geometry.loc.x) as f32 / elem_size[0],
-                (elem.loc.y - self.geometry.loc.y) as f32 / elem_size[1],
-            ))
-            * Matrix3::from_nonuniform_scale(
-                buffer_size.w.max(1) as f32 / src_size[0],
-                buffer_size.h.max(1) as f32 / src_size[1],
-            )
-            * Matrix3::from_translation(Vector2::new(
-                -(view.src.loc.x as f32) / buffer_size.w.max(1) as f32,
-                -(view.src.loc.y as f32) / buffer_size.h.max(1) as f32,
-            ))
-            * y_invert;
-        vec![
-            Uniform::new("u_geometry_size", geo_size),
-            Uniform::new("u_corner_radii", self.radii),
-            Uniform::new("u_rounding_power", self.power),
-            Uniform::new("u_antialias", self.antialias),
-            matrix_uniform("u_input_to_geometry", matrix),
-        ]
+        let matrix = surface_input_to_geometry(&self.inner, self.geometry, self.scale);
+        window_surface_uniforms(
+            self.geometry.size,
+            self.radii,
+            self.power,
+            self.antialias,
+            matrix,
+            self.cascade,
+        )
     }
 }
 
@@ -787,10 +946,13 @@ mod tests {
 
     #[test]
     fn shaders_keep_fixed_cost_contracts() {
-        assert!(ROUNDED_SURFACE_FRAGMENT_SHADER.contains("//_DEFINES_"));
-        assert!(ROUNDED_SURFACE_FRAGMENT_SHADER.contains("u_input_to_geometry"));
-        assert!(ROUNDED_SURFACE_FRAGMENT_SHADER.contains("u_rounding_power"));
-        assert!(!ROUNDED_SURFACE_FRAGMENT_SHADER.contains("for ("));
+        let rounded = rounded_surface_fragment_shader();
+        assert!(rounded.contains("//_DEFINES_"));
+        assert!(rounded.contains("u_input_to_geometry"));
+        assert!(rounded.contains("u_rounding_power"));
+        assert!(rounded.contains("u_cascade_progress"));
+        assert!(rounded.contains("tide_liquid_crest"));
+        assert!(!rounded.contains("for ("));
         assert!(BORDER_FRAGMENT_SHADER.contains("u_color_from"));
         assert!(BORDER_FRAGMENT_SHADER.contains("u_color_to"));
         assert!(!BORDER_FRAGMENT_SHADER.contains("sampler2D"));

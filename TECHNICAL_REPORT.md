@@ -20,7 +20,7 @@ Current release: **0.90.0**, second major pre-release. 1.0 is intentionally rese
 
 | Area | Status |
 | --- | --- |
-| Tiling: BSP, master/stack, cascade (aspect-adapting rows, drag-resize) | Done |
+| Tiling: BSP, master/stack, cascade (aspect-adapting rows, drag-resize, liquid pour/drain) | Done |
 | Workspaces, scratchpads (classic + named), per-window pinning | Done |
 | Multi-monitor, hotplug, independent tiling tree per output, mixed-DPI | Done |
 | Window groups (tabbed), floating, fullscreen, maximize, pseudo-tiling | Done |
@@ -118,7 +118,7 @@ sudo cp share/xdg-desktop-portal/tidewm-portals.conf /usr/share/xdg-desktop-port
 - **Standalone hardware pass** for what's still nested-only: the Ocean compass/overview, and both floating-window ocean physics tiers.
 - **Nvidia native run**: the standalone DRM backend and its overlay-plane workaround still need a real TTY session on Nvidia.
 - **AUR package**: build from source for now.
-- **Design-pending identity features** (parking lot, needs a design conversation before pickup): cascade's pour/drain visual, currents on floating windows, weighted buoyancy sort, tide contexts, workspace depth-moods.
+- **Design-pending identity features** (parking lot, needs a design conversation before pickup): currents on floating windows, weighted buoyancy sort, tide contexts, workspace depth-moods. Cascade's pour/drain visual is implemented with the approved `wave`/`trickle`/`splash`/`none` presets and optional lifecycle-motion replacement.
 
 ## Docs map
 

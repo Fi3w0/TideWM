@@ -10,13 +10,14 @@
 
 use std::time::{Duration, Instant};
 
+use cgmath::Matrix3;
 use smithay::{
     backend::renderer::{
         element::{
             surface::{WaylandSurfaceRenderElement, WaylandSurfaceTexture},
             Element, Id, Kind, RenderElement,
         },
-        gles::{GlesError, GlesFrame, GlesRenderer, GlesTexture},
+        gles::{GlesError, GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture},
         utils::CommitCounter,
         Color32F,
     },
@@ -26,6 +27,7 @@ use smithay::{
 
 use crate::{
     animation::ease_progress,
+    cascade_transition::{CascadeSample, CascadeTransition},
     config::{
         WindowAnimationConfig, WindowAnimationCurve, WindowAnimationEffect, WindowAnimationOrigin,
     },
@@ -266,6 +268,7 @@ struct SnapshotPart {
     alpha: f32,
     kind: Kind,
     content: SnapshotContent,
+    input_to_geometry: Matrix3<f32>,
 }
 
 /// Last drawable surface tree for one mapped window. This is refreshed from
@@ -275,6 +278,7 @@ struct SnapshotPart {
 pub struct WindowFrameSnapshot {
     pub output: String,
     anchor: Point<i32, Physical>,
+    geometry_size: Size<i32, Physical>,
     parts: Vec<SnapshotPart>,
 }
 
@@ -282,6 +286,7 @@ impl WindowFrameSnapshot {
     pub fn capture(
         output: String,
         anchor: Point<i32, Physical>,
+        geometry: Rectangle<i32, Physical>,
         scale: Scale<f64>,
         resize_scale: Scale<f64>,
         elements: &[WaylandSurfaceRenderElement<GlesRenderer>],
@@ -289,6 +294,8 @@ impl WindowFrameSnapshot {
         let parts: Vec<_> = elements
             .iter()
             .map(|element| {
+                let input_to_geometry =
+                    crate::decoration::surface_input_to_geometry(element, geometry, scale);
                 let mut geometry = element.geometry(scale);
                 geometry.loc -= anchor;
                 geometry = geometry.to_f64().upscale(resize_scale).to_i32_round();
@@ -306,12 +313,14 @@ impl WindowFrameSnapshot {
                     alpha: element.alpha(),
                     kind: element.kind(),
                     content,
+                    input_to_geometry,
                 }
             })
             .collect();
         (!parts.is_empty()).then_some(Self {
             output,
             anchor,
+            geometry_size: geometry.size,
             parts,
         })
     }
@@ -333,24 +342,39 @@ impl WindowFrameSnapshot {
         scale: Scale<f64>,
         sample: VisualSample,
         commit: CommitCounter,
+        cascade_program: Option<GlesTexProgram>,
+        cascade_sample: Option<CascadeSample>,
     ) -> Vec<WindowSnapshotElement> {
         let offset = Point::<f64, Logical>::from((sample.offset.x, sample.offset.y))
             .to_physical_precise_round(scale);
         self.parts
             .iter()
             .cloned()
-            .map(|part| WindowSnapshotElement {
-                geometry: Rectangle::new(
-                    self.anchor + offset + part.relative_geometry.loc,
-                    part.relative_geometry.size,
-                ),
-                id: part.id,
-                commit,
-                src: part.src,
-                transform: part.transform,
-                alpha: part.alpha * sample.opacity,
-                kind: part.kind,
-                content: part.content,
+            .map(|part| {
+                let shader_fallback =
+                    matches!(&part.content, SnapshotContent::Solid(_)) || cascade_program.is_none();
+                WindowSnapshotElement {
+                    geometry: Rectangle::new(
+                        self.anchor + offset + part.relative_geometry.loc,
+                        part.relative_geometry.size,
+                    ),
+                    id: part.id,
+                    commit,
+                    src: part.src,
+                    transform: part.transform,
+                    alpha: part.alpha
+                        * sample.opacity
+                        * if cascade_sample.is_some() && shader_fallback {
+                            1.0 - cascade_sample.map(|sample| sample.progress).unwrap_or(0.0)
+                        } else {
+                            1.0
+                        },
+                    kind: part.kind,
+                    content: part.content,
+                    geometry_size: self.geometry_size,
+                    input_to_geometry: part.input_to_geometry,
+                    cascade: cascade_program.clone().zip(cascade_sample),
+                }
             })
             .collect()
     }
@@ -365,6 +389,9 @@ pub struct WindowSnapshotElement {
     alpha: f32,
     kind: Kind,
     content: SnapshotContent,
+    geometry_size: Size<i32, Physical>,
+    input_to_geometry: Matrix3<f32>,
+    cascade: Option<(GlesTexProgram, CascadeSample)>,
 }
 
 impl Element for WindowSnapshotElement {
@@ -408,17 +435,29 @@ impl RenderElement<GlesRenderer> for WindowSnapshotElement {
         _cache: Option<&smithay::utils::user_data::UserDataMap>,
     ) -> Result<(), GlesError> {
         match &self.content {
-            SnapshotContent::Texture(texture) => frame.render_texture_from_to(
-                texture,
-                src,
-                dst,
-                damage,
-                opaque_regions,
-                self.transform,
-                self.alpha,
-                None,
-                &[],
-            ),
+            SnapshotContent::Texture(texture) => {
+                let uniforms = self.cascade.as_ref().map(|(_, sample)| {
+                    crate::decoration::window_surface_uniforms(
+                        self.geometry_size,
+                        [0.0; 4],
+                        2.0,
+                        1.0,
+                        self.input_to_geometry,
+                        Some(*sample),
+                    )
+                });
+                frame.render_texture_from_to(
+                    texture,
+                    src,
+                    dst,
+                    damage,
+                    opaque_regions,
+                    self.transform,
+                    self.alpha,
+                    self.cascade.as_ref().map(|(program, _)| program),
+                    uniforms.as_deref().unwrap_or(&[]),
+                )
+            }
             SnapshotContent::Solid(color) => frame.draw_solid(dst, damage, *color * self.alpha),
         }
     }
@@ -429,7 +468,8 @@ impl RenderElement<GlesRenderer> for WindowSnapshotElement {
 pub struct ClosingWindowAnimation {
     pub surface: WlSurface,
     pub snapshot: WindowFrameSnapshot,
-    pub animation: WindowVisualAnimation,
+    pub animation: Option<WindowVisualAnimation>,
+    pub cascade: Option<CascadeTransition>,
     commit: CommitCounter,
 }
 
@@ -461,20 +501,42 @@ impl ClosingWindowAnimation {
     pub fn new(
         surface: WlSurface,
         snapshot: WindowFrameSnapshot,
-        animation: WindowVisualAnimation,
+        animation: Option<WindowVisualAnimation>,
+        cascade: Option<CascadeTransition>,
     ) -> Self {
         Self {
             surface,
             snapshot,
             animation,
+            cascade,
             commit: CommitCounter::default(),
         }
     }
 
-    pub fn frame_elements(&mut self, scale: Scale<f64>) -> Vec<WindowSnapshotElement> {
+    pub fn finished(&self) -> bool {
+        self.animation
+            .as_ref()
+            .is_none_or(WindowVisualAnimation::finished)
+            && self
+                .cascade
+                .as_ref()
+                .is_none_or(CascadeTransition::finished)
+    }
+
+    pub fn frame_elements(
+        &mut self,
+        scale: Scale<f64>,
+        cascade_program: Option<GlesTexProgram>,
+    ) -> Vec<WindowSnapshotElement> {
         self.commit.increment();
+        let visual = self
+            .animation
+            .as_ref()
+            .map(WindowVisualAnimation::sample)
+            .unwrap_or_default();
+        let cascade_sample = self.cascade.as_ref().map(CascadeTransition::sample);
         self.snapshot
-            .elements(scale, self.animation.sample(), self.commit)
+            .elements(scale, visual, self.commit, cascade_program, cascade_sample)
     }
 }
 
