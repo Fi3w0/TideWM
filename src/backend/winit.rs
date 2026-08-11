@@ -13,7 +13,7 @@ use smithay::{
         },
         wayland_protocols::wp::presentation_time::server::wp_presentation_feedback,
     },
-    utils::{Rectangle, Transform},
+    utils::Transform,
     wayland::presentation::Refresh,
 };
 
@@ -226,7 +226,6 @@ pub fn init_winit(
 
                 tracing::trace!(output = entry.output.name(), "Compositing frame");
                 let size = entry.backend.window_size();
-                let damage = Rectangle::from_size(size);
 
                 let locked = !matches!(state.session_lock, SessionLock::Unlocked);
 
@@ -447,16 +446,23 @@ pub fn init_winit(
                         continue;
                     }
                 };
-                if let Err(err) = entry.backend.submit(Some(&[damage])) {
-                    tracing::warn!(
-                        output = entry.output.name(),
-                        ?err,
-                        "Failed to submit nested output; retrying next frame"
-                    );
-                    entry.dirty = true;
-                    continue;
+                let submitted = if let Some(damage) = render_result.damage {
+                    if let Err(err) = entry.backend.submit(Some(damage)) {
+                        tracing::warn!(
+                            output = entry.output.name(),
+                            ?err,
+                            "Failed to submit nested output; retrying next frame"
+                        );
+                        entry.dirty = true;
+                        continue;
+                    }
+                    true
+                } else {
+                    false
+                };
+                if submitted {
+                    state.mark_output_locked_frame(&entry.output);
                 }
-                state.mark_output_locked_frame(&entry.output);
 
                 // wp_presentation feedback: collected from the same render
                 // element states the frame was just drawn with, timestamped
@@ -468,7 +474,7 @@ pub fn init_winit(
                 // `take_presentation_feedback`).
                 let mut feedback =
                     state.take_presentation_feedback(&entry.output, &render_result.states);
-                if render_result.damage.is_some() {
+                if submitted {
                     feedback.presented(
                         state.clock.now(),
                         entry
