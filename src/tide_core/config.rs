@@ -328,6 +328,32 @@ impl Default for FloatPhysicsConfig {
     }
 }
 
+/// Slow render-only drift for unfocused floating windows in Ocean. This is
+/// explicitly opt-in because it keeps visible eligible windows animating at
+/// rest; `water_effects` remains the master bypass.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CurrentsConfig {
+    pub enabled: bool,
+    /// Screen-space direction in degrees: 0 right, 90 down, 180 left,
+    /// 270 up. Cardinal names are accepted by the Wave lowerer too.
+    pub direction_degrees: f32,
+    /// Maximum envelope in logical pixels.
+    pub strength: f32,
+    /// Duration of one smooth downstream eddy.
+    pub period_ms: u32,
+}
+
+impl Default for CurrentsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            direction_degrees: 0.0,
+            strength: 10.0,
+            period_ms: 14_000,
+        }
+    }
+}
+
 /// How the water-glass refraction distortion moves over time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GlassAnimation {
@@ -899,6 +925,9 @@ pub struct Config {
     /// `light` tier). Opt-in and bypassed by `water_effects`; takes over
     /// from `sway` per window when enabled.
     pub float_physics: FloatPhysicsConfig,
+    /// Ocean-only downstream drift for unfocused floating windows. Opt-in,
+    /// render-only, and paused while a window is focused or dragged.
+    pub currents: CurrentsConfig,
     /// Continuous lateral "swim" between workspaces (spatial roadmap S0).
     /// Bypassed by the `water_effects` master toggle; when off, workspace
     /// navigation is the ordinary discrete switch.
@@ -1309,6 +1338,7 @@ impl Config {
             connected_vessels: raw.connected_vessels,
             sway: raw.sway,
             float_physics: raw.float_physics,
+            currents: raw.currents,
             swim: raw.swim,
             compass: raw.compass,
             minimap: raw.minimap,
@@ -1640,6 +1670,7 @@ struct RawConfig {
     connected_vessels: ConnectedVesselsConfig,
     sway: SwayConfig,
     float_physics: FloatPhysicsConfig,
+    currents: CurrentsConfig,
     swim: SwimConfig,
     compass: CompassConfig,
     minimap: MinimapConfig,
@@ -1804,6 +1835,7 @@ impl Default for RawConfig {
             connected_vessels: ConnectedVesselsConfig::default(),
             sway: SwayConfig::default(),
             float_physics: FloatPhysicsConfig::default(),
+            currents: CurrentsConfig::default(),
             swim: SwimConfig::default(),
             compass: CompassConfig::default(),
             minimap: MinimapConfig::default(),
@@ -4282,6 +4314,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "vessels" => apply_connected_vessels_block(&mut raw.connected_vessels, body),
         "sway" => apply_sway_block(&mut raw.sway, body),
         "physics" => apply_float_physics_block(&mut raw.float_physics, body),
+        "currents" => apply_currents_block(&mut raw.currents, body),
         "swim" => apply_swim_block(&mut raw.swim, body),
         "compass" => apply_compass_block(&mut raw.compass, body),
         "minimap" => apply_minimap_block(&mut raw.minimap, body),
@@ -5163,6 +5196,43 @@ fn apply_float_physics_wave_block(cfg: &mut FloatPhysicsWaveConfig, body: &[wave
                 key = %other,
                 "Unknown key in `float_physics.wave` block, ignoring"
             ),
+        }
+    }
+}
+
+fn apply_currents_block(cfg: &mut CurrentsConfig, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `currents` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "enabled" => set_bool(&mut cfg.enabled, key, value),
+            "direction" => {
+                let cardinal = match value.trim().to_ascii_lowercase().as_str() {
+                    "right" | "east" => Some(0.0),
+                    "down" | "south" => Some(90.0),
+                    "left" | "west" => Some(180.0),
+                    "up" | "north" => Some(270.0),
+                    _ => None,
+                };
+                match cardinal.or_else(|| value.parse::<f32>().ok().filter(|v| v.is_finite())) {
+                    Some(value) => cfg.direction_degrees = value.rem_euclid(360.0),
+                    None => tracing::warn!(
+                        value,
+                        "Expected currents.direction as right/down/left/up or degrees, ignoring"
+                    ),
+                }
+            }
+            "strength" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.strength = value.clamp(0.0, 64.0),
+                _ => tracing::warn!(value, "Expected currents.strength from 0 to 64, ignoring"),
+            },
+            "period" => match parse_duration_ms(value) {
+                Some(value) if (1_000..=120_000).contains(&value) => cfg.period_ms = value,
+                _ => tracing::warn!(value, "Expected currents.period from 1s to 120s, ignoring"),
+            },
+            other => tracing::warn!(key = %other, "Unknown key in `currents` block, ignoring"),
         }
     }
 }
@@ -8330,6 +8400,7 @@ mod tests {
             connected_vessels: ConnectedVesselsConfig::default(),
             sway: SwayConfig::default(),
             float_physics: FloatPhysicsConfig::default(),
+            currents: CurrentsConfig::default(),
             swim: SwimConfig::default(),
             compass: CompassConfig::default(),
             minimap: MinimapConfig::default(),
@@ -9239,6 +9310,29 @@ mod tests {
         let defaults = parse_default_config().sway;
         assert!(!defaults.enabled);
         assert_eq!(defaults, SwayConfig::default());
+    }
+
+    #[test]
+    fn currents_block_parses_clamps_and_matches_generated_defaults() {
+        let entries = wave_entries(
+            "currents {\n\
+             enabled = true\n\
+             direction = up\n\
+             strength = 999\n\
+             period = 22s\n\
+             }\n",
+        );
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        assert!(config.currents.enabled);
+        assert_eq!(config.currents.direction_degrees, 270.0);
+        assert_eq!(config.currents.strength, 64.0);
+        assert_eq!(config.currents.period_ms, 22_000);
+
+        let numeric = wave_entries("currents {\n direction = -45\n }\n");
+        let numeric = Config::from_raw(lower_entries(&numeric)).0;
+        assert_eq!(numeric.currents.direction_degrees, 315.0);
+
+        assert_eq!(parse_default_config().currents, CurrentsConfig::default());
     }
 
     #[test]

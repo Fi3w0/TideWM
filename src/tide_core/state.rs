@@ -406,6 +406,14 @@ pub struct Smallvil {
     /// wave is one continuous field every full-tier window samples by its
     /// own position, not N independent oscillators.
     pub(crate) float_physics_wave_clock: Instant,
+    /// Ocean-only cosmetic current, one small phase clock per visible
+    /// floating window. Records are paused (not reset) while focused or
+    /// directly dragged, and cleared outside Ocean or when disabled.
+    pub(crate) window_currents: HashMap<WlSurface, crate::currents::CurrentDrift>,
+    /// Floating move grabs currently under direct manipulation. Kept
+    /// separately from viscosity because viscosity may be disabled or may
+    /// keep settling briefly after the physical grab ends.
+    pub(crate) current_dragging: HashSet<WlSurface>,
     /// Continuous lateral swim camera, one entry per output that has ever
     /// swum. The offset is purely visual (the logical workspace identity is
     /// still `Layouts::active`'s `u32`); at rest it is zero and the entry
@@ -1357,6 +1365,21 @@ impl Smallvil {
                     sample.offset.y += ay;
                 }
             }
+            if self.config.water_effects
+                && self.config.spatial_engine == crate::config::SpatialEngine::Ocean
+                && self.config.currents.enabled
+            {
+                if let Some(current) = self.window_currents.get(surface) {
+                    let config = self.config.currents;
+                    let (cx, cy) = current.sample(
+                        config.direction_degrees as f64,
+                        config.strength as f64,
+                        config.period_ms as f64 / 1000.0,
+                    );
+                    sample.offset.x += cx;
+                    sample.offset.y += cy;
+                }
+            }
         }
         sample
     }
@@ -1906,6 +1929,95 @@ impl Smallvil {
             self.window_float_bodies.values(),
         ) {
             self.window_float_bodies.clear();
+        }
+    }
+
+    fn currents_enabled(&self) -> bool {
+        self.config.water_effects
+            && self.config.spatial_engine == crate::config::SpatialEngine::Ocean
+            && self.config.currents.enabled
+            && self.config.currents.strength > f32::EPSILON
+    }
+
+    /// Marks the exact floating window being directly manipulated. Move
+    /// grabs call this from their own motion/unset callbacks; it does not
+    /// query the pointer or seat, avoiding the re-entrant grab deadlock class
+    /// documented elsewhere in this state module.
+    pub(crate) fn set_current_dragging(&mut self, surface: &WlSurface, dragging: bool) {
+        if dragging {
+            self.current_dragging.insert(surface.clone());
+        } else {
+            self.current_dragging.remove(surface);
+        }
+        self.request_redraw();
+    }
+
+    /// Advances Ocean currents from the existing backend clock. Only visible
+    /// floating placements retain a record, keeping both state and continuous
+    /// redraw work proportional to what can actually be seen.
+    #[allow(clippy::mutable_key_type)] // WlSurface-keyed bounded visibility set
+    pub(crate) fn update_currents(&mut self) {
+        if !self.currents_enabled() {
+            self.window_currents.clear();
+            self.current_dragging.clear();
+            return;
+        }
+
+        let outputs: Vec<Output> = self.space.outputs().cloned().collect();
+        let mut seen = HashSet::new();
+        let mut visible = Vec::new();
+        for output in outputs {
+            let Some(placements) = self.render_placements(&output) else {
+                continue;
+            };
+            for placement in placements {
+                if !placement.is_floating()
+                    || placement.surface().is_some_and(|surface| {
+                        self.fullscreen.contains_key(surface)
+                            || self.ocean.is_screen_pinned(surface)
+                    })
+                {
+                    continue;
+                }
+                let Some(surface) = placement.surface().cloned() else {
+                    continue;
+                };
+                if !seen.insert(surface.clone()) {
+                    continue;
+                }
+                // Stable for the record's lifetime and cheap to derive.
+                // Different homes decorrelate neighboring windows without a
+                // random-number dependency or global unbounded seed counter.
+                let rect = placement.rect;
+                let phase = (rect.loc.x as f64 * 0.013
+                    + rect.loc.y as f64 * 0.021
+                    + rect.size.w as f64 * 0.003
+                    + rect.size.h as f64 * 0.005)
+                    .rem_euclid(std::f64::consts::TAU);
+                visible.push((surface, phase));
+            }
+        }
+
+        self.window_currents
+            .retain(|surface, _| seen.contains(surface));
+        self.current_dragging
+            .retain(|surface| seen.contains(surface));
+
+        let focused = self.focused_window_surface();
+        let now = Instant::now();
+        let mut needs_redraw = false;
+        for (surface, phase) in visible {
+            let paused =
+                focused.as_ref() == Some(&surface) || self.current_dragging.contains(&surface);
+            let drift = self
+                .window_currents
+                .entry(surface)
+                .or_insert_with(|| crate::currents::CurrentDrift::new(now, phase, paused));
+            drift.tick(now, paused);
+            needs_redraw |= drift.needs_frame();
+        }
+        if needs_redraw {
+            self.request_redraw();
         }
     }
 
@@ -3327,6 +3439,8 @@ impl Smallvil {
             float_physics_accum: 0.0,
             float_physics_last_tick: Instant::now(),
             float_physics_wave_clock: Instant::now(),
+            window_currents: HashMap::new(),
+            current_dragging: HashSet::new(),
             swim_cameras: HashMap::new(),
             window_frame_snapshots: HashMap::new(),
             closing_window_animations: Vec::new(),
@@ -5360,6 +5474,10 @@ impl Smallvil {
             // given body, not just whether it's numerically settled), not
             // here -- see that function's own retain call.
             || !self.window_float_bodies.is_empty()
+            || self
+                .window_currents
+                .values()
+                .any(crate::currents::CurrentDrift::needs_frame)
             || !self.swim_cameras.is_empty()
             || self.ocean.has_active_camera_motion()
             || (self.config.spatial_engine == crate::config::SpatialEngine::Ocean
@@ -7828,6 +7946,8 @@ impl Smallvil {
             if changed {
                 if !was_tiled {
                     self.window_float_ambient.remove(surface);
+                    self.window_currents.remove(surface);
+                    self.current_dragging.remove(surface);
                 }
                 self.retile();
                 self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
@@ -7953,6 +8073,8 @@ impl Smallvil {
             // No longer floating, so no longer needs its own workspace tag.
             self.floating_workspace.remove(surface);
             self.window_float_ambient.remove(surface);
+            self.window_currents.remove(surface);
+            self.current_dragging.remove(surface);
         }
 
         self.retile();
@@ -11304,6 +11426,10 @@ impl Smallvil {
                         self.window_float_ambient.remove(&surface);
                     }
                     self.sync_float_physics_bodies();
+                    if !self.currents_enabled() {
+                        self.window_currents.clear();
+                        self.current_dragging.clear();
+                    }
                     let ordinary_close =
                         self.config.animations.enabled && self.config.animations.close.enabled;
                     let cascade_close = self.config.water_effects

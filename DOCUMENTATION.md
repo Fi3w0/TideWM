@@ -382,6 +382,36 @@ sway {
 }
 ```
 
+### `currents { }`
+
+Ocean-only ambient current for floating windows. An unfocused floater follows
+a slow, bounded downstream eddy in render space; its authoritative Ocean
+rectangle, focus target, pointer hit testing, and IPC geometry never move.
+Focusing or directly dragging the window pauses its phase and eases the visual
+offset back to zero. Unfocusing fades it gently back into the same flow instead
+of jumping or catching up the time spent paused.
+
+This effect is explicitly opt-in because an eligible visible window keeps the
+frame pump active. Tiled, fullscreen, and screen-pinned windows are excluded,
+as are all Classic workspaces. State is one small phase record per visible
+eligible floater, with no texture, framebuffer, or motion history.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Enables currents in Ocean. `water_effects = false` remains the master bypass. |
+| `direction` | cardinal or degrees | `right` (`0`) | `right`/`east`, `down`/`south`, `left`/`west`, `up`/`north`, or any numeric angle. Screen coordinates use clockwise-positive degrees. |
+| `strength` | float, `0`–`64` | `10.0` | Maximum render-offset envelope in logical pixels. `0` disables animation work. |
+| `period` | duration, `1s`–`120s` | `14s` | Time for one smooth downstream eddy. |
+
+```wave
+currents {
+    enabled = true
+    direction = right
+    strength = 10
+    period = 14s
+}
+```
+
 ### `swim { }`
 
 Continuous lateral navigation between workspaces: a horizontal trackpad swipe

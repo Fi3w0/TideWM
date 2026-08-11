@@ -39,6 +39,7 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
         let Some(surface) = self.window.toplevel().map(|toplevel| toplevel.wl_surface()) else {
             return;
         };
+        data.set_current_dragging(surface, true);
         // A workspace switch or null-buffer unmap can end the window's
         // visible lifetime while the physical button remains held. `alive`
         // only checks the resource, so mapping here without this ownership
@@ -236,6 +237,9 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
 
     fn unset(&mut self, data: &mut Smallvil) {
         let completed = self.completion.take_complete();
+        if let Some(surface) = self.window.toplevel().map(|toplevel| toplevel.wl_surface()) {
+            data.set_current_dragging(surface, false);
+        }
         if self.smart_attach_ocean && completed {
             if let Some(surface) = self.window.toplevel().map(|toplevel| toplevel.wl_surface()) {
                 data.smart_attach_ocean_floating(surface, self.last_location);

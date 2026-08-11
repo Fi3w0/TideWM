@@ -9,6 +9,7 @@ pub(crate) mod backdrop;
 pub(crate) mod cascade_transition;
 pub(crate) mod caustics;
 pub(crate) mod compass;
+pub(crate) mod currents;
 pub(crate) mod decoration;
 pub(crate) mod depth;
 pub(crate) mod depth_deck;
