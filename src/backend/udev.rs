@@ -1209,8 +1209,7 @@ fn handle_connector_change(
                                 .any(|output| output.current_scale().integer_scale() == scale)
                         });
                     }
-                    state.lock_surfaces.remove(&surface.output);
-                    state.lock_blank.remove(&surface.output);
+                    state.remove_lock_output(&surface.output);
                     state.layer_dim_buffers.remove(&surface.output);
                     #[cfg(feature = "screencast")]
                     if let Some(screencast) = &state.screencast {

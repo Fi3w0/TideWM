@@ -4969,6 +4969,17 @@ impl Smallvil {
         self.try_confirm_lock();
     }
 
+    /// Drops all session-lock state owned by a disconnected output. If the
+    /// session is still locking, removing an output can satisfy the remaining
+    /// locked-frame requirement, including vacuously when the final output is
+    /// gone.
+    pub(crate) fn remove_lock_output(&mut self, output: &Output) {
+        self.lock_surfaces.remove(output);
+        self.lock_blank.remove(output);
+        self.locked_outputs.remove(output);
+        self.try_confirm_lock();
+    }
+
     fn try_confirm_lock(&mut self) {
         let SessionLock::Locking(_) = &self.session_lock else {
             return;
