@@ -1211,6 +1211,7 @@ fn handle_connector_change(
                     state.lock_surfaces.remove(&surface.output);
                     state.lock_blank.remove(&surface.output);
                     state.layer_dim_buffers.remove(&surface.output);
+                    state.locked_outputs.remove(&surface.output);
                     #[cfg(feature = "screencast")]
                     if let Some(screencast) = &state.screencast {
                         screencast.refresh_outputs(state.space.outputs());

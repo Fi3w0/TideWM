@@ -5,6 +5,9 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 ## [Unreleased]
 
 ### Fixed
+- Output disconnect during udev hotplug now clears the disconnected output from `locked_outputs`, the session-lock-confirmation tracking set, alongside the lock surface/blank-buffer/layer-dim state it was already cleaned up next to. It was previously left behind, retaining a stale `Output` handle across the hotplug until the session unlocked.
+
+### Fixed
 - `tidectl doctor`'s memory check warned above a hard-coded 1.5GB PSS, a flat estimate from before the render/water feature work landed and since replaced by AGENT.md's feature-scaled reference points (basic tiling ~50MB, full water/decoration ~60-70MB idle) and a 2GB absolute-ceiling tripwire. Raised the threshold to match; it still can't judge whether a given reading is normal for the maintainer's actual enabled features, only whether it's blown well past what any configuration should reach.
 
 ### Fixed
