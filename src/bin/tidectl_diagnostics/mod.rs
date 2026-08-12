@@ -506,7 +506,16 @@ pub fn run_checks() -> (Vec<Check>, Option<Diagnostics>) {
         let pid = compositor_pid();
         match pid.and_then(compositor_pss) {
             Some(pss) => {
-                let warn = pss > 1_500_000_000; // 1.5GB soft ceiling, see AGENT.md
+                // 2GB is AGENT.md's current absolute ceiling (Hard
+                // Constraints, revised 2026-07-30 from the old flat
+                // 1.5GB/3GB estimate): a tripwire for runaway feature
+                // growth, not a resting point. Real measured PSS scales
+                // with enabled effects -- basic tiling is ~50MB, the full
+                // water/decoration stack is ~60-70MB idle -- so this can't
+                // judge whether a given reading is normal for the
+                // maintainer's actual feature set, only whether it's blown
+                // well past what any configuration should ever reach.
+                let warn = pss > 2_000_000_000;
                 checks.push(Check::new(
                     "memory",
                     if warn { Verdict::Warn } else { Verdict::Pass },

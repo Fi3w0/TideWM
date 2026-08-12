@@ -5,6 +5,9 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 ## [Unreleased]
 
 ### Fixed
+- `tidectl doctor`'s memory check warned above a hard-coded 1.5GB PSS, a flat estimate from before the render/water feature work landed and since replaced by AGENT.md's feature-scaled reference points (basic tiling ~50MB, full water/decoration ~60-70MB idle) and a 2GB absolute-ceiling tripwire. Raised the threshold to match; it still can't judge whether a given reading is normal for the maintainer's actual enabled features, only whether it's blown well past what any configuration should reach.
+
+### Fixed
 - `tidectl doctor`/`report`'s journal and core-dump sections now actually show the most recent entries instead of the oldest ones in the lookback window. Both `journalctl` and `coredumpctl` default to oldest-first output; neither call passed `--reverse`, so the existing 20/10/40/3-line caps were silently keeping the earliest matches and discarding anything more recent, the opposite of what "recent compositor errors" and "core dumps, last 7 days" claimed to show.
 
 ### Fixed
