@@ -5,6 +5,9 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 ## [Unreleased]
 
 ### Fixed
+- Direct DMA-BUF screen captures (wlr-screencopy and PipeWire zero-copy targets) no longer block the compositor thread on the GPU render fence before handing the buffer back. The fence is exported as a pollable FD and watched from the event loop instead, so a slow or wedged GPU delays only that one capture's completion rather than freezing input and every other client's protocol dispatch; a driver that can't export a native fence FD falls back to the previous bounded blocking wait.
+
+### Fixed
 - Backdrop capture is now damage-driven instead of re-rendering the whole behind-scene once per glass window on every frame. Each glass or frosted surface keeps its own `OutputDamageTracker` and reuses one texture, so an unchanged scene costs zero offscreen GL work where it used to pay a full-scene render per glass window per frame; an interactive drag, a window moving behind, or a real client commit still recaptures because the tracker sees the geometry or commit change itself. The glass layer's commit is now a rendered-value fingerprint of the capture version plus its own wave phase and corner/frost uniforms, so ambient and reactive tails keep animating while static frost bars and settled glass stop forcing visible redraws. The floating-window and layer-shell passes also build their behind-element list once per output instead of once per glass window, so nine glass windows no longer rebuild the desktop nine times a frame.
 
 ### Fixed
