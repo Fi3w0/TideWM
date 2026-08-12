@@ -585,6 +585,7 @@ fn journal_errors(hours: u64) -> Option<Vec<String>> {
     let all = Command::new("journalctl")
         .args([
             "-b",
+            "--reverse",
             "--since",
             &since,
             "--no-pager",
@@ -609,7 +610,7 @@ fn journal_errors(hours: u64) -> Option<Vec<String>> {
 /// coredumpctl can't run.
 fn core_dumps() -> Option<Vec<String>> {
     let out = Command::new("coredumpctl")
-        .args(["--no-pager", "--since", "-7 days", "list"])
+        .args(["--no-pager", "--reverse", "--since", "-7 days", "list"])
         .output()
         .ok()
         .filter(|out| out.status.success())
@@ -889,9 +890,9 @@ pub fn render_report(checks: &[Check], diagnostics: &Option<Diagnostics>, verbos
             out.push_str(&format!(
                 "== 6. Recent compositor errors (journalctl, {}) ==\n",
                 if verbose {
-                    "last 40 lines"
+                    "most recent 40 lines"
                 } else {
-                    "first 10 lines"
+                    "most recent 10 lines"
                 }
             ));
             for line in lines.iter().take(cap) {

@@ -5,6 +5,9 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 ## [Unreleased]
 
 ### Fixed
+- `tidectl doctor`/`report`'s journal and core-dump sections now actually show the most recent entries instead of the oldest ones in the lookback window. Both `journalctl` and `coredumpctl` default to oldest-first output; neither call passed `--reverse`, so the existing 20/10/40/3-line caps were silently keeping the earliest matches and discarding anything more recent, the opposite of what "recent compositor errors" and "core dumps, last 7 days" claimed to show.
+
+### Fixed
 - Ocean's swim-drag workspace advance no longer loops once per requested step. A saturated/garbled gesture delta could previously produce an i32-extreme step count and loop billions of times on the compositor's single event-loop thread before hitting the workspace boundary; the landing workspace and applied-step count are now computed directly with bounded arithmetic, with identical results for every normal-range input.
 
 ### Fixed
