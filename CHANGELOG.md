@@ -5,6 +5,9 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 ## [Unreleased]
 
 ### Fixed
+- Ocean's swim-drag workspace advance no longer loops once per requested step. A saturated/garbled gesture delta could previously produce an i32-extreme step count and loop billions of times on the compositor's single event-loop thread before hitting the workspace boundary; the landing workspace and applied-step count are now computed directly with bounded arithmetic, with identical results for every normal-range input.
+
+### Fixed
 - A PipeWire screencast stream that times out during startup (five seconds, the library call stuck rather than returning) no longer silently detaches its worker thread and cloned event-channel sender forever. The join is now handed off to a throwaway reaper thread that blocks on it and logs the outcome instead, so a stuck startup becomes an observable, bounded leak (one idle thread) rather than an invisible one.
 
 ### Fixed
