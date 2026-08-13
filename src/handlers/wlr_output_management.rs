@@ -512,6 +512,13 @@ impl Dispatch<ZwlrOutputConfigurationHeadV1, ConfigHeadData> for Smallvil {
                     resource.post_error(Error::AlreadySet, "position already set");
                     return;
                 }
+                // Wire values are full-range i32 and the protocol's error
+                // enum has no invalid_position entry to reject extremes
+                // with, so positions are stored as requested; every
+                // arithmetic site that consumes them (the translate delta
+                // below, `translate_floating_windows_on_output`, the udev
+                // auto-layout fold) uses saturating operations instead of
+                // letting an extreme value panic/wrap layout math.
                 cfg.position_set = true;
                 cfg.position = Some((x, y));
             }
@@ -621,7 +628,14 @@ fn finish_configuration(
                 // -- possibly landing on a different output or off-screen
                 // -- even though this apply is about to report success.
                 if let Some(old_position) = old_position {
-                    let delta: Point<i32, Logical> = Point::from(pos) - old_position;
+                    // Saturating: both positions are full-range i32 wire
+                    // values, so plain subtraction of two extremes could
+                    // overflow.
+                    let delta: Point<i32, Logical> = (
+                        pos.0.saturating_sub(old_position.x),
+                        pos.1.saturating_sub(old_position.y),
+                    )
+                        .into();
                     if delta != (0, 0).into() {
                         state.translate_floating_windows_on_output(&output.name(), delta);
                     }

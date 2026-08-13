@@ -5,6 +5,9 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 ## [Unreleased]
 
 ### Fixed
+- Output positions from `zwlr_output_manager` clients (and stored layout state derived from them) can no longer overflow translation and layout arithmetic. The wire carries full-range i32 positions and the protocol has no error for rejecting extremes, so the values are stored as requested but every arithmetic site that consumes them is now saturating: the floating-window translate delta in the apply path, every `loc += delta` inside `translate_floating_windows_on_output` (including fullscreen/maximized restore rects), and the udev auto-layout right-edge fold. An i32-extreme position previously panicked in debug builds and wrapped to a nonsensical layout in release.
+
+### Fixed
 - A session lock whose final unconfirmed output was hot-unplugged could stay in the pending `Locking` state forever. Confirmation was only re-evaluated when a locked frame rendered on an output, and a disconnected output renders nothing -- with zero surviving outputs no frame would ever arrive, so the locker client never got its `locked` event. The disconnect cleanup now re-runs lock confirmation after pruning the departed output's lock state (vacuously confirmed at zero outputs, matching niri's behavior: a lock with nothing left to display it is still locked).
 
 ### Fixed

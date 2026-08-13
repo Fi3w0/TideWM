@@ -4657,7 +4657,7 @@ impl Smallvil {
                 // again from the output's new live geometry; only translate
                 // the durable windowed restore records here.
                 if let Some(tag) = self.floating_workspace.get_mut(&surface) {
-                    tag.rect.loc += delta;
+                    tag.rect.loc = saturating_translate(tag.rect.loc, delta);
                 }
             } else if self.window_is_visible(&surface) {
                 let window = self
@@ -4669,19 +4669,19 @@ impl Smallvil {
                 let Some(mut rect) = self.space.element_geometry(&window) else {
                     continue;
                 };
-                rect.loc += delta;
+                rect.loc = saturating_translate(rect.loc, delta);
                 self.space.map_element(window, rect.loc, false);
                 self.floating_workspace.get_mut(&surface).unwrap().rect = rect;
             } else if let Some(tag) = self.floating_workspace.get_mut(&surface) {
-                tag.rect.loc += delta;
+                tag.rect.loc = saturating_translate(tag.rect.loc, delta);
             }
             if let Some(entry) = self.fullscreen.get_mut(&surface) {
                 if let Some(rect) = &mut entry.restore_rect {
-                    rect.loc += delta;
+                    rect.loc = saturating_translate(rect.loc, delta);
                 }
             }
             if let Some(entry) = self.maximized.get_mut(&surface) {
-                entry.restore_rect.loc += delta;
+                entry.restore_rect.loc = saturating_translate(entry.restore_rect.loc, delta);
             }
         }
     }
@@ -11408,6 +11408,18 @@ fn center(rect: Rectangle<i32, Logical>) -> Point<i32, Logical> {
     (rect.loc.x + rect.size.w / 2, rect.loc.y + rect.size.h / 2).into()
 }
 
+/// `loc + delta` with per-axis saturation. Output positions arrive as
+/// full-range i32 (config `[[output]]`, `zwlr_output_manager` wire
+/// values) and `delta` is a difference of two stored positions, so plain
+/// `i32` addition on adversarial values would panic in debug and wrap in
+/// release.
+fn saturating_translate(
+    loc: Point<i32, Logical>,
+    delta: Point<i32, Logical>,
+) -> Point<i32, Logical> {
+    (loc.x.saturating_add(delta.x), loc.y.saturating_add(delta.y)).into()
+}
+
 fn ocean_island_origins(
     outputs: &[(String, Rectangle<i32, Logical>)],
     max_workspaces: &std::collections::HashMap<String, u32>,
@@ -11561,6 +11573,19 @@ fn nearest_point_in_output_rects(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saturating_translate_never_overflows() {
+        let loc: Point<i32, Logical> = (i32::MAX - 10, i32::MIN + 10).into();
+        let delta: Point<i32, Logical> = (100, -100).into();
+        let out = saturating_translate(loc, delta);
+        assert_eq!(out.x, i32::MAX);
+        assert_eq!(out.y, i32::MIN);
+
+        let ordinary: Point<i32, Logical> = (40, -7).into();
+        let step: Point<i32, Logical> = (12, 5).into();
+        assert_eq!(saturating_translate(ordinary, step), (52, -2).into());
+    }
 
     #[test]
     fn ocean_islands_do_not_overlap_between_outputs() {

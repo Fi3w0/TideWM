@@ -1036,7 +1036,9 @@ fn create_surface(
         .space
         .outputs()
         .filter_map(|output| state.space.output_geometry(output))
-        .fold(0, |max_edge, geo| max_edge.max(geo.loc.x + geo.size.w));
+        .fold(0, |max_edge, geo| {
+            max_edge.max(geo.loc.x.saturating_add(geo.size.w))
+        });
     let position = output_config
         .as_ref()
         .and_then(|c| c.position)
