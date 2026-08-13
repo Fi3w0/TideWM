@@ -317,6 +317,10 @@ fn run_connection(
             let Some(data) = buffer.datas_mut().first_mut() else {
                 return;
             };
+            // PipeWire reuses buffers and their chunk metadata. Mark this
+            // one empty before any fallible branch; only a completed DMA-BUF
+            // render or SHM copy below publishes a non-zero size.
+            *data.chunk_mut().size_mut() = 0;
             let expected_stride = width as usize * 4;
             let expected_len = expected_stride.saturating_mul(height as usize);
 
@@ -367,7 +371,6 @@ fn run_connection(
                         }
                     }
                 }
-                *data.chunk_mut().size_mut() = 0;
                 return;
             }
 
