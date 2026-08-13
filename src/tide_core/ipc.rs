@@ -91,6 +91,15 @@ enum Request {
     /// profile, commit, backend, uptime, engine, config path and warnings,
     /// and counts that a bug report wants without guessing from the host.
     Diagnostics,
+    /// A point-in-time performance snapshot for `tidectl perf`: the
+    /// compositor's own PSS/RSS/CPU-time/threads read from `/proc/self`
+    /// and `getrusage` (so they're always about the right process, unlike
+    /// a CLI that has to find the pid), plus the render/runtime
+    /// self-statistics only a running compositor knows -- per-output
+    /// refresh/scale/transform, whether anything is animating, and the
+    /// water/wallpaper toggles that drive most of the cost. The CLI takes
+    /// two snapshots across a window and derives CPU% from the delta.
+    Perf,
     Action {
         action: String,
     },
@@ -820,6 +829,7 @@ fn handle_request(state: &mut Smallvil, request: Request) -> serde_json::Value {
         Request::FocusedWindow => json!({ "ok": true, "data": focused_window_json(state) }),
         Request::ActiveSubmap => json!({ "ok": true, "data": state.active_submap }),
         Request::Diagnostics => json!({ "ok": true, "data": diagnostics_json(state) }),
+        Request::Perf => json!({ "ok": true, "data": perf_snapshot_json(state) }),
         // Subscribe is intercepted upstream in `register_connection` before
         // `response_payload` ever runs, since handling it requires the
         // connection's stream (not available here). Reaching this arm means
@@ -1040,6 +1050,108 @@ fn diagnostics_json(state: &Smallvil) -> serde_json::Value {
         "submap_count": submaps,
         "screencast_feature": screencast_feature,
     })
+}
+
+/// Point-in-time performance snapshot for `tidectl perf`. Combines
+/// process-level resource use read from the compositor's own `/proc/self`
+/// and `getrusage` (always about the right process) with the
+/// render/runtime self-statistics only a running compositor knows. The
+/// CLI samples this twice across a window and derives CPU% from the
+/// `cpu_user_us`/`cpu_system_us` delta; a single snapshot is enough for
+/// everything else. No GPU-busy%: that needs a vendor-specific source
+/// this process can't read portably (see AGENT.md's perf notes), so the
+/// compositor's own animation/output state is the proxy for render load.
+fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
+    let outputs: Vec<serde_json::Value> = state
+        .space
+        .outputs()
+        .map(|output| {
+            let mode = output.current_mode();
+            let refresh_mhz = mode.map(|m| m.refresh).unwrap_or(0);
+            let logical = state.space.output_geometry(output);
+            json!({
+                "name": output.name(),
+                "logical_width": logical.map(|g| g.size.w).unwrap_or(0),
+                "logical_height": logical.map(|g| g.size.h).unwrap_or(0),
+                "mode_width": mode.map(|m| m.size.w).unwrap_or(0),
+                "mode_height": mode.map(|m| m.size.h).unwrap_or(0),
+                "refresh_hz": if refresh_mhz > 0 { refresh_mhz as f64 / 1000.0 } else { 0.0 },
+                "scale": output.current_scale().fractional_scale(),
+                "transform": format!("{:?}", output.current_transform()),
+            })
+        })
+        .collect();
+    let visible_windows = state.space.elements().count();
+    #[cfg(feature = "screencast")]
+    let screencast_feature = state.screencast.is_some();
+    #[cfg(not(feature = "screencast"))]
+    let screencast_feature = false;
+
+    let (pss_kib, rss_kib, threads) = read_self_proc().unwrap_or((0, 0, 0));
+    let (cpu_user_us, cpu_system_us) = read_self_cpu_us().unwrap_or((0, 0));
+
+    json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "backend": state.backend_name,
+        "uptime_secs": state.start_time.elapsed().as_secs(),
+        "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
+        "spatial_engine": match state.config.spatial_engine {
+            crate::config::SpatialEngine::Classic => "classic",
+            crate::config::SpatialEngine::Ocean => "ocean",
+        },
+        "pss_bytes": pss_kib * 1024,
+        "rss_bytes": rss_kib * 1024,
+        "cpu_user_us": cpu_user_us,
+        "cpu_system_us": cpu_system_us,
+        "threads": threads,
+        "animation_active": state.has_active_animation(),
+        "water_effects": state.config.water_effects,
+        "builtin_wallpaper": state.config.builtin_wallpaper,
+        "screencast_feature": screencast_feature,
+        "session_locked": !matches!(state.session_lock, crate::tide_core::state::SessionLock::Unlocked),
+        "visible_windows": visible_windows,
+        "outputs": outputs,
+    })
+}
+
+/// `(pss_kib, rss_kib, threads)` from the compositor's own `/proc/self`.
+/// PSS comes from `smaps_rollup` (proportional, the number the RAM budget
+/// is measured against), RSS from the same file's `Rss` line, and the
+/// thread count from `/proc/self/status`. All best-effort: a read failure
+/// (very locked-down container without proc) zeroes every field rather
+/// than failing the whole snapshot.
+fn read_self_proc() -> Option<(u64, u64, u64)> {
+    let rollup = std::fs::read_to_string("/proc/self/smaps_rollup").ok()?;
+    let pss = first_kb_field(&rollup, "Pss:")?;
+    let rss = first_kb_field(&rollup, "Rss:")?;
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let threads = first_kb_field(&status, "Threads:")?;
+    Some((pss, rss, threads))
+}
+
+/// First `<label><number> kB` match in `s`, in KiB. Shared by the rollup
+/// and status parses.
+fn first_kb_field(haystack: &str, label: &str) -> Option<u64> {
+    haystack.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix(label)?.trim();
+        let n = rest.split_whitespace().next()?;
+        n.parse::<u64>().ok()
+    })
+}
+
+/// `(user_us, system_us)` CPU time for the whole compositor process from
+/// `getrusage(RUSAGE_SELF)`. Microseconds, so the CLI's CPU% math needs no
+/// `CLK_TCK` constant.
+fn read_self_cpu_us() -> Option<(u64, u64)> {
+    // Safety: getrusage with RUSAGE_SELF writes into a plain rusage struct
+    // owned here; no pointers in or out, the standard well-defined call.
+    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) };
+    if rc != 0 {
+        return None;
+    }
+    let to_us = |tv: libc::timeval| -> u64 { (tv.tv_sec as u64) * 1_000_000 + (tv.tv_usec as u64) };
+    Some((to_us(ru.ru_utime), to_us(ru.ru_stime)))
 }
 
 fn window_json(

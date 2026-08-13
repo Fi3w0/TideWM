@@ -14,7 +14,10 @@
 //! Two host-side commands live outside the socket protocol entirely:
 //! `tidectl doctor` (a battery of quick health checks) and `tidectl report`
 //! (a plain-text diagnostic file for attaching to GitHub issues) -- see
-//! `tidectl_diagnostics.rs`.
+//! `tidectl_diagnostics.rs`. `tidectl perf` is the third: it does use the
+//! socket (two sampled `perf` snapshots across a window) but runs its own
+//! request/response + output cycle rather than the generic single-request
+//! path.
 //!
 //! `tidectl subscribe [event...]` is the one long-lived command: it opens
 //! the subscribe mode (`ipc.rs`) and prints one JSON line per event,
@@ -28,6 +31,7 @@ use std::env;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -71,6 +75,13 @@ fn main() {
         .map(Ok)
         .unwrap_or_else(find_socket)
         .unwrap_or_else(|msg| fail(&msg));
+
+    // `perf` needs the socket (two sampled snapshots across a window), so it
+    // runs after socket discovery but still handles its own request/response
+    // cycle and output formatting rather than the generic single-request path.
+    if args[0] == "perf" {
+        cmd_perf(&socket, &args[1..], json_output);
+    }
 
     // Long-lived subscribe mode: takes over the process, never returns.
     if args[0] == "subscribe" {
@@ -252,6 +263,157 @@ fn cmd_report() {
     }
     println!("Attach the file to a GitHub issue at https://github.com/Fi3w0/TideWM/issues");
     std::process::exit(0);
+}
+
+/// `tidectl perf [--window <secs>] [--json]`: samples the compositor's
+/// resource use and render state over a window (default 3s) and prints a
+/// compact performance summary. Takes two IPC `perf` snapshots spaced by
+/// the window and derives CPU% from the delta of the compositor's own
+/// `getrusage` microsecond counters (so it's always about the right
+/// process and needs no CLK_TCK). PSS/RSS/threads and the render
+/// self-stats come from the second snapshot. No GPU-busy%: that needs a
+/// vendor-specific source the compositor can't read portably.
+fn cmd_perf(socket: &Path, args: &[String], json_output: bool) -> ! {
+    let mut window_secs: f64 = 3.0;
+    let mut iter = args.iter().map(String::as_str);
+    while let Some(arg) = iter.next() {
+        match arg {
+            "--window" | "-w" => match iter.next() {
+                Some(v) => match v.parse::<f64>() {
+                    Ok(n) if n.is_finite() && n > 0.0 => window_secs = n,
+                    _ => fail("--window needs a positive number of seconds"),
+                },
+                None => fail("--window requires a value"),
+            },
+            "-h" | "--help" => {
+                println!("USAGE: tidectl perf [--window <secs>] [--json]");
+                println!("       samples CPU/RAM and render state over <secs> (default 3)");
+                std::process::exit(0);
+            }
+            "--json" | "-j" => {
+                // Already consumed by the global flag parser; accept quietly
+                // in case it appears after the subcommand.
+            }
+            other => fail(&format!("unrecognized argument '{other}' for perf")),
+        }
+    }
+
+    let request = json!({ "request": "perf" });
+    let sample = || -> Value {
+        let response = match send_request(socket, &request) {
+            Ok(r) => r,
+            Err(e) => fail(&format!("failed to query compositor: {e}")),
+        };
+        if response.get("ok").and_then(Value::as_bool) != Some(true) {
+            fail(&format!(
+                "compositor rejected perf request: {}",
+                response.get("error").and_then(Value::as_str).unwrap_or("?")
+            ));
+        }
+        response.get("data").cloned().unwrap_or(Value::Null)
+    };
+
+    let t0 = Instant::now();
+    let first = sample();
+    std::thread::sleep(Duration::from_secs_f64(window_secs));
+    let second = sample();
+    let wall = t0.elapsed();
+
+    let cpu_pct = cpu_percent(&first, &second, wall);
+
+    if json_output {
+        let mut out = second;
+        if let Some(obj) = out.as_object() {
+            let mut obj = obj.clone();
+            obj.insert("cpu_pct".into(), json!(cpu_pct));
+            obj.insert("sample_window_secs".into(), json!(wall.as_secs_f64()));
+            out = Value::Object(obj);
+        }
+        println!("{out}");
+    } else {
+        print_perf_summary(&second, cpu_pct, wall);
+    }
+    std::process::exit(0);
+}
+
+/// CPU% over the window: (user_us_delta + system_us_delta) / wall_us * 100.
+/// Reported as a fraction of one core, so a single-threaded compositor's
+/// main loop stays under ~100; a value near 0 means it idled.
+fn cpu_percent(first: &Value, second: &Value, wall: Duration) -> Option<f64> {
+    let u0 = first.get("cpu_user_us").and_then(Value::as_u64)?;
+    let s0 = first.get("cpu_system_us").and_then(Value::as_u64)?;
+    let u1 = second.get("cpu_user_us").and_then(Value::as_u64)?;
+    let s1 = second.get("cpu_system_us").and_then(Value::as_u64)?;
+    let delta_us = u1.saturating_sub(u0) + s1.saturating_sub(s0);
+    let wall_us = wall.as_micros() as f64;
+    if wall_us <= 0.0 {
+        return Some(0.0);
+    }
+    Some(delta_us as f64 / wall_us * 100.0)
+}
+
+fn print_perf_summary(snap: &Value, cpu_pct: Option<f64>, wall: Duration) {
+    let mib = |key: &str| {
+        snap.get(key)
+            .and_then(Value::as_u64)
+            .map(|b| b as f64 / (1024.0 * 1024.0))
+    };
+    let bool_of = |key: &str| snap.get(key).and_then(Value::as_bool).unwrap_or(false);
+    let pss = mib("pss_bytes");
+    let rss = mib("rss_bytes");
+    let threads = snap.get("threads").and_then(Value::as_u64);
+    let visible = snap.get("visible_windows").and_then(Value::as_u64);
+    let outputs = snap.get("outputs").and_then(Value::as_array);
+
+    println!("TideWM perf over {:.2}s", wall.as_secs_f64());
+    if let Some(pss) = pss {
+        println!("  PSS:        {:>7.1} MiB", pss);
+    }
+    if let Some(rss) = rss {
+        println!("  RSS:        {:>7.1} MiB", rss);
+    }
+    if let Some(cpu) = cpu_pct {
+        println!("  CPU:        {:>7.1}%  (of one core)", cpu);
+    }
+    if let Some(t) = threads {
+        println!("  threads:    {:>7}", t);
+    }
+    println!(
+        "  backend:    {:>7}   engine: {}   profile: {}",
+        snap.get("backend").and_then(Value::as_str).unwrap_or("?"),
+        snap.get("spatial_engine")
+            .and_then(Value::as_str)
+            .unwrap_or("?"),
+        snap.get("profile").and_then(Value::as_str).unwrap_or("?"),
+    );
+    println!(
+        "  identity:   water_effects={} builtin_wallpaper={} animating={}",
+        bool_of("water_effects"),
+        bool_of("builtin_wallpaper"),
+        bool_of("animation_active"),
+    );
+    if let Some(v) = visible {
+        println!("  visible windows: {}", v);
+    }
+    if let Some(outputs) = outputs {
+        for o in outputs {
+            let hz = o.get("refresh_hz").and_then(Value::as_f64).unwrap_or(0.0);
+            let scale = o.get("scale").and_then(Value::as_f64).unwrap_or(0.0);
+            let w = o.get("logical_width").and_then(Value::as_i64).unwrap_or(0);
+            let h = o.get("logical_height").and_then(Value::as_i64).unwrap_or(0);
+            println!(
+                "  output {}: {}x{} @ {:.1} Hz  scale {:.2}  {}",
+                o.get("name").and_then(Value::as_str).unwrap_or("?"),
+                w,
+                h,
+                hz,
+                scale,
+                o.get("transform").and_then(Value::as_str).unwrap_or("?"),
+            );
+        }
+    }
+    println!();
+    println!("(GPU-busy% not available portably; use a vendor tool to measure it.)");
 }
 
 fn fail(msg: &str) -> ! {
@@ -573,6 +735,9 @@ STREAMING:
 DIAGNOSTICS:
     doctor              run quick health checks (PASS/WARN/FAIL/SKIP)
     doctor --json       same checks as machine-readable JSON
+    perf [--window <s>] sample the compositor's RAM/CPU and render state
+                        over a window (default 3s); --json for raw output.
+                        No GPU-busy% (not portable); use a vendor tool.
     report [--output <path>]   write a full diagnostic report file (default
                         tidewm-report.txt) for attaching to a GitHub issue;
                         embeds the doctor quick check, stays compact unless
@@ -606,4 +771,35 @@ FLAGS:
 By default tidectl uses $TIDEWM_SOCKET if set, otherwise the newest
 tidewm-*.sock under $XDG_RUNTIME_DIR."#
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_percent_is_delta_over_wall_as_one_core_fraction() {
+        // 200_000 us of CPU over 1_000_000 us of wall == 20% of one core.
+        let first = json!({ "cpu_user_us": 1_000_000u64, "cpu_system_us": 500_000u64 });
+        let second = json!({ "cpu_user_us": 1_150_000u64, "cpu_system_us": 550_000u64 });
+        let wall = Duration::from_secs(1);
+        assert_eq!(cpu_percent(&first, &second, wall), Some(20.0));
+    }
+
+    #[test]
+    fn cpu_percent_zero_when_idle() {
+        let first = json!({ "cpu_user_us": 42u64, "cpu_system_us": 7u64 });
+        let second = json!({ "cpu_user_us": 42u64, "cpu_system_us": 7u64 });
+        assert_eq!(
+            cpu_percent(&first, &second, Duration::from_secs(2)),
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn cpu_percent_none_when_fields_missing() {
+        let first = json!({});
+        let second = json!({ "cpu_user_us": 10u64, "cpu_system_us": 0u64 });
+        assert_eq!(cpu_percent(&first, &second, Duration::from_secs(1)), None);
+    }
 }
