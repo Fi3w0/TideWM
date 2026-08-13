@@ -394,6 +394,7 @@ pub fn init_winit(
                         // chain's single-insertion-point shape.
                         let workspace_transition =
                             state.workspace_transition_frame_element(renderer, &entry.output);
+                        let workspace_glide = state.workspace_glide_frame_element(&entry.output);
                         let depth_transition =
                             state.depth_transition_frame_element(renderer, &entry.output);
                         let compass_elements =
@@ -418,6 +419,7 @@ pub fn init_winit(
                         elements.extend(ripple_layers.above_windows);
                         elements.extend(compass_elements);
                         elements.extend(workspace_transition);
+                        elements.extend(workspace_glide);
                         elements.extend(closing_windows);
                         elements.extend(depth_elements);
                         elements.extend(space_elements);

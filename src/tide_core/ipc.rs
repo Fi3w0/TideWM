@@ -1095,7 +1095,15 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
         .values()
         .fold(0_u64, |total, transition| {
             total.saturating_add(transition.estimated_texture_bytes())
-        });
+        })
+        .saturating_add(
+            state
+                .workspace_glides
+                .values()
+                .fold(0_u64, |total, transition| {
+                    total.saturating_add(transition.estimated_texture_bytes())
+                }),
+        );
     let tide_texture_estimate_bytes = backdrop_texture_bytes
         .saturating_add(wallpaper_texture_bytes)
         .saturating_add(caustics_texture_bytes)
@@ -1135,7 +1143,7 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
             "wallpaper_bytes": wallpaper_texture_bytes,
             "caustics_bytes": caustics_texture_bytes,
             "workspace_transition_bytes": transition_texture_bytes,
-            "scope": "ARGB payload for TideWM-owned backdrop, wallpaper, caustics, and active workspace-transition textures; excludes client buffers and driver overhead",
+            "scope": "ARGB payload for TideWM-owned backdrop, wallpaper, caustics, and active water/non-water workspace-transition textures; excludes client buffers and driver overhead",
         },
         "outputs": outputs,
     })

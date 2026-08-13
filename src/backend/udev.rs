@@ -152,6 +152,8 @@ smithay::backend::renderer::element::render_elements! {
     /// Captured outgoing workspace peeled away over the live incoming
     /// workspace (Phase R1, see workspace_transition.rs).
     WorkspaceTransition = crate::workspace_transition::WorkspaceTransitionElement,
+    /// Non-water slide/fade of one outgoing workspace snapshot.
+    WorkspaceGlide = crate::workspace_transition::WorkspaceGlideElement,
     /// Full-output dim fill for a `layer_rule { dim_around = true }` layer
     /// surface -- Hyprland's `dimaround`. Pushed directly behind the
     /// Overlay/Top layer pass so it darkens every window and lower layer
@@ -1626,6 +1628,11 @@ fn render_surface(
     } else {
         state.workspace_transition_frame_element(renderer, output)
     };
+    let workspace_glide = if locked {
+        None
+    } else {
+        state.workspace_glide_frame_element(output)
+    };
     let depth_transition = if locked {
         None
     } else {
@@ -1664,6 +1671,7 @@ fn render_surface(
     elements.extend(ripple_layers.above_windows);
     elements.extend(compass_elements);
     elements.extend(workspace_transition);
+    elements.extend(workspace_glide);
     elements.extend(closing_windows);
     elements.extend(depth_elements);
     elements.extend(space_elements);

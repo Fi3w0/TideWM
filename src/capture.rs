@@ -637,6 +637,7 @@ impl Smallvil {
             // loops: AboveAll frontmost, then chrome-less AboveWindows,
             // then windows, then BelowWindows/wallpaper, then BelowAll.
             let workspace_transition = self.workspace_transition_frame_element(renderer, &output);
+            let workspace_glide = self.workspace_glide_frame_element(&output);
             let depth_transition = self.depth_transition_frame_element(renderer, &output);
             let closing_windows = self.closing_window_frame_elements(renderer, &output);
             let Some(placements) = self.render_placements(&output) else {
@@ -676,6 +677,7 @@ impl Smallvil {
                     elements.extend(depth_transition);
                     elements.extend(ripple_layers.above_windows);
                     elements.extend(workspace_transition);
+                    elements.extend(workspace_glide);
                     elements.extend(closing_windows);
                     elements.extend(depth_elements);
                     elements.extend(space_elements);

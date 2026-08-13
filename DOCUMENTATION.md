@@ -222,13 +222,18 @@ releases the live surface. Cloning these GPU handles does not allocate another
 framebuffer or copy the window.
 
 `preset` selects a complete baseline: `tide` (the calm default), `wave` (more
-visible oscillation), `riptide` (short and sharp), or `hypr-smooth`. The
+visible oscillation), `riptide` (short and sharp), `hypr-smooth`, or one of
+the non-water motion packs: `silk`, `snappy`, `gentle`, `cinematic`, and
+`minimal`. The five non-water packs enable smooth workspace and interactive
+move/resize motion even when `water_effects = false`; all values remain
+individually editable in Wave. Existing presets and the default keep those two
+new controls disabled for compatibility. The
 `hypr-smooth` preset mirrors the maintainer's real Hyprland window settings:
 open geometry uses the 300ms `overshot` curve, close geometry uses the 300ms
 `easeInOut` curve, both slide through the nearest output edge, both fade on a
 separate 400ms `easeInOut` clock, and layout motion uses 400ms `easeInOut`.
 Explicit values in the same block always override the preset, even when
-`preset` appears later. The top-level `enabled` disables all three transitions.
+`preset` appears later. The top-level `enabled` disables all animation groups.
 `slowdown` multiplies both geometry and opacity durations (`0.5` is twice as
 fast, `2` twice as slow). `max_closing_snapshots` (default `64`) caps detached
 windows retained for close animation, while `close_snapshot_output_budget`
@@ -237,8 +242,7 @@ live outputs' aggregate mode area. These are complementary: the count protects
 against floods of tiny windows, and the output-relative area budget scales with
 the actual nested, HiDPI, or multi-monitor session without assuming a screen
 resolution. Setting either to `0` disables detached close snapshots. Each
-`open`, `close`, and `movement` sub-block
-supports:
+`open`, `close`, and `movement` sub-blocks support:
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -297,24 +301,60 @@ animations {
         wave_amplitude = 1.25
         wave_decay = 2.4
     }
+
+    workspace {
+        enabled = false
+        style = slide-fade
+        duration = 220ms
+        curve = cubic-bezier(0.16,1,0.3,1)
+        travel = 0.2
+    }
+
+    interactive {
+        enabled = false
+        half_life = 28ms
+    }
 }
 ```
 
+For a completely non-water setup with smooth motion, the short form is:
+
+```wave
+water_effects = false
+animations { preset = silk }
+```
+
+`workspace { }` is a non-water transition drawn from one temporary outgoing
+workspace snapshot over the live incoming workspace. `style` accepts `slide`,
+`slide-fade`, or `fade`; `duration` and `curve` use the same forms as window
+motion. `travel` is a `0`–`1` fraction of the output's live physical width,
+not a fixed pixel distance. At most one snapshot is retained per output, it is
+dropped when the transition ends or the output disappears, and the existing
+water workspace transition takes precedence when both are enabled.
+
+`interactive { }` smooths pointer-driven move and resize without enabling the
+water identity. `half_life` is the refresh-independent exponential settling
+time (`0ms` makes the path immediate). It keeps one small record per actively
+moving window and allocates no texture or framebuffer.
+
 ### Interactive viscosity
 
-`viscosity` controls TideWM's liquid drag and resize feel independently of the
-fixed-duration `animations { movement { } }` transition. Pointer grabs update
-the real window position, resize target, layout ratios, and hit-testing
-immediately. The rendered window rectangle follows with refresh-rate-independent
-exponential damping, including floating move/resize, tiled drag-to-swap, direct
-split-border resize, and modifier-drag tiled resize. Repeated pointer events
-retarget from the current on-screen rectangle, so motion stays continuous.
+The legacy top-level `viscosity` controls TideWM's liquid drag and resize feel
+independently of the fixed-duration `animations { movement { } }` transition.
+Pointer grabs update the real window position, resize target, layout ratios,
+and hit-testing immediately. The rendered window rectangle follows with
+refresh-rate-independent exponential damping, including floating move/resize,
+tiled drag-to-swap, direct split-border resize, and modifier-drag tiled resize.
+Repeated pointer events retarget from the current on-screen rectangle, so
+motion stays continuous.
 
 The state is bounded to one small record per moving window and stores no pointer
 history, textures, or framebuffers. `0` disables it, `1.0` is the default,
 and values up to `4.0` progressively slow settling. `water_effects = false`
-bypasses it globally. A matching `rule { viscosity = ... }` overrides the
-global value for one app.
+bypasses this legacy route. When `animations.interactive.enabled = true`, its
+direct `half_life` takes precedence and works regardless of `water_effects`.
+A matching `rule { viscosity = ... }` overrides only the legacy liquid value
+for one app.
 
 ### `vessels { }` (legacy: `connected_vessels { }`)
 

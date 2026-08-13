@@ -3111,6 +3111,56 @@ pub struct WindowAnimationsConfig {
     pub open: WindowAnimationConfig,
     pub close: WindowAnimationConfig,
     pub movement: WindowAnimationConfig,
+    /// Non-water workspace motion, independent of `water_effects`.
+    pub workspace: WorkspaceAnimationConfig,
+    /// Render-only smoothing for pointer-driven move and resize.
+    pub interactive: InteractiveAnimationConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceAnimationStyle {
+    Slide,
+    SlideFade,
+    Fade,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspaceAnimationConfig {
+    pub enabled: bool,
+    pub style: WorkspaceAnimationStyle,
+    pub duration_ms: u32,
+    pub curve: WindowAnimationCurve,
+    /// Horizontal travel as a fraction of the live output width.
+    pub travel: f32,
+}
+
+impl Default for WorkspaceAnimationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            style: WorkspaceAnimationStyle::SlideFade,
+            duration_ms: 220,
+            curve: WindowAnimationCurve::CubicBezier([0.16, 1.0, 0.3, 1.0]),
+            travel: 0.2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct InteractiveAnimationConfig {
+    pub enabled: bool,
+    /// Exponential follower half-life in milliseconds. This is independent
+    /// of output refresh cadence; elapsed wall time drives the curve.
+    pub half_life_ms: u32,
+}
+
+impl Default for InteractiveAnimationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            half_life_ms: 28,
+        }
+    }
 }
 
 impl Default for WindowAnimationsConfig {
@@ -3174,6 +3224,8 @@ impl WindowAnimationsConfig {
                 wave_cycles: 1.0,
                 wave_decay: 1.5,
             },
+            workspace: WorkspaceAnimationConfig::default(),
+            interactive: InteractiveAnimationConfig::default(),
         }
     }
 
@@ -3234,6 +3286,8 @@ impl WindowAnimationsConfig {
                 wave_cycles: 0.5,
                 wave_decay: 2.4,
             },
+            workspace: WorkspaceAnimationConfig::default(),
+            interactive: InteractiveAnimationConfig::default(),
         }
     }
 
@@ -3275,6 +3329,99 @@ impl WindowAnimationsConfig {
         preset.movement.duration_ms = 165;
         preset.movement.wave_amplitude = 3.0;
         preset.movement.wave_cycles = 0.7;
+        preset
+    }
+
+    fn smooth_glide(
+        open_ms: u32,
+        close_ms: u32,
+        movement_ms: u32,
+        interactive_half_life_ms: u32,
+        workspace_ms: u32,
+        workspace_style: WorkspaceAnimationStyle,
+        workspace_travel: f32,
+    ) -> Self {
+        let mut preset = Self::tide();
+        for animation in [&mut preset.open, &mut preset.close, &mut preset.movement] {
+            animation.effect = WindowAnimationEffect::Glide;
+            animation.wave_amplitude = 0.0;
+            animation.wave_cycles = 0.0;
+            animation.wave_decay = 0.0;
+            animation.curve = WindowAnimationCurve::CubicBezier([0.16, 1.0, 0.3, 1.0]);
+        }
+        preset.open.duration_ms = open_ms;
+        preset.open.offset = (0, 18);
+        preset.open.from_opacity = 0.15;
+        preset.close.duration_ms = close_ms;
+        preset.close.offset = (0, 12);
+        preset.movement.duration_ms = movement_ms;
+        preset.workspace = WorkspaceAnimationConfig {
+            enabled: true,
+            style: workspace_style,
+            duration_ms: workspace_ms,
+            curve: WindowAnimationCurve::CubicBezier([0.16, 1.0, 0.3, 1.0]),
+            travel: workspace_travel,
+        };
+        preset.interactive = InteractiveAnimationConfig {
+            enabled: true,
+            half_life_ms: interactive_half_life_ms,
+        };
+        preset
+    }
+
+    pub fn silk() -> Self {
+        Self::smooth_glide(
+            170,
+            140,
+            200,
+            28,
+            220,
+            WorkspaceAnimationStyle::SlideFade,
+            0.20,
+        )
+    }
+
+    pub fn snappy() -> Self {
+        Self::smooth_glide(
+            120,
+            100,
+            140,
+            16,
+            150,
+            WorkspaceAnimationStyle::SlideFade,
+            0.12,
+        )
+    }
+
+    pub fn gentle() -> Self {
+        Self::smooth_glide(
+            240,
+            200,
+            260,
+            42,
+            280,
+            WorkspaceAnimationStyle::SlideFade,
+            0.16,
+        )
+    }
+
+    pub fn cinematic() -> Self {
+        Self::smooth_glide(
+            320,
+            260,
+            340,
+            52,
+            360,
+            WorkspaceAnimationStyle::SlideFade,
+            0.65,
+        )
+    }
+
+    pub fn minimal() -> Self {
+        let mut preset =
+            Self::smooth_glide(100, 90, 110, 14, 130, WorkspaceAnimationStyle::Fade, 0.0);
+        preset.open.offset = (0, 0);
+        preset.close.offset = (0, 0);
         preset
     }
 }
@@ -4591,9 +4738,14 @@ fn apply_animations_block(cfg: &mut WindowAnimationsConfig, body: &[waves::Entry
             "wave" | "rolling-wave" => *cfg = WindowAnimationsConfig::wave(),
             "riptide" | "breaker" => *cfg = WindowAnimationsConfig::riptide(),
             "hypr" | "hyprland" | "hypr-smooth" => *cfg = WindowAnimationsConfig::hypr_smooth(),
+            "silk" => *cfg = WindowAnimationsConfig::silk(),
+            "snappy" => *cfg = WindowAnimationsConfig::snappy(),
+            "gentle" => *cfg = WindowAnimationsConfig::gentle(),
+            "cinematic" => *cfg = WindowAnimationsConfig::cinematic(),
+            "minimal" => *cfg = WindowAnimationsConfig::minimal(),
             other => tracing::warn!(
                 preset = %other,
-                "Unknown animation preset; expected tide, wave, riptide, or hypr-smooth"
+                "Unknown animation preset; expected tide, wave, riptide, hypr-smooth, silk, snappy, gentle, cinematic, or minimal"
             ),
         }
     }
@@ -4645,23 +4797,98 @@ fn apply_animations_block(cfg: &mut WindowAnimationsConfig, body: &[waves::Entry
                 if !header.trim().is_empty() {
                     tracing::warn!(header, "Animation sub-block headers are ignored");
                 }
-                let target = match keyword.as_str() {
-                    "open" | "window_open" | "window-open" => &mut cfg.open,
-                    "close" | "window_close" | "window-close" => &mut cfg.close,
+                match keyword.as_str() {
+                    "open" | "window_open" | "window-open" => {
+                        apply_window_animation_block(&mut cfg.open, child)
+                    }
+                    "close" | "window_close" | "window-close" => {
+                        apply_window_animation_block(&mut cfg.close, child)
+                    }
                     "move" | "movement" | "window_movement" | "window-movement" => {
-                        &mut cfg.movement
+                        apply_window_animation_block(&mut cfg.movement, child)
                     }
-                    other => {
-                        tracing::warn!(
-                            block = %other,
-                            "Unknown animation sub-block, ignoring"
-                        );
-                        continue;
+                    "workspace" | "workspaces" => {
+                        apply_workspace_animation_block(&mut cfg.workspace, child)
                     }
-                };
-                apply_window_animation_block(target, child);
+                    "interactive" | "drag" | "resize" => {
+                        apply_interactive_animation_block(&mut cfg.interactive, child)
+                    }
+                    other => tracing::warn!(
+                        block = %other,
+                        "Unknown animation sub-block, ignoring"
+                    ),
+                }
             }
             _ => tracing::warn!("Unexpected entry in `animations` block, ignoring"),
+        }
+    }
+}
+
+fn apply_workspace_animation_block(cfg: &mut WorkspaceAnimationConfig, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Workspace animation blocks contain assignments only, ignoring entry");
+            continue;
+        };
+        match key.as_str() {
+            "enabled" => set_bool(&mut cfg.enabled, key, value),
+            "style" | "effect" => {
+                match value.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+                    "slide" => cfg.style = WorkspaceAnimationStyle::Slide,
+                    "slide-fade" | "slidefade" => cfg.style = WorkspaceAnimationStyle::SlideFade,
+                    "fade" => cfg.style = WorkspaceAnimationStyle::Fade,
+                    _ => tracing::warn!(
+                        value,
+                        "Expected workspace style slide, slide-fade, or fade, ignoring"
+                    ),
+                }
+            }
+            "duration" => match parse_duration_ms(value) {
+                Some(value) if (1..=10_000).contains(&value) => cfg.duration_ms = value,
+                _ => tracing::warn!(
+                    value,
+                    "Expected workspace animation duration from 1 to 10000ms, ignoring"
+                ),
+            },
+            "curve" | "ease" => match parse_window_animation_curve(value) {
+                Some(value) => cfg.curve = value,
+                None => tracing::warn!(
+                    value,
+                    "Expected a workspace easing or cubic-bezier(x1,y1,x2,y2), ignoring"
+                ),
+            },
+            "travel" | "distance" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() && (0.0..=1.0).contains(&value) => {
+                    cfg.travel = value
+                }
+                _ => tracing::warn!(
+                    value,
+                    "Expected workspace travel from 0 to 1 of the live output width, ignoring"
+                ),
+            },
+            other => tracing::warn!(key = %other, "Unknown workspace animation setting, ignoring"),
+        }
+    }
+}
+
+fn apply_interactive_animation_block(cfg: &mut InteractiveAnimationConfig, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Interactive animation blocks contain assignments only, ignoring entry");
+            continue;
+        };
+        match key.as_str() {
+            "enabled" => set_bool(&mut cfg.enabled, key, value),
+            "half_life" | "half-life" => match parse_duration_ms(value) {
+                Some(value) if value <= 10_000 => cfg.half_life_ms = value,
+                _ => tracing::warn!(
+                    value,
+                    "Expected interactive half_life from 0 to 10000ms, ignoring"
+                ),
+            },
+            other => {
+                tracing::warn!(key = %other, "Unknown interactive animation setting, ignoring")
+            }
         }
     }
 }
@@ -9893,6 +10120,56 @@ mod tests {
         assert_eq!(animations.movement.duration_ms, 360);
         assert_eq!(animations.movement.curve, WindowAnimationCurve::ExpOut);
         assert!(!animations.movement.animate_size);
+    }
+
+    #[test]
+    fn smooth_preset_and_explicit_workspace_controls_are_order_independent() {
+        let entries = wave_entries(
+            "animations {\n\
+             workspace {\n\
+             enabled = true\n\
+             style = fade\n\
+             duration = 333ms\n\
+             curve = linear\n\
+             travel = 0.42\n\
+             }\n\
+             interactive {\n\
+             enabled = true\n\
+             half_life = 37ms\n\
+             }\n\
+             preset = snappy\n\
+             }\n",
+        );
+        let animations = Config::from_raw(lower_entries(&entries)).0.animations;
+        assert_eq!(animations.open.duration_ms, 120);
+        assert_eq!(animations.open.effect, WindowAnimationEffect::Glide);
+        assert!(animations.workspace.enabled);
+        assert_eq!(animations.workspace.style, WorkspaceAnimationStyle::Fade);
+        assert_eq!(animations.workspace.duration_ms, 333);
+        assert_eq!(animations.workspace.curve, WindowAnimationCurve::Linear);
+        assert_eq!(animations.workspace.travel, 0.42);
+        assert!(animations.interactive.enabled);
+        assert_eq!(animations.interactive.half_life_ms, 37);
+    }
+
+    #[test]
+    fn non_water_motion_presets_enable_workspace_and_interactive_motion() {
+        for preset in [
+            WindowAnimationsConfig::silk(),
+            WindowAnimationsConfig::snappy(),
+            WindowAnimationsConfig::gentle(),
+            WindowAnimationsConfig::cinematic(),
+            WindowAnimationsConfig::minimal(),
+        ] {
+            assert!(preset.workspace.enabled);
+            assert!(preset.interactive.enabled);
+            assert_eq!(preset.open.effect, WindowAnimationEffect::Glide);
+            assert_eq!(preset.close.effect, WindowAnimationEffect::Glide);
+            assert_eq!(preset.movement.effect, WindowAnimationEffect::Glide);
+            assert!((0.0..=1.0).contains(&preset.workspace.travel));
+        }
+        assert!(!WindowAnimationsConfig::tide().workspace.enabled);
+        assert!(!WindowAnimationsConfig::hypr_smooth().interactive.enabled);
     }
 
     #[test]

@@ -457,6 +457,8 @@ pub struct Smallvil {
     /// as its wipe completes (see `workspace_transition.rs`).
     pub(crate) workspace_transitions:
         HashMap<String, crate::workspace_transition::WorkspaceTransition>,
+    /// At most one non-water outgoing workspace snapshot per output.
+    pub(crate) workspace_glides: HashMap<String, crate::workspace_transition::WorkspaceGlide>,
     /// Lazily compiled custom texture shader shared by every output's
     /// transition element.
     pub(crate) workspace_transition_program: Option<GlesTexProgram>,
@@ -1519,14 +1521,22 @@ impl Smallvil {
         }
     }
 
-    fn viscosity_for_surface(&self, surface: &WlSurface) -> f64 {
-        if !self.config.water_effects {
-            return 0.0;
+    fn interactive_motion_half_life(&self, surface: &WlSurface) -> Duration {
+        if self.config.animations.enabled && self.config.animations.interactive.enabled {
+            return Duration::from_millis(self.config.animations.interactive.half_life_ms as u64);
         }
-        self.resolve_window_rules_for(surface)
+        if !self.config.water_effects {
+            return Duration::ZERO;
+        }
+        // Preserve the original water-viscosity feel for existing configs.
+        // This is a user-facing animation baseline, not a display-cadence or
+        // hardware assumption; the follower itself integrates elapsed time.
+        let viscosity = self
+            .resolve_window_rules_for(surface)
             .viscosity
             .unwrap_or(self.config.viscosity)
-            .clamp(0.0, 4.0)
+            .clamp(0.0, 4.0);
+        Duration::from_secs_f64(0.030 * viscosity)
     }
 
     pub(crate) fn connected_resize_handles(
@@ -1553,12 +1563,12 @@ impl Smallvil {
         surface: &WlSurface,
         target: Rectangle<i32, Logical>,
     ) -> bool {
-        let viscosity = self.viscosity_for_surface(surface);
+        let half_life = self.interactive_motion_half_life(surface);
         // Interactive input owns the visual geometry from this point. The
         // generic movement tween must not remain underneath it even when
         // viscosity is disabled and the pointer path becomes immediate.
         self.window_move_animations.remove(surface);
-        if viscosity <= f64::EPSILON {
+        if half_life.is_zero() {
             self.window_viscosity.remove(surface);
             return false;
         }
@@ -1571,11 +1581,11 @@ impl Smallvil {
         let live = Rectangle::new(location, window.geometry().size).to_f64();
         let target = target.to_f64();
         if let Some(motion) = self.window_viscosity.get_mut(surface) {
-            motion.retarget(target, viscosity);
+            motion.retarget(target, half_life);
         } else {
             self.window_viscosity.insert(
                 surface.clone(),
-                crate::viscosity::ViscousMotion::new(live, target, viscosity),
+                crate::viscosity::ViscousMotion::new(live, target, half_life),
             );
         }
         // The generic movement tween and the physical follower must never
@@ -3573,6 +3583,7 @@ impl Smallvil {
             depth_last_tick: Instant::now(),
             pending_workspace_transitions: HashMap::new(),
             workspace_transitions: HashMap::new(),
+            workspace_glides: HashMap::new(),
             workspace_transition_program: None,
             depth_transitions: HashMap::new(),
             depth_transition_program: None,
@@ -5220,6 +5231,7 @@ impl Smallvil {
         // before the fail-closed lock render path can begin.
         self.pending_workspace_transitions.clear();
         self.workspace_transitions.clear();
+        self.workspace_glides.clear();
         self.depth_transitions.clear();
         // Closing snapshots contain client pixels and normally render above
         // the desktop. They are irrelevant once the security boundary is
@@ -5554,6 +5566,8 @@ impl Smallvil {
         // on the event-loop tick that notices the animation ended.
         self.workspace_transitions
             .retain(|_, transition| !transition.finished());
+        self.workspace_glides
+            .retain(|_, transition| !transition.finished());
         self.depth_transitions
             .retain(|_, transition| !transition.finished());
         self.window_open_animations
@@ -5585,6 +5599,7 @@ impl Smallvil {
             .is_some_and(|toast| toast.needs_continued_redraw())
             || !self.ripples.is_empty()
             || !self.workspace_transitions.is_empty()
+            || !self.workspace_glides.is_empty()
             || !self.depth_transitions.is_empty()
             || !self.window_open_animations.is_empty()
             || !self.cascade_window_animations.is_empty()
@@ -6860,12 +6875,21 @@ impl Smallvil {
         if current == target {
             return;
         }
-        if !self.config.water_effects || !self.config.workspace_transition.enabled {
+        let water_transition =
+            self.config.water_effects && self.config.workspace_transition.enabled;
+        let smooth_transition =
+            self.config.animations.enabled && self.config.animations.workspace.enabled;
+        if !water_transition && !smooth_transition {
             self.apply_workspace_switch(output, current, target);
             return;
         }
 
-        let direction = match self.config.workspace_transition.direction {
+        let direction_mode = if water_transition {
+            self.config.workspace_transition.direction
+        } else {
+            crate::config::WorkspaceTransitionDirectionMode::Auto
+        };
+        let direction = match direction_mode {
             crate::config::WorkspaceTransitionDirectionMode::Auto if target > current => {
                 crate::workspace_transition::WorkspaceTransitionDirection::RightToLeft
             }
@@ -6885,7 +6909,8 @@ impl Smallvil {
 
         let outgoing_texture = geometry
             .and_then(|geometry| self.capture_workspace_desktop(renderer, output, geometry));
-        let workspace_motion = self.config.workspace_transition.workspace_motion;
+        let workspace_motion =
+            water_transition && self.config.workspace_transition.workspace_motion;
 
         self.apply_workspace_switch(output, current, target);
 
@@ -6896,16 +6921,30 @@ impl Smallvil {
         };
 
         if let (Some(outgoing_texture), Some(geometry)) = (outgoing_texture, geometry) {
-            self.workspace_transitions.insert(
-                output_name,
-                crate::workspace_transition::WorkspaceTransition::new(
-                    outgoing_texture,
-                    incoming_texture,
-                    direction,
-                    geometry,
-                    &self.config.workspace_transition,
-                ),
-            );
+            if water_transition {
+                self.workspace_transitions.insert(
+                    output_name,
+                    crate::workspace_transition::WorkspaceTransition::new(
+                        outgoing_texture,
+                        incoming_texture,
+                        direction,
+                        geometry,
+                        &self.config.workspace_transition,
+                    ),
+                );
+            } else {
+                self.workspace_glides.insert(
+                    output_name,
+                    crate::workspace_transition::WorkspaceGlide::new(
+                        outgoing_texture,
+                        direction,
+                        geometry,
+                        &self.config.animations.workspace,
+                        self.config.animations.slowdown,
+                    ),
+                );
+                return;
+            }
             // Cosmetic float-physics disturbance (F1 `light`): every float
             // on the output rocks as the wave passes, kicked from the
             // output's center in the wave's travel direction. Only fires
@@ -6965,6 +7004,34 @@ impl Smallvil {
             .map(|transition| {
                 crate::backend::udev::OutputRenderElements::WorkspaceTransition(
                     transition.frame_element(program),
+                )
+            })
+    }
+
+    pub(crate) fn workspace_glide_frame_element(
+        &mut self,
+        output: &Output,
+    ) -> Option<crate::backend::udev::OutputRenderElements> {
+        if !self.config.animations.enabled
+            || !self.config.animations.workspace.enabled
+            || !matches!(self.session_lock, SessionLock::Unlocked)
+        {
+            return None;
+        }
+        let output_name = output.name();
+        if self
+            .workspace_glides
+            .get(&output_name)
+            .is_some_and(|transition| transition.finished())
+        {
+            self.workspace_glides.remove(&output_name);
+            return None;
+        }
+        self.workspace_glides
+            .get_mut(&output_name)
+            .map(|transition| {
+                crate::backend::udev::OutputRenderElements::WorkspaceGlide(
+                    transition.frame_element(),
                 )
             })
     }
@@ -7458,6 +7525,7 @@ impl Smallvil {
     pub(crate) fn remove_workspace_transition_output(&mut self, output_name: &str) {
         self.pending_workspace_transitions.remove(output_name);
         self.workspace_transitions.remove(output_name);
+        self.workspace_glides.remove(output_name);
         self.depth_transitions.remove(output_name);
         self.ocean_canvases.remove(output_name);
         self.compasses.remove(output_name);
@@ -8325,11 +8393,14 @@ impl Smallvil {
             return;
         };
 
-        if self.config.water_effects && self.config.workspace_transition.enabled {
+        if (self.config.water_effects && self.config.workspace_transition.enabled)
+            || (self.config.animations.enabled && self.config.animations.workspace.enabled)
+        {
             // A new switch supersedes any wipe already running on this
             // output. That keeps both latency and texture memory bounded:
             // never a queue, never more than one full-output capture.
             self.workspace_transitions.remove(&output_name);
+            self.workspace_glides.remove(&output_name);
             self.pending_workspace_transitions
                 .insert(output_name, workspace);
             self.request_redraw();
@@ -8357,6 +8428,7 @@ impl Smallvil {
         }
         self.pending_workspace_transitions.remove(&output_name);
         self.workspace_transitions.remove(&output_name);
+        self.workspace_glides.remove(&output_name);
         self.apply_workspace_switch(output, current, workspace);
     }
 
@@ -11537,7 +11609,7 @@ impl Smallvil {
                     let disabled_viscosity: Vec<WlSurface> = self
                         .window_viscosity
                         .keys()
-                        .filter(|surface| self.viscosity_for_surface(surface) <= f64::EPSILON)
+                        .filter(|surface| self.interactive_motion_half_life(surface).is_zero())
                         .cloned()
                         .collect();
                     for surface in disabled_viscosity {
@@ -11600,8 +11672,18 @@ impl Smallvil {
                     self.depth_schematics.clear();
                     self.depth_last_tick = Instant::now() - Duration::from_millis(100);
                     self.update_window_depths();
+                    let any_workspace_animation = (self.config.water_effects
+                        && self.config.workspace_transition.enabled)
+                        || (self.config.animations.enabled
+                            && self.config.animations.workspace.enabled);
                     if !self.config.water_effects || !self.config.workspace_transition.enabled {
                         self.workspace_transitions.clear();
+                    }
+                    if !self.config.animations.enabled || !self.config.animations.workspace.enabled
+                    {
+                        self.workspace_glides.clear();
+                    }
+                    if !any_workspace_animation {
                         let pending = std::mem::take(&mut self.pending_workspace_transitions);
                         for (output_name, workspace) in pending {
                             if let Some(output) = self.output_by_name(&output_name) {
