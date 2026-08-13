@@ -10358,6 +10358,29 @@ impl Smallvil {
 
         self.layout.swap_active(&name_a, &name_b);
 
+        // Groups key their owner off the tree their leaf lives in, which
+        // `swap_active` just moved to the other output. Retag the two
+        // participating owners or tab-strip filtering, ungroup
+        // reinsertion, activation, and the accessibility snapshot keep
+        // resolving the pre-swap output/workspace. Classic-only: under
+        // Ocean no tree moved, and the fields are migration cache, not
+        // ownership.
+        if self.config.spatial_engine == crate::config::SpatialEngine::Classic {
+            for group in &mut self.groups {
+                if let Some((output, workspace)) = swapped_group_owner(
+                    &group.output,
+                    group.workspace,
+                    &name_a,
+                    ws_a,
+                    &name_b,
+                    ws_b,
+                ) {
+                    group.output = output;
+                    group.workspace = workspace;
+                }
+            }
+        }
+
         let delta = match (
             self.space.output_geometry(output_a),
             self.space.output_geometry(output_b),
@@ -11831,6 +11854,30 @@ fn group_removal_outcome(len: usize, active: usize, removed_pos: usize) -> (usiz
     (new_active, false)
 }
 
+/// Pure owner retag for `swap_workspaces`: `Layouts::swap_active` moves the
+/// whole tree keyed `(output, workspace)` into the other output's active
+/// slot, so a group whose owner matches either side of the swap follows its
+/// tree. Returns `None` when the group's workspace did not participate --
+/// a hidden workspace's tree never moves. Kept separate from
+/// `swap_workspaces`'s `Space`/fullscreen side effects so the matching
+/// logic has a plain unit test.
+fn swapped_group_owner(
+    output: &str,
+    workspace: u32,
+    name_a: &str,
+    ws_a: u32,
+    name_b: &str,
+    ws_b: u32,
+) -> Option<(String, u32)> {
+    if output == name_a && workspace == ws_a {
+        Some((name_b.to_string(), ws_b))
+    } else if output == name_b && workspace == ws_b {
+        Some((name_a.to_string(), ws_a))
+    } else {
+        None
+    }
+}
+
 fn directional_score(
     from: Rectangle<i32, Logical>,
     candidate: Rectangle<i32, Logical>,
@@ -12129,6 +12176,35 @@ mod tests {
         let score = directional_score(left, right, Direction::Right).unwrap();
         assert!(score.is_finite());
         assert!(score > f64::from(i32::MAX));
+    }
+
+    #[test]
+    fn swapped_group_owner_follows_only_the_participating_trees() {
+        // A group on output A's active workspace moves to output B's, and
+        // vice versa.
+        assert_eq!(
+            swapped_group_owner("DP-1", 1, "DP-1", 1, "HDMI-A-1", 2),
+            Some(("HDMI-A-1".to_string(), 2))
+        );
+        assert_eq!(
+            swapped_group_owner("HDMI-A-1", 2, "DP-1", 1, "HDMI-A-1", 2),
+            Some(("DP-1".to_string(), 1))
+        );
+        // A group parked on a hidden workspace of either output did not
+        // have its tree moved and keeps its owner.
+        assert_eq!(
+            swapped_group_owner("DP-1", 3, "DP-1", 1, "HDMI-A-1", 2),
+            None
+        );
+        assert_eq!(
+            swapped_group_owner("HDMI-A-1", 1, "DP-1", 1, "HDMI-A-1", 2),
+            None
+        );
+        // Both outputs on the same workspace number still swap by output.
+        assert_eq!(
+            swapped_group_owner("DP-1", 1, "DP-1", 1, "HDMI-A-1", 1),
+            Some(("HDMI-A-1".to_string(), 1))
+        );
     }
 
     #[test]
