@@ -185,6 +185,10 @@ pub struct Smallvil {
     pub(crate) config_warnings: Vec<String>,
 
     pub config: Config,
+    /// Event-driven watches for the main Wave file and its current include
+    /// graph. Installed by `main` after backend initialization and updated
+    /// transactionally after each successful reload.
+    pub(crate) config_watcher: Option<crate::config::ConfigWatcher>,
     /// Every touchpad-class device `apply_touchpad_config` has been run
     /// against (populated on `DeviceAdded`, pruned on `DeviceRemoved` --
     /// see `backend/udev.rs`), so `reload_config` can re-apply a live
@@ -3447,6 +3451,7 @@ impl Smallvil {
             config_warnings: startup_config_warnings.clone(),
 
             config,
+            config_watcher: None,
             known_touchpads: Vec::new(),
             compositor_gesture: None,
             toast: None,
@@ -11280,6 +11285,20 @@ impl Smallvil {
         }
     }
 
+    /// Re-anchor watches after a filesystem event may have created a
+    /// previously missing include directory, before the debounced parse.
+    pub(crate) fn refresh_config_watch_anchors(&mut self) {
+        if let Some(watcher) = &mut self.config_watcher {
+            watcher.refresh_anchors();
+        }
+    }
+
+    fn sync_config_watch_paths(&mut self) {
+        if let Some(watcher) = &mut self.config_watcher {
+            watcher.update_paths(&self.config.source_paths);
+        }
+    }
+
     /// Runs `on "event"` handlers registered in the session Lua (the
     /// config's `_handlers` table), then drains the actions they queued
     /// through `spawn(...)`/`action(...)`. The tide table is refreshed
@@ -11473,6 +11492,7 @@ impl Smallvil {
                     self.welcome_hint = None;
                 }
                 self.config = new_config;
+                self.sync_config_watch_paths();
                 self.rescue_keybinds_active = false;
                 self.helper_keys_down.clear();
                 // A live `workspace_count` change should show up in the

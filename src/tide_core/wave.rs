@@ -19,6 +19,8 @@ use super::wave_fmt::{strip_block_comments, strip_line_comment};
 
 use super::waves::Entry;
 
+type ResolveResult = (Vec<Entry>, Vec<String>, Vec<PathBuf>);
+
 pub(crate) const MAX_QUEUED_ACTIONS: usize = 256;
 const HANDLER_ACTIVE_REGISTRY_KEY: &str = "tidewm-handler-active";
 const MAX_INCLUDE_DEPTH: usize = 64;
@@ -2193,6 +2195,7 @@ struct ResolveContext<'a> {
     stack: &'a EntryStack,
     sym: &'a mut Symbols,
     budget: &'a mut ResolveBudget,
+    source_paths: &'a mut HashSet<PathBuf>,
 }
 
 /// The recursive include walk shared by both resolve rounds. `collect`
@@ -2204,7 +2207,16 @@ fn resolve_walk(
     ancestors: &mut Vec<PathBuf>,
     context: &mut ResolveContext<'_>,
 ) -> Result<Vec<Entry>, String> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    context.source_paths.insert(absolute);
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    context.source_paths.insert(canonical.clone());
     if ancestors.contains(&canonical) {
         return Err(format!("include cycle detected in file {}", path.display()));
     }
@@ -2301,7 +2313,7 @@ fn resolve_uncycled(
 /// evaluates with the full environment and the collected symbols, then
 /// merges per-file entry lists in include order.
 #[cfg(test)]
-pub(crate) fn resolve(path: &Path) -> Result<(Vec<Entry>, Vec<String>), String> {
+pub(crate) fn resolve(path: &Path) -> Result<ResolveResult, String> {
     let lua = Lua::new_with(
         StdLib::MATH | StdLib::STRING | StdLib::TABLE,
         mlua::LuaOptions::default(),
@@ -2325,7 +2337,7 @@ pub(crate) fn resolve_with_lua(
     lua: &Lua,
     tide: &TideInfo,
     path: &Path,
-) -> Result<(Vec<Entry>, Vec<String>), String> {
+) -> Result<ResolveResult, String> {
     let stack: EntryStack = Rc::new(RefCell::new(vec![Rc::new(RefCell::new(Vec::new()))]));
     let statics_out: Rc<RefCell<std::collections::HashMap<String, String>>> =
         Rc::new(RefCell::new(std::collections::HashMap::new()));
@@ -2351,6 +2363,7 @@ pub(crate) fn resolve_with_lua(
     };
     let mut collect_budget = ResolveBudget::default();
     let mut collect_warnings = Vec::new();
+    let mut collect_paths = HashSet::new();
     resolve_walk(
         path,
         &mut ancestors,
@@ -2360,6 +2373,7 @@ pub(crate) fn resolve_with_lua(
             stack: &stack,
             sym: &mut sym,
             budget: &mut collect_budget,
+            source_paths: &mut collect_paths,
         },
     )?;
 
@@ -2374,6 +2388,7 @@ pub(crate) fn resolve_with_lua(
     sym.statics = statics_out.borrow().clone();
     let mut warnings = Vec::new();
     let mut evaluation_budget = ResolveBudget::default();
+    let mut source_paths = HashSet::new();
     let entries = resolve_walk(
         path,
         &mut ancestors,
@@ -2383,10 +2398,13 @@ pub(crate) fn resolve_with_lua(
             stack: &stack,
             sym: &mut sym,
             budget: &mut evaluation_budget,
+            source_paths: &mut source_paths,
         },
     )?;
 
-    Ok((entries, warnings))
+    let mut source_paths: Vec<_> = source_paths.into_iter().collect();
+    source_paths.sort_unstable();
+    Ok((entries, warnings, source_paths))
 }
 
 /// Nils the Lua globals that user config (not the environment) created:
@@ -2796,7 +2814,7 @@ mod tests {
         )
         .unwrap();
 
-        let (entries, warnings) = resolve_with_lua(&lua, &tide, &main).expect("should resolve");
+        let (entries, warnings, _) = resolve_with_lua(&lua, &tide, &main).expect("should resolve");
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(entries.len(), 1);
         let Entry::Handler(event, source) = &entries[0] else {
@@ -2964,7 +2982,7 @@ mod tests {
         )
         .unwrap();
 
-        let (entries, warnings) = resolve(&main).expect("should resolve");
+        let (entries, warnings, _) = resolve(&main).expect("should resolve");
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(
             entries,

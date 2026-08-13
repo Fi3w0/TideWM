@@ -584,8 +584,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // Bound so it stays alive for the process lifetime, same idiom as
-    // `_config_watcher` below.
+    // Bound so it stays alive for the process lifetime; the config watcher
+    // below is instead owned by `Smallvil` because reloads update its graph.
     let _satellite = if state.config.xwayland.enabled {
         crate::xwayland::setup(&state.config.xwayland.path)
     } else {
@@ -615,14 +615,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state.sync_accessibility_tree();
     }
 
-    // Kept alive for the process lifetime: dropping it stops the watch.
-    let _config_watcher = match config::spawn_watcher() {
+    // Owned by `Smallvil` so a successful reload can replace the include
+    // graph and its directory registrations transactionally.
+    state.config_watcher = match config::spawn_watcher(&state.config.source_paths) {
         Ok((watcher, changes)) => {
             match event_loop
                 .handle()
                 .insert_source(changes, |event, _, state| {
                     if let calloop::channel::Event::Msg(pending) = event {
                         pending.store(false, std::sync::atomic::Ordering::Release);
+                        state.refresh_config_watch_anchors();
                         state.note_config_event();
                     }
                 }) {

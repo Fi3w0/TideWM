@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, RwLock,
     },
 };
 
@@ -17,6 +17,8 @@ use smithay::reexports::calloop::channel::{self, Channel};
 
 use crate::wave;
 use crate::waves;
+
+type RawConfigLoad = (RawConfig, Vec<String>, Vec<waves::Entry>, Vec<PathBuf>);
 
 /// A parsed, ready-to-match keybind: which modifiers must be held, which base
 /// (unshifted) key symbol triggers it, and what it does.
@@ -903,6 +905,11 @@ pub struct Config {
     /// know what actually changed and skip the window-affecting re-apply
     /// battery on a no-op save.
     pub(crate) loaded_entries: Vec<waves::Entry>,
+    /// Main config plus every include path reached by the authoritative Wave
+    /// evaluation, including missing targets and canonical symlink targets.
+    /// The hot-reload watcher follows this exact graph instead of assuming
+    /// every include lives below the main config directory.
+    pub(crate) source_paths: Vec<PathBuf>,
     pub terminal: String,
     /// Startup-only spatial ownership model. Hot reload keeps the old value
     /// until the next TideWM launch so live windows never change owners.
@@ -1157,12 +1164,20 @@ impl Config {
     ) -> (Self, Option<String>, Vec<String>) {
         let path = config_path();
 
-        let (raw, error, include_warnings, entries) = if path.exists() {
+        let (raw, error, include_warnings, entries, source_paths) = if path.exists() {
             match load_raw_config_in(lua, tide, &path) {
-                Ok((raw, include_warnings, entries)) => (raw, None, include_warnings, entries),
+                Ok((raw, include_warnings, entries, source_paths)) => {
+                    (raw, None, include_warnings, entries, source_paths)
+                }
                 Err(err) => {
                     tracing::warn!(%err, path = %path.display(), "Failed to parse config, using defaults");
-                    (RawConfig::default(), Some(err), Vec::new(), Vec::new())
+                    (
+                        RawConfig::default(),
+                        Some(err),
+                        Vec::new(),
+                        Vec::new(),
+                        vec![path.clone()],
+                    )
                 }
             }
         } else {
@@ -1189,17 +1204,23 @@ impl Config {
             // parse of the constant) so `include "keybinds.wave"` above
             // actually resolves on this very first boot, not just on the
             // next reload.
-            let (default, include_warnings, entries) = load_raw_config_in(lua, tide, &path)
-                .unwrap_or_else(|err| {
+            let (default, include_warnings, entries, source_paths) =
+                load_raw_config_in(lua, tide, &path).unwrap_or_else(|err| {
                     tracing::error!(%err, "Built-in default Waves config failed to parse");
-                    (RawConfig::default(), Vec::new(), Vec::new())
+                    (
+                        RawConfig::default(),
+                        Vec::new(),
+                        Vec::new(),
+                        vec![path.clone()],
+                    )
                 });
-            (default, None, include_warnings, entries)
+            (default, None, include_warnings, entries, source_paths)
         };
 
         let (mut config, mut warnings) = Self::from_raw(raw);
         warnings.extend(include_warnings);
         config.loaded_entries = entries;
+        config.source_paths = source_paths;
         (config, error, warnings)
     }
 
@@ -1219,10 +1240,12 @@ impl Config {
         lua: &mlua::Lua,
         tide: &wave::TideInfo,
     ) -> Result<(Self, Vec<String>), String> {
-        let (raw, include_warnings, entries) = load_raw_config_in(lua, tide, &config_path())?;
+        let (raw, include_warnings, entries, source_paths) =
+            load_raw_config_in(lua, tide, &config_path())?;
         let (mut config, mut warnings) = Self::from_raw(raw);
         warnings.extend(include_warnings);
         config.loaded_entries = entries;
+        config.source_paths = source_paths;
         Ok((config, warnings))
     }
 
@@ -1241,10 +1264,11 @@ impl Config {
         tide: &wave::TideInfo,
     ) -> Result<(mlua::Lua, Self, Vec<String>), String> {
         let lua = wave::new_lua()?;
-        let (raw, include_warnings, entries) = load_raw_config_in(&lua, tide, path)?;
+        let (raw, include_warnings, entries, source_paths) = load_raw_config_in(&lua, tide, path)?;
         let (mut config, mut warnings) = Self::from_raw(raw);
         warnings.extend(include_warnings);
         config.loaded_entries = entries;
+        config.source_paths = source_paths;
         Ok((lua, config, warnings))
     }
 
@@ -1360,6 +1384,7 @@ impl Config {
 
         let config = Self {
             loaded_entries: Vec::new(),
+            source_paths: Vec::new(),
             terminal: raw.terminal,
             spatial_engine,
             ocean: raw.ocean,
@@ -4054,49 +4079,153 @@ pub fn parse_mode_str(s: &str) -> Option<(i32, i32, Option<f64>)> {
     (w > 0 && h > 0).then_some((w, h, refresh))
 }
 
-/// Watches the whole config directory tree (not just the main file, and
-/// recursively, so a `keybinds.wave` sitting next to `config.wave` -- or in
-/// a subdirectory -- is covered too) and forwards a `()` into the returned
-/// calloop `Channel` whenever a `.wave` file under it changes. Keep the
-/// returned `RecommendedWatcher` alive for as long as watching should
-/// continue; dropping it stops the watch.
-///
-/// Recursive-plus-filtered rather than tracking the exact set of files an
-/// `include` chain currently references: the include graph can only be
-/// known *after* parsing (which itself needs the watcher to already be
-/// running), and in every real layout -- this project's own default,
-/// Hyprland's `~/.config/hypr/` -- every included file lives somewhere
-/// under the same config directory anyway, so this covers the actual case
-/// without re-deriving the watch list on every reload. The `.wave`
-/// extension filter (plus skipping any path with a dotfile/dotdir
-/// component) also keeps a config directory that's its own git repo (as
-/// this user's real Hyprland config is) from spamming reloads on every
-/// `.git/index` write a `git status`/`checkout` causes.
-pub fn spawn_watcher() -> notify::Result<(RecommendedWatcher, Channel<Arc<AtomicBool>>)> {
+/// Owns notify registrations for the exact Wave source graph. Direct parent
+/// directories catch writes/removes/atomic renames; one existing ancestor
+/// keeps a deleted or not-yet-created include directory recoverable. Both
+/// lexical paths and canonical symlink targets are relevant.
+pub struct ConfigWatcher {
+    watcher: RecommendedWatcher,
+    relevant_paths: Arc<RwLock<HashSet<PathBuf>>>,
+    watched_dirs: HashSet<PathBuf>,
+}
+
+impl ConfigWatcher {
+    /// Replaces the watched include graph after a successful transactional
+    /// reload. New directories are registered before obsolete ones are
+    /// removed, so an edit cannot fall into a handoff gap.
+    pub(crate) fn update_paths(&mut self, paths: &[PathBuf]) {
+        let relevant = expanded_watch_paths(paths);
+        let directories = watch_directories(&relevant);
+
+        let additions: Vec<_> = directories
+            .difference(&self.watched_dirs)
+            .cloned()
+            .collect();
+        for directory in additions {
+            match self.watcher.watch(&directory, RecursiveMode::NonRecursive) {
+                Ok(()) => {
+                    self.watched_dirs.insert(directory);
+                }
+                Err(err) => tracing::warn!(
+                    %err,
+                    path = %directory.display(),
+                    "Failed to watch Wave source directory"
+                ),
+            }
+        }
+        if let Ok(mut active) = self.relevant_paths.write() {
+            *active = relevant;
+        }
+
+        let obsolete: Vec<_> = self
+            .watched_dirs
+            .difference(&directories)
+            .cloned()
+            .collect();
+        for directory in obsolete {
+            if let Err(err) = self.watcher.unwatch(&directory) {
+                tracing::debug!(%err, path = %directory.display(), "Failed to retire Wave watch");
+            }
+            self.watched_dirs.remove(&directory);
+        }
+    }
+
+    /// A creation event for a previously missing parent can make a closer
+    /// watch anchor available before the debounced reload runs.
+    pub(crate) fn refresh_anchors(&mut self) {
+        let paths = self
+            .relevant_paths
+            .read()
+            .map(|paths| paths.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        self.update_paths(&paths);
+    }
+}
+
+fn absolute_watch_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    }
+}
+
+fn expanded_watch_paths(paths: &[PathBuf]) -> HashSet<PathBuf> {
+    let mut expanded = HashSet::new();
+    for path in paths {
+        let absolute = absolute_watch_path(path);
+        expanded.insert(absolute.clone());
+        if let Ok(canonical) = absolute.canonicalize() {
+            expanded.insert(canonical);
+        }
+    }
+    expanded
+}
+
+fn nearest_existing_directory(path: &Path) -> Option<PathBuf> {
+    let mut candidate = path.parent();
+    while let Some(directory) = candidate {
+        if directory.is_dir() {
+            return Some(directory.to_path_buf());
+        }
+        candidate = directory.parent();
+    }
+    None
+}
+
+fn watch_directories(paths: &HashSet<PathBuf>) -> HashSet<PathBuf> {
+    let mut directories = HashSet::new();
+    for path in paths {
+        let Some(anchor) = nearest_existing_directory(path) else {
+            continue;
+        };
+        directories.insert(anchor.clone());
+        // If the direct parent itself disappears, its parent reports that
+        // removal/recreation. Avoid registering the filesystem root.
+        if path.parent() == Some(anchor.as_path()) {
+            if let Some(parent) = anchor.parent().filter(|parent| parent.parent().is_some()) {
+                directories.insert(parent.to_path_buf());
+            }
+        }
+    }
+    directories
+}
+
+fn event_affects_paths(event_path: &Path, paths: &HashSet<PathBuf>) -> bool {
+    let absolute = absolute_watch_path(event_path);
+    let canonical = absolute.canonicalize().ok();
+    paths.iter().any(|tracked| {
+        tracked == &absolute
+            || canonical.as_ref().is_some_and(|path| tracked == path)
+            || tracked.starts_with(&absolute)
+            || canonical
+                .as_ref()
+                .is_some_and(|path| tracked.starts_with(path))
+    })
+}
+
+/// Starts the event-driven watcher for the already-parsed source graph and
+/// forwards a coalesced token into the returned calloop channel. Deletion is
+/// as relevant as modify/create: removing an include must drop its old values.
+pub fn spawn_watcher(
+    source_paths: &[PathBuf],
+) -> notify::Result<(ConfigWatcher, Channel<Arc<AtomicBool>>)> {
     let (tx, rx) = channel::channel();
     let event_pending = Arc::new(AtomicBool::new(false));
-    let watch_dir = config_path()
-        .parent()
-        .expect("config path always has a parent")
-        .to_path_buf();
-
-    // The dotfile/dotdir check below has to run against the path *relative
-    // to this directory*, not the absolute path notify reports -- the real
-    // default config lives under `~/.config/tidewm`, and `.config` is
-    // itself a dotdir component of the absolute path, which would wrongly
-    // filter out every real config path if checked directly.
-    let watch_root = watch_dir.clone();
-    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+    let relevant_paths = Arc::new(RwLock::new(expanded_watch_paths(source_paths)));
+    let callback_paths = relevant_paths.clone();
+    let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         let Ok(event) = res else { return };
-        if !(event.kind.is_modify() || event.kind.is_create()) {
+        if !(event.kind.is_modify() || event.kind.is_create() || event.kind.is_remove()) {
             return;
         }
-        let relevant = event.paths.iter().any(|p| {
-            let rel = p.strip_prefix(&watch_root).unwrap_or(p);
-            p.extension().is_some_and(|ext| ext == "wave")
-                && !rel
-                    .components()
-                    .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+        let relevant = callback_paths.read().is_ok_and(|paths| {
+            event
+                .paths
+                .iter()
+                .any(|path| event_affects_paths(path, &paths))
         });
         if relevant
             && !event_pending.swap(true, Ordering::AcqRel)
@@ -4105,26 +4234,12 @@ pub fn spawn_watcher() -> notify::Result<(RecommendedWatcher, Channel<Arc<Atomic
             event_pending.store(false, Ordering::Release);
         }
     })?;
-
-    // `Config::load()` normally creates this directory already, but the
-    // watcher needs it to exist regardless of load order.
-    let _ = fs::create_dir_all(&watch_dir);
-    if let Err(recursive_err) = watcher.watch(&watch_dir, RecursiveMode::Recursive) {
-        // A custom `--config /tmp/foo.wave` is legitimate, but recursively
-        // traversing a broad parent such as /tmp can encounter unrelated
-        // systemd-private directories that are intentionally unreadable.
-        // Keep the main config (and sibling includes) hot-reloadable instead
-        // of disabling the watcher completely. Nested include directories
-        // still get the full recursive behavior whenever the parent allows
-        // it, which is the normal ~/.config/tidewm case.
-        tracing::warn!(
-            %recursive_err,
-            path = %watch_dir.display(),
-            "Recursive config watch failed; falling back to the config directory only"
-        );
-        watcher.watch(&watch_dir, RecursiveMode::NonRecursive)?;
-    }
-
+    let mut watcher = ConfigWatcher {
+        watcher,
+        relevant_paths,
+        watched_dirs: HashSet::new(),
+    };
+    watcher.update_paths(source_paths);
     Ok((watcher, rx))
 }
 
@@ -4137,7 +4252,7 @@ pub fn spawn_watcher() -> notify::Result<(RecommendedWatcher, Channel<Arc<Atomic
 /// The Wave engine is the only grammar. A parse error reports the Wave
 /// parser's message with file/line detail.
 #[cfg(test)]
-fn load_raw_config(path: &Path) -> Result<(RawConfig, Vec<String>, Vec<waves::Entry>), String> {
+fn load_raw_config(path: &Path) -> Result<RawConfigLoad, String> {
     let lua = wave::new_lua().map_err(|e| format!("in file {}: {e}", path.display()))?;
     load_raw_config_in(&lua, &wave::TideInfo::default(), path)
 }
@@ -4150,11 +4265,11 @@ fn load_raw_config_in(
     lua: &mlua::Lua,
     tide: &wave::TideInfo,
     path: &Path,
-) -> Result<(RawConfig, Vec<String>, Vec<waves::Entry>), String> {
-    let (entries, warnings) = wave::resolve_with_lua(lua, tide, path)?;
+) -> Result<RawConfigLoad, String> {
+    let (entries, warnings, source_paths) = wave::resolve_with_lua(lua, tide, path)?;
 
     let raw = lower_entries(&entries);
-    Ok((raw, warnings, entries))
+    Ok((raw, warnings, entries, source_paths))
 }
 
 /// Lowers a fully-merged Waves entry list into a `RawConfig`, starting
@@ -8764,6 +8879,7 @@ mod tests {
     fn resolve_window_rules_folds_last_scalar_wins_bools_accumulate() {
         let mut config = Config {
             loaded_entries: Vec::new(),
+            source_paths: Vec::new(),
             terminal: String::new(),
             spatial_engine: SpatialEngine::Classic,
             ocean: OceanConfig::default(),
@@ -8948,7 +9064,7 @@ mod tests {
              bind Super+F { toggle-fullscreen }\n",
         );
 
-        let (raw, _, _) = load_raw_config(&main).expect("should parse");
+        let (raw, _, _, _) = load_raw_config(&main).expect("should parse");
         // Only what the file declared exists. No default table is merged
         // underneath it, regardless of which modifier variables it uses.
         assert!(!raw.keybinds.contains_key("Super+Q"));
@@ -8981,7 +9097,7 @@ mod tests {
                    spawn = [waybar]\n";
 
         let dir = TestDir::new("wave-syntax-end-to-end");
-        let (raw, warnings, _) =
+        let (raw, warnings, _, _) =
             load_raw_config(&dir.write("config.wave", config)).expect("should evaluate");
 
         assert!(warnings.is_empty(), "should not warn: {warnings:?}");
@@ -9084,7 +9200,7 @@ mod tests {
     #[test]
     fn reload_of_unchanged_file_diffs_empty_and_change_is_detected() {
         fn load_from(path: &Path) -> Config {
-            let (raw, _, entries) = load_raw_config(path).expect("should parse");
+            let (raw, _, entries, _) = load_raw_config(path).expect("should parse");
             let (mut config, _) = Config::from_raw(raw);
             config.loaded_entries = entries;
             config
@@ -9122,7 +9238,7 @@ mod tests {
                  workspace_motion_delay = 150ms\n\
              }\n",
         );
-        let (raw, _, _) = load_raw_config(&main).expect("should parse");
+        let (raw, _, _, _) = load_raw_config(&main).expect("should parse");
         assert_eq!(raw.cursor_hide_after_ms, 2000);
         let transition = &raw.workspace_transition;
         assert_eq!(transition.duration_ms, 600);
@@ -9136,7 +9252,7 @@ mod tests {
             "config.wave",
             "spawn = [waybar, \"swaybg -i ~/wallpaper.png -m fill\"]\n",
         );
-        let (raw, _, _) = load_raw_config(&main).expect("should parse");
+        let (raw, _, _, _) = load_raw_config(&main).expect("should parse");
         assert_eq!(
             raw.spawn_at_startup,
             vec![
@@ -9147,7 +9263,7 @@ mod tests {
         // legacy scalar spelling still works
         let dir = TestDir::new("wave-spawn-scalar");
         let main = dir.write("config.wave", "spawn = [waybar]\n");
-        let (raw, _, _) = load_raw_config(&main).expect("should parse");
+        let (raw, _, _, _) = load_raw_config(&main).expect("should parse");
         assert_eq!(raw.spawn_at_startup, vec!["waybar".to_string()]);
     }
 
@@ -9166,7 +9282,7 @@ mod tests {
                  active_to = theme.deep\n\
              }\n",
         );
-        let (raw, warnings, _) = load_raw_config(&main).expect("should parse");
+        let (raw, warnings, _, _) = load_raw_config(&main).expect("should parse");
         assert!(warnings.is_empty(), "{warnings:?}");
         let border = &raw.border;
         assert_eq!(border.active_from[0], 0x8E as f32 / 255.0);
@@ -9201,7 +9317,7 @@ mod tests {
             gpu_vendor: "nvidia",
             ..Default::default()
         };
-        let (raw, warnings, _) = load_raw_config_in(&lua, &tide, &main).expect("should parse");
+        let (raw, warnings, _, _) = load_raw_config_in(&lua, &tide, &main).expect("should parse");
         assert!(warnings.is_empty(), "{warnings:?}");
 
         // AMD: the conditional is false, so no udev block and no warning.
@@ -9210,7 +9326,7 @@ mod tests {
             gpu_vendor: "amd",
             ..Default::default()
         };
-        let (raw_amd, _, _) = load_raw_config_in(&lua, &tide, &main).expect("should parse");
+        let (raw_amd, _, _, _) = load_raw_config_in(&lua, &tide, &main).expect("should parse");
         assert_eq!(raw_amd.gaps, raw.gaps);
     }
 
@@ -9322,7 +9438,7 @@ mod tests {
                  bind h { focus-left }\n\
              }\n",
         );
-        let (raw_new, warnings, _) = load_raw_config(&new).expect("new names should parse");
+        let (raw_new, warnings, _, _) = load_raw_config(&new).expect("new names should parse");
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(raw_new.spatial_engine, "classic");
         assert_eq!(raw_new.pointer_modifier, "SUPER");
@@ -9342,7 +9458,7 @@ mod tests {
             "spatial_engine = classic\n\
              default_layout = master\n",
         );
-        let (raw, _, _) = load_raw_config(&old).expect("config still loads");
+        let (raw, _, _, _) = load_raw_config(&old).expect("config still loads");
         assert!(
             raw.default_layout.is_empty(),
             "legacy default_layout must be ignored"
@@ -9371,7 +9487,7 @@ mod tests {
             "terminal = wave(\"definitely-not-a-real-binary\", \"/bin/sh\", \"kitty\")\n",
         );
 
-        let (raw, _, _) = load_raw_config(&main).expect("should parse");
+        let (raw, _, _, _) = load_raw_config(&main).expect("should parse");
         assert_eq!(raw.terminal, "/bin/sh");
     }
 
@@ -9435,7 +9551,7 @@ mod tests {
             "include \"keybinds.wave\"\nterminal = kitty\nbind Super+F { toggle-fullscreen }\n",
         );
 
-        let (raw, _, _) = load_raw_config(&main).expect("include chain should resolve");
+        let (raw, _, _, _) = load_raw_config(&main).expect("include chain should resolve");
 
         assert_eq!(raw.terminal, "kitty");
         // Included file's bind survives...
@@ -9459,7 +9575,7 @@ mod tests {
         dir.write("b.wave", "gaps = 12\n");
         let main = dir.write("config.wave", "include \"a.wave\"\ninclude \"b.wave\"\n");
 
-        let (raw, _, _) = load_raw_config(&main).unwrap();
+        let (raw, _, _, _) = load_raw_config(&main).unwrap();
         assert_eq!(raw.gaps, 12);
     }
 
@@ -9471,7 +9587,7 @@ mod tests {
             "include \"does-not-exist.wave\"\nterminal = kitty\n",
         );
 
-        let (raw, warnings, _) =
+        let (raw, warnings, _, _) =
             load_raw_config(&main).expect("a bad include must not fail the top-level file");
         assert_eq!(raw.terminal, "kitty");
         // The failure must reach the caller, not just the log -- this is
@@ -9479,6 +9595,44 @@ mod tests {
         // wrong (see `Config::load_with_error`/`Config::reload`).
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("does-not-exist.wave"));
+    }
+
+    #[test]
+    fn wave_source_graph_keeps_external_missing_and_symlink_paths() {
+        let config_dir = TestDir::new("source-graph-config");
+        let external_dir = TestDir::new("source-graph-external");
+        let target = external_dir.write("target.wave", "terminal = foot\n");
+        let link = external_dir.0.join("linked.wave");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let missing = external_dir.0.join("missing.wave");
+        let main = config_dir.write(
+            "config.wave",
+            &format!(
+                "include \"{}\"\ninclude \"{}\"\n",
+                link.display(),
+                missing.display()
+            ),
+        );
+
+        let (raw, warnings, _, sources) = load_raw_config(&main).unwrap();
+        assert_eq!(raw.terminal, "foot");
+        assert_eq!(warnings.len(), 1);
+        assert!(sources.contains(&main));
+        assert!(sources.contains(&link));
+        assert!(sources.contains(&target.canonicalize().unwrap()));
+        assert!(sources.contains(&missing));
+    }
+
+    #[test]
+    fn watch_relevance_covers_file_removal_and_missing_ancestor_creation() {
+        let root = TestDir::new("watch-relevance");
+        let tracked = root.0.join("new/deep/include.wave");
+        let paths = HashSet::from([tracked.clone()]);
+
+        assert!(event_affects_paths(&tracked, &paths));
+        assert!(event_affects_paths(&root.0.join("new"), &paths));
+        assert!(!event_affects_paths(&root.0.join("unrelated.wave"), &paths));
+        assert!(watch_directories(&paths).contains(&root.0));
     }
 
     #[test]
@@ -9494,7 +9648,7 @@ mod tests {
         dir.write("b.wave", "include \"a.wave\"\n");
         let a = dir.write("a.wave", "include \"b.wave\"\nterminal = kitty\n");
 
-        let (raw, warnings, _) =
+        let (raw, warnings, _, _) =
             load_raw_config(&a).expect("a cycle is skipped with a warning, not a hard failure");
         assert_eq!(raw.terminal, "kitty");
         assert_eq!(warnings.len(), 1);
@@ -9515,7 +9669,7 @@ mod tests {
         let dir = TestDir::new(&format!("default-config-{:?}", std::thread::current().id()));
         dir.write("keybinds.wave", DEFAULT_KEYBINDS_WAVE);
         let main = dir.write("config.wave", DEFAULT_CONFIG_WAVE);
-        let (raw, _, _) =
+        let (raw, _, _, _) =
             load_raw_config(&main).expect("the shipped default must parse and resolve");
         Config::from_raw(raw).0
     }
@@ -10716,7 +10870,7 @@ mod tests {
         ));
         dir.write("keybinds.wave", DEFAULT_KEYBINDS_WAVE);
         let main = dir.write("config.wave", DEFAULT_CONFIG_WAVE);
-        let (raw, include_warnings, _) =
+        let (raw, include_warnings, _, _) =
             load_raw_config(&main).expect("the shipped default must parse and resolve");
         let (_, mut warnings) = Config::from_raw(raw);
         warnings.extend(include_warnings);

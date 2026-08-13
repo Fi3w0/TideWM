@@ -196,6 +196,8 @@ This section is the exact surface-to-Lua mapping. The rule of thumb: the surface
 
 The environment also exposes `math`, `string`, `table`, and a `tide` query table (empty in W1, populated in W7).
 
+Include paths may be relative to the including file, absolute, `~/`-expanded, or symlinked. Hot reload watches the resolved graph itself—including external and currently missing targets—and reacts to creation, modification, atomic replacement, and removal. A successful reload replaces the watched graph; an invalid candidate leaves both the active runtime and its previous graph intact.
+
 ### Statement dispatch
 
 A line, after comment stripping, is dispatched on its first word:
