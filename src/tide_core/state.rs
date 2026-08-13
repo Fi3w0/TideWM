@@ -10755,14 +10755,49 @@ impl Smallvil {
         self.cycling_focus = false;
     }
 
-    /// Moves keyboard focus to the nearest mapped window in `direction`
-    /// from the currently focused one (tiled or floating; works purely off
-    /// on-screen geometry, so it doesn't care which). No-op if nothing is
-    /// focused or nothing else lies in that direction.
+    /// Moves keyboard focus to the nearest window in `direction`. Classic
+    /// uses mapped screen geometry. Ocean uses camera-projected world geometry
+    /// and travels the action output's camera only when the selected window is
+    /// outside its current view; screen pins use viewport geometry and never
+    /// their dormant world rectangle.
     pub fn focus_direction(&mut self, direction: Direction) {
         let Some(focused) = self.focused_window_surface() else {
             return;
         };
+
+        if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+            let Some(output) = self.primary_output() else {
+                return;
+            };
+            let Some(viewport) = self.space.output_geometry(&output).map(|geo| geo.size) else {
+                return;
+            };
+            let Some((next, target_rect, already_visible)) =
+                self.ocean_focus_target(&focused, &output, direction)
+            else {
+                return;
+            };
+            let Some(next_surface) = next.toplevel().map(|t| t.wl_surface().clone()) else {
+                return;
+            };
+
+            if !already_visible {
+                self.ocean.center_on_rect(
+                    &output.name(),
+                    viewport,
+                    target_rect,
+                    Duration::from_millis(self.config.ocean.camera_animation_ms),
+                    self.config.ocean.camera_sway,
+                );
+                self.request_redraw();
+            }
+            if !self.spatial_is_tiled(&next_surface) {
+                self.space.raise_element(&next, false);
+            }
+            self.focus_window(Some(next_surface), SERIAL_COUNTER.next_serial());
+            return;
+        }
+
         let Some(current) = self
             .space
             .elements()
@@ -10774,12 +10809,14 @@ impl Smallvil {
         let Some(next) = self.neighbor_in_direction(&current, direction) else {
             return;
         };
+        let Some(next_surface) = next.toplevel().map(|t| t.wl_surface().clone()) else {
+            return;
+        };
 
-        self.space.raise_element(&next, false);
-        self.focus_window(
-            Some(next.toplevel().unwrap().wl_surface().clone()),
-            SERIAL_COUNTER.next_serial(),
-        );
+        if !self.spatial_is_tiled(&next_surface) {
+            self.space.raise_element(&next, false);
+        }
+        self.focus_window(Some(next_surface), SERIAL_COUNTER.next_serial());
     }
 
     /// Swaps the currently focused *tiled* window with its neighbor in
@@ -11313,23 +11350,76 @@ impl Smallvil {
     /// neighbor roughly level with `from` wins over one that's technically
     /// closer in raw distance but well off to the side.
     fn neighbor_in_direction(&self, from: &Window, direction: Direction) -> Option<Window> {
-        let from_center = center(self.space.element_geometry(from)?);
+        let from_rect = self.space.element_geometry(from)?;
 
         self.space
             .elements()
             .filter(|w| *w != from)
             .filter_map(|w| {
-                let c = center(self.space.element_geometry(w)?);
-                let (primary, off_axis) = match direction {
-                    Direction::Left => (from_center.x - c.x, from_center.y - c.y),
-                    Direction::Right => (c.x - from_center.x, from_center.y - c.y),
-                    Direction::Up => (from_center.y - c.y, from_center.x - c.x),
-                    Direction::Down => (c.y - from_center.y, from_center.x - c.x),
-                };
-                (primary > 0).then_some((w.clone(), primary as f64 + (off_axis as f64).abs() * 2.0))
+                let score =
+                    directional_score(from_rect, self.space.element_geometry(w)?, direction)?;
+                Some((w.clone(), score))
             })
             .min_by(|(_, a), (_, b)| a.total_cmp(b))
             .map(|(w, _)| w)
+    }
+
+    /// Ocean directional focus projects every world rectangle through the
+    /// current camera before comparing direction, so on-screen and off-screen
+    /// candidates share one coordinate space. Screen pins substitute their
+    /// real viewport placement instead of their dormant world rectangle.
+    fn ocean_focus_target(
+        &self,
+        focused: &WlSurface,
+        output: &Output,
+        direction: Direction,
+    ) -> Option<(Window, Rectangle<i32, Logical>, bool)> {
+        let output_geo = self.space.output_geometry(output)?;
+        let visible = self.render_placements(output)?;
+        let layouts = self
+            .ocean
+            .world_layouts(self.config.gaps, self.config.bsp_split_bias);
+        let current = layouts.iter().find(|(window, _, _)| {
+            window
+                .toplevel()
+                .is_some_and(|toplevel| toplevel.wl_surface() == focused)
+        })?;
+        let camera = self.ocean.camera(&output.name());
+        let current_view = visible
+            .iter()
+            .find(|placement| placement.surface() == Some(focused))
+            .map(|placement| placement.rect)
+            .unwrap_or_else(|| crate::ocean::world_to_view_rect(current.1, camera, output_geo.loc));
+        let (window, rect, _) = layouts
+            .iter()
+            .filter_map(|(window, rect, _)| {
+                let surface = window.toplevel().map(|t| t.wl_surface())?;
+                if surface == focused
+                    || self
+                        .fullscreen
+                        .get(surface)
+                        .is_some_and(|entry| entry.output != output.name())
+                {
+                    return None;
+                }
+                let visible_rect = visible
+                    .iter()
+                    .find(|placement| placement.surface() == Some(surface))
+                    .map(|placement| placement.rect);
+                let view_rect = match visible_rect {
+                    Some(rect) => rect,
+                    None if self.ocean.is_screen_pinned(surface) => return None,
+                    None => crate::ocean::world_to_view_rect(*rect, camera, output_geo.loc),
+                };
+                let score = directional_score(current_view, view_rect, direction)?;
+                Some((window.clone(), *rect, score))
+            })
+            .min_by(|(_, _, a), (_, _, b)| a.total_cmp(b))?;
+        let surface = window.toplevel()?.wl_surface();
+        let already_visible = visible
+            .iter()
+            .any(|placement| placement.surface() == Some(surface));
+        Some((window, rect, already_visible))
     }
 
     /// Records one relevant filesystem event and ensures a single trailing
@@ -11893,8 +11983,38 @@ fn group_removal_outcome(len: usize, active: usize, removed_pos: usize) -> (usiz
     (new_active, false)
 }
 
-fn center(rect: Rectangle<i32, Logical>) -> Point<i32, Logical> {
-    (rect.loc.x + rect.size.w / 2, rect.loc.y + rect.size.h / 2).into()
+fn directional_score(
+    from: Rectangle<i32, Logical>,
+    candidate: Rectangle<i32, Logical>,
+    direction: Direction,
+) -> Option<f64> {
+    let from_center = Point::<f64, Logical>::from((
+        f64::from(from.loc.x) + f64::from(from.size.w) / 2.0,
+        f64::from(from.loc.y) + f64::from(from.size.h) / 2.0,
+    ));
+    let candidate_center = Point::<f64, Logical>::from((
+        f64::from(candidate.loc.x) + f64::from(candidate.size.w) / 2.0,
+        f64::from(candidate.loc.y) + f64::from(candidate.size.h) / 2.0,
+    ));
+    let (primary, off_axis) = match direction {
+        Direction::Left => (
+            from_center.x - candidate_center.x,
+            from_center.y - candidate_center.y,
+        ),
+        Direction::Right => (
+            candidate_center.x - from_center.x,
+            from_center.y - candidate_center.y,
+        ),
+        Direction::Up => (
+            from_center.y - candidate_center.y,
+            from_center.x - candidate_center.x,
+        ),
+        Direction::Down => (
+            candidate_center.y - from_center.y,
+            from_center.x - candidate_center.x,
+        ),
+    };
+    (primary > 0.0).then_some(primary + off_axis.abs() * 2.0)
 }
 
 /// `loc + delta` with per-axis saturation. Output positions arrive as
@@ -12122,6 +12242,28 @@ mod tests {
             stable_output_by_name([&alpha, &beta].into_iter()).map(Output::name),
             Some("DP-1".to_string())
         );
+    }
+
+    #[test]
+    fn directional_score_filters_axis_and_penalizes_off_axis_distance() {
+        let from = Rectangle::new((100, 100).into(), (80, 60).into());
+        let aligned = Rectangle::new((220, 110).into(), (40, 40).into());
+        let diagonal = Rectangle::new((190, 260).into(), (40, 40).into());
+
+        let aligned_score = directional_score(from, aligned, Direction::Right).unwrap();
+        let diagonal_score = directional_score(from, diagonal, Direction::Right).unwrap();
+        assert!(aligned_score < diagonal_score);
+        assert!(directional_score(from, aligned, Direction::Left).is_none());
+    }
+
+    #[test]
+    fn directional_score_handles_world_coordinate_edges() {
+        let left = Rectangle::new((i32::MIN, -17).into(), (503, 281).into());
+        let right = Rectangle::new((i32::MAX - 346, 29).into(), (346, 199).into());
+
+        let score = directional_score(left, right, Direction::Right).unwrap();
+        assert!(score.is_finite());
+        assert!(score > f64::from(i32::MAX));
     }
 
     #[test]

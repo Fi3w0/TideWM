@@ -1483,7 +1483,7 @@ The same set of strings works after `bind ... =` at the top level or inside a `s
 **Focus and layout**
 - `cycle-focus` — most-recently-used order, not z-order
 - `focus-urgent` — jump to whichever window is currently marked urgent, if any
-- `focus-left` / `focus-right` / `focus-up` / `focus-down`
+- `focus-left` / `focus-right` / `focus-up` / `focus-down` — Classic selects by live screen geometry. Ocean compares the current camera projection, keeps the camera still for a visible neighbor, and glides it to an off-camera neighbor using `ocean.camera_animation_ms`/`camera_sway`; screen pins use their viewport position.
 - `swap-left` / `swap-right` / `swap-up` / `swap-down`
 - `resize-left` / `resize-right` / `resize-up` / `resize-down` — shrink/grow the focused floating window by 24 logical pixels, or resize its nearest BSP split and connected parallel ancestors
 - `layout:bsp` / `layout:master` / `layout:cascade` — switch the current workspace's tiling algorithm
