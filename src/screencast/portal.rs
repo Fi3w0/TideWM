@@ -1,35 +1,12 @@
-//! `org.freedesktop.impl.portal.ScreenCast`, the actual `xdg-desktop-portal`
-//! backend interface, registered as `org.freedesktop.impl.portal.desktop.tidewm`
-//! on the same DBus connection `dbus.rs` already holds open for
-//! `org.gnome.Mutter.ScreenCast`.
+//! `org.freedesktop.impl.portal.ScreenCast` backend, registered as
+//! `org.freedesktop.impl.portal.desktop.tidewm`. The portal descriptor and
+//! routing configuration under `share/xdg-desktop-portal/` direct the desktop
+//! portal frontend here.
 //!
-//! This is the door apps like Discord and OBS actually reach through: they
-//! call `org.freedesktop.portal.ScreenCast` on the `xdg-desktop-portal`
-//! frontend daemon, which forwards to whichever backend `portals.conf`
-//! names for this interface. `org.gnome.Mutter.ScreenCast` alone only helps
-//! users willing to install `xdg-desktop-portal-gnome`, which pulls in a
-//! `gtk4`/`libadwaita`/`nautilus` dependency chain this project doesn't want
-//! to ask for. Implementing the real backend interface directly keeps
-//! screencasting fully self-contained, and ships alongside `share/xdg-desktop-portal/tidewm.portal`
-//! and `tidewm-portals.conf`, both of which are load-bearing -- nothing
-//! routes to this code without them. See AGENT.md's "Screencasting" section.
-//!
-//! One stream is supported per session. `Start` asks the compositor thread
-//! to show its source picker; monitor, window, and virtual choices never
-//! require the D-Bus worker to inspect live compositor state. This proves the whole
-//! `xdg-desktop-portal` -> PipeWire pipe end-to-end as the smallest
-//! reviewable slice, the same "land the safe testable core first" sequencing
-//! the original Mutter/PipeWire split used.
-//!
-//! **Verification honesty note:** the interface/method/property shapes are
-//! copied from the installed `xdg-desktop-portal` package's own
-//! `org.freedesktop.impl.portal.ScreenCast.xml`, not guessed. The service
-//! has been driven with direct `busctl` calls, but a real `xdg-desktop-portal`
-//! process cannot be rerouted to it from a nested session: the already-running
-//! system portal daemon picked its backend from `XDG_CURRENT_DESKTOP` at its
-//! own startup, before this process (or its `XDG_CURRENT_DESKTOP=tidewm`)
-//! existed. Real Discord/OBS validation needs a fresh login on real hardware.
-//! See CHANGELOG for the exact verification breakdown.
+//! Each session owns at most one PipeWire stream. `Start` asks the compositor
+//! thread to select a monitor, window, or virtual source; the DBus worker does
+//! not inspect live compositor state directly. `CHANGELOG.md` records the
+//! runtime verification scope.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -241,13 +218,8 @@ impl Portal {
         3
     }
 
-    /// `handle` (the `org.freedesktop.impl.portal.Request` path the frontend
-    /// reserved for this call) is intentionally unused.
-    ///
-    /// ponytail: v1 never shows a dialog, so every call here returns before
-    /// a real client would ever have a reason to call `Close()` on a Request
-    /// object at that path. Add one if/when `start` grows a real picker
-    /// dialog with actual wall-clock time for a user to cancel during.
+    /// The request handle is unused because session creation returns without
+    /// displaying cancellable UI. Source selection is handled by `Start`.
     async fn create_session(
         &self,
         _handle: OwnedObjectPath,

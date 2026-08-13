@@ -1,40 +1,11 @@
-//! TideWM's JSON-over-Unix-socket control interface. Two modes share one socket:
+//! TideWM's newline-delimited JSON control socket.
 //!
-//! * **Request-response** (Phase A item 3 of the WM feature-parity roadmap):
-//!   one connection, one request line in, one response line out, then the
-//!   server closes it.
-//! * **Subscribe** (Phase R3 of the render/visual-identity roadmap, see
-//!   AGENT.md): the connection stays open and the server pushes JSON lines
-//!   as the desktop changes -- so a reactive widget (a waybar module, an
-//!   eww `deflisten`, a QuickShell socket reader) doesn't have to poll the
-//!   one-shot queries. Clean documented JSON, deliberately not a mimicry
-//!   of Hyprland's `socket2` event-string wire shape: there's no
-//!   compatibility reason to match that specific format.
-//!
-//! Read queries: `{"request": "outputs"}`, `{"request": "workspaces"}`,
-//! `{"request": "windows"}`, `{"request": "focused-window"}`,
-//! `{"request": "active-submap"}` (the currently active `submap <name> { }`
-//! block, if any -- `null` when the base binds are in effect).
-//! Actions: `{"request": "action", "action": "<string>"}`, where the string
-//! is the *exact* same syntax a `bind` statement's action half uses in
-//! config.wave (e.g. `"workspace:3"`, `"close-window"`, `"spawn:kitty"`) --
-//! routed through
-//! `config::parse_action`/`Smallvil::run_action` directly, so every action
-//! a keybind can trigger is IPC-addressable for free, including ones added
-//! by later phases, with zero new dispatch code here.
-//!
-//! Subscribe: `{"request": "subscribe", "events": ["window", "workspace",
-//! "focus", "urgent", "depth", "config"]}`. Omitting `events` (or sending
-//! an empty array) subscribes to all of them. The server replies with one
-//! ack line, then keeps the connection open and writes one JSON line per
-//! matching event: `{"event": "<kind>", "data": ...}`. The connection's
-//! lifetime is the subscription's lifetime -- closing it unsubscribes.
-//!
-//! Every request-response reply is `{"ok": true, "data": ...}` or
-//! `{"ok": false, "error": "..."}` -- malformed JSON or an unrecognized
-//! action string gets an error response, not a dropped connection, so a
-//! scripting mistake is visible to whatever's on the other end of the
-//! socket.
+//! Request-response connections read one request, write one result, and
+//! close. Subscribe connections acknowledge once and then stream filtered
+//! desktop events until the peer closes. Actions use the same parser and
+//! dispatch path as Wave keybinds. Replies are `{"ok":true,"data":...}` or
+//! `{"ok":false,"error":"..."}`; `DOCUMENTATION.md` defines the complete
+//! request, event, and command surface.
 
 use std::{
     cell::Cell,

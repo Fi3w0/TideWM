@@ -1,34 +1,10 @@
-//! wlr-output-management-unstable-v1: lets kanshi, `wlr-randr`, and wdisplays
-//! read and change output layout at runtime. Hand-rolled on
-//! `wayland-protocols-wlr`: unlike most other protocols this codebase
-//! implements, Smithay 0.7 ships no convenience module for this one.
+//! Hand-rolled wlr-output-management-unstable-v1 support for runtime output
+//! inspection and layout changes. Position, transform, and scale apply to an
+//! enabled head through `Output` and `Space` state.
 //!
-//! Deliberately scoped for this first pass. Heads are fully advertised
-//! (name/description/physical_size/mode/enabled/current_mode/position/
-//! transform/scale, matching what `Output` and `Space` already track), and
-//! `apply`/`test` genuinely live-applies position/transform/scale changes
-//! to an already-enabled head -- pure `Output::change_current_state` +
-//! `Space::map_output` bookkeeping, no DRM involved, and actually
-//! nested-testable (a winit-backed output has no DRM at all, so this path
-//! runs identically under both backends).
-//!
-//! What this does NOT support yet: disabling a head, or changing its mode
-//! (resolution/refresh) to anything other than what it's already running.
-//! Both would need a real DRM modeset renegotiation on the udev backend --
-//! untestable in this sandbox (no real hardware) and the same risk class as
-//! `TileMoveGrab`'s 0.15.1 machine-freeze incident (shipped after only a
-//! code review, froze the entire machine on first real-hardware use). The
-//! protocol explicitly allows a compositor to fail any apply/test for any
-//! reason ("a compositor might round the scale if it doesn't support
-//! fractional scaling"), so an honest `failed` event is the correct,
-//! spec-compliant response here, not a workaround. Revisit once real
-//! hardware is available to verify a live modeset actually works.
-//!
-//! Only one mode is ever advertised per head: the current one, marked
-//! preferred. `Output` doesn't track a connector's full list of
-//! hardware-supported modes outside `backend/udev.rs`'s local DRM scan, and
-//! since mode changes are refused anyway, advertising modes a client
-//! couldn't actually switch to would just be misleading.
+//! Mode changes and disabling heads are rejected because they require DRM
+//! modeset negotiation that this protocol layer does not own. Each head
+//! therefore advertises only its current mode, marked preferred.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -613,6 +589,9 @@ fn finish_configuration(
             let scale = cfg.scale.map(Scale::Fractional);
             let old_position = state.space.output_geometry(output).map(|geo| geo.loc);
             output.change_current_state(None, cfg.transform, scale, cfg.position.map(Into::into));
+            if cfg.scale.is_some() {
+                state.refresh_layer_fractional_scales(output);
+            }
             // A transform or scale change alters the output's logical
             // size, and the layer map's cached non_exclusive_zone only
             // recomputes on arrange() -- without this the retile below

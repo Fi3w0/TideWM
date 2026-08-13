@@ -1,29 +1,7 @@
-//! wp-tearing-control-v1: lets a client (typically a game or drawing-tablet
-//! app driving its own EGL/Vulkan present loop) hint that a surface's
-//! content may be presented with tearing to cut latency.
-//!
-//! Hand-rolled -- there is no Smithay convenience module for this protocol
-//! (unlike its sibling `wp_content_type_v1`, which Smithay does wrap; this
-//! file mirrors that module's exact shape: a manager global handing out a
-//! per-surface object, backed by Smithay's own double-buffered `Cacheable`
-//! state so `set_presentation_hint` applies on the next `wl_surface.commit`
-//! like the spec requires, not immediately).
-//!
-//! **Protocol only, deliberately no config surface and no DRM-level effect
-//! yet.** Honoring the hint means requesting an async/immediate page flip
-//! from the KMS atomic commit, and the pinned Smithay revision's
-//! `AtomicDrmSurface`/`DrmCompositor` hardcode their own `AtomicCommitFlags`
-//! with no caller-provided override point -- confirmed by reading
-//! `backend/drm/surface/atomic.rs` at the pinned rev, not assumed. A
-//! `general.allow_tearing`/`rule { immediate = true }` config pair (Hyprland's
-//! naming) would be dead config with nothing to gate, and worse than dead:
-//! a user pasting a real Hyprland config would get a silent no-op, the same
-//! shape of bug this codebase has already shipped once (`float = true`
-//! no-op'ing in window rules) and caught late. Unlike the VRR config surface
-//! (`config.rs`'s `adaptive_sync`), which shipped ahead of its DRM toggle
-//! because the capability query itself was real, useful signal -- there is
-//! no equivalent partial signal here worth exposing yet. Revisit together
-//! once Smithay (or a raw drm-rs fallback) exposes a real async-flip path.
+//! Tracks wp-tearing-control-v1 hints in double-buffered surface state.
+//! The hints are not yet honored by KMS because the pinned Smithay API does
+//! not expose async-flip flags to `DrmCompositor`; no config toggle is exposed
+//! until the backend can apply it.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;

@@ -168,8 +168,8 @@ impl WlrLayerShellHandler for Smallvil {
         if let Err(err) = map.map_layer(&desktop_surface) {
             tracing::warn!(%err, "Failed to map layer surface");
         } else {
-            // A layer surface's output never changes once mapped, so its
-            // fractional scale is set exactly once, here.
+            // Seed the preferred scale immediately; live output-scale
+            // changes refresh every mapped layer through output management.
             self.set_layer_fractional_scale(&desktop_surface, &output);
             self.unmapped_layer_surfaces
                 .insert(desktop_surface.wl_surface().clone());

@@ -384,13 +384,9 @@ pub struct Smallvil {
     /// frame pump alive the whole time. Independent of `window_float_physics`
     /// entirely: the two offsets simply add when both are active.
     pub(crate) window_float_ambient: HashMap<WlSurface, Instant>,
-    /// F1 `full` tier's rigid-body-ish state: one mass-spring-damper body
-    /// per floating window currently resolving `Full`, real velocity and
-    /// all, so it can exchange collision impulses the way `FloatPhysics`'
-    /// closed form can't. Ticked by `update_float_physics_full`, synced
-    /// (inserted/pruned) every tick by `sync_float_physics_bodies` rather
-    /// than only on a kick, since the continuous wave field needs a body to
-    /// push on `full` windows even before their first disturbance.
+    /// One mass-spring-damper body per floating window using full physics.
+    /// Continuous wave forcing and collisions require persistent velocity;
+    /// `sync_float_physics_bodies` keeps membership aligned with live rules.
     pub(crate) window_float_bodies: HashMap<WlSurface, crate::float_physics::FloatBody>,
     /// Fixed-timestep accumulator for `update_float_physics_full`'s
     /// integrator, carried across ticks so a variable frame interval still
@@ -4168,35 +4164,10 @@ impl Smallvil {
             .then_some(output)
     }
 
-    /// The output a new action without any other spatial hint should
-    /// target. Used for "which monitor does this land on" decisions (new
-    /// windows, layer surfaces the client didn't pin to a specific output,
-    /// workspace keybinds).
-    ///
-    /// Resolution order depends on `focus_follows_mouse` because the two
-    /// settings describe the same underlying intent -- "where my attention
-    /// is" -- and ought to agree on which monitor that is:
-    ///
-    ///   * **`focus_follows_mouse = true` (default):** pointer output
-    ///     first. This is what makes a freshly-plugged second monitor get
-    ///     new windows on the first `Super+Enter` after moving the mouse
-    ///     over to it, even when that monitor has no windows yet for
-    ///     `focus_follows_mouse` itself to shift keyboard focus onto.
-    ///     Hyprland/i3/sway's "active monitor follows mouse" default is the
-    ///     same idea. Suspended while an Exclusive/OnDemand layer owns the
-    ///     keyboard (matching `focus_follows_mouse`'s own early-return in
-    ///     that case): a launcher or lock screen shouldn't redirect spawns
-    ///     to whatever output the pointer happens to have drifted onto
-    ///     during the layer interaction -- the remembered window's output
-    ///     is the better signal of pre-layer intent.
-    ///
-    ///   * **`focus_follows_mouse = false`:** focused window's output
-    ///     first. In a click-to-focus model an unrelated pointer position
-    ///     is a weaker signal of intent than whatever the user last
-    ///     clicked, so the focused window wins.
-    ///
-    /// Either way the focused window's output, then the first mapped
-    /// output, fill in the remaining fallbacks.
+    /// Chooses the output for an action with no stronger spatial hint. With
+    /// focus-follows-mouse, prefer the pointer output unless an exclusive
+    /// layer owns focus; otherwise prefer focused-window ownership. Fall back
+    /// through the other focus signal and then any mapped output.
     pub(crate) fn primary_output(&self) -> Option<Output> {
         let intended_output = self.window_focus.as_ref().and_then(|surface| {
             self.pointer_output_for_surface(surface)
@@ -5152,8 +5123,6 @@ impl Smallvil {
     }
 
     /// Same as `set_window_fractional_scale` for a layer-shell surface.
-    /// Called once at map time -- a layer surface's output never changes
-    /// afterwards, so there is nothing to refresh later.
     pub(crate) fn set_layer_fractional_scale(
         &self,
         layer: &desktop::LayerSurface,
@@ -5165,6 +5134,13 @@ impl Smallvil {
                 fractional.set_preferred_scale(scale);
             });
         });
+    }
+
+    /// Refreshes mapped layer surfaces after their output's live scale changes.
+    pub(crate) fn refresh_layer_fractional_scales(&self, output: &Output) {
+        for layer in layer_map_for_output(output).layers() {
+            self.set_layer_fractional_scale(layer, output);
+        }
     }
 
     /// Sends the frame-done callback to every mapped layer surface on
@@ -7361,39 +7337,10 @@ impl Smallvil {
             .collect()
     }
 
-    /// Builds and shows the whole-world minimap (spatial roadmap S5's other
-    /// half, alongside the compass) on `output` -- called once `input.rs`
-    /// detects `config.minimap`'s hold chord has just become fully held.
-    /// A no-op if it's already open (holding the chord longer doesn't
-    /// rebuild it), outside Ocean, `minimap.enabled` is false, the session
-    /// is locked, or a move/resize/pan drag is in progress -- the peek's
-    /// own button handling never calls `pointer.button()`, so opening
-    /// mid-drag would strand that grab's commit logic waiting for a
-    /// release event it will never see. Same "don't start while the
-    /// pointer is already grabbed" guard `modifier_pan_fingers`'s
-    /// gesture-start already checks for the same reason.
-    ///
-    /// Deliberately checks `is_grabbed() && popup_grab.is_none()`, not
-    /// `is_grabbed()` alone -- `is_grabbed()` is also true for an ordinary
-    /// client popup's implicit grab (any open GTK/Qt dropdown), which
-    /// doesn't have the release-starvation hazard above: a popup grab is
-    /// about click-outside-to-dismiss routing, not a commit that waits on
-    /// a specific release event. Refusing to open just because a menu
-    /// happens to be open would be an unnecessary restriction; the popup
-    /// simply receives no input for the peek's duration and resumes
-    /// normally once it closes, the same `PointerButton` arm already
-    /// treats a popup grab as distinct from a move/resize grab.
-    ///
-    /// Callers must treat "did not open" (`self.minimap_peek` still `None`
-    /// after this returns) as a real outcome, not just "already open" --
-    /// in particular, the chord press that triggers this must not
-    /// intercept the key unless a peek actually opened, or it would
-    /// silently shadow an ordinary keybind on the same combo.
-    ///
-    /// Reads window rects from `Ocean::world_layouts`, the same source
-    /// `compass_frame_elements` uses -- keeps the compass and the minimap
-    /// agreeing on exactly the same window set, and folds in
-    /// `attached_sizes`/the floating stack for free.
+    /// Opens the Ocean minimap from current `world_layouts`. Active pointer
+    /// grabs suppress it because consuming the matching release would strand
+    /// their commit; popup grabs are safe and remain eligible. Callers only
+    /// intercept the trigger if this method actually opens the peek.
     pub(crate) fn open_minimap_peek(&mut self, output: &Output) {
         if self.minimap_peek.is_some()
             || self.config.spatial_engine != crate::config::SpatialEngine::Ocean

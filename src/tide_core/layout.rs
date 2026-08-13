@@ -998,8 +998,8 @@ impl Layouts {
     /// tree; see `BspLayout::hit_test_split`. Always `None` under master or
     /// cascade mode: neither's geometry (`layout_master`/`layout_cascade`)
     /// follows the tree's own shape, so a BSP split boundary found here
-    /// wouldn't correspond to any actual border on screen to drag. Cascade's
-    /// own row/column resize is unbuilt scope, not an oversight here.
+    /// wouldn't correspond to any actual border on screen to drag. Cascade
+    /// uses its separate row/column hit testing and ratio state.
     pub fn hit_test_split(
         &self,
         output: &str,

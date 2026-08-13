@@ -1054,12 +1054,8 @@ impl OceanSpace {
             return;
         };
         let (max_w, max_h) = self.growth_ceiling(reef_index);
-        // ponytail: fixed 8-round measure-and-grow rather than solving the
-        // dwindle tree's split math for an exact minimum rect -- each round
-        // measures the real slot through the same `layout()` the renderer
-        // itself calls, so it can never drift from what's actually on
-        // screen. Upgrade to a closed-form solve if 8 rounds ever visibly
-        // fails to converge for a real tree depth.
+        // Measure the real BSP slot and grow iteratively; eight rounds bound
+        // the work while using the same layout geometry as rendering.
         for _ in 0..8 {
             let reef = &self.reefs[reef_index];
             if !reef.auto_width && !reef.auto_height {

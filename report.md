@@ -25,9 +25,9 @@ The finding text below is the original audit evidence. It is intentionally retai
 - Medium explicitly re-audited and closed: M-01, M-02, M-04 through M-10, M-12 through M-23, M-25 through M-30, and M-32 through M-36.
 - Medium still open or awaiting a fresh audit: M-24, M-37, and M-42 through M-45, M-47, M-48, and M-50 through M-73. (M-03 fixed 2026-08-13 in `7f97c04`; M-31 fixed 2026-08-13 in `854b223`; M-38 fixed 2026-08-13 in `b473f67`; M-39 fixed 2026-08-13 in `1e5348c`; M-40 fixed 2026-08-13 in `911b942`; M-41 fixed 2026-08-13 in `27c9489`; M-46 fixed 2026-08-13 in `5f0e15e`; M-49 fixed 2026-08-13 in `2c466d6`; M-74 fixed 2026-08-13 in `6e2f42e`; M-11 fixed 2026-08-09 in `441d559` — see their finding bodies.) M-24 and M-50 got **partial fixes/mitigations only, not full closes** — see their finding bodies before treating either as resolved: M-24's leak (`eb9107b`, 2026-08-13) is now observable and bounded, not eliminated; M-50's stale threshold (`bdbef36`, 2026-08-13) is corrected but the finding's "cannot judge the selected feature set" half is untouched.
 - Performance re-audit (2026-08-13): P-02, P-03, P-06, P-07, P-08, and P-10 are fixed in `c211a17`, `193e63d`, `950d921`, `7e9a128`, and `c508041`. P-01's duplicate same-pass Ocean layout was removed in `248c2d3`; a broader cross-pass cache remains profiling- and invalidation-design-gated. P-04 was already single-search in the reconciled tree. P-05's remaining allocation is a bounded once-per-window history path, and P-09's picker rebuild happens only when selection state changes; neither justifies hot-path complexity without a profile. P-11 and P-14 are closed by the real-hardware results recorded below. P-12's scheduling fix is covered by nonstandard-cadence unit tests but still needs a real-DRM trace. P-13 is substantially mitigated by configurable backdrop downscaling, immediate stale-capture eviction, and the built-in-wallpaper toggle; general client-buffer pressure and the shared-per-output blur-buffer design option remain.
-- Lower-confidence re-audit (2026-08-13): U-02, U-03, U-05, and U-06 are fixed in `7edcc3b`; U-07 and U-08 in `7edc8c2`; U-11 in `9898128`; U-12 in `8efcdfe`; and the concrete hardware-facing U-14 ranges in `73d62ec`. U-09 and U-13 were already bounded in the reconciled tree. U-01, U-04, U-10, U-15, and U-16 remain design/security/policy investigations rather than confirmed drop-in fixes. U-14 remains an ongoing parser-audit category for future fields, not permission to invent hardware defaults.
+- Lower-confidence re-audit (2026-08-13): U-01 is fixed in `fc82fea`; U-02, U-03, U-05, and U-06 in `7edcc3b`; U-07 and U-08 in `7edc8c2`; U-11 in `9898128`; U-12 in `8efcdfe`; and the concrete hardware-facing U-14 ranges in `73d62ec`. U-09 and U-13 were already bounded in the reconciled tree. U-04, U-10, U-15, and U-16 remain design/security/policy investigations rather than confirmed drop-in fixes. U-14 remains an ongoing parser-audit category for future fields, not permission to invent hardware defaults.
 - Formatter findings F-01 through F-04: closed.
-- The highest-confidence stale source comments were cleaned up in 0.90.84; the long-form comment-compression list below remains incremental cleanup, not a release blocker. The roadmap still needs the maintainer's animation-feel decision and the real-hardware matrix below.
+- The highest-confidence stale source comments were cleaned up in 0.90.84. Version 0.90.88 also compresses nine high-priority module histories into current ownership and safety contracts; the remaining line-level list below is incremental cleanup, not a release blocker. The non-water motion-pack decision landed in 0.90.86, while the real-hardware matrix below remains.
 
 ### Open finding re-audit notes
 
@@ -799,7 +799,7 @@ These are not all bugs, but they are concrete places where the code can be short
 
 ## Lower-confidence and defensive findings to investigate
 
-- **U-01 — Never-signalled DMA-BUF blockers may accumulate.** `handlers/compositor.rs:35-81` adds a source and transaction blocker for each not-ready commit. Confirm Smithay cleanup/coalescing under repeated hostile never-signalled fences.
+- **U-01 — Fixed: never-signalled DMA-BUF blockers could accumulate.** Smithay cancels transactions whose surfaces are all dead when its per-client queue is reevaluated, but TideWM previously retained every unsignalled one-shot calloop source indefinitely and had no ownership record with which to remove it on disconnect. Commit `fc82fea` tracks registration tokens per client, removes signalled sources from that registry, removes all remaining sources when the client disconnects, and disconnects a client before it can exceed 64 pending fences or the compositor-wide 1024-source ceiling. Surface destruction also reevaluates Smithay's queue so dead-only transactions are discarded promptly. The cap is a protocol resource bound; it does not depend on GPU, output, resolution, or refresh properties.
 - **U-02 — Ocean placement prefix assumes perfect map/stack consistency.** `ocean.rs:1385-1390` slices at `self.floating.len()` although the prefix is produced by `floating_stack.filter_map`. Add a debug invariant or derive the count from collected entries.
 - **U-03 — Dredge can select a screen-pinned window's dormant world rect.** `ocean.rs:1231-1264`, `:1358-1372` include pins in `world_layouts`; a pinned window below the viewport may be moved/unpinned as “submerged.”
 - **U-04 — Ocean directional focus may choose off-camera windows.** `state.rs:9632-9652` searches Space, where all Ocean world windows are mapped. Decide whether focus should travel the camera or only consider visible placements.
@@ -828,74 +828,35 @@ Recommended rule:
 - Prefer one direct sentence. Use a short paragraph only when the invariant truly has multiple parts.
 - Do not describe a known bug as intentional behavior. Use a short `TODO` until it is fixed.
 
-### Comments that are factually stale or misleading
+### Factual comment cleanup status
 
-- `src/tide_core/wave.rs:1-15` says the old line parser still produces entries and describes Wave phases as future work. The rewrite is complete.
-- `wave.rs:630`, `:1136`, `:1940` retain dead-code/future-phase explanations that no longer describe the implementation.
-- `src/screencast/dbus.rs:1-18` says TideWM relies on the GNOME portal and has not been tested with real OBS; TideWM now has its own portal and project docs say OBS/Discord were verified.
-- `src/backend/udev.rs:1-22` says output-disconnect windows remain orphaned; migration now exists, although this audit found holes in it.
-- `src/visual/ripple.rs:1-20` presents workspace transition as future reuse, but the separate transition module is built.
-- `src/visual/animation.rs:1-10` calls effects future work although the effect stack exists.
-- `src/tide_core/state.rs:4979-4984` says active animation is “just a fading toast”; many systems are now checked.
-- `src/tide_core/state.rs:7378-7385` says absence from Classic `Layouts` means floating. Ocean tiles, parked group members, depth-deck windows, and unmapped roles disprove it.
-- `src/tide_core/state.rs:4642-4655` says layer scale is set once because an output never changes; live output-management scale invalidates that claim.
-- `src/tide_core/layout.rs:294-300`, `:686-690` say `layout()` writes cascade state even though `&self` cannot; `refresh_cascade_state` writes it.
-- `layout.rs:864-869` says cascade row/column resize is unbuilt although the implementation is directly above.
-- `src/handlers/mod.rs:414-423` justifies activation behavior by claiming TideWM has no urgency indicator; it now has urgency handling.
-- The migration overview at `state.rs:8299-8315` overclaims group correctness.
-- `TECHNICAL_REPORT.md` still says 3 GB is the hard RAM ceiling while `AGENT.md` explicitly revised it to 2 GB. The doctor also retains the obsolete 1.5 GB threshold.
-- `backend/winit.rs:146` and `state.rs:1810-1818` call both backend timers “~60 Hz”; winit now targets 30–360 Hz.
-- `backend/udev.rs:825-835` claims rate gating yields configured effect FPS; M-53 shows the extra-poll under-run.
-- `AGENT.md`'s high-refresh/scheduling text treats udev pacing as complete after a 120 Hz modeset, but a successful mode does not prove distinct-frame cadence (H-34).
-- `backend/udev.rs:11-15` still says disconnected windows are not migrated; migration exists, though this audit found incomplete cases.
+The stale Wave, screencast, connector-migration, animation, layout, urgency,
+memory-budget, and backend-cadence claims listed by the original audit were
+rechecked and corrected in 0.90.84. Version 0.90.88 removes another nine module
+histories, five dense path-level narratives, and the remaining
+`ponytail`/obsolete Cascade wording. Rechecking the old “layer scale is set
+once” claim exposed a real behavior gap: live output scale changes now resend
+the output's current preferred fractional scale to mapped layer-shell clients.
 
-### Suggested concise replacements
+No known factually false item from the original list remains in source. The
+remaining work below is readability cleanup; comments that encode protocol,
+threading, coordinate, render-order, or security invariants should stay.
 
-| Location | Suggested comment |
-| --- | --- |
-| `wave.rs:1-15` | “Compiles Wave syntax to sandboxed Lua and lowers it into config entries. This module also owns includes, typed literals, session globals, eval, and event-handler registration.” |
-| `state.rs:4979-4984` | “Prunes completed animations and reports whether another frame is needed.” |
-| `state.rs:3678-3706` | “Chooses an action target. With focus-follows-mouse, prefer pointer output unless a layer owns focus; otherwise prefer the focused window. Fall back to any mapped output.” |
-| `state.rs:8022-8036` | “If pinning caused this fullscreen window to float, undo that mechanical change when pinning is toggled off.” |
-| `state.rs:8299-8315` | “Translate live spatial ownership in place. BSP trees move between Classic workspaces and Ocean reefs; floating rects and pins are converted; engine-only camera/bookmark/deck state is dropped.” |
-| `ocean.rs:64-72` | “For anchored zooms, derive origin from interpolated zoom so the point under the viewport anchor stays fixed.” |
-| `ocean.rs:988-993` | “Measure the real BSP slot and grow iteratively; eight rounds bound the work.” Remove the unnatural `ponytail` marker. |
-| `layout.rs:267-318` | For runtime maps: “Per-workspace overrides; prune when the workspace tree becomes empty.” For rules: “Config-owned fallback by workspace number.” For revision: “Invalidates split grabs after structural changes.” |
-| `layout.rs:1489-1501` | “The first tree-order window is master; remaining windows share the stack. Orientation selects the split axis.” |
-| `layout.rs:1811-1821` | “Choose the row count whose grid aspect is closest to the output aspect in log space.” |
-| `visual/water_glass.rs:316-324` | “Leave opaque regions empty because glass samples content behind the surface.” |
-| `grabs/move_grab.rs:75-85` | “While smart attach is enabled, show the tiled target under the pointer.” |
-| `grabs/tile_move_grab.rs:73-93` | “Hit-test immutable layout slots, not the visually moved Space element. Cross-output drops snap back.” |
-| `backend/winit.rs:59-72` | “Winit permits one process-global EventLoop, so nested mode exposes one simulated output.” |
-| `backend/udev.rs:93-104` | “Custom shaders make this render-element enum GLES-specific.” |
-| `handlers/tearing_control.rs:1-26` | “Protocol state is tracked but not yet honored by KMS because the pinned Smithay API exposes no async-flip flag.” |
-| `main.rs:150-171` | “Publish the Wayland/display environment to the user activation environment.” |
-| `visual/overview.rs:259-269` | “Advance at least one pixel so zero-width glyphs do not overlap.” |
+### Highest-priority comment blocks
 
-### Highest-priority comment blocks to shorten
-
-The following blocks are large enough to materially obstruct code review. They should be handled in a dedicated comment-only change after the behavioral bugs are fixed:
-
-- `src/tide_core/config.rs:3581-3626` — 46 lines.
-- `src/visual/minimap.rs:1-45` — 45 lines; reduce to purpose, coordinate model, and input contract. Lines `:37-45` currently rationalize the lost-click bug and should become a short TODO.
-- `src/handlers/mod.rs:619-661` — 43 lines; section essays also occur at `:108-116`, `:161-169`, `:230-240`, `:275-289`, `:332-348`, `:405-423`, `:493-504`, `:542-579`, `:689-715`.
-- `src/tide_core/ipc.rs:1-37` — keep protocol modes and framing; move phase/history text.
-- `src/accessibility/mod.rs:1-34` — keep the threading and suppression contract; remove implementation history/compositor comparison.
-- `src/visual/overview.rs:1-33` — keep purpose and current limitations in roughly five lines.
-- `src/tide_core/state.rs:6565-6597` — minimap design history.
-- `src/screencast/portal.rs:1-32`, `:118-145` — shorten architecture and locking contracts; remove the stray `ponytail` word.
-- `src/handlers/wlr_output_management.rs:1-31` — keep supported/unsupported protocol scope; remove historical machine-freeze narration.
-- `src/tide_core/input.rs:1396-1425` — reduce to the live input invariant.
-- `state.rs:3678-3706` — use the target-selection replacement above.
-- `src/visual/ripple.rs:41-67` — shader contract can be about five lines: normalized UV, premultiplied alpha, and no `#version`.
-- `src/tide_core/waves.rs:57-83` — retain only merge precedence/invariants.
-- `src/handlers/tearing_control.rs:1-26` and `src/grabs/tile_move_grab.rs:1-26` — use the replacements above.
+Completed in 0.90.88: the minimap, IPC, accessibility, overview, portal,
+output-management, tearing-control, tiled-move, and floating-physics module
+headers, plus the dense output-selection, minimap-open, modifier-drag,
+input-method, shortcut-inhibitor, ripple-shader, and Wave-merge explanations.
+The reported `RippleConfig` block was re-audited and retained: its field-level
+inheritance and units are current public configuration semantics rather than
+implementation history.
 
 Additional dense/historical targets:
 
 - `state.rs:1255-1274` is misplaced above `base_window_visual_sample`; move a 2–3 line stack/skip invariant to `desktop_render_elements` or delete it.
 - `state.rs:1633-1642`, `:4339-4356`, `:4447-4462`, `:6840-6862`, `:7043-7062`, `:7897-7909`, `:8681-8698`, `:8896-8905`, `:8976-9010`, `:9034-9044`, `:10321-10329`, `:10502-10516` narrate incidents or repeat nearby code. Preserve only the active invariant.
-- `src/visual/float_physics.rs:1-23`, `:70-76`, `:132-145`, `:160-169`, `:202-219`, `:252-260`, `:276-288`, `:330-336` is the most over-commented visual file. Keep equations, units, coordinate space, and rest conditions; move design chronology. Remove “rigid-body-ish.”
+- `src/visual/float_physics.rs`'s module history and “rigid-body-ish” wording are gone; the remaining internal comments should be re-audited around the equations, units, coordinate space, and rest conditions.
 - `src/visual/caustics.rs:1-21`, `:51-58` — remove prose such as “absence of drama”; keep cache/failure behavior.
 - `src/visual/error_overlay.rs:325-335`, `:346-354`, `:387-393` — retain formula/invariant, delete bug-story prose.
 - `src/visual/water_glass.rs:1-15`, `:107-119`, `:236-242`, `:316-324` — keep shader inputs, animation condition, and opacity rule.

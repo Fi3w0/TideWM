@@ -57,33 +57,10 @@ fn assign_is_multi(key: &str) -> bool {
     matches!(key, "spawn" | "workspace_name" | "workspace_gaps")
 }
 
-/// Folds `incoming` onto `target` in place, applying the same policy in
-/// both directions this gets used for: parsing one file's own entries
-/// (fold its lines onto an initially-empty accumulator, so accidental
-/// duplication *within* one file is handled the same way as duplication
-/// *across* included files) and resolving `include`s (fold the including
-/// file's own entries onto whatever its includes already produced, so its
-/// own keys win -- see `resolve`).
-///
-/// - A scalar entry (`Assign`/`VarDef`/`Bind`) replaces any earlier entry
-///   of the same kind with the same key/name/combo -- last write wins,
-///   matching a TOML table's "duplicate key means override" shape once
-///   merged across files (a *literal* duplicate key within one raw TOML
-///   file is a hard parse error there; Waves is more forgiving on
-///   purpose, since "last bind on this combo wins" is a perfectly
-///   sensible thing to want across a multi-file split). The one
-///   exception is [`assign_is_multi`]'s keys (`spawn`, `workspace_name`),
-///   which accumulate instead -- see its own doc comment.
-/// - A block whose keyword is in [`block_is_keyed`] (`input`, `touchpad`,
-///   `env`, `switch_events`, `mode`, `ripple_preset`) merges recursively with an
-///   existing block of the same keyword *and* header (the header is the
-///   mode name for `mode`, empty for the others) -- these are
-///   conceptually single named sections, the same as a TOML table
-///   merging key-by-key across files.
-/// - Every other block (`output`, `rule`, anything not in the allowlist)
-///   always appends as a new entry, never merges -- these are
-///   conceptually arrays (TOML's `[[output]]`/`[[window_rule]]`
-///   concatenate across files, they don't merge by name).
+/// Merges entries with include precedence: later scalars replace earlier ones
+/// and move to the later position, multi-value assignments accumulate, keyed
+/// blocks merge recursively by keyword/header, and all other blocks append.
+/// The same policy handles duplicates within one file and across includes.
 pub(crate) fn merge_into(target: &mut Vec<Entry>, incoming: Vec<Entry>) {
     // Replacements must move to their last-write position, so mutating an
     // entry in place would change observable lowering order. Tombstones let

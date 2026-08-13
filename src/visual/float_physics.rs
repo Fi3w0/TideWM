@@ -1,26 +1,7 @@
-//! Cosmetic 2D bob-and-drift for floating windows (spatial roadmap F1,
-//! `light` tier). The generalization of `sway.rs`: instead of one lateral
-//! axis kicked by a drag, two axes are kicked by any disturbance -- a
-//! floating drag, a window mapping, or a workspace-transition wave passing
-//! across the output -- and decay back to rest on their own.
-//!
-//! Like `sway.rs`/`viscosity.rs`/`ripple.rs`, there is no per-frame
-//! integrator, no motion history, and no render allocation. The offset is a
-//! closed-form function of the time elapsed since the last kick, so a
-//! settled window stops asking for frames entirely and an idle desktop
-//! still ticks zero frames. A kick is just a sample-then-reseed of the two
-//! amplitudes.
-//!
-//! The lateral axis uses cosine (exact continuity on re-kick, the sway
-//! precedent); the vertical axis uses sine, a fixed quarter-period offset,
-//! so a window energized by a disturbance reads as bobbing in place rather
-//! than sliding diagonally. Because the vertical term is zero at the kick
-//! instant, an actively dragged window stays put vertically while the
-//! pointer has authority, then bobs once the drag releases and the
-//! accumulated vertical amplitude has room to oscillate. The exact phase
-//! relationship and every default below are feel parameters, open to the
-//! user's nested tuning pass; the shape here is the deliberate starting
-//! point.
+//! Render-only 2D bob and drift for floating windows. A disturbance samples
+//! the current offset and reseeds a bounded, exponentially decaying cosine/
+//! sine pair. The closed-form sample stores no motion history, allocates no
+//! render resource, and stops requesting frames after settling.
 
 use std::time::Instant;
 

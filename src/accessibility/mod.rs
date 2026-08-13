@@ -1,37 +1,9 @@
-//! `org.freedesktop.a11y.KeyboardMonitor` over the session DBus: lets a
-//! screen reader (Orca) grab or watch specific keys system-wide, regardless
-//! of window focus. Wayland's own per-client input isolation otherwise
-//! makes this impossible -- a client can't snoop another client's
-//! keyboard input, and an accessibility tool is not a special case to
-//! Wayland itself, so the compositor has to be the one exposing this.
-//! Interface shape and grab semantics ported from niri's own
-//! `src/dbus/freedesktop_a11y.rs` (the reference this project studies for
-//! foundational mechanisms), read directly rather than guessed at.
+//! `org.freedesktop.a11y.KeyboardMonitor` support for global screen-reader
+//! key watches and grabs. The compositor thread only updates the shared grab
+//! state and queues events on a bounded channel. DBus emission runs on the
+//! DBus thread, outside the input path and without access to `Smallvil`.
 //!
-//! **Deliberately narrower than niri's own `Manager`:** niri bundles
-//! `PointerLocator` (mouse-review support, a synchronous
-//! DBus-thread-asks-compositor-for-pointer-contents round trip) into the
-//! same object. Not ported here -- no request for mouse review, and it
-//! would need its own bidirectional channel; `KeyboardMonitor` alone is
-//! what makes Orca's *own* keybinds (e.g. its modifier key) work at all,
-//! which is the load-bearing piece.
-//!
-//! **Threading, deliberately stricter than niri's own reference:** niri's
-//! `process_key` (called synchronously from the compositor's own input
-//! handling) locks its shared grab state and then calls
-//! `async_io::block_on` for `KeyEvent` signal emission *while still
-//! holding that lock*, blocking the compositor's own thread on DBus I/O.
-//! This project has already been burned twice by a blocking call hiding
-//! in a hot synchronous path (`TileMoveGrab`'s deadlock, the fence-wait
-//! retry loop) and by the same "never touch `Smallvil` from a DBus
-//! thread" rule `screencast/mod.rs` already established, so this doesn't
-//! copy that shape: `process_key` only ever touches the shared
-//! `Arc<Mutex<KeyboardGrabs>>` (a fast, in-memory, never-held-across-I/O
-//! critical section, the same safe shape `ScreencastState.outputs`
-//! already uses) and queues outbound `KeyEvent`s on a bounded
-//! `std::sync::mpsc` channel; the actual (blocking) signal emission
-//! happens on the DBus thread itself, which has nothing else to do while
-//! idle anyway. See `dbus.rs` for that half.
+//! PointerLocator is outside this module's scope.
 
 mod dbus;
 mod tree;

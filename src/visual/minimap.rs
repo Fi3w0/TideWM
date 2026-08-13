@@ -1,44 +1,12 @@
-//! Whole-world Ocean overview minimap (spatial roadmap S5's other half,
-//! alongside `crate::compass`). Hold `minimap.key` (default `Super+Space`)
-//! to peek: a schematic map of every window in the shared world, plus every
-//! connected output's current camera viewport, scaled to fit the
-//! triggering output. Click a window or region to travel that output's
-//! camera there and dismiss; release without clicking just dismisses.
-//! Ocean-only, and deliberately *not* gated by `water_effects` -- see
-//! `MinimapConfig`'s own doc for why.
+//! CPU-rendered overview of Ocean windows and live output camera viewports.
+//! It is built once when the peek opens; clicking travels the triggering
+//! output's camera, while release dismisses without moving. Screen-pinned
+//! windows have no world position and are omitted. A camera already moving
+//! on another output is sampled at its current position.
 //!
-//! Same CPU-composited-texture approach as `overview.rs` (built once per
-//! peek via `MinimapPeek::build`, not rebuilt every frame). Box/label
-//! placement still reuses `overview.rs`'s `fill_rect`/`stroke_rect`/
-//! `draw_label` directly for the flat `Plain` preset; the two decorated
-//! presets (`Bioluminescent`, `Glass`) layer rounded corners, a gradient
-//! backdrop, and a soft colored rim on top, reusing `toast.rs`'s
-//! `rounded_rect_coverage_local` and `ui_theme::mix` -- the same
-//! rounded-box-with-soft-shadow technique the toast card already uses,
-//! just with the shadow's color parameterized instead of fixed black.
-//!
-//! **Presets pick a baseline look; `background_color`/`window_color`/
-//! `accent_color` still override individual colors on top of it** -- the
-//! same shape `compass`'s `shape` + `urgent_color`/`deep_color` already
-//! established, not a second config pattern to learn.
-//!
-//! **Known-lossy, same spirit as `overview.rs`'s own admitted gaps:**
-//! screen-pinned windows (`Smallvil::screen_pins`) aren't drawn -- a pin is
-//! glued to one output's screen space, not a world location, so it has
-//! nothing meaningful to show on a *world* map. And because the whole
-//! canvas is built once at peek-open rather than kept live, a camera
-//! mid-`OceanCameraMotion` ease on another output at that exact instant is
-//! snapshotted at whatever point its animation had reached, not its final
-//! destination -- a single-seat compositor can't move a second output's
-//! camera *during* the hold itself (there's only one keyboard/pointer), so
-//! this is the one residual staleness case, not a general "goes stale"
-//! problem.
-//!
-//! Closing re-resolves pointer focus at the cursor's unchanged location,
-//! matching Smithay's own post-grab focus restoration. A click-to-travel
-//! press is compositor-consumed, so its paired release is suppressed after
-//! the minimap disappears rather than leaking half a click to the newly
-//! re-entered client.
+//! The minimap owns pointer input while open. Closing restores focus at the
+//! unchanged cursor position and suppresses the release paired with a
+//! compositor-consumed click.
 
 use smithay::{
     backend::allocator::Fourcc,

@@ -1,29 +1,8 @@
-//! Drags a *tiled* window: the tiled counterpart to `move_grab.rs` (which
-//! moves a floating window freely). The window visually follows the
-//! cursor for the duration of the drag via the same `space.map_element`
-//! trick `MoveSurfaceGrab` uses, but its `Layouts` tree membership is
-//! never touched mid-gesture -- on release, dropping it on another tiled
-//! window swaps the two (`Layouts::swap`); dropping anywhere else just
-//! calls `retile()` with no swap, which snaps it right back to its
-//! original slot, since nothing about the tree actually changed.
-//!
-//! Shipped once, then DISABLED as of 2026-07-18: real-hardware testing hit
-//! a total system freeze (unresponsive even to VT-switch, needing a hard
-//! reboot) dragging a tiled window with an overlapping floating window
-//! nearby.
-//!
-//! Root cause confirmed and fixed: `drop()` used to call
-//! `data.seat.get_pointer().unwrap().current_location()` from inside the
-//! pointer grab's `button()` callback, which already holds the same
-//! `std::sync::Mutex` for the whole dispatch (`PointerHandle::button` in
-//! Smithay's `input/pointer/mod.rs`) -- a guaranteed self-deadlock on this
-//! single-threaded compositor's only event loop thread, freezing
-//! everything including VT-switch handling. Fixed by tracking pointer
-//! location purely from motion events (`last_location`, same approach
-//! `MoveSurfaceGrab` already used) instead of re-querying the seat.
-//!
-//! Re-enabled (wired back into `input.rs`) for a real-hardware retest --
-//! see AGENT.md/CHANGELOG.md for the retest result.
+//! Pointer grab for tiled-window drag-to-swap. The window follows the cursor
+//! visually while its layout membership remains unchanged. A completed drop
+//! over another immutable layout slot swaps the windows; cancellation or an
+//! invalid target retiles the original tree. Pointer position is retained
+//! from motion events and never re-queried from inside a pointer callback.
 
 use crate::{grabs::GrabCompletion, Smallvil};
 use smithay::{

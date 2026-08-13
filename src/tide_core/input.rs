@@ -1419,36 +1419,11 @@ impl Smallvil {
 
                     let under = self.window_under(pointer.current_location());
 
-                    // Configured-modifier+drag moves/resizes a floating
-                    // window, the same convention Hyprland and most tiling
-                    // WMs use so you don't need decorations to reposition
-                    // anything. The shipped config points this at `$mod`.
-                    //
-                    // Modifier+Left-drag on a *tiled* window instead picks it
-                    // up for drag-to-swap (TileMoveGrab,
-                    // grabs/tile_move_grab.rs)
-                    // -- dropping it on another tile swaps the two, dropping
-                    // anywhere else snaps it back. This shipped once, froze
-                    // the entire machine on its first real-hardware test
-                    // (unresponsive even to VT-switch, hard reboot needed),
-                    // and was disabled immediately. Root cause since found
-                    // and fixed: `TileMoveGrab::drop()` called
-                    // `seat.get_pointer().current_location()` from inside the
-                    // grab's own `button()` callback, which already holds
-                    // that same pointer mutex for the whole dispatch -- a
-                    // guaranteed self-deadlock, confirmed against Smithay's
-                    // source. Fixed by tracking pointer location from motion
-                    // events instead, same as MoveSurfaceGrab already does.
-                    // Re-enabled here for the real-hardware retest this
-                    // project's own standing rule required before trusting
-                    // it again -- see AGENT.md/CHANGELOG.md.
-                    // `modifier_state().logo` is the XKB *effective* state:
-                    // it also includes latched/locked modifiers. In a nested
-                    // compositor the host can additionally leave that state
-                    // stale across keyboard-focus changes. Neither case means
-                    // the user is physically holding the main modifier now.
-                    // Require actually pressed modifier keys so an ordinary
-                    // drag can never turn into a compositor move/resize.
+                    // Modifier-drag moves/resizes floaters and drag-swaps tiles.
+                    // Use physically held modifiers rather than XKB effective
+                    // state, which can include latched, locked, or stale host
+                    // state. TileMoveGrab retains pointer motion internally and
+                    // must not re-lock the pointer from its button callback.
                     let modifier_drag = self
                         .config
                         .pointer_modifier
