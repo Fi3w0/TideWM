@@ -8208,6 +8208,56 @@ impl Smallvil {
         });
     }
 
+    /// Converts a just-mapped tiled window on a *hidden* Classic workspace
+    /// to floating. The interactive `toggle_floating` path cannot do this:
+    /// it looks the window up in `space.elements()` (a hidden workspace's
+    /// windows are never mapped) and tags the float with the output's
+    /// *active* workspace rather than the tree it actually came from. The
+    /// window handle comes from `Layouts`, the rect from the slot the tree
+    /// would have given it, and nothing touches `Space` -- the window
+    /// becomes visible through `apply_workspace_switch`'s ordinary
+    /// incoming-floating map when its workspace is shown.
+    pub(crate) fn float_hidden_tiled_window(
+        &mut self,
+        surface: &WlSurface,
+        output_name: &str,
+        workspace: u32,
+    ) {
+        let Some(window) = self.layout.window_of(surface) else {
+            return;
+        };
+        let rect = self
+            .output_by_name(output_name)
+            .and_then(|output| self.output_tiling_area(&output))
+            .and_then(|area| {
+                self.layout
+                    .layout(
+                        output_name,
+                        workspace,
+                        area,
+                        self.gaps_for(output_name, workspace),
+                    )
+                    .into_iter()
+                    .find_map(|(candidate, rect)| is_window(&candidate, surface).then_some(rect))
+            })
+            .unwrap_or_else(|| Rectangle::new(Point::default(), window.geometry().size));
+        self.pseudo_tiled.remove(surface);
+        self.layout.remove(surface);
+        self.floating_workspace.insert(
+            surface.clone(),
+            FloatingTag {
+                window,
+                output: output_name.to_string(),
+                workspace,
+                rect,
+            },
+        );
+        self.buoyancy_dirty = true;
+        self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
+            surface: surface.clone(),
+        });
+    }
+
     /// Resolves a `"workspace:N"`/`"move-to-workspace:N"` target to a real
     /// workspace number: a `Number` passes through, a `Name` looks itself
     /// up in `config.workspace_names`. Warns and returns `None` for an
@@ -9505,7 +9555,13 @@ impl Smallvil {
         if !self.floating_workspace.contains_key(surface) {
             return;
         }
-        let Some(current) = self.space.element_geometry(&window) else {
+        // A floating window on a hidden workspace isn't in `Space`; its
+        // durable tag rect is the only geometry it has.
+        let Some(current) = self
+            .space
+            .element_geometry(&window)
+            .or_else(|| self.floating_workspace.get(surface).map(|tag| tag.rect))
+        else {
             return;
         };
         let loc = position.map(Point::from).unwrap_or(current.loc);
@@ -9518,7 +9574,9 @@ impl Smallvil {
             });
             toplevel.send_pending_configure();
         }
-        self.space.map_element(window, rect.loc, false);
+        if self.window_is_visible(surface) {
+            self.space.map_element(window, rect.loc, false);
+        }
         if let Some(tag) = self.floating_workspace.get_mut(surface) {
             tag.rect = rect;
         }
@@ -12020,7 +12078,7 @@ fn squared_center_distance(a: Rectangle<i32, Logical>, b: Rectangle<i32, Logical
 /// Keeps at least a small, grabbable part of a floating window inside the
 /// target working area after an output move. Raw origin translation can put
 /// almost the entire window off-screen when the destination is smaller.
-fn clamp_rect_visible(
+pub(crate) fn clamp_rect_visible(
     mut rect: Rectangle<i32, Logical>,
     bounds: Rectangle<i32, Logical>,
 ) -> Rectangle<i32, Logical> {

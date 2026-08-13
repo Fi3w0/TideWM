@@ -26,7 +26,9 @@ use smithay::{
 
 use crate::{
     grabs::{resize_grab, GrabCompletion, MoveSurfaceGrab, ResizeSurfaceGrab},
-    state::{FullscreenEntry, LifecycleFlutter, MaximizedEntry, PopupGrabState},
+    state::{
+        clamp_rect_visible, FullscreenEntry, LifecycleFlutter, MaximizedEntry, PopupGrabState,
+    },
     Smallvil,
 };
 
@@ -1139,13 +1141,39 @@ impl Smallvil {
         }
 
         // Reuse interactive conversion paths before the first presented frame.
+        // A rule targeting a hidden Classic workspace needs the Space-free
+        // conversion: `toggle_floating` looks the window up in
+        // `space.elements()` (never populated for a hidden tree) and tags
+        // floats with the output's *active* workspace, so it would silently
+        // no-op and leave the window tiled -- and `pin` below would then mark
+        // a still-tiled window pinned.
+        let hidden_classic_target =
+            !ocean_engine && workspace != self.layout.active_workspace(&output.name());
         if rule.float || rule.pin || rule.maximize || implicit_float || flutter_float {
-            self.toggle_floating(surface);
+            if hidden_classic_target {
+                self.float_hidden_tiled_window(surface, &output.name(), workspace);
+            } else {
+                self.toggle_floating(surface);
+            }
             if rule.pin {
                 if ocean_engine {
                     self.ocean.pin_to_screen(surface, &output.name());
                 } else {
                     self.pinned.insert(surface.clone());
+                    // Pinning promises visibility on every workspace, so a
+                    // pinned window aimed at a hidden one maps immediately
+                    // instead of waiting for a switch that exempts it.
+                    if hidden_classic_target && !self.window_is_visible(surface) {
+                        let bounds = self.output_tiling_area(&output);
+                        if let Some(tag) = self.floating_workspace.get_mut(surface) {
+                            if let Some(bounds) = bounds {
+                                tag.rect = clamp_rect_visible(tag.rect, bounds);
+                            }
+                            let window = tag.window.clone();
+                            let loc = tag.rect.loc;
+                            self.space.map_element(window, loc, false);
+                        }
+                    }
                 }
             }
             if rule.position.is_some() || rule.size.is_some() {
