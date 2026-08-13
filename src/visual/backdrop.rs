@@ -4,6 +4,8 @@
 //! Each capture keeps a texture and damage tracker, skipping unchanged scenes
 //! while translated geometry still invalidates a moving window's capture.
 
+use std::collections::HashSet;
+
 use smithay::backend::{
     allocator::Fourcc,
     renderer::{
@@ -38,6 +40,9 @@ pub struct BackdropCapture {
     /// Native requested size, kept separately to detect size or scale changes.
     size: Size<i32, Physical>,
     scale: i32,
+    /// Outputs whose latest scene snapshot still contained this surface.
+    /// Names avoid retaining disconnected Smithay `Output` objects.
+    visible_outputs: HashSet<String>,
 }
 
 impl BackdropCapture {
@@ -70,7 +75,14 @@ impl BackdropCapture {
             tracker: OutputDamageTracker::new((texture_w, texture_h), 1.0, Transform::Normal),
             size,
             scale,
+            visible_outputs: HashSet::new(),
         })
+    }
+
+    /// Reconciles one output's latest visibility result. Returns whether at
+    /// least one output still needs this texture.
+    pub fn set_output_visible(&mut self, output: &str, visible: bool) -> bool {
+        update_output_visibility(&mut self.visible_outputs, output, visible)
     }
 
     /// Translates output-physical `behind` elements to `rect`'s origin and
@@ -140,6 +152,15 @@ impl BackdropCapture {
     }
 }
 
+fn update_output_visibility(outputs: &mut HashSet<String>, output: &str, visible: bool) -> bool {
+    if visible {
+        outputs.insert(output.to_string());
+    } else {
+        outputs.remove(output);
+    }
+    !outputs.is_empty()
+}
+
 /// One-shot native-resolution capture for a full-output transition snapshot.
 /// The per-window `backdrop_capture_scale` setting does not apply.
 pub fn capture_once<E: RenderElement<GlesRenderer>>(
@@ -171,5 +192,15 @@ mod tests {
     fn scale_below_one_is_clamped_to_native_size() {
         assert_eq!(scaled_size(Size::from((800, 600)), 0), (800, 600));
         assert_eq!(scaled_size(Size::from((800, 600)), -3), (800, 600));
+    }
+
+    #[test]
+    fn capture_visibility_survives_until_its_last_output_drops_it() {
+        let mut outputs = HashSet::new();
+
+        assert!(update_output_visibility(&mut outputs, "left", true));
+        assert!(update_output_visibility(&mut outputs, "right", true));
+        assert!(update_output_visibility(&mut outputs, "left", false));
+        assert!(!update_output_visibility(&mut outputs, "right", false));
     }
 }

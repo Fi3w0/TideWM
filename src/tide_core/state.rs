@@ -312,8 +312,8 @@ pub struct Smallvil {
     /// Captured immediately before a visible frame and sampled by
     /// water/frost glass while building that same frame's elements. The
     /// window-sized texture is reused until its dimensions change. Evicted in
-    /// `detach_mapped_toplevel` alongside `window_opacity`, or this grows
-    /// for the life of the session.
+    /// `detach_mapped_toplevel` alongside `window_opacity`; render passes also
+    /// drop it after its last output stops presenting the surface.
     pub(crate) backdrop_textures: HashMap<WlSurface, crate::backdrop::BackdropCapture>,
     /// Cached full-output solid fill for `layer_rule { dim_around = true }`,
     /// one per output -- same "own buffer per output, dedup only bumps its
@@ -5128,6 +5128,9 @@ impl Smallvil {
         self.workspace_transitions.clear();
         self.workspace_glides.clear();
         self.depth_transitions.clear();
+        // Backdrop textures also contain unlocked client pixels. Unlock
+        // recaptures visible glass before composing its first desktop frame.
+        self.backdrop_textures.clear();
         // Closing snapshots contain client pixels and normally render above
         // the desktop. They are irrelevant once the security boundary is
         // active and must never survive into a locked composition.
@@ -6229,6 +6232,32 @@ impl Smallvil {
         ))
     }
 
+    /// Reconciles one class of capture against an output's latest scene.
+    /// A texture is retained while any output still presents its surface.
+    #[allow(clippy::mutable_key_type)] // Existing WlSurface-keyed ownership registries.
+    fn reconcile_backdrop_visibility(
+        &mut self,
+        output_name: &str,
+        visible: &[WlSurface],
+        windows: bool,
+    ) {
+        let foreign_toplevels = &self.foreign_toplevels;
+        self.backdrop_textures.retain(|surface, capture| {
+            if foreign_toplevels.contains_key(surface) != windows {
+                return true;
+            }
+            let visible = visible.iter().any(|candidate| candidate == surface);
+            capture.set_output_visible(output_name, visible)
+        });
+    }
+
+    /// Drops a disconnected or powered-off output's claims on captures.
+    /// Textures still presented through another Ocean camera remain alive.
+    pub(crate) fn remove_backdrop_output(&mut self, output_name: &str) {
+        self.backdrop_textures
+            .retain(|_, capture| capture.set_output_visible(output_name, false));
+    }
+
     /// Captures the backdrop behind every currently-visible window whose
     /// resolved rule selects water/frost glass (or whose compositor opacity
     /// implicitly selects water glass). This includes tiled placements in
@@ -6261,6 +6290,8 @@ impl Smallvil {
                 .then(|| surface.clone())
             })
             .collect();
+        let output_name = output.name();
+        self.reconcile_backdrop_visibility(&output_name, &surfaces, true);
         if surfaces.is_empty() {
             return;
         }
@@ -6312,13 +6343,14 @@ impl Smallvil {
             let capture_scale = self.config.backdrop_capture_scale;
             let first_capture = !self.backdrop_textures.contains_key(&surface);
             if first_capture {
-                let Some(capture) = crate::backdrop::BackdropCapture::new(
+                let Some(mut capture) = crate::backdrop::BackdropCapture::new(
                     renderer,
                     physical_rect.size,
                     capture_scale,
                 ) else {
                     continue;
                 };
+                capture.set_output_visible(&output_name, true);
                 self.backdrop_textures.insert(surface.clone(), capture);
             }
             let Some(capture) = self.backdrop_textures.get_mut(&surface) else {
@@ -6334,7 +6366,7 @@ impl Smallvil {
             }
         }
         tracing::debug!(
-            output = output.name(),
+            output = output_name,
             rendered,
             skipped,
             "Window backdrop captures"
@@ -6377,6 +6409,12 @@ impl Smallvil {
                 })
                 .collect()
         };
+        let output_name = output.name();
+        let layer_surfaces: Vec<WlSurface> = surfaces
+            .iter()
+            .map(|(surface, _)| surface.clone())
+            .collect();
+        self.reconcile_backdrop_visibility(&output_name, &layer_surfaces, false);
         if surfaces.is_empty() {
             return;
         }
@@ -6385,10 +6423,7 @@ impl Smallvil {
         // layers are all excluded from the list, so one build serves every
         // layer's capture and no blurred layer ever captures itself or a
         // sibling blurred layer.
-        let skip: Vec<WlSurface> = surfaces
-            .iter()
-            .map(|(surface, _)| surface.clone())
-            .collect();
+        let skip = layer_surfaces;
         let Some(space_elements) = self.desktop_render_elements(
             renderer,
             output,
@@ -6412,13 +6447,14 @@ impl Smallvil {
             let capture_scale = self.config.backdrop_capture_scale;
             let first_capture = !self.backdrop_textures.contains_key(&surface);
             if first_capture {
-                let Some(capture) = crate::backdrop::BackdropCapture::new(
+                let Some(mut capture) = crate::backdrop::BackdropCapture::new(
                     renderer,
                     physical_rect.size,
                     capture_scale,
                 ) else {
                     continue;
                 };
+                capture.set_output_visible(&output_name, true);
                 self.backdrop_textures.insert(surface.clone(), capture);
             }
             let Some(capture) = self.backdrop_textures.get_mut(&surface) else {
@@ -6434,7 +6470,7 @@ impl Smallvil {
             }
         }
         tracing::debug!(
-            output = output.name(),
+            output = output_name,
             rendered,
             skipped,
             "Layer backdrop captures"
@@ -9400,7 +9436,9 @@ impl Smallvil {
         };
         if applied {
             if !on {
-                self.remove_workspace_transition_output(&output.name());
+                let output_name = output.name();
+                self.remove_workspace_transition_output(&output_name);
+                self.remove_backdrop_output(&output_name);
             }
             self.wlr_output_power_management_state.set(output, on);
         }

@@ -1193,6 +1193,7 @@ fn handle_connector_change(
                     // unreachable. No-op if this was the only output.
                     let disconnected_name = surface.output.name();
                     state.remove_workspace_transition_output(&disconnected_name);
+                    state.remove_backdrop_output(&disconnected_name);
                     let fallback: Option<String> = state
                         .space
                         .outputs()
