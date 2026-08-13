@@ -16,7 +16,7 @@ use smithay::reexports::wayland_server::{
     protocol::wl_output::Transform as WlTransform,
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource, WEnum,
 };
-use smithay::utils::{Logical, Point, Rectangle, Transform};
+use smithay::utils::{Logical, Rectangle, Transform};
 use wayland_protocols_wlr::output_management::v1::server::{
     zwlr_output_configuration_head_v1::{self, ZwlrOutputConfigurationHeadV1},
     zwlr_output_configuration_v1::{self, ZwlrOutputConfigurationV1},
@@ -25,7 +25,10 @@ use wayland_protocols_wlr::output_management::v1::server::{
     zwlr_output_mode_v1::{self, ZwlrOutputModeV1},
 };
 
-use crate::Smallvil;
+use crate::{
+    output_layout::{checked_output_delta, logical_output_size, validate_desktop_layout},
+    Smallvil,
+};
 
 /// Highest version this hand-rolled implementation advertises. v4 only adds
 /// adaptive_sync (VRR), which TideWM doesn't support on any backend yet;
@@ -488,13 +491,11 @@ impl Dispatch<ZwlrOutputConfigurationHeadV1, ConfigHeadData> for Smallvil {
                     resource.post_error(Error::AlreadySet, "position already set");
                     return;
                 }
-                // Wire values are full-range i32 and the protocol's error
-                // enum has no invalid_position entry to reject extremes
-                // with, so positions are stored as requested; every
-                // arithmetic site that consumes them (the translate delta
-                // below, `translate_floating_windows_on_output`, the udev
-                // auto-layout fold) uses saturating operations instead of
-                // letting an extreme value panic/wrap layout math.
+                // The wire value is full-range i32 and there is no
+                // per-field invalid_position error. Keep it intact here;
+                // `finish_configuration` validates the complete proposed
+                // desktop and returns the configuration-level `failed`
+                // event when its edges or span do not fit logical i32.
                 cfg.position_set = true;
                 cfg.position = Some((x, y));
             }
@@ -565,17 +566,42 @@ fn finish_configuration(
         return;
     }
 
-    let supported = inner.ops.iter().all(|(output, op)| match op {
-        HeadOp::Disabled => false,
-        HeadOp::Enabled(cfg) => match cfg.custom_mode {
-            None => true,
-            Some((w, h, r)) => output
-                .current_mode()
-                .is_some_and(|m| m.size.w == w && m.size.h == h && (r == 0 || m.refresh == r)),
-        },
-    });
+    let proposed_layout: Option<Vec<Rectangle<i32, Logical>>> = inner
+        .ops
+        .iter()
+        .map(|(output, op)| {
+            let HeadOp::Enabled(cfg) = op else {
+                return None;
+            };
+            let mode = output.current_mode()?;
+            if cfg.custom_mode.is_some_and(|(w, h, r)| {
+                mode.size.w != w || mode.size.h != h || (r != 0 && mode.refresh != r)
+            }) {
+                return None;
+            }
+
+            let transform = cfg.transform.unwrap_or_else(|| output.current_transform());
+            let scale = cfg
+                .scale
+                .unwrap_or_else(|| output.current_scale().fractional_scale());
+            let size = logical_output_size(mode.size, transform, scale)?;
+            let position = cfg
+                .position
+                .map(Into::into)
+                .or_else(|| state.space.output_geometry(output).map(|geo| geo.loc))?;
+            let old_position = state.space.output_geometry(output)?.loc;
+            checked_output_delta(old_position, position)?;
+            Some(Rectangle::new(position, size))
+        })
+        .collect();
+    let supported = proposed_layout
+        .as_ref()
+        .is_some_and(|rects| validate_desktop_layout(rects.iter().copied()).is_ok());
 
     if !supported {
+        tracing::warn!(
+            "Rejected output configuration whose mode or complete logical desktop is unsupported"
+        );
         resource.failed();
         return;
     }
@@ -607,14 +633,11 @@ fn finish_configuration(
                 // -- possibly landing on a different output or off-screen
                 // -- even though this apply is about to report success.
                 if let Some(old_position) = old_position {
-                    // Saturating: both positions are full-range i32 wire
-                    // values, so plain subtraction of two extremes could
-                    // overflow.
-                    let delta: Point<i32, Logical> = (
-                        pos.0.saturating_sub(old_position.x),
-                        pos.1.saturating_sub(old_position.y),
-                    )
-                        .into();
+                    // The transaction validator proved this exact
+                    // translation fits the coordinate domain before any
+                    // output state was mutated.
+                    let delta = checked_output_delta(old_position, pos.into())
+                        .expect("validated output translation");
                     if delta != (0, 0).into() {
                         state.translate_floating_windows_on_output(&output.name(), delta);
                     }

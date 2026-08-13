@@ -67,6 +67,7 @@ use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
 use crate::{
     config::OutputTransformConfig,
     cursor,
+    output_layout::{logical_output_size, resolve_output_position},
     state::{LockRenderElement, SessionLock, Smallvil},
 };
 
@@ -1022,25 +1023,6 @@ fn create_surface(
         size: (mode.size().0 as i32, mode.size().1 as i32).into(),
         refresh: mode.vrefresh() as i32 * 1000,
     };
-    // Rightmost edge of every currently-mapped output, not the sum of their
-    // widths: summing assumes outputs are only ever appended in order, which
-    // hotplug breaks. Two 1920-wide outputs A (x=0) and B (x=1920);
-    // disconnect A, then connect C -- summing only B's width gives 1920,
-    // landing C directly on top of the still-mapped B. Taking the max right
-    // edge instead always lands a new output past every existing one,
-    // regardless of gaps left by earlier disconnects. Only used as the
-    // fallback when config doesn't pin an explicit position.
-    let auto_x = state
-        .space
-        .outputs()
-        .filter_map(|output| state.space.output_geometry(output))
-        .fold(0, |max_edge, geo| {
-            max_edge.max(geo.loc.x.saturating_add(geo.size.w))
-        });
-    let position = output_config
-        .as_ref()
-        .and_then(|c| c.position)
-        .unwrap_or((auto_x, 0));
     let scale = Scale::Fractional(output_config.as_ref().map(|c| c.scale).unwrap_or(1.0));
     let transform = match output_config
         .as_ref()
@@ -1056,11 +1038,51 @@ fn create_surface(
         OutputTransformConfig::Flipped180 => Transform::Flipped180,
         OutputTransformConfig::Flipped270 => Transform::Flipped270,
     };
+    let Some(logical_size) =
+        logical_output_size(output_mode.size, transform, scale.fractional_scale())
+    else {
+        tracing::error!(
+            connector_name,
+            mode = ?output_mode.size,
+            scale = scale.fractional_scale(),
+            ?transform,
+            "Output geometry does not fit TideWM's logical coordinate domain"
+        );
+        return None;
+    };
+    let requested_position = output_config
+        .as_ref()
+        .and_then(|config| config.position)
+        .map(Into::into);
+    let Some((position, preserved_request)) = resolve_output_position(
+        state
+            .space
+            .outputs()
+            .filter_map(|output| state.space.output_geometry(output)),
+        requested_position,
+        logical_size,
+    ) else {
+        tracing::error!(
+            connector_name,
+            ?logical_size,
+            "Could not place output inside TideWM's logical coordinate domain"
+        );
+        return None;
+    };
+    if requested_position.is_some() && !preserved_request {
+        tracing::warn!(
+            connector_name,
+            requested = ?requested_position,
+            fallback = ?position,
+            ?logical_size,
+            "Configured output position exceeds the representable desktop; using automatic placement"
+        );
+    }
     output.change_current_state(
         Some(output_mode),
         Some(transform),
         Some(scale),
-        Some(position.into()),
+        Some(position),
     );
     output.set_preferred(output_mode);
 

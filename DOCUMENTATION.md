@@ -1226,14 +1226,14 @@ input {
 
 ### `output <name> { }`
 
-Per-connector overrides, **udev backend only** — winit's single simulated output has no real mode list or transform-as-monitor-orientation meaning. Purely opt-in: an output with no matching block auto-configures (preferred mode, auto-positioned to the right of whatever's already mapped, scale 1, no rotation). One block per connector; repeat the block (in the same or another included file) for a second monitor.
+Per-connector overrides, **udev backend only** — winit's single simulated output has no real mode list or transform-as-monitor-orientation meaning. Purely opt-in: an output with no matching block auto-configures (preferred mode, auto-positioned to the right of whatever's already mapped, scale 1, no rotation). One block per connector; repeat the block (in the same or another included file) for a second monitor. Position validation uses the selected output's live logical size after mode, transform, and scale: TideWM does not assume a resolution, refresh rate, or maximum monitor count. A configured position whose rectangle or complete desktop span cannot be represented warns and uses automatic placement instead.
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | header | string | — | Connector name, e.g. `eDP-1`, `DP-2`. Check your logs or the `outputs` IPC query for what TideWM detected. |
 | `enabled` | bool | `true` | Set `false` to leave a connected output unused. |
 | `mode` | string, optional | connector's preferred mode | `1920x1080` or `1920x1080@60`. Falls back to the connector's own preferred mode if unset or unmatched. |
-| `position` | `WxH`, optional | auto-layout | e.g. `1920x0`. Falls back to auto-layout (rightmost edge of already-mapped outputs) if unset. |
+| `position` | `WxH`, optional | auto-layout | e.g. `1920x0`. Falls back to the live layout's right edge if unset or outside the logical coordinate domain; if no adjacent position fits at that edge, the output safely overlaps the live minimum corner. |
 | `scale` | float | `1.0` | |
 | `transform` | string | `normal` | One of `normal`, `90`, `180`, `270`, `flipped`, `flipped-90`, `flipped-180`, `flipped-270`. |
 | `gaps` | integer, optional | global `gaps` | Per-output gap override for every workspace shown on this connector. A `workspace_gaps` entry beats it. |
@@ -1614,7 +1614,7 @@ Full flag/command list: `tidectl --help`.
 | `zwp-text-input-v3` + `zwp-input-method-v2` + `zwp-virtual-keyboard-v1` | IME support | Done — app-side activation verified live; see CHANGELOG for the exact verification bar per sub-protocol |
 | `wp-cursor-shape-v1` | Named-cursor requests (Qt6/GTK4, QuickShell) | Done |
 | `zwp-tablet-v2` | Drawing tablet/pen support (tools, pressure, tilt, proximity) | Done via Smithay's convenience module — global, per-device hotplug advertisement, and full axis/proximity/tip/button forwarding live in `tide_core/input.rs`. Verified live nested that the global advertises and a real client's `get_tablet_seat` request completes cleanly with no crash; real tablet hardware to exercise actual `DeviceAdded`/axis/pressure/tilt events has not been available to test |
-| `wlr-output-management-unstable-v1` | Runtime output reconfiguration (`wlr-randr`, `kanshi`, `wdisplays`) | Done — position/transform/scale apply live; disabling an output or changing resolution needs real hardware to verify a live modeset |
+| `wlr-output-management-unstable-v1` | Runtime output reconfiguration (`wlr-randr`, `kanshi`, `wdisplays`) | Done — position/transform/scale apply live; complete layouts outside Smithay's logical coordinate domain fail atomically; disabling an output or changing resolution needs real hardware to verify a live modeset |
 | `wlr-output-power-management-unstable-v1` | Display on/off (DPMS) | Protocol + render-loop logic done; real CRTC power toggle unverified on hardware |
 | `zwlr-gamma-control-manager-v1` | Night-light tools (`wlsunset`, `gammastep`) | Protocol + DRM gamma ioctls done; real color-change unverified on hardware |
 | `org.freedesktop.a11y.KeyboardMonitor` (DBus, not a Wayland protocol) | Screen reader (Orca) grabbing/watching keys system-wide | Done, behind the `accessibility` Cargo feature (off by default, `cargo build --features accessibility`) — see CHANGELOG for the verification bar |

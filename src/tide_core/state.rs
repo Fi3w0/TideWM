@@ -12016,12 +12016,27 @@ fn clamp_rect_visible(
     let visible_h = MIN_VISIBLE
         .min(rect.size.h.max(1))
         .min(bounds.size.h.max(1));
-    let min_x = bounds.loc.x - rect.size.w + visible_w;
-    let max_x = bounds.loc.x + bounds.size.w - visible_w;
-    let min_y = bounds.loc.y - rect.size.h + visible_h;
-    let max_y = bounds.loc.y + bounds.size.h - visible_h;
-    rect.loc.x = rect.loc.x.clamp(min_x.min(max_x), min_x.max(max_x));
-    rect.loc.y = rect.loc.y.clamp(min_y.min(max_y), min_y.max(max_y));
+    let clamp_axis = |value: i32, origin: i32, extent: i32, window: i32, visible: i32| {
+        let min = i64::from(origin) - i64::from(window) + i64::from(visible);
+        let max = i64::from(origin) + i64::from(extent) - i64::from(visible);
+        let low = min.min(max).max(i64::from(i32::MIN));
+        let high = min.max(max).min(i64::from(i32::MAX));
+        i64::from(value).clamp(low, high) as i32
+    };
+    rect.loc.x = clamp_axis(
+        rect.loc.x,
+        bounds.loc.x,
+        bounds.size.w,
+        rect.size.w,
+        visible_w,
+    );
+    rect.loc.y = clamp_axis(
+        rect.loc.y,
+        bounds.loc.y,
+        bounds.size.h,
+        rect.size.h,
+        visible_h,
+    );
     rect
 }
 
@@ -12219,6 +12234,23 @@ mod tests {
         let clamped = clamp_rect_visible(far_offscreen, bounds);
 
         assert_eq!(clamped.loc, (2688, 568).into());
+    }
+
+    #[test]
+    fn visible_rect_clamp_handles_coordinate_edges() {
+        let low_bounds = Rectangle::new((i32::MIN, i32::MIN).into(), (347, 199).into());
+        let high_bounds =
+            Rectangle::new((i32::MAX - 347, i32::MAX - 199).into(), (347, 199).into());
+        let window = Rectangle::new((0, 0).into(), (503, 281).into());
+
+        assert_eq!(
+            clamp_rect_visible(window, low_bounds).loc,
+            (i32::MIN + 315, i32::MIN + 167).into()
+        );
+        assert_eq!(
+            clamp_rect_visible(window, high_bounds).loc,
+            (i32::MAX - 818, i32::MAX - 448).into()
+        );
     }
 
     #[test]

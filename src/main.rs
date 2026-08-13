@@ -15,7 +15,7 @@ mod visual;
 mod xwayland;
 
 pub(crate) use tide_core::{
-    classic_depth, config, input, ipc, layout, ocean, placement, state, wave, waves,
+    classic_depth, config, input, ipc, layout, ocean, output_layout, placement, state, wave, waves,
 };
 #[cfg(feature = "screencast")]
 pub(crate) use visual::source_picker;
