@@ -3008,17 +3008,18 @@ impl Smallvil {
         // run while `window_depths` is mutably borrowed. Skipped entirely
         // when depth is globally off, since every window takes the
         // `reset_disabled` branch regardless of exemption in that case.
-        // A plain Vec (not a HashSet) -- realistic window counts are small
-        // enough that a linear `contains` below is cheaper than dealing
-        // with `WlSurface`'s interior-mutable liveness flag as a hash key.
-        let exempt: Vec<WlSurface> = if enabled {
+        // `depth_exempt` is intentionally resolved before the mutable walk,
+        // but membership in that result must stay constant-time: this runs
+        // at 10 Hz and the old Vec made the two full window walks quadratic.
+        #[allow(clippy::mutable_key_type)]
+        let exempt: HashSet<WlSurface> = if enabled {
             self.window_depths
                 .keys()
                 .filter(|surface| self.depth_exempt(surface))
                 .cloned()
                 .collect()
         } else {
-            Vec::new()
+            HashSet::new()
         };
         let mut changed = false;
         // Collect per-surface tier transitions while we still hold the
@@ -11096,7 +11097,8 @@ impl Smallvil {
         if self
             .classic_depth
             .entries_for(&output, workspace)
-            .is_empty()
+            .next()
+            .is_none()
         {
             if down && self.layout.window_count(&output, workspace) > 1 {
                 self.sink_window();
@@ -11207,7 +11209,6 @@ impl Smallvil {
         let titles: Vec<String> = self
             .classic_depth
             .entries_for(&view.output, view.workspace)
-            .into_iter()
             .map(|entry| crate::tab_strip::window_title(&entry.surface))
             .collect();
         self.depth_deck_overlay = Some(crate::depth_deck::DepthDeckOverlay::build(
@@ -11229,7 +11230,6 @@ impl Smallvil {
             self.layout
                 .insert(&entry.output, entry.workspace, entry.window, None);
         }
-        self.retile();
     }
 
     fn start_depth_transition(&mut self, output: &str, down: bool) {
