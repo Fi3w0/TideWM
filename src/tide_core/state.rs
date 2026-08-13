@@ -11372,9 +11372,11 @@ impl Smallvil {
         self.handler_depth -= 1;
     }
 
-    /// Refreshes the `tide` table's live facts (outputs and the first
-    /// output's active workspace) from the current scene, then rebuilds
-    /// the Lua `tide` table so `tidectl eval` sees the live session.
+    /// Refreshes the `tide` table's live facts (outputs and, for Classic,
+    /// the first output's active workspace) from the current scene, then
+    /// rebuilds the Lua `tide` table so `tidectl eval` sees the live session.
+    /// Ocean and a zero-output session publish the documented `0` sentinel;
+    /// neither has a meaningful numbered active workspace.
     pub(crate) fn sync_tide(&mut self) {
         self.tide.backend = self.backend_name;
         self.tide.outputs = self
@@ -11389,11 +11391,11 @@ impl Smallvil {
                 ))
             })
             .collect();
-        if let Some(first) = self.space.outputs().next() {
-            let name = first.name().to_string();
-            let workspace = self.layout.active_workspace(&name);
-            self.tide.workspace = i64::from(workspace);
-        }
+        let first_workspace = self.space.outputs().next().map(|output| {
+            let name = output.name().to_string();
+            self.layout.active_workspace(&name)
+        });
+        self.tide.workspace = tide_workspace_value(self.config.spatial_engine, first_workspace);
         if let Ok(tide_table) = crate::wave::build_tide_table(&self.config_lua, &self.tide) {
             let _ = self.config_lua.globals().set("tide", tide_table);
         }
@@ -12044,6 +12046,13 @@ fn stable_output_by_name<'a>(outputs: impl Iterator<Item = &'a Output>) -> Optio
     outputs.min_by(|left, right| left.name().cmp(&right.name()))
 }
 
+fn tide_workspace_value(engine: crate::config::SpatialEngine, first_workspace: Option<u32>) -> i64 {
+    match (engine, first_workspace) {
+        (crate::config::SpatialEngine::Classic, Some(workspace)) => i64::from(workspace),
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -12088,6 +12097,16 @@ mod tests {
             stable_output_by_name([&alpha, &beta].into_iter()).map(Output::name),
             Some("DP-1".to_string())
         );
+    }
+
+    #[test]
+    fn tide_workspace_is_zero_without_classic_output_ownership() {
+        use crate::config::SpatialEngine;
+
+        assert_eq!(tide_workspace_value(SpatialEngine::Classic, Some(7)), 7);
+        assert_eq!(tide_workspace_value(SpatialEngine::Classic, None), 0);
+        assert_eq!(tide_workspace_value(SpatialEngine::Ocean, Some(7)), 0);
+        assert_eq!(tide_workspace_value(SpatialEngine::Ocean, None), 0);
     }
 
     #[test]
