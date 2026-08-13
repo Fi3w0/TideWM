@@ -2099,35 +2099,45 @@ pub(crate) fn lua_value_to_json(value: Value) -> Result<serde_json::Value, Strin
                 }
 
                 let converted = (|| {
-                    // A dense sequence becomes an array; otherwise an object
-                    // of string-keyed fields (nested tables recurse).
-                    let mut is_array = true;
+                    // JSON has no mixed table shape. Accept either a dense
+                    // 1-based Lua sequence or an object with string keys;
+                    // rejecting every other combination keeps `tidectl eval`
+                    // from silently dropping fields.
+                    let entries: Vec<(Value, Value)> = t
+                        .clone()
+                        .pairs::<Value, Value>()
+                        .collect::<mlua::Result<_>>()
+                        .map_err(|e| e.to_string())?;
                     let n = t.raw_len();
-                    for i in 1..=n {
-                        if t.raw_get::<Value>(i).is_err() {
-                            is_array = false;
-                            break;
-                        }
-                    }
-                    if is_array && n > 0 {
+                    let is_array = n > 0
+                        && entries.len() == n
+                        && entries.iter().all(|(key, _)| {
+                            matches!(key, Value::Integer(index) if (1..=n as i64).contains(index))
+                        });
+                    let is_object = entries
+                        .iter()
+                        .all(|(key, _)| matches!(key, Value::String(_)));
+
+                    if is_array {
                         let mut out = Vec::with_capacity(n);
                         for i in 1..=n {
                             let child: Value = t.raw_get(i).map_err(|e| e.to_string())?;
                             out.push(convert(child, depth + 1, state)?);
                         }
                         Ok(serde_json::Value::Array(out))
-                    } else {
+                    } else if is_object {
                         let mut out = serde_json::Map::new();
-                        for pair in t.pairs::<mlua::Value, mlua::Value>() {
-                            let (key, child) = pair.map_err(|e| e.to_string())?;
+                        for (key, child) in entries {
                             let mlua::Value::String(key) = key else {
-                                continue;
+                                unreachable!()
                             };
                             let key = key.to_string_lossy();
                             state.count_string(key.len())?;
                             out.insert(key, convert(child, depth + 1, state)?);
                         }
                         Ok(serde_json::Value::Object(out))
+                    } else {
+                        Err("eval result table must be either a dense 1-based list or a string-keyed object".to_string())
                     }
                 })();
                 state.ancestors.remove(&identity);
@@ -2715,6 +2725,28 @@ mod tests {
         let json = lua_value_to_json(Value::Table(root)).unwrap();
         assert_eq!(json["left"]["value"], 7);
         assert_eq!(json["right"]["value"], 7);
+    }
+
+    #[test]
+    fn eval_json_rejects_mixed_table_keys_instead_of_dropping_fields() {
+        let lua = Lua::new();
+        let table = lua.create_table().unwrap();
+        table.set(1, "first").unwrap();
+        table.set("named", "kept-or-error").unwrap();
+
+        let err = lua_value_to_json(Value::Table(table)).unwrap_err();
+        assert!(err.contains("dense 1-based list"), "{err}");
+    }
+
+    #[test]
+    fn eval_json_rejects_sparse_numeric_tables() {
+        let lua = Lua::new();
+        let table = lua.create_table().unwrap();
+        table.set(1, "first").unwrap();
+        table.set(3, "third").unwrap();
+
+        let err = lua_value_to_json(Value::Table(table)).unwrap_err();
+        assert!(err.contains("dense 1-based list"), "{err}");
     }
 
     #[test]
