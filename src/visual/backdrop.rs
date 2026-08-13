@@ -1,9 +1,5 @@
-//! Backdrop capture renders whatever sits behind a window's rect into an
-//! offscreen texture -- the shared plumbing every future water/decoration
-//! effect that samples "what's behind this window" (water-glass refraction,
-//! frost-glass blur) needs before it can run its own shader against that
-//! content. Render roadmap Phase R0.5, see AGENT.md's "Render and visual
-//! identity roadmap".
+//! Backdrop capture renders the scene behind a window into the texture used
+//! by water-glass refraction and frost blur.
 //!
 //! Reuses the exact bind/render_output technique `capture.rs` uses for
 //! screenshots, but runs immediately before the visible output is bound.
@@ -29,7 +25,7 @@ use smithay::backend::{
             Id, RenderElement,
         },
         gles::{GlesRenderer, GlesTexture},
-        Bind, Offscreen,
+        Bind, Offscreen, Texture,
     },
 };
 use smithay::utils::{Physical, Point, Rectangle, Scale, Size, Transform};
@@ -76,6 +72,16 @@ pub struct BackdropCapture {
 }
 
 impl BackdropCapture {
+    /// ARGB pixel payload currently owned by this capture. Driver metadata,
+    /// alignment, and allocator overhead are intentionally not guessed.
+    pub fn estimated_texture_bytes(&self) -> u64 {
+        let size = self.texture.size();
+        u64::try_from(size.w.max(0))
+            .unwrap_or(u64::MAX)
+            .saturating_mul(u64::try_from(size.h.max(0)).unwrap_or(u64::MAX))
+            .saturating_mul(4)
+    }
+
     /// Allocates the capture texture (at `size` downscaled by `scale`, `1`
     /// meaning full native resolution) and its damage tracker. `None` on an
     /// empty size or a renderer/GL failure (logged, not fatal -- the caller

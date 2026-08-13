@@ -1080,6 +1080,26 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
         })
         .collect();
     let visible_windows = state.space.elements().count();
+    let backdrop_texture_bytes = state
+        .backdrop_textures
+        .values()
+        .fold(0_u64, |total, capture| {
+            total.saturating_add(capture.estimated_texture_bytes())
+        });
+    let wallpaper_texture_bytes = state.builtin_wallpaper.estimated_texture_bytes();
+    let caustics_texture_bytes = state.caustics.values().fold(0_u64, |total, caustics| {
+        total.saturating_add(caustics.estimated_texture_bytes())
+    });
+    let transition_texture_bytes = state
+        .workspace_transitions
+        .values()
+        .fold(0_u64, |total, transition| {
+            total.saturating_add(transition.estimated_texture_bytes())
+        });
+    let tide_texture_estimate_bytes = backdrop_texture_bytes
+        .saturating_add(wallpaper_texture_bytes)
+        .saturating_add(caustics_texture_bytes)
+        .saturating_add(transition_texture_bytes);
     #[cfg(feature = "screencast")]
     let screencast_feature = state.screencast.is_some();
     #[cfg(not(feature = "screencast"))]
@@ -1108,6 +1128,15 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
         "screencast_feature": screencast_feature,
         "session_locked": !matches!(state.session_lock, crate::tide_core::state::SessionLock::Unlocked),
         "visible_windows": visible_windows,
+        "tide_texture_estimate": {
+            "bytes": tide_texture_estimate_bytes,
+            "backdrop_bytes": backdrop_texture_bytes,
+            "backdrop_count": state.backdrop_textures.len(),
+            "wallpaper_bytes": wallpaper_texture_bytes,
+            "caustics_bytes": caustics_texture_bytes,
+            "workspace_transition_bytes": transition_texture_bytes,
+            "scope": "ARGB payload for TideWM-owned backdrop, wallpaper, caustics, and active workspace-transition textures; excludes client buffers and driver overhead",
+        },
         "outputs": outputs,
     })
 }

@@ -367,6 +367,21 @@ impl WorkspaceTransition {
         self.animation.finished()
     }
 
+    /// ARGB pixel payload retained for this output's transition. The
+    /// optional incoming texture exists only when synchronized workspace
+    /// motion is enabled.
+    pub fn estimated_texture_bytes(&self) -> u64 {
+        std::iter::once(&self.outgoing_texture)
+            .chain(self.incoming_texture.iter())
+            .fold(0_u64, |total, texture| {
+                let size = texture.size();
+                let pixels = u64::try_from(size.w.max(0))
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(u64::try_from(size.h.max(0)).unwrap_or(u64::MAX));
+                total.saturating_add(pixels.saturating_mul(4))
+            })
+    }
+
     pub fn frame_element(&mut self, program: GlesTexProgram) -> WorkspaceTransitionElement {
         self.commit.increment();
         let width = self.geometry.size.w.max(1) as f32;

@@ -363,6 +363,7 @@ fn print_perf_summary(snap: &Value, cpu_pct: Option<f64>, wall: Duration) {
     let rss = mib("rss_bytes");
     let threads = snap.get("threads").and_then(Value::as_u64);
     let visible = snap.get("visible_windows").and_then(Value::as_u64);
+    let textures = snap.get("tide_texture_estimate");
     let outputs = snap.get("outputs").and_then(Value::as_array);
 
     println!("TideWM perf over {:.2}s", wall.as_secs_f64());
@@ -395,6 +396,23 @@ fn print_perf_summary(snap: &Value, cpu_pct: Option<f64>, wall: Duration) {
     if let Some(v) = visible {
         println!("  visible windows: {}", v);
     }
+    if let Some(textures) = textures {
+        let texture_mib = |key: &str| {
+            textures
+                .get(key)
+                .and_then(Value::as_u64)
+                .map(|bytes| bytes as f64 / (1024.0 * 1024.0))
+                .unwrap_or(0.0)
+        };
+        println!(
+            "  Tide textures: {:.1} MiB  (backdrops {:.1}, wallpaper {:.1}, caustics {:.1}, transition {:.1})",
+            texture_mib("bytes"),
+            texture_mib("backdrop_bytes"),
+            texture_mib("wallpaper_bytes"),
+            texture_mib("caustics_bytes"),
+            texture_mib("workspace_transition_bytes"),
+        );
+    }
     if let Some(outputs) = outputs {
         for o in outputs {
             let hz = o.get("refresh_hz").and_then(Value::as_f64).unwrap_or(0.0);
@@ -413,7 +431,9 @@ fn print_perf_summary(snap: &Value, cpu_pct: Option<f64>, wall: Duration) {
         }
     }
     println!();
-    println!("(GPU-busy% not available portably; use a vendor tool to measure it.)");
+    println!(
+        "(Texture figures exclude client buffers/driver overhead; GPU-busy% needs a vendor tool.)"
+    );
 }
 
 fn fail(msg: &str) -> ! {

@@ -12,7 +12,7 @@ This is a static code review, not a claim that every issue below was reproduced 
 - Implementation branch: `ai/codex/report-fixes`
 - Separate worktree: `/home/fiw/Proyects/TideWM-worktrees/report-fixes`
 - Latest behavioral head before this documentation pass: `73d62ec`
-- Current TideWM version on the branch: `0.90.84`
+- Current TideWM version on the branch: `0.90.85`
 - Push status: local only; nothing from this branch has been pushed.
 - The branch was fast-forwarded to master `dfc00b7` before this pass, preserving the earlier audit-remediation history and incorporating the intervening render/visual-identity work.
 

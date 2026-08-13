@@ -6,7 +6,7 @@ A fast technical reference for TideWM: what it is, what's implemented, current h
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). A full tiling-WM feature set (BSP/master-stack/cascade layouts, workspaces, multi-monitor, layer-shell, IPC, XWayland) with a water/aqua render identity layered on top as a fully toggleable effect stack, plus a second spatial engine ("Ocean") as an alternative to numbered workspaces.
 
-Current release: **0.90.84**, second major pre-release. 1.0 is intentionally reserved until the effect stack and Ocean get a broader real-hardware pass (see CHANGELOG).
+Current release: **0.90.85**, second major pre-release. 1.0 is intentionally reserved until the effect stack and Ocean get a broader real-hardware pass (see CHANGELOG).
 
 ## Architecture
 

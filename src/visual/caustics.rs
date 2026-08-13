@@ -235,6 +235,22 @@ pub struct CausticsFrameTiming {
 }
 
 impl Caustics {
+    /// ARGB pixel payload retained by the visible and scratch targets.
+    /// Caustics intentionally double-buffers so a failed update cannot
+    /// corrupt the last good frame.
+    pub fn estimated_texture_bytes(&self) -> u64 {
+        self.texture
+            .iter()
+            .chain(self.scratch_texture.iter())
+            .fold(0_u64, |total, texture| {
+                let size = texture.size();
+                let pixels = u64::try_from(size.w.max(0))
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(u64::try_from(size.h.max(0)).unwrap_or(u64::MAX));
+                total.saturating_add(pixels.saturating_mul(4))
+            })
+    }
+
     /// Time until a configured constant-motion frame is due. `None` means
     /// piggyback mode; an uninitialized output is immediately due once.
     pub fn next_frame_in(&self, fps: u32) -> Option<Duration> {
