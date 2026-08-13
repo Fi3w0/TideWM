@@ -1,16 +1,6 @@
-//! Pointer glyphs for the udev backend. `Theme` loads the system's real
-//! xcursor theme (`XCURSOR_THEME`/`XCURSOR_SIZE`, same env vars every
-//! xcursor-aware client honors) so `CursorImageStatus::Named` renders the
-//! actual system pointer instead of a placeholder. `fallback_glyph_element`
-//! is the last-resort dot below that, CPU-composited the same way
-//! `toast.rs` does its pill, used only when no theme could be loaded at
-//! all -- the point of that one isn't to look right, it's so the pointer is
-//! never fully invisible on real display hardware.
-//!
-//! Not used by the winit backend: there, the host compositor's own OS
-//! cursor is what's actually on screen (TideWM's nested window is just
-//! client content to it), so drawing one here would just overlay a second,
-//! redundant cursor.
+//! Themed pointer glyphs for the udev backend, loaded from standard xcursor
+//! environment settings with a process-stable fallback dot. Winit relies on
+//! the host compositor's cursor and does not render these elements.
 
 use std::{collections::HashMap, sync::OnceLock, time::Duration};
 
@@ -33,9 +23,7 @@ use xcursor::{
 const SIZE: i32 = 14;
 const RADIUS: f32 = 5.0;
 
-/// The fallback never changes, so keep one stable buffer for the process.
-/// `MemoryRenderBuffer` handles one lazy texture import per renderer context;
-/// rebuilding it here used to discard that cache on every rendered frame.
+/// Process-stable fallback buffer, retaining lazy imports per renderer context.
 fn fallback_glyph_buffer() -> &'static MemoryRenderBuffer {
     static BUFFER: OnceLock<MemoryRenderBuffer> = OnceLock::new();
 
@@ -88,15 +76,8 @@ pub fn fallback_glyph_element(
     .ok()
 }
 
-/// A loaded xcursor theme. `None` from `load()` means no theme was found
-/// (or the "default" cursor is missing from it) -- not a hard error, just
-/// the exact case `fallback_glyph_element` above exists to cover.
-///
-/// Per-icon frames are loaded lazily and cached by canonical name (`None`
-/// cached too, for an icon this theme genuinely doesn't ship), rather than
-/// eagerly loading every `CursorIcon` variant at startup -- a themed
-/// desktop only ever touches a handful of shapes in a session, and a real
-/// xcursor theme can ship dozens of animated, multi-size icons each.
+/// Lazily loaded xcursor theme. Missing icon results are cached by canonical
+/// name; prepared buffers are cached separately by live integer asset scale.
 pub struct Theme {
     theme: CursorTheme,
     size: u32,
@@ -212,17 +193,12 @@ impl Theme {
             cache: HashMap::new(),
             prepared: PreparedCache::default(),
         };
-        // Confirms the theme is actually usable at all before returning
-        // Some -- matches the previous behavior of only ever loading
-        // "default" and treating its absence as "no theme".
+        // A usable theme must provide its default cursor.
         theme.frames(CursorIcon::Default)?;
         Some(theme)
     }
 
-    /// Loads and caches `icon`'s frames, falling back through its legacy
-    /// alternate xcursor names (`CursorIcon::alt_names()`) for themes that
-    /// don't ship the modern CSS name -- most don't, XDG cursor themes are
-    /// still overwhelmingly named the old X11 way (`hand2`, `xterm`, ...).
+    /// Loads and caches frames, trying legacy xcursor aliases after the CSS name.
     fn frames(&mut self, icon: CursorIcon) -> Option<&[Image]> {
         if !self.cache.contains_key(icon.name()) {
             let loaded = std::iter::once(icon.name())
@@ -263,13 +239,8 @@ impl Theme {
         if asset_scale <= 0 {
             return None;
         }
-        // Falls back to the theme's default arrow if this specific shape
-        // isn't shipped -- a wrong-but-present pointer beats an invisible
-        // one, same reasoning `fallback_glyph_element` exists for below.
-        // Resolved in two steps (rather than `Option::or` chaining two
-        // `self.frames(...)` calls) since the second call would otherwise
-        // need to borrow `self` again while the first call's result is
-        // still held.
+        // Resolve in two steps to release the first mutable borrow before
+        // loading the visible fallback cursor.
         let icon = if self.frames(icon).is_some() {
             icon
         } else {

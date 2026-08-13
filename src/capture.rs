@@ -415,10 +415,8 @@ impl Smallvil {
             return;
         };
         let locked = !matches!(self.session_lock, SessionLock::Unlocked);
-        // A toplevel capture has no lock-screen composition of its own. It
-        // must fail closed before resolving or rendering the requested
-        // window, otherwise an existing window stream can continue reading
-        // client pixels after the session locks.
+        // Toplevel capture has no lock composition, so fail before resolving
+        // client content whenever the session is locked.
         if locked && window.is_some() {
             fail!(completion, CaptureFailureReason::Unknown);
             return;
@@ -533,23 +531,12 @@ impl Smallvil {
             return;
         }
 
-        // What the user sees: space + layer-shell surfaces (both come from
-        // `render_output`) plus the toast OSD and any window-group tab
-        // strips, plus the composited cursor when the client asked for it.
-        // None of that applies while locked: a capture must show exactly what the
-        // visible frame shows -- the lock content, never the desktop
-        // underneath -- or a screenshot tool could read straight through
-        // the lock. Skipped, not just covered, for the same reason the
-        // visible-frame render loops skip it: `render_output` below pulls
-        // layer-shell content from `layer_map_for_output` unconditionally,
-        // independent of whatever `spaces` it's given.
+        // Mirror visible composition. While locked, omit the entire desktop
+        // path because `render_output` would otherwise include layer-shell
+        // content independently of the supplied spaces.
         let mut elements: Vec<OutputRenderElements> = Vec::new();
         if !locked {
-            // Pushed first so it ends up topmost (index 0 is the front,
-            // this codebase's established render-element-list convention)
-            // -- a screenshot taken while the overview is open shows it,
-            // same as it shows a toast or a tab strip; this matches how
-            // both of those are already captured rather than excluded.
+            // Element index zero is frontmost, so visible overlays are pushed first.
             if let Some(depth_deck_element) = self
                 .depth_deck_overlay
                 .as_ref()
@@ -591,10 +578,7 @@ impl Smallvil {
             let idle_hidden = self.config.cursor_hide_after_ms > 0
                 && self.last_pointer_motion.elapsed()
                     >= std::time::Duration::from_millis(self.config.cursor_hide_after_ms as u64);
-            // Same lock-aware hide as `backend/udev.rs::render_surface` --
-            // a locked pointer's on-screen position is permanently stale,
-            // so a screenshot/screencast frame taken during a lock should
-            // not show a frozen system cursor glyph either.
+            // Pointer-lock coordinates are stale; never capture a frozen glyph.
             let pointer_locked = self.pointer_is_locked();
             let forced_visible = CursorImageStatus::Named(CursorIcon::Default);
             let hidden = CursorImageStatus::Hidden;
@@ -661,19 +645,9 @@ impl Smallvil {
             }
         }
 
-        // Not `from_output`: that inherits the output's advertised
-        // transform, and the winit backend advertises `Flipped180` purely
-        // to cancel its EGL surface's y-orientation at present time (see
-        // `backend/winit.rs`) -- `render_output` multiplies the transform
-        // into the GL projection (smithay `damage/mod.rs`), so inheriting
-        // it bakes a real vertical flip into this offscreen texture and
-        // breaks `finish_capture_readback`'s top-down orientation contract
-        // (grim captures came out upside-down on winit, while real
-        // hardware with a Normal transform was fine). `Transform::Normal`
-        // matches what the window-capture path above always used. Known
-        // simplification: a udev output configured rotated/flipped gets
-        // its capture in logical (upright) orientation, not scanout
-        // orientation -- untested territory before this change too.
+        // Capture is top-down logical content, so do not inherit winit's
+        // presentation-only `Flipped180` transform. Rotated udev outputs also
+        // remain upright here rather than exposing scanout orientation.
         let mut damage_tracker = OutputDamageTracker::new(
             (size.w, size.h),
             output.current_scale().fractional_scale(),
@@ -689,17 +663,9 @@ impl Smallvil {
                 [0.0, 0.0, 0.0, 1.0],
             )
         } else {
-            // Same water-glass substitution the visible-frame loops apply
-            // (`backend/winit.rs`) -- without it, a screenshot of a
-            // water-glass window would show its plain, unrefracted content
-            // instead of what's actually on screen, the exact "separate
-            // render path forgot the new effect" bug class this codebase
-            // already hit once with session-lock (see AGENT.md). Same
-            // reasoning applies to ripples -- a screenshot mid-ripple
-            // would otherwise drop the ring from the captured frame.
-            // Ripple layers are respected just like the visible-frame
-            // loops: AboveAll frontmost, then chrome-less AboveWindows,
-            // then windows, then BelowWindows/wallpaper, then BelowAll.
+            // Use the visible frame's effect substitutions and z-order:
+            // AboveAll, chrome-less AboveWindows, windows, BelowWindows and
+            // wallpaper, then BelowAll.
             let workspace_transition = self.workspace_transition_frame_element(renderer, &output);
             let workspace_glide = self.workspace_glide_frame_element(&output);
             let depth_transition = self.depth_transition_frame_element(renderer, &output);

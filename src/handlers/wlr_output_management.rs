@@ -618,20 +618,13 @@ fn finish_configuration(
             if cfg.scale.is_some() {
                 state.refresh_layer_fractional_scales(output);
             }
-            // A transform or scale change alters the output's logical
-            // size, and the layer map's cached non_exclusive_zone only
-            // recomputes on arrange() -- without this the retile below
-            // uses the stale zone (same bug the winit Resized handler
-            // had, found via a real nested-resize repro).
+            // Transform/scale changes require fresh layer exclusive zones
+            // before the retile uses the new logical size.
             smithay::desktop::layer_map_for_output(output).arrange();
             if let Some(pos) = cfg.position {
                 state.space.map_output(output, pos);
-                // retile() below repositions tiled windows for free (their
-                // tree is recomputed against the output's fresh area);
-                // floating windows have no equivalent automatic step, so
-                // without this they'd keep their old absolute coordinates
-                // -- possibly landing on a different output or off-screen
-                // -- even though this apply is about to report success.
+                // Tiling recomputes from the output area; floating geometry
+                // must be translated by the same output movement explicitly.
                 if let Some(old_position) = old_position {
                     // The transaction validator proved this exact
                     // translation fits the coordinate domain before any

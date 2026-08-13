@@ -1299,26 +1299,6 @@ impl Smallvil {
         }
     }
 
-    /// Builds the desktop stack explicitly, allowing both per-window alpha
-    /// and fullscreen placement to differ from Smithay's all-or-nothing
-    /// `space_render_elements` helper. The returned vector is front-to-back.
-    /// Fullscreen windows cover layer-shell Top/Overlay surfaces as requested;
-    /// regular windows retain the protocol order above Bottom/Background.
-    /// `skip` omits each listed surface's own elements from the result --
-    /// used by backdrop capture (`backdrop.rs`, Phase R0.5) to render
-    /// "everything behind window X" without X itself in the way, and by
-    /// water-glass (`water_glass.rs`, Phase R1) to pull every eligible
-    /// window out of its normal z-slot so it can be reinserted (its own
-    /// element plus a water-glass layer) at a caller-chosen position. A
-    /// slice rather than one surface since more than one window can be
-    /// water-glass-eligible on the same output at once. Built into the
-    /// same real walk every other caller uses (`&[]`) rather than
-    /// filtering an already-built list by index afterward: this list
-    /// mixes windows and layer-shell surfaces across two
-    /// fullscreen-ordering passes, and index arithmetic against that
-    /// composition is exactly the kind of off-by-one this project's
-    /// front-to-back element-order convention has already been burned by
-    /// once (see session-lock's element-order bug, AGENT.md).
     fn base_window_visual_sample(
         &self,
         surface: Option<&WlSurface>,
@@ -1638,11 +1618,7 @@ impl Smallvil {
         self.request_redraw();
     }
 
-    /// `sway_enabled_for_surface`'s counterpart for F1. `pub(crate)` (unlike
-    /// `sway_enabled_for_surface`) because the drag call site in
-    /// `grabs/move_grab.rs` branches on it directly: when this resolves
-    /// `Light` or `Full` for the same window, `float_physics_kick` takes
-    /// over instead of `sway_kick` -- the two mechanics never stack.
+    /// Resolves the exclusive floating-physics tier used instead of sway.
     pub(crate) fn float_physics_tier_for_surface(
         &self,
         surface: &WlSurface,
@@ -1661,14 +1637,8 @@ impl Smallvil {
         self.float_physics_tier_for_surface(surface) != crate::config::FloatPhysicsTier::Off
     }
 
-    /// Feeds one 2D disturbance into a floating window's bob-and-drift
-    /// (F1 `light`). Called directly for the window a disturbance
-    /// originates at (a drag, or the source of a `float_physics_kick_near`
-    /// spread); a no-op when the water identity, the mechanic, or this
-    /// window's rule disables it. A kick counts as attention: it resets
-    /// the window's depth clock the same way real focus does, so a
-    /// disturbed float stays buoyant on the existing `depth {}` timer
-    /// instead of sinking mid-bob.
+    /// Applies a 2D disturbance at the resolved physics tier. A kick also
+    /// refreshes depth attention so the window cannot sink mid-motion.
     pub(crate) fn float_physics_kick(&mut self, surface: &WlSurface, impulse: (f64, f64)) {
         if impulse.0.abs() < f64::EPSILON && impulse.1.abs() < f64::EPSILON {
             return;
@@ -1708,14 +1678,8 @@ impl Smallvil {
         self.request_redraw();
     }
 
-    /// Spreads one 2D disturbance across every floating window on `output`,
-    /// scaled by distance from `point` per `float_physics.radius`: `1.0` at
-    /// `point` itself, falling off linearly to zero at `radius`, matching
-    /// `falloff_kick`. `falloff = false` limits the effect to whatever
-    /// window sits exactly at `point` (a window mapping's own center), so
-    /// no neighbor spillover. Used by disturbance sources that aren't
-    /// already a specific dragged window: a window mapping, or a
-    /// workspace-transition wave passing across the output.
+    /// Spreads a disturbance across output floaters with the configured
+    /// distance falloff from `point`.
     pub(crate) fn float_physics_kick_near(
         &mut self,
         output: &Output,
@@ -1826,12 +1790,8 @@ impl Smallvil {
         self.request_redraw();
     }
 
-    /// Keeps a complete body set while a full-tier simulation is active and
-    /// drops bodies whose windows stopped qualifying. Continuous wave
-    /// forcing starts the set without a kick; with forcing off, a kick
-    /// creates the first body lazily and the remaining full-tier floaters
-    /// join so collision handling still sees them. Once every body settles,
-    /// the whole set stays absent until the next real disturbance.
+    /// Maintains all qualifying full-tier bodies while collision/wave
+    /// simulation is active, and prunes the set completely once idle.
     fn sync_float_physics_bodies(&mut self) {
         if !self.config.water_effects {
             self.window_float_bodies.clear();
@@ -1870,14 +1830,8 @@ impl Smallvil {
         }
     }
 
-    /// Anchor rect (window's own logical position/size, unaffected by its
-    /// current cosmetic offset), mass (area-derived per the design
-    /// conversation -- a big window shoves a small one), and edge bounds in
-    /// the anchor's own coordinate space for one F1 `full` body. Resolved once per
-    /// outer tick in `update_float_physics_full`, reused across every
-    /// substep -- a floating window's own logical position doesn't move
-    /// mid-tick, only its cosmetic offset does, which `step_float_physics_
-    /// full` tracks itself.
+    /// Resolves one body's logical anchor, area-derived mass, and edge bounds
+    /// once per outer tick for reuse across fixed substeps.
     fn float_body_context(&self, surface: &WlSurface) -> Option<FloatBodyContext> {
         let rect = self.window_rect_for_kick(surface)?;
         let anchor = (
@@ -2687,6 +2641,9 @@ impl Smallvil {
         }
     }
 
+    /// Builds the front-to-back desktop stack with explicit fullscreen/layer
+    /// ordering. `skip` removes window surfaces during backdrop capture;
+    /// `glass_layers` are reinserted immediately behind their owning windows.
     #[allow(clippy::mutable_key_type)] // WlSurface-keyed glass layer map
     pub(crate) fn desktop_render_elements(
         &mut self,
@@ -4354,12 +4311,7 @@ impl Smallvil {
             _ => None,
         };
 
-        // Assigned here, before the activation-change block below, so that
-        // `refresh_wlr_toplevel_state`'s `is_window_activated` check (which
-        // reads `self.keyboard_focus`) already sees the new focus target by
-        // the time it runs for either surface -- otherwise the surface
-        // losing focus would still read back as activated for one more
-        // statement, since `self.keyboard_focus` wouldn't have moved yet.
+        // Commit the target before mirroring activation to wlr-toplevel state.
         self.keyboard_focus = resolved;
 
         let mut activation_changed = false;
@@ -4589,14 +4541,8 @@ impl Smallvil {
             .map(|lock_surface| lock_surface.wl_surface().clone())
     }
 
-    /// Forces Smithay to re-resolve pointer enter/leave focus at the
-    /// pointer's current location without an actual device motion --
-    /// needed whenever `surface_under`'s answer changes out from under the
-    /// pointer (locking, unlocking, a lock surface registering), since
-    /// nothing else would otherwise trigger the re-resolution before the
-    /// next real mouse move. A click with no preceding motion (a trackpad
-    /// tap, most commonly) would otherwise still hit whatever was focused
-    /// before the change.
+    /// Re-resolves enter/leave at the current pointer location after the
+    /// surface stack changes without physical motion.
     fn refresh_pointer_focus(&mut self) {
         let Some(pointer) = self.seat.get_pointer() else {
             return;
@@ -4684,12 +4630,8 @@ impl Smallvil {
                 return;
             };
             self.ocean.set_floating_rect(&surface, rect);
-            // `primary_output()` touches `pointer.current_location()`, which
-            // deadlocks here: this runs from a pointer grab's own `unset()`,
-            // called synchronously from inside `PointerHandle::button()`
-            // while it already holds the pointer's internal borrow. The
-            // window's own geometry (`rect`, just above) gives the same
-            // answer without touching the pointer at all.
+            // Grab teardown already holds the pointer borrow; resolve output
+            // from window geometry instead of calling `primary_output()`.
             if let Some(output) = self.output_for_window(window) {
                 self.set_window_fractional_scale(window, &output);
                 self.ocean.set_entry_output(&surface, output.name());
@@ -4706,15 +4648,8 @@ impl Smallvil {
         let Some(rect) = self.space.element_geometry(window) else {
             return;
         };
-        // Falls back to `primary_output()` for a window dragged fully
-        // outside every output's geometry, same fallback
-        // `toggle_floating`'s own floating-to-tiled path already uses for
-        // the identical ambiguity. Without it, `owner` stays `None` here
-        // and `tag.output`/`tag.workspace` below would keep whatever
-        // output the window *left* -- its `rect` still updates to the new
-        // (off-screen) position, but a later workspace switch on that
-        // stale output would still try to hide a window that isn't
-        // actually there anymore.
+        // A fully off-output rectangle inherits the action output so durable
+        // ownership does not remain attached to the output it left.
         let owner = self
             .output_for_window(window)
             .or_else(|| self.primary_output())
@@ -4762,14 +4697,8 @@ impl Smallvil {
             return false;
         };
         let pointer_view = pointer_location - output_geo.loc.to_f64();
-        // Precise point-containment (the same check the tiled-to-tiled swap
-        // grab already uses), not the proximity-radius `smart_tiling_target`
-        // -- that one's threshold scaled with the *moving* window's own
-        // size, so a floater someone had resized large enough would count
-        // as "near" nearly any tile it overlapped, attaching on effectively
-        // every drop instead of only an intentional one. Parked, not
-        // deleted: revisit smart_tiling_target if a magnet-radius feel is
-        // wanted again later.
+        // Require pointer containment; a radius scaled by the moving window
+        // would make large floaters attach on nearly every overlap.
         let Some(target) = self.ocean.tiled_target_at_view(
             surface,
             &output_name,
@@ -4800,24 +4729,9 @@ impl Smallvil {
         true
     }
 
-    /// `Action::ResizeToMonitor`: sets the focused Ocean floating window's
-    /// world-space size to its output's resolution inset by the configured
-    /// gap, centered on its current center point. No-op for a tiled window
-    /// (`floating_rect` returns `None`) or outside Ocean.
-    ///
-    /// Inset by `gaps` rather than the raw output size -- the border is
-    /// drawn as a stroke around the window's own configured rect (see
-    /// `window_border_element`), not inside it, so a window sized to
-    /// exactly fill the output pushes its border past the visible screen
-    /// edge entirely. Same margin `do_maximize_request`/"border
-    /// fullscreen" already insets its own target rect by, just reused here
-    /// instead of the raw resolution.
-    ///
-    /// Sends the client's configure directly rather than relying on
-    /// `retile()` -- unlike a tiled window (sized every call from
-    /// `tiled_layouts`), `retile_ocean` only ever repositions a floating
-    /// window via `space.map_element`, never resizes one, so nothing else
-    /// would deliver this size to the client.
+    /// Fits the focused Ocean floater to its live output minus configured
+    /// gaps, preserving its center. Sends size directly because Ocean retile
+    /// only repositions floating windows.
     pub(crate) fn resize_to_monitor(&mut self) {
         if self.config.spatial_engine != crate::config::SpatialEngine::Ocean {
             return;
@@ -6321,10 +6235,8 @@ impl Smallvil {
     /// both Classic and Ocean: a tile samples the wallpaper and below-window
     /// effects inside its own visible rect. The gaps remain untouched.
     ///
-    /// Eligibility is config-driven rather than placement-driven, so an
-    /// ordinary opaque tile allocates no capture. Gated on `water_effects`,
-    /// the master toggle for this whole roadmap. Water and frost glass
-    /// sample the stored texture while building that same visible frame.
+    /// Eligibility is config-driven, so ordinary opaque placements allocate
+    /// no capture. Water and frost sample the stored texture in the same frame.
     pub(crate) fn capture_window_backdrops(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -6439,16 +6351,9 @@ impl Smallvil {
         }
     }
 
-    /// The layer-shell analog of `capture_window_backdrops`: captures a
-    /// backdrop for each currently-mapped layer surface resolving
-    /// `layer_rule { blur = true }`, reusing the exact same
-    /// `backdrop_textures` map windows populate -- keys are `WlSurface`s
-    /// and a layer surface's is never equal to a window's, so there is no
-    /// collision, and no second cache is worth carrying. Deliberately
-    /// gated on `frost.enabled`, not `water_effects`: layer blur is
-    /// general decoration, the same call the shadow/rounding/border
-    /// precedent already makes elsewhere in this file, not part of the
-    /// water identity.
+    /// Captures backdrops for mapped layer surfaces whose rule enables blur.
+    /// Window and layer surfaces safely share the `WlSurface`-keyed cache.
+    /// Layer frost is independent of the water-effects master toggle.
     pub(crate) fn capture_layer_backdrops(&mut self, renderer: &mut GlesRenderer, output: &Output) {
         if !self.config.frost.enabled {
             return;
@@ -6572,16 +6477,8 @@ impl Smallvil {
             .collect()
     }
 
-    /// Builds, for each of `surfaces` (from `glass_eligible_surfaces`),
-    /// *only* the glass layer (water/frost element sampling the captured
-    /// backdrop). The window's own surface, popups, and border are NOT built
-    /// here anymore -- `desktop_render_elements` renders them in the
-    /// window's real z-slot and inserts each glass layer directly behind its
-    /// own window, so a glass window sits among windows and under chrome
-    /// like any other window, instead of being hoisted above everything
-    /// (which put the glass over layer-shell bars, the old behavior).
-    /// Returns a map keyed by surface so the walk can match layers to
-    /// windows. Lazily compiles the shaders on first call.
+    /// Builds only the captured glass layer for each eligible surface. The
+    /// desktop walk owns client chrome and inserts this layer in its real z-slot.
     #[allow(clippy::mutable_key_type)] // WlSurface keys, same as every other map here
     pub(crate) fn glass_layer_elements(
         &mut self,
@@ -7140,16 +7037,8 @@ impl Smallvil {
         ))
     }
 
-    /// Ambient caustic light over the wallpaper, below windows. The
-    /// pattern renders analytically into a cached 1/4-resolution texture
-    /// and is upscale-blitted to the output, so the constant-motion mode
-    /// costs a fraction of the old full-output pass. The phase advances
-    /// only while a frame is being assembled, so the default `fps = 0`
-    /// mode piggybacks on damage-driven frames (idle desktop = static
-    /// caustics, zero extra frames). A non-zero `fps` opts into constant
-    /// motion through `has_active_animation`'s gate. Skipped entirely
-    /// while a session lock is held, matching the ocean canvas's own
-    /// guard.
+    /// Builds the unlocked wallpaper-level caustics element. Zero FPS advances
+    /// only with other damage; positive FPS uses the per-output deadline.
     pub(crate) fn caustics_frame_element(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -7259,13 +7148,8 @@ impl Smallvil {
             .is_some_and(|delay| delay.is_zero())
     }
 
-    /// Off-screen urgent/deep compass cues for the Ocean engine (spatial
-    /// roadmap S5). Each off-viewport urgent window, plus each window
-    /// physically below the viewport, leaves a soft bioluminescent glow at
-    /// the viewport edge in its direction; nearer is brighter. Ambient and
-    /// render-only -- travel stays on the existing pan/zoom/bookmark/depth
-    /// actions. No element is produced while nothing is off-screen, so the
-    /// common idle desktop ticks no frames for the compass.
+    /// Builds render-only Ocean edge cues for off-viewport urgent/deep windows.
+    /// An empty cue set creates no element or idle work.
     pub(crate) fn compass_frame_elements(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -8239,14 +8123,8 @@ impl Smallvil {
             self.layout.remove(surface);
             self.space.raise_element(&window, false);
         } else {
-            // Tile onto whichever output the window is actually sitting on
-            // right now (it was floating, so it has a real on-screen
-            // position already), not wherever the focused window happens
-            // to be. Falls back to `primary_output()` for the edge case of
-            // a floating window dragged fully outside every output's
-            // geometry -- previously (single-output, no such thing as
-            // "outside the output") floating-to-tiled always succeeded, and
-            // this keeps that true rather than silently no-oping.
+            // Tile on the output containing the floater, with the action
+            // output as fallback when it is fully outside all outputs.
             let Some(output) = self
                 .output_for_window(&window)
                 .or_else(|| self.primary_output())
@@ -8308,26 +8186,8 @@ impl Smallvil {
         }
     }
 
-    /// Switches `output`'s visible workspace to `workspace`: hides
-    /// everything currently on the active one (unmapped, not destroyed or
-    /// untiled) and shows everything belonging to the new one. No-op if
-    /// `workspace` is already active, or if an exclusive-interactivity layer
-    /// (e.g. a lock screen) is mapped -- same guard `cycle_focus` uses, so a
-    /// lock screen can't be escaped by switching workspaces out from under
-    /// it. `self.pinned` windows are exempt from this whole cycle -- never
-    /// hidden, never re-shown, since they're already visible regardless.
-    /// This is also how the scratchpad works: it's just workspace
-    /// `SCRATCHPAD_WORKSPACE` under the hood, switched to like any other.
-    /// Workspace numbers to report for `output`, via the IPC `workspaces`
-    /// query and the `ext-workspace-v1` protocol -- one shared definition
-    /// so both describe the same set (see `handlers/ext_workspace.rs`).
-    /// Always includes every workspace with a window (tiled or floating)
-    /// plus whichever one is currently active, regardless of
-    /// `workspace_count`, so a manual switch past the configured count is
-    /// still reported truthfully. `workspace_count`, when set, adds the
-    /// full `1..=N` range on top so idle/empty workspaces show up too;
-    /// left unset, this is exactly the original populated-or-active-only
-    /// behavior.
+    /// Workspace numbers shared by IPC and ext-workspace: populated and active
+    /// entries plus the optional configured `1..=N` range.
     pub(crate) fn advertised_workspaces(&self, output: &str) -> Vec<u32> {
         let mut numbers: Vec<u32> = self
             .layout
@@ -8351,6 +8211,8 @@ impl Smallvil {
         numbers
     }
 
+    /// Switches one output's visible workspace without destroying hidden
+    /// content. Pinned windows remain visible; exclusive layers block the action.
     pub fn switch_workspace(&mut self, output: &Output, workspace: u32) {
         if self.exclusive_layer().is_some() {
             return;
@@ -8658,10 +8520,7 @@ impl Smallvil {
             return;
         }
         let active = self.layout.active_workspace(&output);
-        // Look the `Window` up through the tree, not `space.elements()`:
-        // a tiled window already hidden on a non-active workspace isn't
-        // mapped, so it wouldn't be found there, but the tree always holds
-        // it regardless of visibility.
+        // Hidden tiled windows remain in the tree but not in Space.
         let Some(window) = self.layout.window_of(surface) else {
             return;
         };
@@ -8669,35 +8528,19 @@ impl Smallvil {
         self.layout.insert(&output, workspace, window.clone(), None);
 
         if current == active {
-            // Leaving the visible workspace: hide it, then retile so its
-            // former neighbors on the active tree expand to fill the space
-            // it left behind (the same reconciliation any other tiled-
-            // window removal already triggers).
+            // Hide the departing tile before filling its active-tree slot.
             self.space.unmap_elem(&window);
             self.retile();
             self.refocus_after_hide(&output);
         } else {
-            // Either staying hidden (moving between two non-active
-            // workspaces) or becoming visible (`workspace == active`) --
-            // retile() maps anything now in the active tree on its own,
-            // nothing else to do either way.
+            // Retile maps the target only when its new workspace is active.
             self.retile();
         }
     }
 
-    /// Shows/hides the scratchpad on `output`: if it's already showing,
-    /// returns to whatever workspace was active before (so toggling back
-    /// and forth doesn't strand you on some fixed fallback); otherwise
-    /// remembers the current workspace and shows the scratchpad. The
-    /// scratchpad has no structure of its own -- it's just workspace
-    /// `SCRATCHPAD_WORKSPACE`, reusing `switch_workspace`'s hide/show
-    /// mechanics as-is.
-    /// `name` selects a named scratchpad; `None` is the classic unnamed
-    /// one. Toggling scratchpad B while scratchpad A is showing switches
-    /// straight to B (matching Hyprland's special-workspace behavior)
-    /// without recording A as the workspace to return to -- only a real,
-    /// non-scratchpad workspace ever lands in `scratchpad_previous`, so
-    /// toggling off always returns to actual work.
+    /// Toggles a reserved scratchpad workspace. Entering remembers only a
+    /// non-scratchpad origin; switching directly between named scratchpads
+    /// therefore preserves the real workspace used when toggling back.
     pub fn toggle_scratchpad(&mut self, output: &Output, name: Option<&str>) {
         let Some(target) = self.scratchpad_workspace(name) else {
             return;
@@ -9041,9 +8884,7 @@ impl Smallvil {
             }
         }
 
-        // A group's parked members are deliberately absent from both Space
-        // and Layouts, so the group's durable ownership tag must move along
-        // with whichever active member was migrated above.
+        // Parked group members need their durable ownership moved explicitly.
         for group in &mut self.groups {
             if group.output == from_output {
                 group.output = to_output.to_string();
@@ -9179,23 +9020,9 @@ impl Smallvil {
 
     // -- Spatial-engine migration (S6) -----------------------------------------
 
-    /// Migrates every live window's spatial ownership from the current
-    /// engine to `target`, in place, without restarting. Replaces the old
-    /// startup-only force-revert in `reload_config`.
-    ///
-    /// Both engines share the compositor core (window registry, protocols,
-    /// the model-neutral `PlacedWindow` render contract), so migration is a
-    /// state translation, not a re-map: Classic workspace trees move whole
-    /// into Ocean reefs (same `BspLayout` type) and back, floating windows
-    /// are translated between workspace-local and world coordinates, and
-    /// engine-neutral tags (`fullscreen`, `maximized`, `focus_history`,
-    /// `pinned` as a semantic) ride through. Pins map between Classic's
-    /// `pinned` set and Ocean's viewport-anchored screen pins; tab groups
-    /// carry across -- the tab-strip render path reads placements, which
-    /// both engines produce. Engine-only state with no counterpart on the
-    /// other side is deliberately dropped: Classic's depth deck is recalled
-    /// to the surface first (its parked windows rejoin their trees), and
-    /// Ocean's bookmarks and camera history are discarded.
+    /// Translates live ownership between Classic workspaces and Ocean reefs.
+    /// Shared window/protocol tags survive; pins change representation. State
+    /// with no counterpart is dropped after restoring any parked windows.
     fn migrate_spatial_engine(&mut self, target: crate::config::SpatialEngine) -> bool {
         if target == self.config.spatial_engine {
             return true;
@@ -9230,15 +9057,9 @@ impl Smallvil {
             crate::config::SpatialEngine::Ocean => self.migrate_classic_to_ocean(),
         }
         self.config.spatial_engine = target;
-        // Rebuild the `Space::map_element` cache under the new engine's
-        // ownership. `retile_with_viscosity`'s Ocean branch calls
-        // `retile_ocean` (maps every reef window) and its Classic branch
-        // walks `Layouts::layout` -- exactly the remap a migration needs.
+        // Rebuild Space as the new engine's render/input cache.
         self.retile_with_viscosity(false, None);
-        // Classic's retile only maps tree windows. Floating windows
-        // migrated in from Ocean must be placed explicitly, mirroring the
-        // `pinned || workspace == active` visibility rule
-        // `migrate_output_windows` already uses.
+        // Classic retile maps trees only; restore visible migrated floaters.
         if target == crate::config::SpatialEngine::Classic {
             let floating: Vec<(WlSurface, Rectangle<i32, Logical>, Window)> = self
                 .floating_workspace
@@ -9295,9 +9116,7 @@ impl Smallvil {
         let floating: Vec<(WlSurface, FloatingTag)> = self.floating_workspace.drain().collect();
         let reef_gap = self.config.gaps.max(0);
 
-        // Each output gets a disjoint island in the shared Ocean world. The
-        // old per-output `workspace * stride` formula placed every output's
-        // workspace 1 at world X=0, overlapping windows and cameras.
+        // Assign disjoint islands before placing per-output reef sequences.
         let mut max_workspaces = std::collections::HashMap::new();
         for (output_name, _) in &output_viewports {
             let max_workspace = trees
@@ -9317,9 +9136,7 @@ impl Smallvil {
         }
         let island_x = ocean_island_origins(&output_viewports, &max_workspaces, reef_gap);
 
-        // Clear remaining Classic-only render state. `pinned` is left
-        // alone (harmless under Ocean, preserves round-trip identity) and
-        // `groups` ride across per the S6 design decision.
+        // Clear Classic-only pseudo-tile state; groups and pin semantics migrate.
         self.pseudo_tiled.clear();
 
         for (output_name, geometry) in &output_viewports {
@@ -10318,16 +10135,8 @@ impl Smallvil {
         }
     }
 
-    /// Render elements for every relevant group's tab strip, anchored to the
-    /// top edge of its active member's current or swim-neighbor rect. Called
-    /// by both backends' `render_surface`, same as `toast`'s render element -- a
-    /// solo tile never has a group entry at all, so this is a genuine
-    /// no-op (empty `Vec`) in the common case. Each group's cached
-    /// `strip` buffer is only rebuilt here when missing (just
-    /// created, or invalidated by a membership/active change -- see
-    /// `WindowGroup::strip`'s own doc comment) or when the leaf's width no
-    /// longer matches the cached one (an output resize, a sibling split
-    /// drag) -- not every frame.
+    /// Builds visible group tab strips at their active placement. Cached pixels
+    /// rebuild only after invalidation or a live width change.
     pub fn tab_strip_elements(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -10401,15 +10210,8 @@ impl Smallvil {
     /// *content* -- the tiled tree and every tagged floating window trade
     /// places, relocating onto the other monitor's screen area, while
     /// each output keeps its own workspace-number bookkeeping untouched
-    /// (`layout::Layouts` is per-output-namespaced, see its own doc
-    /// comment -- there's no single global "workspace 3" to move between
-    /// monitors the way i3 or Hyprland's fully-global workspace model
-    /// has). Matches Hyprland's `swapactiveworkspaces` dispatcher. A
-    /// plain one-directional "move workspace to output" isn't
-    /// implemented separately -- switch the destination to an empty
-    /// workspace first, then swap, for the same effect. No-op if either
-    /// output is the same one, or an exclusive-interactivity layer is
-    /// mapped (same guard every other workspace-navigation path uses).
+    /// Swaps the two outputs' active per-output workspaces. No-op for one
+    /// output or while an exclusive-interactivity layer owns navigation.
     pub fn swap_workspaces(&mut self, output_a: &Output, output_b: &Output) {
         if self.exclusive_layer().is_some() {
             return;
@@ -10653,15 +10455,8 @@ impl Smallvil {
         self.retile();
     }
 
-    /// If `config.input.focus_follows_mouse` is on, moves keyboard focus to
-    /// whatever window (not layer surface -- bars/launchers are deliberately
-    /// excluded, matching typical i3/sway/Hyprland scope) is under `pos`.
-    /// Called on every pointer motion. Deliberately doesn't raise -- Hyprland's
-    /// own default hover-focus doesn't either, only clicking raises. No-ops
-    /// if the window under `pos` is already focused (hovering the same
-    /// window repeatedly shouldn't spam redundant focus events), or if an
-    /// exclusive-interactivity layer (e.g. a lock screen) is mapped, same
-    /// guard every other focus-changing path already checks.
+    /// Focuses the window under `pos` without raising it. Layer surfaces and
+    /// exclusive-interactivity states are excluded.
     pub fn focus_follows_mouse(&mut self, pos: Point<f64, Logical>) {
         if !self.config.input.focus_follows_mouse {
             return;
@@ -10711,11 +10506,7 @@ impl Smallvil {
         }
         let surface_of = |w: &Window| w.toplevel().map(|t| t.wl_surface().clone());
 
-        // MRU order: every visible window that's been focused before, most
-        // recent first, then any visible window `focus_history` doesn't
-        // know about yet (freshly mapped, never focused) in `Space`'s own
-        // order -- matches niri/Hyprland's own Alt-Tab convention instead
-        // of the previous plain z-order walk.
+        // MRU windows first, then never-focused visible windows in Space order.
         let mut ordered: Vec<WlSurface> = self
             .focus_history
             .iter()

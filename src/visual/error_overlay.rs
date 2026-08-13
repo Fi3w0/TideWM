@@ -1,10 +1,8 @@
 //! Persistent compositor-owned configuration error panel for TideWM.
 //!
-//! Like Hyprland's error overlay, this is not a notification popup: while a
-//! config error exists it occupies a fixed strip at the top of each output
-//! and `Smallvil::output_tiling_area` reserves that space from tiled clients.
-//! Fixing and successfully reloading the config removes it. Ordinary reload
-//! and debug toasts remain a separate mechanism.
+//! While a config error exists, this occupies a reserved strip at the top of
+//! each output until a successful reload. Transient reload/debug messages use
+//! the separate toast path.
 
 use std::collections::HashMap;
 
@@ -110,11 +108,7 @@ fn build_buffer(
     let top = CARD_MARGIN_Y;
     let card_width = (width - CARD_MARGIN_X * 2).max(1);
     let card_height = PANEL_HEIGHT - CARD_MARGIN_Y * 2;
-    // The theme radius is tuned against the toast pill's smaller card
-    // (70px tall). Applied raw, a larger panel's corners read as
-    // proportionally tight -- the rounding looks sized for a tiny toast.
-    // Scale by the card-height ratio so the panel keeps the same visual
-    // roundness the toast has, not a fixed pixel value.
+    // Preserve the toast card's radius-to-height ratio for this taller panel.
     let radius = (theme.radius as f32 * card_height as f32 / crate::toast::CARD_HEIGHT as f32)
         .min(card_height as f32 / 2.0)
         .max(4.0);
@@ -322,17 +316,9 @@ fn rounded_rect_coverage(
     let fy = (y - top) as f32 + 0.5;
     let fw = width as f32;
     let fh = height as f32;
-    // Each axis's contribution is how far past that axis's flat region a
-    // point sits, floored at zero -- *not* an early return the moment
-    // either axis alone reads "still flat". The old `dx <= 0.0 || dy <=
-    // 0.0 => return 1.0` shortcut treated "flat along x" as "fully inside"
-    // regardless of how far outside the shape y actually was (and vice
-    // versa), so a point directly above/below the flat middle of an edge
-    // reported full coverage arbitrarily far from the shape -- the panel's
-    // fill/shadow/border all silently ignored their own top/bottom bounds
-    // there. Flooring each axis at zero first, then always taking the
-    // corner distance, keeps flat regions at 1.0 while a point genuinely
-    // outside on either axis correctly falls off.
+    // Clamp each axis's distance from its flat region independently, then
+    // evaluate the corner distance; being inside one axis cannot hide an
+    // out-of-bounds coordinate on the other.
     let dx = ((fx - fw / 2.0).abs() - (fw / 2.0 - radius)).max(0.0);
     let dy = ((fy - fh / 2.0).abs() - (fh / 2.0 - radius)).max(0.0);
     let distance = (dx * dx + dy * dy).sqrt();
@@ -343,15 +329,8 @@ fn rounded_rect_coverage(
 mod tests {
     use super::*;
 
-    /// A point directly above the flat middle of the card's top edge, far
-    /// outside the shape on the y axis alone, must read as fully
-    /// uncovered -- the shape doesn't extend forever just because x
-    /// happens to sit in the flat (non-corner) region. Regression for a
-    /// real bug: the old formula's `dx <= 0.0 || dy <= 0.0 => return 1.0`
-    /// shortcut reported full coverage there, so the panel's fill/shadow/
-    /// border silently ignored their own vertical bounds across nearly
-    /// the whole card width -- visible as almost no margin/rounding
-    /// except right at the corners.
+    /// A point outside one axis remains uncovered even when it lies in the
+    /// other axis's flat region.
     #[test]
     fn coverage_is_zero_far_outside_the_shape_even_in_the_flat_region() {
         let (left, top, width, height, radius) = (18, 9, 1884, 98, 12.0);
@@ -384,13 +363,7 @@ mod tests {
         assert!(lines[1].ends_with('…'));
     }
 
-    /// A real, long diagnostic (`waves.rs`'s include-failure message) on a
-    /// narrow output (a portrait or secondary monitor) forces both allotted
-    /// body lines. The second line's baseline (`build_buffer`'s own
-    /// `top + 66 + index * 17` formula) must still leave every glyph above
-    /// the card's bottom edge (`PANEL_HEIGHT - CARD_MARGIN_Y`) -- text
-    /// bleeding past the rounded card into the shadow/background below it
-    /// is exactly what "the big warning is broken" looks like.
+    /// Both body lines must remain inside the card on a narrow output.
     #[test]
     fn wrapped_body_text_stays_above_the_cards_bottom_edge() {
         let font = crate::toast::font();

@@ -1,22 +1,9 @@
 //! xwayland-satellite integration.
 //!
-//! X11 apps run through `xwayland-satellite` (a separate process) rather
-//! than TideWM implementing an in-process X11 window manager via Smithay's
-//! `XwmHandler`. Satellite does the X11 window-manager work itself and
-//! presents X11 clients to TideWM as ordinary Wayland `xdg_shell` surfaces,
-//! so nothing elsewhere in the compositor needs to know an X11 client is
-//! involved at all. Matches how niri and driftwm both integrate XWayland
-//! (see AGENT.md); TideWM's per-output tiling trees have no shared global
-//! coordinate system for an in-process X11 WM to plug into anyway.
-//!
-//! Spawned eagerly at startup rather than on first X11 connection: the
-//! on-demand `-listenfd` handoff (pre-bind the X11 socket, hand the FD to
-//! satellite when a client connects) has a documented interop bug with
-//! Xwayland 24.x and multi-layout XKB configs (the queued connection races
-//! Xwayland's keyboard init against the `wl_keyboard.keymap` event). Eager
-//! "vanilla" mode -- satellite binds its own socket on startup -- sidesteps
-//! that race by construction, at the cost of a satellite process (~30MB)
-//! resident even if no X11 client ever runs.
+//! X11 apps run through a separate `xwayland-satellite` process and reach the
+//! compositor as ordinary XDG surfaces. Satellite starts eagerly and binds its
+//! own socket; avoiding the on-demand `-listenfd` handoff prevents its known
+//! keyboard-initialization race with multi-layout XKB configurations.
 
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};

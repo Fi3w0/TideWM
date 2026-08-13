@@ -1,18 +1,6 @@
-//! Water-glass, the render roadmap's first actually-visible effect (Phase
-//! R1, see AGENT.md's "Render and visual identity roadmap"). Renders a
-//! captured backdrop (`backdrop.rs`, Phase R0.5) through a custom GLES
-//! fragment shader that perturbs the sample coordinate, giving a wavy,
-//! refracted look instead of the plain flat content that would otherwise
-//! sit behind a semi-transparent window.
-//!
-//! Applies specifically to a floating window with a `window_opacity` rule
-//! below 1.0 -- reusing that existing rule rather than inventing a new
-//! config key, since "what shows through a semi-transparent window" is
-//! exactly what this already means. The water-glass layer draws fully
-//! opaque at the window's own rect, *behind* the window's own (semi-
-//! transparent) surface element: without that, the real undistorted
-//! backdrop would still show through underneath the distorted copy,
-//! reading as a ghost rather than glass.
+//! Refracts a captured backdrop behind eligible translucent floating windows.
+//! The glass layer replaces the real backdrop beneath the client surface so
+//! the undistorted scene cannot bleed through the refracted copy.
 
 use smithay::{
     backend::renderer::{
@@ -34,15 +22,10 @@ use std::time::Instant;
 /// enough that ambient mode reads as water, not vibration.
 const PHASE_RATE: f32 = 2.2;
 
-/// Per-window water-glass animation state, stored in
-/// `Smallvil::glass_anim`. Closed-form like the rest of this codebase's
-/// motion (`viscosity.rs`, `sway.rs`, `ripple.rs`): no per-frame
-/// integration, just a phase derived from an epoch and a smoothstep
-/// settle envelope over the time since the last disturbance.
+/// Per-window animation state: phase comes from an epoch and distortion uses
+/// a smoothstep envelope since the last disturbance.
 pub struct GlassAnim {
-    /// Phase origin for this window. Per-window (not process-global) so a
-    /// window becoming glass mid-session doesn't jump to some arbitrary
-    /// shared angle; continuity only has to hold per window.
+    /// Per-window phase origin, avoiding a jump to process-global time.
     epoch: Instant,
     /// Last time the glass was disturbed: the window moved or a ripple
     /// passed underneath.
@@ -91,19 +74,10 @@ impl GlassAnim {
     }
 }
 
-/// Adapted directly from Smithay's own default texture fragment shader
-/// (`backend/renderer/gles/shaders/implicit/texture.frag` in the pinned
-/// source) -- same `//_DEFINES_` placeholder and `#if defined(...)`
-/// blocks, since `compile_custom_texture_shader` substitutes the same set
-/// of defines regardless of which custom shader is compiled. The only
-/// change from the original is the sampling coordinate: a small,
-/// position-based sine/cosine offset instead of a straight `v_coords`
-/// lookup. The offset is animated by two extra uniforms: `u_phase`
-/// advances the wave over time and `u_amp` scales the distortion
-/// strength. Static mode passes `u_phase = 0, u_amp = amplitude` and
-/// reproduces the original fixed look exactly; reactive mode modulates
-/// `u_amp` by a settle envelope; ambient mode lets `u_phase` run
-/// continuously. See `config::WaterGlassConfig`.
+/// Smithay-compatible texture shader with its required definitions placeholder
+/// and alpha/debug branches. `u_phase` advances the wave and `u_amp` controls
+/// distortion strength; `WaterGlassConfig` selects static, reactive, or
+/// continuously animated values.
 const WATER_GLASS_FRAGMENT_SHADER: &str = r#"
 #version 100
 
@@ -186,11 +160,7 @@ void main() {
 }
 "#;
 
-/// Compiles the shader against `renderer` the first time it's needed and
-/// caches it -- a `GlesTexProgram` is cheap to clone (`Arc`-backed) once
-/// compiled, so every frame just clones the cached handle rather than
-/// recompiling. Per-renderer, not a process-global `OnceLock` like
-/// `toast::font()`, since compiling needs a live `&mut GlesRenderer`.
+/// Compiles lazily against the live renderer and reuses its cloneable handle.
 pub fn water_glass_program(
     cache: &mut Option<GlesTexProgram>,
     renderer: &mut GlesRenderer,
@@ -220,16 +190,9 @@ pub fn water_glass_program(
     }
 }
 
-/// Rendered-value fingerprint for the glass element's damage identity, the
-/// same contract `decoration::border_commit` already documents: the damage
-/// tracker only ever compares it for equality, never treats it as a
-/// chronological counter. Folds in everything that changes the drawn result
-/// without moving the element: the backdrop capture's content `version`,
-/// the wave `phase`/`amp`, and the corner uniforms. `phase` only counts
-/// while it can visibly distort (`amp > 0`) -- a settled reactive tail or
-/// static mode holds a constant commit even though the phase clock keeps
-/// running, which is what lets a static desktop stop redrawing the glass
-/// layer at all.
+/// Equality-only damage fingerprint for every non-geometric value that changes
+/// the image. Phase is ignored at zero amplitude because it cannot affect the
+/// rendered result.
 pub fn water_glass_commit(
     capture_version: usize,
     phase: f32,
@@ -252,13 +215,8 @@ pub fn water_glass_commit(
     CommitCounter::from(hash.finish() as usize)
 }
 
-/// One window's water-glass layer for one frame: the captured backdrop
-/// texture run through the refraction shader, drawn at the window's own
-/// rect. `id`/`commit` are the *stable* per-window identity kept in
-/// `backdrop::BackdropCapture` (not a fresh `Id` each frame) -- the damage
-/// tracker keys its own per-element bookkeeping off `Id`, and a fresh one
-/// every frame would leak an orphaned entry in that tracker's internal
-/// map for every frame this window is water-glass-eligible, never pruned.
+/// One frame of a window's refracted backdrop. Identity stays stable per
+/// capture so damage-tracker bookkeeping remains reusable and bounded.
 pub struct WaterGlassElement {
     id: Id,
     commit: CommitCounter,
@@ -332,15 +290,8 @@ impl Element for WaterGlassElement {
         Kind::Unspecified
     }
 
-    // `opaque_regions` deliberately left at its default (empty): this
-    // element normally draws at alpha 1.0 (temporarily lower during a
-    // lifecycle fade), but claiming opacity here would tell the damage tracker it
-    // can skip drawing whatever's behind it -- and the whole point of
-    // this element existing is that it visually replaces that content,
-    // not that nothing needs to be there. Getting this wrong is exactly
-    // the kind of "looks plausible, quietly skips a draw" bug this
-    // project has already been burned by once (session-lock's element
-    // ordering).
+    // Keep opaque regions empty: this texture is derived from the scene behind
+    // it, so that scene must remain available to the capture path.
 }
 
 impl RenderElement<GlesRenderer> for WaterGlassElement {
@@ -386,10 +337,7 @@ mod tests {
 
     #[test]
     fn shader_source_keeps_the_defines_placeholder_and_required_uniforms() {
-        // Not a GL compile check (no EGL context in unit tests, see every
-        // other backend/gles-adjacent module in this project) -- just a
-        // guard against accidentally dropping the substitution point or a
-        // uniform `compile_custom_texture_shader`'s contract requires.
+        // Unit tests have no EGL context; guard the source-level shader contract.
         assert!(WATER_GLASS_FRAGMENT_SHADER.contains("//_DEFINES_"));
         assert!(WATER_GLASS_FRAGMENT_SHADER.contains("uniform sampler2D tex"));
         assert!(WATER_GLASS_FRAGMENT_SHADER.contains("uniform float alpha"));
@@ -433,11 +381,7 @@ mod tests {
 
     #[test]
     fn water_glass_commit_is_stable_when_the_scene_is_static() {
-        // The damage-driven capture only bumps `version` when it actually
-        // re-rendered; the element's commit is built from it, so a static
-        // desktop (same capture, same geometry/config/animation) must hash
-        // to the same value across frames or the visible output never stops
-        // redrawing the glass layer.
+        // Unchanged rendered values must keep output damage quiescent.
         let baseline = water_glass_commit(3, 1.42, 0.0, [4.0; 4], 2.0, 1.5);
         assert_eq!(
             baseline,
@@ -447,9 +391,7 @@ mod tests {
 
     #[test]
     fn water_glass_commit_advances_when_the_capture_re_renders() {
-        // `version` is what connects a recapture to the visible frame's
-        // decision to redraw the glass: a behind-scene change that produced
-        // a new texture has to flip the commit so the new pixels are drawn.
+        // New captured pixels must invalidate the visible glass element.
         let before = water_glass_commit(3, 1.42, 0.0, [4.0; 4], 2.0, 1.5);
         let after = water_glass_commit(4, 1.42, 0.0, [4.0; 4], 2.0, 1.5);
         assert_ne!(before, after);
@@ -457,9 +399,7 @@ mod tests {
 
     #[test]
     fn water_glass_commit_advances_while_the_wave_is_animating() {
-        // Ambient and reactive tails advance the phase every frame while the
-        // distortion is visible; the commit has to follow so the wave keeps
-        // moving on screen instead of freezing after the first frame.
+        // Visible phase motion must invalidate the glass element.
         let first = water_glass_commit(3, 1.42, 0.5, [4.0; 4], 2.0, 1.5);
         let second = water_glass_commit(3, 1.43, 0.5, [4.0; 4], 2.0, 1.5);
         assert_ne!(first, second);
@@ -467,19 +407,14 @@ mod tests {
 
     #[test]
     fn water_glass_commit_ignores_phase_once_settled() {
-        // Reactive mode keeps the phase clock running forever, but once the
-        // settle envelope drives amplitude to zero the phase can no longer
-        // change the image. Holding the commit constant at that point is
-        // exactly what stops the static-tail from self-sustaining redraws.
+        // Phase cannot change the image after the amplitude settles to zero.
         let settled = water_glass_commit(3, 5.0, 0.0, [4.0; 4], 2.0, 1.5);
         assert_eq!(settled, water_glass_commit(3, 9.9, 0.0, [4.0; 4], 2.0, 1.5));
     }
 
     #[test]
     fn water_glass_commit_advances_on_corner_config_change() {
-        // A config hot-reload that changes only the rounded-corner uniforms
-        // has to redraw, and `damage_since` compares the commit for that;
-        // geometry/alpha/z changes are caught by the tracker separately.
+        // A corner-only config change still changes the image.
         let before = water_glass_commit(3, 0.0, 0.5, [4.0; 4], 2.0, 1.5);
         let after = water_glass_commit(3, 0.0, 0.5, [8.0; 4], 2.0, 1.5);
         assert_ne!(before, after);

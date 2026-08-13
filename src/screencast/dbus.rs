@@ -1,17 +1,7 @@
-//! `org.gnome.Mutter.ScreenCast` + `.Session` + `.Stream` on the session
-//! bus, via `zbus::interface`. TideWM's portal backend bridges the standard
-//! desktop portal API to this service.
-//!
-//! Monitor and window lifecycles (`CreateSession` -> `RecordMonitor` or
-//! `RecordWindow` -> `Start` -> PipeWire node -> `Stop`) are implemented.
-//! `RecordArea` and `RecordVirtual` are not declared, so callers receive
-//! DBus `UnknownMethod` for those unsupported source types.
-//!
-//! Runs on its own OS thread via `zbus::blocking`, not calloop: zbus's
-//! blocking connection dispatches incoming method calls on its own
-//! internal executor for the life of the `Connection`, so this thread's
-//! only job is to build the connection, register the interfaces, and
-//! then block forever keeping it alive. It never touches `Smallvil`.
+//! Mutter-compatible monitor/window screencast objects plus the desktop portal
+//! bridge. The dedicated thread owns the blocking zbus connection while zbus's
+//! executor dispatches calls; compositor state is reached only through events.
+//! Area and virtual sources are intentionally unsupported.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -123,18 +113,8 @@ fn run(
     );
     task.detach();
 
-    // The portal backend name is requested separately (rather than via
-    // `.name()` above) so a name collision here -- unlikely, but possible if
-    // another compositor's backend is somehow already claiming it -- doesn't
-    // take down the already-working Mutter interface too.
-    //
-    // Both case variants are claimed: xdg-desktop-portal derives the backend
-    // name from `XDG_CURRENT_DESKTOP`, and display managers hand that out in
-    // the session's exact spelling (`TideWM` here) while the conventional
-    // portal naming is lowercase -- some xdp versions lowercase the desktop
-    // name before looking up the backend, some use it verbatim. Claiming
-    // both means the backend is reachable either way, at the cost of one
-    // inert extra name.
+    // Claim portal names separately so a collision cannot tear down the
+    // Mutter interface. Both desktop-name spellings are used by portal versions.
     let portal_connection = async_connection.clone();
     let portal_task = async_connection.executor().spawn(
         async move {
@@ -163,10 +143,7 @@ fn run(
     );
     portal_task.detach();
 
-    // Keeps `_connection` (and with it, the registered interfaces) alive
-    // for the process lifetime. zbus dispatches incoming calls on its
-    // own internal executor threads regardless of whether this thread is
-    // parked; there is nothing left for this thread itself to do.
+    // Keep the registered interfaces alive; zbus dispatches on its executor.
     loop {
         std::thread::park();
     }

@@ -1,17 +1,7 @@
-//! Full-output workspace transition from render-roadmap Phase R1.
-//!
-//! The outgoing desktop is captured after its visible frame has been
-//! submitted, then drawn over the already-live incoming workspace. The
-//! default style floods the complete output with a procedurally animated
-//! water body before its trailing edge reveals the new workspace; the
-//! original colored boundary remains as the alternate `glow` style. Water,
-//! foam, spray, core, and glow are analytical shader geometry, so tuning
-//! them adds no extra render targets. Optional workspace motion captures the
-//! incoming desktop too and slides both captures edge-to-edge under the wave.
-//! The owning state therefore keeps one texture normally or two while that
-//! option is enabled, and drops them as soon as the animation finishes,
-//! giving the effect a bounded transient cost instead of retaining workspace
-//! history.
+//! Full-output transition from a captured outgoing desktop to the live incoming
+//! workspace. Water/glow geometry is analytical; optional workspace motion adds
+//! one incoming capture. State owns at most two transient output-sized textures
+//! and drops them when the animation finishes.
 
 use std::time::{Duration, Instant};
 

@@ -1,24 +1,8 @@
-//! Ambient caustic light patterns over the wallpaper, below windows.
-//!
-//! The pattern is rendered analytically into a small offscreen texture
-//! (1/4 resolution, reused across frames) and blitted upscaled to the
-//! output every frame -- the pattern is very low-frequency, so the blit
-//! is visually identical to a direct full-output pass at roughly 1/16th
-//! of the fragment cost. That makes the `caustics.fps` constant-motion
-//! mode affordable on integrated graphics, instead of being the
-//! frame-rate tax a full-resolution procedural pass used to be.
-//!
-//! Motion is phase-accumulated in `Caustics` and only advances when a
-//! frame is actually built, so the default mode piggybacks on
-//! damage-driven frames -- an idle desktop shows static caustics that
-//! read as part of the wallpaper and ticks zero frames. Setting
-//! `caustics.fps` above zero opts into constant motion: the frame pump
-//! gate (`Smallvil::caustics_active`) keeps redraws coming at roughly
-//! that rate, capped so it never becomes a per-refresh busy loop.
-//!
-//! Gated on the `water_effects` master toggle like the rest of the water
-//! identity. Works under both spatial engines; it's wallpaper-level
-//! ambience, not navigation.
+//! Damage-aware caustic light rendered over the wallpaper in both spatial
+//! engines. The analytical pattern is cached at quarter resolution and
+//! upscaled; phase advances only when a frame is built. A zero configured FPS
+//! piggybacks on other damage, while a positive FPS supplies its own bounded
+//! per-output deadline.
 
 use std::time::{Duration, Instant};
 
@@ -40,25 +24,16 @@ use smithay::utils::{
 
 use crate::config::CausticsConfig;
 
-/// Offscreen render scale: the caustics pattern is low-frequency, so the
-/// visible output is a 1/4-resolution texture upscaled to the output.
-/// Fragment cost drops ~16x; the pattern density is resolution-independent
-/// (the shader works in output-relative coordinates), so the blit reads
-/// the same as a direct full-output pass.
+/// The shader uses output-relative coordinates, so its low-frequency pattern
+/// can be rendered at quarter resolution and upscaled.
 const CAUSTICS_DOWNSCALE: i32 = 4;
 
 /// Maximum exponential recovery interval in units of the live configured or
 /// output refresh cadence. This bounds retries without assuming a frame rate.
 const MAX_FAILURE_BACKOFF_MULTIPLIER: u32 = 1024;
 
-/// Caustic interference from a few rotated, drifting sine fields,
-/// sharpened into light-web ridges. Deliberately evoking the wave
-/// transition's streak layers (`workspace_transition.rs`) without copying
-/// its travel-coupled coordinate system -- this pattern has no direction
-/// of travel, it just breathes.
-///
-/// Premultiplied alpha out, same contract as the ripple/ocean-canvas
-/// pixel shaders. No `#version` directive; Smithay prepends its own.
+/// Rotated sine fields form a directionless light pattern. Output is
+/// premultiplied alpha; Smithay supplies the shader version directive.
 const CAUSTICS_SHADER: &str = r#"
 precision highp float;
 
@@ -186,12 +161,8 @@ pub struct CausticsSample {
     pub scale: f32,
 }
 
-/// Per-output caustics state. `phase` only advances inside
-/// `frame_element` -- which only runs while a frame is actually being
-/// assembled -- so a damage-driven idle desktop simply stops advancing
-/// it. The last rendered sample is remembered so the damage tracker's
-/// commit counter only increments when the drawn result would actually
-/// change (same shape as `ocean_canvas::OceanCanvas::frame_element`).
+/// Per-output caustics state. Phase advances only while building a frame, and
+/// the commit changes only when the rendered sample changes.
 pub struct Caustics {
     id: Id,
     commit: CommitCounter,

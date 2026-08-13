@@ -258,26 +258,9 @@ fn run_connection(
             if id != spa::param::ParamType::Format.as_raw() || param.is_none() {
                 return;
             }
-            // SPA_PARAM_BUFFERS_* values are stable protocol enum values
-            // from spa/param/buffers.h.
-            //
-            // MemFd only, DMA-BUF disabled for now: offering DmaBuf here
-            // (even with a concrete Linear modifier negotiated cleanly on
-            // the format side) made PipeWire's own core buffer allocator
-            // fail identically both with `Modifier::Invalid` and
-            // `Modifier::Linear` -- confirmed live, `pw.link: ... allocating
-            // -> error error alloc buffers: Operation not supported (-95)`
-            // in `pipewire.service`'s own log, i.e. a PipeWire-core
-            // allocation failure, not a format-pod mistake. The generic
-            // `pw_stream` path apparently can't fabricate a DMA-BUF on this
-            // system without the producer allocating it itself (real
-            // compositors do this via their own GBM device, handing
-            // pre-allocated buffers to PipeWire through `add_buffer` +
-            // `ALLOC_BUFFERS` -- a real subproject, not a pod tweak, and
-            // hardware-facing code of the same class that froze the machine
-            // once already, see `TileMoveGrab`/CHANGELOG 0.15.1). This is
-            // the discriminating build: MemFd-only tells us whether OBS
-            // even accepts it before that work is worth starting.
+            // The generic PipeWire allocator cannot provide DMA-BUFs for this
+            // stream. Advertise MemFd only; DMA-BUF requires TideWM to allocate
+            // and export buffers from its GBM device.
             let memfd_mask = 1i32 << spa::buffer::DataType::MemFd.as_raw();
             let buffers = pw::spa::pod::object!(
                 pw::spa::utils::SpaTypes::ObjectParamBuffers,
@@ -325,14 +308,8 @@ fn run_connection(
             let expected_len = expected_stride.saturating_mul(height as usize);
 
             if data.type_() == spa::buffer::DataType::DmaBuf && data.fd() >= 0 {
-                // PipeWire's own allocator (see the Linear-modifier comment
-                // on the format enum below) may pad the stride for GPU
-                // alignment -- this buffer's chunk metadata, already
-                // populated by whoever allocated it before this callback
-                // ever ran, reports the real one. Assuming width*4 here
-                // would silently produce a sheared/skewed image the moment
-                // the negotiated size needs padding; fall back to width*4
-                // only if the reported stride is unset.
+                // Honor allocator-provided row padding; use packed stride only
+                // when the chunk does not report one.
                 let stride = match data.chunk().stride() {
                     stride if stride > 0 => stride as u32,
                     _ => expected_stride as u32,
@@ -458,11 +435,7 @@ fn run_connection(
         ]
     }
 
-    // MemFd only for now -- see the matching comment on the Buffers param
-    // above for why DMA-BUF is disabled rather than tuned further. A format
-    // enum without a modifier property is what tells PipeWire's negotiation
-    // this format is SHM/MemFd-only; adding one back is the first step if
-    // DMA-BUF export gets a real (app-allocates-the-buffer) implementation.
+    // Omitting a modifier advertises the format as SHM/MemFd-only.
     let format_plain = pw::spa::pod::Object {
         type_: pw::spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
         id: pw::spa::param::ParamType::EnumFormat.as_raw(),
@@ -486,14 +459,8 @@ fn run_connection(
         .map_err(|err| err.to_string())?;
 
     let deadline = Instant::now() + Duration::from_secs(5);
-    // A `StreamFlags::DRIVER` stream never gets a `process()` call on its
-    // own -- confirmed live (real consumer negotiated format, PipeWire
-    // reported the link as active and the node as running, yet zero
-    // `process()` calls ever happened): per pipewire/stream.h's "Driving
-    // the graph" section, a driver stream must call `trigger_process()`
-    // itself to start each graph cycle. `is_driving()` only returns true
-    // once the stream reaches `Streaming` (i.e. something is actually
-    // linked and consuming), so this is a no-op while paused/unlinked.
+    // DRIVER streams must trigger each graph cycle. `is_driving()` limits this
+    // to an actively linked consumer.
     let frame_interval = Duration::from_millis(1000 / 30);
     let mut next_trigger = Instant::now();
     loop {

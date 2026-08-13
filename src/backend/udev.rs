@@ -134,11 +134,9 @@ smithay::backend::renderer::element::render_elements! {
     WindowSnapshot = crate::window_animation::WindowSnapshotElement,
     /// Analytical solid/gradient border above its own window.
     Border = crate::decoration::BorderElement,
-    /// Impulse ripple (Phase R1, see ripple.rs), drawn over windows but
-    /// below toast/overview/picker/tab-strip chrome. Same renderer-
-    /// concrete-ness reason as `WaterGlass` above.
+    /// Impulse ripple above windows and below compositor chrome.
     Ripple = crate::ripple::RippleElement,
-    /// Cool-depth wash and urgent bioluminescent border (Phase R1).
+    /// Cool-depth wash and urgent bioluminescent border.
     DepthOverlay = crate::depth::DepthOverlayElement,
     /// Allocation-free vertical pressure wave for direct Classic depth moves.
     DepthTransition = crate::depth_transition::DepthTransitionElement,
@@ -147,50 +145,34 @@ smithay::backend::renderer::element::render_elements! {
     /// Ambient caustic light over the wallpaper, below windows. Engine-
     /// agnostic; gated by `water_effects` plus its own enable.
     Caustics = crate::caustics::CausticsElement,
-    /// Bioluminescent edge-glow cue for an off-screen urgent/deep Ocean
-    /// window (spatial roadmap S5). Above windows, below chrome.
+    /// Off-screen Ocean cue above windows and below compositor chrome.
     Compass = crate::compass::CompassElement,
-    /// Captured outgoing workspace peeled away over the live incoming
-    /// workspace (Phase R1, see workspace_transition.rs).
+    /// Captured outgoing workspace over the live incoming workspace.
     WorkspaceTransition = crate::workspace_transition::WorkspaceTransitionElement,
     /// Non-water slide/fade of one outgoing workspace snapshot.
     WorkspaceGlide = crate::workspace_transition::WorkspaceGlideElement,
-    /// Full-output dim fill for a `layer_rule { dim_around = true }` layer
-    /// surface -- Hyprland's `dimaround`. Pushed directly behind the
-    /// Overlay/Top layer pass so it darkens every window and lower layer
-    /// without needing its own capture step.
+    /// Full-output fill immediately behind a dim-around Overlay/Top surface.
     Dim = SolidColorRenderElement,
 }
 
 struct SurfaceData {
     compositor: GbmDrmCompositor,
     output: Output,
-    /// The `wl_output` global's own id, kept so it can be retracted on
-    /// disconnect -- `create_surface` used to discard this (`let _global =
-    /// ...`), which left the global advertised to every client forever
-    /// after an unplug, with a replug adding a second one on top rather
-    /// than replacing it.
+    /// The `wl_output` global id, retracted when this surface disconnects.
     global: GlobalId,
     /// A frame is queued and we're waiting for its VBlank; the KMS API
     /// doesn't allow submitting another one to the same CRTC until then.
     pending: bool,
-    /// Content changed since this surface last actually rendered. Distinct
-    /// from `Smallvil::needs_redraw` (which the Timer tick consumes as soon
-    /// as it's observed) so a surface skipped this tick because it was
-    /// still `pending` doesn't lose the update -- its VBlank handler will
-    /// pick this back up.
+    /// Content changed since this surface rendered. Persists across a tick
+    /// skipped for pending VBlank.
     dirty: bool,
     /// `queue_frame` produces no VBlank when it returns `EmptyFrame`. Keep
     /// one estimated-VBlank timer armed in that case so animations get
     /// another render opportunity without turning the regular poll into a
     /// busy retry loop.
     empty_frame_retry_pending: Option<u64>,
-    /// Set by `wlr-output-power-management-v1` (see `Smallvil::set_output_power`
-    /// below), via `GbmDrmCompositor::clear()` -- DPMS off, every plane
-    /// disabled, pending/queued/next frame cleared. The render loop skips
-    /// this surface entirely while set; `clear()`'s own doc comment says
-    /// calling `queue_frame` again (the ordinary render path) re-enables,
-    /// so turning back on is just "stop skipping it, mark dirty."
+    /// DPMS-off state. Rendering is skipped until power-on marks it dirty;
+    /// the next ordinary queue re-enables scanout after `clear()`.
     powered_off: bool,
 }
 
@@ -201,10 +183,7 @@ struct DeviceData {
     renderer: Rc<RefCell<GlesRenderer>>,
     surfaces: HashMap<crtc::Handle, SurfaceData>,
     libinput: Libinput,
-    /// Kept around (not just used once at startup) so a udev "device
-    /// changed" event -- a monitor plugged or unplugged into a port on
-    /// this GPU -- can rescan and create/tear down surfaces at runtime; see
-    /// `handle_connector_change`.
+    /// Retained for connector rescans on udev device changes.
     gbm: GbmDevice<DrmDeviceFd>,
     render_formats: Vec<Format>,
     scanner: DrmScanner,
@@ -220,11 +199,7 @@ pub fn init_udev(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let display_handle = state.display_handle.clone();
 
-    // Unlike the winit backend, there's no host compositor to connect to
-    // here (this backend *is* the compositor), so this can be exported
-    // immediately: nothing downstream depends on reading the old value
-    // first. Lets anything spawned later (terminal, xwayland-satellite)
-    // find this socket -- previously only the winit backend exported this.
+    // Udev owns the display, so spawned clients can use this socket immediately.
     std::env::set_var("WAYLAND_DISPLAY", &state.socket_name);
 
     let (mut session, session_notifier) = LibSeatSession::new()
@@ -994,10 +969,7 @@ fn create_surface(
         }
     };
 
-    // Config surface plus a real-capability query only, for now -- no
-    // `drm_surface.use_vrr()` call yet. See `AdaptiveSync`'s own doc for
-    // why the actual toggle is deliberately deferred to a session where
-    // this can be verified on real hardware, not just compiled.
+    // Report live VRR capability; scanout toggling is not implemented yet.
     match drm_surface.vrr_supported(connector.handle()) {
         Ok(support) => tracing::info!(
             connector_name,
@@ -1586,12 +1558,8 @@ fn render_surface(
     // glass layer behind its own surface); only depth-replaced windows are
     // skipped.
     let replaced_surfaces = depth_surfaces;
-    // The canvas grid, caustics, and BelowWindows ripples all sit between
-    // windows and the wallpaper. They are passed INTO
-    // `desktop_render_elements` so they land *above* whatever wallpaper
-    // engine is attached -- awww/swww/swaybg/hyprpaper are layer-shell
-    // Background surfaces inside that walk, and anything spliced after it
-    // would render behind the wallpaper.
+    // Insert backdrop effects inside the desktop walk so they remain above
+    // layer-shell Background surfaces and below windows.
     let ripple_layers = if locked {
         Default::default()
     } else {
@@ -1627,9 +1595,7 @@ fn render_surface(
         Vec::new()
     };
 
-    // Background-level placeholder, not transient UI -- behind
-    // toast/overview/tab-strip/cursor in the chain below. Never shown
-    // while locked, same as the tab strip/overview above.
+    // Background-level placeholder behind compositor chrome and absent on lock.
     let welcome_element = if locked || !state.should_show_welcome_hint() {
         None
     } else {

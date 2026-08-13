@@ -1034,8 +1034,6 @@ fn local_now() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let tz = std::env::var("TZ").ok();
-    let _ = tz;
     // Date-only in UTC to avoid pulling a timezone crate into the CLI.
     let days = secs / 86_400;
     let z = days as i64 + 719_468;

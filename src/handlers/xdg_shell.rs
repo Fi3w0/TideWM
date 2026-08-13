@@ -1059,17 +1059,8 @@ impl Smallvil {
             }
             return;
         };
-        // Auto-float heuristic (Phase N tier 1): a dialog with a parent, or
-        // a window with a dimension pinned by min/max size (a splash
-        // screen, a fixed-size utility panel, a small bootstrapper), tiling
-        // by default is a bad first-run experience. Matches sway's
-        // `wants_floating` exactly: either dimension fixed (with both min
-        // dimensions nonzero) floats, since a BSP layout varies both
-        // dimensions and a pinned one can't take its slot. niri is more
-        // conservative (fixed *height* only); the OR version is the
-        // defensible match for BSP. `rule.tile` is the one escape hatch
-        // back to tiled per app, checked here rather than baked into the
-        // heuristic itself.
+        // Parent dialogs and clients pinning either dimension float unless an
+        // explicit tile rule overrides the heuristic.
         let implicit_float = !rule.tile
             && self.unmapped_toplevels.get(surface).is_some_and(|window| {
                 let has_parent = window.toplevel().is_some_and(|t| t.parent().is_some());
@@ -1097,13 +1088,8 @@ impl Smallvil {
         let workspace = rule
             .workspace
             .unwrap_or_else(|| self.layout.active_workspace(&output.name()));
-        // Window swallowing (`swallow = true` window rule): a tiled window
-        // whose process spawned this one gets replaced by it. Inserting
-        // targeted at the swallower splits its tile; detaching the
-        // swallower right after collapses the split, leaving this window
-        // exactly in its place. Skipped when the new window is about to
-        // float -- hiding the terminal under a floating child would leave
-        // an empty tile behind.
+        // Insert beside a tiled swallower before detaching it so tree collapse
+        // leaves the child in the same slot. Floating children do not swallow.
         let swallow_target =
             if ocean_engine || rule.float || rule.pin || implicit_float || flutter_float {
                 None
@@ -1118,10 +1104,7 @@ impl Smallvil {
                 .unwrap_or_else(|| Size::from((1, 1)));
             self.ocean
                 .insert(&output.name(), viewport, window, focused.as_ref());
-            // Once per window's lifetime, here rather than inside
-            // `OceanSpace::insert` itself -- that's also called on every
-            // floating<->tiled reattach, which must never reorder or
-            // duplicate an app-slot entry for a window that isn't new.
+            // Record only initial map; reattachment also calls `insert`.
             self.ocean.record_app_opened(surface.clone());
         } else {
             self.layout.insert(
@@ -1131,21 +1114,9 @@ impl Smallvil {
                 swallow_target.as_ref().or(focused.as_ref()),
             );
         }
-        // `toggle_floating`/`toggle_pseudo_tile` below look the window up
-        // via `self.space.elements()`, which `layout.insert` alone does not
-        // populate -- only `retile()`'s own `space.map_element` call does.
-        // This `retile()` is pure bookkeeping (position tracking), not a
-        // render or a present, so applying the rule's placement after it
-        // is still invisible to the client: nothing is actually drawn
-        // until the backend's own render loop runs, strictly after this
-        // function returns. But `retile()` also unconditionally sends this
-        // window a tiled-size *protocol* configure -- if a conversion below
-        // is guaranteed to resize it again right after, the client (a
-        // terminal, say) receives both in quick succession and visibly
-        // re-flows its content twice. See `skips_first_tile_configure`'s own
-        // doc comment for which conversions actually guarantee that second
-        // configure. A flutter-floated window guarantees the same second
-        // (floating) configure, so it skips the tiled one too.
+        // Retile maps the window into Space before rule conversions look it
+        // up. Skip its tiled configure when an immediate conversion guarantees
+        // a replacement configure, avoiding two client reflows before present.
         if skips_first_tile_configure(&rule, implicit_float) || flutter_float {
             self.retile_skip_first_configure(surface);
         } else {
@@ -1167,10 +1138,7 @@ impl Smallvil {
             }
         }
 
-        // Tiling it first and immediately converting here (reusing the
-        // exact same logic the interactive toggles use, rather than
-        // re-deriving floating-rect placement from scratch) is, for the
-        // same reason, still applied before the window's first real frame.
+        // Reuse interactive conversion paths before the first presented frame.
         if rule.float || rule.pin || rule.maximize || implicit_float || flutter_float {
             self.toggle_floating(surface);
             if rule.pin {
@@ -1202,22 +1170,15 @@ impl Smallvil {
             }
         }
 
-        // Role creation alone must never steal focus. A real first buffer
-        // does. An Exclusive layer can temporarily own the actual keyboard,
-        // while centralized focus retains this window as the restore target.
-        // `rule.no_focus` (Phase N tier 2) is the one exception: leaves
-        // whatever was focused before completely untouched, rather than
-        // picking some other window to focus instead.
+        // First map may become the restore target even while an exclusive layer
+        // owns the keyboard. `no_focus` leaves existing focus untouched.
         if !rule.no_focus {
             let focus_on_map = self
                 .config
                 .resolve_ripple_config(rule.ripple.as_ref(), crate::config::RippleTrigger::Focus)
                 .focus_on_map
                 .unwrap_or(false);
-            // Mapping and its automatic focus are one lifecycle transaction.
-            // Let the map ripple be its single visual cue; ordinary focus
-            // handoffs after this still animate through `focus_window`.
-            // `focus_on_map = true` deliberately restores effect stacking.
+            // Map focus suppresses a duplicate focus cue unless configured.
             self.focus_window_on_map(
                 Some(surface.clone()),
                 SERIAL_COUNTER.next_serial(),
@@ -1229,22 +1190,11 @@ impl Smallvil {
         // only offsets/fades the first rendered frames toward that state.
         self.start_window_open_animation(surface);
 
-        // Droplet-impact ripple at the window's center -- Phase R1, see
-        // `ripple.rs`. After the placement/retile/focus block above so the
-        // window's `space.element_location` reflects its final spot,
-        // including any floating-rule conversion. No-op when `water_effects`
-        // is off; see `spawn_window_map_ripple`'s own doc.
+        // Spawn after placement so the ripple uses the final window center.
         self.spawn_window_map_ripple(surface);
 
-        // Cosmetic float-physics disturbance (F1 `light`, spatial roadmap):
-        // a newly mapped floating window "lands in the water" with a
-        // downward-biased kick, and any floating neighbors within
-        // `float_physics.radius` rock too. Fixed synthetic magnitude --
-        // there's no real motion to sample the way a drag has, so this is
-        // a starting point, open to the same feel-tuning pass as every
-        // other `float_physics` default. `float_physics_kick_near` itself
-        // is the no-op gate when the mechanic or this window's rule
-        // disables it.
+        // Mapping has no measured velocity, so use the configured physics
+        // response with one synthetic downward impulse near the final center.
         const MAP_KICK_IMPULSE: f64 = 120.0;
         if let Some(center) = self.window_center_for_kick(surface) {
             if let Some(window) = self.mapped_toplevel_window(surface) {
