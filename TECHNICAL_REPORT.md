@@ -6,7 +6,7 @@ A fast technical reference for TideWM: what it is, what's implemented, current h
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). A full tiling-WM feature set (BSP/master-stack/cascade layouts, workspaces, multi-monitor, layer-shell, IPC, XWayland) with a water/aqua render identity layered on top as a fully toggleable effect stack, plus a second spatial engine ("Ocean") as an alternative to numbered workspaces.
 
-Current release: **0.90.95**, second major pre-release. 1.0 is intentionally reserved until the effect stack and Ocean get a broader real-hardware pass (see CHANGELOG).
+Current release: **0.90.101**, second major pre-release. 1.0 is intentionally reserved until the effect stack and Ocean get a broader real-hardware pass (see CHANGELOG).
 
 ## Architecture
 
@@ -44,6 +44,7 @@ Current release: **0.90.95**, second major pre-release. 1.0 is intentionally res
 ## Hardware verification
 
 - **AMD**: primary development and test hardware. The standalone `udev`/DRM backend, the full water/decoration render stack, swim's real-touchpad gesture path, and Ocean's core navigation (reefs, cameras, freeform drag) are all verified here.
+- **Latest standalone AMD health pass (2026-08-13)**: release 0.90.72 on Renoir completed full-output and cursor-overlay screencopy, reversible workspace transitions with ordered IPC events, invalid-action/batch/eval handling, and 100 one-shot plus 20 interrupted subscription connections without descriptor or PSS growth. Doctor remained all-pass with no TideWM panic/error or coredump. One-window PSS settled at 86.8 MiB after the reload/capture pass. The configured 24-fps caustics were the dominant continuous CPU/GPU cost; see `report.md` for the measured A/B and its whole-GPU caveat.
 - **Nvidia**: nested backend verified on a real RTX 3060 (proprietary driver): clean EGL/GLES context, correct rendering, no crashes. The standalone DRM backend and its Nvidia overlay-plane workaround are unverified on real Nvidia hardware.
 - **Intel**: untested so far.
 - **Still nested-only**: Ocean compass/overview, floating-window ocean physics (both tiers), `canvas_pan_button`, `modifier_pan_fingers`.

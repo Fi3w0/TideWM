@@ -103,12 +103,18 @@ pub fn find_socket() -> Result<PathBuf, String> {
     })
 }
 
-/// Runs every check. `doctor` prints the results; `report` embeds them.
-pub fn run_checks() -> (Vec<Check>, Option<Diagnostics>) {
+/// Runs every check. `doctor` prints the results; `report` embeds them. An
+/// explicit socket selects that compositor throughout the report, including
+/// PID-derived memory accounting; otherwise normal environment/newest-socket
+/// discovery applies.
+pub fn run_checks(socket_override: Option<&Path>) -> (Vec<Check>, Option<Diagnostics>) {
     let mut checks: Vec<Check> = Vec::new();
 
     // --- Compositor reachability -------------------------------------------------
-    let socket = find_socket();
+    let socket = socket_override
+        .map(Path::to_path_buf)
+        .map(Ok)
+        .unwrap_or_else(find_socket);
     let (diagnostics, mut checks) = match socket {
         Ok(path) => match request(&path, &json!({ "request": "diagnostics" })) {
             Ok(json) => {
@@ -507,8 +513,8 @@ pub fn run_checks() -> (Vec<Check>, Option<Diagnostics>) {
     }
 
     // --- Memory ---------------------------------------------------------------------------
-    if let Some(_diag) = &diagnostics {
-        let pid = compositor_pid();
+    if let Some(diag) = &diagnostics {
+        let pid = compositor_pid(&diag.socket);
         match pid.and_then(compositor_pss) {
             Some(pss) => {
                 // 2GB is AGENT.md's current absolute ceiling (Hard
@@ -619,8 +625,7 @@ fn read_proc_environ(pid: i64) -> std::collections::HashMap<String, String> {
 
 /// The running TideWM compositor's PID, found by socket path (the PID is
 /// embedded in the socket name `tidewm-<pid>.sock`).
-fn compositor_pid() -> Option<i64> {
-    let socket = find_socket().ok()?;
+fn compositor_pid(socket: &Path) -> Option<i64> {
     let name = socket.file_name()?.to_string_lossy();
     let pid = name.trim_start_matches("tidewm-").trim_end_matches(".sock");
     pid.parse::<i64>().ok()
@@ -1117,5 +1122,14 @@ mod tests {
         )
         .is_none());
         assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn compositor_pid_comes_from_the_selected_socket() {
+        assert_eq!(
+            compositor_pid(Path::new("/run/user/1000/tidewm-4242.sock")),
+            Some(4242)
+        );
+        assert_eq!(compositor_pid(Path::new("/tmp/not-tidewm.sock")), None);
     }
 }

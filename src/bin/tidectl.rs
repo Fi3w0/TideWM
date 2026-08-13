@@ -78,8 +78,8 @@ fn main() {
     // Host-side commands: run before any socket work, so a compositor that
     // won't even start can still be diagnosed.
     match args[0].as_str() {
-        "doctor" => return cmd_doctor(json_output),
-        "report" => return cmd_report(),
+        "doctor" => return cmd_doctor(json_output, socket_override.as_deref()),
+        "report" => return cmd_report(&args[1..], socket_override.as_deref()),
         _ => {}
     }
 
@@ -143,8 +143,8 @@ fn main() {
 /// per check. Exit code: 0 = nothing wrong, 1 = warnings, 2 = failures
 /// (skipped checks don't count either way). `--json` prints the checks as
 /// machine-readable JSON for bars/scripts.
-fn cmd_doctor(json_output: bool) {
-    let (checks, _diagnostics) = tidectl_diagnostics::run_checks();
+fn cmd_doctor(json_output: bool, socket_override: Option<&Path>) {
+    let (checks, _diagnostics) = tidectl_diagnostics::run_checks(socket_override);
     if json_output {
         let payload: Vec<Value> = checks
             .iter()
@@ -235,24 +235,10 @@ fn cmd_doctor(json_output: bool) {
 /// prints where it went. The quick check runs first and is embedded; the
 /// report stays compact unless problems were detected, in which case the
 /// log-heavy sections expand.
-fn cmd_report() {
-    let mut output: PathBuf = PathBuf::from("tidewm-report.txt");
-    let mut args = env::args().skip(2);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-o" | "--output" => match args.next() {
-                Some(path) => output = PathBuf::from(path),
-                None => fail("--output requires a path argument"),
-            },
-            "-h" | "--help" => {
-                println!("USAGE: tidectl report [--output <path>]");
-                std::process::exit(0);
-            }
-            other => fail(&format!("unrecognized argument '{other}' for report")),
-        }
-    }
+fn cmd_report(args: &[String], socket_override: Option<&Path>) {
+    let output = parse_report_output(args).unwrap_or_else(|message| fail(&message));
 
-    let (checks, diagnostics) = tidectl_diagnostics::run_checks();
+    let (checks, diagnostics) = tidectl_diagnostics::run_checks(socket_override);
     let verbose = tidectl_diagnostics::needs_verbose(&checks);
     let report = tidectl_diagnostics::render_report(&checks, &diagnostics, verbose);
     if let Err(err) = std::fs::write(&output, &report) {
@@ -276,6 +262,25 @@ fn cmd_report() {
     }
     println!("Attach the file to a GitHub issue at https://github.com/Fi3w0/TideWM/issues");
     std::process::exit(0);
+}
+
+/// Parses only the report-specific arguments left after `main` removes
+/// global flags such as `--socket`. Re-reading `env::args` here would put the
+/// socket path back into the positional stream and reject an otherwise valid
+/// `tidectl --socket <path> report` invocation.
+fn parse_report_output(args: &[String]) -> Result<PathBuf, String> {
+    let mut output = PathBuf::from("tidewm-report.txt");
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-o" | "--output" => match args.next() {
+                Some(path) => output = PathBuf::from(path),
+                None => return Err("--output requires a path argument".to_string()),
+            },
+            other => return Err(format!("unrecognized argument '{other}' for report")),
+        }
+    }
+    Ok(output)
 }
 
 /// `tidectl perf [--window <secs>] [--json]`: samples the compositor's
@@ -927,6 +932,19 @@ mod tests {
         let first = json!({});
         let second = json!({ "cpu_user_us": 10u64, "cpu_system_us": 0u64 });
         assert_eq!(cpu_percent(&first, &second, Duration::from_secs(1)), None);
+    }
+
+    #[test]
+    fn report_output_uses_only_filtered_subcommand_arguments() {
+        assert_eq!(
+            parse_report_output(&["--output".into(), "/tmp/tidewm-report.txt".into()]),
+            Ok(PathBuf::from("/tmp/tidewm-report.txt"))
+        );
+        assert_eq!(
+            parse_report_output(&[]),
+            Ok(PathBuf::from("tidewm-report.txt"))
+        );
+        assert!(parse_report_output(&["/run/user/1000/tidewm.sock".into()]).is_err());
     }
 
     #[test]

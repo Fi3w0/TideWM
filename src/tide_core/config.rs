@@ -4318,6 +4318,15 @@ fn parse_list_value(value: &str) -> Option<Vec<String>> {
 /// `90m`) as the Wave engine's duration values serialize to. Returns
 /// `None` for zero/negative or unparseable values.
 fn parse_duration_ms(value: &str) -> Option<u32> {
+    parse_duration_ms_including_zero(value).filter(|ms| *ms > 0)
+}
+
+/// The non-negative duration parser used by fields where zero has an
+/// explicit meaning. Keep this separate from [`parse_duration_ms`] so the
+/// many animation lifetimes that require progress cannot silently become
+/// zero-length while values such as `workspace_motion_delay = 0ms` remain
+/// valid.
+fn parse_duration_ms_including_zero(value: &str) -> Option<u32> {
     let value = value.trim();
     let (num, scale) = if let Some(num) = value.strip_suffix("ms") {
         (num, 1.0)
@@ -4329,8 +4338,14 @@ fn parse_duration_ms(value: &str) -> Option<u32> {
         (value, 1.0)
     };
     let n = num.trim().parse::<f64>().ok()?;
+    if !n.is_finite() || n < 0.0 {
+        return None;
+    }
     let ms = (n * scale).round();
-    u32::try_from(ms as i64).ok().filter(|ms| *ms > 0)
+    if !ms.is_finite() || ms > f64::from(u32::MAX) {
+        return None;
+    }
+    Some(ms as u32)
 }
 
 /// What changed between two merged entry lists (W3's reload diff).
@@ -5271,7 +5286,7 @@ fn apply_workspace_transition_block(cfg: &mut WorkspaceTransitionConfig, body: &
             "workspace_motion" | "move_workspaces" => {
                 set_bool(&mut cfg.workspace_motion, key, value)
             }
-            "workspace_motion_delay" => match parse_duration_ms(value) {
+            "workspace_motion_delay" => match parse_duration_ms_including_zero(value) {
                 Some(value) if value <= 5000 => cfg.workspace_motion_delay_ms = value,
                 _ => tracing::warn!(
                     value,
@@ -7085,8 +7100,10 @@ fn parse_ripple_size_mode(value: &str) -> Option<RippleSizeMode> {
 
 fn parse_triggers(value: &str) -> Option<Vec<RippleTrigger>> {
     let mut out = Vec::new();
-    for tok in value.split_whitespace() {
-        match tok {
+    let tokens = parse_list_value(value)
+        .unwrap_or_else(|| value.split_whitespace().map(str::to_string).collect());
+    for tok in tokens {
+        match tok.as_str() {
             "map" => out.push(RippleTrigger::Map),
             "focus" => out.push(RippleTrigger::Focus),
             "urgent" => out.push(RippleTrigger::Urgent),
@@ -9227,6 +9244,9 @@ mod tests {
         assert_eq!(parse_duration_ms("1.5s"), Some(1500));
         assert_eq!(parse_duration_ms("2m"), Some(120_000));
         assert_eq!(parse_duration_ms("0"), None);
+        assert_eq!(parse_duration_ms_including_zero("0ms"), Some(0));
+        assert_eq!(parse_duration_ms_including_zero("-0.1ms"), None);
+        assert_eq!(parse_duration_ms_including_zero("NaNms"), None);
         assert_eq!(parse_duration_ms("nope"), None);
 
         let dir = TestDir::new("wave-durations");
@@ -9235,14 +9255,14 @@ mod tests {
             "cursor_hide_after = 2s\n\
              transition {\n\
                  duration = 600ms\n\
-                 workspace_motion_delay = 150ms\n\
+                 workspace_motion_delay = 0ms\n\
              }\n",
         );
         let (raw, _, _, _) = load_raw_config(&main).expect("should parse");
         assert_eq!(raw.cursor_hide_after_ms, 2000);
         let transition = &raw.workspace_transition;
         assert_eq!(transition.duration_ms, 600);
-        assert_eq!(transition.workspace_motion_delay_ms, 150);
+        assert_eq!(transition.workspace_motion_delay_ms, 0);
     }
 
     #[test]
@@ -11028,6 +11048,14 @@ mod tests {
         assert_eq!(config.ripple.glow, Some(1.2));
         assert_eq!(config.ripple.wobble, Some(0.9));
         assert_eq!(config.ripple.detail, Some(1.1));
+        assert_eq!(
+            config.ripple.triggers,
+            vec![
+                RippleTrigger::Map,
+                RippleTrigger::Focus,
+                RippleTrigger::Urgent
+            ]
+        );
     }
 
     #[test]
