@@ -580,6 +580,22 @@ pub enum SpatialEngine {
     Ocean,
 }
 
+/// Which shape TideWM's first-party toast/popup chrome draws. `Pill` is the
+/// original rounded card (icon orb + "TIDEWM" label + message); `Banner` is
+/// a long bar with a bottom progress line that fills in as the toast's
+/// visible time elapses, then the whole thing fades -- opt-in via
+/// `[popup] { style = banner }`. Loosely modeled on how Hyprland's own
+/// config-warning notifications look and behave (own implementation, not
+/// a port). `Pill` stays the default for now; every existing toast call
+/// site already picks up whichever style is configured, since both read
+/// through `UiTheme::from_config`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToastStyle {
+    #[default]
+    Pill,
+    Banner,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct OceanReefConfig {
     pub name: String,
@@ -2937,6 +2953,8 @@ pub struct PopupConfig {
     pub border_color: Option<[f32; 4]>,
     /// Pixels. Auto matches the average `[rounding]` radius.
     pub radius: Option<f32>,
+    /// Card shape. Defaults to `Pill`, the original card. See `ToastStyle`.
+    pub style: ToastStyle,
 }
 
 /// Which built-in shape a ripple draws. Multiple shapes can stack
@@ -7042,6 +7060,16 @@ fn apply_popup_block(cfg: &mut PopupConfig, body: &[waves::Entry]) {
             "radius" => {
                 cfg.radius = parse_f32_clamped(value, 0.0, 64.0, "popup.radius");
             }
+            "style" => {
+                cfg.style = match value.trim().to_ascii_lowercase().as_str() {
+                    "pill" | "card" => ToastStyle::Pill,
+                    "banner" | "bar" | "strip" => ToastStyle::Banner,
+                    other => {
+                        tracing::warn!(value = other, "Unknown popup.style, using pill");
+                        ToastStyle::Pill
+                    }
+                };
+            }
             _ => tracing::warn!(key, "Unknown popup key, ignoring"),
         }
     }
@@ -10600,6 +10628,20 @@ mod tests {
         assert_eq!(theme.popup_accent(false, 0.0), [255, 0, 0]);
         assert_eq!(theme.popup_accent(false, 1.0), [255, 0, 0]);
         assert_eq!(theme.popup_accent(true, 0.5), [255, 0, 0]);
+    }
+
+    #[test]
+    fn popup_style_defaults_to_pill_and_parses_banner() {
+        let auto = Config::from_raw(RawConfig::default()).0;
+        assert_eq!(auto.popup.style, ToastStyle::Pill);
+
+        let entries = wave_entries("popup {\n style = banner\n }\n");
+        let banner = Config::from_raw(lower_entries(&entries)).0;
+        assert_eq!(banner.popup.style, ToastStyle::Banner);
+
+        let entries = wave_entries("popup {\n style = nonsense\n }\n");
+        let fallback = Config::from_raw(lower_entries(&entries)).0;
+        assert_eq!(fallback.popup.style, ToastStyle::Pill);
     }
 
     #[test]

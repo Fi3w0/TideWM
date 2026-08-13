@@ -7,7 +7,7 @@
 //! luminance. Reloading a theme therefore recolors the next compositor panel
 //! without adding another set of color knobs.
 
-use crate::config::Config;
+use crate::config::{Config, ToastStyle};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UiTheme {
@@ -27,6 +27,8 @@ pub struct UiTheme {
     /// `[popup] { border_color }` pin. `None` (the default/auto case)
     /// means `accent()`'s gradient, same as every other border in TideWM.
     popup_border_color: Option<[u8; 3]>,
+    /// `[popup] { style }`. Defaults to `Pill`.
+    pub style: ToastStyle,
 }
 
 impl UiTheme {
@@ -82,6 +84,7 @@ impl UiTheme {
             radius,
             border_width,
             popup_border_color,
+            style: config.popup.style,
         }
     }
 
@@ -115,6 +118,15 @@ impl UiTheme {
             radius: 12,
             border_width: 2.0,
             popup_border_color: None,
+            style: ToastStyle::Pill,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_with_style(style: ToastStyle) -> Self {
+        Self {
+            style,
+            ..Self::for_test()
         }
     }
 }
