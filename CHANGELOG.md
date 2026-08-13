@@ -5,6 +5,9 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 ## [Unreleased]
 
 ### Fixed
+- Removing the GPU TideWM is driving (udev `Removed` for the managed DRM device) now ends the compositor session through the normal teardown path instead of leaving a permanently black live session that can never render again. TideWM deliberately drives a single GPU, so there is no fallback device to switch to; staying alive only kept clients connected to an invisible compositor. Stopping the event loop returns control to the login/session manager, the same fail-closed mechanism the session-lock client-crash path already uses.
+
+### Fixed
 - xwayland-satellite startup no longer exports `DISPLAY` before the X11 socket actually exists, and no longer hangs compositor startup if the satellite binary wedges. The version probe now waits with a two-second deadline (killing the probe child on timeout) instead of blocking forever, and each display-number attempt waits up to five seconds for `/tmp/.X11-unix/X<N>` to appear while the child stays alive. A satellite that loses the display-number race to another X server, crashes during startup, or never creates its socket is now detected and the next display number is tried, where previously `DISPLAY` was exported unconditionally the instant `spawn()` returned -- leaving startup X clients racing a socket that might never appear, and a dead satellite leaving poisoned environment state behind.
 
 ### Fixed
