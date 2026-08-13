@@ -1548,6 +1548,7 @@ rewriting a line removes or changes it completely.
 `$XDG_RUNTIME_DIR/tidewm-<pid>.sock`: one JSON request line in, one JSON response line out, per connection. Read queries return structured data; `{"request": "action", "action": "<any string above>"}` runs any action string. `{"request":"batch","actions":["workspace:2","spawn:kitty"]}` validates the complete list first, then executes up to 128 actions in order, so an invalid later item cannot leave a half-run batch. This is genuinely the same path a keybind press uses (`config::parse_action` → `Smallvil::run_action`).
 
 Queries: `outputs`, `workspaces`, `windows`, `focused-window`, `active-submap`, `diagnostics`. `{"request": "eval", "expression": "<wave expression>"}` evaluates on the live session Lua (config variables, section tables, and the refreshed `tide` table) and returns the value as JSON.
+The `windows` query describes every protocol-mapped toplevel, including clients on inactive Classic workspaces, parked group tabs, and Depth Deck entries; visibility in the current output scene is not treated as mapping state.
 In Ocean, `outputs` reports `active_workspace: null`, the current two-axis
 `camera_origin`, and `camera_zoom`; `workspaces` returns an empty list because bookmarks
 are navigation targets rather than real workspaces. Ocean window entries use

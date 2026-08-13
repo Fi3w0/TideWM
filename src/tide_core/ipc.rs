@@ -293,11 +293,8 @@ impl IpcEvent {
 /// callers each have a sensible fallback for that case.
 fn snapshot_window(state: &Smallvil, surface: &WlSurface) -> Option<serde_json::Value> {
     let focused = state.focused_window_surface();
-    let window = state
-        .space
-        .elements()
-        .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface))?;
-    window_json(state, window, focused.as_ref())
+    let window = state.mapped_toplevel_window(surface)?;
+    window_json(state, &window, focused.as_ref())
 }
 
 /// A long-lived subscribe connection. One per `subscribe` request, stored
@@ -946,17 +943,24 @@ fn workspaces_json(state: &Smallvil) -> serde_json::Value {
     json!(workspaces)
 }
 
-/// Only currently-mapped (visible) windows -- a window tiled or tagged on a
-/// hidden workspace isn't in `space.elements()` at all, same structural
-/// limitation `FloatingTag` was introduced to work around internally.
-/// Listing hidden-workspace windows too is a reasonable follow-up once
-/// something needs it.
+/// Every protocol-mapped toplevel, including windows absent from `Space`
+/// because their Classic workspace, group tab, or Depth Deck entry is hidden.
+/// Numeric foreign-toplevel ids provide deterministic mapping-order output.
 fn windows_json(state: &Smallvil) -> serde_json::Value {
     let focused = state.focused_window_surface();
-    let windows: Vec<_> = state
-        .space
-        .elements()
-        .filter_map(|window| window_json(state, window, focused.as_ref()))
+    let mut mapped: Vec<_> = state
+        .foreign_toplevel_numeric_ids
+        .iter()
+        .filter_map(|(surface, id)| {
+            state
+                .mapped_toplevel_window(surface)
+                .map(|window| (*id, window))
+        })
+        .collect();
+    mapped.sort_unstable_by_key(|(id, _)| *id);
+    let windows: Vec<_> = mapped
+        .iter()
+        .filter_map(|(_, window)| window_json(state, window, focused.as_ref()))
         .collect();
     json!(windows)
 }
@@ -965,13 +969,9 @@ fn focused_window_json(state: &Smallvil) -> serde_json::Value {
     let Some(focused) = state.focused_window_surface() else {
         return serde_json::Value::Null;
     };
-    let window = state
-        .space
-        .elements()
-        .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == &focused));
-    match window {
+    match state.mapped_toplevel_window(&focused) {
         Some(window) => {
-            window_json(state, window, Some(&focused)).unwrap_or(serde_json::Value::Null)
+            window_json(state, &window, Some(&focused)).unwrap_or(serde_json::Value::Null)
         }
         None => serde_json::Value::Null,
     }
