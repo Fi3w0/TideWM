@@ -39,6 +39,9 @@ pub struct Satellite {
     /// by comparing a surface's client PID against this one -- every X11
     /// app arrives as one of satellite's own Wayland surfaces.
     pub pid: u32,
+    /// DISPLAY value exported for this child, retained so SIGCHLD cleanup
+    /// removes only the value TideWM itself installed.
+    pub display_name: String,
 }
 
 /// Spawn `xwayland-satellite :N` eagerly and export `DISPLAY=:N` for every
@@ -83,7 +86,7 @@ pub fn setup(path: &str) -> Option<Satellite> {
                 tracing::info!(pid, display = %display_name, "Spawned xwayland-satellite");
                 crate::track_child(child);
                 std::env::set_var("DISPLAY", &display_name);
-                return Some(Satellite { pid });
+                return Some(Satellite { pid, display_name });
             }
             Err(reason) => {
                 tracing::warn!(

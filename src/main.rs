@@ -54,14 +54,33 @@ pub(crate) fn track_child(child: Child) {
     SPAWNED_CHILDREN.lock().unwrap().push(child);
 }
 
-fn reap_spawned_children() {
+fn reap_spawned_children(state: &mut Smallvil) {
     SPAWNED_CHILDREN
         .lock()
         .unwrap()
         .retain_mut(|child| match child.try_wait() {
             Ok(None) => true,
             Ok(Some(status)) => {
-                tracing::debug!(pid = child.id(), ?status, "Spawned child exited");
+                let pid = child.id();
+                let satellite_exited = i32::try_from(pid)
+                    .ok()
+                    .is_some_and(|pid| state.xwayland_satellite_pid == Some(pid));
+                if satellite_exited {
+                    state.xwayland_satellite_pid = None;
+                    if state.xwayland_display.as_deref().is_some_and(|display| {
+                        std::env::var("DISPLAY").ok().as_deref() == Some(display)
+                    }) {
+                        std::env::remove_var("DISPLAY");
+                    }
+                    state.xwayland_display = None;
+                    tracing::warn!(
+                        pid,
+                        ?status,
+                        "xwayland-satellite exited; X11 support is unavailable"
+                    );
+                } else {
+                    tracing::debug!(pid, ?status, "Spawned child exited");
+                }
                 false
             }
             Err(err) => {
@@ -466,8 +485,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // through this one event-loop source instead of to an arbitrary worker.
     event_loop
         .handle()
-        .insert_source(Signals::new(&[Signal::SIGCHLD])?, |_event, _, _state| {
-            reap_spawned_children()
+        .insert_source(Signals::new(&[Signal::SIGCHLD])?, |_event, _, state| {
+            reap_spawned_children(state)
         })?;
 
     let display: Display<Smallvil> = Display::new()?;
@@ -524,6 +543,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
     state.xwayland_satellite_pid = _satellite.as_ref().map(|satellite| satellite.pid as i32);
+    state.xwayland_display = _satellite
+        .as_ref()
+        .map(|satellite| satellite.display_name.clone());
 
     // After backend init, not inside `Smallvil::new`: the DBus service
     // thread needs a real initial output list (for `RecordMonitor`'s

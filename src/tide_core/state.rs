@@ -158,9 +158,12 @@ pub struct Smallvil {
     /// `xwayland` module docs), so comparing a surface's client PID
     /// against this one is how `rule { xwayland = ... }` tells an X11
     /// window apart from a native Wayland one -- there's no XWayland
-    /// protocol marker to introspect instead. Set once in `main.rs` right
-    /// after `xwayland::setup` returns; never changes afterward.
+    /// protocol marker to introspect instead. Cleared by SIGCHLD handling
+    /// if the satellite exits.
     pub(crate) xwayland_satellite_pid: Option<i32>,
+    /// DISPLAY installed by the live satellite. Kept alongside its PID so
+    /// child-exit cleanup removes only TideWM's own value.
+    pub(crate) xwayland_display: Option<String>,
 
     /// Which backend is driving this session: `"winit"` (nested) or
     /// `"udev"` (standalone DRM/TTY). Set by `main.rs` after backend init;
@@ -3475,6 +3478,7 @@ impl Smallvil {
             start_time,
             display_handle: dh,
             xwayland_satellite_pid: None,
+            xwayland_display: None,
             backend_name: "unknown",
             config_lua,
             tide,
