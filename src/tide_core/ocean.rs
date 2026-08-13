@@ -432,6 +432,13 @@ impl OceanSpace {
         self.camera_motions.values().any(OceanCameraMotion::active)
     }
 
+    /// Drops completed interpolation records. `cameras` already stores each
+    /// motion's target, so removing a finished record preserves the sampled
+    /// camera while keeping the auxiliary map bounded to active work.
+    pub fn prune_completed_camera_motions(&mut self) {
+        self.camera_motions.retain(|_, motion| motion.active());
+    }
+
     pub fn camera_revision(&self) -> u64 {
         self.camera_revision
     }
@@ -721,7 +728,7 @@ impl OceanSpace {
 
     fn anchor_empty_reef_to_camera(&mut self, reef_index: usize, camera: OceanCamera) -> bool {
         let reef = &mut self.reefs[reef_index];
-        if !reef.anchor_empty_layout_to_camera || !reef.layout.windows().is_empty() {
+        if !reef.anchor_empty_layout_to_camera || !reef.layout.is_empty() {
             return false;
         }
         reef.rect.loc = Point::from((
@@ -732,9 +739,9 @@ impl OceanSpace {
     }
 
     pub fn remove(&mut self, surface: &WlSurface) {
-        for reef in &mut self.reefs {
-            reef.layout.remove(surface);
-        }
+        self.reefs
+            .iter_mut()
+            .any(|reef| reef.layout.remove(surface));
         self.entry_outputs.remove(surface);
         self.floating.remove(surface);
         self.attached_sizes.remove(surface);
@@ -810,8 +817,7 @@ impl OceanSpace {
         let Some(reef) = self.reefs.iter_mut().find(|reef| reef.layout.contains(old)) else {
             return false;
         };
-        reef.layout.replace_leaf(old, new_window);
-        true
+        reef.layout.replace_leaf(old, new_window)
     }
 
     /// Gives an ungrouped tab a new leaf in the same reef as the surviving
@@ -947,8 +953,16 @@ impl OceanSpace {
         gap: i32,
         split_bias: SplitBias,
     ) -> Vec<(Window, Rectangle<i32, Logical>)> {
-        self.reefs
-            .iter()
+        self.tiled_layouts_from_reefs(self.reefs.iter(), gap, split_bias)
+    }
+
+    fn tiled_layouts_from_reefs<'a>(
+        &'a self,
+        reefs: impl Iterator<Item = &'a OceanReef>,
+        gap: i32,
+        split_bias: SplitBias,
+    ) -> Vec<(Window, Rectangle<i32, Logical>)> {
+        reefs
             .flat_map(|reef| reef.layout.layout(reef.rect, gap, split_bias))
             .map(|(window, rect)| {
                 let surface = window.toplevel().map(|toplevel| toplevel.wl_surface());
@@ -959,6 +973,29 @@ impl OceanSpace {
                 (window, rect)
             })
             .collect()
+    }
+
+    /// Layouts only reefs that can contribute to this camera. Every layout
+    /// algorithm keeps its tiles inside the reef rectangle, including
+    /// preserved-size attachments, so an off-view reef can be rejected
+    /// before walking its BSP tree.
+    fn tiled_layouts_for_view(
+        &self,
+        camera: OceanCamera,
+        viewport: Size<i32, Logical>,
+        gap: i32,
+        split_bias: SplitBias,
+    ) -> Vec<(Window, Rectangle<i32, Logical>)> {
+        let dragged = self.drag_override.as_ref().map(|(surface, _)| surface);
+        let reefs = self.reefs.iter().filter(|reef| {
+            reef_may_contribute_to_view(
+                reef.rect,
+                camera,
+                viewport,
+                dragged.is_some_and(|surface| reef.layout.contains(surface)),
+            )
+        });
+        self.tiled_layouts_from_reefs(reefs, gap, split_bias)
     }
 
     pub fn make_floating(&mut self, surface: &WlSurface, gap: i32, split_bias: SplitBias) -> bool {
@@ -973,9 +1010,9 @@ impl OceanSpace {
         else {
             return false;
         };
-        for reef in &mut self.reefs {
-            reef.layout.remove(surface);
-        }
+        self.reefs
+            .iter_mut()
+            .any(|reef| reef.layout.remove(surface));
         self.attached_sizes.remove(surface);
         self.floating.insert(surface.clone(), (window, rect));
         self.raise_floating(surface);
@@ -1048,12 +1085,8 @@ impl OceanSpace {
             return;
         };
         let (max_w, max_h) = self.growth_ceiling(reef_index);
-        // ponytail: fixed 8-round measure-and-grow rather than solving the
-        // dwindle tree's split math for an exact minimum rect -- each round
-        // measures the real slot through the same `layout()` the renderer
-        // itself calls, so it can never drift from what's actually on
-        // screen. Upgrade to a closed-form solve if 8 rounds ever visibly
-        // fails to converge for a real tree depth.
+        // Measure the real BSP slot and grow iteratively; eight rounds bound
+        // the work while using the same layout geometry as rendering.
         for _ in 0..8 {
             let reef = &self.reefs[reef_index];
             if !reef.auto_width && !reef.auto_height {
@@ -1306,6 +1339,9 @@ impl OceanSpace {
             .into_iter()
             .filter_map(|(window, rect, _)| {
                 let surface = window.toplevel()?.wl_surface().clone();
+                if self.screen_pins.contains_key(&surface) {
+                    return None;
+                }
                 let dy = rect.loc.y as f64 - visible_bottom;
                 (dy >= 0.0).then_some((
                     surface,
@@ -1474,12 +1510,19 @@ impl OceanSpace {
         gap: i32,
         split_bias: SplitBias,
     ) -> Vec<(Window, Rectangle<i32, Logical>, PlacementKind)> {
+        self.world_layouts_from_tiled(self.tiled_layouts(gap, split_bias))
+    }
+
+    pub(crate) fn world_layouts_from_tiled(
+        &self,
+        tiled: Vec<(Window, Rectangle<i32, Logical>)>,
+    ) -> Vec<(Window, Rectangle<i32, Logical>, PlacementKind)> {
         self.floating_stack
             .iter()
             .filter_map(|surface| self.floating.get(surface))
             .map(|(window, rect)| (window.clone(), *rect, PlacementKind::Floating))
             .chain(
-                self.tiled_layouts(gap, split_bias)
+                tiled
                     .into_iter()
                     .map(|(window, rect)| (window, rect, PlacementKind::Tiled)),
             )
@@ -1496,11 +1539,20 @@ impl OceanSpace {
         split_bias: SplitBias,
     ) -> Vec<PlacedWindow> {
         let camera = self.camera(output);
-        let mut layouts = self.world_layouts(gap, split_bias);
+        let tiled = self.tiled_layouts_for_view(camera, output_geo.size, gap, split_bias);
+        let mut layouts = self.world_layouts_from_tiled(tiled);
         // Floating entries were collected first and are already frontmost.
         // Reverse only the tiled suffix so cascade/BSP tree order mirrors
         // Classic's front-to-back renderer contract.
-        let floating_count = self.floating.len();
+        let floating_count = layouts
+            .iter()
+            .take_while(|(_, _, kind)| *kind == PlacementKind::Floating)
+            .count();
+        debug_assert_eq!(
+            floating_count,
+            self.floating.len(),
+            "Ocean floating map and stack must contain the same live surfaces"
+        );
         layouts[floating_count..].reverse();
         // A tiled window mid `OceanTileMoveGrab` drag renders at its live
         // dragged rectangle instead of its frozen reef slot, lifted to the
@@ -1663,6 +1715,15 @@ fn visible_through_camera(
     let right = left + rect.size.w as f64 * camera.zoom;
     let bottom = top + rect.size.h as f64 * camera.zoom;
     right > 0.0 && bottom > 0.0 && left < viewport.w as f64 && top < viewport.h as f64
+}
+
+fn reef_may_contribute_to_view(
+    rect: Rectangle<i32, Logical>,
+    camera: OceanCamera,
+    viewport: Size<i32, Logical>,
+    contains_dragged_tile: bool,
+) -> bool {
+    contains_dragged_tile || visible_through_camera(rect, camera, viewport)
 }
 
 #[cfg(test)]
@@ -1926,6 +1987,25 @@ mod tests {
     }
 
     #[test]
+    fn reef_culling_retains_visible_reefs_and_the_live_drag_owner() {
+        let reef = Rectangle::new(Point::from((4200, -1300)), Size::from((713, 509)));
+        let camera = OceanCamera {
+            origin: OceanPoint { x: 17.0, y: 29.0 },
+            zoom: 1.25,
+        };
+        let viewport = Size::from((1379, 811));
+
+        assert!(!reef_may_contribute_to_view(reef, camera, viewport, false));
+        assert!(reef_may_contribute_to_view(reef, camera, viewport, true));
+        assert!(reef_may_contribute_to_view(
+            Rectangle::new(Point::from((200, 100)), Size::from((640, 480))),
+            camera,
+            viewport,
+            false,
+        ));
+    }
+
+    #[test]
     fn zoom_keeps_the_world_point_under_the_anchor_stable() {
         let mut ocean = OceanSpace::from_config(&OceanConfig::default());
         ocean.pan("main", 100.0, 200.0);
@@ -1935,6 +2015,19 @@ mod tests {
         let camera = ocean.camera("main");
         assert_eq!(camera.zoom, 2.0);
         assert_eq!(camera.origin, OceanPoint { x: 300.0, y: 350.0 });
+    }
+
+    #[test]
+    fn completed_camera_motion_prunes_without_changing_the_target_camera() {
+        let mut ocean = OceanSpace::from_config(&OceanConfig::default());
+        ocean.animate_pan("main", 80.0, 40.0, Duration::from_millis(1), 0.0);
+        ocean.camera_motions.get_mut("main").unwrap().started -= Duration::from_millis(2);
+        let completed = ocean.camera("main");
+
+        ocean.prune_completed_camera_motions();
+
+        assert!(ocean.camera_motions.is_empty());
+        assert_eq!(ocean.camera("main"), completed);
     }
 
     #[test]

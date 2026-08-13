@@ -1,18 +1,9 @@
 //! Wave: the Lua-backed config surface.
 //!
-//! Implements the desugaring contract in `WAVE.md`'s "The desugaring
-//! contract (for implementers)" section. The surface syntax compiles to
-//! a Lua chunk, the chunk runs against a small registration environment,
-//! and evaluation produces the same [`Entry`] list the line-based parser
-//! in [`super::waves`] produces, so `config.rs`'s lowering and
-//! `merge_into`'s merge policies work unchanged. Keeping the split this
-//! way means this module can be tested against its own syntax rules
-//! alone, without dragging in every config field this project has today.
-//!
-//! This is the W1/W2 slice of the rewrite: the grammar core and the
-//! config-loading integration. `on "event"` handlers (W7), section
-//! globals so `theme.primary` reads as an expression (W4), and duration
-//! math (`600ms * 2`, W4's typed values) are deliberately not here yet.
+//! Compiles Wave syntax to sandboxed Lua and lowers the registrations into
+//! [`Entry`] values consumed by the config layer. This module also owns
+//! includes, typed literals, session globals, eval, and event handlers; the
+//! language and desugaring contract are documented in `WAVE.md`.
 
 use std::{
     cell::{Cell, RefCell},
@@ -27,6 +18,8 @@ use mlua::{FromLua, Function, HookTriggers, Lua, StdLib, Value, Variadic, VmStat
 use super::wave_fmt::{strip_block_comments, strip_line_comment};
 
 use super::waves::Entry;
+
+type ResolveResult = (Vec<Entry>, Vec<String>, Vec<PathBuf>);
 
 pub(crate) const MAX_QUEUED_ACTIONS: usize = 256;
 const HANDLER_ACTIVE_REGISTRY_KEY: &str = "tidewm-handler-active";
@@ -2099,35 +2092,45 @@ pub(crate) fn lua_value_to_json(value: Value) -> Result<serde_json::Value, Strin
                 }
 
                 let converted = (|| {
-                    // A dense sequence becomes an array; otherwise an object
-                    // of string-keyed fields (nested tables recurse).
-                    let mut is_array = true;
+                    // JSON has no mixed table shape. Accept either a dense
+                    // 1-based Lua sequence or an object with string keys;
+                    // rejecting every other combination keeps `tidectl eval`
+                    // from silently dropping fields.
+                    let entries: Vec<(Value, Value)> = t
+                        .clone()
+                        .pairs::<Value, Value>()
+                        .collect::<mlua::Result<_>>()
+                        .map_err(|e| e.to_string())?;
                     let n = t.raw_len();
-                    for i in 1..=n {
-                        if t.raw_get::<Value>(i).is_err() {
-                            is_array = false;
-                            break;
-                        }
-                    }
-                    if is_array && n > 0 {
+                    let is_array = n > 0
+                        && entries.len() == n
+                        && entries.iter().all(|(key, _)| {
+                            matches!(key, Value::Integer(index) if (1..=n as i64).contains(index))
+                        });
+                    let is_object = entries
+                        .iter()
+                        .all(|(key, _)| matches!(key, Value::String(_)));
+
+                    if is_array {
                         let mut out = Vec::with_capacity(n);
                         for i in 1..=n {
                             let child: Value = t.raw_get(i).map_err(|e| e.to_string())?;
                             out.push(convert(child, depth + 1, state)?);
                         }
                         Ok(serde_json::Value::Array(out))
-                    } else {
+                    } else if is_object {
                         let mut out = serde_json::Map::new();
-                        for pair in t.pairs::<mlua::Value, mlua::Value>() {
-                            let (key, child) = pair.map_err(|e| e.to_string())?;
+                        for (key, child) in entries {
                             let mlua::Value::String(key) = key else {
-                                continue;
+                                unreachable!()
                             };
                             let key = key.to_string_lossy();
                             state.count_string(key.len())?;
                             out.insert(key, convert(child, depth + 1, state)?);
                         }
                         Ok(serde_json::Value::Object(out))
+                    } else {
+                        Err("eval result table must be either a dense 1-based list or a string-keyed object".to_string())
                     }
                 })();
                 state.ancestors.remove(&identity);
@@ -2192,6 +2195,7 @@ struct ResolveContext<'a> {
     stack: &'a EntryStack,
     sym: &'a mut Symbols,
     budget: &'a mut ResolveBudget,
+    source_paths: &'a mut HashSet<PathBuf>,
 }
 
 /// The recursive include walk shared by both resolve rounds. `collect`
@@ -2203,7 +2207,16 @@ fn resolve_walk(
     ancestors: &mut Vec<PathBuf>,
     context: &mut ResolveContext<'_>,
 ) -> Result<Vec<Entry>, String> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    context.source_paths.insert(absolute);
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    context.source_paths.insert(canonical.clone());
     if ancestors.contains(&canonical) {
         return Err(format!("include cycle detected in file {}", path.display()));
     }
@@ -2300,7 +2313,7 @@ fn resolve_uncycled(
 /// evaluates with the full environment and the collected symbols, then
 /// merges per-file entry lists in include order.
 #[cfg(test)]
-pub(crate) fn resolve(path: &Path) -> Result<(Vec<Entry>, Vec<String>), String> {
+pub(crate) fn resolve(path: &Path) -> Result<ResolveResult, String> {
     let lua = Lua::new_with(
         StdLib::MATH | StdLib::STRING | StdLib::TABLE,
         mlua::LuaOptions::default(),
@@ -2324,7 +2337,7 @@ pub(crate) fn resolve_with_lua(
     lua: &Lua,
     tide: &TideInfo,
     path: &Path,
-) -> Result<(Vec<Entry>, Vec<String>), String> {
+) -> Result<ResolveResult, String> {
     let stack: EntryStack = Rc::new(RefCell::new(vec![Rc::new(RefCell::new(Vec::new()))]));
     let statics_out: Rc<RefCell<std::collections::HashMap<String, String>>> =
         Rc::new(RefCell::new(std::collections::HashMap::new()));
@@ -2350,6 +2363,7 @@ pub(crate) fn resolve_with_lua(
     };
     let mut collect_budget = ResolveBudget::default();
     let mut collect_warnings = Vec::new();
+    let mut collect_paths = HashSet::new();
     resolve_walk(
         path,
         &mut ancestors,
@@ -2359,6 +2373,7 @@ pub(crate) fn resolve_with_lua(
             stack: &stack,
             sym: &mut sym,
             budget: &mut collect_budget,
+            source_paths: &mut collect_paths,
         },
     )?;
 
@@ -2373,6 +2388,7 @@ pub(crate) fn resolve_with_lua(
     sym.statics = statics_out.borrow().clone();
     let mut warnings = Vec::new();
     let mut evaluation_budget = ResolveBudget::default();
+    let mut source_paths = HashSet::new();
     let entries = resolve_walk(
         path,
         &mut ancestors,
@@ -2382,10 +2398,13 @@ pub(crate) fn resolve_with_lua(
             stack: &stack,
             sym: &mut sym,
             budget: &mut evaluation_budget,
+            source_paths: &mut source_paths,
         },
     )?;
 
-    Ok((entries, warnings))
+    let mut source_paths: Vec<_> = source_paths.into_iter().collect();
+    source_paths.sort_unstable();
+    Ok((entries, warnings, source_paths))
 }
 
 /// Nils the Lua globals that user config (not the environment) created:
@@ -2718,6 +2737,28 @@ mod tests {
     }
 
     #[test]
+    fn eval_json_rejects_mixed_table_keys_instead_of_dropping_fields() {
+        let lua = Lua::new();
+        let table = lua.create_table().unwrap();
+        table.set(1, "first").unwrap();
+        table.set("named", "kept-or-error").unwrap();
+
+        let err = lua_value_to_json(Value::Table(table)).unwrap_err();
+        assert!(err.contains("dense 1-based list"), "{err}");
+    }
+
+    #[test]
+    fn eval_json_rejects_sparse_numeric_tables() {
+        let lua = Lua::new();
+        let table = lua.create_table().unwrap();
+        table.set(1, "first").unwrap();
+        table.set(3, "third").unwrap();
+
+        let err = lua_value_to_json(Value::Table(table)).unwrap_err();
+        assert!(err.contains("dense 1-based list"), "{err}");
+    }
+
+    #[test]
     fn eval_json_rejects_excessive_nesting() {
         let lua = Lua::new();
         let root = lua.create_table().unwrap();
@@ -2773,7 +2814,7 @@ mod tests {
         )
         .unwrap();
 
-        let (entries, warnings) = resolve_with_lua(&lua, &tide, &main).expect("should resolve");
+        let (entries, warnings, _) = resolve_with_lua(&lua, &tide, &main).expect("should resolve");
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(entries.len(), 1);
         let Entry::Handler(event, source) = &entries[0] else {
@@ -2941,7 +2982,7 @@ mod tests {
         )
         .unwrap();
 
-        let (entries, warnings) = resolve(&main).expect("should resolve");
+        let (entries, warnings, _) = resolve(&main).expect("should resolve");
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(
             entries,

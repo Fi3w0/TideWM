@@ -1,36 +1,9 @@
-//! Workspace overview: TideWM's schematic grid (rects + titles, not live window
-//! content) of every workspace on one output, toggled with a single
-//! keybind (`"toggle-overview"`). Same CPU-composited-texture approach as
-//! `toast.rs`/`tab_strip.rs` -- built once when toggled on
-//! (`Smallvil::toggle_overview`), not rebuilt every frame, since nothing
-//! about it animates or otherwise needs to change on its own.
+//! CPU-rendered schematic workspace grid for one output. It is rebuilt only
+//! when toggled, and draws tiled layout rectangles and titles rather than
+//! live client textures. Floating windows and runtime fullscreen, maximize,
+//! and pseudo-tile overrides are therefore omitted.
 //!
-//! **v1 is schematic, not live thumbnails.** Each window is drawn as a
-//! labeled box (geometry straight from `layout::Layouts::layout`, computed
-//! directly at the smaller cell size -- no separate scaling math needed)
-//! rather than a real screenshot of its content. Live thumbnails would
-//! mean rendering each *hidden* workspace's windows into an offscreen
-//! texture one at a time, which needs temporarily remapping them into
-//! `Smallvil::space` first (a hidden window isn't render-able at all
-//! otherwise -- it's simply not in `space.elements()`, same as every other
-//! "hidden window" gap this project has hit before) -- real render-path
-//! work with its own latency/memory tradeoffs, deliberately deferred. The
-//! mode itself (toggle on/off, grid arrangement) doesn't change if that's
-//! ever built later: only what a cell draws would need to.
-//!
-//! Also known-lossy for v1, worth remembering rather than treating as a
-//! bug report later: floating windows aren't tracked by `Layouts` at all
-//! (see `Smallvil::floating_workspace`), so they never appear in a cell;
-//! and fullscreen/maximized/pseudo-tile rect overrides are applied in
-//! `Smallvil::retile`, not `Layouts::layout`, so an overridden window's
-//! schematic box reflects its plain tiled slot, not the override. Good
-//! enough for "roughly what's on each workspace," not a pixel-accurate
-//! preview.
-//!
-//! The CPU rasterization primitives below (`fill_rect`, `stroke_rect`,
-//! `draw_label`, `rgba`) are `pub(crate)` and reused as-is by
-//! `crate::minimap`, Ocean's whole-world equivalent of this schematic --
-//! same dark-panel/labeled-box visual language, different content source.
+//! The minimap reuses the raster helpers below for the same visual language.
 
 use fontdue::Font;
 use smithay::{

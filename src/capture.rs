@@ -33,7 +33,10 @@ use smithay::{
     output::Output,
     reexports::{
         calloop::{generic::Generic, Interest, Mode, PostAction},
-        wayland_server::protocol::{wl_buffer::WlBuffer, wl_surface::WlSurface},
+        wayland_server::{
+            backend::ClientId,
+            protocol::{wl_buffer::WlBuffer, wl_surface::WlSurface},
+        },
     },
     utils::{Buffer as BufferCoords, IsAlive, Logical, Point, Rectangle, Scale, Size, Transform},
     wayland::{
@@ -49,11 +52,41 @@ use crate::{backend::udev::OutputRenderElements, state::SessionLock, Smallvil};
 /// A malicious or broken client must not be able to queue an unlimited
 /// number of full-output GL readbacks before the backend renders a frame.
 const MAX_PENDING_CAPTURES: usize = 64;
+/// Reserve queue capacity for other capture clients during a burst. Normal
+/// screenshot and stream clients keep at most one frame in flight.
+const MAX_PENDING_CAPTURES_PER_CLIENT: usize = 8;
 /// Even a bounded queue can freeze the compositor if all of its full-size
 /// GL readbacks run in one event-loop turn. Spread bursts over frames while
 /// still allowing both screencast cursor variants and ordinary screenshots
 /// to make progress together.
 const MAX_CAPTURE_RENDERS_PER_OUTPUT_FRAME: usize = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureQueueLimit {
+    Client,
+    Output,
+    Global,
+}
+
+fn capture_queue_limit(
+    total: usize,
+    per_client: Option<usize>,
+    per_output: usize,
+    output_count: usize,
+) -> Option<CaptureQueueLimit> {
+    let per_output_limit = MAX_PENDING_CAPTURES
+        .div_ceil(output_count.max(1))
+        .max(MAX_CAPTURE_RENDERS_PER_OUTPUT_FRAME);
+    if per_client.is_some_and(|count| count >= MAX_PENDING_CAPTURES_PER_CLIENT) {
+        Some(CaptureQueueLimit::Client)
+    } else if output_count > 1 && per_output >= per_output_limit {
+        Some(CaptureQueueLimit::Output)
+    } else if total >= MAX_PENDING_CAPTURES {
+        Some(CaptureQueueLimit::Global)
+    } else {
+        None
+    }
+}
 
 /// Pixel size of TideWM's upright, output-local offscreen capture target.
 /// A rotated scanout swaps the logical axes; it must not make the capture
@@ -175,6 +208,9 @@ impl CaptureCompletion {
 /// A validated capture request waiting for a backend render loop (which owns
 /// the GL renderer) to produce the pixels.
 pub struct PendingCapture {
+    /// Wayland client responsible for this request. Internal PipeWire work has
+    /// no Wayland owner and remains bounded by the output and global limits.
+    pub client_id: Option<ClientId>,
     pub output: Output,
     /// A mapped toplevel surface for per-window capture. `None` means the
     /// full output. The output remains explicit because it selects the GL
@@ -191,9 +227,30 @@ pub struct PendingCapture {
 
 impl Smallvil {
     pub(crate) fn queue_capture(&mut self, capture: PendingCapture) {
-        if self.pending_captures.len() >= MAX_PENDING_CAPTURES {
+        let per_client = capture.client_id.as_ref().map(|client_id| {
+            self.pending_captures
+                .iter()
+                .filter(|pending| pending.client_id.as_ref() == Some(client_id))
+                .count()
+        });
+        let per_output = self
+            .pending_captures
+            .iter()
+            .filter(|pending| pending.output == capture.output)
+            .count();
+        let output_count = self.space.outputs().count();
+        if let Some(reason) = capture_queue_limit(
+            self.pending_captures.len(),
+            per_client,
+            per_output,
+            output_count,
+        ) {
             tracing::warn!(
-                limit = MAX_PENDING_CAPTURES,
+                ?reason,
+                total = self.pending_captures.len(),
+                per_client,
+                per_output,
+                output_count,
                 "Capture queue full; rejecting request"
             );
             capture.completion.fail(CaptureFailureReason::Unknown);
@@ -210,6 +267,7 @@ impl Smallvil {
         target: crate::screencast::FrameTarget,
     ) {
         self.queue_capture(PendingCapture {
+            client_id: None,
             output,
             window: None,
             draw_cursor: target.draw_cursor,
@@ -226,6 +284,7 @@ impl Smallvil {
         target: crate::screencast::FrameTarget,
     ) {
         self.queue_capture(PendingCapture {
+            client_id: None,
             output,
             window: Some(surface),
             draw_cursor: false,
@@ -271,6 +330,7 @@ impl Smallvil {
             let mut without_cursor = Vec::new();
             for capture in mine.drain(..) {
                 let PendingCapture {
+                    client_id,
                     output,
                     window,
                     draw_cursor,
@@ -286,6 +346,7 @@ impl Smallvil {
                         }
                     }
                     (window, region, completion) => regular.push(PendingCapture {
+                        client_id,
                         output,
                         window,
                         draw_cursor,
@@ -296,6 +357,7 @@ impl Smallvil {
             }
             if !without_cursor.is_empty() {
                 regular.push(PendingCapture {
+                    client_id: None,
                     output: output.clone(),
                     window: None,
                     draw_cursor: false,
@@ -305,6 +367,7 @@ impl Smallvil {
             }
             if !with_cursor.is_empty() {
                 regular.push(PendingCapture {
+                    client_id: None,
                     output: output.clone(),
                     window: None,
                     draw_cursor: true,
@@ -333,6 +396,7 @@ impl Smallvil {
         composite_cursor: bool,
     ) {
         let PendingCapture {
+            client_id: _,
             output,
             window,
             draw_cursor,
@@ -351,10 +415,8 @@ impl Smallvil {
             return;
         };
         let locked = !matches!(self.session_lock, SessionLock::Unlocked);
-        // A toplevel capture has no lock-screen composition of its own. It
-        // must fail closed before resolving or rendering the requested
-        // window, otherwise an existing window stream can continue reading
-        // client pixels after the session locks.
+        // Toplevel capture has no lock composition, so fail before resolving
+        // client content whenever the session is locked.
         if locked && window.is_some() {
             fail!(completion, CaptureFailureReason::Unknown);
             return;
@@ -469,23 +531,22 @@ impl Smallvil {
             return;
         }
 
-        // What the user sees: space + layer-shell surfaces (both come from
-        // `render_output`) plus the toast OSD and any window-group tab
-        // strips, plus the composited cursor when the client asked for it.
-        // None of that applies while locked: a capture must show exactly what the
-        // visible frame shows -- the lock content, never the desktop
-        // underneath -- or a screenshot tool could read straight through
-        // the lock. Skipped, not just covered, for the same reason the
-        // visible-frame render loops skip it: `render_output` below pulls
-        // layer-shell content from `layer_map_for_output` unconditionally,
-        // independent of whatever `spaces` it's given.
+        let placements = if locked {
+            Vec::new()
+        } else {
+            let Some(placements) = self.render_placements(&output) else {
+                fail!(completion, CaptureFailureReason::Unknown);
+                return;
+            };
+            placements
+        };
+
+        // Mirror visible composition. While locked, omit the entire desktop
+        // path because `render_output` would otherwise include layer-shell
+        // content independently of the supplied spaces.
         let mut elements: Vec<OutputRenderElements> = Vec::new();
         if !locked {
-            // Pushed first so it ends up topmost (index 0 is the front,
-            // this codebase's established render-element-list convention)
-            // -- a screenshot taken while the overview is open shows it,
-            // same as it shows a toast or a tab strip; this matches how
-            // both of those are already captured rather than excluded.
+            // Element index zero is frontmost, so visible overlays are pushed first.
             if let Some(depth_deck_element) = self
                 .depth_deck_overlay
                 .as_ref()
@@ -509,7 +570,7 @@ impl Smallvil {
                 elements.push(OutputRenderElements::Composited(error_element));
             }
             elements.extend(
-                self.tab_strip_elements(renderer, &output)
+                self.tab_strip_elements(renderer, &output, &placements)
                     .into_iter()
                     .map(OutputRenderElements::Composited),
             );
@@ -527,10 +588,7 @@ impl Smallvil {
             let idle_hidden = self.config.cursor_hide_after_ms > 0
                 && self.last_pointer_motion.elapsed()
                     >= std::time::Duration::from_millis(self.config.cursor_hide_after_ms as u64);
-            // Same lock-aware hide as `backend/udev.rs::render_surface` --
-            // a locked pointer's on-screen position is permanently stale,
-            // so a screenshot/screencast frame taken during a lock should
-            // not show a frozen system cursor glyph either.
+            // Pointer-lock coordinates are stale; never capture a frozen glyph.
             let pointer_locked = self.pointer_is_locked();
             let forced_visible = CursorImageStatus::Named(CursorIcon::Default);
             let hidden = CursorImageStatus::Hidden;
@@ -597,19 +655,9 @@ impl Smallvil {
             }
         }
 
-        // Not `from_output`: that inherits the output's advertised
-        // transform, and the winit backend advertises `Flipped180` purely
-        // to cancel its EGL surface's y-orientation at present time (see
-        // `backend/winit.rs`) -- `render_output` multiplies the transform
-        // into the GL projection (smithay `damage/mod.rs`), so inheriting
-        // it bakes a real vertical flip into this offscreen texture and
-        // breaks `finish_capture_readback`'s top-down orientation contract
-        // (grim captures came out upside-down on winit, while real
-        // hardware with a Normal transform was fine). `Transform::Normal`
-        // matches what the window-capture path above always used. Known
-        // simplification: a udev output configured rotated/flipped gets
-        // its capture in logical (upright) orientation, not scanout
-        // orientation -- untested territory before this change too.
+        // Capture is top-down logical content, so do not inherit winit's
+        // presentation-only `Flipped180` transform. Rotated udev outputs also
+        // remain upright here rather than exposing scanout orientation.
         let mut damage_tracker = OutputDamageTracker::new(
             (size.w, size.h),
             output.current_scale().fractional_scale(),
@@ -625,24 +673,13 @@ impl Smallvil {
                 [0.0, 0.0, 0.0, 1.0],
             )
         } else {
-            // Same water-glass substitution the visible-frame loops apply
-            // (`backend/winit.rs`) -- without it, a screenshot of a
-            // water-glass window would show its plain, unrefracted content
-            // instead of what's actually on screen, the exact "separate
-            // render path forgot the new effect" bug class this codebase
-            // already hit once with session-lock (see AGENT.md). Same
-            // reasoning applies to ripples -- a screenshot mid-ripple
-            // would otherwise drop the ring from the captured frame.
-            // Ripple layers are respected just like the visible-frame
-            // loops: AboveAll frontmost, then chrome-less AboveWindows,
-            // then windows, then BelowWindows/wallpaper, then BelowAll.
+            // Use the visible frame's effect substitutions and z-order:
+            // AboveAll, chrome-less AboveWindows, windows, BelowWindows and
+            // wallpaper, then BelowAll.
             let workspace_transition = self.workspace_transition_frame_element(renderer, &output);
+            let workspace_glide = self.workspace_glide_frame_element(&output);
             let depth_transition = self.depth_transition_frame_element(renderer, &output);
             let closing_windows = self.closing_window_frame_elements(renderer, &output);
-            let Some(placements) = self.render_placements(&output) else {
-                fail!(completion, CaptureFailureReason::Unknown);
-                return;
-            };
             let glass_surfaces = self.glass_eligible_surfaces(&placements);
             #[allow(clippy::mutable_key_type)]
             let mut glass_layers =
@@ -676,6 +713,7 @@ impl Smallvil {
                     elements.extend(depth_transition);
                     elements.extend(ripple_layers.above_windows);
                     elements.extend(workspace_transition);
+                    elements.extend(workspace_glide);
                     elements.extend(closing_windows);
                     elements.extend(depth_elements);
                     elements.extend(space_elements);
@@ -1025,6 +1063,13 @@ impl Smallvil {
         }
         self.pending_captures = remaining;
     }
+
+    /// Drops work owned by a disconnected Wayland client immediately instead
+    /// of letting dead protocol resources occupy its queue share until render.
+    pub(crate) fn discard_captures_for_client(&mut self, client_id: &ClientId) {
+        self.pending_captures
+            .retain(|capture| capture.client_id.as_ref() != Some(client_id));
+    }
 }
 
 fn shm_copy_end(offset: usize, stride: usize, rows: usize, row_bytes: usize) -> Option<usize> {
@@ -1124,6 +1169,37 @@ mod tests {
         assert_eq!(
             output_capture_size(&flipped_rotated),
             Some((71, 113).into())
+        );
+    }
+
+    #[test]
+    fn capture_queue_reserves_capacity_per_client_and_output() {
+        assert_eq!(capture_queue_limit(0, Some(0), 0, 1), None);
+        assert_eq!(
+            capture_queue_limit(
+                MAX_PENDING_CAPTURES_PER_CLIENT - 1,
+                Some(MAX_PENDING_CAPTURES_PER_CLIENT - 1),
+                MAX_PENDING_CAPTURES_PER_CLIENT - 1,
+                1,
+            ),
+            None
+        );
+        assert_eq!(
+            capture_queue_limit(
+                MAX_PENDING_CAPTURES_PER_CLIENT,
+                Some(MAX_PENDING_CAPTURES_PER_CLIENT),
+                MAX_PENDING_CAPTURES_PER_CLIENT,
+                1,
+            ),
+            Some(CaptureQueueLimit::Client)
+        );
+        assert_eq!(
+            capture_queue_limit(MAX_PENDING_CAPTURES / 2, None, MAX_PENDING_CAPTURES / 2, 2,),
+            Some(CaptureQueueLimit::Output)
+        );
+        assert_eq!(
+            capture_queue_limit(MAX_PENDING_CAPTURES, None, MAX_PENDING_CAPTURES, 1),
+            Some(CaptureQueueLimit::Global)
         );
     }
 

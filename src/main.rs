@@ -15,7 +15,7 @@ mod visual;
 mod xwayland;
 
 pub(crate) use tide_core::{
-    classic_depth, config, input, ipc, layout, ocean, placement, state, wave, waves,
+    classic_depth, config, input, ipc, layout, ocean, output_layout, placement, state, wave, waves,
 };
 #[cfg(feature = "screencast")]
 pub(crate) use visual::source_picker;
@@ -28,6 +28,9 @@ pub(crate) use visual::{
 
 use std::{
     collections::HashMap,
+    ffi::OsStr,
+    mem::MaybeUninit,
+    os::unix::process::CommandExt,
     path::Path,
     process::{Child, Command, ExitStatus, Output},
     sync::Mutex,
@@ -54,14 +57,67 @@ pub(crate) fn track_child(child: Child) {
     SPAWNED_CHILDREN.lock().unwrap().push(child);
 }
 
-fn reap_spawned_children() {
+/// Builds a child command whose pre-exec hook clears TideWM's inherited
+/// signal mask. `calloop::Signals` blocks handled signals in this process and
+/// every thread/child created afterwards; without this hook, ordinary apps
+/// would inherit blocked SIGINT/SIGTERM/SIGHUP and ignore normal shutdown.
+pub(crate) fn child_command(program: impl AsRef<OsStr>) -> Command {
+    let mut command = Command::new(program);
+    // Safety: after fork and before exec this hook calls only libc signal-mask
+    // functions over stack-owned plain data. It captures nothing and performs
+    // no work beyond replacing the signal mask or returning that libc error.
+    unsafe {
+        command.pre_exec(clear_child_signal_mask);
+    }
+    command
+}
+
+fn clear_child_signal_mask() -> std::io::Result<()> {
+    let mut empty = MaybeUninit::<libc::sigset_t>::uninit();
+    // Safety: `sigemptyset` initializes the pointed-to sigset on success.
+    if unsafe { libc::sigemptyset(empty.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // Safety: the successful call above initialized `empty` completely.
+    let empty = unsafe { empty.assume_init() };
+    // Safety: both pointers are valid for the call; the previous mask is not
+    // needed in the soon-to-exec child. pthread_sigmask returns the errno
+    // value directly rather than storing it in `errno`.
+    let result = unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut()) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::from_raw_os_error(result))
+    }
+}
+
+fn reap_spawned_children(state: &mut Smallvil) {
     SPAWNED_CHILDREN
         .lock()
         .unwrap()
         .retain_mut(|child| match child.try_wait() {
             Ok(None) => true,
             Ok(Some(status)) => {
-                tracing::debug!(pid = child.id(), ?status, "Spawned child exited");
+                let pid = child.id();
+                let satellite_exited = i32::try_from(pid)
+                    .ok()
+                    .is_some_and(|pid| state.xwayland_satellite_pid == Some(pid));
+                if satellite_exited {
+                    state.xwayland_satellite_pid = None;
+                    if state.xwayland_display.as_deref().is_some_and(|display| {
+                        std::env::var("DISPLAY").ok().as_deref() == Some(display)
+                    }) {
+                        std::env::remove_var("DISPLAY");
+                    }
+                    state.xwayland_display = None;
+                    tracing::warn!(
+                        pid,
+                        ?status,
+                        "xwayland-satellite exited; X11 support is unavailable"
+                    );
+                } else {
+                    tracing::debug!(pid, ?status, "Spawned child exited");
+                }
                 false
             }
             Err(err) => {
@@ -83,7 +139,7 @@ pub(crate) fn spawn(cmd: &str) -> std::io::Result<()> {
     let program = parts
         .next()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "empty command"))?;
-    let child = std::process::Command::new(program).args(parts).spawn()?;
+    let child = child_command(program).args(parts).spawn()?;
     track_child(child);
     Ok(())
 }
@@ -185,11 +241,11 @@ struct ProcessSessionEnvironmentRunner;
 
 impl SessionEnvironmentRunner for ProcessSessionEnvironmentRunner {
     fn status(&self, program: &str, args: &[String]) -> std::io::Result<ExitStatus> {
-        Command::new(program).args(args).status()
+        child_command(program).args(args).status()
     }
 
     fn output(&self, program: &str, args: &[String]) -> std::io::Result<Output> {
-        Command::new(program).args(args).output()
+        child_command(program).args(args).output()
     }
 
     fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
@@ -462,13 +518,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut event_loop: EventLoop<'static, Smallvil> = EventLoop::try_new()?;
 
     // Create this before backend/optional-service initialization spawns any
-    // threads. Threads inherit the signal mask, ensuring SIGCHLD is delivered
-    // through this one event-loop source instead of to an arbitrary worker.
-    event_loop
-        .handle()
-        .insert_source(Signals::new(&[Signal::SIGCHLD])?, |_event, _, _state| {
-            reap_spawned_children()
-        })?;
+    // threads. Threads inherit the signal mask, ensuring process-lifecycle
+    // signals are delivered through this one event-loop source instead of to
+    // an arbitrary worker. `child_command` clears the inherited mask before
+    // every external exec.
+    event_loop.handle().insert_source(
+        Signals::new(&[
+            Signal::SIGCHLD,
+            Signal::SIGINT,
+            Signal::SIGTERM,
+            Signal::SIGHUP,
+        ])?,
+        |event, _, state| match event.signal() {
+            Signal::SIGCHLD => reap_spawned_children(state),
+            signal => {
+                tracing::info!(?signal, "Stopping after process signal");
+                state.loop_signal.stop();
+            }
+        },
+    )?;
 
     let display: Display<Smallvil> = Display::new()?;
     let mut state = Smallvil::new(&mut event_loop, display);
@@ -516,14 +584,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // Bound so it stays alive for the process lifetime, same idiom as
-    // `_config_watcher` below.
+    // Bound so it stays alive for the process lifetime; the config watcher
+    // below is instead owned by `Smallvil` because reloads update its graph.
     let _satellite = if state.config.xwayland.enabled {
         crate::xwayland::setup(&state.config.xwayland.path)
     } else {
         None
     };
     state.xwayland_satellite_pid = _satellite.as_ref().map(|satellite| satellite.pid as i32);
+    state.xwayland_display = _satellite
+        .as_ref()
+        .map(|satellite| satellite.display_name.clone());
 
     // After backend init, not inside `Smallvil::new`: the DBus service
     // thread needs a real initial output list (for `RecordMonitor`'s
@@ -544,14 +615,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state.sync_accessibility_tree();
     }
 
-    // Kept alive for the process lifetime: dropping it stops the watch.
-    let _config_watcher = match config::spawn_watcher() {
+    // Owned by `Smallvil` so a successful reload can replace the include
+    // graph and its directory registrations transactionally.
+    state.config_watcher = match config::spawn_watcher(&state.config.source_paths) {
         Ok((watcher, changes)) => {
             match event_loop
                 .handle()
                 .insert_source(changes, |event, _, state| {
                     if let calloop::channel::Event::Msg(pending) = event {
                         pending.store(false, std::sync::atomic::Ordering::Release);
+                        state.refresh_config_watch_anchors();
                         state.note_config_event();
                     }
                 }) {
@@ -682,6 +755,35 @@ mod session_environment_tests {
                 .unwrap()
                 .push(Call::Read(path.to_path_buf()));
             Ok(self.portal_environment.clone())
+        }
+    }
+
+    #[test]
+    fn child_command_clears_the_parents_inherited_signal_mask_before_exec() {
+        let mut blocked = MaybeUninit::<libc::sigset_t>::uninit();
+        let mut previous = MaybeUninit::<libc::sigset_t>::uninit();
+        // Safety: these calls initialize stack-owned sigsets and change only
+        // this test thread's mask. The previous mask is restored immediately
+        // after spawn, before inspecting the child result.
+        unsafe {
+            assert_eq!(libc::sigemptyset(blocked.as_mut_ptr()), 0);
+            let mut blocked = blocked.assume_init();
+            assert_eq!(libc::sigaddset(&mut blocked, libc::SIGTERM), 0);
+            assert_eq!(
+                libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, previous.as_mut_ptr()),
+                0
+            );
+            let previous = previous.assume_init();
+            let child = child_command("sh")
+                .args(["-c", "kill -TERM $$; exit 42"])
+                .spawn();
+            assert_eq!(
+                libc::pthread_sigmask(libc::SIG_SETMASK, &previous, std::ptr::null_mut()),
+                0
+            );
+
+            let status = child.unwrap().wait().unwrap();
+            assert_eq!(status.signal(), Some(libc::SIGTERM));
         }
     }
 

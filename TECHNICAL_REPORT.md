@@ -6,14 +6,14 @@ A fast technical reference for TideWM: what it is, what's implemented, current h
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). A full tiling-WM feature set (BSP/master-stack/cascade layouts, workspaces, multi-monitor, layer-shell, IPC, XWayland) with a water/aqua render identity layered on top as a fully toggleable effect stack, plus a second spatial engine ("Ocean") as an alternative to numbered workspaces.
 
-Current release: **0.90.0**, second major pre-release. 1.0 is intentionally reserved until the effect stack and Ocean get a broader real-hardware pass (see CHANGELOG).
+Current release: **0.90.101**, second major pre-release. 1.0 is intentionally reserved until the effect stack and Ocean get a broader real-hardware pass (see CHANGELOG).
 
 ## Architecture
 
 - **Two backends**: `winit` (nested inside an existing session, the primary dev/test loop) and `udev`/DRM (standalone TTY session, the real daily-driver path).
 - **Two spatial engines**, chosen with `spatial_engine = classic|ocean` and switchable live on a config hot reload, migrating every window in place with no restart.
 - **XWayland** via a spawned [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite) process rather than an embedded X11 window manager, so X11 clients arrive as ordinary `xdg_shell` surfaces.
-- **Render pipeline**: one shared backdrop-capture pipeline feeds water-glass/frost glass, then shadow, then rounding/borders, then window-open/close/move animation. The same element walk feeds live rendering on both backends, screenshots, screencasts, and workspace-transition captures, so effects don't need parallel implementations per output path.
+- **Render pipeline**: one shared backdrop-capture pipeline feeds water-glass/frost glass, then shadow, then rounding/borders, then window-open/close/move animation. Each output render or desktop capture shares one frame-owned placement snapshot across those consumers; the same element walk feeds both backends, screenshots, screencasts, and workspace-transition captures, so effects don't need parallel implementations per output path.
 - **RAM target**: effect-scaled with a 2GB absolute ceiling. Real measurements come in far below that: ~50MB PSS for a plain tiling setup (effects off), ~60-70MB PSS idle and ~63MB with nine glass windows with the full water stack on (real AMD, 0.90.59) -- roughly half of same-machine Hyprland.
 
 ## Feature status
@@ -44,6 +44,7 @@ Current release: **0.90.0**, second major pre-release. 1.0 is intentionally rese
 ## Hardware verification
 
 - **AMD**: primary development and test hardware. The standalone `udev`/DRM backend, the full water/decoration render stack, swim's real-touchpad gesture path, and Ocean's core navigation (reefs, cameras, freeform drag) are all verified here.
+- **Latest standalone AMD health pass (2026-08-13)**: release 0.90.72 on Renoir completed full-output and cursor-overlay screencopy, reversible workspace transitions with ordered IPC events, invalid-action/batch/eval handling, and 100 one-shot plus 20 interrupted subscription connections without descriptor or PSS growth. Doctor remained all-pass with no TideWM panic/error or coredump. One-window PSS settled at 86.8 MiB after the reload/capture pass. The configured 24-fps caustics were the dominant continuous CPU/GPU cost; see `report.md` for the measured A/B and its whole-GPU caveat.
 - **Nvidia**: nested backend verified on a real RTX 3060 (proprietary driver): clean EGL/GLES context, correct rendering, no crashes. The standalone DRM backend and its Nvidia overlay-plane workaround are unverified on real Nvidia hardware.
 - **Intel**: untested so far.
 - **Still nested-only**: Ocean compass/overview, floating-window ocean physics (both tiers), `canvas_pan_button`, `modifier_pan_fingers`.
@@ -116,6 +117,9 @@ sudo cp share/xdg-desktop-portal/tidewm-portals.conf /usr/share/xdg-desktop-port
 
 ## Roadmap
 
+- **Audit follow-through**: real-DRM cadence verification for P-12, a maintained Smithay-pin decision for DRM-master reacquisition failure, and fresh review of the medium-confidence items still open in `report.md`.
+- **Lower TideWM-owned VRAM**: active capture cost is measurable through `tidectl perf`, adjustable with `backdrop_capture_scale`, and reclaimed after the last output stops presenting a glass surface; `builtin_wallpaper = false` also avoids the fallback texture. Measure representative large glass windows before considering a shared per-output blur framebuffer, whose different overlap/occlusion semantics need an explicit design decision. Client surface buffers remain outside compositor control.
+- **Non-water motion presets**: smooth window move/resize and workspace motion that works with `water_effects = false`, exposed as Wave-selectable presets and tunable fields. Exact feel and defaults require maintainer approval before implementation.
 - **Feel-tuning** across viscosity, sway, depth timings, cascade's drag feel, floating-window ocean physics, and the transition/ripple presets. All ship with working defaults; the actual feel still gets refined against real use.
 - **Standalone hardware pass** for what's still nested-only: the Ocean compass/overview, and both floating-window ocean physics tiers.
 - **Nvidia native run**: the standalone DRM backend and its overlay-plane workaround still need a real TTY session on Nvidia.

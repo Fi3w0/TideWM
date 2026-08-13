@@ -91,7 +91,7 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | `water_effects` | bool | `true` | Master toggle for TideWM's water/aqua render identity. Disables water-glass, backdrop capture, impulse ripples, wave workspace transitions, Cascade pour/drain, automatic depth/buoyancy, interactive viscosity, connected-vessel resize, and floating sway when `false`. |
 | `builtin_wallpaper` | bool | `true` | Whether the embedded 4K aqua fallback wallpaper is decoded and drawn. A layer-shell wallpaper (swaybg/swww/hyprpaper) renders above it regardless, so set this `false` to skip the decode and its GPU texture entirely and reclaim the CPU and VRAM it would otherwise cost — useful on low-RAM machines or when an external wallpaper daemon is always present. Live-reloadable: a running session stops drawing it the moment this becomes `false`. |
 | `viscosity` | float, `0`–`4` | `1.0` | Interactive window move/resize damping. `0` follows the pointer immediately; higher values settle more slowly. Render-only: logical geometry and hit-testing stay at the pointer target. Disabled by `water_effects = false`. |
-| `backdrop_capture_scale` | int, `1`–`4` | `1` | Linear downscale for the per-window backdrop capture that feeds frost glass, water glass, and layer-shell blur. `1` captures at native resolution (unchanged look). `2`/`4` allocate a texture with 1/4 or 1/16 the area — real VRAM/GPU savings with several glass windows open at once — at the cost of a visibly softer captured image once magnified back up to the window's size. Changes how the water identity looks, so it defaults to the unchanged behavior rather than a pre-picked value; see `report.md`'s P-13/P-14 entries for the measurements behind this knob. |
+| `backdrop_capture_scale` | int, `1`–`4` | `1` | Linear downscale for the per-window backdrop capture that feeds frost glass, water glass, and layer-shell blur. `1` captures at native resolution (unchanged look). `2`/`4` allocate a texture with 1/4 or 1/16 the area — real VRAM/GPU savings with several glass windows open at once — at the cost of a visibly softer captured image once magnified back up to the window's size. Changes how the water identity looks, so it defaults to the unchanged behavior rather than a pre-picked value. Captures are also released automatically after their last output stops presenting the surface, including hidden Classic workspaces and off-camera Ocean windows. See `report.md`'s P-13/P-14 entries for the measurements behind this knob. |
 | `cursor_always_visible` | bool | `false` | Forces the udev backend's software cursor to stay visible even when a client asks to hide it (e.g. a terminal hiding its own pointer glyph after inactivity). Off by default — respecting a client's own hide request is correct behavior; this is an opt-in override. |
 | `cursor_hide_after` | duration | `0` | udev backend only: hides the software cursor after this long without real pointer motion (niri's `cursor.hide-after-inactive-ms`), e.g. `2s` or `2000ms`; `0` disables it. Independent of `cursor_always_visible` — that overrides a *client's* hide request, this is a compositor-driven idle timer, and the two can be combined. |
 | `auto_back_and_forth` | bool | `false` | Re-selecting the already-active workspace jumps back to whichever one was active immediately before it, instead of no-opping (niri's own feature of the same name). |
@@ -222,13 +222,18 @@ releases the live surface. Cloning these GPU handles does not allocate another
 framebuffer or copy the window.
 
 `preset` selects a complete baseline: `tide` (the calm default), `wave` (more
-visible oscillation), `riptide` (short and sharp), or `hypr-smooth`. The
+visible oscillation), `riptide` (short and sharp), `hypr-smooth`, or one of
+the non-water motion packs: `silk`, `snappy`, `gentle`, `cinematic`, and
+`minimal`. The five non-water packs enable smooth workspace and interactive
+move/resize motion even when `water_effects = false`; all values remain
+individually editable in Wave. Existing presets and the default keep those two
+new controls disabled for compatibility. The
 `hypr-smooth` preset mirrors the maintainer's real Hyprland window settings:
 open geometry uses the 300ms `overshot` curve, close geometry uses the 300ms
 `easeInOut` curve, both slide through the nearest output edge, both fade on a
 separate 400ms `easeInOut` clock, and layout motion uses 400ms `easeInOut`.
 Explicit values in the same block always override the preset, even when
-`preset` appears later. The top-level `enabled` disables all three transitions.
+`preset` appears later. The top-level `enabled` disables all animation groups.
 `slowdown` multiplies both geometry and opacity durations (`0.5` is twice as
 fast, `2` twice as slow). `max_closing_snapshots` (default `64`) caps detached
 windows retained for close animation, while `close_snapshot_output_budget`
@@ -237,8 +242,7 @@ live outputs' aggregate mode area. These are complementary: the count protects
 against floods of tiny windows, and the output-relative area budget scales with
 the actual nested, HiDPI, or multi-monitor session without assuming a screen
 resolution. Setting either to `0` disables detached close snapshots. Each
-`open`, `close`, and `movement` sub-block
-supports:
+`open`, `close`, and `movement` sub-blocks support:
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -297,24 +301,60 @@ animations {
         wave_amplitude = 1.25
         wave_decay = 2.4
     }
+
+    workspace {
+        enabled = false
+        style = slide-fade
+        duration = 220ms
+        curve = cubic-bezier(0.16,1,0.3,1)
+        travel = 0.2
+    }
+
+    interactive {
+        enabled = false
+        half_life = 28ms
+    }
 }
 ```
 
+For a completely non-water setup with smooth motion, the short form is:
+
+```wave
+water_effects = false
+animations { preset = silk }
+```
+
+`workspace { }` is a non-water transition drawn from one temporary outgoing
+workspace snapshot over the live incoming workspace. `style` accepts `slide`,
+`slide-fade`, or `fade`; `duration` and `curve` use the same forms as window
+motion. `travel` is a `0`–`1` fraction of the output's live physical width,
+not a fixed pixel distance. At most one snapshot is retained per output, it is
+dropped when the transition ends or the output disappears, and the existing
+water workspace transition takes precedence when both are enabled.
+
+`interactive { }` smooths pointer-driven move and resize without enabling the
+water identity. `half_life` is the refresh-independent exponential settling
+time (`0ms` makes the path immediate). It keeps one small record per actively
+moving window and allocates no texture or framebuffer.
+
 ### Interactive viscosity
 
-`viscosity` controls TideWM's liquid drag and resize feel independently of the
-fixed-duration `animations { movement { } }` transition. Pointer grabs update
-the real window position, resize target, layout ratios, and hit-testing
-immediately. The rendered window rectangle follows with refresh-rate-independent
-exponential damping, including floating move/resize, tiled drag-to-swap, direct
-split-border resize, and modifier-drag tiled resize. Repeated pointer events
-retarget from the current on-screen rectangle, so motion stays continuous.
+The legacy top-level `viscosity` controls TideWM's liquid drag and resize feel
+independently of the fixed-duration `animations { movement { } }` transition.
+Pointer grabs update the real window position, resize target, layout ratios,
+and hit-testing immediately. The rendered window rectangle follows with
+refresh-rate-independent exponential damping, including floating move/resize,
+tiled drag-to-swap, direct split-border resize, and modifier-drag tiled resize.
+Repeated pointer events retarget from the current on-screen rectangle, so
+motion stays continuous.
 
 The state is bounded to one small record per moving window and stores no pointer
 history, textures, or framebuffers. `0` disables it, `1.0` is the default,
 and values up to `4.0` progressively slow settling. `water_effects = false`
-bypasses it globally. A matching `rule { viscosity = ... }` overrides the
-global value for one app.
+bypasses this legacy route. When `animations.interactive.enabled = true`, its
+direct `half_life` takes precedence and works regardless of `water_effects`.
+A matching `rule { viscosity = ... }` overrides only the legacy liquid value
+for one app.
 
 ### `vessels { }` (legacy: `connected_vessels { }`)
 
@@ -503,6 +543,12 @@ tiling zones, not pages, and bookmarks are named camera return points. The
 optional camera-anchored guide field moves and scales with the world, so empty
 travel remains legible instead of looking like windows sliding over a fixed
 wallpaper.
+
+Rendering derives one placement snapshot from each output's current camera and
+shares it across every consumer in that render pass, including glass capture,
+tab strips, and final composition. Reefs outside that camera are rejected
+before their BSP trees are walked. Whole-world features such as the minimap
+still inspect every reef, and no placement snapshot persists across frames.
 
 With no `reef` declaration TideWM creates `main` at `0x0`. Its dimensions come
 from the real logical output viewport—there is no 1080p resolution constant.
@@ -1186,14 +1232,14 @@ input {
 
 ### `output <name> { }`
 
-Per-connector overrides, **udev backend only** — winit's single simulated output has no real mode list or transform-as-monitor-orientation meaning. Purely opt-in: an output with no matching block auto-configures (preferred mode, auto-positioned to the right of whatever's already mapped, scale 1, no rotation). One block per connector; repeat the block (in the same or another included file) for a second monitor.
+Per-connector overrides, **udev backend only** — winit's single simulated output has no real mode list or transform-as-monitor-orientation meaning. Purely opt-in: an output with no matching block auto-configures (preferred mode, auto-positioned to the right of whatever's already mapped, scale 1, no rotation). One block per connector; repeat the block (in the same or another included file) for a second monitor. Position validation uses the selected output's live logical size after mode, transform, and scale: TideWM does not assume a resolution, refresh rate, or maximum monitor count. A configured position whose rectangle or complete desktop span cannot be represented warns and uses automatic placement instead.
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | header | string | — | Connector name, e.g. `eDP-1`, `DP-2`. Check your logs or the `outputs` IPC query for what TideWM detected. |
 | `enabled` | bool | `true` | Set `false` to leave a connected output unused. |
 | `mode` | string, optional | connector's preferred mode | `1920x1080` or `1920x1080@60`. Falls back to the connector's own preferred mode if unset or unmatched. |
-| `position` | `WxH`, optional | auto-layout | e.g. `1920x0`. Falls back to auto-layout (rightmost edge of already-mapped outputs) if unset. |
+| `position` | `WxH`, optional | auto-layout | e.g. `1920x0`. Falls back to the live layout's right edge if unset or outside the logical coordinate domain; if no adjacent position fits at that edge, the output safely overlaps the live minimum corner. |
 | `scale` | float | `1.0` | |
 | `transform` | string | `normal` | One of `normal`, `90`, `180`, `270`, `flipped`, `flipped-90`, `flipped-180`, `flipped-270`. |
 | `gaps` | integer, optional | global `gaps` | Per-output gap override for every workspace shown on this connector. A `workspace_gaps` entry beats it. |
@@ -1443,7 +1489,7 @@ The same set of strings works after `bind ... =` at the top level or inside a `s
 **Focus and layout**
 - `cycle-focus` — most-recently-used order, not z-order
 - `focus-urgent` — jump to whichever window is currently marked urgent, if any
-- `focus-left` / `focus-right` / `focus-up` / `focus-down`
+- `focus-left` / `focus-right` / `focus-up` / `focus-down` — Classic selects by live screen geometry. Ocean compares the current camera projection, keeps the camera still for a visible neighbor, and glides it to an off-camera neighbor using `ocean.camera_animation_ms`/`camera_sway`; screen pins use their viewport position.
 - `swap-left` / `swap-right` / `swap-up` / `swap-down`
 - `resize-left` / `resize-right` / `resize-up` / `resize-down` — shrink/grow the focused floating window by 24 logical pixels, or resize its nearest BSP split and connected parallel ancestors
 - `layout:bsp` / `layout:master` / `layout:cascade` — switch the current workspace's tiling algorithm
@@ -1500,8 +1546,11 @@ rewriting a line removes or changes it completely.
 ## IPC and `tidectl`
 
 `$XDG_RUNTIME_DIR/tidewm-<pid>.sock`: one JSON request line in, one JSON response line out, per connection. Read queries return structured data; `{"request": "action", "action": "<any string above>"}` runs any action string. `{"request":"batch","actions":["workspace:2","spawn:kitty"]}` validates the complete list first, then executes up to 128 actions in order, so an invalid later item cannot leave a half-run batch. This is genuinely the same path a keybind press uses (`config::parse_action` → `Smallvil::run_action`).
+Normal process termination through SIGINT, SIGTERM, or SIGHUP exits through the compositor event loop and removes this socket. SIGKILL and machine/process failure cannot run cleanup; PID-scoped discovery and stale-socket handling cover that unavoidable case.
 
 Queries: `outputs`, `workspaces`, `windows`, `focused-window`, `active-submap`, `diagnostics`. `{"request": "eval", "expression": "<wave expression>"}` evaluates on the live session Lua (config variables, section tables, and the refreshed `tide` table) and returns the value as JSON.
+The `windows` query describes every protocol-mapped toplevel, including clients on inactive Classic workspaces, parked group tabs, and Depth Deck entries; visibility in the current output scene is not treated as mapping state.
+`tidectl` gives connection, request-write, one-shot-response, and subscription-handshake I/O 10 seconds to complete. One-shot replies are limited to 16 MiB and each newline-delimited subscription record to 256 KiB. After the subscribe acknowledgement, the read deadline is removed: an event stream may correctly remain quiet for any length of time, but no single peer-controlled record can grow memory without bound.
 In Ocean, `outputs` reports `active_workspace: null`, the current two-axis
 `camera_origin`, and `camera_zoom`; `workspaces` returns an empty list because bookmarks
 are navigation targets rather than real workspaces. Ocean window entries use
@@ -1536,7 +1585,7 @@ tidectl subscribe focus workspace window   # long-lived event stream, one JSON l
 
 `tidectl subscribe [event...]` is the one long-lived CLI command: it opens the subscribe mode above and prints each `{"event": "<kind>", "data": ...}` line verbatim until TideWM exits (socket EOF ends the process cleanly, so a supervisor can restart it). With no event names every channel is subscribed. A bar or panel runs it as a persistent process and parses stdout — instant, event-driven updates with no polling; the QuickShell Tide rice uses exactly this instead of its old fixed-rate `tidectl` polls.
 
-`tidectl perf [--window <secs>] [--json]` takes two IPC `perf` snapshots spaced by the window (default 3s) and prints a compact PSS/RSS/thread-count/render-state summary. CPU% comes from the delta of the compositor's own `getrusage` microsecond counters between the two snapshots, so it's always about the right process and needs no `CLK_TCK` constant; there's no GPU-busy%, since that needs a vendor-specific source the compositor can't read portably.
+`tidectl perf [--window <secs>] [--json]` takes two IPC `perf` snapshots spaced by the window (default 3s) and prints a compact PSS/RSS/thread-count/render-state summary. CPU% comes from the delta of the compositor's own `getrusage` microsecond counters between the two snapshots, so it's always about the right process and needs no `CLK_TCK` constant. It also reports the ARGB pixel payload of TideWM-owned backdrop, built-in-wallpaper, caustics, and active workspace-transition textures, derived from their live allocations. That estimate excludes client buffers and driver metadata, while GPU-busy% still requires a vendor-specific tool.
 
 **Diagnostics.** Two host-side commands run entirely outside the socket, so they work even when TideWM won't start:
 
@@ -1574,7 +1623,7 @@ Full flag/command list: `tidectl --help`.
 | `zwp-text-input-v3` + `zwp-input-method-v2` + `zwp-virtual-keyboard-v1` | IME support | Done — app-side activation verified live; see CHANGELOG for the exact verification bar per sub-protocol |
 | `wp-cursor-shape-v1` | Named-cursor requests (Qt6/GTK4, QuickShell) | Done |
 | `zwp-tablet-v2` | Drawing tablet/pen support (tools, pressure, tilt, proximity) | Done via Smithay's convenience module — global, per-device hotplug advertisement, and full axis/proximity/tip/button forwarding live in `tide_core/input.rs`. Verified live nested that the global advertises and a real client's `get_tablet_seat` request completes cleanly with no crash; real tablet hardware to exercise actual `DeviceAdded`/axis/pressure/tilt events has not been available to test |
-| `wlr-output-management-unstable-v1` | Runtime output reconfiguration (`wlr-randr`, `kanshi`, `wdisplays`) | Done — position/transform/scale apply live; disabling an output or changing resolution needs real hardware to verify a live modeset |
+| `wlr-output-management-unstable-v1` | Runtime output reconfiguration (`wlr-randr`, `kanshi`, `wdisplays`) | Done — position/transform/scale apply live; complete layouts outside Smithay's logical coordinate domain fail atomically; disabling an output or changing resolution needs real hardware to verify a live modeset |
 | `wlr-output-power-management-unstable-v1` | Display on/off (DPMS) | Protocol + render-loop logic done; real CRTC power toggle unverified on hardware |
 | `zwlr-gamma-control-manager-v1` | Night-light tools (`wlsunset`, `gammastep`) | Protocol + DRM gamma ioctls done; real color-change unverified on hardware |
 | `org.freedesktop.a11y.KeyboardMonitor` (DBus, not a Wayland protocol) | Screen reader (Orca) grabbing/watching keys system-wide | Done, behind the `accessibility` Cargo feature (off by default, `cargo build --features accessibility`) — see CHANGELOG for the verification bar |

@@ -144,7 +144,7 @@ pub fn init_winit(
     // hitting exactly that hang after moving this into `Smallvil::new()`.
     std::env::set_var("WAYLAND_DISPLAY", &state.socket_name);
 
-    // A bounded ~60Hz calloop Timer drives the loop, not
+    // A bounded host-cadence calloop Timer drives the loop, not
     // WinitEvent::Redraw/backend.window().request_redraw() (the pattern
     // smallvil used): nothing throttles how fast request_redraw() re-fires
     // on its own, and it was spinning the CPU at 100% even fully idle. A
@@ -230,6 +230,18 @@ pub fn init_winit(
                 let size = entry.backend.window_size();
 
                 let locked = !matches!(state.session_lock, SessionLock::Unlocked);
+                let placements = if locked {
+                    Vec::new()
+                } else {
+                    match state.render_placements(&entry.output) {
+                        Some(placements) => placements,
+                        None => {
+                            tracing::warn!("Failed to gather nested output placements");
+                            entry.dirty = true;
+                            continue;
+                        }
+                    }
+                };
 
                 // Backdrop capture is FBO-only and must happen outside the
                 // visible bind/submit lifetime. Running it immediately
@@ -238,8 +250,8 @@ pub fn init_winit(
                 // behind. Same-sized recaptures reuse their window texture.
                 if !locked {
                     let renderer = entry.backend.renderer();
-                    state.capture_window_backdrops(renderer, &entry.output);
-                    state.capture_layer_backdrops(renderer, &entry.output);
+                    state.capture_window_backdrops(renderer, &entry.output, &placements);
+                    state.capture_layer_backdrops(renderer, &entry.output, &placements);
                 }
 
                 let render_result = {
@@ -312,14 +324,6 @@ pub fn init_winit(
                         // space_elements -- see glass_frame_elements'
                         // own doc comment for why this means "topmost
                         // among windows," not real multi-window z-order.
-                        let placements = match state.render_placements(&entry.output) {
-                            Some(placements) => placements,
-                            None => {
-                                tracing::warn!("Failed to gather nested output placements");
-                                entry.dirty = true;
-                                continue;
-                            }
-                        };
                         let glass_surfaces = state.glass_eligible_surfaces(&placements);
                         #[allow(clippy::mutable_key_type)]
                         let mut glass_layers = state.glass_layer_elements(
@@ -394,6 +398,7 @@ pub fn init_winit(
                         // chain's single-insertion-point shape.
                         let workspace_transition =
                             state.workspace_transition_frame_element(renderer, &entry.output);
+                        let workspace_glide = state.workspace_glide_frame_element(&entry.output);
                         let depth_transition =
                             state.depth_transition_frame_element(renderer, &entry.output);
                         let compass_elements =
@@ -410,7 +415,11 @@ pub fn init_winit(
                                 .chain(overview_element)
                                 .chain(toast_element)
                                 .chain(error_element)
-                                .chain(state.tab_strip_elements(renderer, &entry.output))
+                                .chain(state.tab_strip_elements(
+                                    renderer,
+                                    &entry.output,
+                                    &placements,
+                                ))
                                 .chain(welcome_element)
                                 .map(crate::backend::udev::OutputRenderElements::Composited),
                         );
@@ -418,6 +427,7 @@ pub fn init_winit(
                         elements.extend(ripple_layers.above_windows);
                         elements.extend(compass_elements);
                         elements.extend(workspace_transition);
+                        elements.extend(workspace_glide);
                         elements.extend(closing_windows);
                         elements.extend(depth_elements);
                         elements.extend(space_elements);
@@ -531,11 +541,9 @@ pub fn init_winit(
             state.cleanup_capture();
             let _ = state.display_handle.flush_clients();
 
-            // Re-arm at the host panel's real frame period (the mode
-            // refresh set above from the host monitor), not a hardcoded
-            // ~60Hz -- still a bounded Timer, so the no-CPU-spin property
-            // this loop exists for is unchanged; it just ticks at the
-            // rate the host can actually display.
+            // Re-arm at the host panel's reported frame period. The bounded
+            // timer preserves the no-spin property while following the
+            // monitor that owns the nested window.
             let refresh = outputs
                 .iter()
                 .filter_map(|entry| entry.output.current_mode())

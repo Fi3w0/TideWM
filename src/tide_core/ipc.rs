@@ -1,40 +1,11 @@
-//! TideWM's JSON-over-Unix-socket control interface. Two modes share one socket:
+//! TideWM's newline-delimited JSON control socket.
 //!
-//! * **Request-response** (Phase A item 3 of the WM feature-parity roadmap):
-//!   one connection, one request line in, one response line out, then the
-//!   server closes it.
-//! * **Subscribe** (Phase R3 of the render/visual-identity roadmap, see
-//!   AGENT.md): the connection stays open and the server pushes JSON lines
-//!   as the desktop changes -- so a reactive widget (a waybar module, an
-//!   eww `deflisten`, a QuickShell socket reader) doesn't have to poll the
-//!   one-shot queries. Clean documented JSON, deliberately not a mimicry
-//!   of Hyprland's `socket2` event-string wire shape: there's no
-//!   compatibility reason to match that specific format.
-//!
-//! Read queries: `{"request": "outputs"}`, `{"request": "workspaces"}`,
-//! `{"request": "windows"}`, `{"request": "focused-window"}`,
-//! `{"request": "active-submap"}` (the currently active `submap <name> { }`
-//! block, if any -- `null` when the base binds are in effect).
-//! Actions: `{"request": "action", "action": "<string>"}`, where the string
-//! is the *exact* same syntax a `bind` statement's action half uses in
-//! config.wave (e.g. `"workspace:3"`, `"close-window"`, `"spawn:kitty"`) --
-//! routed through
-//! `config::parse_action`/`Smallvil::run_action` directly, so every action
-//! a keybind can trigger is IPC-addressable for free, including ones added
-//! by later phases, with zero new dispatch code here.
-//!
-//! Subscribe: `{"request": "subscribe", "events": ["window", "workspace",
-//! "focus", "urgent", "depth", "config"]}`. Omitting `events` (or sending
-//! an empty array) subscribes to all of them. The server replies with one
-//! ack line, then keeps the connection open and writes one JSON line per
-//! matching event: `{"event": "<kind>", "data": ...}`. The connection's
-//! lifetime is the subscription's lifetime -- closing it unsubscribes.
-//!
-//! Every request-response reply is `{"ok": true, "data": ...}` or
-//! `{"ok": false, "error": "..."}` -- malformed JSON or an unrecognized
-//! action string gets an error response, not a dropped connection, so a
-//! scripting mistake is visible to whatever's on the other end of the
-//! socket.
+//! Request-response connections read one request, write one result, and
+//! close. Subscribe connections acknowledge once and then stream filtered
+//! desktop events until the peer closes. Actions use the same parser and
+//! dispatch path as Wave keybinds. Replies are `{"ok":true,"data":...}` or
+//! `{"ok":false,"error":"..."}`; `DOCUMENTATION.md` defines the complete
+//! request, event, and command surface.
 
 use std::{
     cell::Cell,
@@ -322,11 +293,8 @@ impl IpcEvent {
 /// callers each have a sensible fallback for that case.
 fn snapshot_window(state: &Smallvil, surface: &WlSurface) -> Option<serde_json::Value> {
     let focused = state.focused_window_surface();
-    let window = state
-        .space
-        .elements()
-        .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface))?;
-    window_json(state, window, focused.as_ref())
+    let window = state.mapped_toplevel_window(surface)?;
+    window_json(state, &window, focused.as_ref())
 }
 
 /// A long-lived subscribe connection. One per `subscribe` request, stored
@@ -975,17 +943,24 @@ fn workspaces_json(state: &Smallvil) -> serde_json::Value {
     json!(workspaces)
 }
 
-/// Only currently-mapped (visible) windows -- a window tiled or tagged on a
-/// hidden workspace isn't in `space.elements()` at all, same structural
-/// limitation `FloatingTag` was introduced to work around internally.
-/// Listing hidden-workspace windows too is a reasonable follow-up once
-/// something needs it.
+/// Every protocol-mapped toplevel, including windows absent from `Space`
+/// because their Classic workspace, group tab, or Depth Deck entry is hidden.
+/// Numeric foreign-toplevel ids provide deterministic mapping-order output.
 fn windows_json(state: &Smallvil) -> serde_json::Value {
     let focused = state.focused_window_surface();
-    let windows: Vec<_> = state
-        .space
-        .elements()
-        .filter_map(|window| window_json(state, window, focused.as_ref()))
+    let mut mapped: Vec<_> = state
+        .foreign_toplevel_numeric_ids
+        .iter()
+        .filter_map(|(surface, id)| {
+            state
+                .mapped_toplevel_window(surface)
+                .map(|window| (*id, window))
+        })
+        .collect();
+    mapped.sort_unstable_by_key(|(id, _)| *id);
+    let windows: Vec<_> = mapped
+        .iter()
+        .filter_map(|(_, window)| window_json(state, window, focused.as_ref()))
         .collect();
     json!(windows)
 }
@@ -994,13 +969,9 @@ fn focused_window_json(state: &Smallvil) -> serde_json::Value {
     let Some(focused) = state.focused_window_surface() else {
         return serde_json::Value::Null;
     };
-    let window = state
-        .space
-        .elements()
-        .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == &focused));
-    match window {
+    match state.mapped_toplevel_window(&focused) {
         Some(window) => {
-            window_json(state, window, Some(&focused)).unwrap_or(serde_json::Value::Null)
+            window_json(state, &window, Some(&focused)).unwrap_or(serde_json::Value::Null)
         }
         None => serde_json::Value::Null,
     }
@@ -1080,6 +1051,34 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
         })
         .collect();
     let visible_windows = state.space.elements().count();
+    let backdrop_texture_bytes = state
+        .backdrop_textures
+        .values()
+        .fold(0_u64, |total, capture| {
+            total.saturating_add(capture.estimated_texture_bytes())
+        });
+    let wallpaper_texture_bytes = state.builtin_wallpaper.estimated_texture_bytes();
+    let caustics_texture_bytes = state.caustics.values().fold(0_u64, |total, caustics| {
+        total.saturating_add(caustics.estimated_texture_bytes())
+    });
+    let transition_texture_bytes = state
+        .workspace_transitions
+        .values()
+        .fold(0_u64, |total, transition| {
+            total.saturating_add(transition.estimated_texture_bytes())
+        })
+        .saturating_add(
+            state
+                .workspace_glides
+                .values()
+                .fold(0_u64, |total, transition| {
+                    total.saturating_add(transition.estimated_texture_bytes())
+                }),
+        );
+    let tide_texture_estimate_bytes = backdrop_texture_bytes
+        .saturating_add(wallpaper_texture_bytes)
+        .saturating_add(caustics_texture_bytes)
+        .saturating_add(transition_texture_bytes);
     #[cfg(feature = "screencast")]
     let screencast_feature = state.screencast.is_some();
     #[cfg(not(feature = "screencast"))]
@@ -1108,6 +1107,15 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
         "screencast_feature": screencast_feature,
         "session_locked": !matches!(state.session_lock, crate::tide_core::state::SessionLock::Unlocked),
         "visible_windows": visible_windows,
+        "tide_texture_estimate": {
+            "bytes": tide_texture_estimate_bytes,
+            "backdrop_bytes": backdrop_texture_bytes,
+            "backdrop_count": state.backdrop_textures.len(),
+            "wallpaper_bytes": wallpaper_texture_bytes,
+            "caustics_bytes": caustics_texture_bytes,
+            "workspace_transition_bytes": transition_texture_bytes,
+            "scope": "ARGB payload for TideWM-owned backdrop, wallpaper, caustics, and active water/non-water workspace-transition textures; excludes client buffers and driver overhead",
+        },
         "outputs": outputs,
     })
 }

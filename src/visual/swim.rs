@@ -1,18 +1,7 @@
-//! Continuous lateral "swim" camera from spatial roadmap S0.
-//!
-//! The lateral axis stays a sequence of discrete tiling spots, each an
-//! ordinary BSP/master/cascade tree, so logical workspace identity is still
-//! the `u32` number owned by `Layouts::active`. This module owns the
-//! purely-visual continuous camera offset layered on top of that discrete
-//! identity: a horizontal trackpad swipe pans the offset, the anchor
-//! advances once it crosses the halfway mark, and a spring eases the
-//! residual offset back to rest on release. At rest the offset is zero, so
-//! the idle frame is identical to the discrete-switch mode and an idle
-//! desktop still ticks zero frames.
-//!
-//! Like sway/viscosity/ripple, there is no per-frame integrator and no
-//! motion history: the spring is a closed-form ease over R0's `Animation`
-//! primitive, and a settled camera stops asking for frames entirely.
+//! Continuous visual camera offset over discrete numbered workspaces. A swipe
+//! advances the logical anchor at half-spot crossings and a closed-form spring
+//! settles the residual offset to zero without retaining motion history or
+//! requesting idle frames.
 
 use std::time::{Duration, Instant};
 
@@ -137,14 +126,8 @@ impl SwimCamera {
             .is_some_and(|spring| !spring.finished())
     }
 
-    /// Whether the camera is fully idle: no live drag offset, no in-flight
-    /// spring. The one state where this entry carries no information and
-    /// can be pruned from the tracking map, same "finished means gone"
-    /// convention `window_sway`/`window_viscosity` already use. Checks
-    /// `settling()` rather than `spring.is_none()` directly -- a finished
-    /// spring stays `Some` until something takes or overwrites it (`drag`,
-    /// another `release`), so `is_none()` alone would never observe a
-    /// settled camera as prunable.
+    /// Whether the tracking entry can be pruned. A finished spring may remain
+    /// stored, so this uses its sampled state rather than `Option::is_none`.
     pub fn at_rest(&self) -> bool {
         !self.settling() && self.offset == 0.0
     }

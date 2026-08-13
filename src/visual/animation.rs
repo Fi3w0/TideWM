@@ -1,13 +1,6 @@
-//! Shared animation primitive, the foundation piece of the render/visual
-//! identity roadmap (AGENT.md's "Render and visual identity roadmap", Phase
-//! R0). Before this, nothing in the codebase interpolated a value over time;
-//! every state change (opacity, toast fade, resize) was either instant or,
-//! in `toast.rs`'s case, hand-rolled elapsed-time arithmetic. This is that
-//! arithmetic pulled out into something any future effect (ripple decay,
-//! workspace-transition progress, resize damping) can reuse instead of
-//! re-deriving it, and `toast.rs`'s fade is the first thing built on it --
-//! see its own use for the shape of a delayed-start animation (one that
-//! begins at a past instant, not "now").
+//! Time-based interpolation shared by compositor UI, window motion, ripples,
+//! and workspace transitions. Sampling is wall-clock based, so duration is
+//! independent of an output's refresh cadence.
 
 use std::time::{Duration, Instant};
 

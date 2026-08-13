@@ -1,26 +1,7 @@
-//! Cosmetic 2D bob-and-drift for floating windows (spatial roadmap F1,
-//! `light` tier). The generalization of `sway.rs`: instead of one lateral
-//! axis kicked by a drag, two axes are kicked by any disturbance -- a
-//! floating drag, a window mapping, or a workspace-transition wave passing
-//! across the output -- and decay back to rest on their own.
-//!
-//! Like `sway.rs`/`viscosity.rs`/`ripple.rs`, there is no per-frame
-//! integrator, no motion history, and no render allocation. The offset is a
-//! closed-form function of the time elapsed since the last kick, so a
-//! settled window stops asking for frames entirely and an idle desktop
-//! still ticks zero frames. A kick is just a sample-then-reseed of the two
-//! amplitudes.
-//!
-//! The lateral axis uses cosine (exact continuity on re-kick, the sway
-//! precedent); the vertical axis uses sine, a fixed quarter-period offset,
-//! so a window energized by a disturbance reads as bobbing in place rather
-//! than sliding diagonally. Because the vertical term is zero at the kick
-//! instant, an actively dragged window stays put vertically while the
-//! pointer has authority, then bobs once the drag releases and the
-//! accumulated vertical amplitude has room to oscillate. The exact phase
-//! relationship and every default below are feel parameters, open to the
-//! user's nested tuning pass; the shape here is the deliberate starting
-//! point.
+//! Render-only 2D bob and drift for floating windows. A disturbance samples
+//! the current offset and reseeds a bounded, exponentially decaying cosine/
+//! sine pair. The closed-form sample stores no motion history, allocates no
+//! render resource, and stops requesting frames after settling.
 
 use std::time::Instant;
 
@@ -45,9 +26,7 @@ pub struct FloatPhysics {
 }
 
 impl FloatPhysics {
-    /// First kick from rest. Equivalent to a zeroed record followed by
-    /// `kick`, kept as its own constructor to mirror `sway.rs`'s shape and
-    /// make the from-rest case legible at the call site.
+    /// Creates a state at rest and applies its first kick.
     pub fn kicked(
         impulse: (f64, f64),
         response: f64,
@@ -129,20 +108,10 @@ pub fn falloff_kick(source: (f64, f64), target: (f64, f64), radius: f64) -> Opti
     Some(1.0 - dist / radius)
 }
 
-/// Continuous ambient "sitting on water" offset (`toggle-float-ambient`),
-/// independent of the kick/decay model above. Real buoyancy sims don't
-/// fire discrete impulses at an idle floating object -- they track a
-/// smooth wave-height function and let the object follow it. This is that
-/// function: a small sum of sine waves at incommensurate frequency
-/// multiples and phases (`period_s` scales the slowest/dominant one; the
-/// others are fixed ratios off it), so the path is continuous, never
-/// settles, and doesn't visibly repeat on a short cycle -- the classic
-/// "sum a few waves" trick real ocean-shader/buoyancy implementations use
-/// instead of simulating a full wave field for one bobbing object. `elapsed`
-/// is seconds since ambient was toggled on for this window, so two windows
-/// toggled on at different times drift out of phase with each other for
-/// free. Each axis's own coefficients sum to `<= 1.0`, so the result is
-/// bounded to `amplitude` by construction -- no separate clamp needed.
+/// Continuous ambient offset independent of the kick/decay model. A bounded
+/// sum of incommensurate sine waves avoids a short visible repeat; `elapsed`
+/// is per-window time since activation, so separately enabled windows differ
+/// in phase. Each axis remains within `amplitude` by construction.
 pub fn ambient_sample(elapsed: f64, amplitude: f64, period_s: f64) -> (f64, f64) {
     let omega = std::f64::consts::TAU / period_s.max(0.001);
     let x = amplitude * (0.6 * (omega * elapsed).sin() + 0.4 * (omega * 1.9 * elapsed + 1.3).sin());
@@ -151,22 +120,13 @@ pub fn ambient_sample(elapsed: f64, amplitude: f64, period_s: f64) -> (f64, f64)
     (x, y)
 }
 
-/// Combined offset+velocity magnitude below which a `full`-tier body is
-/// treated as settled. A separate constant from `SETTLE_EPSILON` (rather
-/// than reusing it for both position and velocity) since the two are
-/// different units; both happen to read fine at the same numeric value.
+/// Independent full-tier thresholds for position and velocity, which have
+/// different units despite sharing a useful numeric value.
 const BODY_SETTLE_EPSILON: f64 = 0.25;
 
-/// A `full`-tier floating window: a unit mass-spring-damper body anchored
-/// at the window's own logical position (offset `(0, 0)`), carrying real
-/// velocity state instead of `FloatPhysics`' closed-form amplitude/phase.
-/// Velocity state is what makes collision impulse exchange possible --
-/// closed-form motion has no notion of "how fast is this moving right
-/// now" to hand to another body. Advanced by `step_body`, a plain
-/// semi-implicit-Euler integrator; the state itself holds no clock, unlike
-/// `FloatPhysics`, since a rigid-body sim needs a fixed timestep loop
-/// driving it forward regardless (see `Smallvil::update_float_physics_full`),
-/// not a "sample any time" closed form.
+/// Full-tier unit mass-spring-damper body anchored at zero logical offset.
+/// Explicit velocity supports collision impulses; the fixed-timestep owner
+/// supplies time to `step_body`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FloatBody {
     pub offset: (f64, f64),
@@ -178,21 +138,14 @@ impl FloatBody {
         Self::default()
     }
 
-    /// Absorbs one instantaneous disturbance as a velocity change (an
-    /// impulse, not a position jump) -- the collision solver and the wave
-    /// field both already work purely in velocity/acceleration terms, so a
-    /// drag/map/workspace-wave kick joins them the same way rather than
-    /// needing its own special-cased application.
+    /// Applies an instantaneous velocity impulse without moving position.
     pub fn kick(&mut self, impulse: (f64, f64), response: f64) {
         self.velocity.0 += impulse.0 * response;
         self.velocity.1 += impulse.1 * response;
     }
 
-    /// Settled when not visibly displaced and not visibly moving. Callers
-    /// combine this with whether continuous wave forcing is active for the
-    /// window -- a body can be numerically "settled" for an instant while
-    /// still being forced right back out by the wave on the very next step,
-    /// which is exactly the "wave on never settles" behavior by design.
+    /// Settled when neither displacement nor velocity is visible. Callers
+    /// separately account for continuous wave forcing.
     pub fn finished(&self) -> bool {
         self.offset.0.hypot(self.offset.1) <= BODY_SETTLE_EPSILON
             && self.velocity.0.hypot(self.velocity.1) <= BODY_SETTLE_EPSILON
@@ -211,24 +164,9 @@ pub(crate) fn bodies_need_simulation<'a>(
     wave_enabled || bodies.into_iter().any(|body| !body.finished())
 }
 
-/// Advances one body by `dt` seconds under a damped-spring pull toward
-/// `target` -- `(0, 0)` when the wave field is off (so the body settles
-/// back to its real logical position), or the current wave height when
-/// it's on (so the body never fully settles, chasing a moving anchor
-/// instead). `stiffness`/`drag` play the spring/damping role
-/// `frequency`/`damping` already play for `light` tier's closed form,
-/// reusing those same two config knobs rather than adding a parallel pair
-/// -- see `Smallvil::update_float_physics_full` for the mapping. Uses
-/// semi-implicit ("symplectic") Euler: velocity updates from the current
-/// acceleration first, then position updates from the *new* velocity --
-/// unconditionally stable for a damped spring at reasonable step sizes,
-/// unlike plain (explicit) Euler which can blow up. `max_offset` is a hard
-/// positional clamp (not just an energy/amplitude clamp like `kick`'s
-/// above): this is render-offset-only, so any unclamped drift means a
-/// click lands where the window visually isn't. Clamping zeroes the
-/// outward radial velocity component so a body pressed against its own
-/// leash doesn't keep straining against it frame after frame -- it can
-/// still slide tangentially along the boundary.
+/// Advances a damped spring toward `target` using semi-implicit Euler.
+/// `max_offset` hard-bounds the render displacement; at the boundary only the
+/// outward radial velocity is removed, preserving tangential motion.
 pub fn step_body(
     body: &mut FloatBody,
     target: (f64, f64),
@@ -261,15 +199,9 @@ pub fn step_body(
     }
 }
 
-/// Continuous traveling-wave target for `full` tier's spring anchor,
-/// keyed by a body's own fixed world X position (not its current offset,
-/// which would feed the wave's own output back into itself) rather than
-/// per-window elapsed time like `ambient_sample` -- so windows spread out
-/// left to right visibly ripple in sequence like one shared surface,
-/// instead of every window bobbing in lockstep. Reuses `ambient_sample`'s
-/// "sum a couple of incommensurate sines" shape for the same
-/// never-quite-repeats feel, as a real traveling wave `sin(kx - wt)`
-/// rather than a per-window phase offset.
+/// Traveling-wave spring target keyed by fixed world X, not the body's live
+/// offset. Spatially separated windows therefore share one advancing wave
+/// instead of feeding the simulation output back into its input.
 pub fn wave_target(
     world_x: f64,
     elapsed: f64,
@@ -285,19 +217,10 @@ pub fn wave_target(
     (x, y)
 }
 
-/// Resolves one AABB overlap between two `full`-tier bodies as a single
-/// impulse along the shallower overlap axis (the usual "minimum
-/// translation axis" pick for a box-vs-box collision normal) -- velocity
-/// exchange only, never positional separation. Floating windows already
-/// sit stacked at rest by user choice (deliberately overlapped windows are
-/// a normal floating-desktop thing), so a resting, fully-overlapped pair
-/// must exchange nothing: returns `false` without touching either
-/// velocity whenever the relative velocity along the resolved normal is
-/// separating or zero, and only actually exchanges an impulse when the
-/// two are closing. `restitution` is the usual bounciness coefficient (`0`
-/// perfectly inelastic, `1` perfectly elastic); masses are assumed
-/// positive (callers clamp window area to a small minimum). Rects are
-/// `(x, y, w, h)` in the same coordinate space as both bodies' offsets.
+/// Exchanges velocity for a closing AABB overlap along its shallowest axis;
+/// it never separates positions. Resting or separating overlaps are unchanged.
+/// Rectangles and offsets share a coordinate space, and callers provide
+/// positive masses. Restitution ranges from inelastic `0` to elastic `1`.
 pub fn resolve_collision(
     a_rect: (f64, f64, f64, f64),
     b_rect: (f64, f64, f64, f64),
@@ -339,13 +262,8 @@ pub fn resolve_collision(
     true
 }
 
-/// Bounces a body's velocity off an output edge when its current rect has
-/// crossed that edge while still moving further out -- an infinite-mass
-/// wall, so only the body's own velocity changes, the same one-sided
-/// "only when approaching" rule `resolve_collision` uses against another
-/// body. Lets floating windows read as bobbing in a basin instead of open
-/// water with no walls. `rect`/`output` are `(x, y, w, h)` in the same
-/// coordinate space.
+/// Reflects outward velocity after crossing an output edge. `rect` and
+/// `output` are `(x, y, w, h)` in one coordinate space.
 pub fn resolve_edge_collision(
     rect: (f64, f64, f64, f64),
     vel: &mut (f64, f64),

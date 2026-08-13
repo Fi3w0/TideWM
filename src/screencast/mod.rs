@@ -324,6 +324,7 @@ pub fn init<'a>(
                     return;
                 }
                 state.queue_capture(PendingCapture {
+                    client_id: None,
                     output,
                     window,
                     draw_cursor,

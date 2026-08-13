@@ -134,23 +134,9 @@ impl PointerGrab<Smallvil> for ResizeSurfaceGrab {
                 (data.min_size, data.max_size)
             });
 
-        let min_width = min_size.w.max(1);
-        let min_height = min_size.h.max(1);
-
-        let max_width = if max_size.w == 0 {
-            i32::MAX
-        } else {
-            max_size.w
-        };
-        let max_height = if max_size.h == 0 {
-            i32::MAX
-        } else {
-            max_size.h
-        };
-
         self.last_window_size = Size::from((
-            new_window_width.max(min_width).min(max_width),
-            new_window_height.max(min_height).min(max_height),
+            constrain_dimension(new_window_width, min_size.w, max_size.w),
+            constrain_dimension(new_window_height, min_size.h, max_size.h),
         ));
 
         let xdg = self.window.toplevel().unwrap();
@@ -323,7 +309,9 @@ impl PointerGrab<Smallvil> for ResizeSurfaceGrab {
     }
 
     fn unset(&mut self, _data: &mut Smallvil) {
-        let toplevel = self.window.toplevel().unwrap();
+        let Some(toplevel) = self.window.toplevel() else {
+            return;
+        };
         cancel(toplevel.wl_surface());
         toplevel.with_pending_state(|state| {
             state.states.unset(xdg_toplevel::State::Resizing);
@@ -332,6 +320,16 @@ impl PointerGrab<Smallvil> for ResizeSurfaceGrab {
             toplevel.send_pending_configure();
         }
     }
+}
+
+/// Applies XDG size hints in max-then-min order. A zero maximum is
+/// unbounded; if a broken client advertises max < min, the minimum wins
+/// instead of TideWM producing a size below the client's minimum.
+fn constrain_dimension(mut value: i32, min_size: i32, max_size: i32) -> i32 {
+    if max_size > 0 {
+        value = value.min(max_size);
+    }
+    value.max(min_size.max(1))
 }
 
 /// State of the resize operation.
@@ -440,4 +438,17 @@ pub fn handle_commit(space: &mut Space<Window>, surface: &WlSurface) -> Option<(
     }
 
     Some(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::constrain_dimension;
+
+    #[test]
+    fn size_constraints_honor_normal_unbounded_and_inverted_hints() {
+        assert_eq!(constrain_dimension(50, 100, 300), 100);
+        assert_eq!(constrain_dimension(500, 100, 300), 300);
+        assert_eq!(constrain_dimension(500, 100, 0), 500);
+        assert_eq!(constrain_dimension(250, 300, 200), 300);
+    }
 }

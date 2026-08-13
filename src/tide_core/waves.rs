@@ -11,7 +11,10 @@
 //! means this module can be tested against its merge rules alone,
 //! without dragging in every config field this project happens to have
 //! today.
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 /// One parsed line (or block) from a `.wave` file. Deliberately untyped
 /// beyond this shape -- `config.rs` decides what a given `keyword`/`key`
@@ -54,69 +57,107 @@ fn assign_is_multi(key: &str) -> bool {
     matches!(key, "spawn" | "workspace_name" | "workspace_gaps")
 }
 
-/// Folds `incoming` onto `target` in place, applying the same policy in
-/// both directions this gets used for: parsing one file's own entries
-/// (fold its lines onto an initially-empty accumulator, so accidental
-/// duplication *within* one file is handled the same way as duplication
-/// *across* included files) and resolving `include`s (fold the including
-/// file's own entries onto whatever its includes already produced, so its
-/// own keys win -- see `resolve`).
-///
-/// - A scalar entry (`Assign`/`VarDef`/`Bind`) replaces any earlier entry
-///   of the same kind with the same key/name/combo -- last write wins,
-///   matching a TOML table's "duplicate key means override" shape once
-///   merged across files (a *literal* duplicate key within one raw TOML
-///   file is a hard parse error there; Waves is more forgiving on
-///   purpose, since "last bind on this combo wins" is a perfectly
-///   sensible thing to want across a multi-file split). The one
-///   exception is [`assign_is_multi`]'s keys (`spawn`, `workspace_name`),
-///   which accumulate instead -- see its own doc comment.
-/// - A block whose keyword is in [`block_is_keyed`] (`input`, `touchpad`,
-///   `env`, `switch_events`, `mode`, `ripple_preset`) merges recursively with an
-///   existing block of the same keyword *and* header (the header is the
-///   mode name for `mode`, empty for the others) -- these are
-///   conceptually single named sections, the same as a TOML table
-///   merging key-by-key across files.
-/// - Every other block (`output`, `rule`, anything not in the allowlist)
-///   always appends as a new entry, never merges -- these are
-///   conceptually arrays (TOML's `[[output]]`/`[[window_rule]]`
-///   concatenate across files, they don't merge by name).
+/// Merges entries with include precedence: later scalars replace earlier ones
+/// and move to the later position, multi-value assignments accumulate, keyed
+/// blocks merge recursively by keyword/header, and all other blocks append.
+/// The same policy handles duplicates within one file and across includes.
 pub(crate) fn merge_into(target: &mut Vec<Entry>, incoming: Vec<Entry>) {
+    // Replacements must move to their last-write position, so mutating an
+    // entry in place would change observable lowering order. Tombstones let
+    // us invalidate the previous positions in O(1), append the replacement,
+    // then compact once after the merge instead of retaining the whole
+    // target for every incoming scalar.
+    let mut slots: Vec<Option<Entry>> = std::mem::take(target).into_iter().map(Some).collect();
+    let mut assigns: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut variables: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut binds: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut handlers: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut keyed_blocks: HashMap<String, HashMap<String, usize>> = HashMap::new();
+
+    for (index, entry) in slots
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| entry.as_ref().map(|entry| (index, entry)))
+    {
+        match entry {
+            Entry::Assign(key, _) if !assign_is_multi(key) => {
+                assigns.entry(key.clone()).or_default().push(index);
+            }
+            Entry::VarDef(name, _) => variables.entry(name.clone()).or_default().push(index),
+            Entry::Bind(combo, _) => binds.entry(combo.clone()).or_default().push(index),
+            Entry::Handler(event, _) => handlers.entry(event.clone()).or_default().push(index),
+            Entry::Block(keyword, header, _) if block_is_keyed(keyword) => {
+                keyed_blocks
+                    .entry(keyword.clone())
+                    .or_default()
+                    .entry(header.clone())
+                    .or_insert(index);
+            }
+            _ => {}
+        }
+    }
+
     for entry in incoming {
-        match &entry {
-            Entry::Assign(key, _) => {
-                if !assign_is_multi(key) {
-                    target.retain(|e| !matches!(e, Entry::Assign(k, _) if k == key));
+        match entry {
+            Entry::Assign(key, value) => {
+                if assign_is_multi(&key) {
+                    slots.push(Some(Entry::Assign(key, value)));
+                } else {
+                    invalidate_slots(&mut slots, assigns.remove(&key));
+                    let index = slots.len();
+                    assigns.insert(key.clone(), vec![index]);
+                    slots.push(Some(Entry::Assign(key, value)));
                 }
-                target.push(entry);
             }
-            Entry::VarDef(name, _) => {
-                target.retain(|e| !matches!(e, Entry::VarDef(n, _) if n == name));
-                target.push(entry);
+            Entry::VarDef(name, value) => {
+                invalidate_slots(&mut slots, variables.remove(&name));
+                let index = slots.len();
+                variables.insert(name.clone(), vec![index]);
+                slots.push(Some(Entry::VarDef(name, value)));
             }
-            Entry::Bind(combo, _) => {
-                target.retain(|e| !matches!(e, Entry::Bind(c, _) if c == combo));
-                target.push(entry);
+            Entry::Bind(combo, action) => {
+                invalidate_slots(&mut slots, binds.remove(&combo));
+                let index = slots.len();
+                binds.insert(combo.clone(), vec![index]);
+                slots.push(Some(Entry::Bind(combo, action)));
             }
-            Entry::Handler(event, _) => {
-                target.retain(|e| !matches!(e, Entry::Handler(ev, _) if ev == event));
-                target.push(entry);
+            Entry::Handler(event, body) => {
+                invalidate_slots(&mut slots, handlers.remove(&event));
+                let index = slots.len();
+                handlers.insert(event.clone(), vec![index]);
+                slots.push(Some(Entry::Handler(event, body)));
             }
             Entry::Include(_) => {
                 // Resolved away before merging ever sees it -- see `resolve`.
             }
-            Entry::Block(keyword, header, body) if block_is_keyed(keyword) => {
-                if let Some(Entry::Block(_, _, existing_body)) = target
-                    .iter_mut()
-                    .find(|e| matches!(e, Entry::Block(k, h, _) if k == keyword && h == header))
-                {
-                    merge_into(existing_body, body.clone());
+            Entry::Block(keyword, header, body) if block_is_keyed(&keyword) => {
+                let existing = keyed_blocks
+                    .get(&keyword)
+                    .and_then(|headers| headers.get(&header))
+                    .copied();
+                if let Some(index) = existing {
+                    let Some(Entry::Block(_, _, existing_body)) = slots[index].as_mut() else {
+                        unreachable!("keyed block index must address a live block")
+                    };
+                    merge_into(existing_body, body);
                 } else {
-                    target.push(entry);
+                    let index = slots.len();
+                    keyed_blocks
+                        .entry(keyword.clone())
+                        .or_default()
+                        .insert(header.clone(), index);
+                    slots.push(Some(Entry::Block(keyword, header, body)));
                 }
             }
-            Entry::Block(..) => target.push(entry),
+            entry @ Entry::Block(..) => slots.push(Some(entry)),
         }
+    }
+    target.extend(slots.into_iter().flatten());
+}
+
+fn invalidate_slots(slots: &mut [Option<Entry>], positions: Option<Vec<usize>>) {
+    for position in positions.into_iter().flatten() {
+        slots[position] = None;
     }
 }
 
@@ -169,6 +210,27 @@ mod tests {
         let mut acc = Vec::new();
         merge_into(&mut acc, vec![assign("gaps", "8"), assign("gaps", "12")]);
         assert_eq!(acc, vec![Entry::Assign("gaps".into(), "12".into())]);
+    }
+
+    #[test]
+    fn scalar_override_keeps_last_write_order_and_removes_all_old_copies() {
+        let mut acc = vec![
+            assign("gaps", "4"),
+            block("output", "DP-1", vec![]),
+            assign("gaps", "8"),
+            assign("border_size", "2"),
+        ];
+
+        merge_into(&mut acc, vec![assign("gaps", "12")]);
+
+        assert_eq!(
+            acc,
+            vec![
+                block("output", "DP-1", vec![]),
+                assign("border_size", "2"),
+                assign("gaps", "12"),
+            ]
+        );
     }
 
     #[test]

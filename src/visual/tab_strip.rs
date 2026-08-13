@@ -1,12 +1,6 @@
-//! TideWM's tab-strip UI for a window group: a thin bar along the top of a grouped
-//! leaf's rect, one segment per member, the active one visually distinct.
-//! Same CPU-composited-texture approach as `toast.rs` (rasterize once into
-//! an RGBA buffer, hand it to the renderer as a texture) rather than every
-//! frame -- see `Smallvil::tab_strip_elements`, the only caller, for when a
-//! group's cached buffer actually gets rebuilt.
-//!
-//! Title commits invalidate the owning group's cache, including parked
-//! background tabs, so the next frame rebuilds the strip with current text.
+//! Cached CPU-rendered tab strip for a grouped tiled leaf. Title commits from
+//! active or parked members invalidate the owning group so the next frame uses
+//! current labels.
 
 use fontdue::Font;
 use smithay::{
@@ -34,8 +28,7 @@ fn display_title(title: Option<String>) -> String {
         .unwrap_or_else(|| "(untitled)".to_string())
 }
 
-/// The title a client has set for `surface`, or a placeholder if it hasn't
-/// (or unset it) -- same accessor `ipc.rs`'s `window_json` already uses.
+/// The current client title, or a placeholder when absent.
 pub fn window_title(surface: &WlSurface) -> String {
     display_title(with_states(surface, |states| {
         states

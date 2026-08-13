@@ -1,15 +1,7 @@
-//! Bioluminescent edge-glow compass for the Ocean engine (spatial roadmap
-//! S5). A window outside the output camera's viewport leaves a soft glow
-//! at the viewport edge in its direction: urgent windows glow in any
-//! direction, physically deep (sunk or lower-reef) windows glow below.
-//! Nearer windows glow brighter; the cue fades to nothing at the
-//! configured maximum distance. Cues are ambient and render-only --
-//! camera travel stays on the existing pan/zoom/bookmark/depth actions.
-//!
-//! One analytical pixel shader, no texture or framebuffer, and no render
-//! element at all when nothing is off-screen (the common case), so an
-//! idle desktop stays damage-driven. Cue slots are capped so a crowded
-//! world cannot grow the element list unboundedly.
+//! Render-only Ocean edge cues for urgent or deep windows outside the camera
+//! viewport. Distance controls brightness, and cues vanish beyond the
+//! configured range. The analytical shader allocates no texture; an empty cue
+//! set creates no element, and the cue count is bounded.
 
 use smithay::{
     backend::renderer::{

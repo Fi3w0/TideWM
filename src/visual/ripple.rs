@@ -1,12 +1,6 @@
-//! Impulse ripple, the second piece of Phase R1's identity slice (see
-//! AGENT.md's "Render and visual identity roadmap"). One shared primitive
-//! for a radial disturbance from a point, decaying over time -- intended
-//! to be triggered by different window-manager events (a window mapping
-//! is a droplet impact, a focus change ripples from the old focus to the
-//! new one, an urgent hint pulses until acknowledged) rather than three
-//! separate effects. The wave/aqua workspace transition (Phase R1, later
-//! sub-slice) will be this same primitive's directional variant, not a
-//! separate effect.
+//! Configurable impulse ripples shared by map, focus, and urgency triggers.
+//! Each ripple expands from an event-specific anchor and decays without
+//! changing authoritative window geometry.
 //!
 //! Fully configurable through the global `ripple { }` block and per-app
 //! `rule { ripple { } }` overrides -- see `config::RippleConfig` for the
@@ -38,33 +32,10 @@ use crate::config::{
     RippleAnchor, RippleConfig, RippleEase, RippleLayer, RipplePreset, RippleShape,
 };
 
-/// Procedural fragment shader for polished expanding impulse presets and the
-/// original geometric-shape compatibility mode.
-/// `v_coords` is normalized UV in `[0, 1]` from Smithay's vertex shader
-/// (see `build_texture_mat` in `backend/renderer/gles/mod.rs`, which
-/// divides by texture size at the end of building the tex matrix). The
-/// element's bounding square is sized to `(2r, 2r)` where `r` is the
-/// current ring radius, so a "ring" shape sits at UV radius `0.5` --
-/// the element grows over time, the ring follows its edge. Other shapes
-/// (square, droplet, cross) reuse the same bounding-square convention,
-/// drawn as different distance-field falloffs within it.
-///
-/// The Smithay pixel-shader framework supplies `size` (the element's
-/// buffer size) and `alpha` (the element's own alpha, see
-/// `RippleElement::alpha`) automatically. Additional uniforms:
-/// Presets remain one analytical element each. Their inner rings, glow,
-/// highlights, lobes, and wobble are math inside this shader, not extra
-/// textures or render elements. `Legacy` alone may emit multiple elements
-/// for the old `shapes` list.
-///
-/// RGB is pre-multiplied by alpha before writing `gl_FragColor`, matching
-/// `water_glass::WATER_GLASS_FRAGMENT_SHADER`'s own alpha handling --
-/// Smithay's GL blend setup expects pre-multiplied on this path.
-///
-/// The shader must not contain a `#version` directive; Smithay prepends
-/// `#version 100` itself (see `GlesRenderer::compile_custom_pixel_shader`'s
-/// own contract). Mirrors `water_glass::WATER_GLASS_FRAGMENT_SHADER`'s
-/// approach to that contract.
+/// Procedural impulse shader. `v_coords` is normalized UV and the element is
+/// a `(2r, 2r)` square, so its outer ring lies at radius `0.5`. Presets remain
+/// one analytical element; legacy shapes may stack several. Output RGB is
+/// premultiplied, and the source omits `#version` because Smithay supplies it.
 const RIPPLE_FRAGMENT_SHADER: &str = r#"
 precision highp float;
 

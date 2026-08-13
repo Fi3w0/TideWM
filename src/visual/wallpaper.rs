@@ -66,6 +66,19 @@ impl BuiltinWallpaper {
         }
     }
 
+    /// ARGB pixel payload of the imported fallback texture. This reports
+    /// zero until lazy import succeeds and excludes driver overhead.
+    pub fn estimated_texture_bytes(&self) -> u64 {
+        if self.imported.is_some() {
+            u64::try_from(WIDTH)
+                .unwrap_or(u64::MAX)
+                .saturating_mul(u64::try_from(HEIGHT).unwrap_or(u64::MAX))
+                .saturating_mul(4)
+        } else {
+            0
+        }
+    }
+
     pub fn render_element(
         &mut self,
         renderer: &mut GlesRenderer,

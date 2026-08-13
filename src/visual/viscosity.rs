@@ -10,22 +10,7 @@ use std::time::{Duration, Instant};
 
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
-/// Half-life in milliseconds at `viscosity = 1.0`.
-///
-/// A half-life makes the control refresh-rate independent: each elapsed
-/// interval removes the same fraction of the remaining distance regardless
-/// of whether the backend presents at 60, 120, or 165 Hz.
-const BASE_HALF_LIFE_MS: f64 = 30.0;
 const SETTLE_EPSILON: f64 = 0.25;
-
-fn half_life(viscosity: f64) -> Duration {
-    let viscosity = if viscosity.is_finite() {
-        viscosity.max(0.0)
-    } else {
-        0.0
-    };
-    Duration::from_secs_f64((BASE_HALF_LIFE_MS * viscosity) / 1000.0)
-}
 
 #[derive(Debug)]
 pub struct ViscousMotion {
@@ -39,11 +24,11 @@ impl ViscousMotion {
     pub fn new(
         from: Rectangle<f64, Logical>,
         target: Rectangle<f64, Logical>,
-        viscosity: f64,
+        half_life: Duration,
     ) -> Self {
         Self {
             start: Instant::now(),
-            half_life: half_life(viscosity),
+            half_life,
             from,
             target,
         }
@@ -52,12 +37,12 @@ impl ViscousMotion {
     /// Re-targets from the rectangle currently on screen. The previous
     /// logical target never leaks into the new curve, which prevents a
     /// snap when pointer events arrive faster than frames are presented.
-    pub fn retarget(&mut self, target: Rectangle<f64, Logical>, viscosity: f64) {
+    pub fn retarget(&mut self, target: Rectangle<f64, Logical>, half_life: Duration) {
         let now = Instant::now();
         self.from = self.sample_at(now);
         self.target = target;
         self.start = now;
-        self.half_life = half_life(viscosity);
+        self.half_life = half_life;
     }
 
     pub fn sample(&self) -> Rectangle<f64, Logical> {
@@ -109,7 +94,7 @@ mod tests {
         let mut motion = ViscousMotion::new(
             rect(0.0, 20.0, 100.0, 300.0),
             rect(200.0, 100.0, 300.0, 100.0),
-            1.0,
+            Duration::from_millis(30),
         );
         motion.start = Instant::now() - motion.half_life;
         let sample = motion.sample();
@@ -124,10 +109,10 @@ mod tests {
         let mut motion = ViscousMotion::new(
             rect(0.0, 0.0, 100.0, 100.0),
             rect(200.0, 0.0, 100.0, 100.0),
-            1.0,
+            Duration::from_millis(30),
         );
         motion.start = Instant::now() - motion.half_life;
-        motion.retarget(rect(300.0, 0.0, 100.0, 100.0), 1.0);
+        motion.retarget(rect(300.0, 0.0, 100.0, 100.0), Duration::from_millis(30));
         let sample = motion.sample();
         assert!((sample.loc.x - 100.0).abs() < 2.0);
     }
@@ -137,16 +122,9 @@ mod tests {
         let motion = ViscousMotion::new(
             rect(0.0, 0.0, 100.0, 100.0),
             rect(200.0, 50.0, 300.0, 400.0),
-            0.0,
+            Duration::ZERO,
         );
         assert_eq!(motion.sample(), rect(200.0, 50.0, 300.0, 400.0));
         assert!(motion.finished());
-    }
-
-    #[test]
-    fn non_finite_viscosity_is_safely_immediate() {
-        let target = rect(200.0, 50.0, 300.0, 400.0);
-        let motion = ViscousMotion::new(rect(0.0, 0.0, 100.0, 100.0), target, f64::NAN);
-        assert_eq!(motion.sample(), target);
     }
 }

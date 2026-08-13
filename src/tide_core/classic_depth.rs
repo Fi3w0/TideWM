@@ -36,11 +36,14 @@ impl ClassicDepthDeck {
         self.view.as_ref()
     }
 
-    pub fn entries_for(&self, output: &str, workspace: u32) -> Vec<&DepthDeckEntry> {
+    pub fn entries_for<'a>(
+        &'a self,
+        output: &'a str,
+        workspace: u32,
+    ) -> impl Iterator<Item = &'a DepthDeckEntry> + 'a {
         self.entries
             .iter()
-            .filter(|entry| entry.output == output && entry.workspace == workspace)
-            .collect()
+            .filter(move |entry| entry.output == output && entry.workspace == workspace)
     }
 
     pub fn output_names(&self) -> impl Iterator<Item = &str> {
@@ -141,33 +144,27 @@ impl ClassicDepthDeck {
         replacement: DepthDeckEntry,
         down: bool,
     ) -> Option<DepthDeckEntry> {
-        let matching: Vec<usize> = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| entry.output == output && entry.workspace == workspace)
-            .map(|(index, _)| index)
-            .collect();
         let chosen = if down {
-            matching.first().copied()
+            self.entries
+                .iter()
+                .position(|entry| entry.output == output && entry.workspace == workspace)
         } else {
-            matching.last().copied()
+            self.entries
+                .iter()
+                .rposition(|entry| entry.output == output && entry.workspace == workspace)
         }?;
         let selected = self.entries.remove(chosen);
 
-        let remaining: Vec<usize> = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| entry.output == output && entry.workspace == workspace)
-            .map(|(index, _)| index)
-            .collect();
         let insertion = if down {
-            remaining
-                .last()
+            self.entries
+                .iter()
+                .rposition(|entry| entry.output == output && entry.workspace == workspace)
                 .map_or(self.entries.len(), |index| index + 1)
         } else {
-            remaining.first().copied().unwrap_or(0)
+            self.entries
+                .iter()
+                .position(|entry| entry.output == output && entry.workspace == workspace)
+                .unwrap_or(0)
         };
         self.entries.insert(insertion, replacement);
         self.clamp_view();

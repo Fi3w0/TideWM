@@ -174,7 +174,7 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Smallvil {
 impl Dispatch<ZwlrScreencopyFrameV1, WlrFrameData> for Smallvil {
     fn request(
         state: &mut Self,
-        _client: &Client,
+        client: &Client,
         resource: &ZwlrScreencopyFrameV1,
         request: zwlr_screencopy_frame_v1::Request,
         data: &WlrFrameData,
@@ -214,6 +214,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, WlrFrameData> for Smallvil {
                 return;
             }
             state.queue_capture(PendingCapture {
+                client_id: Some(client.id()),
                 output: capture.output.clone(),
                 window: None,
                 draw_cursor: data.overlay_cursor,
@@ -242,6 +243,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, WlrFrameData> for Smallvil {
         }
 
         state.queue_capture(PendingCapture {
+            client_id: Some(client.id()),
             output: capture.output.clone(),
             window: None,
             draw_cursor: data.overlay_cursor,

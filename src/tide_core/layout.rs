@@ -15,7 +15,7 @@
 //! `Output` type itself) so this module stays decoupled from Wayland/Smithay
 //! desktop-state types beyond what it already touches.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use smithay::{
     desktop::Window,
@@ -98,11 +98,21 @@ impl SplitResizeHandle {
 #[derive(Default)]
 pub struct BspLayout {
     root: Option<Node>,
+    /// Number of leaves in `root`. Keeping this beside the tree avoids
+    /// allocating a cloned `Vec<Window>` just to answer routine occupancy
+    /// and count queries.
+    len: usize,
 }
 
 impl BspLayout {
-    fn is_empty(&self) -> bool {
-        self.root.is_none()
+    pub(crate) fn is_empty(&self) -> bool {
+        debug_assert_eq!(self.root.is_none(), self.len == 0);
+        self.len == 0
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        debug_assert_eq!(self.root.is_none(), self.len == 0);
+        self.len
     }
 
     /// Inserts `window`, splitting the leaf containing `target` (usually the
@@ -114,12 +124,22 @@ impl BspLayout {
             None => Node::Leaf(window),
             Some(root) => insert_into(root, window, target),
         });
+        self.len += 1;
     }
 
     /// Removes the window backed by `surface`, collapsing its sibling up
     /// into its former parent's place. No-op if `surface` isn't tiled.
-    pub fn remove(&mut self, surface: &WlSurface) {
-        self.root = self.root.take().and_then(|root| remove_from(root, surface));
+    pub fn remove(&mut self, surface: &WlSurface) -> bool {
+        let Some(root) = self.root.take() else {
+            return false;
+        };
+        let (root, removed) = remove_from(root, surface);
+        self.root = root;
+        if removed {
+            self.len -= 1;
+        }
+        debug_assert_eq!(self.root.is_none(), self.len == 0);
+        removed
     }
 
     pub fn contains(&self, surface: &WlSurface) -> bool {
@@ -160,10 +180,10 @@ impl BspLayout {
     /// replacement doesn't need to already be tiled anywhere itself. Used to
     /// swap which tab of a window group is visible in its shared slot (see
     /// `Smallvil::cycle_tab`/`ungroup`). No-op if `old` isn't tiled here.
-    pub fn replace_leaf(&mut self, old: &WlSurface, new_window: &Window) {
-        if let Some(root) = &mut self.root {
-            replace_leaf(root, old, new_window);
-        }
+    pub fn replace_leaf(&mut self, old: &WlSurface, new_window: &Window) -> bool {
+        self.root
+            .as_mut()
+            .is_some_and(|root| replace_leaf(root, old, new_window))
     }
 
     /// The on-screen rectangle for every tiled window, gaps already applied.
@@ -311,16 +331,19 @@ impl Drop for BspLayout {
 /// work with just outputs, and an output not yet in `active` defaults to
 /// workspace `1` (see `active_workspace`).
 ///
-/// A handful of operations (`contains`, `output_of`, `remove`, `swap`) search
-/// or act across every workspace rather than taking one explicitly: a window
-/// is still "tiled" even while its workspace is hidden, and removing a
-/// destroyed window or swapping two on-screen neighbors doesn't need the
-/// caller to know which workspace it's asking about. Operations that render
-/// or address one specific tree (`insert`, `layout`, `hit_test_split`,
-/// `ratio_at`, `set_ratio`) take `workspace` explicitly instead.
+/// A direct surface-owner index lets operations such as `contains`,
+/// `output_of`, `remove`, and `swap` address hidden tiled windows without
+/// scanning every workspace. Operations that render or address one specific
+/// tree (`insert`, `layout`, `hit_test_split`, `ratio_at`, `set_ratio`) still
+/// take `workspace` explicitly.
 #[derive(Default)]
 pub struct Layouts {
     trees: HashMap<(String, u32), BspLayout>,
+    /// Direct surface -> tree ownership. Geometry remains authoritative in
+    /// `trees`; this index prevents common membership/output/workspace
+    /// queries from walking every workspace tree.
+    #[allow(clippy::mutable_key_type)]
+    owners: HashMap<WlSurface, (String, u32)>,
     active: HashMap<String, u32>,
     /// Per-(output, workspace) tiling algorithm override; a workspace not
     /// in this map uses `default_algorithm` (seeded from the `default_layout`
@@ -380,16 +403,13 @@ impl Layouts {
     /// Whether `surface` is tiled on any (output, workspace) tree, visible
     /// or not.
     pub fn contains(&self, surface: &WlSurface) -> bool {
-        self.trees.values().any(|l| l.contains(surface))
+        self.owners.contains_key(surface)
     }
 
     /// The name of the output whose tree currently holds `surface`, if any,
     /// regardless of whether that tree's workspace is the active one.
     pub fn output_of(&self, surface: &WlSurface) -> Option<&str> {
-        self.trees
-            .iter()
-            .find(|(_, l)| l.contains(surface))
-            .map(|((name, _), _)| name.as_str())
+        self.owners.get(surface).map(|(name, _)| name.as_str())
     }
 
     /// The workspace number of whichever tree currently holds `surface`, if
@@ -398,7 +418,7 @@ impl Layouts {
     /// but on some other hidden one" -- the two look identical if you only
     /// ever compare against `active_workspace`.
     pub fn workspace_of(&self, surface: &WlSurface) -> Option<u32> {
-        self.key_of(surface).map(|(_, workspace)| workspace)
+        self.owners.get(surface).map(|(_, workspace)| *workspace)
     }
 
     /// The `Window` handle backing `surface`, wherever it's tiled. Unlike
@@ -407,14 +427,11 @@ impl Layouts {
     /// held by its tree, just not mapped, so `space.elements()` won't have
     /// it anymore (see `Smallvil::switch_workspace`'s own note on this).
     pub fn window_of(&self, surface: &WlSurface) -> Option<Window> {
-        self.trees.values().find_map(|l| l.window(surface))
+        self.trees.get(self.owners.get(surface)?)?.window(surface)
     }
 
     fn key_of(&self, surface: &WlSurface) -> Option<(String, u32)> {
-        self.trees
-            .iter()
-            .find(|(_, l)| l.contains(surface))
-            .map(|(key, _)| key.clone())
+        self.owners.get(surface).cloned()
     }
 
     /// The workspace currently visible on `output`. Defaults to `1` for an
@@ -439,10 +456,18 @@ impl Layouts {
         window: Window,
         target: Option<&WlSurface>,
     ) {
+        let key = (output.to_string(), workspace);
+        let surface = window
+            .toplevel()
+            .map(|toplevel| toplevel.wl_surface().clone());
         self.trees
-            .entry((output.to_string(), workspace))
+            .entry(key.clone())
             .or_default()
             .insert(window, target);
+        if let Some(surface) = surface {
+            let old = self.owners.insert(surface, key);
+            debug_assert!(old.is_none(), "a tiled surface must have exactly one owner");
+        }
         self.bump_topology_revision();
     }
 
@@ -463,7 +488,7 @@ impl Layouts {
     pub fn populated_workspaces(&self) -> Vec<(String, u32)> {
         self.trees
             .iter()
-            .filter(|(_, tree)| !tree.windows().is_empty())
+            .filter(|(_, tree)| !tree.is_empty())
             .map(|(key, _)| key.clone())
             .collect()
     }
@@ -495,9 +520,11 @@ impl Layouts {
         // not grow this registry forever.
         let changed = !tree_a.is_empty() || !tree_b.is_empty();
         if !tree_b.is_empty() {
+            index_tree_owners(&mut self.owners, output_a, ws_a, &tree_b);
             self.trees.insert((output_a.to_string(), ws_a), tree_b);
         }
         if !tree_a.is_empty() {
+            index_tree_owners(&mut self.owners, output_b, ws_b, &tree_a);
             self.trees.insert((output_b.to_string(), ws_b), tree_a);
         }
         if changed {
@@ -508,24 +535,33 @@ impl Layouts {
     /// Removes the window backed by `surface` from whichever tree holds it.
     /// No-op if `surface` isn't tiled anywhere.
     pub fn remove(&mut self, surface: &WlSurface) {
-        let changed = self.contains(surface);
-        for layout in self.trees.values_mut() {
-            layout.remove(surface);
+        let Some(key) = self.owners.get(surface).cloned() else {
+            return;
+        };
+        let removed = self
+            .trees
+            .get_mut(&key)
+            .is_some_and(|layout| layout.remove(surface));
+        debug_assert!(removed, "layout owner index must point at the owning tree");
+        self.owners.remove(surface);
+        if !removed {
+            return;
         }
         // Workspace IDs can come from IPC, so retaining an empty tree for
         // every ID a window ever visited creates unbounded memory growth and
         // progressively slows all ownership scans.
-        self.trees.retain(|_, layout| !layout.is_empty());
+        if self.trees.get(&key).is_some_and(BspLayout::is_empty) {
+            self.trees.remove(&key);
+        }
         // `algorithms`/`master_ratio` are keyed the same way and reachable
         // through the same IPC action surface (see their own field docs) --
         // prune them alongside `trees` so they can't outlive it.
-        let live_keys: HashSet<(String, u32)> = self.trees.keys().cloned().collect();
-        prune_orphaned(&mut self.algorithms, &live_keys);
-        prune_orphaned(&mut self.master_ratio, &live_keys);
-        prune_orphaned(&mut self.cascade_state, &live_keys);
-        if changed {
-            self.bump_topology_revision();
+        if !self.trees.contains_key(&key) {
+            self.algorithms.remove(&key);
+            self.master_ratio.remove(&key);
+            self.cascade_state.remove(&key);
         }
+        self.bump_topology_revision();
     }
 
     /// The tiling algorithm active for `output`'s `workspace`: an explicit
@@ -640,8 +676,22 @@ impl Layouts {
     /// `old` isn't tiled anywhere.
     pub fn replace_leaf(&mut self, old: &WlSurface, new_window: &Window) {
         let Some(key) = self.key_of(old) else { return };
-        if let Some(layout) = self.trees.get_mut(&key) {
-            layout.replace_leaf(old, new_window);
+        let replaced = self
+            .trees
+            .get_mut(&key)
+            .is_some_and(|layout| layout.replace_leaf(old, new_window));
+        if replaced {
+            self.owners.remove(old);
+            if let Some(surface) = new_window
+                .toplevel()
+                .map(|toplevel| toplevel.wl_surface().clone())
+            {
+                let previous = self.owners.insert(surface, key);
+                debug_assert!(
+                    previous.is_none(),
+                    "a replacement surface must not already have a tiled owner"
+                );
+            }
             self.bump_topology_revision();
         }
     }
@@ -690,7 +740,7 @@ impl Layouts {
     pub fn window_count(&self, output: &str, workspace: u32) -> usize {
         self.trees
             .get(&(output.to_string(), workspace))
-            .map(|t| t.windows().len())
+            .map(BspLayout::len)
             .unwrap_or(0)
     }
 
@@ -734,18 +784,21 @@ impl Layouts {
         let keys: Vec<(String, u32)> = self
             .trees
             .iter()
-            .filter(|(_, tree)| !tree.windows().is_empty())
+            .filter(|(_, tree)| !tree.is_empty())
             .map(|(k, _)| k.clone())
             .collect();
-        keys.into_iter()
+        let drained = keys
+            .into_iter()
             .filter_map(|key| {
                 self.algorithms.remove(&key);
                 self.master_ratio.remove(&key);
                 self.cascade_state.remove(&key);
                 let tree = self.trees.remove(&key)?;
-                (!tree.windows().is_empty()).then_some((key.0, key.1, tree))
+                Some((key.0, key.1, tree))
             })
-            .collect()
+            .collect();
+        self.owners.clear();
+        drained
     }
 
     /// Inserts a pre-populated workspace tree, used by engine migration from
@@ -753,7 +806,12 @@ impl Layouts {
     /// not set an algorithm -- the caller should follow up with
     /// `set_algorithm` or rely on `default_algorithm`.
     pub(crate) fn insert_migrated_tree(&mut self, output: String, workspace: u32, tree: BspLayout) {
-        self.trees.insert((output, workspace), tree);
+        let key = (output, workspace);
+        if let Some(old) = self.trees.remove(&key) {
+            unindex_tree_owners(&mut self.owners, &old);
+        }
+        index_tree_owners(&mut self.owners, &key.0, key.1, &tree);
+        self.trees.insert(key, tree);
         self.bump_topology_revision();
     }
 
@@ -940,8 +998,8 @@ impl Layouts {
     /// tree; see `BspLayout::hit_test_split`. Always `None` under master or
     /// cascade mode: neither's geometry (`layout_master`/`layout_cascade`)
     /// follows the tree's own shape, so a BSP split boundary found here
-    /// wouldn't correspond to any actual border on screen to drag. Cascade's
-    /// own row/column resize is unbuilt scope, not an oversight here.
+    /// wouldn't correspond to any actual border on screen to drag. Cascade
+    /// uses its separate row/column hit testing and ratio state.
     pub fn hit_test_split(
         &self,
         output: &str,
@@ -1093,15 +1151,31 @@ impl Layouts {
     }
 }
 
-/// Drops any entry whose (output, workspace) key isn't in `live_keys` --
-/// shared by `Layouts::remove` for both `algorithms` and `master_ratio`,
-/// and independently testable without needing a real tree/`Window` to
-/// actually empty (see this module's tests).
-fn prune_orphaned<T>(
-    overrides: &mut HashMap<(String, u32), T>,
-    live_keys: &HashSet<(String, u32)>,
+#[allow(clippy::mutable_key_type)]
+fn index_tree_owners(
+    owners: &mut HashMap<WlSurface, (String, u32)>,
+    output: &str,
+    workspace: u32,
+    tree: &BspLayout,
 ) {
-    overrides.retain(|key, _| live_keys.contains(key));
+    for surface in tree.windows().into_iter().filter_map(|window| {
+        window
+            .toplevel()
+            .map(|toplevel| toplevel.wl_surface().clone())
+    }) {
+        owners.insert(surface, (output.to_string(), workspace));
+    }
+}
+
+#[allow(clippy::mutable_key_type)]
+fn unindex_tree_owners(owners: &mut HashMap<WlSurface, (String, u32)>, tree: &BspLayout) {
+    for surface in tree.windows().into_iter().filter_map(|window| {
+        window
+            .toplevel()
+            .map(|toplevel| toplevel.wl_surface().clone())
+    }) {
+        owners.remove(&surface);
+    }
 }
 
 fn insert_into(mut root: Node, window: Window, target: Option<&WlSurface>) -> Node {
@@ -1127,12 +1201,12 @@ struct RemoveFrame {
     sibling: Node,
 }
 
-fn remove_from(node: Node, target: &WlSurface) -> Option<Node> {
+fn remove_from(node: Node, target: &WlSurface) -> (Option<Node>, bool) {
     let Some(path) = find_path(&node, target) else {
-        return Some(node);
+        return (Some(node), false);
     };
     if path.is_empty() {
-        return None;
+        return (None, true);
     }
 
     let mut frames = Vec::with_capacity(path.len());
@@ -1185,7 +1259,7 @@ fn remove_from(node: Node, target: &WlSurface) -> Option<Node> {
             },
         });
     }
-    rebuilt
+    (rebuilt, true)
 }
 
 fn node_contains(node: &Node, target: &WlSurface) -> bool {
@@ -1308,12 +1382,15 @@ fn swap_leaves(
 /// Single-sided counterpart to `swap_leaves`: overwrites the leaf currently
 /// holding `old` with `new_window`, unconditionally (`new_window` need not
 /// already be part of this tree).
-fn replace_leaf(node: &mut Node, old: &WlSurface, new_window: &Window) {
+fn replace_leaf(node: &mut Node, old: &WlSurface, new_window: &Window) -> bool {
     let Some(path) = find_path(node, old) else {
-        return;
+        return false;
     };
     if let Some(Node::Leaf(window)) = node_mut_at_path(node, &path) {
         *window = new_window.clone();
+        true
+    } else {
+        false
     }
 }
 
@@ -2279,26 +2356,6 @@ mod tests {
             .map(|rect| i64::from(rect.size.w) * i64::from(rect.size.h))
             .sum();
         assert_eq!(total, 1);
-    }
-
-    #[test]
-    fn prune_orphaned_drops_only_keys_with_no_live_tree() {
-        // Exercises the same logic `Layouts::remove` runs on `algorithms`/
-        // `master_ratio` after a tree empties, without needing a real
-        // `Window`/`WlSurface` (Smithay has no lightweight way to construct
-        // one outside a real Wayland client connection -- see this
-        // codebase's other tests, e.g. `handlers/xdg_shell.rs`, which
-        // extract pure logic out for the same reason).
-        let mut overrides = HashMap::new();
-        overrides.insert(("DP-1".to_string(), 1), LayoutAlgorithm::Master);
-        overrides.insert(("DP-1".to_string(), 2), LayoutAlgorithm::Master);
-        let mut live_keys = HashSet::new();
-        live_keys.insert(("DP-1".to_string(), 2));
-
-        prune_orphaned(&mut overrides, &live_keys);
-
-        assert_eq!(overrides.len(), 1);
-        assert!(overrides.contains_key(&("DP-1".to_string(), 2)));
     }
 
     #[test]

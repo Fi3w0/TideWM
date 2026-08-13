@@ -1,20 +1,6 @@
-//! TideWM's persistent "fake window" placeholder shown on an otherwise-empty
-//! desktop, pointing a first-time user at how to open a terminal --
-//! Hyprland's own default-config hint, adapted to this project's existing
-//! CPU-composited-texture pattern (same approach as `toast.rs`/
-//! `overview.rs`). Deliberately not a fading toast: a brand-new user might
-//! not be looking at the exact moment a timed popup would show, so this
-//! stays up as long as the desktop is actually empty, not on a timer --
-//! and disappears the instant a real window maps, the same way Hyprland's
-//! own hint gives way to the first window you open.
-//!
-//! Built once at startup (`main.rs`, gated on `config.show_welcome_hint`)
-//! and never rebuilt -- its content is static. Whether it's drawn at all
-//! is decided fresh every frame by the render call sites (`Smallvil::
-//! should_show_welcome_hint`): config flag still on, and nothing mapped
-//! anywhere in `space`. Dismissed permanently by deleting (or setting
-//! `false`) `show_welcome_hint` in config -- checked on every reload, same
-//! as any other config value, unlike the one-shot toast this replaced.
+//! Static welcome card shown while `show_welcome_hint` is enabled and no real
+//! window is mapped. Its buffer is built once; render call sites decide current
+//! visibility from live config and Space state.
 
 use fontdue::Font;
 use smithay::{
@@ -39,8 +25,7 @@ const TEXT_RGB: (u8, u8, u8) = (225, 225, 225);
 const PAD: i32 = 24;
 const LINE_GAP: i32 = 10;
 
-/// The one static card. `render_element` is called every frame the caller
-/// decides it should be visible; this struct itself doesn't track that.
+/// Static card data; callers own its visibility policy.
 pub struct WelcomeHint {
     buffer: MemoryRenderBuffer,
     size: (i32, i32),
@@ -164,9 +149,7 @@ fn stroke_rect(pixels: &mut [u8], width: i32, height: i32, thickness: i32, rgb: 
     }
 }
 
-/// Left-aligned text at baseline `(x0, baseline_y)`, clipped to the card's
-/// own bounds -- same overflow-is-just-cut-off choice `overview.rs`'s
-/// `draw_label` makes.
+/// Left-aligned text clipped to the card bounds.
 fn draw_line(
     pixels: &mut [u8],
     canvas: (i32, i32),

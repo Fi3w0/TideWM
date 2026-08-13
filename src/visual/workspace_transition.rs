@@ -1,17 +1,7 @@
-//! Full-output workspace transition from render-roadmap Phase R1.
-//!
-//! The outgoing desktop is captured after its visible frame has been
-//! submitted, then drawn over the already-live incoming workspace. The
-//! default style floods the complete output with a procedurally animated
-//! water body before its trailing edge reveals the new workspace; the
-//! original colored boundary remains as the alternate `glow` style. Water,
-//! foam, spray, core, and glow are analytical shader geometry, so tuning
-//! them adds no extra render targets. Optional workspace motion captures the
-//! incoming desktop too and slides both captures edge-to-edge under the wave.
-//! The owning state therefore keeps one texture normally or two while that
-//! option is enabled, and drops them as soon as the animation finishes,
-//! giving the effect a bounded transient cost instead of retaining workspace
-//! history.
+//! Full-output transition from a captured outgoing desktop to the live incoming
+//! workspace. Water/glow geometry is analytical; optional workspace motion adds
+//! one incoming capture. State owns at most two transient output-sized textures
+//! and drops them when the animation finishes.
 
 use std::time::{Duration, Instant};
 
@@ -30,7 +20,10 @@ use smithay::{
 
 use crate::{
     animation::Animation,
-    config::{RippleEase, WorkspaceTransitionConfig, WorkspaceTransitionStyle},
+    config::{
+        RippleEase, WorkspaceAnimationConfig, WorkspaceAnimationStyle, WorkspaceTransitionConfig,
+        WorkspaceTransitionStyle,
+    },
 };
 
 const WORKSPACE_TRANSITION_FRAGMENT_SHADER_PREFIX: &str = r#"
@@ -367,6 +360,21 @@ impl WorkspaceTransition {
         self.animation.finished()
     }
 
+    /// ARGB pixel payload retained for this output's transition. The
+    /// optional incoming texture exists only when synchronized workspace
+    /// motion is enabled.
+    pub fn estimated_texture_bytes(&self) -> u64 {
+        std::iter::once(&self.outgoing_texture)
+            .chain(self.incoming_texture.iter())
+            .fold(0_u64, |total, texture| {
+                let size = texture.size();
+                let pixels = u64::try_from(size.w.max(0))
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(u64::try_from(size.h.max(0)).unwrap_or(u64::MAX));
+                total.saturating_add(pixels.saturating_mul(4))
+            })
+    }
+
     pub fn frame_element(&mut self, program: GlesTexProgram) -> WorkspaceTransitionElement {
         self.commit.increment();
         let width = self.geometry.size.w.max(1) as f32;
@@ -559,6 +567,163 @@ impl RenderElement<GlesRenderer> for WorkspaceTransitionElement {
     }
 }
 
+/// A non-water workspace transition. It retains only the outgoing desktop;
+/// the incoming workspace stays live underneath. Travel is resolved from the
+/// captured output's real width, so this has no display-size assumptions.
+pub struct WorkspaceGlide {
+    id: Id,
+    commit: CommitCounter,
+    outgoing_texture: GlesTexture,
+    animation: Animation,
+    curve: crate::config::WindowAnimationCurve,
+    direction: WorkspaceTransitionDirection,
+    style: WorkspaceAnimationStyle,
+    geometry: Rectangle<i32, Physical>,
+    travel: f32,
+}
+
+fn glide_sample(
+    width: i32,
+    travel: f32,
+    progress: f32,
+    direction: WorkspaceTransitionDirection,
+    style: WorkspaceAnimationStyle,
+) -> (i32, f32) {
+    let progress = progress.clamp(0.0, 1.0);
+    let moving = !matches!(style, WorkspaceAnimationStyle::Fade);
+    let distance = if moving {
+        (width.max(0) as f32 * travel.clamp(0.0, 1.0) * progress).round() as i32
+    } else {
+        0
+    };
+    let sign = match direction {
+        WorkspaceTransitionDirection::LeftToRight => 1,
+        WorkspaceTransitionDirection::RightToLeft => -1,
+    };
+    let alpha = if matches!(
+        style,
+        WorkspaceAnimationStyle::Fade | WorkspaceAnimationStyle::SlideFade
+    ) {
+        1.0 - progress
+    } else {
+        1.0
+    };
+    (sign * distance, alpha)
+}
+
+impl WorkspaceGlide {
+    pub fn new(
+        outgoing_texture: GlesTexture,
+        direction: WorkspaceTransitionDirection,
+        geometry: Rectangle<i32, Physical>,
+        config: &WorkspaceAnimationConfig,
+        slowdown: f32,
+    ) -> Self {
+        let duration_ms = (config.duration_ms as f32 * slowdown)
+            .round()
+            .clamp(1.0, 100_000.0) as u64;
+        Self {
+            id: Id::new(),
+            commit: CommitCounter::default(),
+            outgoing_texture,
+            animation: Animation::new(0.0, 1.0, Instant::now(), Duration::from_millis(duration_ms)),
+            curve: config.curve,
+            direction,
+            style: config.style,
+            geometry,
+            travel: config.travel.clamp(0.0, 1.0),
+        }
+    }
+
+    pub fn finished(&self) -> bool {
+        self.animation.finished()
+    }
+
+    pub fn estimated_texture_bytes(&self) -> u64 {
+        let size = self.outgoing_texture.size();
+        u64::try_from(size.w.max(0))
+            .unwrap_or(u64::MAX)
+            .saturating_mul(u64::try_from(size.h.max(0)).unwrap_or(u64::MAX))
+            .saturating_mul(4)
+    }
+
+    pub fn frame_element(&mut self) -> WorkspaceGlideElement {
+        self.commit.increment();
+        let progress = crate::animation::ease_progress(self.curve, self.animation.value());
+        let (offset, alpha) = glide_sample(
+            self.geometry.size.w,
+            self.travel,
+            progress,
+            self.direction,
+            self.style,
+        );
+        WorkspaceGlideElement {
+            id: self.id.clone(),
+            commit: self.commit,
+            outgoing_texture: self.outgoing_texture.clone(),
+            geometry: Rectangle::new(
+                (self.geometry.loc.x + offset, self.geometry.loc.y).into(),
+                self.geometry.size,
+            ),
+            alpha,
+        }
+    }
+}
+
+pub struct WorkspaceGlideElement {
+    id: Id,
+    commit: CommitCounter,
+    outgoing_texture: GlesTexture,
+    geometry: Rectangle<i32, Physical>,
+    alpha: f32,
+}
+
+impl Element for WorkspaceGlideElement {
+    fn id(&self) -> &Id {
+        &self.id
+    }
+
+    fn current_commit(&self) -> CommitCounter {
+        self.commit
+    }
+
+    fn src(&self) -> Rectangle<f64, Buffer> {
+        Rectangle::from_size(self.outgoing_texture.size().to_f64())
+    }
+
+    fn geometry(&self, _scale: Scale<f64>) -> Rectangle<i32, Physical> {
+        self.geometry
+    }
+
+    fn kind(&self) -> Kind {
+        Kind::Unspecified
+    }
+}
+
+impl RenderElement<GlesRenderer> for WorkspaceGlideElement {
+    fn draw(
+        &self,
+        frame: &mut GlesFrame<'_, '_>,
+        src: Rectangle<f64, Buffer>,
+        dst: Rectangle<i32, Physical>,
+        damage: &[Rectangle<i32, Physical>],
+        _opaque_regions: &[Rectangle<i32, Physical>],
+        _cache: Option<&UserDataMap>,
+    ) -> Result<(), GlesError> {
+        frame.render_texture_from_to(
+            &self.outgoing_texture,
+            src,
+            dst,
+            damage,
+            &[],
+            Transform::Normal,
+            self.alpha,
+            None,
+            &[],
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -617,5 +782,39 @@ mod tests {
         assert!((delayed_motion_progress(0.625, 0.25) - 0.5).abs() < f32::EPSILON);
         assert_eq!(delayed_motion_progress(1.0, 0.25), 1.0);
         assert!((delayed_motion_progress(0.96, 2.0) - 0.2).abs() < 0.000_01);
+    }
+
+    #[test]
+    fn glide_travel_scales_from_live_output_width() {
+        assert_eq!(
+            glide_sample(
+                1_000,
+                0.2,
+                0.5,
+                WorkspaceTransitionDirection::RightToLeft,
+                WorkspaceAnimationStyle::SlideFade,
+            ),
+            (-100, 0.5)
+        );
+        assert_eq!(
+            glide_sample(
+                2_000,
+                0.2,
+                0.5,
+                WorkspaceTransitionDirection::LeftToRight,
+                WorkspaceAnimationStyle::Slide,
+            ),
+            (200, 1.0)
+        );
+        assert_eq!(
+            glide_sample(
+                2_000,
+                1.0,
+                0.25,
+                WorkspaceTransitionDirection::RightToLeft,
+                WorkspaceAnimationStyle::Fade,
+            ),
+            (0, 0.75)
+        );
     }
 }

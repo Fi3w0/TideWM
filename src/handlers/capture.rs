@@ -10,7 +10,7 @@
 
 use smithay::{
     output::{Output, WeakOutput},
-    reexports::wayland_server::protocol::wl_shm,
+    reexports::wayland_server::{protocol::wl_shm, Resource},
     utils::IsAlive,
     wayland::{
         image_capture_source::{
@@ -124,14 +124,19 @@ impl ImageCopyCaptureHandler for Smallvil {
     }
 
     fn frame(&mut self, session: &SessionRef, frame: Frame) {
-        if let Some(surface) = session
-            .source()
+        let source = session.source();
+        let Some(client_id) = frame.buffer().client().map(|client| client.id()) else {
+            frame.fail(CaptureFailureReason::Unknown);
+            return;
+        };
+        if let Some(surface) = source
             .user_data()
             .get::<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>()
             .cloned()
         {
             match self.capture_output_for_screencast(&surface) {
                 Some(output) => self.queue_capture(PendingCapture {
+                    client_id: Some(client_id),
                     output,
                     window: Some(surface),
                     draw_cursor: false,
@@ -142,14 +147,14 @@ impl ImageCopyCaptureHandler for Smallvil {
             }
             return;
         }
-        let output = session
-            .source()
+        let output = source
             .user_data()
             .get::<WeakOutput>()
             .and_then(WeakOutput::upgrade);
         match output {
             Some(output) => {
                 self.queue_capture(PendingCapture {
+                    client_id: Some(client_id),
                     output,
                     window: None,
                     draw_cursor: session.draw_cursor(),

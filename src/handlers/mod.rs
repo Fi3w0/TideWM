@@ -611,20 +611,10 @@ delegate_foreign_toplevel_list!(Smallvil);
 //
 // wp-keyboard-shortcuts-inhibit + wp-pointer-gestures
 //
-// Shortcuts-inhibit lets a VM or remote-desktop client capture combos the
-// compositor would otherwise intercept (Alt+Tab etc.) for its guest.
-// Activation policy is the simple one niri and wlroots both use: activate
-// on creation, gate at event time -- `input.rs`'s keyboard filter checks
-// whether the *keyboard-focused* surface holds an active inhibitor before
-// matching `[keybinds]`, so the inhibit only applies while that client is
-// actually focused. VT-switch is checked before the gate, same as the
-// session-lock early-return: a stuck guest can't take away the escape
-// hatch.
-//
-// Pointer-gestures is pure global advertisement: no handler trait exists.
-// `input.rs` forwards the backend's libinput swipe/pinch/hold events to
-// the pointer handle, and Smithay's own machinery delivers them to
-// whichever client created gesture objects for the focused surface.
+// Activate shortcut inhibitors immediately, then honor them only while their
+// surface owns keyboard focus. Session locking and VT switching remain ahead
+// of this gate in the input filter. Smithay routes advertised pointer gestures
+// to gesture objects belonging to the pointer-focused client.
 //
 
 impl KeyboardShortcutsInhibitHandler for Smallvil {
@@ -667,45 +657,11 @@ delegate_security_context!(Smallvil);
 //
 // zwp_text_input_v3 + zwp_input_method_v2 + zwp_virtual_keyboard_v1
 //
-// Text-input (client-side: "I'm a text field, here's my content type and
-// surrounding text") and input-method (IME-side: receives that state,
-// replies with commit_string/preedit) are two ends of the same relay,
-// almost entirely Smithay's own machinery. Text-input has no handler
-// trait at all: focus tracking is automatic off `WlSurface`'s own
-// `KeyboardTarget` impl, which already fires from
-// `reconcile_keyboard_focus`'s existing `keyboard.set_focus` call -- an
-// IME activates the moment a focused text field enables itself, with
-// zero code here. An IME's `grab_keyboard` request composes with
-// `input.rs`'s own filter the same way any other keyboard grab does: the
-// filter always runs first (VT-switch, session-lock, shortcuts-inhibit,
-// `[keybinds]` all still win), and only un-intercepted keys get routed to
-// the grab instead of the normally-focused client.
-//
-// `InputMethodHandler` below is the one real integration point: placing
-// the IME's candidate-window popup. Reuses the same `PopupManager`/
-// `PopupKind` machinery xdg-popups and layer-shell popups already go
-// through (`PopupKind::InputMethod` was already a live match arm in
-// `xdg_shell.rs`'s commit handler, just unreachable until this). No
-// configure/ack handshake exists for this popup type at the protocol
-// level, so that existing no-op arm is correct as-is. `parent_geometry`
-// uses `mapped_toplevel_window` rather than anvil's `space.elements()`
-// scan, since a text field can legitimately be focused on a
-// currently-hidden workspace; falls back to a zero rect for a
-// non-window parent (a layer-shell surface, say) -- matching anvil's own
-// simpler behavior, not solved here.
-//
-// Virtual-keyboard is the odd one out: its `key`/`modifiers` requests
-// bypass `input.rs`'s filter and any active grab entirely by design,
-// delivering straight to whichever client actually holds keyboard focus
-// (Smithay's `VirtualKeyboardManagerState`, no handler trait). That's
-// correct per spec -- an on-screen keyboard or `wtype`-style tool wants
-// its keys delivered as literal input, not reinterpreted as a WM
-// keybind.
-//
-// Text-input remains available to ordinary applications. Input-method and
-// virtual-keyboard are privileged globals: the security-context filter
-// hides both from sandboxed listeners while trusted desktop utilities on
-// TideWM's main socket retain the normal behavior.
+// Smithay relays text-input state and virtual-keyboard events. TideWM places
+// IME popups through the shared PopupManager; hidden-workspace parents are
+// resolved through mapped toplevel ownership, with zero geometry for a
+// non-window parent. Input-method and virtual-keyboard globals are hidden from
+// security-context listeners, while ordinary text-input remains public.
 //
 
 impl InputMethodHandler for Smallvil {

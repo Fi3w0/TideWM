@@ -1,24 +1,10 @@
-//! Backdrop capture renders whatever sits behind a window's rect into an
-//! offscreen texture -- the shared plumbing every future water/decoration
-//! effect that samples "what's behind this window" (water-glass refraction,
-//! frost-glass blur) needs before it can run its own shader against that
-//! content. Render roadmap Phase R0.5, see AGENT.md's "Render and visual
-//! identity roadmap".
-//!
-//! Reuses the exact bind/render_output technique `capture.rs` uses for
-//! screenshots, but runs immediately before the visible output is bound.
-//! Offscreen work between a visible bind and submit breaks winit's EGL
-//! lifecycle; doing it before that bind is safe and lets the same visible
-//! frame consume a capture made for the window's current geometry. This is
-//! important during an interactive drag, where a post-submit capture would
-//! always be displayed one pointer event behind.
-//!
-//! Captures are damage-tracked: each `BackdropCapture` owns a persistent
-//! `OutputDamageTracker` and reuses one texture, so a capture pass over an
-//! unchanged behind-scene costs zero GL work (`render_output` returns with
-//! no damage and nothing is drawn). The tracker also sees a moved window on
-//! its own -- the translated element geometry no longer matches its
-//! bookkeeping -- so an interactive drag still recaptures every frame.
+//! Captures the scene behind a window for water-glass refraction and frost.
+//! Offscreen rendering runs before the visible output bind so winit's EGL
+//! lifecycle remains valid and the same frame sees current window geometry.
+//! Each capture keeps a texture and damage tracker, skipping unchanged scenes
+//! while translated geometry still invalidates a moving window's capture.
+
+use std::collections::HashSet;
 
 use smithay::backend::{
     allocator::Fourcc,
@@ -29,17 +15,12 @@ use smithay::backend::{
             Id, RenderElement,
         },
         gles::{GlesRenderer, GlesTexture},
-        Bind, Offscreen,
+        Bind, Offscreen, Texture,
     },
 };
 use smithay::utils::{Physical, Point, Rectangle, Scale, Size, Transform};
 
-/// Shrinks a captured rect's native size by `scale` (clamped to at least
-/// `1`), rounding each axis up so the allocated texture never rounds down to
-/// zero on a thin window. `1` reproduces the exact prior full-resolution
-/// behavior. Returned as a plain tuple, not a typed `Size`, since callers
-/// need it in both `Buffer` space (`create_buffer`) and `Physical` space
-/// (the damage tracker's own size).
+/// Downscales a native size, rounding up and keeping each axis nonzero.
 fn scaled_size(size: Size<i32, Physical>, scale: i32) -> (i32, i32) {
     let scale = scale.max(1);
     (
@@ -48,38 +29,35 @@ fn scaled_size(size: Size<i32, Physical>, scale: i32) -> (i32, i32) {
     )
 }
 
-/// A backdrop capture plus the stable identity (`Id`) and content version a
-/// `water_glass::WaterGlassElement` built from it needs to report to the
-/// damage tracker. `id` is created once per window the first time it's
-/// captured and reused on every recapture -- a fresh `Id` every frame would
-/// leak an orphaned entry in the damage tracker's own per-element
-/// bookkeeping for every frame this window is water-glass-eligible, never
-/// pruned. `version` increments only when a recapture actually re-rendered
-/// the texture, so consumers can tell unchanged content apart from new
-/// content instead of assuming every frame brought a fresh capture.
+/// A persistent capture with stable damage identity. `version` advances only
+/// when new pixels are rendered into the texture.
 pub struct BackdropCapture {
     pub texture: GlesTexture,
     pub id: Id,
     pub version: usize,
-    /// Persistent damage tracker, sized to the *allocated* (possibly
-    /// downscaled) texture. This is what lets an unchanged behind-scene
-    /// skip the offscreen render entirely; the old per-call tracker (and
-    /// its `age = 0`) forced a full scene render for every glass window on
-    /// every frame.
+    /// Sized to the allocated texture so unchanged content can skip rendering.
     tracker: OutputDamageTracker,
-    /// Native (unscaled) requested rect size, tracked separately from the
-    /// texture's own allocated size so a resize and a live
-    /// `backdrop_capture_scale` config change are both detected against the
-    /// same field a caller actually passes in.
+    /// Native requested size, kept separately to detect size or scale changes.
     size: Size<i32, Physical>,
     scale: i32,
+    /// Outputs whose latest scene snapshot still contained this surface.
+    /// Names avoid retaining disconnected Smithay `Output` objects.
+    visible_outputs: HashSet<String>,
 }
 
 impl BackdropCapture {
-    /// Allocates the capture texture (at `size` downscaled by `scale`, `1`
-    /// meaning full native resolution) and its damage tracker. `None` on an
-    /// empty size or a renderer/GL failure (logged, not fatal -- the caller
-    /// simply tries again on a later frame).
+    /// ARGB pixel payload currently owned by this capture. Driver metadata,
+    /// alignment, and allocator overhead are intentionally not guessed.
+    pub fn estimated_texture_bytes(&self) -> u64 {
+        let size = self.texture.size();
+        u64::try_from(size.w.max(0))
+            .unwrap_or(u64::MAX)
+            .saturating_mul(u64::try_from(size.h.max(0)).unwrap_or(u64::MAX))
+            .saturating_mul(4)
+    }
+
+    /// Allocates a downscaled texture and matching damage tracker. Empty sizes
+    /// and renderer failures return `None` after logging.
     pub fn new(renderer: &mut GlesRenderer, size: Size<i32, Physical>, scale: i32) -> Option<Self> {
         if size.w <= 0 || size.h <= 0 {
             return None;
@@ -97,21 +75,20 @@ impl BackdropCapture {
             tracker: OutputDamageTracker::new((texture_w, texture_h), 1.0, Transform::Normal),
             size,
             scale,
+            visible_outputs: HashSet::new(),
         })
     }
 
-    /// Renders `behind` -- elements positioned in the same output-physical
-    /// space `rect` itself is given in -- into the capture texture,
-    /// translating each one so `rect`'s own top-left lands at the texture's
-    /// origin, then scaling that translated geometry down by `scale` so it
-    /// fits a texture allocated at `rect.size / scale`. A native-size or
-    /// `scale` change reallocates the texture and resets the tracker (both
-    /// stay sized to the downscaled region). Returns `Some(true)` when new
-    /// content was actually rendered (`version` then already incremented),
-    /// `Some(false)` when the tracker found no damage and skipped the
-    /// render, and `None` on an empty rect or a renderer/GL failure (logged,
-    /// not fatal -- a missed capture just means whatever effect wanted it
-    /// skips a frame, not a crash).
+    /// Reconciles one output's latest visibility result. Returns whether at
+    /// least one output still needs this texture.
+    pub fn set_output_visible(&mut self, output: &str, visible: bool) -> bool {
+        update_output_visibility(&mut self.visible_outputs, output, visible)
+    }
+
+    /// Translates output-physical `behind` elements to `rect`'s origin and
+    /// scales them into the capture texture. Size or scale changes reallocate
+    /// both texture and tracker. Returns whether pixels were rendered, or
+    /// `None` for an empty rectangle or logged renderer failure.
     pub fn capture<E: RenderElement<GlesRenderer>>(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -137,9 +114,7 @@ impl BackdropCapture {
 
         let offset = (-rect.loc.x, -rect.loc.y);
         let origin = Point::<i32, Physical>::from((0, 0));
-        // Always wrapped, even at scale 1 (an identity rescale), so the
-        // element list stays one concrete type regardless of the live
-        // config value instead of branching into two `Vec` element types.
+        // Keep one concrete element type for every live scale value.
         let downscale = Scale::from(1.0 / scale as f64);
         let translated: Vec<RescaleRenderElement<RelocateRenderElement<&E>>> = behind
             .iter()
@@ -154,9 +129,7 @@ impl BackdropCapture {
             .bind(&mut self.texture)
             .map_err(|err| tracing::warn!(%err, "Failed to bind backdrop capture target"))
             .ok()?;
-        // One persistent texture rendered once per capture pass, so the
-        // buffer age is exactly 1: the texture holds the previous render's
-        // content and only new damage has to be drawn.
+        // The persistent texture contains exactly the previous render.
         match self.tracker.render_output(
             renderer,
             &mut target,
@@ -179,15 +152,17 @@ impl BackdropCapture {
     }
 }
 
-/// One-shot full render of `behind` into a fresh texture, for callers that
-/// capture once and move on (the workspace-transition snapshot) and so have
-/// no use for a persistent damage tracker. A fresh tracker treats the whole
-/// region as damaged, which is exactly right for a texture that has never
-/// been rendered. Always captures at native resolution (`scale = 1`),
-/// independent of `backdrop_capture_scale`: this feeds a full-output texture
-/// displayed 1:1 during the workspace transition, not a per-window glass
-/// effect, so softening it would be a visible, unrelated regression rather
-/// than the VRAM trade that knob is for.
+fn update_output_visibility(outputs: &mut HashSet<String>, output: &str, visible: bool) -> bool {
+    if visible {
+        outputs.insert(output.to_string());
+    } else {
+        outputs.remove(output);
+    }
+    !outputs.is_empty()
+}
+
+/// One-shot native-resolution capture for a full-output transition snapshot.
+/// The per-window `backdrop_capture_scale` setting does not apply.
 pub fn capture_once<E: RenderElement<GlesRenderer>>(
     renderer: &mut GlesRenderer,
     rect: Rectangle<i32, Physical>,
@@ -217,5 +192,15 @@ mod tests {
     fn scale_below_one_is_clamped_to_native_size() {
         assert_eq!(scaled_size(Size::from((800, 600)), 0), (800, 600));
         assert_eq!(scaled_size(Size::from((800, 600)), -3), (800, 600));
+    }
+
+    #[test]
+    fn capture_visibility_survives_until_its_last_output_drops_it() {
+        let mut outputs = HashSet::new();
+
+        assert!(update_output_visibility(&mut outputs, "left", true));
+        assert!(update_output_visibility(&mut outputs, "right", true));
+        assert!(update_output_visibility(&mut outputs, "left", false));
+        assert!(!update_output_visibility(&mut outputs, "right", false));
     }
 }

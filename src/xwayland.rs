@@ -1,24 +1,11 @@
 //! xwayland-satellite integration.
 //!
-//! X11 apps run through `xwayland-satellite` (a separate process) rather
-//! than TideWM implementing an in-process X11 window manager via Smithay's
-//! `XwmHandler`. Satellite does the X11 window-manager work itself and
-//! presents X11 clients to TideWM as ordinary Wayland `xdg_shell` surfaces,
-//! so nothing elsewhere in the compositor needs to know an X11 client is
-//! involved at all. Matches how niri and driftwm both integrate XWayland
-//! (see AGENT.md); TideWM's per-output tiling trees have no shared global
-//! coordinate system for an in-process X11 WM to plug into anyway.
-//!
-//! Spawned eagerly at startup rather than on first X11 connection: the
-//! on-demand `-listenfd` handoff (pre-bind the X11 socket, hand the FD to
-//! satellite when a client connects) has a documented interop bug with
-//! Xwayland 24.x and multi-layout XKB configs (the queued connection races
-//! Xwayland's keyboard init against the `wl_keyboard.keymap` event). Eager
-//! "vanilla" mode -- satellite binds its own socket on startup -- sidesteps
-//! that race by construction, at the cost of a satellite process (~30MB)
-//! resident even if no X11 client ever runs.
+//! X11 apps run through a separate `xwayland-satellite` process and reach the
+//! compositor as ordinary XDG surfaces. Satellite starts eagerly and binds its
+//! own socket; avoiding the on-demand `-listenfd` handoff prevents its known
+//! keyboard-initialization race with multi-layout XKB configurations.
 
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 const MAX_DISPLAY: u32 = 50;
@@ -39,6 +26,9 @@ pub struct Satellite {
     /// by comparing a surface's client PID against this one -- every X11
     /// app arrives as one of satellite's own Wayland surfaces.
     pub pid: u32,
+    /// DISPLAY value exported for this child, retained so SIGCHLD cleanup
+    /// removes only the value TideWM itself installed.
+    pub display_name: String,
 }
 
 /// Spawn `xwayland-satellite :N` eagerly and export `DISPLAY=:N` for every
@@ -64,7 +54,7 @@ pub fn setup(path: &str) -> Option<Satellite> {
         }
         let display_name = format!(":{display}");
 
-        let mut child = match Command::new(path)
+        let mut child = match crate::child_command(path)
             .arg(&display_name)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -83,7 +73,7 @@ pub fn setup(path: &str) -> Option<Satellite> {
                 tracing::info!(pid, display = %display_name, "Spawned xwayland-satellite");
                 crate::track_child(child);
                 std::env::set_var("DISPLAY", &display_name);
-                return Some(Satellite { pid });
+                return Some(Satellite { pid, display_name });
             }
             Err(reason) => {
                 tracing::warn!(
@@ -165,7 +155,7 @@ fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Option<std::proces
 /// actually use listenfd downstream (see module docs), just its presence
 /// as a version marker.
 fn probe(path: &str) -> bool {
-    let mut child = match Command::new(path)
+    let mut child = match crate::child_command(path)
         .args([":0", "--test-listenfd-support"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())

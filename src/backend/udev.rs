@@ -1,25 +1,15 @@
 //! Standalone TTY/DRM backend: no host compositor, drives real display
 //! hardware directly via KMS/DRM, GBM and a libseat session.
 //!
-//! Structured after `malbiruk/driftwm`'s `backend/udev.rs` (single GPU,
-//! direct `DrmCompositor`, no multi-GPU render-node juggling), not anvil's
-//! `DrmOutputManager`/`MultiRenderer` machinery, which exists to composite
-//! across several GPUs at once -- more than TideWM needs right now. All
-//! Smithay API calls here were cross-checked against the actual pinned
-//! `smithay v0.7.0` source, not guessed from either reference.
+//! The backend deliberately drives one GPU with a direct `DrmCompositor`;
+//! multi-GPU rendering is outside its ownership model.
 //!
-//! Runtime output hotplug (a monitor plugged/unplugged into a port on the
-//! GPU already in use) is handled -- see `handle_connector_change` -- but
-//! windows on a disconnected output aren't migrated to another one, just
-//! left in that output's now-orphaned tiling tree. A hot-added or removed
-//! *GPU* (as opposed to a monitor) is out of scope entirely, matching the
-//! single-GPU design above.
+//! Connector hotplug migrates window ownership and rebuilds the affected
+//! output state. Removing the managed GPU ends the session because this
+//! backend has no second GPU to take ownership.
 //!
-//! Scope deliberately left out of this first pass (tracked as a follow-up,
-//! not silently missing): retrying `DrmCompositor::new` with
-//! `Modifier::Invalid` (implicit modifiers) if the first negotiation fails,
-//! which driftwm does and some hardware needs -- `create_surface` below
-//! just drops the surface on that failure instead. See AGENT.md.
+//! Surface creation currently requires explicit modifier negotiation; a
+//! failed `DrmCompositor` construction leaves that connector unpublished.
 
 use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, time::Duration};
 
@@ -77,6 +67,7 @@ use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
 use crate::{
     config::OutputTransformConfig,
     cursor,
+    output_layout::{logical_output_size, resolve_output_position},
     state::{LockRenderElement, SessionLock, Smallvil},
 };
 
@@ -143,11 +134,9 @@ smithay::backend::renderer::element::render_elements! {
     WindowSnapshot = crate::window_animation::WindowSnapshotElement,
     /// Analytical solid/gradient border above its own window.
     Border = crate::decoration::BorderElement,
-    /// Impulse ripple (Phase R1, see ripple.rs), drawn over windows but
-    /// below toast/overview/picker/tab-strip chrome. Same renderer-
-    /// concrete-ness reason as `WaterGlass` above.
+    /// Impulse ripple above windows and below compositor chrome.
     Ripple = crate::ripple::RippleElement,
-    /// Cool-depth wash and urgent bioluminescent border (Phase R1).
+    /// Cool-depth wash and urgent bioluminescent border.
     DepthOverlay = crate::depth::DepthOverlayElement,
     /// Allocation-free vertical pressure wave for direct Classic depth moves.
     DepthTransition = crate::depth_transition::DepthTransitionElement,
@@ -156,48 +145,34 @@ smithay::backend::renderer::element::render_elements! {
     /// Ambient caustic light over the wallpaper, below windows. Engine-
     /// agnostic; gated by `water_effects` plus its own enable.
     Caustics = crate::caustics::CausticsElement,
-    /// Bioluminescent edge-glow cue for an off-screen urgent/deep Ocean
-    /// window (spatial roadmap S5). Above windows, below chrome.
+    /// Off-screen Ocean cue above windows and below compositor chrome.
     Compass = crate::compass::CompassElement,
-    /// Captured outgoing workspace peeled away over the live incoming
-    /// workspace (Phase R1, see workspace_transition.rs).
+    /// Captured outgoing workspace over the live incoming workspace.
     WorkspaceTransition = crate::workspace_transition::WorkspaceTransitionElement,
-    /// Full-output dim fill for a `layer_rule { dim_around = true }` layer
-    /// surface -- Hyprland's `dimaround`. Pushed directly behind the
-    /// Overlay/Top layer pass so it darkens every window and lower layer
-    /// without needing its own capture step.
+    /// Non-water slide/fade of one outgoing workspace snapshot.
+    WorkspaceGlide = crate::workspace_transition::WorkspaceGlideElement,
+    /// Full-output fill immediately behind a dim-around Overlay/Top surface.
     Dim = SolidColorRenderElement,
 }
 
 struct SurfaceData {
     compositor: GbmDrmCompositor,
     output: Output,
-    /// The `wl_output` global's own id, kept so it can be retracted on
-    /// disconnect -- `create_surface` used to discard this (`let _global =
-    /// ...`), which left the global advertised to every client forever
-    /// after an unplug, with a replug adding a second one on top rather
-    /// than replacing it.
+    /// The `wl_output` global id, retracted when this surface disconnects.
     global: GlobalId,
     /// A frame is queued and we're waiting for its VBlank; the KMS API
     /// doesn't allow submitting another one to the same CRTC until then.
     pending: bool,
-    /// Content changed since this surface last actually rendered. Distinct
-    /// from `Smallvil::needs_redraw` (which the Timer tick consumes as soon
-    /// as it's observed) so a surface skipped this tick because it was
-    /// still `pending` doesn't lose the update -- its VBlank handler will
-    /// pick this back up.
+    /// Content changed since this surface rendered. Persists across a tick
+    /// skipped for pending VBlank.
     dirty: bool,
     /// `queue_frame` produces no VBlank when it returns `EmptyFrame`. Keep
     /// one estimated-VBlank timer armed in that case so animations get
     /// another render opportunity without turning the regular poll into a
     /// busy retry loop.
     empty_frame_retry_pending: Option<u64>,
-    /// Set by `wlr-output-power-management-v1` (see `Smallvil::set_output_power`
-    /// below), via `GbmDrmCompositor::clear()` -- DPMS off, every plane
-    /// disabled, pending/queued/next frame cleared. The render loop skips
-    /// this surface entirely while set; `clear()`'s own doc comment says
-    /// calling `queue_frame` again (the ordinary render path) re-enables,
-    /// so turning back on is just "stop skipping it, mark dirty."
+    /// DPMS-off state. Rendering is skipped until power-on marks it dirty;
+    /// the next ordinary queue re-enables scanout after `clear()`.
     powered_off: bool,
 }
 
@@ -208,10 +183,7 @@ struct DeviceData {
     renderer: Rc<RefCell<GlesRenderer>>,
     surfaces: HashMap<crtc::Handle, SurfaceData>,
     libinput: Libinput,
-    /// Kept around (not just used once at startup) so a udev "device
-    /// changed" event -- a monitor plugged or unplugged into a port on
-    /// this GPU -- can rescan and create/tear down surfaces at runtime; see
-    /// `handle_connector_change`.
+    /// Retained for connector rescans on udev device changes.
     gbm: GbmDevice<DrmDeviceFd>,
     render_formats: Vec<Format>,
     scanner: DrmScanner,
@@ -227,11 +199,7 @@ pub fn init_udev(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let display_handle = state.display_handle.clone();
 
-    // Unlike the winit backend, there's no host compositor to connect to
-    // here (this backend *is* the compositor), so this can be exported
-    // immediately: nothing downstream depends on reading the old value
-    // first. Lets anything spawned later (terminal, xwayland-satellite)
-    // find this socket -- previously only the winit backend exported this.
+    // Udev owns the display, so spawned clients can use this socket immediately.
     std::env::set_var("WAYLAND_DISPLAY", &state.socket_name);
 
     let (mut session, session_notifier) = LibSeatSession::new()
@@ -1001,10 +969,7 @@ fn create_surface(
         }
     };
 
-    // Config surface plus a real-capability query only, for now -- no
-    // `drm_surface.use_vrr()` call yet. See `AdaptiveSync`'s own doc for
-    // why the actual toggle is deliberately deferred to a session where
-    // this can be verified on real hardware, not just compiled.
+    // Report live VRR capability; scanout toggling is not implemented yet.
     match drm_surface.vrr_supported(connector.handle()) {
         Ok(support) => tracing::info!(
             connector_name,
@@ -1030,25 +995,6 @@ fn create_surface(
         size: (mode.size().0 as i32, mode.size().1 as i32).into(),
         refresh: mode.vrefresh() as i32 * 1000,
     };
-    // Rightmost edge of every currently-mapped output, not the sum of their
-    // widths: summing assumes outputs are only ever appended in order, which
-    // hotplug breaks. Two 1920-wide outputs A (x=0) and B (x=1920);
-    // disconnect A, then connect C -- summing only B's width gives 1920,
-    // landing C directly on top of the still-mapped B. Taking the max right
-    // edge instead always lands a new output past every existing one,
-    // regardless of gaps left by earlier disconnects. Only used as the
-    // fallback when config doesn't pin an explicit position.
-    let auto_x = state
-        .space
-        .outputs()
-        .filter_map(|output| state.space.output_geometry(output))
-        .fold(0, |max_edge, geo| {
-            max_edge.max(geo.loc.x.saturating_add(geo.size.w))
-        });
-    let position = output_config
-        .as_ref()
-        .and_then(|c| c.position)
-        .unwrap_or((auto_x, 0));
     let scale = Scale::Fractional(output_config.as_ref().map(|c| c.scale).unwrap_or(1.0));
     let transform = match output_config
         .as_ref()
@@ -1064,11 +1010,51 @@ fn create_surface(
         OutputTransformConfig::Flipped180 => Transform::Flipped180,
         OutputTransformConfig::Flipped270 => Transform::Flipped270,
     };
+    let Some(logical_size) =
+        logical_output_size(output_mode.size, transform, scale.fractional_scale())
+    else {
+        tracing::error!(
+            connector_name,
+            mode = ?output_mode.size,
+            scale = scale.fractional_scale(),
+            ?transform,
+            "Output geometry does not fit TideWM's logical coordinate domain"
+        );
+        return None;
+    };
+    let requested_position = output_config
+        .as_ref()
+        .and_then(|config| config.position)
+        .map(Into::into);
+    let Some((position, preserved_request)) = resolve_output_position(
+        state
+            .space
+            .outputs()
+            .filter_map(|output| state.space.output_geometry(output)),
+        requested_position,
+        logical_size,
+    ) else {
+        tracing::error!(
+            connector_name,
+            ?logical_size,
+            "Could not place output inside TideWM's logical coordinate domain"
+        );
+        return None;
+    };
+    if requested_position.is_some() && !preserved_request {
+        tracing::warn!(
+            connector_name,
+            requested = ?requested_position,
+            fallback = ?position,
+            ?logical_size,
+            "Configured output position exceeds the representable desktop; using automatic placement"
+        );
+    }
     output.change_current_state(
         Some(output_mode),
         Some(transform),
         Some(scale),
-        Some(position.into()),
+        Some(position),
     );
     output.set_preferred(output_mode);
 
@@ -1207,6 +1193,7 @@ fn handle_connector_change(
                     // unreachable. No-op if this was the only output.
                     let disconnected_name = surface.output.name();
                     state.remove_workspace_transition_output(&disconnected_name);
+                    state.remove_backdrop_output(&disconnected_name);
                     let fallback: Option<String> = state
                         .space
                         .outputs()
@@ -1386,14 +1373,19 @@ fn render_surface(
     let locked = !matches!(state.session_lock, SessionLock::Unlocked);
 
     let output = &surface.output;
+    let placements = if locked {
+        Vec::new()
+    } else {
+        state.render_placements(output)?
+    };
     // The renderer has a current EGL context here, but the DRM target has
     // not been bound by `render_frame` yet. Capture now so glass uses the
     // current window position in this visible frame; capturing afterward
     // made interactive moves visibly trail and flicker. Same-sized captures
     // reuse their existing window texture.
     if !locked {
-        state.capture_window_backdrops(renderer, output);
-        state.capture_layer_backdrops(renderer, output);
+        state.capture_window_backdrops(renderer, output, &placements);
+        state.capture_layer_backdrops(renderer, output, &placements);
     }
     let size = output.current_mode().map(|m| m.size).unwrap_or_default();
     let output_scale = output.current_scale();
@@ -1507,7 +1499,7 @@ fn render_surface(
     let tab_strip_elements = if locked {
         Vec::new()
     } else {
-        state.tab_strip_elements(renderer, output)
+        state.tab_strip_elements(renderer, output, &placements)
     };
 
     // The overview shows window titles too -- same lock-gating as the tab
@@ -1549,11 +1541,6 @@ fn render_surface(
         state.config_error_element(output, renderer)
     };
 
-    let placements = if locked {
-        Vec::new()
-    } else {
-        state.render_placements(output)?
-    };
     let (depth_elements, depth_surfaces) = if locked {
         (Vec::new(), Vec::new())
     } else {
@@ -1572,12 +1559,8 @@ fn render_surface(
     // glass layer behind its own surface); only depth-replaced windows are
     // skipped.
     let replaced_surfaces = depth_surfaces;
-    // The canvas grid, caustics, and BelowWindows ripples all sit between
-    // windows and the wallpaper. They are passed INTO
-    // `desktop_render_elements` so they land *above* whatever wallpaper
-    // engine is attached -- awww/swww/swaybg/hyprpaper are layer-shell
-    // Background surfaces inside that walk, and anything spliced after it
-    // would render behind the wallpaper.
+    // Insert backdrop effects inside the desktop walk so they remain above
+    // layer-shell Background surfaces and below windows.
     let ripple_layers = if locked {
         Default::default()
     } else {
@@ -1613,9 +1596,7 @@ fn render_surface(
         Vec::new()
     };
 
-    // Background-level placeholder, not transient UI -- behind
-    // toast/overview/tab-strip/cursor in the chain below. Never shown
-    // while locked, same as the tab strip/overview above.
+    // Background-level placeholder behind compositor chrome and absent on lock.
     let welcome_element = if locked || !state.should_show_welcome_hint() {
         None
     } else {
@@ -1635,6 +1616,11 @@ fn render_surface(
         None
     } else {
         state.workspace_transition_frame_element(renderer, output)
+    };
+    let workspace_glide = if locked {
+        None
+    } else {
+        state.workspace_glide_frame_element(output)
     };
     let depth_transition = if locked {
         None
@@ -1674,6 +1660,7 @@ fn render_surface(
     elements.extend(ripple_layers.above_windows);
     elements.extend(compass_elements);
     elements.extend(workspace_transition);
+    elements.extend(workspace_glide);
     elements.extend(closing_windows);
     elements.extend(depth_elements);
     elements.extend(space_elements);
