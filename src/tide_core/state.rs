@@ -5513,6 +5513,13 @@ impl Smallvil {
         renderer: &mut GlesRenderer,
     ) -> Option<smithay::backend::renderer::element::texture::TextureRenderElement<GlesTexture>>
     {
+        // Honor the `builtin_wallpaper` config toggle: when off, the embedded
+        // 4K artwork is never decoded and no GPU texture is built, so neither
+        // CPU nor VRAM is paid for it. Read live so a hot reload to false
+        // stops drawing it immediately.
+        if !self.config.builtin_wallpaper {
+            return None;
+        }
         let logical_size = self.space.output_geometry(output)?.size;
         self.builtin_wallpaper
             .render_element(renderer, logical_size)

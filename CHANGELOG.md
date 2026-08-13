@@ -4,6 +4,9 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 
 ## [Unreleased]
 
+### Added
+- New Wave config key `builtin_wallpaper` (bool, default `true`) controls whether the embedded 4K aqua fallback wallpaper is decoded and drawn. A layer-shell wallpaper (swaybg/swww/hyprpaper) already renders above it, so setting it `false` skips the decode and its GPU texture entirely -- reclaiming the CPU and VRAM that backdrop would otherwise cost, useful on low-RAM machines or when an external wallpaper daemon is always present. Live-reloadable: a running session stops drawing it the moment it becomes `false`.
+
 ### Fixed
 - Output positions from `zwlr_output_manager` clients (and stored layout state derived from them) can no longer overflow translation and layout arithmetic. The wire carries full-range i32 positions and the protocol has no error for rejecting extremes, so the values are stored as requested but every arithmetic site that consumes them is now saturating: the floating-window translate delta in the apply path, every `loc += delta` inside `translate_floating_windows_on_output` (including fullscreen/maximized restore rects), and the udev auto-layout right-edge fold. An i32-extreme position previously panicked in debug builds and wrapped to a nonsensical layout in release.
 
