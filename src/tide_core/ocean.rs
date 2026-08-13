@@ -810,8 +810,7 @@ impl OceanSpace {
         let Some(reef) = self.reefs.iter_mut().find(|reef| reef.layout.contains(old)) else {
             return false;
         };
-        reef.layout.replace_leaf(old, new_window);
-        true
+        reef.layout.replace_leaf(old, new_window)
     }
 
     /// Gives an ungrouped tab a new leaf in the same reef as the surviving
