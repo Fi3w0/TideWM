@@ -487,6 +487,10 @@ pub struct Smallvil {
 
     // Smithay State
     pub compositor_state: CompositorState,
+    /// Implicit-fence watchers keyed by their Wayland client. Signalled
+    /// sources remove themselves; disconnect cleanup removes the rest.
+    pub(crate) dmabuf_blocker_sources: HashMap<ClientId, Vec<RegistrationToken>>,
+    pub(crate) dmabuf_blocker_source_count: usize,
     pub xdg_shell_state: XdgShellState,
     /// `zxdg_decoration_manager_v1`: lets GTK/Qt clients ask whether to draw
     /// their own title bar (client-side decorations). TideWM enforces
@@ -3598,6 +3602,8 @@ impl Smallvil {
             socket_name,
 
             compositor_state,
+            dmabuf_blocker_sources: HashMap::new(),
+            dmabuf_blocker_source_count: 0,
             xdg_shell_state,
             xdg_decoration_state,
             kde_decoration_state,
@@ -5279,6 +5285,14 @@ impl Smallvil {
     }
 
     fn handle_client_disconnect(&mut self, client_id: ClientId) {
+        if let Some(sources) = self.dmabuf_blocker_sources.remove(&client_id) {
+            self.dmabuf_blocker_source_count = self
+                .dmabuf_blocker_source_count
+                .saturating_sub(sources.len());
+            for token in sources {
+                self.loop_handle.remove(token);
+            }
+        }
         if self.session_lock_client.as_ref() == Some(&client_id)
             && !matches!(self.session_lock, SessionLock::Unlocked)
         {
@@ -5290,6 +5304,36 @@ impl Smallvil {
             );
             self.session_lock_client = None;
             self.loop_signal.stop();
+        }
+    }
+
+    pub(crate) fn track_dmabuf_blocker_source(
+        &mut self,
+        client_id: ClientId,
+        token: RegistrationToken,
+    ) {
+        self.dmabuf_blocker_sources
+            .entry(client_id)
+            .or_default()
+            .push(token);
+        self.dmabuf_blocker_source_count = self.dmabuf_blocker_source_count.saturating_add(1);
+    }
+
+    pub(crate) fn untrack_dmabuf_blocker_source(
+        &mut self,
+        client_id: &ClientId,
+        token: RegistrationToken,
+    ) {
+        let Some(sources) = self.dmabuf_blocker_sources.get_mut(client_id) else {
+            return;
+        };
+        let previous_len = sources.len();
+        sources.retain(|candidate| *candidate != token);
+        self.dmabuf_blocker_source_count = self
+            .dmabuf_blocker_source_count
+            .saturating_sub(previous_len - sources.len());
+        if sources.is_empty() {
+            self.dmabuf_blocker_sources.remove(client_id);
         }
     }
 

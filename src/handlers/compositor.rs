@@ -1,3 +1,5 @@
+use std::{cell::Cell, rc::Rc};
+
 use crate::{grabs::resize_grab, state::ClientState, Smallvil};
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
@@ -5,6 +7,7 @@ use smithay::{
     reexports::{
         calloop::Interest,
         wayland_server::{
+            backend::protocol::ProtocolError,
             protocol::{wl_buffer, wl_surface::WlSurface},
             Client, Resource,
         },
@@ -22,6 +25,13 @@ use smithay::{
 };
 
 use super::{layer_shell, xdg_shell};
+
+const MAX_PENDING_DMABUF_BLOCKERS_PER_CLIENT: usize = 64;
+const MAX_PENDING_DMABUF_BLOCKERS_TOTAL: usize = 1024;
+
+fn dmabuf_blocker_admitted(per_client: usize, total: usize) -> bool {
+    per_client < MAX_PENDING_DMABUF_BLOCKERS_PER_CLIENT && total < MAX_PENDING_DMABUF_BLOCKERS_TOTAL
+}
 
 impl CompositorHandler for Smallvil {
     fn compositor_state(&mut self) -> &mut CompositorState {
@@ -60,17 +70,51 @@ impl CompositorHandler for Smallvil {
             let Some(client) = surface.client() else {
                 return;
             };
+            let client_id = client.id();
+            let per_client = state
+                .dmabuf_blocker_sources
+                .get(&client_id)
+                .map_or(0, Vec::len);
+            let total = state.dmabuf_blocker_source_count;
+            if !dmabuf_blocker_admitted(per_client, total) {
+                tracing::warn!(
+                    per_client,
+                    total,
+                    "Disconnecting client after excessive pending DMA-BUF fences"
+                );
+                client.kill(
+                    &state.display_handle,
+                    ProtocolError {
+                        code: 0,
+                        object_id: surface.id().protocol_id(),
+                        object_interface: "wl_surface".to_string(),
+                        message: "too many pending DMA-BUF readiness fences".to_string(),
+                    },
+                );
+                return;
+            }
+
+            let token_slot = Rc::new(Cell::new(None));
+            let callback_token = token_slot.clone();
+            let callback_client_id = client_id.clone();
 
             match state
                 .loop_handle
                 .insert_source(source, move |_, _, state: &mut Smallvil| {
+                    if let Some(token) = callback_token.get() {
+                        state.untrack_dmabuf_blocker_source(&callback_client_id, token);
+                    }
                     if let Some(client_state) = client.get_data::<ClientState>() {
                         let dh = state.display_handle.clone();
                         client_state.compositor_state.blocker_cleared(state, &dh);
                     }
                     Ok(())
                 }) {
-                Ok(_) => add_blocker(surface, blocker),
+                Ok(token) => {
+                    token_slot.set(Some(token));
+                    state.track_dmabuf_blocker_source(client_id, token);
+                    add_blocker(surface, blocker);
+                }
                 Err(err) => {
                     tracing::warn!(
                         %err,
@@ -137,6 +181,12 @@ impl CompositorHandler for Smallvil {
     }
 
     fn destroyed(&mut self, surface: &WlSurface) {
+        if let Some(client) = surface.client() {
+            if let Some(client_state) = client.get_data::<ClientState>() {
+                let dh = self.display_handle.clone();
+                client_state.compositor_state.blocker_cleared(self, &dh);
+            }
+        }
         // Idle-inhibit isn't specific to xdg_toplevels (a layer-shell surface
         // or a bare wl_surface with no shell role at all can hold one too),
         // so this generic wl_surface-destroyed hook -- not
@@ -162,3 +212,25 @@ impl ShmHandler for Smallvil {
 
 delegate_compositor!(Smallvil);
 delegate_shm!(Smallvil);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dmabuf_blocker_caps_accept_below_and_reject_at_each_limit() {
+        assert!(dmabuf_blocker_admitted(0, 0));
+        assert!(dmabuf_blocker_admitted(
+            MAX_PENDING_DMABUF_BLOCKERS_PER_CLIENT - 1,
+            MAX_PENDING_DMABUF_BLOCKERS_TOTAL - 1,
+        ));
+        assert!(!dmabuf_blocker_admitted(
+            MAX_PENDING_DMABUF_BLOCKERS_PER_CLIENT,
+            0,
+        ));
+        assert!(!dmabuf_blocker_admitted(
+            0,
+            MAX_PENDING_DMABUF_BLOCKERS_TOTAL,
+        ));
+    }
+}
