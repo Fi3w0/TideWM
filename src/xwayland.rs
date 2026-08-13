@@ -5,7 +5,7 @@
 //! own socket; avoiding the on-demand `-listenfd` handoff prevents its known
 //! keyboard-initialization race with multi-layout XKB configurations.
 
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 const MAX_DISPLAY: u32 = 50;
@@ -54,7 +54,7 @@ pub fn setup(path: &str) -> Option<Satellite> {
         }
         let display_name = format!(":{display}");
 
-        let mut child = match Command::new(path)
+        let mut child = match crate::child_command(path)
             .arg(&display_name)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -155,7 +155,7 @@ fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Option<std::proces
 /// actually use listenfd downstream (see module docs), just its presence
 /// as a version marker.
 fn probe(path: &str) -> bool {
-    let mut child = match Command::new(path)
+    let mut child = match crate::child_command(path)
         .args([":0", "--test-listenfd-support"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
