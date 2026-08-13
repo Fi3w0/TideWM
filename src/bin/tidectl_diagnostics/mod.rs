@@ -17,10 +17,15 @@
 //! compositor-dependent checks report SKIP and the host half still works,
 //! including a journal excerpt that may explain the failed launch.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_COMMAND_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 
 /// Verdict for one diagnostic check. `Skip` means the check couldn't run
 /// (missing tool, compositor not running) and is neither good nor bad.
@@ -533,15 +538,63 @@ pub fn run_checks() -> (Vec<Check>, Option<Diagnostics>) {
     (checks, diagnostics)
 }
 
-/// Runs a command, returning stdout as a String on success (empty string
-/// if it ran but printed nothing), None if it couldn't run at all.
+/// Runs a diagnostic helper without allowing a missing/wedged host utility
+/// or its output to stall or grow `tidectl` indefinitely. The reader keeps
+/// draining after the retained prefix reaches its cap so a normal child can
+/// still exit even if it prints more than the report will consume.
 fn command_output(args: &[&str]) -> Option<String> {
-    Command::new(args[0])
+    command_output_with_limits(args, COMMAND_TIMEOUT, MAX_COMMAND_OUTPUT_BYTES)
+}
+
+fn command_output_with_limits(args: &[&str], timeout: Duration, cap: usize) -> Option<String> {
+    let mut child = Command::new(args[0])
         .args(&args[1..])
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let reader = std::thread::Builder::new()
+        .name("tidectl-diagnostic-output".into())
+        .spawn(move || {
+            let mut retained = Vec::new();
+            let mut chunk = [0_u8; 8192];
+            loop {
+                match stdout.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        let remaining = cap.saturating_sub(retained.len());
+                        retained.extend_from_slice(&chunk[..count.min(remaining)]);
+                    }
+                    Err(_) => return,
+                }
+            }
+            let _ = tx.send(retained);
+        })
+        .ok()?;
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                return None;
+            }
+        }
+    };
+    if !status.success() {
+        return None;
+    }
+
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let output = rx.recv_timeout(remaining).ok()?;
+    let _ = reader.join();
+    Some(String::from_utf8_lossy(&output).into_owned())
 }
 
 /// Reads a process's environment from /proc/<pid>/environ.
@@ -591,21 +644,17 @@ fn compositor_pss(pid: i64) -> Option<u64> {
 /// None when journalctl can't run or has no TideWM entries at all.
 fn journal_errors(hours: u64) -> Option<Vec<String>> {
     let since = format!("{hours} hours ago");
-    let all = Command::new("journalctl")
-        .args([
-            "-b",
-            "--reverse",
-            "--since",
-            &since,
-            "--no-pager",
-            "-o",
-            "short-iso",
-            "_COMM=TideWM",
-        ])
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())?;
+    let all = command_output(&[
+        "journalctl",
+        "-b",
+        "--reverse",
+        "--since",
+        &since,
+        "--no-pager",
+        "-o",
+        "short-iso",
+        "_COMM=TideWM",
+    ])?;
     let interesting: Vec<String> = all
         .lines()
         .filter(|line| line.contains("error") || line.contains("panic") || line.contains("ERROR"))
@@ -618,12 +667,14 @@ fn journal_errors(hours: u64) -> Option<Vec<String>> {
 /// TideWM core dumps in the last 7 days, newest first. None when
 /// coredumpctl can't run.
 fn core_dumps() -> Option<Vec<String>> {
-    let out = Command::new("coredumpctl")
-        .args(["--no-pager", "--reverse", "--since", "-7 days", "list"])
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())?;
+    let out = command_output(&[
+        "coredumpctl",
+        "--no-pager",
+        "--reverse",
+        "--since",
+        "-7 days",
+        "list",
+    ])?;
     let lines: Vec<String> = out
         .lines()
         .filter(|line| line.contains("TideWM"))
@@ -634,17 +685,7 @@ fn core_dumps() -> Option<Vec<String>> {
 
 /// Sends one JSON request over the IPC socket and parses the response.
 fn request(socket: &Path, request: &Value) -> Result<Value, String> {
-    use std::io::{Read, Write};
-    let mut stream = std::os::unix::net::UnixStream::connect(socket)
-        .map_err(|e| format!("failed to connect: {e}"))?;
-    let mut payload = serde_json::to_vec(request).map_err(|e| e.to_string())?;
-    payload.push(b'\n');
-    stream.write_all(&payload).map_err(|e| e.to_string())?;
-    stream.shutdown(std::net::Shutdown::Write).ok();
-    let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-    let line = buf.split(|&b| b == b'\n').next().unwrap_or(&[]);
-    serde_json::from_slice(line).map_err(|e| e.to_string())
+    super::send_request(socket, request).map_err(|e| e.to_string())
 }
 
 /// Fetches an IPC query's `data` field, or None if the compositor is
@@ -1049,4 +1090,32 @@ fn local_now() -> String {
     let hour = (secs % 86_400) / 3_600;
     let minute = (secs % 3_600) / 60;
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diagnostic_command_output_is_capped_while_the_child_still_completes() {
+        let output = command_output_with_limits(
+            &["sh", "-c", "printf 123456789"],
+            Duration::from_secs(1),
+            4,
+        )
+        .unwrap();
+        assert_eq!(output, "1234");
+    }
+
+    #[test]
+    fn diagnostic_command_timeout_returns_without_waiting_for_child_exit() {
+        let started = Instant::now();
+        assert!(command_output_with_limits(
+            &["sh", "-c", "sleep 1"],
+            Duration::from_millis(25),
+            1024,
+        )
+        .is_none());
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
 }

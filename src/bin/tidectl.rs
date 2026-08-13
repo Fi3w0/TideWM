@@ -35,6 +35,19 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+/// Request/response IPC is local and normally completes in one event-loop
+/// turn. Keep a stalled peer from holding a command or script forever while
+/// still allowing ample time for a heavily loaded compositor to answer.
+const IPC_IO_TIMEOUT: Duration = Duration::from_secs(10);
+/// One-shot queries can legitimately list many mapped windows, but no TideWM
+/// response needs unbounded storage. This is a protocol/resource bound, not a
+/// display-mode or hardware assumption.
+const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+/// The compositor drops a subscriber after roughly this much queued event
+/// data, so one individual newline-delimited record cannot legitimately be
+/// larger. The client independently enforces the same wire-level envelope.
+const MAX_SUBSCRIPTION_RECORD_BYTES: usize = 256 * 1024;
+
 fn main() {
     let raw_args: Vec<String> = env::args().skip(1).collect();
 
@@ -454,7 +467,7 @@ fn cmd_subscribe(socket_path: &Path, auto_discovered: bool, events: &[String]) -
     } else {
         json!({ "request": "subscribe", "events": events })
     };
-    let (stream, connected_path) = match UnixStream::connect(socket_path) {
+    let (stream, connected_path) = match connect_with_timeout(socket_path) {
         Ok(stream) => (stream, socket_path.to_path_buf()),
         Err(e) if auto_discovered && e.kind() == std::io::ErrorKind::ConnectionRefused => {
             // Mirrors the one-shot path's stale-socket dance: remove only
@@ -462,7 +475,7 @@ fn cmd_subscribe(socket_path: &Path, auto_discovered: bool, events: &[String]) -
             // another live TideWM instance may use a different path.
             let _ = std::fs::remove_file(socket_path);
             let retry_path = find_socket().unwrap_or_else(|msg| fail(&msg));
-            let stream = UnixStream::connect(&retry_path).unwrap_or_else(|e| {
+            let stream = connect_with_timeout(&retry_path).unwrap_or_else(|e| {
                 fail(&format!(
                     "failed to connect to {}: {e}",
                     retry_path.display()
@@ -475,6 +488,12 @@ fn cmd_subscribe(socket_path: &Path, auto_discovered: bool, events: &[String]) -
             socket_path.display()
         )),
     };
+    stream
+        .set_read_timeout(Some(IPC_IO_TIMEOUT))
+        .unwrap_or_else(|e| fail(&format!("failed to set socket read timeout: {e}")));
+    stream
+        .set_write_timeout(Some(IPC_IO_TIMEOUT))
+        .unwrap_or_else(|e| fail(&format!("failed to set socket write timeout: {e}")));
     let mut write_stream = match stream.try_clone() {
         Ok(s) => s,
         Err(e) => fail(&format!("failed to clone socket: {e}")),
@@ -486,12 +505,13 @@ fn cmd_subscribe(socket_path: &Path, auto_discovered: bool, events: &[String]) -
         .unwrap_or_else(|e| fail(&format!("failed to write request: {e}")));
 
     let mut reader = BufReader::new(stream);
-    let mut ack = String::new();
-    match reader.read_line(&mut ack) {
-        Ok(0) | Err(_) => fail("no response from TideWM (is it running?)"),
+    let mut ack = Vec::new();
+    match read_bounded_line(&mut reader, &mut ack, MAX_SUBSCRIPTION_RECORD_BYTES) {
+        Ok(0) => fail("no response from TideWM (is it running?)"),
+        Err(e) => fail(&format!("failed to read subscription response: {e}")),
         Ok(_) => {}
     }
-    let ack: Value = serde_json::from_str(&ack).unwrap_or_else(|_| {
+    let ack: Value = serde_json::from_slice(&ack).unwrap_or_else(|_| {
         fail("unrecognized response from TideWM");
     });
     if !ack.get("ok").and_then(Value::as_bool).unwrap_or(false) {
@@ -502,22 +522,74 @@ fn cmd_subscribe(socket_path: &Path, auto_discovered: bool, events: &[String]) -
         fail(err);
     }
 
+    // The handshake is bounded, but a healthy subscription is expected to
+    // sit idle indefinitely between events. Keep only the per-record size
+    // bound for the streaming phase.
+    reader
+        .get_ref()
+        .set_read_timeout(None)
+        .unwrap_or_else(|e| fail(&format!("failed to clear socket read timeout: {e}")));
+
     // Streaming: one JSON line per event, echoed verbatim. Exit when the
     // compositor goes away (socket EOF), so a supervisor can restart us.
-    let mut line = String::new();
+    let mut line = Vec::new();
     loop {
-        line.clear();
-        let read = reader
-            .read_line(&mut line)
+        let read = read_bounded_line(&mut reader, &mut line, MAX_SUBSCRIPTION_RECORD_BYTES)
             .unwrap_or_else(|e| fail(&format!("read error on {}: {e}", connected_path.display())));
         if read == 0 {
             break;
         }
-        print!("{line}");
-        use std::io::Write as _;
-        let _ = std::io::stdout().flush();
+        std::str::from_utf8(&line).unwrap_or_else(|_| fail("non-UTF-8 event from TideWM"));
+        let mut stdout = std::io::stdout().lock();
+        stdout
+            .write_all(&line)
+            .and_then(|()| stdout.flush())
+            .unwrap_or_else(|e| fail(&format!("failed to write event: {e}")));
     }
     std::process::exit(0);
+}
+
+/// Reads one newline-delimited record without letting `BufRead::read_line`
+/// grow its destination indefinitely. The cap includes the trailing newline.
+fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    destination: &mut Vec<u8>,
+    cap: usize,
+) -> std::io::Result<usize> {
+    destination.clear();
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(destination.len());
+        }
+        let newline = available.iter().position(|&byte| byte == b'\n');
+        let take = newline.map_or(available.len(), |index| index + 1);
+        if destination.len().saturating_add(take) > cap {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("IPC record exceeds {cap}-byte limit"),
+            ));
+        }
+        destination.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if newline.is_some() {
+            return Ok(destination.len());
+        }
+    }
+}
+
+fn read_bounded_to_end<R: Read>(reader: R, cap: usize) -> std::io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    reader
+        .take((cap as u64).saturating_add(1))
+        .read_to_end(&mut buf)?;
+    if buf.len() > cap {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("IPC response exceeds {cap}-byte limit"),
+        ));
+    }
+    Ok(buf)
 }
 
 /// Builds the `{"request": ...}` JSON body. Read queries pass straight
@@ -594,16 +666,50 @@ fn find_socket() -> Result<PathBuf, String> {
     })
 }
 
+/// `UnixStream` has read/write timeouts but no connect timeout. A blocking
+/// AF_UNIX connect can still wait behind a full listener backlog, so perform
+/// just that syscall on a worker and bound how long the CLI waits for it.
+/// Every caller exits the process on a timeout; a kernel-stuck worker cannot
+/// outlive the timed-out `tidectl` command.
+fn connect_with_timeout(socket_path: &Path) -> std::io::Result<UnixStream> {
+    let path = socket_path.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let worker = std::thread::Builder::new()
+        .name("tidectl-connect".into())
+        .spawn(move || {
+            let _ = tx.send(UnixStream::connect(path));
+        })?;
+
+    match rx.recv_timeout(IPC_IO_TIMEOUT) {
+        Ok(result) => {
+            let _ = worker.join();
+            result
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "IPC connection did not complete within {} seconds",
+                IPC_IO_TIMEOUT.as_secs()
+            ),
+        )),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            let _ = worker.join();
+            Err(std::io::Error::other("IPC connection worker stopped"))
+        }
+    }
+}
+
 fn send_request(socket_path: &Path, request: &Value) -> std::io::Result<Value> {
-    let mut stream = UnixStream::connect(socket_path)?;
+    let mut stream = connect_with_timeout(socket_path)?;
+    stream.set_read_timeout(Some(IPC_IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(IPC_IO_TIMEOUT))?;
 
     let mut payload = serde_json::to_vec(request).map_err(std::io::Error::other)?;
     payload.push(b'\n');
     stream.write_all(&payload)?;
     stream.shutdown(std::net::Shutdown::Write).ok();
 
-    let mut buf = Vec::new();
-    stream.read_to_end(&mut buf)?;
+    let buf = read_bounded_to_end(stream, MAX_RESPONSE_BYTES)?;
     let line = buf.split(|&b| b == b'\n').next().unwrap_or(&[]);
     serde_json::from_slice(line).map_err(std::io::Error::other)
 }
@@ -821,5 +927,34 @@ mod tests {
         let first = json!({});
         let second = json!({ "cpu_user_us": 10u64, "cpu_system_us": 0u64 });
         assert_eq!(cpu_percent(&first, &second, Duration::from_secs(1)), None);
+    }
+
+    #[test]
+    fn bounded_line_stops_at_newline_and_preserves_the_next_record() {
+        let mut reader = BufReader::new(std::io::Cursor::new(b"first\nsecond\n"));
+        let mut line = Vec::new();
+
+        assert_eq!(read_bounded_line(&mut reader, &mut line, 6).unwrap(), 6);
+        assert_eq!(line, b"first\n");
+        assert_eq!(read_bounded_line(&mut reader, &mut line, 7).unwrap(), 7);
+        assert_eq!(line, b"second\n");
+    }
+
+    #[test]
+    fn bounded_line_rejects_a_record_larger_than_its_cap() {
+        let mut reader = BufReader::new(std::io::Cursor::new(b"oversized\n"));
+        let mut line = Vec::new();
+        let err = read_bounded_line(&mut reader, &mut line, 9).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn bounded_response_accepts_exact_cap_and_rejects_one_more_byte() {
+        assert_eq!(
+            read_bounded_to_end(std::io::Cursor::new(b"1234"), 4).unwrap(),
+            b"1234"
+        );
+        let err = read_bounded_to_end(std::io::Cursor::new(b"12345"), 4).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 }

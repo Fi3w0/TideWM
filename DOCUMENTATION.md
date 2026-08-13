@@ -1549,6 +1549,7 @@ rewriting a line removes or changes it completely.
 
 Queries: `outputs`, `workspaces`, `windows`, `focused-window`, `active-submap`, `diagnostics`. `{"request": "eval", "expression": "<wave expression>"}` evaluates on the live session Lua (config variables, section tables, and the refreshed `tide` table) and returns the value as JSON.
 The `windows` query describes every protocol-mapped toplevel, including clients on inactive Classic workspaces, parked group tabs, and Depth Deck entries; visibility in the current output scene is not treated as mapping state.
+`tidectl` gives connection, request-write, one-shot-response, and subscription-handshake I/O 10 seconds to complete. One-shot replies are limited to 16 MiB and each newline-delimited subscription record to 256 KiB. After the subscribe acknowledgement, the read deadline is removed: an event stream may correctly remain quiet for any length of time, but no single peer-controlled record can grow memory without bound.
 In Ocean, `outputs` reports `active_workspace: null`, the current two-axis
 `camera_origin`, and `camera_zoom`; `workspaces` returns an empty list because bookmarks
 are navigation targets rather than real workspaces. Ocean window entries use
