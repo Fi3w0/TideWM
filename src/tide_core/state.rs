@@ -5014,7 +5014,14 @@ impl Smallvil {
         self.try_confirm_lock();
     }
 
-    fn try_confirm_lock(&mut self) {
+    /// No-op unless `Locking`. Confirmation is normally driven by
+    /// `mark_output_locked_frame` from the render loops, but an output
+    /// hot-unplug removes a frame source entirely -- with zero surviving
+    /// outputs no frame will ever arrive -- so the disconnect path calls
+    /// this directly after pruning its lock state. The predicate is
+    /// vacuously true at zero outputs, matching niri's behavior: a lock
+    /// with nothing left to show it is still confirmed locked.
+    pub(crate) fn try_confirm_lock(&mut self) {
         let SessionLock::Locking(_) = &self.session_lock else {
             return;
         };

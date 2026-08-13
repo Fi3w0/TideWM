@@ -5,6 +5,9 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 ## [Unreleased]
 
 ### Fixed
+- A session lock whose final unconfirmed output was hot-unplugged could stay in the pending `Locking` state forever. Confirmation was only re-evaluated when a locked frame rendered on an output, and a disconnected output renders nothing -- with zero surviving outputs no frame would ever arrive, so the locker client never got its `locked` event. The disconnect cleanup now re-runs lock confirmation after pruning the departed output's lock state (vacuously confirmed at zero outputs, matching niri's behavior: a lock with nothing left to display it is still locked).
+
+### Fixed
 - Removing the GPU TideWM is driving (udev `Removed` for the managed DRM device) now ends the compositor session through the normal teardown path instead of leaving a permanently black live session that can never render again. TideWM deliberately drives a single GPU, so there is no fallback device to switch to; staying alive only kept clients connected to an invisible compositor. Stopping the event loop returns control to the login/session manager, the same fail-closed mechanism the session-lock client-crash path already uses.
 
 ### Fixed

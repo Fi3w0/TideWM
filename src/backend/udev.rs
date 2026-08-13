@@ -1222,6 +1222,12 @@ fn handle_connector_change(
                     state.lock_blank.remove(&surface.output);
                     state.layer_dim_buffers.remove(&surface.output);
                     state.locked_outputs.remove(&surface.output);
+                    // A disconnected output can no longer render the locked
+                    // frame that would drive lock confirmation, so re-run
+                    // the predicate here -- otherwise a `Locking` session
+                    // whose last unconfirmed output just vanished stays
+                    // pending forever (no later frame will arrive).
+                    state.try_confirm_lock();
                     #[cfg(feature = "screencast")]
                     if let Some(screencast) = &state.screencast {
                         screencast.refresh_outputs(state.space.outputs());
