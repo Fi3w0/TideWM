@@ -5,6 +5,9 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 ## [Unreleased]
 
 ### Fixed
+- xwayland-satellite startup no longer exports `DISPLAY` before the X11 socket actually exists, and no longer hangs compositor startup if the satellite binary wedges. The version probe now waits with a two-second deadline (killing the probe child on timeout) instead of blocking forever, and each display-number attempt waits up to five seconds for `/tmp/.X11-unix/X<N>` to appear while the child stays alive. A satellite that loses the display-number race to another X server, crashes during startup, or never creates its socket is now detected and the next display number is tried, where previously `DISPLAY` was exported unconditionally the instant `spawn()` returned -- leaving startup X clients racing a socket that might never appear, and a dead satellite leaving poisoned environment state behind.
+
+### Fixed
 - The IPC subscriber-flush retry timer no longer runs forever once started. It used to re-arm itself unconditionally every 16ms from the moment the first `subscribe` connection landed, waking the event loop at the frame interval even with zero subscribers connected for the rest of the session. It's now armed on demand only when a subscriber's write genuinely didn't fully drain (kernel buffer momentarily full), and stops re-arming once every subscriber catches up.
 
 ### Fixed
