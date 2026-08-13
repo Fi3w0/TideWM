@@ -3844,14 +3844,14 @@ impl Smallvil {
         &self,
         pos: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
-        let output = self.space.output_under(pos).next()?;
-        let output_geo = self.space.output_geometry(output)?;
+        let output = self.output_for_point(pos)?;
+        let output_geo = self.space.output_geometry(&output)?;
 
         // While locked, only the lock surface is hit-testable -- never the
         // windows/layers underneath, even if there is no lock surface yet
         // for this output (in which case there's simply nothing here).
         if !matches!(self.session_lock, SessionLock::Unlocked) {
-            let lock_surface = self.lock_surfaces.get(output)?;
+            let lock_surface = self.lock_surfaces.get(&output)?;
             let output_local = pos - output_geo.loc.to_f64();
             return under_from_surface_tree(
                 lock_surface.wl_surface(),
@@ -3862,10 +3862,10 @@ impl Smallvil {
             .map(|(s, p)| (s, p.to_f64() + output_geo.loc.to_f64()));
         }
 
-        self.fullscreen_surface_under(output, pos)
+        self.fullscreen_surface_under(&output, pos)
             .or_else(|| {
                 self.layer_surface_under(
-                    output,
+                    &output,
                     output_geo,
                     pos,
                     &[WlrLayer::Overlay, WlrLayer::Top],
@@ -3873,7 +3873,7 @@ impl Smallvil {
             })
             .or_else(|| {
                 if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
-                    self.render_placements(output).and_then(|placements| {
+                    self.render_placements(&output).and_then(|placements| {
                         placements.into_iter().find_map(|placement| {
                             let rect = crate::placement::translated_rect(
                                 placement.rect,
@@ -3930,7 +3930,7 @@ impl Smallvil {
             })
             .or_else(|| {
                 self.layer_surface_under(
-                    output,
+                    &output,
                     output_geo,
                     pos,
                     &[WlrLayer::Bottom, WlrLayer::Background],
@@ -3951,8 +3951,8 @@ impl Smallvil {
                 .element_under(pos)
                 .map(|(window, location)| (window.clone(), location));
         }
-        let output = self.space.output_under(pos).next()?;
-        self.render_placements(output)?
+        let output = self.output_for_point(pos)?;
+        self.render_placements(&output)?
             .into_iter()
             .find_map(|placement| {
                 let rect = crate::placement::translated_rect(placement.rect, placement.view_offset);
@@ -4073,18 +4073,19 @@ impl Smallvil {
         &self,
         pos: Point<f64, Logical>,
     ) -> Option<desktop::LayerSurface> {
-        let output = self.space.output_under(pos).next()?;
+        let output = self.output_for_point(pos)?;
         let (surface, _) = self.surface_under(pos)?;
-        let map = layer_map_for_output(output);
+        let map = layer_map_for_output(&output);
         map.layer_for_surface(&surface, WindowSurfaceType::ALL)
             .filter(|layer| !self.unmapped_layer_surfaces.contains(layer.wl_surface()))
             .cloned()
     }
 
-    /// The output containing `pos`, if any. Used to decide which output's
-    /// tiling tree a click/drag/new-window action should target.
+    /// The output containing `pos`, if any. Overlap is resolved by stable
+    /// output name so pointer ownership does not depend on `Space`'s map
+    /// iteration order. Used for click, drag, focus, and placement targets.
     pub(crate) fn output_for_point(&self, pos: Point<f64, Logical>) -> Option<Output> {
-        self.space.output_under(pos).next().cloned()
+        stable_output_by_name(self.space.output_under(pos)).cloned()
     }
 
     /// The output containing the largest share of a window's current geometry.
@@ -4578,12 +4579,10 @@ impl Smallvil {
     /// any output yet; `reconcile_keyboard_focus` then clears keyboard
     /// focus entirely rather than leaking it to a window.
     fn lock_focus_target(&self) -> Option<WlSurface> {
-        let pointer_output = self.seat.get_pointer().and_then(|pointer| {
-            self.space
-                .output_under(pointer.current_location())
-                .next()
-                .cloned()
-        });
+        let pointer_output = self
+            .seat
+            .get_pointer()
+            .and_then(|pointer| self.output_for_point(pointer.current_location()));
         pointer_output
             .and_then(|output| self.lock_surfaces.get(&output))
             .or_else(|| self.lock_surfaces.values().next())
@@ -12060,9 +12059,27 @@ fn nearest_point_in_output_rects(
     nearest.map(|(_, point)| point)
 }
 
+fn stable_output_by_name<'a>(outputs: impl Iterator<Item = &'a Output>) -> Option<&'a Output> {
+    outputs.min_by(|left, right| left.name().cmp(&right.name()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smithay::output::{PhysicalProperties, Subpixel};
+
+    fn named_output(name: &str) -> Output {
+        Output::new(
+            name.to_string(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "test".to_string(),
+                model: "test".to_string(),
+                serial_number: "test".to_string(),
+            },
+        )
+    }
 
     #[test]
     fn saturating_translate_never_overflows() {
@@ -12075,6 +12092,21 @@ mod tests {
         let ordinary: Point<i32, Logical> = (40, -7).into();
         let step: Point<i32, Logical> = (12, 5).into();
         assert_eq!(saturating_translate(ordinary, step), (52, -2).into());
+    }
+
+    #[test]
+    fn overlapping_output_priority_is_name_stable() {
+        let alpha = named_output("DP-1");
+        let beta = named_output("HDMI-A-1");
+
+        assert_eq!(
+            stable_output_by_name([&beta, &alpha].into_iter()).map(Output::name),
+            Some("DP-1".to_string())
+        );
+        assert_eq!(
+            stable_output_by_name([&alpha, &beta].into_iter()).map(Output::name),
+            Some("DP-1".to_string())
+        );
     }
 
     #[test]
