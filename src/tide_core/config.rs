@@ -3893,11 +3893,18 @@ pub struct WorkspaceRule {
 /// `(width, height, refresh_hz)`.
 pub fn parse_mode_str(s: &str) -> Option<(i32, i32, Option<f64>)> {
     let (res, refresh) = match s.split_once('@') {
-        Some((res, r)) => (res, Some(r.parse::<f64>().ok()?)),
+        Some((res, r)) => {
+            let refresh = r.trim().parse::<f64>().ok()?;
+            if !refresh.is_finite() || refresh <= 0.0 {
+                return None;
+            }
+            (res, Some(refresh))
+        }
         None => (s, None),
     };
     let (w, h) = res.split_once('x')?;
-    Some((w.parse().ok()?, h.parse().ok()?, refresh))
+    let (w, h) = (w.trim().parse().ok()?, h.trim().parse().ok()?);
+    (w > 0 && h > 0).then_some((w, h, refresh))
 }
 
 /// Watches the whole config directory tree (not just the main file, and
@@ -4488,7 +4495,16 @@ fn apply_touchpad_block(touchpad: &mut TouchpadConfig, body: &[waves::Entry]) {
             "middle_emulation" => set_opt_bool(&mut touchpad.middle_emulation, key, value),
             "click_method" => touchpad.click_method = Some(value.clone()),
             "scroll_method" => touchpad.scroll_method = Some(value.clone()),
-            "accel_speed" => set_opt_f64(&mut touchpad.accel_speed, key, value),
+            "accel_speed" => match value.parse::<f64>() {
+                Ok(speed) if speed.is_finite() && (-1.0..=1.0).contains(&speed) => {
+                    touchpad.accel_speed = Some(speed)
+                }
+                _ => tracing::warn!(
+                    key,
+                    value,
+                    "Expected accel_speed from -1.0 to 1.0, ignoring"
+                ),
+            },
             "accel_profile" => touchpad.accel_profile = Some(value.clone()),
             "workspace_swipe_fingers" => match value.parse::<u32>() {
                 Ok(0) => touchpad.workspace_swipe_fingers = None,
@@ -4500,9 +4516,16 @@ fn apply_touchpad_block(touchpad: &mut TouchpadConfig, body: &[waves::Entry]) {
                 ),
                 Err(err) => tracing::warn!(key, value, %err, "Expected an integer, ignoring"),
             },
-            "workspace_swipe_distance" => {
-                set_opt_f64(&mut touchpad.workspace_swipe_distance, key, value)
-            }
+            "workspace_swipe_distance" => match value.parse::<f64>() {
+                Ok(distance) if distance.is_finite() && distance > 0.0 => {
+                    touchpad.workspace_swipe_distance = Some(distance)
+                }
+                _ => tracing::warn!(
+                    key,
+                    value,
+                    "Expected a positive workspace_swipe_distance, ignoring"
+                ),
+            },
             "gesture_swipe_fingers" => {
                 set_gesture_fingers(&mut touchpad.gesture_swipe_fingers, key, value)
             }
@@ -6802,7 +6825,10 @@ fn lower_output_block(header: &str, body: &[waves::Entry]) -> OutputConfig {
                 Some(pos) => cfg.position = Some(pos),
                 None => tracing::warn!(value, "Expected a position like `1920x0`, ignoring"),
             },
-            "scale" => set_f64(&mut cfg.scale, key, value),
+            "scale" => match value.parse::<f64>() {
+                Ok(scale) if scale.is_finite() && scale > 0.0 => cfg.scale = scale,
+                _ => tracing::warn!(value, "Expected a positive finite output scale, ignoring"),
+            },
             "transform" => match parse_transform(value) {
                 Some(t) => cfg.transform = t,
                 None => tracing::warn!(value, "Unknown transform, ignoring"),
@@ -7245,13 +7271,6 @@ fn parse_viscosity(value: &str) -> Option<f64> {
         .ok()
         .filter(|value| value.is_finite())
         .map(|value| value.clamp(0.0, 4.0))
-}
-
-fn set_opt_f64(field: &mut Option<f64>, key: &str, value: &str) {
-    match value.parse::<f64>() {
-        Ok(n) if n.is_finite() => *field = Some(n),
-        _ => tracing::warn!(key, value, "Expected a finite number, ignoring"),
-    }
 }
 
 static CONFIG_PATH_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
@@ -8235,17 +8254,39 @@ mod tests {
         set_f64(&mut required, "scale", "1.25");
         assert_eq!(required, 1.25);
 
-        let mut optional = Some(-0.5);
-        set_opt_f64(&mut optional, "accel_speed", "-inf");
-        assert_eq!(optional, Some(-0.5));
-        set_opt_f64(&mut optional, "accel_speed", "0.25");
-        assert_eq!(optional, Some(0.25));
-
         let output = lower_output_block(
             "DP-1",
             &[waves::Entry::Assign("scale".into(), "NaN".into())],
         );
         assert_eq!(output.scale, OutputConfig::default().scale);
+    }
+
+    #[test]
+    fn hardware_numeric_config_rejects_invalid_ranges_without_guessing() {
+        assert_eq!(
+            parse_mode_str("2560x1440@144"),
+            Some((2560, 1440, Some(144.0)))
+        );
+        for mode in ["0x1080@60", "1920x-1@60", "1920x1080@0", "1920x1080@NaN"] {
+            assert!(parse_mode_str(mode).is_none(), "{mode}");
+        }
+
+        let output = lower_output_block(
+            "any-connector",
+            &[waves::Entry::Assign("scale".into(), "-1".into())],
+        );
+        assert_eq!(output.scale, OutputConfig::default().scale);
+
+        let mut touchpad = TouchpadConfig::default();
+        apply_touchpad_block(
+            &mut touchpad,
+            &[
+                waves::Entry::Assign("accel_speed".into(), "2".into()),
+                waves::Entry::Assign("workspace_swipe_distance".into(), "0".into()),
+            ],
+        );
+        assert!(touchpad.accel_speed.is_none());
+        assert!(touchpad.workspace_swipe_distance.is_none());
     }
 
     #[test]
