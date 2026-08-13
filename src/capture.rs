@@ -33,7 +33,10 @@ use smithay::{
     output::Output,
     reexports::{
         calloop::{generic::Generic, Interest, Mode, PostAction},
-        wayland_server::protocol::{wl_buffer::WlBuffer, wl_surface::WlSurface},
+        wayland_server::{
+            backend::ClientId,
+            protocol::{wl_buffer::WlBuffer, wl_surface::WlSurface},
+        },
     },
     utils::{Buffer as BufferCoords, IsAlive, Logical, Point, Rectangle, Scale, Size, Transform},
     wayland::{
@@ -49,11 +52,41 @@ use crate::{backend::udev::OutputRenderElements, state::SessionLock, Smallvil};
 /// A malicious or broken client must not be able to queue an unlimited
 /// number of full-output GL readbacks before the backend renders a frame.
 const MAX_PENDING_CAPTURES: usize = 64;
+/// Reserve queue capacity for other capture clients during a burst. Normal
+/// screenshot and stream clients keep at most one frame in flight.
+const MAX_PENDING_CAPTURES_PER_CLIENT: usize = 8;
 /// Even a bounded queue can freeze the compositor if all of its full-size
 /// GL readbacks run in one event-loop turn. Spread bursts over frames while
 /// still allowing both screencast cursor variants and ordinary screenshots
 /// to make progress together.
 const MAX_CAPTURE_RENDERS_PER_OUTPUT_FRAME: usize = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureQueueLimit {
+    Client,
+    Output,
+    Global,
+}
+
+fn capture_queue_limit(
+    total: usize,
+    per_client: Option<usize>,
+    per_output: usize,
+    output_count: usize,
+) -> Option<CaptureQueueLimit> {
+    let per_output_limit = MAX_PENDING_CAPTURES
+        .div_ceil(output_count.max(1))
+        .max(MAX_CAPTURE_RENDERS_PER_OUTPUT_FRAME);
+    if per_client.is_some_and(|count| count >= MAX_PENDING_CAPTURES_PER_CLIENT) {
+        Some(CaptureQueueLimit::Client)
+    } else if output_count > 1 && per_output >= per_output_limit {
+        Some(CaptureQueueLimit::Output)
+    } else if total >= MAX_PENDING_CAPTURES {
+        Some(CaptureQueueLimit::Global)
+    } else {
+        None
+    }
+}
 
 /// Pixel size of TideWM's upright, output-local offscreen capture target.
 /// A rotated scanout swaps the logical axes; it must not make the capture
@@ -175,6 +208,9 @@ impl CaptureCompletion {
 /// A validated capture request waiting for a backend render loop (which owns
 /// the GL renderer) to produce the pixels.
 pub struct PendingCapture {
+    /// Wayland client responsible for this request. Internal PipeWire work has
+    /// no Wayland owner and remains bounded by the output and global limits.
+    pub client_id: Option<ClientId>,
     pub output: Output,
     /// A mapped toplevel surface for per-window capture. `None` means the
     /// full output. The output remains explicit because it selects the GL
@@ -191,9 +227,30 @@ pub struct PendingCapture {
 
 impl Smallvil {
     pub(crate) fn queue_capture(&mut self, capture: PendingCapture) {
-        if self.pending_captures.len() >= MAX_PENDING_CAPTURES {
+        let per_client = capture.client_id.as_ref().map(|client_id| {
+            self.pending_captures
+                .iter()
+                .filter(|pending| pending.client_id.as_ref() == Some(client_id))
+                .count()
+        });
+        let per_output = self
+            .pending_captures
+            .iter()
+            .filter(|pending| pending.output == capture.output)
+            .count();
+        let output_count = self.space.outputs().count();
+        if let Some(reason) = capture_queue_limit(
+            self.pending_captures.len(),
+            per_client,
+            per_output,
+            output_count,
+        ) {
             tracing::warn!(
-                limit = MAX_PENDING_CAPTURES,
+                ?reason,
+                total = self.pending_captures.len(),
+                per_client,
+                per_output,
+                output_count,
                 "Capture queue full; rejecting request"
             );
             capture.completion.fail(CaptureFailureReason::Unknown);
@@ -210,6 +267,7 @@ impl Smallvil {
         target: crate::screencast::FrameTarget,
     ) {
         self.queue_capture(PendingCapture {
+            client_id: None,
             output,
             window: None,
             draw_cursor: target.draw_cursor,
@@ -226,6 +284,7 @@ impl Smallvil {
         target: crate::screencast::FrameTarget,
     ) {
         self.queue_capture(PendingCapture {
+            client_id: None,
             output,
             window: Some(surface),
             draw_cursor: false,
@@ -271,6 +330,7 @@ impl Smallvil {
             let mut without_cursor = Vec::new();
             for capture in mine.drain(..) {
                 let PendingCapture {
+                    client_id,
                     output,
                     window,
                     draw_cursor,
@@ -286,6 +346,7 @@ impl Smallvil {
                         }
                     }
                     (window, region, completion) => regular.push(PendingCapture {
+                        client_id,
                         output,
                         window,
                         draw_cursor,
@@ -296,6 +357,7 @@ impl Smallvil {
             }
             if !without_cursor.is_empty() {
                 regular.push(PendingCapture {
+                    client_id: None,
                     output: output.clone(),
                     window: None,
                     draw_cursor: false,
@@ -305,6 +367,7 @@ impl Smallvil {
             }
             if !with_cursor.is_empty() {
                 regular.push(PendingCapture {
+                    client_id: None,
                     output: output.clone(),
                     window: None,
                     draw_cursor: true,
@@ -333,6 +396,7 @@ impl Smallvil {
         composite_cursor: bool,
     ) {
         let PendingCapture {
+            client_id: _,
             output,
             window,
             draw_cursor,
@@ -1027,6 +1091,13 @@ impl Smallvil {
         }
         self.pending_captures = remaining;
     }
+
+    /// Drops work owned by a disconnected Wayland client immediately instead
+    /// of letting dead protocol resources occupy its queue share until render.
+    pub(crate) fn discard_captures_for_client(&mut self, client_id: &ClientId) {
+        self.pending_captures
+            .retain(|capture| capture.client_id.as_ref() != Some(client_id));
+    }
 }
 
 fn shm_copy_end(offset: usize, stride: usize, rows: usize, row_bytes: usize) -> Option<usize> {
@@ -1126,6 +1197,37 @@ mod tests {
         assert_eq!(
             output_capture_size(&flipped_rotated),
             Some((71, 113).into())
+        );
+    }
+
+    #[test]
+    fn capture_queue_reserves_capacity_per_client_and_output() {
+        assert_eq!(capture_queue_limit(0, Some(0), 0, 1), None);
+        assert_eq!(
+            capture_queue_limit(
+                MAX_PENDING_CAPTURES_PER_CLIENT - 1,
+                Some(MAX_PENDING_CAPTURES_PER_CLIENT - 1),
+                MAX_PENDING_CAPTURES_PER_CLIENT - 1,
+                1,
+            ),
+            None
+        );
+        assert_eq!(
+            capture_queue_limit(
+                MAX_PENDING_CAPTURES_PER_CLIENT,
+                Some(MAX_PENDING_CAPTURES_PER_CLIENT),
+                MAX_PENDING_CAPTURES_PER_CLIENT,
+                1,
+            ),
+            Some(CaptureQueueLimit::Client)
+        );
+        assert_eq!(
+            capture_queue_limit(MAX_PENDING_CAPTURES / 2, None, MAX_PENDING_CAPTURES / 2, 2,),
+            Some(CaptureQueueLimit::Output)
+        );
+        assert_eq!(
+            capture_queue_limit(MAX_PENDING_CAPTURES, None, MAX_PENDING_CAPTURES, 1),
+            Some(CaptureQueueLimit::Global)
         );
     }
 

@@ -5261,6 +5261,7 @@ impl Smallvil {
     }
 
     fn handle_client_disconnect(&mut self, client_id: ClientId) {
+        self.discard_captures_for_client(&client_id);
         if let Some(sources) = self.dmabuf_blocker_sources.remove(&client_id) {
             self.dmabuf_blocker_source_count = self
                 .dmabuf_blocker_source_count
