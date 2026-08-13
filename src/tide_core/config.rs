@@ -923,6 +923,8 @@ pub struct Config {
     /// broken configuration harder to repair.
     pub show_config_reload_toast: bool,
     pub water_effects: bool,
+    /// Embedded aqua fallback wallpaper on/off. See `RawConfig::builtin_wallpaper`.
+    pub builtin_wallpaper: bool,
     /// Strength of TideWM's render-only interactive move/resize damping.
     /// `1.0` is the default half-life multiplier, `0.0` disables it, and
     /// larger values settle more slowly. `water_effects` is the master
@@ -1365,6 +1367,7 @@ impl Config {
             show_welcome_hint: raw.show_welcome_hint,
             show_config_reload_toast: raw.show_config_reload_toast,
             water_effects: raw.water_effects,
+            builtin_wallpaper: raw.builtin_wallpaper,
             viscosity: raw.viscosity.clamp(0.0, 4.0),
             backdrop_capture_scale: raw.backdrop_capture_scale.clamp(1, 4),
             connected_vessels: raw.connected_vessels,
@@ -1701,6 +1704,14 @@ struct RawConfig {
     show_welcome_hint: bool,
     show_config_reload_toast: bool,
     water_effects: bool,
+    /// Whether the embedded 4K aqua fallback wallpaper is decoded and drawn.
+    /// Default true (the water identity's backdrop); false skips the decode
+    /// and GPU texture entirely so neither CPU nor VRAM is paid for it -- a
+    /// layer-shell wallpaper (swaybg/swww/hyprpaper) renders above it
+    /// anyway. Read each frame in `wallpaper_element`, so a hot reload to
+    /// false stops drawing it; an already-imported texture is dropped on the
+    /// next renderer-context replacement.
+    builtin_wallpaper: bool,
     viscosity: f64,
     backdrop_capture_scale: i32,
     connected_vessels: ConnectedVesselsConfig,
@@ -1868,6 +1879,7 @@ impl Default for RawConfig {
             show_welcome_hint: false,
             show_config_reload_toast: true,
             water_effects: true,
+            builtin_wallpaper: true,
             viscosity: 1.0,
             connected_vessels: ConnectedVesselsConfig::default(),
             sway: SwayConfig::default(),
@@ -4274,6 +4286,7 @@ fn is_known_top_level_key(key: &str) -> bool {
             | "welcome_hint"
             | "reload_toast"
             | "water_effects"
+            | "builtin_wallpaper"
             | "viscosity"
             | "backdrop_capture_scale"
             | "cursor_always_visible"
@@ -4302,6 +4315,7 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
         "welcome_hint" => set_bool(&mut raw.show_welcome_hint, key, value),
         "reload_toast" => set_bool(&mut raw.show_config_reload_toast, key, value),
         "water_effects" => set_bool(&mut raw.water_effects, key, value),
+        "builtin_wallpaper" => set_bool(&mut raw.builtin_wallpaper, key, value),
         "viscosity" => match parse_viscosity(value) {
             Some(value) => raw.viscosity = value,
             None => tracing::warn!(value, "Expected finite viscosity from 0.0 to 4.0, ignoring"),
@@ -7999,6 +8013,22 @@ mod tests {
     }
 
     #[test]
+    fn builtin_wallpaper_defaults_on_and_parses_toggle() {
+        // Omitted key keeps the identity backdrop on.
+        let config = Config::from_raw(lower_entries(&wave_entries(""))).0;
+        assert!(config.builtin_wallpaper);
+
+        // Explicit off lowers through.
+        let config =
+            Config::from_raw(lower_entries(&wave_entries("builtin_wallpaper = false\n"))).0;
+        assert!(!config.builtin_wallpaper);
+
+        // Explicit on is honored too.
+        let config = Config::from_raw(lower_entries(&wave_entries("builtin_wallpaper = true\n"))).0;
+        assert!(config.builtin_wallpaper);
+    }
+
+    #[test]
     fn parse_workspace_names_skips_malformed_entries_and_last_duplicate_wins() {
         let names = parse_workspace_names(&[
             "3 web".to_string(),
@@ -8476,6 +8506,7 @@ mod tests {
             show_welcome_hint: false,
             show_config_reload_toast: true,
             water_effects: true,
+            builtin_wallpaper: true,
             viscosity: 1.0,
             backdrop_capture_scale: 1,
             connected_vessels: ConnectedVesselsConfig::default(),

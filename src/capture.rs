@@ -13,6 +13,8 @@
 //! CPU mapping, and copies them into the client-provided SHM buffer. Both
 //! protocols share that whole path; only the completion event differs.
 
+use std::{cell::RefCell, rc::Rc, time::Instant};
+
 use smithay::{
     backend::{
         allocator::Fourcc,
@@ -29,7 +31,10 @@ use smithay::{
     desktop::layer_map_for_output,
     input::pointer::{CursorIcon, CursorImageStatus, CursorImageSurfaceData},
     output::Output,
-    reexports::wayland_server::protocol::{wl_buffer::WlBuffer, wl_surface::WlSurface},
+    reexports::{
+        calloop::{generic::Generic, Interest, Mode, PostAction},
+        wayland_server::protocol::{wl_buffer::WlBuffer, wl_surface::WlSurface},
+    },
     utils::{Buffer as BufferCoords, IsAlive, Logical, Point, Rectangle, Scale, Size, Transform},
     wayland::{
         compositor::with_states,
@@ -58,6 +63,41 @@ pub(crate) fn output_capture_size(output: &Output) -> Option<Size<i32, BufferCoo
     let mode = output.current_mode()?;
     let transformed = output.current_transform().transform_size(mode.size);
     Some(Size::from((transformed.w.max(1), transformed.h.max(1))))
+}
+
+/// Hands a directly-rendered DMA-BUF capture back to its consumer once the
+/// render fence is known signaled. Split out so it can run either inline
+/// (fence already reached) or later, from a calloop callback watching the
+/// exported fence FD -- see the `direct_completion` branch of
+/// `render_one_capture`, M-03 in `report.md`.
+fn complete_dmabuf_capture(
+    start_time: Instant,
+    rect: Rectangle<i32, BufferCoords>,
+    completion: CaptureCompletion,
+) {
+    match completion {
+        CaptureCompletion::WlrDmabuf {
+            frame,
+            report_damage,
+            ..
+        } => {
+            if report_damage {
+                frame.damage(0, 0, rect.size.w as u32, rect.size.h as u32);
+            }
+            let elapsed = start_time.elapsed();
+            let secs = elapsed.as_secs();
+            frame.ready(
+                (secs >> 32) as u32,
+                (secs & 0xFFFF_FFFF) as u32,
+                elapsed.subsec_nanos(),
+            );
+        }
+        #[cfg(feature = "screencast")]
+        CaptureCompletion::PipewireDmabuf { done, .. } => {
+            let _ = done.send(true);
+        }
+        _ => unreachable!(),
+    }
 }
 
 /// How a drained capture reports completion to its client. Everything up to
@@ -675,35 +715,63 @@ impl Smallvil {
             drop(target);
             // `ready` transfers the buffer back to the client. Unlike the
             // SHM readback path below, no map/copy operation implicitly
-            // waits for GL, so explicitly wait for the render fence before
-            // telling a consumer it may read/reuse the DMA-BUF.
-            if let Err(err) = render_result.sync.wait() {
-                tracing::warn!(%err, "DMA-BUF capture fence wait failed");
-                completion.fail(CaptureFailureReason::Unknown);
+            // waits for GL, so the render fence must be observed before a
+            // consumer may read/reuse the DMA-BUF. Blocking this thread on
+            // it stalls input and every other client's protocol dispatch
+            // for as long as a slow or wedged GPU takes to signal, so the
+            // fence is exported and watched from the event loop instead of
+            // waited on synchronously -- the same non-blocking completion
+            // niri's screencopy/PipeWire cast paths use for this exact
+            // problem (`Screencopy::submit_after_sync`,
+            // `Cast::queue_after_sync`).
+            let sync = render_result.sync;
+            if sync.is_reached() {
+                complete_dmabuf_capture(self.start_time, rect, completion);
                 return;
             }
-            match completion {
-                CaptureCompletion::WlrDmabuf {
-                    frame,
-                    report_damage,
-                    ..
-                } => {
-                    if report_damage {
-                        frame.damage(0, 0, rect.size.w as u32, rect.size.h as u32);
-                    }
-                    let elapsed = self.start_time.elapsed();
-                    let secs = elapsed.as_secs();
-                    frame.ready(
-                        (secs >> 32) as u32,
-                        (secs & 0xFFFF_FFFF) as u32,
-                        elapsed.subsec_nanos(),
+            match sync.export() {
+                Some(sync_fd) => {
+                    let start_time = self.start_time;
+                    // `insert_source` only returns the source, not the
+                    // callback, on failure, so `completion` is parked in a
+                    // shared cell rather than moved by value -- the failure
+                    // branch below can still recover and complete it
+                    // instead of silently dropping a client's request.
+                    let completion_cell = Rc::new(RefCell::new(Some(completion)));
+                    let callback_cell = Rc::clone(&completion_cell);
+                    let result = self.loop_handle.insert_source(
+                        Generic::new(sync_fd, Interest::READ, Mode::OneShot),
+                        move |_, _, _state: &mut Smallvil| {
+                            if let Some(completion) = callback_cell.borrow_mut().take() {
+                                complete_dmabuf_capture(start_time, rect, completion);
+                            }
+                            Ok(PostAction::Remove)
+                        },
                     );
+                    if let Err(err) = result {
+                        tracing::warn!(
+                            %err,
+                            "Failed to watch DMA-BUF capture fence; completing without waiting for it"
+                        );
+                        if let Some(completion) = completion_cell.borrow_mut().take() {
+                            complete_dmabuf_capture(start_time, rect, completion);
+                        }
+                    }
                 }
-                #[cfg(feature = "screencast")]
-                CaptureCompletion::PipewireDmabuf { done, .. } => {
-                    let _ = done.send(true);
+                None => {
+                    // The fence exists but this driver can't export it as a
+                    // native fence FD (pre-EGL_ANDROID_native_fence_sync),
+                    // outside this project's declared platform scope
+                    // (recent kernel/Mesa). Fall back to a blocking wait
+                    // rather than hand back a buffer the GPU may not have
+                    // finished writing.
+                    if let Err(err) = sync.wait() {
+                        tracing::warn!(%err, "DMA-BUF capture fence wait failed");
+                        completion.fail(CaptureFailureReason::Unknown);
+                        return;
+                    }
+                    complete_dmabuf_capture(self.start_time, rect, completion);
                 }
-                _ => unreachable!(),
             }
             return;
         }

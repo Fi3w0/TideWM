@@ -759,8 +759,10 @@ pub fn init_udev(
     // already driving fires `Changed`, which is the only case handled --
     // see `handle_connector_change`. `Added`/`Removed` mean a whole GPU
     // appeared or disappeared, out of scope for the single-GPU design this
-    // backend deliberately uses (see module docs); logged so it's at least
-    // visible rather than silently doing nothing.
+    // backend deliberately uses (see module docs): `Added` is logged and
+    // ignored, and `Removed` of the driven GPU ends the session, since a
+    // live compositor that can no longer render anything is worse than a
+    // clean teardown back to the session manager.
     let device_for_udev = Rc::clone(&device);
     let display_handle_for_udev = display_handle.clone();
     event_loop
@@ -786,9 +788,17 @@ pub fn init_udev(
                 if device_id == dev.drm.device_id() {
                     tracing::error!(
                         ?device_id,
-                        "The GPU TideWM is driving was removed; can't continue rendering \
-                         (single-GPU design, no fallback GPU to switch to)"
+                        "The GPU TideWM is driving was removed; ending the session so \
+                         control returns to the login/session manager (single-GPU design, \
+                         no fallback GPU to switch to)"
                     );
+                    drop(dev);
+                    // The compositor cannot render anything without its only
+                    // GPU, so staying alive would mean a permanently black
+                    // live session. Stopping the loop runs the normal
+                    // teardown path -- the same fail-closed mechanism the
+                    // session-lock client-crash path already uses.
+                    state.loop_signal.stop();
                 } else {
                     tracing::debug!(?device_id, "udev device removed (not the one we're driving)");
                 }
@@ -1032,7 +1042,9 @@ fn create_surface(
         .space
         .outputs()
         .filter_map(|output| state.space.output_geometry(output))
-        .fold(0, |max_edge, geo| max_edge.max(geo.loc.x + geo.size.w));
+        .fold(0, |max_edge, geo| {
+            max_edge.max(geo.loc.x.saturating_add(geo.size.w))
+        });
     let position = output_config
         .as_ref()
         .and_then(|c| c.position)

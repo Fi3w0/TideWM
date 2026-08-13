@@ -1,6 +1,6 @@
 [package]
 name = "tidewm"
-version = "0.90.68"
+version = "0.90.72"
 edition = "2021"
 # Verified floor: wayland-protocols 0.32.13 requires 1.86 (1.85 fails to
 # compile it). The optional `screencast`/`accessibility` features need
@@ -15,6 +15,10 @@ path = "src/main.rs"
 [dependencies]
 bitflags = "2.2.1"
 cgmath = "0.18"
+# `getrusage` for the built-in perf check's CPU-time read (microseconds,
+# so no CLK_TCK assumption). Already pulled in transitively; declared
+# directly to keep the perf path from relying on an indirect dep.
+libc = "0.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }

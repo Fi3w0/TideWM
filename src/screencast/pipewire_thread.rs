@@ -68,11 +68,12 @@ pub(super) fn start(
     let (stop, stop_rx) = mpsc::channel();
     let alive = Arc::new(AtomicBool::new(true));
     let alive_for_worker = alive.clone();
+    let thread_name = match &source {
+        ScreencastSource::Output(output) => format!("screencast-pw-{output}"),
+        ScreencastSource::Window(id) => format!("screencast-pw-window-{id}"),
+    };
     let worker = std::thread::Builder::new()
-        .name(match &source {
-            ScreencastSource::Output(output) => format!("screencast-pw-{output}"),
-            ScreencastSource::Window(id) => format!("screencast-pw-window-{id}"),
-        })
+        .name(thread_name.clone())
         .spawn(move || {
             struct MarkStopped(Arc<AtomicBool>);
             impl Drop for MarkStopped {
@@ -114,7 +115,35 @@ pub(super) fn start(
             // PipeWire call and the public five-second timeout must remain a
             // real bound. Once initialization returns, the queued stop (or a
             // disconnected receiver) makes the worker exit immediately.
+            //
+            // Dropping `worker` at this point would just detach the thread
+            // rather than stop it, silently leaking it (and the cloned
+            // `compositor` channel sender it holds) for however long the
+            // stuck PipeWire call takes to return, if it ever does, with no
+            // way to tell it ever happened. Hand the join off to a
+            // throwaway reaper thread instead: it does nothing but block on
+            // `worker.join()` and log the outcome, so the leak is at worst
+            // one idle waiting thread instead of an invisible one, and
+            // becomes observable if the worker does eventually unblock.
             let _ = stop.send(());
+            if std::thread::Builder::new()
+                .name(format!("{thread_name}-reaper"))
+                .spawn(move || match worker.join() {
+                    Ok(()) => tracing::debug!(
+                        thread = %thread_name,
+                        "Timed-out PipeWire startup worker exited after the fact"
+                    ),
+                    Err(_) => tracing::warn!(
+                        thread = %thread_name,
+                        "Timed-out PipeWire startup worker panicked"
+                    ),
+                })
+                .is_err()
+            {
+                tracing::warn!(
+                    "Failed to spawn PipeWire startup reaper; worker thread is leaked untracked"
+                );
+            }
             Err("timed out creating PipeWire stream".into())
         }
     }

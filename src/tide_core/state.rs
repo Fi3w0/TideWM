@@ -4958,7 +4958,7 @@ impl Smallvil {
                 // again from the output's new live geometry; only translate
                 // the durable windowed restore records here.
                 if let Some(tag) = self.floating_workspace.get_mut(&surface) {
-                    tag.rect.loc += delta;
+                    tag.rect.loc = saturating_translate(tag.rect.loc, delta);
                 }
             } else if self.window_is_visible(&surface) {
                 let window = self
@@ -4970,19 +4970,19 @@ impl Smallvil {
                 let Some(mut rect) = self.space.element_geometry(&window) else {
                     continue;
                 };
-                rect.loc += delta;
+                rect.loc = saturating_translate(rect.loc, delta);
                 self.space.map_element(window, rect.loc, false);
                 self.floating_workspace.get_mut(&surface).unwrap().rect = rect;
             } else if let Some(tag) = self.floating_workspace.get_mut(&surface) {
-                tag.rect.loc += delta;
+                tag.rect.loc = saturating_translate(tag.rect.loc, delta);
             }
             if let Some(entry) = self.fullscreen.get_mut(&surface) {
                 if let Some(rect) = &mut entry.restore_rect {
-                    rect.loc += delta;
+                    rect.loc = saturating_translate(rect.loc, delta);
                 }
             }
             if let Some(entry) = self.maximized.get_mut(&surface) {
-                entry.restore_rect.loc += delta;
+                entry.restore_rect.loc = saturating_translate(entry.restore_rect.loc, delta);
             }
         }
     }
@@ -5326,6 +5326,13 @@ impl Smallvil {
         self.try_confirm_lock();
     }
 
+    /// No-op unless `Locking`. Confirmation is normally driven by
+    /// `mark_output_locked_frame` from the render loops, but an output
+    /// hot-unplug removes a frame source entirely -- with zero surviving
+    /// outputs no frame will ever arrive -- so `remove_lock_output` calls
+    /// this directly after pruning its lock state. The predicate is
+    /// vacuously true at zero outputs, matching niri's behavior: a lock
+    /// with nothing left to show it is still confirmed locked.
     fn try_confirm_lock(&mut self) {
         let SessionLock::Locking(_) = &self.session_lock else {
             return;
@@ -5829,6 +5836,13 @@ impl Smallvil {
         renderer: &mut GlesRenderer,
     ) -> Option<smithay::backend::renderer::element::texture::TextureRenderElement<GlesTexture>>
     {
+        // Honor the `builtin_wallpaper` config toggle: when off, the embedded
+        // 4K artwork is never decoded and no GPU texture is built, so neither
+        // CPU nor VRAM is paid for it. Read live so a hot reload to false
+        // stops drawing it immediately.
+        if !self.config.builtin_wallpaper {
+            return None;
+        }
         let logical_size = self.space.output_geometry(output)?.size;
         self.builtin_wallpaper
             .render_element(renderer, logical_size)
@@ -6327,6 +6341,12 @@ impl Smallvil {
         ) else {
             return;
         };
+        // Front-to-back, index 0 topmost: the windows come first and the
+        // wallpaper goes last, the same order the visible frame uses.
+        // Pushing the wallpaper first put it *on top of* every window in
+        // the captured texture -- the glass then sampled a texture that
+        // was nothing but wallpaper, which read as "the aqua wave only
+        // shows the background and ignores everything else."
         let behind: Vec<crate::backend::udev::OutputRenderElements> = space_elements
             .into_iter()
             .chain(
@@ -11812,6 +11832,18 @@ fn center(rect: Rectangle<i32, Logical>) -> Point<i32, Logical> {
     (rect.loc.x + rect.size.w / 2, rect.loc.y + rect.size.h / 2).into()
 }
 
+/// `loc + delta` with per-axis saturation. Output positions arrive as
+/// full-range i32 (config `[[output]]`, `zwlr_output_manager` wire
+/// values) and `delta` is a difference of two stored positions, so plain
+/// `i32` addition on adversarial values would panic in debug and wrap in
+/// release.
+fn saturating_translate(
+    loc: Point<i32, Logical>,
+    delta: Point<i32, Logical>,
+) -> Point<i32, Logical> {
+    (loc.x.saturating_add(delta.x), loc.y.saturating_add(delta.y)).into()
+}
+
 fn ocean_island_origins(
     outputs: &[(String, Rectangle<i32, Logical>)],
     max_workspaces: &std::collections::HashMap<String, u32>,
@@ -11965,6 +11997,19 @@ fn nearest_point_in_output_rects(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saturating_translate_never_overflows() {
+        let loc: Point<i32, Logical> = (i32::MAX - 10, i32::MIN + 10).into();
+        let delta: Point<i32, Logical> = (100, -100).into();
+        let out = saturating_translate(loc, delta);
+        assert_eq!(out.x, i32::MAX);
+        assert_eq!(out.y, i32::MIN);
+
+        let ordinary: Point<i32, Logical> = (40, -7).into();
+        let step: Point<i32, Logical> = (12, 5).into();
+        assert_eq!(saturating_translate(ordinary, step), (52, -2).into());
+    }
 
     #[test]
     fn ocean_islands_do_not_overlap_between_outputs() {

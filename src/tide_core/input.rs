@@ -266,23 +266,24 @@ fn workspace_swipe_target(current: u32, delta_x: f64, delta_y: f64, threshold: f
 /// (same sign as `advances`, shorter in magnitude when a boundary was hit)
 /// so the caller can fold any refused remainder back into the camera.
 fn swim_advance_target(current: u32, advances: i32) -> (u32, i32) {
-    let mut workspace = current;
-    let mut applied = 0;
-    for _ in 0..advances.unsigned_abs() {
-        let next = if advances > 0 {
-            workspace.checked_add(1)
-        } else {
-            (workspace > 1).then(|| workspace - 1)
-        };
-        match next {
-            Some(next) => {
-                workspace = next;
-                applied += advances.signum();
-            }
-            None => break,
-        }
+    if advances > 0 {
+        // Same boundary as the old per-step `checked_add(1)`: refuse only
+        // at `u32::MAX`. `advances` is a positive `i32`, so `steps` is
+        // always <= `i32::MAX` and the final cast back is lossless.
+        let room = u32::MAX - current;
+        let steps = (advances as u32).min(room);
+        (current + steps, steps as i32)
+    } else if advances < 0 {
+        // Same boundary as the old `(workspace > 1).then(...)`: refuse at
+        // 1, never step into the reserved scratchpad workspace 0. `room`
+        // is capped at `i32::MAX` so `-(steps as i32)` can never overflow
+        // even if `current` were implausibly close to `u32::MAX`.
+        let room = current.saturating_sub(1).min(i32::MAX as u32);
+        let steps = advances.unsigned_abs().min(room);
+        (current - steps, -(steps as i32))
+    } else {
+        (current, 0)
     }
-    (workspace, applied)
 }
 
 fn completed_swipe_direction(delta_x: f64, delta_y: f64, threshold: f64) -> Option<Direction> {
@@ -3314,6 +3315,24 @@ mod tests {
     fn swim_advance_target_applies_multiple_steps_within_bounds() {
         assert_eq!(swim_advance_target(3, 3), (6, 3));
         assert_eq!(swim_advance_target(6, -3), (3, -3));
+    }
+
+    #[test]
+    fn swim_advance_target_extreme_advances_stop_at_the_boundary() {
+        // M-46: a saturated gesture delta can produce an i32 extreme. The
+        // old implementation looped `advances.unsigned_abs()` times, which
+        // for these inputs would have taken far too long to run as a test
+        // (or frozen the real event loop) instead of returning immediately.
+        assert_eq!(swim_advance_target(u32::MAX - 2, i32::MAX), (u32::MAX, 2));
+        assert_eq!(swim_advance_target(3, i32::MIN), (1, -2));
+        // `current` implausibly close to `u32::MAX` with `advances ==
+        // i32::MIN`: the defensive `i32::MAX` cap on `room` stops one step
+        // short of the scratchpad boundary rather than risk overflowing
+        // the `-(steps as i32)` cast: 4294967295 - i32::MAX == i32::MAX + 1.
+        assert_eq!(
+            swim_advance_target(u32::MAX, i32::MIN),
+            (i32::MAX as u32 + 1, -(i32::MAX))
+        );
     }
 
     #[test]
