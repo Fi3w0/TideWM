@@ -1,21 +1,11 @@
 //! `org.gnome.Mutter.ScreenCast` + `.Session` + `.Stream` on the session
-//! DBus, via `zbus::interface`. Matches niri's choice of the Mutter
-//! interface over `xdg-desktop-portal-wlr`'s own (see AGENT.md's
-//! "Screencasting" section): `xdg-desktop-portal-gnome` already knows how
-//! to bridge this interface to the standard portal, so any user with it
-//! installed gets a working screencast without TideWM implementing the
-//! portal's own permission-dialog session dance.
+//! bus, via `zbus::interface`. TideWM's portal backend bridges the standard
+//! desktop portal API to this service.
 //!
 //! Monitor and window lifecycles (`CreateSession` -> `RecordMonitor` or
 //! `RecordWindow` -> `Start` -> PipeWire node -> `Stop`) are implemented.
 //! `RecordArea` and `RecordVirtual` are not declared, so callers receive
 //! DBus `UnknownMethod` for those unsupported source types.
-//!
-//! **Verification honesty note:** the method and property shapes have been
-//! cross-checked against Mutter's upstream implementation. The service has
-//! been tested with direct zbus calls, but not yet through a real
-//! portal-mediated client (OBS/Firefox) on a DRM session.
-//! See CHANGELOG for the exact verification breakdown.
 //!
 //! Runs on its own OS thread via `zbus::blocking`, not calloop: zbus's
 //! blocking connection dispatches incoming method calls on its own

@@ -1,18 +1,9 @@
 //! Wave: the Lua-backed config surface.
 //!
-//! Implements the desugaring contract in `WAVE.md`'s "The desugaring
-//! contract (for implementers)" section. The surface syntax compiles to
-//! a Lua chunk, the chunk runs against a small registration environment,
-//! and evaluation produces the same [`Entry`] list the line-based parser
-//! in [`super::waves`] produces, so `config.rs`'s lowering and
-//! `merge_into`'s merge policies work unchanged. Keeping the split this
-//! way means this module can be tested against its own syntax rules
-//! alone, without dragging in every config field this project has today.
-//!
-//! This is the W1/W2 slice of the rewrite: the grammar core and the
-//! config-loading integration. `on "event"` handlers (W7), section
-//! globals so `theme.primary` reads as an expression (W4), and duration
-//! math (`600ms * 2`, W4's typed values) are deliberately not here yet.
+//! Compiles Wave syntax to sandboxed Lua and lowers the registrations into
+//! [`Entry`] values consumed by the config layer. This module also owns
+//! includes, typed literals, session globals, eval, and event handlers; the
+//! language and desugaring contract are documented in `WAVE.md`.
 
 use std::{
     cell::{Cell, RefCell},

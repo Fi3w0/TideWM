@@ -1,25 +1,15 @@
 //! Standalone TTY/DRM backend: no host compositor, drives real display
 //! hardware directly via KMS/DRM, GBM and a libseat session.
 //!
-//! Structured after `malbiruk/driftwm`'s `backend/udev.rs` (single GPU,
-//! direct `DrmCompositor`, no multi-GPU render-node juggling), not anvil's
-//! `DrmOutputManager`/`MultiRenderer` machinery, which exists to composite
-//! across several GPUs at once -- more than TideWM needs right now. All
-//! Smithay API calls here were cross-checked against the actual pinned
-//! `smithay v0.7.0` source, not guessed from either reference.
+//! The backend deliberately drives one GPU with a direct `DrmCompositor`;
+//! multi-GPU rendering is outside its ownership model.
 //!
-//! Runtime output hotplug (a monitor plugged/unplugged into a port on the
-//! GPU already in use) is handled -- see `handle_connector_change` -- but
-//! windows on a disconnected output aren't migrated to another one, just
-//! left in that output's now-orphaned tiling tree. A hot-added or removed
-//! *GPU* (as opposed to a monitor) is out of scope entirely, matching the
-//! single-GPU design above.
+//! Connector hotplug migrates window ownership and rebuilds the affected
+//! output state. Removing the managed GPU ends the session because this
+//! backend has no second GPU to take ownership.
 //!
-//! Scope deliberately left out of this first pass (tracked as a follow-up,
-//! not silently missing): retrying `DrmCompositor::new` with
-//! `Modifier::Invalid` (implicit modifiers) if the first negotiation fails,
-//! which driftwm does and some hardware needs -- `create_surface` below
-//! just drops the surface on that failure instead. See AGENT.md.
+//! Surface creation currently requires explicit modifier negotiation; a
+//! failed `DrmCompositor` construction leaves that connector unpublished.
 
 use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, time::Duration};
 

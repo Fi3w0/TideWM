@@ -1908,15 +1908,9 @@ impl Smallvil {
         })
     }
 
-    /// Advances F1 `full` tier's rigid-body-ish simulation. Called every
-    /// tick from both backends' existing ~60Hz frame timer, right
-    /// alongside `update_window_depths`/`update_urgent_pulses` -- that
-    /// timer already runs continuously regardless of whether anything is
-    /// animating, so this reuses it rather than inventing a second loop.
-    /// Internally a fixed-timestep accumulator (120Hz, capped substeps)
-    /// rather than stepping directly by the real frame interval, so the
-    /// spring/collision integration stays numerically stable regardless of
-    /// how choppy the real frame timing gets.
+    /// Advances the full floating-physics simulation from either backend's
+    /// live frame clock. A fixed-timestep accumulator with capped catch-up
+    /// keeps integration stable across variable output cadence.
     pub(crate) fn update_float_physics_full(&mut self) {
         const FIXED_DT: f64 = 1.0 / 120.0;
         const MAX_SUBSTEPS: u32 = 8;
@@ -5551,12 +5545,8 @@ impl Smallvil {
         self.redraw_wakeup = Some(wakeup);
     }
 
-    /// Whether something is still mid-animation and needs another frame
-    /// even though nothing else marked itself dirty in the meantime --
-    /// today that's just a fading toast, but this is the one place a future
-    /// water/decoration effect (ripple decay, workspace-transition
-    /// progress) plugs into instead of both backends growing their own
-    /// copy of this check, the way they used to for the toast alone.
+    /// Prunes completed animations and reports whether another frame is
+    /// needed even when no client or input event produced damage.
     pub fn has_active_animation(&mut self) -> bool {
         // Completion cleanup must not depend on an output actually being
         // rendered. A DPMS-off/minimized output can skip its frame path;

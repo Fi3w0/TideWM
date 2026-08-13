@@ -1,12 +1,6 @@
-//! Impulse ripple, the second piece of Phase R1's identity slice (see
-//! AGENT.md's "Render and visual identity roadmap"). One shared primitive
-//! for a radial disturbance from a point, decaying over time -- intended
-//! to be triggered by different window-manager events (a window mapping
-//! is a droplet impact, a focus change ripples from the old focus to the
-//! new one, an urgent hint pulses until acknowledged) rather than three
-//! separate effects. The wave/aqua workspace transition (Phase R1, later
-//! sub-slice) will be this same primitive's directional variant, not a
-//! separate effect.
+//! Configurable impulse ripples shared by map, focus, and urgency triggers.
+//! Each ripple expands from an event-specific anchor and decays without
+//! changing authoritative window geometry.
 //!
 //! Fully configurable through the global `ripple { }` block and per-app
 //! `rule { ripple { } }` overrides -- see `config::RippleConfig` for the

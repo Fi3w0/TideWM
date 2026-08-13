@@ -144,7 +144,7 @@ pub fn init_winit(
     // hitting exactly that hang after moving this into `Smallvil::new()`.
     std::env::set_var("WAYLAND_DISPLAY", &state.socket_name);
 
-    // A bounded ~60Hz calloop Timer drives the loop, not
+    // A bounded host-cadence calloop Timer drives the loop, not
     // WinitEvent::Redraw/backend.window().request_redraw() (the pattern
     // smallvil used): nothing throttles how fast request_redraw() re-fires
     // on its own, and it was spinning the CPU at 100% even fully idle. A
@@ -531,11 +531,9 @@ pub fn init_winit(
             state.cleanup_capture();
             let _ = state.display_handle.flush_clients();
 
-            // Re-arm at the host panel's real frame period (the mode
-            // refresh set above from the host monitor), not a hardcoded
-            // ~60Hz -- still a bounded Timer, so the no-CPU-spin property
-            // this loop exists for is unchanged; it just ticks at the
-            // rate the host can actually display.
+            // Re-arm at the host panel's reported frame period. The bounded
+            // timer preserves the no-spin property while following the
+            // monitor that owns the nested window.
             let refresh = outputs
                 .iter()
                 .filter_map(|entry| entry.output.current_mode())
