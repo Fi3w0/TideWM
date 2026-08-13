@@ -5582,6 +5582,7 @@ impl Smallvil {
             self.window_float_ambient.remove(&surface);
         }
         self.swim_cameras.retain(|_, camera| !camera.at_rest());
+        self.ocean.prune_completed_camera_motions();
         self.closing_window_animations
             .retain(|closing| !closing.finished());
         self.ripples.retain(|ripple| !ripple.finished());

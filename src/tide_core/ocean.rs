@@ -432,6 +432,13 @@ impl OceanSpace {
         self.camera_motions.values().any(OceanCameraMotion::active)
     }
 
+    /// Drops completed interpolation records. `cameras` already stores each
+    /// motion's target, so removing a finished record preserves the sampled
+    /// camera while keeping the auxiliary map bounded to active work.
+    pub fn prune_completed_camera_motions(&mut self) {
+        self.camera_motions.retain(|_, motion| motion.active());
+    }
+
     pub fn camera_revision(&self) -> u64 {
         self.camera_revision
     }
@@ -1305,6 +1312,9 @@ impl OceanSpace {
             .into_iter()
             .filter_map(|(window, rect, _)| {
                 let surface = window.toplevel()?.wl_surface().clone();
+                if self.screen_pins.contains_key(&surface) {
+                    return None;
+                }
                 let dy = rect.loc.y as f64 - visible_bottom;
                 (dy >= 0.0).then_some((
                     surface,
@@ -1506,7 +1516,15 @@ impl OceanSpace {
         // Floating entries were collected first and are already frontmost.
         // Reverse only the tiled suffix so cascade/BSP tree order mirrors
         // Classic's front-to-back renderer contract.
-        let floating_count = self.floating.len();
+        let floating_count = layouts
+            .iter()
+            .take_while(|(_, _, kind)| *kind == PlacementKind::Floating)
+            .count();
+        debug_assert_eq!(
+            floating_count,
+            self.floating.len(),
+            "Ocean floating map and stack must contain the same live surfaces"
+        );
         layouts[floating_count..].reverse();
         // A tiled window mid `OceanTileMoveGrab` drag renders at its live
         // dragged rectangle instead of its frozen reef slot, lifted to the
@@ -1941,6 +1959,19 @@ mod tests {
         let camera = ocean.camera("main");
         assert_eq!(camera.zoom, 2.0);
         assert_eq!(camera.origin, OceanPoint { x: 300.0, y: 350.0 });
+    }
+
+    #[test]
+    fn completed_camera_motion_prunes_without_changing_the_target_camera() {
+        let mut ocean = OceanSpace::from_config(&OceanConfig::default());
+        ocean.animate_pan("main", 80.0, 40.0, Duration::from_millis(1), 0.0);
+        ocean.camera_motions.get_mut("main").unwrap().started -= Duration::from_millis(2);
+        let completed = ocean.camera("main");
+
+        ocean.prune_completed_camera_motions();
+
+        assert!(ocean.camera_motions.is_empty());
+        assert_eq!(ocean.camera("main"), completed);
     }
 
     #[test]
