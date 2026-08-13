@@ -1910,7 +1910,9 @@ impl Smallvil {
             steps += 1;
             self.step_float_physics_full(&contexts, FIXED_DT);
         }
-        self.request_redraw();
+        if matches!(self.session_lock, SessionLock::Unlocked) {
+            self.request_redraw();
+        }
 
         // Passive at-rest bodies stay present while another body moves so
         // the collision pass can hit them. Once all motion ends, remove the
@@ -5536,6 +5538,14 @@ impl Smallvil {
         self.closing_window_animations
             .retain(|closing| !closing.finished());
         self.ripples.retain(|ripple| !ripple.finished());
+        // Desktop content is invisible behind a session lock. Suppress the
+        // animation predicate so the fast timer, per-CRTC dirty re-arm, and
+        // global redraw request all stand down; lock surfaces render through
+        // their own commit path. Pruning above still runs so finished
+        // animations are cleaned up regardless of lock state.
+        if !matches!(self.session_lock, SessionLock::Unlocked) {
+            return false;
+        }
         self.toast
             .as_ref()
             .is_some_and(|toast| toast.needs_continued_redraw())
