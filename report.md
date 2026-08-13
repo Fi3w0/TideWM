@@ -11,8 +11,8 @@ This is a static code review, not a claim that every issue below was reproduced 
 - Updated: 2026-08-13
 - Implementation branch: `ai/codex/report-fixes`
 - Separate worktree: `/home/fiw/Proyects/TideWM-worktrees/report-fixes`
-- Latest behavioral head before this documentation pass: `1b14b48`
-- Current TideWM version on the branch: `0.90.92`
+- Latest behavioral head before this documentation pass: `763fef3`
+- Current TideWM version on the branch: `0.90.93`
 - Push status: local only; nothing from this branch has been pushed.
 - The branch was fast-forwarded to master `dfc00b7` before this pass, preserving the earlier audit-remediation history and incorporating the intervening render/visual-identity work.
 
@@ -27,7 +27,7 @@ The finding text below is the original audit evidence. It is intentionally retai
 - Performance re-audit (2026-08-13): P-02, P-03, P-06, P-07, P-08, and P-10 are fixed in `c211a17`, `193e63d`, `950d921`, `7e9a128`, and `c508041`. P-01's duplicate same-pass Ocean layout was removed in `248c2d3`; a broader cross-pass cache remains profiling- and invalidation-design-gated. P-04 was already single-search in the reconciled tree. P-05's remaining allocation is a bounded once-per-window history path, and P-09's picker rebuild happens only when selection state changes; neither justifies hot-path complexity without a profile. P-11 and P-14 are closed by the real-hardware results recorded below. P-12's scheduling fix is covered by nonstandard-cadence unit tests but still needs a real-DRM trace. P-13 is substantially mitigated by configurable backdrop downscaling, immediate stale-capture eviction, and the built-in-wallpaper toggle; general client-buffer pressure and the shared-per-output blur-buffer design option remain.
 - Lower-confidence re-audit (2026-08-13): every concrete U-01 through U-16 item has now been investigated. U-01 is fixed in `fc82fea`; U-04 in `1b14b48`; U-10 in `51c476e`; U-15 in `5fe5db4`; U-16 in `e6bf868`; U-02, U-03, U-05, and U-06 in `7edcc3b`; U-07 and U-08 in `7edc8c2`; U-11 in `9898128`; U-12 in `8efcdfe`; and the concrete hardware-facing U-14 ranges in `73d62ec`. U-09 and U-13 were already bounded in the reconciled tree. U-14 remains an ongoing parser-audit category for future fields, not permission to invent hardware defaults.
 - Formatter findings F-01 through F-04: closed.
-- The highest-confidence stale source comments were cleaned up in 0.90.84. Version 0.90.88 also compresses nine high-priority module histories into current ownership and safety contracts; the remaining line-level list below is incremental cleanup, not a release blocker. The non-water motion-pack decision landed in 0.90.86, while the real-hardware matrix below remains.
+- The highest-confidence stale source comments were cleaned up in 0.90.84. Version 0.90.88 compresses nine high-priority module histories into current ownership and safety contracts, and 0.90.93 completes the audit's remaining enumerated cleanup across visual, backend, capture, protocol, cursor, Xwayland, and core-state paths. The non-water motion-pack decision landed in 0.90.86, while the real-hardware matrix below remains.
 
 ### Open finding re-audit notes
 
@@ -124,6 +124,8 @@ The finding text below is the original audit evidence. It is intentionally retai
 | P-14 | `441d559` | **New (2026-08-09 Hyprland head-to-head).** Nine windows: TideWM glass 56% GPU-busy vs Hyprland plain 33% — ~23 pp is the water/glass identity's load cost. Primary GPU-lowering target. Investigate damage-driven backdrop capture (not per-frame), reduced-res capture, shared capture. See finding body. **Fix landed 2026-08-09 (`441d559`, `ai/codex/report-fixes`): each `BackdropCapture` now owns a persistent `OutputDamageTracker` and reuses one texture with buffer age 1, so an unchanged behind-scene costs zero offscreen GL work where it used to pay a full-scene render per glass window per frame; a moved window still recaptures (the tracker sees the translated element geometry change), and a size change reallocates texture + tracker. The glass layer's commit is now a rendered-value fingerprint (capture version + wave phase/amp + corner/frost uniforms) instead of incrementing every frame, so static frost and settled glass stop forcing visible redraws while ambient/reactive tails keep animating. The floating-window and layer-shell capture passes also build their behind-element list once per output instead of once per glass window. A `debug!` log per pass reports rendered/skipped counts. Nested boot confirmed; **real-AMD before/after 2026-08-10 (master `c2f1320` / 0.90.59, nine frost kitty, 25 clean detached 1s samples): gpu_busy 56% → min 26 / med 28 / avg 27.6% -- target met, ~5 pp below same-machine Hyprland-plain 33%. PSS 62.9 MB, VRAM 455/512 MiB. P-14 closed; the standing maintainer direction to keep lowering both GPU and VRAM is future work, not P-14.** |
 
 ### Validation state
+
+- After `763fef3`, strict all-target/all-feature Clippy, formatting, diff checks, and `cargo build --release --all-features` passed. The effective all-feature result remains 450 compositor tests plus 3 `tidectl` and 9 `wavefmt` tests; the sandbox allowed 447 compositor tests and the three IPC Unix-socket tests passed when rerun with normal socket permissions. The source diff was verified to change executable Rust only by removing the dead two-line `TZ` read; all other Rust changes are comments.
 
 - After `1b14b48`, strict all-target/all-feature Clippy, formatting, diff checks, and `cargo build --release --all-features` passed. The effective all-feature result is 450 compositor tests plus 3 `tidectl` and 9 `wavefmt` tests; the sandbox allowed 447 compositor tests and the three IPC Unix-socket tests passed when rerun with normal socket permissions. Covers U-04.
 
@@ -841,10 +843,18 @@ histories, five dense path-level narratives, and the remaining
 `ponytail`/obsolete Cascade wording. Rechecking the old “layer scale is set
 once” claim exposed a real behavior gap: live output scale changes now resend
 the output's current preferred fractional scale to mapped layer-shell clients.
+Version 0.90.93 (`763fef3`) completes the audit's remaining enumerated
+readability cleanup across visual, backend, capture, protocol, cursor,
+Xwayland, and core-state paths while retaining their EGL/DRM ordering, thread
+and texture ownership, lock privacy, damage identity, shader, geometry,
+simulation-bound, and settling contracts. It also moves the misplaced
+desktop-stack comment onto
+`desktop_render_elements`, the function it describes, and removes the dead `TZ`
+environment read from diagnostics.
 
-No known factually false item from the original list remains in source. The
-remaining work below is readability cleanup; comments that encode protocol,
-threading, coordinate, render-order, or security invariants should stay.
+No known factually false or enumerated readability item from the original list
+remains in source. Comments that encode protocol, threading, coordinate,
+render-order, or security invariants intentionally stay.
 
 ### Highest-priority comment blocks
 
@@ -856,26 +866,11 @@ The reported `RippleConfig` block was re-audited and retained: its field-level
 inheritance and units are current public configuration semantics rather than
 implementation history.
 
-Additional dense/historical targets:
-
-- `state.rs:1255-1274` is misplaced above `base_window_visual_sample`; move a 2–3 line stack/skip invariant to `desktop_render_elements` or delete it.
-- `state.rs:1633-1642`, `:4339-4356`, `:4447-4462`, `:6840-6862`, `:7043-7062`, `:7897-7909`, `:8681-8698`, `:8896-8905`, `:8976-9010`, `:9034-9044`, `:10321-10329`, `:10502-10516` narrate incidents or repeat nearby code. Preserve only the active invariant.
-- `src/visual/float_physics.rs`'s module history and “rigid-body-ish” wording are gone; the remaining internal comments should be re-audited around the equations, units, coordinate space, and rest conditions.
-- `src/visual/caustics.rs:1-21`, `:51-58` — remove prose such as “absence of drama”; keep cache/failure behavior.
-- `src/visual/error_overlay.rs:325-335`, `:346-354`, `:387-393` — retain formula/invariant, delete bug-story prose.
-- `src/visual/water_glass.rs:1-15`, `:107-119`, `:236-242`, `:316-324` — keep shader inputs, animation condition, and opacity rule.
-- `src/visual/backdrop.rs:1-14`, `:31-39`, `:46-52`; `compass.rs:1-12`; `welcome.rs:1-17`; `workspace_transition.rs:1-14`; `tab_strip.rs:1-13`; `swim.rs:1-15`, `:30-37`, `:140-147` — compress module histories into current responsibility.
-- `src/grabs/ocean_tile_move_grab.rs:1-13`, `:58-68`, `:278-283` — the “fridge magnet needs a light” metaphor and incorrect teardown narrative were removed with M-12; retain only the completion-token and unconditional-cleanup invariant.
-- `src/screencast/dbus.rs:1-24`, `:136-174`; `portal.rs` above; `pipewire_thread.rs:267-286`, `:329-344`, `:491-500` — keep D-Bus thread ownership, transport limitation, and DRIVER requirement; move experiment logs.
-- `src/backend/udev.rs:167-216`, `:1590-1608` — one sentence per field/invariant; move freeze history.
-- `src/backend/udev.rs:987-994` — “Place unconfigured hotplug outputs after the current maximum right edge; summing widths overlaps after disconnect/replug.”
-- `src/backend/udev.rs:1143-1153` and `src/handlers/wlr_output_management.rs:606-619` — retain operation order in two or three lines; remove narrated examples.
-- `src/capture.rs:406-423`, `:537-549`, `:565-575`, `:688-716` — keep privacy, transform, and z-order facts; remove chronological debugging stories.
-- `src/cursor.rs:1-13`, `:85-93`, `:120-156`, `:165-202` — reduce repeated cache/fallback/borrow explanations to one sentence per function.
-- `src/handlers/xdg_shell.rs:1029-1039`, `:1067-1079`, `:1101-1115`, `:1197-1212`, `:1225-1230`, `:1262-1267`, `:1302-1317` — retain lifecycle ordering only.
-- `src/xwayland.rs:1-19` — satellite architecture plus eager-start reason is enough.
-
-Small cleanup examples: remove the duplicated `.map(str::to_string).map(str::to_string)` in diagnostics, the duplicated PipeWire comment, and dead `TZ` read in `local_now`. These are not performance problems, but they make generated-looking code easier to spot.
+All enumerated dense/historical targets have now been re-audited. The Ocean
+tile-move grab already contained only its completion-token and unconditional
+cleanup invariants after M-12, and 0.90.93 removes the remaining dead `TZ` read
+and duplicate PipeWire explanation. The duplicated diagnostic string mapping
+was no longer present in the reconciled tree.
 
 ## Wave formatter bugs
 
