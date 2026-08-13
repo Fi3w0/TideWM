@@ -360,7 +360,7 @@ pub(crate) const SUBSCRIBER_PENDING_CAP: usize = 256 * 1024;
 /// case) are already drained inline by `emit_ipc_event` -- this timer is
 /// the retry path for subscribers whose kernel write buffer was full at
 /// emit time.
-const FLUSH_INTERVAL: Duration = Duration::from_millis(16);
+pub(crate) const FLUSH_INTERVAL: Duration = Duration::from_millis(16);
 
 impl IpcSubscriber {
     /// Non-blocking write of as much of `pending` as the kernel will take.
@@ -452,24 +452,15 @@ pub fn init(event_loop: &mut EventLoop<Smallvil>) -> std::io::Result<SocketGuard
         )
         .map_err(|err| std::io::Error::other(err.to_string()))?;
 
-    // Periodic subscriber flush. The fast path (write buffer not full at
-    // emit time) is already handled inline inside `emit_ipc_event`; this
-    // timer is the retry path for subscribers whose kernel write buffer
-    // was momentarily full, and also the probe that retires a wedged
-    // subscriber once its pending cap is exceeded. Re-arms itself on the
-    // same interval rather than using `Timer::immediate()` so an idle
-    // compositor with no subscribers costs one short wakeup per frame --
-    // the same cost both backends' own redraw-timer already pays.
-    loop_handle
-        .insert_source(
-            Timer::from_duration(FLUSH_INTERVAL),
-            |_, _, state: &mut Smallvil| {
-                state.flush_ipc_subscribers();
-                TimeoutAction::ToDuration(FLUSH_INTERVAL)
-            },
-        )
-        .map_err(|err| std::io::Error::other(err.to_string()))?;
-
+    // Periodic subscriber flush is *not* started here. The fast path
+    // (write buffer not full at emit time) is already handled inline
+    // inside `emit_ipc_event`/`register_subscriber`'s ack; those are also
+    // where the retry timer gets armed on demand via
+    // `Smallvil::schedule_ipc_flush`, only when a subscriber's write
+    // genuinely didn't fully drain. M-41: this used to be a Timer that
+    // re-armed itself unconditionally forever once started, waking every
+    // frame interval even with zero subscribers connected -- the common
+    // case for most of a session.
     std::env::set_var("TIDEWM_SOCKET", &path);
     tracing::info!(path = %path.display(), "IPC socket listening");
     Ok(SocketGuard(path))
@@ -674,8 +665,12 @@ fn register_subscriber(
         sub.pending.extend(ack_line);
         sub.pending.push_back(b'\n');
         // Best-effort inline flush. The periodic `flush_ipc_subscribers`
-        // timer is the retry path if the kernel buffer was full.
+        // timer is the retry path if the kernel buffer was full -- arm it
+        // on demand rather than assume it's already running (M-41).
         sub.try_flush();
+        if !sub.pending.is_empty() {
+            state.schedule_ipc_flush();
+        }
     }
 
     // EOF watcher on the cloned read side. Any data the client sends after

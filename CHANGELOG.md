@@ -5,6 +5,9 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 ## [Unreleased]
 
 ### Fixed
+- The IPC subscriber-flush retry timer no longer runs forever once started. It used to re-arm itself unconditionally every 16ms from the moment the first `subscribe` connection landed, waking the event loop at the frame interval even with zero subscribers connected for the rest of the session. It's now armed on demand only when a subscriber's write genuinely didn't fully drain (kernel buffer momentarily full), and stops re-arming once every subscriber catches up.
+
+### Fixed
 - Output disconnect during udev hotplug now clears the disconnected output from `locked_outputs`, the session-lock-confirmation tracking set, alongside the lock surface/blank-buffer/layer-dim state it was already cleaned up next to. It was previously left behind, retaining a stale `Output` handle across the hotplug until the session unlocked.
 
 ### Fixed

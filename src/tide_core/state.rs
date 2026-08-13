@@ -292,6 +292,14 @@ pub struct Smallvil {
     /// callback can't accidentally target a fresh subscriber that reused
     /// the same id.
     pub(crate) next_ipc_subscriber_id: usize,
+    /// Whether the periodic subscriber-flush retry timer (`ipc::FLUSH_INTERVAL`)
+    /// is currently scheduled. M-41: the timer used to re-arm itself
+    /// unconditionally forever once started at `ipc::init`, waking every
+    /// frame even with zero subscribers. `schedule_ipc_flush` now only
+    /// arms it when a subscriber's `pending` actually has bytes the inline
+    /// flush couldn't drain, and its own callback stops re-arming once
+    /// every subscriber is caught up.
+    ipc_flush_timer_armed: bool,
 
     pub layout: Layouts,
     pub space: Space<Window>,
@@ -2817,6 +2825,7 @@ impl Smallvil {
         }
         let payload = event.to_json_line(self);
         let mut to_drop: Vec<usize> = Vec::new();
+        let mut needs_retry = false;
         for (id, sub) in self.ipc_subscribers.iter_mut() {
             if !crate::ipc::event_matches(&sub.filter, &event) {
                 continue;
@@ -2831,6 +2840,11 @@ impl Smallvil {
                 to_drop.push(*id);
                 continue;
             }
+            if !sub.pending.is_empty() {
+                // Kernel write buffer was full; some bytes are still
+                // queued. Needs the periodic retry timer running.
+                needs_retry = true;
+            }
             if sub.pending.len() > crate::ipc::SUBSCRIBER_PENDING_CAP {
                 tracing::warn!(
                     id,
@@ -2844,12 +2858,16 @@ impl Smallvil {
         for id in to_drop {
             self.remove_ipc_subscriber(id);
         }
+        if needs_retry {
+            self.schedule_ipc_flush();
+        }
     }
 
     /// Periodic retry path for subscribers whose kernel write buffer was
-    /// full at `emit_ipc_event` time. Registered as a recurring 16ms
-    /// `Timer` in `ipc::init`. Also retires any subscriber flagged for
-    /// removal mid-emit (peer-closed or cap-exceeded).
+    /// full at `emit_ipc_event` time. Invoked by the on-demand timer
+    /// `schedule_ipc_flush` arms (see there for why it's on-demand rather
+    /// than a permanently recurring `Timer`). Also retires any subscriber
+    /// flagged for removal mid-emit (peer-closed or cap-exceeded).
     pub(crate) fn flush_ipc_subscribers(&mut self) {
         if self.ipc_subscribers.is_empty() {
             return;
@@ -2866,6 +2884,41 @@ impl Smallvil {
         }
         for id in to_drop {
             self.remove_ipc_subscriber(id);
+        }
+    }
+
+    /// Arms the periodic subscriber-flush retry timer if it isn't already
+    /// running (`ipc_flush_timer_armed`). Call this only when a subscriber's
+    /// `pending` genuinely has bytes left after an inline `try_flush` --
+    /// the common case (no subscribers, or a healthy subscriber whose write
+    /// never blocks) never calls this at all, so an idle compositor no
+    /// longer wakes for IPC at every frame interval (M-41). The timer's own
+    /// callback stops re-arming and clears the flag once every subscriber
+    /// is fully drained, rather than running forever once started.
+    pub(crate) fn schedule_ipc_flush(&mut self) {
+        if self.ipc_flush_timer_armed {
+            return;
+        }
+        self.ipc_flush_timer_armed = true;
+        let result = self.loop_handle.insert_source(
+            Timer::from_duration(crate::ipc::FLUSH_INTERVAL),
+            |_, _, state: &mut Smallvil| {
+                state.flush_ipc_subscribers();
+                if state
+                    .ipc_subscribers
+                    .values()
+                    .any(|sub| !sub.pending.is_empty())
+                {
+                    TimeoutAction::ToDuration(crate::ipc::FLUSH_INTERVAL)
+                } else {
+                    state.ipc_flush_timer_armed = false;
+                    TimeoutAction::Drop
+                }
+            },
+        );
+        if let Err(err) = result {
+            self.ipc_flush_timer_armed = false;
+            tracing::warn!(%err, "Failed to schedule IPC subscriber flush retry");
         }
     }
 
@@ -3180,6 +3233,7 @@ impl Smallvil {
 
             ipc_subscribers: HashMap::new(),
             next_ipc_subscriber_id: 1,
+            ipc_flush_timer_armed: false,
 
             layout: {
                 let mut layout = Layouts::default();
