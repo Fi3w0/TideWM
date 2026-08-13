@@ -1372,14 +1372,19 @@ fn render_surface(
     let locked = !matches!(state.session_lock, SessionLock::Unlocked);
 
     let output = &surface.output;
+    let placements = if locked {
+        Vec::new()
+    } else {
+        state.render_placements(output)?
+    };
     // The renderer has a current EGL context here, but the DRM target has
     // not been bound by `render_frame` yet. Capture now so glass uses the
     // current window position in this visible frame; capturing afterward
     // made interactive moves visibly trail and flicker. Same-sized captures
     // reuse their existing window texture.
     if !locked {
-        state.capture_window_backdrops(renderer, output);
-        state.capture_layer_backdrops(renderer, output);
+        state.capture_window_backdrops(renderer, output, &placements);
+        state.capture_layer_backdrops(renderer, output, &placements);
     }
     let size = output.current_mode().map(|m| m.size).unwrap_or_default();
     let output_scale = output.current_scale();
@@ -1493,7 +1498,7 @@ fn render_surface(
     let tab_strip_elements = if locked {
         Vec::new()
     } else {
-        state.tab_strip_elements(renderer, output)
+        state.tab_strip_elements(renderer, output, &placements)
     };
 
     // The overview shows window titles too -- same lock-gating as the tab
@@ -1535,11 +1540,6 @@ fn render_surface(
         state.config_error_element(output, renderer)
     };
 
-    let placements = if locked {
-        Vec::new()
-    } else {
-        state.render_placements(output)?
-    };
     let (depth_elements, depth_surfaces) = if locked {
         (Vec::new(), Vec::new())
     } else {

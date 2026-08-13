@@ -6241,14 +6241,11 @@ impl Smallvil {
         &mut self,
         renderer: &mut GlesRenderer,
         output: &Output,
+        placements: &[crate::placement::PlacedWindow],
     ) {
         if !self.config.water_effects {
             return;
         }
-
-        let Some(placements) = self.render_placements(output) else {
-            return;
-        };
         let surfaces: Vec<WlSurface> = placements
             .iter()
             .filter(|placement| placement.replacement_eligible())
@@ -6277,7 +6274,7 @@ impl Smallvil {
         let Some(space_elements) = self.desktop_render_elements(
             renderer,
             output,
-            &placements,
+            placements,
             &surfaces,
             &mut HashMap::new(),
             Vec::new(),
@@ -6354,13 +6351,15 @@ impl Smallvil {
     /// Captures backdrops for mapped layer surfaces whose rule enables blur.
     /// Window and layer surfaces safely share the `WlSurface`-keyed cache.
     /// Layer frost is independent of the water-effects master toggle.
-    pub(crate) fn capture_layer_backdrops(&mut self, renderer: &mut GlesRenderer, output: &Output) {
+    pub(crate) fn capture_layer_backdrops(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+        placements: &[crate::placement::PlacedWindow],
+    ) {
         if !self.config.frost.enabled {
             return;
         }
-        let Some(placements) = self.render_placements(output) else {
-            return;
-        };
         let output_scale = output.current_scale().fractional_scale();
         #[allow(clippy::mutable_key_type)]
         let surfaces: Vec<(WlSurface, Rectangle<i32, Physical>)> = {
@@ -6393,7 +6392,7 @@ impl Smallvil {
         let Some(space_elements) = self.desktop_render_elements(
             renderer,
             output,
-            &placements,
+            placements,
             &skip,
             &mut HashMap::new(),
             Vec::new(),
@@ -10137,15 +10136,13 @@ impl Smallvil {
 
     /// Builds visible group tab strips at their active placement. Cached pixels
     /// rebuild only after invalidation or a live width change.
-    pub fn tab_strip_elements(
+    pub(crate) fn tab_strip_elements(
         &mut self,
         renderer: &mut GlesRenderer,
         output: &Output,
+        scene: &[crate::placement::PlacedWindow],
     ) -> Vec<MemoryRenderBufferRenderElement<GlesRenderer>> {
         let output_name = output.name();
-        let Some(scene) = self.render_placements(output) else {
-            return Vec::new();
-        };
         // Groups are few; a flat vector avoids using Wayland objects (whose
         // liveness flag is interior-mutable) as hash keys for transient
         // per-frame placement data.

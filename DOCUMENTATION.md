@@ -544,6 +544,12 @@ optional camera-anchored guide field moves and scales with the world, so empty
 travel remains legible instead of looking like windows sliding over a fixed
 wallpaper.
 
+Rendering derives one placement snapshot from each output's current camera and
+shares it across every consumer in that render pass, including glass capture,
+tab strips, and final composition. Reefs outside that camera are rejected
+before their BSP trees are walked. Whole-world features such as the minimap
+still inspect every reef, and no placement snapshot persists across frames.
+
 With no `reef` declaration TideWM creates `main` at `0x0`. Its dimensions come
 from the real logical output viewport—there is no 1080p resolution constant.
 An explicitly declared reef may omit either dimension to inherit and expand

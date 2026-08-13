@@ -531,6 +531,16 @@ impl Smallvil {
             return;
         }
 
+        let placements = if locked {
+            Vec::new()
+        } else {
+            let Some(placements) = self.render_placements(&output) else {
+                fail!(completion, CaptureFailureReason::Unknown);
+                return;
+            };
+            placements
+        };
+
         // Mirror visible composition. While locked, omit the entire desktop
         // path because `render_output` would otherwise include layer-shell
         // content independently of the supplied spaces.
@@ -560,7 +570,7 @@ impl Smallvil {
                 elements.push(OutputRenderElements::Composited(error_element));
             }
             elements.extend(
-                self.tab_strip_elements(renderer, &output)
+                self.tab_strip_elements(renderer, &output, &placements)
                     .into_iter()
                     .map(OutputRenderElements::Composited),
             );
@@ -670,10 +680,6 @@ impl Smallvil {
             let workspace_glide = self.workspace_glide_frame_element(&output);
             let depth_transition = self.depth_transition_frame_element(renderer, &output);
             let closing_windows = self.closing_window_frame_elements(renderer, &output);
-            let Some(placements) = self.render_placements(&output) else {
-                fail!(completion, CaptureFailureReason::Unknown);
-                return;
-            };
             let glass_surfaces = self.glass_eligible_surfaces(&placements);
             #[allow(clippy::mutable_key_type)]
             let mut glass_layers =

@@ -230,6 +230,18 @@ pub fn init_winit(
                 let size = entry.backend.window_size();
 
                 let locked = !matches!(state.session_lock, SessionLock::Unlocked);
+                let placements = if locked {
+                    Vec::new()
+                } else {
+                    match state.render_placements(&entry.output) {
+                        Some(placements) => placements,
+                        None => {
+                            tracing::warn!("Failed to gather nested output placements");
+                            entry.dirty = true;
+                            continue;
+                        }
+                    }
+                };
 
                 // Backdrop capture is FBO-only and must happen outside the
                 // visible bind/submit lifetime. Running it immediately
@@ -238,8 +250,8 @@ pub fn init_winit(
                 // behind. Same-sized recaptures reuse their window texture.
                 if !locked {
                     let renderer = entry.backend.renderer();
-                    state.capture_window_backdrops(renderer, &entry.output);
-                    state.capture_layer_backdrops(renderer, &entry.output);
+                    state.capture_window_backdrops(renderer, &entry.output, &placements);
+                    state.capture_layer_backdrops(renderer, &entry.output, &placements);
                 }
 
                 let render_result = {
@@ -312,14 +324,6 @@ pub fn init_winit(
                         // space_elements -- see glass_frame_elements'
                         // own doc comment for why this means "topmost
                         // among windows," not real multi-window z-order.
-                        let placements = match state.render_placements(&entry.output) {
-                            Some(placements) => placements,
-                            None => {
-                                tracing::warn!("Failed to gather nested output placements");
-                                entry.dirty = true;
-                                continue;
-                            }
-                        };
                         let glass_surfaces = state.glass_eligible_surfaces(&placements);
                         #[allow(clippy::mutable_key_type)]
                         let mut glass_layers = state.glass_layer_elements(
@@ -411,7 +415,11 @@ pub fn init_winit(
                                 .chain(overview_element)
                                 .chain(toast_element)
                                 .chain(error_element)
-                                .chain(state.tab_strip_elements(renderer, &entry.output))
+                                .chain(state.tab_strip_elements(
+                                    renderer,
+                                    &entry.output,
+                                    &placements,
+                                ))
                                 .chain(welcome_element)
                                 .map(crate::backend::udev::OutputRenderElements::Composited),
                         );

@@ -953,8 +953,16 @@ impl OceanSpace {
         gap: i32,
         split_bias: SplitBias,
     ) -> Vec<(Window, Rectangle<i32, Logical>)> {
-        self.reefs
-            .iter()
+        self.tiled_layouts_from_reefs(self.reefs.iter(), gap, split_bias)
+    }
+
+    fn tiled_layouts_from_reefs<'a>(
+        &'a self,
+        reefs: impl Iterator<Item = &'a OceanReef>,
+        gap: i32,
+        split_bias: SplitBias,
+    ) -> Vec<(Window, Rectangle<i32, Logical>)> {
+        reefs
             .flat_map(|reef| reef.layout.layout(reef.rect, gap, split_bias))
             .map(|(window, rect)| {
                 let surface = window.toplevel().map(|toplevel| toplevel.wl_surface());
@@ -965,6 +973,29 @@ impl OceanSpace {
                 (window, rect)
             })
             .collect()
+    }
+
+    /// Layouts only reefs that can contribute to this camera. Every layout
+    /// algorithm keeps its tiles inside the reef rectangle, including
+    /// preserved-size attachments, so an off-view reef can be rejected
+    /// before walking its BSP tree.
+    fn tiled_layouts_for_view(
+        &self,
+        camera: OceanCamera,
+        viewport: Size<i32, Logical>,
+        gap: i32,
+        split_bias: SplitBias,
+    ) -> Vec<(Window, Rectangle<i32, Logical>)> {
+        let dragged = self.drag_override.as_ref().map(|(surface, _)| surface);
+        let reefs = self.reefs.iter().filter(|reef| {
+            reef_may_contribute_to_view(
+                reef.rect,
+                camera,
+                viewport,
+                dragged.is_some_and(|surface| reef.layout.contains(surface)),
+            )
+        });
+        self.tiled_layouts_from_reefs(reefs, gap, split_bias)
     }
 
     pub fn make_floating(&mut self, surface: &WlSurface, gap: i32, split_bias: SplitBias) -> bool {
@@ -1508,7 +1539,8 @@ impl OceanSpace {
         split_bias: SplitBias,
     ) -> Vec<PlacedWindow> {
         let camera = self.camera(output);
-        let mut layouts = self.world_layouts(gap, split_bias);
+        let tiled = self.tiled_layouts_for_view(camera, output_geo.size, gap, split_bias);
+        let mut layouts = self.world_layouts_from_tiled(tiled);
         // Floating entries were collected first and are already frontmost.
         // Reverse only the tiled suffix so cascade/BSP tree order mirrors
         // Classic's front-to-back renderer contract.
@@ -1683,6 +1715,15 @@ fn visible_through_camera(
     let right = left + rect.size.w as f64 * camera.zoom;
     let bottom = top + rect.size.h as f64 * camera.zoom;
     right > 0.0 && bottom > 0.0 && left < viewport.w as f64 && top < viewport.h as f64
+}
+
+fn reef_may_contribute_to_view(
+    rect: Rectangle<i32, Logical>,
+    camera: OceanCamera,
+    viewport: Size<i32, Logical>,
+    contains_dragged_tile: bool,
+) -> bool {
+    contains_dragged_tile || visible_through_camera(rect, camera, viewport)
 }
 
 #[cfg(test)]
@@ -1942,6 +1983,25 @@ mod tests {
                 zoom: 1.0,
             },
             viewport
+        ));
+    }
+
+    #[test]
+    fn reef_culling_retains_visible_reefs_and_the_live_drag_owner() {
+        let reef = Rectangle::new(Point::from((4200, -1300)), Size::from((713, 509)));
+        let camera = OceanCamera {
+            origin: OceanPoint { x: 17.0, y: 29.0 },
+            zoom: 1.25,
+        };
+        let viewport = Size::from((1379, 811));
+
+        assert!(!reef_may_contribute_to_view(reef, camera, viewport, false));
+        assert!(reef_may_contribute_to_view(reef, camera, viewport, true));
+        assert!(reef_may_contribute_to_view(
+            Rectangle::new(Point::from((200, 100)), Size::from((640, 480))),
+            camera,
+            viewport,
+            false,
         ));
     }
 
