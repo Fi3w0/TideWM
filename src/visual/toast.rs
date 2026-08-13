@@ -43,12 +43,17 @@ const VISIBLE_FOR: Duration = Duration::from_millis(2400);
 const FADE_FOR: Duration = Duration::from_millis(450);
 
 // `ToastStyle::Banner`: a long, short bar instead of the pill's tall card,
-// with a bottom progress line instead of the pill's orb/wordmark. Own
-// geometry, not shared with the pill constants above -- see toast.rs's
-// module doc for why the two styles exist.
+// with a solid accent bar down the left edge and a bottom progress line
+// instead of the pill's orb-and-wordmark caption. Own geometry, not shared
+// with the pill constants above -- see toast.rs's module doc for why the
+// two styles exist.
 const BANNER_HEIGHT: i32 = 46;
 const BANNER_INSET: i32 = 6;
-const BANNER_TEXT_PAD_X: i32 = 20;
+const BANNER_ACCENT_WIDTH: i32 = 6;
+const BANNER_ICON_RADIUS: f32 = 9.0;
+const BANNER_ICON_LEFT_GAP: i32 = 10;
+const BANNER_TEXT_LEFT_GAP: i32 = 12;
+const BANNER_TEXT_RIGHT_PAD: i32 = 20;
 const BANNER_PROGRESS_HEIGHT: i32 = 3;
 const BANNER_PROGRESS_INSET_X: i32 = 14;
 const BANNER_PROGRESS_BOTTOM_GAP: i32 = 6;
@@ -452,22 +457,15 @@ fn rasterize_pill_for_output(
 
     // Small themed current/orb: recognizable Tide chrome without baking a
     // logo bitmap into every notification texture.
-    let accent = theme.accent(kind == ToastKind::Error, 0.35);
-    let center = (card_x + 23, card_y + CARD_HEIGHT / 2);
-    for y in center.1 - 11..=center.1 + 11 {
-        for x in center.0 - 11..=center.0 + 11 {
-            let distance = (((x - center.0).pow(2) + (y - center.1).pow(2)) as f32).sqrt();
-            let coverage = (11.5 - distance).clamp(0.0, 1.0);
-            if coverage > 0.0 {
-                blend_color_pixel(&mut pixels, width, x, y, accent, (coverage * 225.0) as u8);
-            }
-        }
-    }
-    for x in center.0 - 7..=center.0 + 7 {
-        let phase = (x - (center.0 - 7)) as f32 / 14.0 * std::f32::consts::TAU;
-        let y = center.1 + (phase.sin() * 2.0).round() as i32;
-        blend_color_pixel(&mut pixels, width, x, y, theme.text, 220);
-    }
+    let icon_accent = theme.accent(kind == ToastKind::Error, 0.35);
+    draw_tide_mark(
+        &mut pixels,
+        width,
+        (card_x + 23, card_y + CARD_HEIGHT / 2),
+        11.5,
+        icon_accent,
+        theme.text,
+    );
 
     draw_text(
         &mut pixels,
@@ -511,15 +509,16 @@ fn rasterize_pill_for_output(
     Some((pixels, width, height))
 }
 
-/// `ToastStyle::Banner`: a long, short bar (no orb, no "TIDEWM" label --
-/// the tinted border already reads as Tide chrome, and a shorter box has
-/// less room for both a caption and a message anyway) with a bottom
-/// progress line that fills in as `fill` (0.0-1.0) grows. Same background
-/// gradient, border-stroke, and rounded-corner recipe as the pill so the
-/// two styles read as one family, just reshaped -- not a port of
-/// Hyprland's own notification, which slides a second rect in over the
-/// first to fake a colored left edge and has no configurable corners at
-/// all.
+/// `ToastStyle::Banner`: a long, short bar with a solid accent bar down
+/// the left edge, the pill's own procedural icon mark scaled down (no
+/// "TIDEWM" wordmark -- a shorter box has less room for both a caption and
+/// a message), and a bottom progress line that fills in as `fill`
+/// (0.0-1.0) grows. Same background gradient, border-stroke, and
+/// rounded-corner recipe as the pill so the two styles read as one family,
+/// just reshaped -- not a port of Hyprland's own notification, which
+/// slides a second rect in over the first to fake its colored left edge,
+/// draws from a fixed per-severity palette instead of the live theme, and
+/// has no configurable corners at all.
 fn rasterize_banner_for_output(
     message: &str,
     kind: ToastKind,
@@ -530,7 +529,10 @@ fn rasterize_banner_for_output(
     let font = font();
     let font_size = kind.font_size();
     let height = BANNER_HEIGHT + BANNER_INSET * 2;
-    let chrome_width = BANNER_TEXT_PAD_X * 2 + BANNER_INSET * 2;
+    let icon_diameter = (BANNER_ICON_RADIUS * 2.0).ceil() as i32;
+    let text_start_offset =
+        BANNER_ACCENT_WIDTH + BANNER_ICON_LEFT_GAP + icon_diameter + BANNER_TEXT_LEFT_GAP;
+    let chrome_width = BANNER_INSET * 2 + text_start_offset + BANNER_TEXT_RIGHT_PAD;
     let available_width = narrowest_output_width
         .map(|width| width.saturating_sub(MARGIN * 2))
         .unwrap_or(BANNER_MIN_WIDTH);
@@ -602,6 +604,42 @@ fn rasterize_banner_for_output(
         }
     }
 
+    // Solid accent bar down the left edge -- the piece of Hyprland's own
+    // notification look this style borrows most directly, unlike the thin
+    // border stroke alone. Rounded only on its outer (card) corners: the
+    // mask box is widened by `radius` so `rounded_rect_coverage_local`
+    // curves the top/bottom-left the same as the card itself, then only
+    // the true `BANNER_ACCENT_WIDTH` columns are actually painted.
+    let accent_bar_mask_w = BANNER_ACCENT_WIDTH + radius as i32;
+    for y in 0..height {
+        for x in 0..(card_x + BANNER_ACCENT_WIDTH).min(width) {
+            let coverage =
+                rounded_rect_coverage_local(x, y, card_x, card_y, accent_bar_mask_w, BANNER_HEIGHT, radius);
+            if coverage <= 0.0 {
+                continue;
+            }
+            blend_color_pixel(&mut pixels, width, x, y, accent, (coverage * 255.0) as u8);
+        }
+    }
+
+    // Same procedural mark the pill uses, scaled down -- ties the two
+    // styles to one family instead of Banner reading as a plain bordered
+    // box.
+    let icon_accent = theme.accent(kind == ToastKind::Error, 0.35);
+    let icon_radius_i32 = BANNER_ICON_RADIUS.round() as i32;
+    let icon_center = (
+        card_x + BANNER_ACCENT_WIDTH + BANNER_ICON_LEFT_GAP + icon_radius_i32,
+        card_y + BANNER_HEIGHT / 2,
+    );
+    draw_tide_mark(
+        &mut pixels,
+        width,
+        icon_center,
+        BANNER_ICON_RADIUS,
+        icon_accent,
+        theme.text,
+    );
+
     let track = ProgressTrack {
         x: card_x + BANNER_PROGRESS_INSET_X,
         y: card_y + BANNER_HEIGHT - BANNER_PROGRESS_BOTTOM_GAP - BANNER_PROGRESS_HEIGHT,
@@ -619,7 +657,7 @@ fn rasterize_banner_for_output(
     stamp_progress_fill(&mut pixels, width, track, accent, fill);
 
     let baseline = card_y + 28;
-    let mut pen_x = card_x + BANNER_TEXT_PAD_X;
+    let mut pen_x = card_x + text_start_offset;
 
     for glyph in line.glyphs {
         let metrics = glyph.metrics;
@@ -719,6 +757,36 @@ fn blend_color_pixel(pixels: &mut [u8], width: i32, x: i32, y: i32, rgb: [u8; 3]
         pixels[i + channel] = (bg + (target as f32 - bg) * t) as u8;
     }
     pixels[i + 3] = pixels[i + 3].max(coverage);
+}
+
+/// Small procedural "Tide" mark: a filled accent disc with a wavy
+/// current-line across it, no bitmap asset. Shared by both toast styles
+/// (scaled by `radius`) so they read as the same chrome family.
+fn draw_tide_mark(
+    pixels: &mut [u8],
+    width: i32,
+    center: (i32, i32),
+    radius: f32,
+    accent: [u8; 3],
+    wave_color: [u8; 3],
+) {
+    let r = radius.ceil() as i32;
+    for y in center.1 - r..=center.1 + r {
+        for x in center.0 - r..=center.0 + r {
+            let distance = (((x - center.0).pow(2) + (y - center.1).pow(2)) as f32).sqrt();
+            let coverage = (radius - distance).clamp(0.0, 1.0);
+            if coverage > 0.0 {
+                blend_color_pixel(pixels, width, x, y, accent, (coverage * 225.0) as u8);
+            }
+        }
+    }
+    let span = (radius * 0.61).round().max(3.0) as i32;
+    let amplitude = (radius * 0.17).round().max(1.0);
+    for x in center.0 - span..=center.0 + span {
+        let phase = (x - (center.0 - span)) as f32 / (span * 2).max(1) as f32 * std::f32::consts::TAU;
+        let y = center.1 + (phase.sin() * amplitude).round() as i32;
+        blend_color_pixel(pixels, width, x, y, wave_color, 220);
+    }
 }
 
 fn draw_text(
