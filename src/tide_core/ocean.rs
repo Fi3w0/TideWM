@@ -1474,12 +1474,19 @@ impl OceanSpace {
         gap: i32,
         split_bias: SplitBias,
     ) -> Vec<(Window, Rectangle<i32, Logical>, PlacementKind)> {
+        self.world_layouts_from_tiled(self.tiled_layouts(gap, split_bias))
+    }
+
+    pub(crate) fn world_layouts_from_tiled(
+        &self,
+        tiled: Vec<(Window, Rectangle<i32, Logical>)>,
+    ) -> Vec<(Window, Rectangle<i32, Logical>, PlacementKind)> {
         self.floating_stack
             .iter()
             .filter_map(|surface| self.floating.get(surface))
             .map(|(window, rect)| (window.clone(), *rect, PlacementKind::Floating))
             .chain(
-                self.tiled_layouts(gap, split_bias)
+                tiled
                     .into_iter()
                     .map(|(window, rect)| (window, rect, PlacementKind::Tiled)),
             )

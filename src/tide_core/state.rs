@@ -7807,10 +7807,7 @@ impl Smallvil {
             }
         }
 
-        for (window, rect, _) in self
-            .ocean
-            .world_layouts(self.config.gaps, self.config.bsp_split_bias)
-        {
+        for (window, rect, _) in self.ocean.world_layouts_from_tiled(tiled) {
             let output = window
                 .toplevel()
                 .and_then(|toplevel| self.ocean.entry_output(toplevel.wl_surface()))
