@@ -721,7 +721,7 @@ impl OceanSpace {
 
     fn anchor_empty_reef_to_camera(&mut self, reef_index: usize, camera: OceanCamera) -> bool {
         let reef = &mut self.reefs[reef_index];
-        if !reef.anchor_empty_layout_to_camera || !reef.layout.windows().is_empty() {
+        if !reef.anchor_empty_layout_to_camera || !reef.layout.is_empty() {
             return false;
         }
         reef.rect.loc = Point::from((
@@ -732,9 +732,9 @@ impl OceanSpace {
     }
 
     pub fn remove(&mut self, surface: &WlSurface) {
-        for reef in &mut self.reefs {
-            reef.layout.remove(surface);
-        }
+        self.reefs
+            .iter_mut()
+            .any(|reef| reef.layout.remove(surface));
         self.entry_outputs.remove(surface);
         self.floating.remove(surface);
         self.attached_sizes.remove(surface);
@@ -973,9 +973,9 @@ impl OceanSpace {
         else {
             return false;
         };
-        for reef in &mut self.reefs {
-            reef.layout.remove(surface);
-        }
+        self.reefs
+            .iter_mut()
+            .any(|reef| reef.layout.remove(surface));
         self.attached_sizes.remove(surface);
         self.floating.insert(surface.clone(), (window, rect));
         self.raise_floating(surface);
