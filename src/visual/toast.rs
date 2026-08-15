@@ -359,16 +359,13 @@ fn rasterize_toast_for_output(
     fill: f32,
 ) -> Option<Rasterized> {
     match theme.style {
-        ToastStyle::Pill => {
-            rasterize_pill_for_output(message, kind, theme, narrowest_output_width).map(
-                |(pixels, width, height)| Rasterized {
-                    pixels,
-                    width,
-                    height,
-                    progress_track: None,
-                },
-            )
-        }
+        ToastStyle::Pill => rasterize_pill_for_output(message, kind, theme, narrowest_output_width)
+            .map(|(pixels, width, height)| Rasterized {
+                pixels,
+                width,
+                height,
+                progress_track: None,
+            }),
         ToastStyle::Banner => {
             rasterize_banner_for_output(message, kind, theme, narrowest_output_width, fill)
         }
@@ -613,8 +610,15 @@ fn rasterize_banner_for_output(
     let accent_bar_mask_w = BANNER_ACCENT_WIDTH + radius as i32;
     for y in 0..height {
         for x in 0..(card_x + BANNER_ACCENT_WIDTH).min(width) {
-            let coverage =
-                rounded_rect_coverage_local(x, y, card_x, card_y, accent_bar_mask_w, BANNER_HEIGHT, radius);
+            let coverage = rounded_rect_coverage_local(
+                x,
+                y,
+                card_x,
+                card_y,
+                accent_bar_mask_w,
+                BANNER_HEIGHT,
+                radius,
+            );
             if coverage <= 0.0 {
                 continue;
             }
@@ -783,7 +787,8 @@ fn draw_tide_mark(
     let span = (radius * 0.61).round().max(3.0) as i32;
     let amplitude = (radius * 0.17).round().max(1.0);
     for x in center.0 - span..=center.0 + span {
-        let phase = (x - (center.0 - span)) as f32 / (span * 2).max(1) as f32 * std::f32::consts::TAU;
+        let phase =
+            (x - (center.0 - span)) as f32 / (span * 2).max(1) as f32 * std::f32::consts::TAU;
         let y = center.1 + (phase.sin() * amplitude).round() as i32;
         blend_color_pixel(pixels, width, x, y, wave_color, 220);
     }
@@ -927,7 +932,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(raster.height, BANNER_HEIGHT + BANNER_INSET * 2);
-        assert!(raster.width > raster.height * 2, "banner should read long, not squarish");
+        assert!(
+            raster.width > raster.height * 2,
+            "banner should read long, not squarish"
+        );
         assert!(raster.progress_track.is_some());
         let visible = raster
             .pixels
@@ -940,12 +948,15 @@ mod tests {
     #[test]
     fn banner_progress_line_grows_with_fill_then_disappears_with_the_toast() {
         let theme = banner_theme();
-        let empty = rasterize_toast_for_output("Configuration reloaded", ToastKind::Info, theme, None, 0.0)
-            .unwrap();
-        let half = rasterize_toast_for_output("Configuration reloaded", ToastKind::Info, theme, None, 0.5)
-            .unwrap();
-        let full = rasterize_toast_for_output("Configuration reloaded", ToastKind::Info, theme, None, 1.0)
-            .unwrap();
+        let empty =
+            rasterize_toast_for_output("Configuration reloaded", ToastKind::Info, theme, None, 0.0)
+                .unwrap();
+        let half =
+            rasterize_toast_for_output("Configuration reloaded", ToastKind::Info, theme, None, 0.5)
+                .unwrap();
+        let full =
+            rasterize_toast_for_output("Configuration reloaded", ToastKind::Info, theme, None, 1.0)
+                .unwrap();
         let track = empty.progress_track.unwrap();
 
         let filled_pixels = |raster: &Rasterized| {
