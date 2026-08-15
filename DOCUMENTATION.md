@@ -1281,12 +1281,18 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 
 | Key | Type | Notes |
 | --- | --- | --- |
-| `app_id` | string, optional | Matches exactly. At least one of `app_id`/`title`/`app_id_regex`/`title_regex`/`pid`/`xwayland` is required — a rule with none of these never matches anything. |
+| `app_id` | string, optional | Matches exactly. At least one of `app_id`/`title`/`app_id_regex`/`title_regex`/`pid`/`xwayland`/`urgent`/`initial_class`/`initial_title`/`at_startup` is required — a rule with none of these never matches anything. |
 | `title` | string, optional | Matches case-insensitively, anywhere in the string. |
 | `app_id_regex` | regular expression, optional | Rust regex matched against the full app ID string. Combines with other criteria in the same rule. |
 | `title_regex` | regular expression, optional | Rust regex matched against the title. Use `(?i)` for case-insensitive matching. |
 | `pid` | integer, optional | Exact match against the window's real client PID (sway's `[pid=...]`). Never matches a window whose PID couldn't be read (a dead client). |
 | `xwayland` | bool, optional | Tri-state: unset matches either kind of window; `true`/`false` requires the window to be (or not be) an X11 client running through `xwayland-satellite` (Hyprland's `xwayland:1`/`xwayland:0`). `is_xwayland` is an alias. |
+| `urgent` | bool, optional | Tri-state urgent-hint match. Re-checked live — a matching rule takes effect immediately when a window becomes urgent or is focused/cleared, not only at map time. |
+| `initial_class` | string, optional | Like `app_id`, but checked once against the identity a window reported at its *very first* map (Hyprland `initialClass`) — a later `set_app_id`/title rename can't make this stop or start matching. |
+| `initial_title` | string, optional | Spawn-time-only title match, same substring semantics as `title` (Hyprland `initialTitle`). |
+| `initial_class_regex` | regular expression, optional | Spawn-time-only regex class match. |
+| `initial_title_regex` | regular expression, optional | Spawn-time-only regex title match. |
+| `at_startup` | bool, optional | Tri-state match on whether the window mapped within roughly 5 seconds of compositor launch (niri `at-startup`) — lets a rule target session-autostarted apps (`spawn`) differently from ones opened later by hand. |
 | `workspace` | integer, optional | Initial workspace, same numbering as `workspace:N` keybinds (including `0`, the scratchpad). |
 | `output` | string, optional | Initial output by connector name. Falls back to normal placement if unset or unconnected. |
 | `float` | bool | Default `false`. |
@@ -1361,6 +1367,14 @@ rule {
         tint_alpha = 0.0
         noise = 0.015
     }
+}
+
+rule {
+    # Only apps this compositor itself launched at login, not a foot
+    # window opened by hand later.
+    at_startup = true
+    initial_class = waybar-companion
+    workspace = 1
 }
 ```
 

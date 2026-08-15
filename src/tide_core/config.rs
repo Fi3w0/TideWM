@@ -1147,6 +1147,22 @@ pub struct Config {
     pub env: HashMap<String, String>,
 }
 
+/// Match facts `resolve_window_rules` needs for one window, bundled so the
+/// function stays under clippy's argument-count lint as match criteria
+/// (initial_class/initial_title/at_startup) keep growing. Same facts
+/// `Smallvil::resolve_window_rules_for` gathers per surface.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct WindowMatchFacts<'a> {
+    pub app_id: Option<&'a str>,
+    pub title: Option<&'a str>,
+    pub pid: Option<i32>,
+    pub is_xwayland: bool,
+    pub urgent: bool,
+    pub initial_app_id: Option<&'a str>,
+    pub initial_title: Option<&'a str>,
+    pub at_startup: bool,
+}
+
 impl Config {
     /// Load `$XDG_CONFIG_HOME/tidewm/config.wave` (falling back to
     /// `~/.config/tidewm/config.wave`), writing out the default file on first
@@ -1527,17 +1543,38 @@ impl Config {
     /// booleans have no "leave alone" state to fall back to). Called once
     /// per newly-mapped window, not per frame, so folding rather than
     /// caching is fine.
-    pub(crate) fn resolve_window_rules(
-        &self,
-        app_id: Option<&str>,
-        title: Option<&str>,
-        pid: Option<i32>,
-        is_xwayland: bool,
-        urgent: bool,
-    ) -> WindowRule {
+    pub(crate) fn resolve_window_rules(&self, facts: WindowMatchFacts) -> WindowRule {
         let mut effective = WindowRule::default();
         for rule in &self.window_rules {
-            if !rule.matches(app_id, title, pid, is_xwayland, urgent) {
+            // `matches`/`matches_initial` each vacuously pass when a rule
+            // sets none of the fields they check, so a rule using only
+            // spawn-time criteria (say, just `initial_class`) must skip the
+            // live-fact check entirely rather than calling `matches` with
+            // no live criteria to test -- `matches`'s own blank-rule guard
+            // would then reject it outright regardless of `app_id`/`title`.
+            let has_live = rule.has_live_criteria();
+            let has_initial = rule.has_initial_criteria();
+            if !has_live && !has_initial {
+                continue;
+            }
+            if has_live
+                && !rule.matches(
+                    facts.app_id,
+                    facts.title,
+                    facts.pid,
+                    facts.is_xwayland,
+                    facts.urgent,
+                )
+            {
+                continue;
+            }
+            if has_initial
+                && !rule.matches_initial(
+                    facts.initial_app_id,
+                    facts.initial_title,
+                    facts.at_startup,
+                )
+            {
                 continue;
             }
             if rule.workspace.is_some() {
@@ -2239,6 +2276,24 @@ pub struct WindowRule {
     /// gathers current urgency (`self.urgent.contains(surface)`) alongside
     /// every other match fact.
     pub urgent: Option<bool>,
+    /// Spawn-time-only class match (Hyprland `initialClass`). Checked
+    /// against the app_id a window reported at its *first* map, captured
+    /// once into `Smallvil::initial_toplevel_identity` and never updated
+    /// again -- unlike `app_id`, a later `set_app_id` from the client can't
+    /// make this stop or start matching. Case-insensitive exact match, same
+    /// semantics as `app_id`. See `WindowRule::matches_initial`.
+    pub initial_class: Option<String>,
+    /// Spawn-time-only title match (Hyprland `initialTitle`). Same capture
+    /// as `initial_class` but for title, substring match like `title`.
+    pub initial_title: Option<String>,
+    pub initial_class_regex: Option<regex::Regex>,
+    pub initial_title_regex: Option<regex::Regex>,
+    /// Tri-state match on whether the window mapped during the compositor's
+    /// own startup grace window (niri `at-startup`) -- see
+    /// `Smallvil::resolve_window_rules_for`'s `at_startup` fact. Lets a rule
+    /// target only session-autostarted apps (`spawn`) differently from ones
+    /// launched later by hand.
+    pub at_startup: Option<bool>,
     /// Initial workspace number -- same numbering `workspace:N` keybinds
     /// use, including 0 (the reserved scratchpad) if you want a window to
     /// always start hidden.
@@ -3969,6 +4024,86 @@ impl WindowRule {
             }
         }
         true
+    }
+
+    /// The spawn-time-only criteria (`initial_class`/`initial_title`,
+    /// `at_startup`), split out from `matches` so the facts a rule needs at
+    /// ordinary live-resolve time (app_id/title/pid/xwayland/urgent) don't
+    /// change shape -- keeps every existing `matches` test call site working
+    /// unchanged. `matches`'s own blank-rule guard only looks at the live
+    /// fields, so a rule made of only these criteria correctly fails
+    /// `matches` on its own; `resolve_window_rules` is what combines this
+    /// with `has_initial_criteria`/`has_live_criteria` to decide whether a
+    /// rule applies at all. See those two and the blank-rule test above.
+    pub(crate) fn matches_initial(
+        &self,
+        initial_app_id: Option<&str>,
+        initial_title: Option<&str>,
+        at_startup: bool,
+    ) -> bool {
+        if let Some(want) = &self.initial_class {
+            let Some(app_id) = initial_app_id else {
+                return false;
+            };
+            if !app_id.eq_ignore_ascii_case(want) {
+                return false;
+            }
+        }
+        if let Some(want) = &self.initial_title {
+            let Some(title) = initial_title else {
+                return false;
+            };
+            if !title.to_lowercase().contains(&want.to_lowercase()) {
+                return false;
+            }
+        }
+        if let Some(pattern) = &self.initial_class_regex {
+            let Some(app_id) = initial_app_id else {
+                return false;
+            };
+            if !pattern.is_match(app_id) {
+                return false;
+            }
+        }
+        if let Some(pattern) = &self.initial_title_regex {
+            let Some(title) = initial_title else {
+                return false;
+            };
+            if !pattern.is_match(title) {
+                return false;
+            }
+        }
+        if let Some(want) = self.at_startup {
+            if want != at_startup {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether any live-resolve-time criterion (app_id/title/pid/xwayland/
+    /// urgent, or their regex variants) is set. Mirrors `matches`'s own
+    /// blank-rule guard; `resolve_window_rules` uses this to tell a rule
+    /// using only spawn-time criteria apart from a genuinely empty one,
+    /// since `matches` itself has no way to vacuously accept every window.
+    fn has_live_criteria(&self) -> bool {
+        self.app_id.is_some()
+            || self.title.is_some()
+            || self.app_id_regex.is_some()
+            || self.title_regex.is_some()
+            || self.pid.is_some()
+            || self.is_xwayland.is_some()
+            || self.urgent.is_some()
+    }
+
+    /// Same idea as `has_live_criteria` but for the spawn-time-only fields
+    /// `matches_initial` checks.
+    fn has_initial_criteria(&self) -> bool {
+        self.initial_class.is_some()
+            || self.initial_title.is_some()
+            || self.initial_class_regex.is_some()
+            || self.initial_title_regex.is_some()
+            || self.at_startup.is_some()
     }
 }
 
@@ -7258,6 +7393,21 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                 },
                 "xwayland" | "is_xwayland" => set_opt_bool(&mut rule.is_xwayland, key, value),
                 "urgent" => set_opt_bool(&mut rule.urgent, key, value),
+                "initial_class" => rule.initial_class = Some(value.clone()),
+                "initial_title" => rule.initial_title = Some(value.clone()),
+                "initial_class_regex" => match regex::Regex::new(value) {
+                    Ok(pattern) => rule.initial_class_regex = Some(pattern),
+                    Err(err) => {
+                        tracing::warn!(value, %err, "Invalid initial_class_regex, ignoring")
+                    }
+                },
+                "initial_title_regex" => match regex::Regex::new(value) {
+                    Ok(pattern) => rule.initial_title_regex = Some(pattern),
+                    Err(err) => {
+                        tracing::warn!(value, %err, "Invalid initial_title_regex, ignoring")
+                    }
+                },
+                "at_startup" => set_opt_bool(&mut rule.at_startup, key, value),
                 "workspace" => match value.parse() {
                     Ok(n) => rule.workspace = Some(n),
                     Err(_) => tracing::warn!(value, "Expected a workspace number, ignoring"),
@@ -8352,6 +8502,16 @@ mode nav {
 mod tests {
     use super::*;
 
+    /// Shorthand for the common `resolve_window_rules` test call: only
+    /// `app_id` set, everything else defaulted. Keeps call sites short
+    /// enough for rustfmt to lay out on one line.
+    fn facts_for(app_id: &str) -> WindowMatchFacts<'_> {
+        WindowMatchFacts {
+            app_id: Some(app_id),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn switch_events_parse_valid_actions_and_drop_invalid_ones() {
         // Same string syntax `[keybinds]` uses, including the colon-prefixed
@@ -8582,6 +8742,40 @@ mod tests {
         assert!(combined.matches(Some("firefox"), None, None, false, true));
         assert!(!combined.matches(Some("firefox"), None, None, false, false));
         assert!(!combined.matches(Some("chromium"), None, None, false, true));
+    }
+
+    #[test]
+    fn window_rule_matches_initial_class_and_title_spawn_time_only() {
+        // `matches` (the live-fact function) never sees these criteria --
+        // a blank rule using only initial_class must still refuse to match
+        // nothing, which is why the blank-rule guard lives in `matches` and
+        // reads `self` directly rather than taking these as parameters.
+        let by_initial_class = lower_window_rule_block(&[waves::Entry::Assign(
+            "initial_class".into(),
+            "kitty".into(),
+        )]);
+        assert!(!by_initial_class.matches(Some("kitty"), None, None, false, false));
+        assert!(by_initial_class.matches_initial(Some("kitty"), None, false));
+        assert!(!by_initial_class.matches_initial(Some("alacritty"), None, false));
+        assert!(!by_initial_class.matches_initial(None, None, false));
+
+        let by_initial_title =
+            lower_window_rule_block(&[waves::Entry::Assign("initial_title".into(), "pip".into())]);
+        assert!(by_initial_title.matches_initial(None, Some("Video - PIP"), false));
+        assert!(!by_initial_title.matches_initial(None, Some("normal tab"), false));
+    }
+
+    #[test]
+    fn window_rule_matches_at_startup_alone() {
+        let startup_only =
+            lower_window_rule_block(&[waves::Entry::Assign("at_startup".into(), "true".into())]);
+        assert!(startup_only.matches_initial(None, None, true));
+        assert!(!startup_only.matches_initial(None, None, false));
+
+        let not_startup =
+            lower_window_rule_block(&[waves::Entry::Assign("at_startup".into(), "false".into())]);
+        assert!(not_startup.matches_initial(None, None, false));
+        assert!(!not_startup.matches_initial(None, None, true));
     }
 
     #[test]
@@ -9005,13 +9199,13 @@ mod tests {
         };
         // Only the two "kitty" rules should ever combine; the "firefox"
         // one must not leak in just because it's in the same list.
-        let effective = config.resolve_window_rules(Some("kitty"), None, None, false, false);
+        let effective = config.resolve_window_rules(facts_for("kitty"));
         assert_eq!(effective.workspace, Some(5)); // later match overrides earlier
         assert!(effective.float); // set by the first match, not unset by the second
         assert!(effective.pin); // set by the second match
 
         config.window_rules.clear();
-        let none_matched = config.resolve_window_rules(Some("kitty"), None, None, false, false);
+        let none_matched = config.resolve_window_rules(facts_for("kitty"));
         assert_eq!(none_matched.workspace, None);
         assert!(!none_matched.float);
     }
@@ -9799,15 +9993,11 @@ mod tests {
         let config = Config::from_raw(lower_entries(&entries)).0;
         assert_eq!(config.viscosity, 1.75);
         assert_eq!(
-            config
-                .resolve_window_rules(Some("kitty"), None, None, false, false)
-                .viscosity,
+            config.resolve_window_rules(facts_for("kitty")).viscosity,
             Some(4.0)
         );
         assert_eq!(
-            config
-                .resolve_window_rules(Some("foot"), None, None, false, false)
-                .viscosity,
+            config.resolve_window_rules(facts_for("foot")).viscosity,
             None
         );
         assert_eq!(parse_default_config().viscosity, 1.0);
@@ -9878,17 +10068,10 @@ mod tests {
         assert_eq!(config.sway.frequency, 0.1);
         assert_eq!(config.sway.damping, 20.0);
         assert_eq!(
-            config
-                .resolve_window_rules(Some("kitty"), None, None, false, false)
-                .sway,
+            config.resolve_window_rules(facts_for("kitty")).sway,
             Some(false)
         );
-        assert_eq!(
-            config
-                .resolve_window_rules(Some("foot"), None, None, false, false)
-                .sway,
-            None
-        );
+        assert_eq!(config.resolve_window_rules(facts_for("foot")).sway, None);
 
         let defaults = parse_default_config().sway;
         assert!(!defaults.enabled);
@@ -9944,17 +10127,10 @@ mod tests {
         assert_eq!(config.buoyancy.settle_ms, 320);
         assert_eq!(config.buoyancy.flow_reduction, 0.0);
         assert_eq!(
-            config
-                .resolve_window_rules(Some("kitty"), None, None, false, false)
-                .weight,
+            config.resolve_window_rules(facts_for("kitty")).weight,
             Some(0.6)
         );
-        assert_eq!(
-            config
-                .resolve_window_rules(Some("foot"), None, None, false, false)
-                .weight,
-            None
-        );
+        assert_eq!(config.resolve_window_rules(facts_for("foot")).weight, None);
         assert_eq!(parse_default_config().buoyancy, BuoyancyConfig::default());
     }
 
@@ -10003,14 +10179,12 @@ mod tests {
         assert_eq!(config.float_physics.wave.speed, 2000.0);
         assert_eq!(
             config
-                .resolve_window_rules(Some("kitty"), None, None, false, false)
+                .resolve_window_rules(facts_for("kitty"))
                 .float_physics,
             Some(FloatPhysicsTier::Off)
         );
         assert_eq!(
-            config
-                .resolve_window_rules(Some("foot"), None, None, false, false)
-                .float_physics,
+            config.resolve_window_rules(facts_for("foot")).float_physics,
             None
         );
 
@@ -10029,7 +10203,7 @@ mod tests {
         assert_eq!(legacy_config.float_physics.tier, FloatPhysicsTier::Light);
         assert_eq!(
             legacy_config
-                .resolve_window_rules(Some("kitty"), None, None, false, false)
+                .resolve_window_rules(facts_for("kitty"))
                 .float_physics,
             Some(FloatPhysicsTier::Light)
         );
@@ -10107,17 +10281,10 @@ mod tests {
         // Two matching rules for the same app: the later one wins, same
         // fold rule every other Option<bool> rule field uses.
         assert_eq!(
-            config
-                .resolve_window_rules(Some("kitty"), None, None, false, false)
-                .depth,
+            config.resolve_window_rules(facts_for("kitty")).depth,
             Some(true)
         );
-        assert_eq!(
-            config
-                .resolve_window_rules(Some("foot"), None, None, false, false)
-                .depth,
-            None
-        );
+        assert_eq!(config.resolve_window_rules(facts_for("foot")).depth, None);
     }
 
     #[test]
@@ -10428,7 +10595,7 @@ mod tests {
         assert_eq!(config.frost.tint_alpha, 0.2);
         assert_eq!(config.frost.corner_radius, 16.0);
         assert_eq!(config.frost.corner_softness, 1.5);
-        let rule = config.resolve_window_rules(Some("kitty"), None, None, false, false);
+        let rule = config.resolve_window_rules(facts_for("kitty"));
         assert_eq!(rule.opacity, Some(0.7));
         assert_eq!(rule.active_opacity, Some(1.0));
         assert_eq!(rule.inactive_opacity, Some(0.75));
@@ -10519,7 +10686,7 @@ mod tests {
         assert!(config.shadow.floating_only);
         assert!(config.shadow.fullscreen);
 
-        let resolved = config.resolve_window_rules(Some("kitty"), None, None, false, false);
+        let resolved = config.resolve_window_rules(facts_for("kitty"));
         let shadow = resolved.shadow.unwrap().apply_to(&config.shadow);
         assert!(shadow.enabled);
         assert_eq!(shadow.softness, 24.0);
@@ -10587,7 +10754,7 @@ mod tests {
         assert_eq!(config.border.animation_speed, 42.0);
         assert_eq!(config.border.pulse_amount, 0.2);
 
-        let resolved = config.resolve_window_rules(Some("kitty"), None, None, false, false);
+        let resolved = config.resolve_window_rules(facts_for("kitty"));
         let rounding = resolved.rounding.unwrap().apply_to(&config.rounding);
         let border = resolved.border.unwrap().apply_to(&config.border);
         assert_eq!(rounding.radii, [18.0, 22.0, 10.0, 6.0]);
@@ -10653,17 +10820,10 @@ mod tests {
         let config = Config::from_raw(lower_entries(&entries)).0;
 
         assert_eq!(
-            config
-                .resolve_window_rules(Some("kitty"), None, None, false, false)
-                .glass,
+            config.resolve_window_rules(facts_for("kitty")).glass,
             Some(GlassMode::Plain)
         );
-        assert_eq!(
-            config
-                .resolve_window_rules(Some("foot"), None, None, false, false)
-                .glass,
-            None
-        );
+        assert_eq!(config.resolve_window_rules(facts_for("foot")).glass, None);
     }
 
     #[test]

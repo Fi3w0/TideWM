@@ -920,6 +920,14 @@ pub struct Smallvil {
     /// never tiled again.
     pub flutter_floated: HashSet<WlSurface>,
 
+    /// `(app_id, title)` captured once at a surface's true first map, never
+    /// overwritten by a later unmap/remap (the flutter-storm case) or a
+    /// live `set_app_id`/`set_title` -- what `initial_class`/`initial_title`
+    /// window-rule criteria match against. Populated in `map_toplevel`,
+    /// pruned in `toplevel_destroyed` (not on ordinary unmap, since a
+    /// remapped surface should keep its original spawn identity).
+    pub initial_toplevel_identity: HashMap<WlSurface, (Option<String>, Option<String>)>,
+
     /// Named scratchpads (Hyprland's named "special workspaces"):
     /// each name is lazily assigned its own reserved workspace number from
     /// `NAMED_SCRATCHPAD_BASE` upward on first use, then behaves exactly
@@ -1445,27 +1453,51 @@ impl Smallvil {
         self.config.water_effects && self.config.swim.enabled
     }
 
-    /// Gathers every fact `WindowRule::matches` needs for one surface
-    /// (identity, PID, XWayland-ness, current urgency) and folds the
-    /// matching `[[window_rule]]` entries into one effective rule. The
-    /// single chokepoint every other resolver in this file goes through,
-    /// so a new match criterion only needs wiring here once instead of at
-    /// each call site.
+    /// Gathers every fact `WindowRule::matches`/`matches_initial` need for
+    /// one surface (identity, PID, XWayland-ness, current urgency, spawn-time
+    /// identity, startup-window-ness) and folds the matching
+    /// `[[window_rule]]` entries into one effective rule. The single
+    /// chokepoint every other resolver in this file goes through, so a new
+    /// match criterion only needs wiring here once instead of at each call
+    /// site.
     pub(crate) fn resolve_window_rules_for(
         &self,
         surface: &WlSurface,
     ) -> crate::config::WindowRule {
+        // How long after compositor launch a newly-mapped window still
+        // counts as `at_startup` (niri) -- long enough to cover a
+        // `spawn`-launched app's typical cold-start time, short enough to
+        // not catch something the user opens by hand during a slow login.
+        // Picked without access to niri's own real default (the reference
+        // clone is outside this sandbox's allowed paths); revisit if a
+        // real config needs a different window.
+        const STARTUP_GRACE_PERIOD: Duration = Duration::from_secs(5);
+
         let (app_id, title) = self.toplevel_identity(surface);
         let pid = self.client_pid(surface);
         let is_xwayland = self.is_xwayland_surface(surface);
         let urgent = self.urgent.contains(surface);
-        self.config.resolve_window_rules(
-            app_id.as_deref(),
-            title.as_deref(),
-            pid,
-            is_xwayland,
-            urgent,
-        )
+        // Falls back to the current identity for a surface this compositor
+        // process never saw map (nothing recorded it), which just makes
+        // initial_class/initial_title behave like their live counterparts
+        // in that edge case rather than never matching at all.
+        let (initial_app_id, initial_title) = self
+            .initial_toplevel_identity
+            .get(surface)
+            .cloned()
+            .unwrap_or_else(|| (app_id.clone(), title.clone()));
+        let at_startup = self.start_time.elapsed() < STARTUP_GRACE_PERIOD;
+        self.config
+            .resolve_window_rules(crate::config::WindowMatchFacts {
+                app_id: app_id.as_deref(),
+                title: title.as_deref(),
+                pid,
+                is_xwayland,
+                urgent,
+                initial_app_id: initial_app_id.as_deref(),
+                initial_title: initial_title.as_deref(),
+                at_startup,
+            })
     }
 
     /// Re-derives `window_opacity`/`window_glass_modes` for one window from
@@ -3647,6 +3679,7 @@ impl Smallvil {
             expected_tiled_size: HashMap::new(),
             tiled_size_refusals: HashMap::new(),
             flutter_floated: HashSet::new(),
+            initial_toplevel_identity: HashMap::new(),
             workspace_previous: HashMap::new(),
             pseudo_tiled: HashSet::new(),
             urgent: HashSet::new(),

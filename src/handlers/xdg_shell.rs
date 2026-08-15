@@ -61,6 +61,7 @@ impl XdgShellHandler for Smallvil {
         self.restore_swallowed(surface.wl_surface());
         self.unmapped_toplevels.remove(surface.wl_surface());
         self.detach_mapped_toplevel(surface.wl_surface());
+        self.initial_toplevel_identity.remove(surface.wl_surface());
         self.forget_toplevel_flutter(surface.wl_surface());
         self.forget_window_focus(surface.wl_surface());
         self.retile();
@@ -1032,6 +1033,15 @@ impl Smallvil {
     }
 
     fn map_toplevel(&mut self, surface: &WlSurface) {
+        // Must run before `resolve_window_rules_for` below so a rule with
+        // `initial_class`/`initial_title` sees this window's very first
+        // identity, not a later one. A remap (flutter storm) hits this
+        // `contains_key` guard and leaves the original spawn identity alone.
+        if !self.initial_toplevel_identity.contains_key(surface) {
+            let identity = self.toplevel_identity(surface);
+            self.initial_toplevel_identity
+                .insert(surface.clone(), identity);
+        }
         let rule = self.resolve_window_rules_for(surface);
         if let Some(opacity) = crate::config::WindowOpacity::from_rule(&rule) {
             self.window_opacity.insert(surface.clone(), opacity);
