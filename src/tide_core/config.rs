@@ -1665,6 +1665,19 @@ impl Config {
                     None => rule_ripple.clone(),
                 });
             }
+            effective.persistent_size |= rule.persistent_size;
+            if rule.min_width.is_some() {
+                effective.min_width = rule.min_width;
+            }
+            if rule.max_width.is_some() {
+                effective.max_width = rule.max_width;
+            }
+            if rule.min_height.is_some() {
+                effective.min_height = rule.min_height;
+            }
+            if rule.max_height.is_some() {
+                effective.max_height = rule.max_height;
+            }
         }
         effective
     }
@@ -2397,6 +2410,26 @@ pub struct WindowRule {
     /// `ripple { }` block. Set `enabled = false` inside this sub-block to
     /// suppress ripples entirely for matching windows. See `RippleConfig`.
     pub ripple: Option<RippleConfig>,
+    /// Remember this app's last floating size across launches (Hyprland
+    /// `persistentsize`). Recorded from the floating rect at close time
+    /// (`Smallvil::detach_mapped_toplevel`, keyed by app_id in
+    /// `Smallvil::remembered_floating_sizes`) and reapplied at the next map
+    /// in place of the client's own natural size, unless this same rule
+    /// also sets an explicit `size`. In-memory only -- does not survive a
+    /// compositor restart, same "session, not disk" scope as the rest of
+    /// TideWM's runtime state.
+    pub persistent_size: bool,
+    /// Hard floating-size bounds in logical pixels (niri `min-width` /
+    /// `max-width` / `min-height` / `max-height`), tighter than whatever
+    /// the client's own xdg `min_size`/`max_size` hints already are, never
+    /// looser. Enforced at the one place TideWM currently sets a floating
+    /// window's size on a rule's behalf (`map_toplevel`'s
+    /// `apply_floating_placement` call). Interactive border-drag resize
+    /// does not clamp against these yet.
+    pub min_width: Option<i32>,
+    pub max_width: Option<i32>,
+    pub min_height: Option<i32>,
+    pub max_height: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7554,6 +7587,23 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                         "Expected <width>x<height> for a rule's size, ignoring"
                     ),
                 },
+                "persistent_size" => set_bool(&mut rule.persistent_size, key, value),
+                "min_width" => match value.parse::<i32>() {
+                    Ok(n) if n > 0 => rule.min_width = Some(n),
+                    _ => tracing::warn!(value, "Expected a positive min_width, ignoring"),
+                },
+                "max_width" => match value.parse::<i32>() {
+                    Ok(n) if n > 0 => rule.max_width = Some(n),
+                    _ => tracing::warn!(value, "Expected a positive max_width, ignoring"),
+                },
+                "min_height" => match value.parse::<i32>() {
+                    Ok(n) if n > 0 => rule.min_height = Some(n),
+                    _ => tracing::warn!(value, "Expected a positive min_height, ignoring"),
+                },
+                "max_height" => match value.parse::<i32>() {
+                    Ok(n) if n > 0 => rule.max_height = Some(n),
+                    _ => tracing::warn!(value, "Expected a positive max_height, ignoring"),
+                },
                 "ripple" if value == "none" => {
                     // Shorthand for a rule that matches the window but
                     // suppresses any ripple on it. Equivalent to a full
@@ -10001,6 +10051,39 @@ mod tests {
             None
         );
         assert_eq!(parse_default_config().viscosity, 1.0);
+    }
+
+    #[test]
+    fn window_rule_size_effects_parse_and_fold() {
+        let entries = wave_entries(
+            "rule {\n\
+             app_id = kitty\n\
+             persistent_size = true\n\
+             min_width = 200\n\
+             min_height = 150\n\
+             }\n\
+             rule {\n\
+             app_id = kitty\n\
+             max_width = 1200\n\
+             max_height = 900\n\
+             }\n\
+             rule {\n\
+             app_id = foot\n\
+             min_width = -5\n\
+             }\n",
+        );
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        let kitty = config.resolve_window_rules(facts_for("kitty"));
+        assert!(kitty.persistent_size);
+        assert_eq!(kitty.min_width, Some(200));
+        assert_eq!(kitty.min_height, Some(150));
+        // Set by a later matching rule, folded on top of the first's fields.
+        assert_eq!(kitty.max_width, Some(1200));
+        assert_eq!(kitty.max_height, Some(900));
+
+        // A negative min_width is rejected at parse time, not clamped.
+        let foot = config.resolve_window_rules(facts_for("foot"));
+        assert_eq!(foot.min_width, None);
     }
 
     #[test]

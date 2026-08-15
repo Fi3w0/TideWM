@@ -928,6 +928,14 @@ pub struct Smallvil {
     /// remapped surface should keep its original spawn identity).
     pub initial_toplevel_identity: HashMap<WlSurface, (Option<String>, Option<String>)>,
 
+    /// Last known floating size per app_id, for `rule { persistent_size =
+    /// true }` (Hyprland). Recorded in `detach_mapped_toplevel` from a
+    /// closing floating window, reapplied at the next map of the same
+    /// app_id in `map_toplevel`. In-memory only, keyed by app_id rather
+    /// than surface since the whole point is surviving past this window's
+    /// own lifetime.
+    pub remembered_floating_sizes: HashMap<String, (i32, i32)>,
+
     /// Named scratchpads (Hyprland's named "special workspaces"):
     /// each name is lazily assigned its own reserved workspace number from
     /// `NAMED_SCRATCHPAD_BASE` upward on first use, then behaves exactly
@@ -3680,6 +3688,7 @@ impl Smallvil {
             tiled_size_refusals: HashMap::new(),
             flutter_floated: HashSet::new(),
             initial_toplevel_identity: HashMap::new(),
+            remembered_floating_sizes: HashMap::new(),
             workspace_previous: HashMap::new(),
             pseudo_tiled: HashSet::new(),
             urgent: HashSet::new(),

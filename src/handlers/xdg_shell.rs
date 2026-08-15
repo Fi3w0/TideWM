@@ -1186,8 +1186,24 @@ impl Smallvil {
                     }
                 }
             }
-            if rule.position.is_some() || rule.size.is_some() {
-                self.apply_floating_placement(surface, rule.position, rule.size);
+            // `persistent_size` only ever substitutes for an explicit
+            // `size`, never overrides one -- a rule author who set both
+            // clearly wants the fixed size to win. Hard min/max bounds only
+            // apply to a size this block is already about to set; a window
+            // that opens at its own natural size (no rule.size/
+            // persistent_size hit) isn't clamped here yet -- see the
+            // `min_width` doc comment on `WindowRule`.
+            let remembered_size = rule
+                .persistent_size
+                .then(|| self.toplevel_identity(surface).0)
+                .flatten()
+                .and_then(|app_id| self.remembered_floating_sizes.get(&app_id).copied());
+            let effective_size = rule
+                .size
+                .or(remembered_size)
+                .map(|size| clamp_rule_size(size, &rule));
+            if rule.position.is_some() || effective_size.is_some() {
+                self.apply_floating_placement(surface, rule.position, effective_size);
                 if rule.pin && ocean_engine {
                     self.ocean.refresh_screen_pin(surface, &output.name());
                 }
@@ -1415,6 +1431,22 @@ impl Smallvil {
         if self.classic_depth.remove(surface).is_some() {
             self.depth_deck_overlay = None;
             self.classic_depth.close();
+        }
+        // Remember this app's floating size before the maps below drop it,
+        // for `rule { persistent_size = true }`. Checked here rather than
+        // only at a genuine close: an unmap that turns out to be a remap
+        // (flutter storm) still leaves the most recent size remembered,
+        // which is the more useful behavior either way.
+        if self.resolve_window_rules_for(surface).persistent_size {
+            let size = self
+                .floating_workspace
+                .get(surface)
+                .map(|tag| tag.rect.size)
+                .or_else(|| self.ocean.floating_rect(surface).map(|rect| rect.size));
+            if let (Some(app_id), Some(size)) = (&closed_app_id, size) {
+                self.remembered_floating_sizes
+                    .insert(app_id.clone(), (size.w, size.h));
+            }
         }
         self.layout.remove(surface);
         self.ocean.remove(surface);
@@ -1918,12 +1950,34 @@ fn is_dimension_pinned(
     min_size.w > 0 && min_size.h > 0 && (min_size.w == max_size.w || min_size.h == max_size.h)
 }
 
+/// Clamps a rule-driven floating size to that rule's own `min_width` /
+/// `max_width` / `min_height` / `max_height` (niri hard size constraints).
+/// A misconfigured rule with `min > max` on the same dimension resolves to
+/// `max` (the last clamp applied) rather than panicking or picking one
+/// arbitrarily.
+fn clamp_rule_size(size: (i32, i32), rule: &crate::config::WindowRule) -> (i32, i32) {
+    let (mut w, mut h) = size;
+    if let Some(min_w) = rule.min_width {
+        w = w.max(min_w);
+    }
+    if let Some(max_w) = rule.max_width {
+        w = w.min(max_w);
+    }
+    if let Some(min_h) = rule.min_height {
+        h = h.max(min_h);
+    }
+    if let Some(max_h) = rule.max_height {
+        h = h.min(max_h);
+    }
+    (w, h)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        is_dimension_pinned, lifecycle_transition, remove_flutter_tracking, retain_flutter_record,
-        skips_first_tile_configure, swallowed_restore_destination, ToplevelIdentityChange,
-        ToplevelTracking, ToplevelTransition, FLUTTER_WINDOW,
+        clamp_rule_size, is_dimension_pinned, lifecycle_transition, remove_flutter_tracking,
+        retain_flutter_record, skips_first_tile_configure, swallowed_restore_destination,
+        ToplevelIdentityChange, ToplevelTracking, ToplevelTransition, FLUTTER_WINDOW,
     };
     use crate::state::LifecycleFlutter;
     use std::collections::{HashMap, HashSet};
@@ -2089,6 +2143,39 @@ mod tests {
             ..Default::default()
         };
         assert!(skips_first_tile_configure(&positioned, true)); // implicit_float + explicit position
+    }
+
+    #[test]
+    fn clamp_rule_size_enforces_min_and_max_independently_per_axis() {
+        use crate::config::WindowRule;
+
+        let unconstrained = WindowRule::default();
+        assert_eq!(clamp_rule_size((100, 100), &unconstrained), (100, 100));
+
+        let min_only = WindowRule {
+            min_width: Some(200),
+            min_height: Some(150),
+            ..Default::default()
+        };
+        assert_eq!(clamp_rule_size((100, 100), &min_only), (200, 150));
+        assert_eq!(clamp_rule_size((300, 300), &min_only), (300, 300));
+
+        let max_only = WindowRule {
+            max_width: Some(800),
+            max_height: Some(600),
+            ..Default::default()
+        };
+        assert_eq!(clamp_rule_size((1000, 1000), &max_only), (800, 600));
+        assert_eq!(clamp_rule_size((400, 400), &max_only), (400, 400));
+
+        let both = WindowRule {
+            min_width: Some(200),
+            max_width: Some(800),
+            min_height: Some(150),
+            max_height: Some(600),
+            ..Default::default()
+        };
+        assert_eq!(clamp_rule_size((100, 1000), &both), (200, 600));
     }
 
     #[test]

@@ -1323,6 +1323,8 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 | `border { }` | sub-block | Per-app border geometry, state-gradient, animation and scope overrides. Matching rules merge field by field. |
 | `position` | `<x>x<y>`, optional | Exact floating placement. No-op unless the window ends up floating. |
 | `size` | `<width>x<height>`, optional | Exact floating size. No-op unless the window ends up floating. |
+| `persistent_size` | bool | Default `false`. Remembers this app's last floating size across launches (Hyprland `persistentsize`) and reapplies it at the next map in place of `size`, if `size` isn't also set on the same match. In-memory only, does not survive a compositor restart. |
+| `min_width` / `max_width` / `min_height` / `max_height` | integer, optional | Hard floating-size bounds in logical pixels (niri). Enforced wherever a rule already sets a floating size (an explicit `size` or a `persistent_size` hit) — a window opened at its own natural size isn't clamped, and interactive border-drag resize doesn't clamp against these yet either. |
 | `ripple { }` | sub-block | Per-app overrides for any global ripple field; unspecified fields inherit the global block. `ripple = none` suppresses ripples for matching windows. |
 
 The effective surface opacity is `opacity × state opacity`, clamped to `0`–`1`; for example, `opacity = 0.9` plus `inactive_opacity = 0.8` renders at `0.72`. This compositor opacity affects text and foreground pixels too. For colorless frost with opaque text, keep these at `1.0`, set per-app `frost.tint_alpha = 0.0`, and use the app's own background transparency when available.
@@ -1367,6 +1369,16 @@ rule {
         tint_alpha = 0.0
         noise = 0.015
     }
+}
+
+rule {
+    # A terminal float remembers whatever size you last resized it to,
+    # bounded so a stray tiny/huge resize never sticks.
+    app_id = foot
+    float = true
+    persistent_size = true
+    min_width = 400
+    min_height = 300
 }
 
 rule {
