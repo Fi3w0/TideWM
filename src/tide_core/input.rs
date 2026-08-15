@@ -2135,6 +2135,24 @@ impl Smallvil {
                     }
                 }
 
+                // niri's `scroll-factor`: multiplies the continuous scroll
+                // delta for whatever window currently has pointer focus.
+                // Discrete wheel-click (v120) counts are left alone --
+                // scaling a fixed-size click count doesn't have the same
+                // obviously-correct meaning a continuous delta does.
+                let scroll_factor = self
+                    .seat
+                    .get_pointer()
+                    .and_then(|pointer| pointer.current_focus())
+                    .map(|surface| {
+                        self.resolve_window_rules_for(&surface)
+                            .scroll_factor
+                            .unwrap_or(1.0)
+                    })
+                    .unwrap_or(1.0);
+                let horizontal_amount = horizontal_amount * scroll_factor;
+                let vertical_amount = vertical_amount * scroll_factor;
+
                 let mut frame = AxisFrame::new(event.time_msec()).source(source);
                 if horizontal_amount != 0.0 {
                     frame = frame.value(Axis::Horizontal, horizontal_amount);

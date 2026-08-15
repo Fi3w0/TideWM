@@ -1678,6 +1678,9 @@ impl Config {
             if rule.max_height.is_some() {
                 effective.max_height = rule.max_height;
             }
+            if rule.scroll_factor.is_some() {
+                effective.scroll_factor = rule.scroll_factor;
+            }
         }
         effective
     }
@@ -2430,6 +2433,12 @@ pub struct WindowRule {
     pub max_width: Option<i32>,
     pub min_height: Option<i32>,
     pub max_height: Option<i32>,
+    /// Multiplies libinput scroll-wheel/finger axis deltas while this
+    /// window has pointer focus (niri `scroll-factor`). `1.0` is unset's
+    /// implicit value; only the continuous axis amount is scaled, not
+    /// discrete wheel-click (`v120`) counts. See the `PointerAxis` arm in
+    /// `tide_core/input.rs`.
+    pub scroll_factor: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7604,6 +7613,10 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                     Ok(n) if n > 0 => rule.max_height = Some(n),
                     _ => tracing::warn!(value, "Expected a positive max_height, ignoring"),
                 },
+                "scroll_factor" => match value.parse::<f64>() {
+                    Ok(n) if n.is_finite() && n >= 0.0 => rule.scroll_factor = Some(n),
+                    _ => tracing::warn!(value, "Expected a non-negative scroll_factor, ignoring"),
+                },
                 "ripple" if value == "none" => {
                     // Shorthand for a rule that matches the window but
                     // suppresses any ripple on it. Equivalent to a full
@@ -10054,13 +10067,14 @@ mod tests {
     }
 
     #[test]
-    fn window_rule_size_effects_parse_and_fold() {
+    fn window_rule_size_and_scroll_effects_parse_and_fold() {
         let entries = wave_entries(
             "rule {\n\
              app_id = kitty\n\
              persistent_size = true\n\
              min_width = 200\n\
              min_height = 150\n\
+             scroll_factor = 2.5\n\
              }\n\
              rule {\n\
              app_id = kitty\n\
@@ -10080,6 +10094,7 @@ mod tests {
         // Set by a later matching rule, folded on top of the first's fields.
         assert_eq!(kitty.max_width, Some(1200));
         assert_eq!(kitty.max_height, Some(900));
+        assert_eq!(kitty.scroll_factor, Some(2.5));
 
         // A negative min_width is rejected at parse time, not clamped.
         let foot = config.resolve_window_rules(facts_for("foot"));
