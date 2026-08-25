@@ -17,3 +17,6 @@ Thumbs.db
 
 # Internal dev notes, not part of the public repo
 AGENT.md
+
+# Hermes dispatch scratch (task/rules/skills/worklog)
+.hermes/
