@@ -7,7 +7,7 @@
 **A Wayland desktop that feels like water.**
 
 ![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=for-the-badge)
-![Status](https://img.shields.io/badge/status-functional-brightgreen?style=for-the-badge)
+![Status](https://img.shields.io/badge/status-beta-orange?style=for-the-badge)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/ZhkxA83cKk)
 
 **[<kbd> <br> Try&nbsp;it <br> </kbd>](#try-it)**
@@ -65,7 +65,7 @@ cargo run --locked --features screencast   # opens nested inside your current se
 
 openSUSE and everything else, plus setting it up as a real login session: see [TECHNICAL_REPORT.md](TECHNICAL_REPORT.md#building).
 
-**Gentoo note:** if GL clients (kitty, OBS) crawl while TideWM itself is smooth, your user can't open `/dev/dri/renderD*` -- add the `uaccess` tag or the `video` group. Compositors work off `card0`; client apps need the render node.
+**Gentoo note:** if GL clients (kitty, OBS) crawl while TideWM stays smooth, your user lacks access to `/dev/dri/renderD*` (compositors use `card0`, clients need the render node) -- add the `uaccess` tag or `video` group.
 
 ## A taste of the defaults
 
@@ -102,7 +102,7 @@ bind $mod+Q      { close-window }
 
 ## About this project
 
-I'm building TideWM solo. I use AI coding agents to move fast, then verify everything myself on real hardware before I trust it. If something breaks on your setup, that's genuinely useful, not an inconvenience, [open an issue](https://github.com/Fi3w0/TideWM/issues/new/choose) or drop into [Discord](https://discord.gg/ZhkxA83cKk).
+I'm building TideWM solo, and it's beta -- I haven't hit 1.0 yet. I use AI coding agents to move fast, then verify everything myself on real hardware before I trust it. If something breaks on your setup, that's genuinely useful, not an inconvenience, [open an issue](https://github.com/Fi3w0/TideWM/issues/new/choose) or drop into [Discord](https://discord.gg/ZhkxA83cKk).
 
 For what's actually implemented, what's verified on real hardware, and what's still in progress: [TECHNICAL_REPORT.md](TECHNICAL_REPORT.md).
 
