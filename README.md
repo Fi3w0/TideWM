@@ -65,6 +65,8 @@ cargo run --locked --features screencast   # opens nested inside your current se
 
 openSUSE and everything else, plus setting it up as a real login session: see [TECHNICAL_REPORT.md](TECHNICAL_REPORT.md#building).
 
+**Gentoo note:** if GL clients (kitty, OBS) crawl while TideWM itself is smooth, your user can't open `/dev/dri/renderD*` -- add the `uaccess` tag or the `video` group. Compositors work off `card0`; client apps need the render node.
+
 ## A taste of the defaults
 
 | Shortcut               | Action                      |
