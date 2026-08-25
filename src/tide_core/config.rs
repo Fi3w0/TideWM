@@ -856,6 +856,17 @@ pub enum Action {
     /// app_id -- the dock's "quit app". Apps that confirm-and-close on
     /// their own handle it; anything stuck must be killed by the caller.
     CloseApp(String),
+    /// Adds a tag to the focused window -- the runtime counterpart to
+    /// `rule { add_tag = [...] }`. No-op with nothing focused. See
+    /// `Smallvil::tag_window`.
+    TagWindow(String),
+    /// Removes a tag from the focused window. No-op with nothing focused
+    /// or if it doesn't carry the tag. See `Smallvil::untag_window`.
+    UntagWindow(String),
+    /// Focuses a window carrying this tag, cycling to the next one
+    /// carrying it on repeated presses. No-op if no mapped window carries
+    /// the tag. See `Smallvil::toggle_tag`.
+    ToggleTag(String),
     Quit,
 }
 
@@ -1161,6 +1172,11 @@ pub(crate) struct WindowMatchFacts<'a> {
     pub initial_app_id: Option<&'a str>,
     pub initial_title: Option<&'a str>,
     pub at_startup: bool,
+    /// The window's current tag set, if it has ever carried one --
+    /// `None` rather than an empty set for the common untagged case, so
+    /// resolving rules for most windows borrows nothing new. See
+    /// `WindowRule::matches_tags`.
+    pub tags: Option<&'a HashSet<String>>,
 }
 
 impl Config {
@@ -1554,7 +1570,8 @@ impl Config {
             // would then reject it outright regardless of `app_id`/`title`.
             let has_live = rule.has_live_criteria();
             let has_initial = rule.has_initial_criteria();
-            if !has_live && !has_initial {
+            let has_tag = rule.has_tag_criteria();
+            if !has_live && !has_initial && !has_tag {
                 continue;
             }
             if has_live
@@ -1575,6 +1592,9 @@ impl Config {
                     facts.at_startup,
                 )
             {
+                continue;
+            }
+            if has_tag && !rule.matches_tags(facts.tags) {
                 continue;
             }
             if rule.workspace.is_some() {
@@ -1680,6 +1700,9 @@ impl Config {
             }
             if rule.scroll_factor.is_some() {
                 effective.scroll_factor = rule.scroll_factor;
+            }
+            if !rule.add_tag.is_empty() {
+                effective.add_tag.extend(rule.add_tag.iter().cloned());
             }
         }
         effective
@@ -2439,6 +2462,21 @@ pub struct WindowRule {
     /// discrete wheel-click (`v120`) counts. See the `PointerAxis` arm in
     /// `tide_core/input.rs`.
     pub scroll_factor: Option<f64>,
+    /// Arbitrary string tags this rule requires (Hyprland's `tag:name`
+    /// criterion, niri's marks): the rule matches when the window carries
+    /// any tag listed here. Checked against the window's CURRENT tag set
+    /// (`Smallvil::window_tags`), never a spawn-time snapshot -- a tag
+    /// added mid-session (`tag-window`, `untag-window`, or another rule's
+    /// `add_tag`) takes effect on the very next resolve, the same "live"
+    /// character `urgent` already has. See `WindowRule::matches_tags`.
+    pub tag: Vec<String>,
+    /// Tags to add to a matching window the moment it first maps
+    /// (Hyprland's `tag = +name`). Every matching rule's list accumulates
+    /// rather than last-wins, since tags are naturally additive -- see
+    /// `Config::resolve_window_rules`. There is no rule-level tag removal;
+    /// `untag-window` is the only way to remove one, keeping this
+    /// deliberately narrow to what the task actually needs.
+    pub add_tag: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4146,6 +4184,26 @@ impl WindowRule {
             || self.initial_class_regex.is_some()
             || self.initial_title_regex.is_some()
             || self.at_startup.is_some()
+    }
+
+    /// Same idea as `has_live_criteria`/`has_initial_criteria`, gating
+    /// `matches_tags`.
+    fn has_tag_criteria(&self) -> bool {
+        !self.tag.is_empty()
+    }
+
+    /// Live tag-set match (the `tag` field): whether the window's CURRENT
+    /// tag set contains any tag this rule lists. Split out from `matches`
+    /// for the same reason `matches_initial` is its own method -- so
+    /// `matches`'s five-argument shape, and every existing direct-call
+    /// test site, stays unchanged. Unlike `matches_initial`, this
+    /// re-checks live state on every resolve rather than a spawn-time
+    /// snapshot: a tag added mid-session (`tag-window`/`untag-window`, or
+    /// another rule's `add_tag`) takes effect on the very next resolve,
+    /// the same "live" character `urgent` already has. See
+    /// `Smallvil::resolve_window_rules_for`.
+    pub(crate) fn matches_tags(&self, tags: Option<&HashSet<String>>) -> bool {
+        tags.is_some_and(|tags| self.tag.iter().any(|t| tags.contains(t)))
     }
 }
 
@@ -7617,6 +7675,25 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                     Ok(n) if n.is_finite() && n >= 0.0 => rule.scroll_factor = Some(n),
                     _ => tracing::warn!(value, "Expected a non-negative scroll_factor, ignoring"),
                 },
+                // List-shaped: `tag = ["work", "browser"]` on one line, or
+                // repeated `tag = "work"` lines both accumulate, same dual
+                // form the top-level `spawn` key supports.
+                "tag" => match parse_list_value(value) {
+                    Some(items) => rule.tag.extend(items),
+                    None if value.trim().starts_with('[') => {
+                        tracing::warn!("Expected a non-empty rule tag list, ignoring")
+                    }
+                    None if !value.trim().is_empty() => rule.tag.push(value.trim().to_string()),
+                    None => tracing::warn!("Expected a non-empty rule tag, ignoring"),
+                },
+                "add_tag" => match parse_list_value(value) {
+                    Some(items) => rule.add_tag.extend(items),
+                    None if value.trim().starts_with('[') => {
+                        tracing::warn!("Expected a non-empty rule add_tag list, ignoring")
+                    }
+                    None if !value.trim().is_empty() => rule.add_tag.push(value.trim().to_string()),
+                    None => tracing::warn!("Expected a non-empty rule add_tag, ignoring"),
+                },
                 "ripple" if value == "none" => {
                     // Shorthand for a rule that matches the window but
                     // suppresses any ripple on it. Equivalent to a full
@@ -8157,6 +8234,15 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
     if let Some(name) = action.strip_prefix("close-app:") {
         return (!name.trim().is_empty()).then(|| Action::CloseApp(name.trim().to_string()));
     }
+    if let Some(name) = action.strip_prefix("tag-window:") {
+        return (!name.trim().is_empty()).then(|| Action::TagWindow(name.trim().to_string()));
+    }
+    if let Some(name) = action.strip_prefix("untag-window:") {
+        return (!name.trim().is_empty()).then(|| Action::UntagWindow(name.trim().to_string()));
+    }
+    if let Some(name) = action.strip_prefix("toggle-tag:") {
+        return (!name.trim().is_empty()).then(|| Action::ToggleTag(name.trim().to_string()));
+    }
     match action {
         "exit-mode" => Some(Action::ExitSubmap),
         "master-grow" => Some(Action::GrowMaster),
@@ -8622,6 +8708,28 @@ mod tests {
     }
 
     #[test]
+    fn tag_actions_parse_and_require_a_name() {
+        assert!(matches!(
+            parse_action("tag-window:work"),
+            Some(Action::TagWindow(ref n)) if n == "work"
+        ));
+        assert!(matches!(
+            parse_action("untag-window:work"),
+            Some(Action::UntagWindow(ref n)) if n == "work"
+        ));
+        assert!(matches!(
+            parse_action("toggle-tag:work"),
+            Some(Action::ToggleTag(ref n)) if n == "work"
+        ));
+        // Unlike scratchpad's bare/named dual form, there's no sensible
+        // default tag to fall back to -- a missing name drops the bind
+        // entirely, same as any other malformed action string.
+        assert!(parse_action("tag-window:").is_none());
+        assert!(parse_action("untag-window:").is_none());
+        assert!(parse_action("toggle-tag:").is_none());
+    }
+
+    #[test]
     fn parse_workspace_gaps_resolves_names_and_skips_malformed_entries() {
         let mut names = HashMap::new();
         names.insert("web".to_string(), 3);
@@ -8839,6 +8947,55 @@ mod tests {
             lower_window_rule_block(&[waves::Entry::Assign("at_startup".into(), "false".into())]);
         assert!(not_startup.matches_initial(None, None, false));
         assert!(!not_startup.matches_initial(None, None, true));
+    }
+
+    #[test]
+    fn window_rule_tag_field_parses_bracket_list_and_bare_string() {
+        let bracket_list = lower_window_rule_block(&[waves::Entry::Assign(
+            "tag".into(),
+            "[\"work\", \"scratch\"]".into(),
+        )]);
+        assert_eq!(
+            bracket_list.tag,
+            vec!["work".to_string(), "scratch".to_string()]
+        );
+
+        // A single bare tag (no bracket list) works too, same dual form
+        // the top-level `spawn` key supports.
+        let bare = lower_window_rule_block(&[waves::Entry::Assign("tag".into(), "work".into())]);
+        assert_eq!(bare.tag, vec!["work".to_string()]);
+
+        let empty = lower_window_rule_block(&[
+            waves::Entry::Assign("tag".into(), "[]".into()),
+            waves::Entry::Assign("add_tag".into(), "[]".into()),
+        ]);
+        assert!(empty.tag.is_empty());
+        assert!(empty.add_tag.is_empty());
+    }
+
+    #[test]
+    fn window_rule_matches_tags_live_current_set() {
+        // `tag` is checked against the window's CURRENT tag set, not a
+        // spawn-time snapshot -- there's no `matches_initial`-style split
+        // for it, so this goes through `matches_tags` directly.
+        let by_tag = lower_window_rule_block(&[waves::Entry::Assign(
+            "tag".into(),
+            "[\"work\", \"scratch\"]".into(),
+        )]);
+        assert!(!by_tag.matches_tags(None));
+
+        let mut work_tag = HashSet::new();
+        work_tag.insert("work".to_string());
+        assert!(by_tag.matches_tags(Some(&work_tag)));
+
+        let mut unrelated_tag = HashSet::new();
+        unrelated_tag.insert("unrelated".to_string());
+        assert!(!by_tag.matches_tags(Some(&unrelated_tag)));
+
+        // A rule with no `tag` criterion never matches through this path,
+        // mirroring `matches`'s own blank-rule guard.
+        let blank = WindowRule::default();
+        assert!(!blank.matches_tags(Some(&work_tag)));
     }
 
     #[test]
@@ -10099,6 +10256,61 @@ mod tests {
         // A negative min_width is rejected at parse time, not clamped.
         let foot = config.resolve_window_rules(facts_for("foot"));
         assert_eq!(foot.min_width, None);
+    }
+
+    #[test]
+    fn window_rule_add_tag_accumulates_and_tag_match_is_live_only() {
+        let entries = wave_entries(
+            "rule {\n\
+             app_id = kitty\n\
+             add_tag = [\"work\", \"terminal\"]\n\
+             }\n\
+             rule {\n\
+             app_id = kitty\n\
+             add_tag = scratch\n\
+             }\n\
+             rule {\n\
+             tag = [\"work\", \"scratch\"]\n\
+             opacity = 0.5\n\
+             }\n",
+        );
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        let kitty = config.resolve_window_rules(facts_for("kitty"));
+        // Every matching rule's add_tag list accumulates rather than
+        // last-wins, since tags are additive.
+        assert_eq!(
+            kitty.add_tag,
+            vec![
+                "work".to_string(),
+                "terminal".to_string(),
+                "scratch".to_string(),
+            ]
+        );
+        // `facts_for` sets no tags, so the tag-matching rule (which has no
+        // app_id/title criterion at all) never applies from app_id alone --
+        // `resolve_window_rules` itself is a single pass and never
+        // retroactively satisfies `tag` from its own `add_tag` output.
+        // `Smallvil::map_toplevel` is what re-resolves a second time after
+        // writing `window_tags`, so a `tag`-keyed rule actually does see a
+        // same-map `add_tag`; that chaining lives one level up from this
+        // pure fold, not here.
+        assert!(kitty.opacity.is_none());
+
+        let mut current_tags = HashSet::new();
+        current_tags.insert("work".to_string());
+        let tagged = config.resolve_window_rules(WindowMatchFacts {
+            tags: Some(&current_tags),
+            ..Default::default()
+        });
+        assert_eq!(tagged.opacity, Some(0.5));
+
+        let mut other_tags = HashSet::new();
+        other_tags.insert("unrelated".to_string());
+        let untagged = config.resolve_window_rules(WindowMatchFacts {
+            tags: Some(&other_tags),
+            ..Default::default()
+        });
+        assert!(untagged.opacity.is_none());
     }
 
     #[test]

@@ -2764,6 +2764,21 @@ impl Smallvil {
             Action::FocusUrgent => {
                 self.focus_urgent();
             }
+            Action::TagWindow(tag) => {
+                let focused = self.focused_window_surface();
+                if let Some(surface) = focused {
+                    self.tag_window(&surface, &tag);
+                }
+            }
+            Action::UntagWindow(tag) => {
+                let focused = self.focused_window_surface();
+                if let Some(surface) = focused {
+                    self.untag_window(&surface, &tag);
+                }
+            }
+            Action::ToggleTag(tag) => {
+                self.toggle_tag(&tag);
+            }
             Action::ToggleDpms => {
                 self.toggle_dpms();
             }

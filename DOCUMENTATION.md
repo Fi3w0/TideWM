@@ -1281,7 +1281,7 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 
 | Key | Type | Notes |
 | --- | --- | --- |
-| `app_id` | string, optional | Matches exactly. At least one of `app_id`/`title`/`app_id_regex`/`title_regex`/`pid`/`xwayland`/`urgent`/`initial_class`/`initial_title`/`at_startup` is required — a rule with none of these never matches anything. |
+| `app_id` | string, optional | Matches exactly. At least one of `app_id`/`title`/`app_id_regex`/`title_regex`/`pid`/`xwayland`/`urgent`/`initial_class`/`initial_title`/`at_startup`/`tag` is required — a rule with none of these never matches anything. |
 | `title` | string, optional | Matches case-insensitively, anywhere in the string. |
 | `app_id_regex` | regular expression, optional | Rust regex matched against the full app ID string. Combines with other criteria in the same rule. |
 | `title_regex` | regular expression, optional | Rust regex matched against the title. Use `(?i)` for case-insensitive matching. |
@@ -1293,6 +1293,7 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 | `initial_class_regex` | regular expression, optional | Spawn-time-only regex class match. |
 | `initial_title_regex` | regular expression, optional | Spawn-time-only regex title match. |
 | `at_startup` | bool, optional | Tri-state match on whether the window mapped within roughly 5 seconds of compositor launch (niri `at-startup`) — lets a rule target session-autostarted apps (`spawn`) differently from ones opened later by hand. |
+| `tag` | string or list, optional | Matches exactly (case-sensitive, unlike `app_id`) when the window carries any tag listed here (Hyprland `tag:name`, niri marks). Checked against the window's *current* tag set, not a spawn-time snapshot — a tag added mid-session (`tag-window`, `untag-window`, or another rule's `add_tag`) takes effect on the next resolve, the same live behavior `urgent` has. A window starts with no tags. |
 | `workspace` | integer, optional | Initial workspace, same numbering as `workspace:N` keybinds (including `0`, the scratchpad). |
 | `output` | string, optional | Initial output by connector name. Falls back to normal placement if unset or unconnected. |
 | `float` | bool | Default `false`. |
@@ -1326,11 +1327,12 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 | `persistent_size` | bool | Default `false`. Remembers this app's last floating size across launches (Hyprland `persistentsize`) and reapplies it at the next map in place of `size`, if `size` isn't also set on the same match. In-memory only, does not survive a compositor restart. |
 | `min_width` / `max_width` / `min_height` / `max_height` | integer, optional | Hard floating-size bounds in logical pixels (niri). Enforced wherever a rule already sets a floating size (an explicit `size` or a `persistent_size` hit) — a window opened at its own natural size isn't clamped, and interactive border-drag resize doesn't clamp against these yet either. |
 | `scroll_factor` | float, `≥ 0` | Default `1.0` (unset). Multiplies libinput scroll-wheel/finger axis deltas while the matched window has pointer focus (niri `scroll-factor`). Only the continuous scroll amount is scaled, not discrete wheel-click counts. |
+| `add_tag` | string or list, optional | Adds the listed tags to the window the moment it first maps (Hyprland `tag = +name`). Every matching rule's list accumulates rather than last-wins, since tags are additive. There's no rule-level tag removal; `untag-window` is the only way. |
 | `ripple { }` | sub-block | Per-app overrides for any global ripple field; unspecified fields inherit the global block. `ripple = none` suppresses ripples for matching windows. |
 
 The effective surface opacity is `opacity × state opacity`, clamped to `0`–`1`; for example, `opacity = 0.9` plus `inactive_opacity = 0.8` renders at `0.72`. This compositor opacity affects text and foreground pixels too. For colorless frost with opaque text, keep these at `1.0`, set per-app `frost.tint_alpha = 0.0`, and use the app's own background transparency when available.
 
-Multiple rules can match the same window: scalar fields take the *last* match; `frost { }`, `shadow { }`, `rounding { }`, `border { }`, and `ripple { }` sub-blocks merge field by field; boolean effects accumulate (any match sets one, never unsets it).
+Multiple rules can match the same window: scalar fields take the *last* match; `frost { }`, `shadow { }`, `rounding { }`, `border { }`, and `ripple { }` sub-blocks merge field by field; boolean effects accumulate (any match sets one, never unsets it); `add_tag` accumulates too, since tags are naturally additive.
 
 ```
 rule {
@@ -1388,6 +1390,19 @@ rule {
     at_startup = true
     initial_class = waybar-companion
     workspace = 1
+}
+
+rule {
+    # Tag every terminal "work", then dim any tagged window regardless of
+    # which app it is -- a `tag-window:work`/`untag-window:work` keybind
+    # can add or remove the same tag on anything else by hand.
+    app_id = kitty
+    add_tag = work
+}
+
+rule {
+    tag = work
+    inactive_opacity = 0.85
 }
 ```
 
@@ -1521,6 +1536,11 @@ The same set of strings works after `bind ... =` at the top level or inside a `s
 - `resize-left` / `resize-right` / `resize-up` / `resize-down` — shrink/grow the focused floating window by 24 logical pixels, or resize its nearest BSP split and connected parallel ancestors
 - `layout:bsp` / `layout:master` / `layout:cascade` — switch the current workspace's tiling algorithm
 - `master-grow` / `master-shrink` — nudge the master/stack ratio (master layout only, no-op under BSP)
+
+**Tags**
+- `tag-window:<name>` — add a tag to the focused window, the runtime counterpart to `rule { add_tag = ... }`
+- `untag-window:<name>` — remove a tag from the focused window
+- `toggle-tag:<name>` — focus a window carrying `<name>`, cycling to the next one carrying it on repeated presses
 
 **Groups (window tabbing)**
 - `group-left` / `group-right` / `group-up` / `group-down`

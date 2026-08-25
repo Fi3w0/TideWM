@@ -978,6 +978,16 @@ pub struct Smallvil {
     /// `depth_last_tick`'s 10Hz gate for `update_window_depths`.
     urgent_pulse_tick: Instant,
 
+    /// Arbitrary string tags carried by a window (Hyprland tags/sway
+    /// marks), keyed by surface. No entry means "no tags" -- an untagged
+    /// window (the overwhelming common case) costs nothing beyond the
+    /// `HashMap`'s own empty state. Populated from a matching rule's
+    /// `add_tag` at first map (`map_toplevel`) and from `tag-window`/
+    /// `untag-window` at any time; read live by `resolve_window_rules_for`
+    /// for the `rule { tag = [...] }` match criterion. Cleared per-surface
+    /// in `detach_mapped_toplevel`, same lifecycle as `urgent`/`pinned`.
+    pub window_tags: HashMap<WlSurface, HashSet<String>>,
+
     /// (output, workspace) pairs that have already fired their
     /// `[[workspace_rule]] on_created_empty` command (see
     /// `apply_workspace_switch`). TideWM's numbered workspaces always
@@ -1495,6 +1505,7 @@ impl Smallvil {
             .cloned()
             .unwrap_or_else(|| (app_id.clone(), title.clone()));
         let at_startup = self.start_time.elapsed() < STARTUP_GRACE_PERIOD;
+        let tags = self.window_tags.get(surface);
         self.config
             .resolve_window_rules(crate::config::WindowMatchFacts {
                 app_id: app_id.as_deref(),
@@ -1505,6 +1516,7 @@ impl Smallvil {
                 initial_app_id: initial_app_id.as_deref(),
                 initial_title: initial_title.as_deref(),
                 at_startup,
+                tags,
             })
     }
 
@@ -3694,6 +3706,7 @@ impl Smallvil {
             urgent: HashSet::new(),
             urgent_pulse_last: HashMap::new(),
             urgent_pulse_tick: Instant::now(),
+            window_tags: HashMap::new(),
             workspace_created_empty_fired: HashSet::new(),
             focus_history: Vec::new(),
             cycling_focus: false,
@@ -10202,6 +10215,94 @@ impl Smallvil {
             return;
         };
         self.activate_toplevel(&surface);
+    }
+
+    /// Adds `tag` to `surface`'s tag set (`tag-window:<name>`) -- the
+    /// runtime counterpart to `rule { add_tag = [...] }`. Idempotent, like
+    /// `HashSet::insert` itself. `tag` is the one match criterion besides
+    /// `urgent` that can flip after map time, so a matching rule's
+    /// opacity/glass takes effect immediately rather than waiting for the
+    /// next natural resolve -- same precedent as `mark_urgent`.
+    pub(crate) fn tag_window(&mut self, surface: &WlSurface, tag: &str) {
+        let inserted = self
+            .window_tags
+            .entry(surface.clone())
+            .or_default()
+            .insert(tag.to_string());
+        if inserted {
+            self.refresh_window_opacity_and_glass_for(surface);
+            self.request_redraw();
+        }
+    }
+
+    /// Removes `tag` from `surface`'s tag set (`untag-window:<name>`),
+    /// dropping the map entry entirely once its last tag is gone so an
+    /// untagged window costs nothing, same invariant `window_tags` keeps
+    /// everywhere else.
+    pub(crate) fn untag_window(&mut self, surface: &WlSurface, tag: &str) {
+        let Some(tags) = self.window_tags.get_mut(surface) else {
+            return;
+        };
+        if !tags.remove(tag) {
+            return;
+        }
+        if tags.is_empty() {
+            self.window_tags.remove(surface);
+        }
+        self.refresh_window_opacity_and_glass_for(surface);
+        self.request_redraw();
+    }
+
+    /// Focuses a window carrying `tag`, cycling to the next one carrying
+    /// it on repeated presses (`toggle-tag:<name>`) -- same MRU-then-
+    /// arbitrary-order idea as `cycle_focus`, scoped to just the tagged
+    /// subset, and reusing `activate_toplevel` so a match on a hidden
+    /// workspace switches there first (`focus_urgent`'s own precedent).
+    /// No-op if nothing carries the tag. `cycling_focus` suppresses the
+    /// MRU reorder for the duration, the same guard `cycle_focus` uses --
+    /// without it, the next press would read back whatever this one just
+    /// focused as "current" and oscillate between two windows instead of
+    /// visiting every tagged one in turn.
+    pub(crate) fn toggle_tag(&mut self, tag: &str) {
+        let mut windows: Vec<WlSurface> = self
+            .window_tags
+            .iter()
+            .filter(|(_, tags)| tags.contains(tag))
+            .map(|(surface, _)| surface.clone())
+            .collect();
+        // A tag can outlive the window it was on if some future caller
+        // forgets the `detach_mapped_toplevel` cleanup this relies on --
+        // filtering here means a stale entry gets skipped once rather than
+        // wedging every future press on a dead surface `activate_toplevel`
+        // can never focus (its own `mapped_toplevel_window` guard would
+        // silently no-op, leaving `current_index` unchanged).
+        windows.retain(|s| self.mapped_toplevel_window(s).is_some());
+        if windows.is_empty() {
+            return;
+        }
+        let mut ordered: Vec<WlSurface> = self
+            .focus_history
+            .iter()
+            .filter(|s| windows.contains(s))
+            .cloned()
+            .collect();
+        for surface in &windows {
+            if !ordered.contains(surface) {
+                ordered.push(surface.clone());
+            }
+        }
+        let current = self.focused_window_surface();
+        let current_index = current
+            .as_ref()
+            .and_then(|s| ordered.iter().position(|o| o == s));
+        let next_index = match current_index {
+            Some(i) => (i + 1) % ordered.len(),
+            None => 0,
+        };
+        let next = ordered[next_index].clone();
+        self.cycling_focus = true;
+        self.activate_toplevel(&next);
+        self.cycling_focus = false;
     }
 
     /// Grants an xdg-activation request for `surface`: focus its window,

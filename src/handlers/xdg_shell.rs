@@ -1043,6 +1043,23 @@ impl Smallvil {
                 .insert(surface.clone(), identity);
         }
         let rule = self.resolve_window_rules_for(surface);
+        // A rule matching this window may itself assign tags a *different*
+        // rule keys off (`rule { tag = [...] }`) -- re-resolve once more so
+        // that second rule's effects apply at this same first map, instead
+        // of silently waiting for some later live re-resolve (urgency,
+        // title change) that might never come. One extra pass, not a
+        // fixed-point loop: a tag-keyed rule that itself sets `add_tag`
+        // still won't feed a third rule in the same map, an acknowledged
+        // ceiling rather than a silent one.
+        let rule = if rule.add_tag.is_empty() {
+            rule
+        } else {
+            self.window_tags
+                .entry(surface.clone())
+                .or_default()
+                .extend(rule.add_tag.iter().cloned());
+            self.resolve_window_rules_for(surface)
+        };
         if let Some(opacity) = crate::config::WindowOpacity::from_rule(&rule) {
             self.window_opacity.insert(surface.clone(), opacity);
         } else {
@@ -1456,6 +1473,7 @@ impl Smallvil {
         self.pinned.remove(surface);
         self.pseudo_tiled.remove(surface);
         self.urgent.remove(surface);
+        self.window_tags.remove(surface);
         self.window_opacity.remove(surface);
         self.window_glass_modes.remove(surface);
         self.window_open_animations.remove(surface);
