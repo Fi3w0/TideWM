@@ -897,6 +897,17 @@ pub fn init_udev(
                 if node.ty() != NodeType::Primary {
                     return;
                 }
+                // Check before doing any of the open/DRM/GBM/EGL work below --
+                // udev can fire a duplicate or already-tracked `Added` (e.g. a
+                // spurious re-add of the primary GPU), and there's no reason to
+                // open and immediately discard a device fd for that case.
+                {
+                    let dev = device_for_udev.borrow();
+                    if dev.render_only_devices.contains_key(&node) || device_id == dev.drm.device_id()
+                    {
+                        return;
+                    }
+                }
                 let vendor = gpu_vendor(&path);
                 if state.config.gpu.exclude.iter().any(|selector| {
                     gpu_selector_matches(selector, &path, node, node, vendor)
@@ -941,9 +952,6 @@ pub fn init_udev(
                 drop(display);
 
                 let mut dev = device_for_udev.borrow_mut();
-                if dev.render_only_devices.contains_key(&node) || device_id == dev.drm.device_id() {
-                    return;
-                }
                 if let Err(error) = dev.gpu.manager.borrow_mut().as_mut().add_node(render_node, gbm.clone()) {
                     tracing::warn!(?path, %error, "Failed to register hot-added GPU renderer");
                     return;
