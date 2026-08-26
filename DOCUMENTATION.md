@@ -1266,10 +1266,23 @@ Standalone udev/DRM sessions can select the GPU that owns TideWM's own GLES rend
 
 `auto` preserves the original primary-GPU-first heuristic and falls back to the first opened GPU with a connected display. An explicit selector is tried first and safely falls back to `auto` with a warning when it is missing or has no connected display. Excluded GPUs are never opened by TideWM. Every opened non-primary GPU remains render-only: clients may use it through PRIME/offload, and Smithay copies their DMA-BUF content onto the selected primary before TideWM's existing GLES effects render it. TideWM does not currently split outputs across GPUs.
 
+`render` can only select a GPU that actually has a connected display -- that's a KMS/hardware fact, not a software limit. A desktop where the monitor cable is plugged into the discrete GPU already picks it under plain `auto`, and `render` there just makes the choice explicit/pinned instead of relying on the heuristic. On the common laptop wiring, the internal panel is hardwired to the iGPU alone; the dGPU has no display output of its own there, so `render = vendor:nvidia` cannot make it the scanout GPU no matter what -- it falls back to `auto` (the iGPU) with a warning instead of producing a black screen. The dGPU is still usable in that case, just as a render-only offload target for games (`exclude` it instead if you don't want it opened at all).
+
 ```wave
+# Desktop: monitor is on the discrete GPU, pin it explicitly and keep the
+# iGPU fully untouched (not even opened as a render-only offload node).
 gpu {
     render = vendor:amd
-    exclude = ["/dev/dri/card2"]
+    exclude = ["/dev/dri/card0"]
+}
+```
+
+```wave
+# Hybrid laptop: panel is wired to the iGPU, so `render` stays auto (the
+# only GPU that can actually drive the screen); the dGPU is left available
+# for PRIME-offloaded games without pinning it to anything.
+gpu {
+    render = auto
 }
 ```
 
