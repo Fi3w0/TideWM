@@ -1130,6 +1130,10 @@ pub struct Config {
     /// `AdaptiveSync`'s own doc for what actually happens with this today.
     pub adaptive_sync: AdaptiveSync,
     pub outputs: Vec<OutputConfig>,
+    /// Startup-only DRM GPU ownership and render-node policy. The nested
+    /// backend is initialized before config hot reload can replace hardware,
+    /// so changes take effect on the next TideWM start.
+    pub gpu: GpuConfig,
     /// Laptop lid / tablet-mode switch bindings, udev backend only. winit
     /// has no host-independent access to libinput's switch capability, so
     /// on a nested session these just sit unused.
@@ -1483,6 +1487,7 @@ impl Config {
             xwayland: raw.xwayland,
             spawn_at_startup: raw.spawn_at_startup,
             outputs: raw.outputs,
+            gpu: GpuConfig::from_raw(raw.gpu, &mut warnings),
             switch_events: SwitchEventsConfig::from_raw(raw.switch_events),
             window_rules: raw.window_rules,
             layer_rules: raw.layer_rules,
@@ -1892,6 +1897,7 @@ struct RawConfig {
     xwayland: XwaylandConfig,
     spawn_at_startup: Vec<String>,
     outputs: Vec<OutputConfig>,
+    gpu: GpuConfigRaw,
     switch_events: SwitchEventsRaw,
     window_rules: Vec<WindowRule>,
     layer_rules: Vec<LayerRule>,
@@ -2037,6 +2043,7 @@ impl Default for RawConfig {
             xwayland: XwaylandConfig::default(),
             spawn_at_startup: Vec::new(),
             outputs: Vec::new(),
+            gpu: GpuConfigRaw::default(),
             switch_events: SwitchEventsRaw::default(),
             window_rules: Vec::new(),
             layer_rules: Vec::new(),
@@ -2235,6 +2242,93 @@ pub enum OutputTransformConfig {
     Flipped90,
     Flipped180,
     Flipped270,
+}
+
+/// Which DRM device TideWM should use for its own GLES rendering and
+/// scanout. Paths may name either a primary (`cardN`) or render node; the
+/// backend resolves both to the same physical device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GpuSelector {
+    Auto,
+    Path(PathBuf),
+    Vendor(GpuVendor),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuVendor {
+    Amd,
+    Nvidia,
+    Intel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuConfig {
+    pub render: GpuSelector,
+    pub exclude: Vec<GpuSelector>,
+}
+
+impl Default for GpuConfig {
+    fn default() -> Self {
+        Self {
+            render: GpuSelector::Auto,
+            exclude: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct GpuConfigRaw {
+    render: String,
+    exclude: Vec<String>,
+}
+
+impl Default for GpuConfigRaw {
+    fn default() -> Self {
+        Self {
+            render: "auto".to_string(),
+            exclude: Vec::new(),
+        }
+    }
+}
+
+impl GpuConfig {
+    fn from_raw(raw: GpuConfigRaw, warnings: &mut Vec<String>) -> Self {
+        let render = parse_gpu_selector(&raw.render, true).unwrap_or_else(|| {
+            warnings.push(format!(
+                "Invalid gpu.render {:?}; using auto (expected auto, /dev/dri/..., or vendor:amd|nvidia|intel)",
+                raw.render
+            ));
+            GpuSelector::Auto
+        });
+        let exclude = raw
+            .exclude
+            .into_iter()
+            .filter_map(|value| match parse_gpu_selector(&value, false) {
+                Some(selector) => Some(selector),
+                None => {
+                    warnings.push(format!(
+                        "Invalid gpu.exclude entry {value:?}; ignoring (expected /dev/dri/... or vendor:amd|nvidia|intel)"
+                    ));
+                    None
+                }
+            })
+            .collect();
+        Self { render, exclude }
+    }
+}
+
+fn parse_gpu_selector(value: &str, allow_auto: bool) -> Option<GpuSelector> {
+    let value = value.trim();
+    match value.to_ascii_lowercase().as_str() {
+        "auto" if allow_auto => Some(GpuSelector::Auto),
+        "vendor:amd" => Some(GpuSelector::Vendor(GpuVendor::Amd)),
+        "vendor:nvidia" => Some(GpuSelector::Vendor(GpuVendor::Nvidia)),
+        "vendor:intel" => Some(GpuSelector::Vendor(GpuVendor::Intel)),
+        _ => {
+            let path = PathBuf::from(value);
+            (path.is_absolute() && path.starts_with("/dev/dri")).then_some(GpuSelector::Path(path))
+        }
+    }
 }
 
 /// Parsed `[switch_events]` entries: one optional [`Action`] per lid /
@@ -4937,6 +5031,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
             apply_ripple_block(preset, body);
         }
         "output" => raw.outputs.push(lower_output_block(header, body)),
+        "gpu" => apply_gpu_block(&mut raw.gpu, body),
         "rule" => raw.window_rules.push(lower_window_rule_block(body)),
         "layer_rule" => raw.layer_rules.push(lower_layer_rule_block(body)),
         "workspace_rule" => raw.workspace_rules.push(lower_workspace_rule_block(body)),
@@ -4982,6 +5077,28 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
             if !computation_only {
                 tracing::warn!(keyword = %other, "Unknown config block, ignoring");
             }
+        }
+    }
+}
+
+fn apply_gpu_block(gpu: &mut GpuConfigRaw, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `gpu` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "render" => gpu.render = value.clone(),
+            "exclude" => {
+                gpu.exclude = if value.trim() == "[]" {
+                    Vec::new()
+                } else if let Some(values) = parse_list_value(value) {
+                    values
+                } else {
+                    vec![value.clone()]
+                };
+            }
+            other => tracing::warn!(key = %other, "Unknown key in `gpu` block, ignoring"),
         }
     }
 }
@@ -8489,6 +8606,13 @@ xwayland {
 
 # ~~~~~~~~~~~~~~~~~ monitors ~~~~~~~~~~~~~~~~~
 
+# Select the GPU TideWM uses for its own rendering and scanout. Secondary
+# non-excluded GPUs remain available for client PRIME/offload rendering.
+gpu {
+    render = auto                  # auto, /dev/dri/cardN, or vendor:...
+    exclude = []                   # device paths and/or vendor tags
+}
+
 # TideWM picks a sensible mode/scale per monitor on its own; set this only
 # to override one.
 # output eDP-1 {
@@ -8506,7 +8630,9 @@ xwayland {
 # }
 
 # switch_events {
-#     lid_close = spawn:systemctl suspend
+#     lid_close = spawn:systemctl suspend      # systemd; use "loginctl suspend" under
+#                                               # elogind, or your distro's own suspend
+#                                               # command (e.g. "zzz") on OpenRC without it
 # }
 
 # ~~~~~~~~~~~~~~~~~ window rules ~~~~~~~~~~~~~~~~~
@@ -8792,6 +8918,43 @@ mod tests {
         assert!(parsed.lid_open.is_none());
         assert!(parsed.tablet_mode_on.is_none());
         assert!(parsed.tablet_mode_off.is_none());
+    }
+
+    #[test]
+    fn gpu_block_parses_render_and_exclusions() {
+        let raw = lower_entries(&wave_entries(
+            "gpu {\n\
+                 render = vendor:amd\n\
+                 exclude = [vendor:nvidia, \"/dev/dri/card3\"]\n\
+             }\n",
+        ));
+        let (config, warnings) = Config::from_raw(raw);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(config.gpu.render, GpuSelector::Vendor(GpuVendor::Amd));
+        assert_eq!(
+            config.gpu.exclude,
+            vec![
+                GpuSelector::Vendor(GpuVendor::Nvidia),
+                GpuSelector::Path(PathBuf::from("/dev/dri/card3")),
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_gpu_values_degrade_safely() {
+        let raw = lower_entries(&wave_entries(
+            "gpu {\n\
+                 render = definitely-not-a-gpu\n\
+                 exclude = [auto, vendor:bogus, \"/dev/dri/card2\"]\n\
+             }\n",
+        ));
+        let (config, warnings) = Config::from_raw(raw);
+        assert_eq!(config.gpu.render, GpuSelector::Auto);
+        assert_eq!(
+            config.gpu.exclude,
+            vec![GpuSelector::Path(PathBuf::from("/dev/dri/card2"))]
+        );
+        assert_eq!(warnings.len(), 3);
     }
 
     #[test]
@@ -9392,6 +9555,7 @@ mod tests {
             xwayland: XwaylandConfig::default(),
             spawn_at_startup: Vec::new(),
             outputs: Vec::new(),
+            gpu: GpuConfig::default(),
             switch_events: SwitchEventsConfig::default(),
             submaps: HashMap::new(),
             env: HashMap::new(),

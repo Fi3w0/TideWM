@@ -130,6 +130,13 @@ impl CompositorHandler for Smallvil {
         // persistent renderer state is the source of truth for whether a
         // surface currently has a usable buffer.
         on_commit_buffer_handler::<Self>(surface);
+        if let Some(gpu) = &self.udev_gpu {
+            // `early_import` alone leaves a `MultiTexture` in Smithay's
+            // multi-renderer cache. The udev bridge also exposes the copied
+            // primary-node `GlesTexture` under the concrete GLES context id
+            // consumed by TideWM's existing effects/render elements.
+            gpu.prepare_surface(surface);
+        }
         self.request_redraw();
         let committed_window = if !is_sync_subsurface(surface) {
             let mut root = surface.clone();

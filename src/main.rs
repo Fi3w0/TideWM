@@ -674,8 +674,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state.request_redraw();
     }
 
-    event_loop.run(None, &mut state, move |_| {
-        // Smallvil is running
+    // Flush after every dispatch, not just whichever event source happened to
+    // fire -- matches anvil's own post-dispatch flush. Without this, outgoing
+    // protocol messages (key events, frame-done callbacks) only reached
+    // clients whenever the udev backend's maintenance timer or the winit
+    // backend's render tick happened to run its own flush_clients() call, and
+    // the maintenance timer's cadence backs off to a flat 1s once nothing
+    // tracked by has_active_animation() is live -- the case for a plain tiled
+    // window with no floating-window physics running. Clients sat starved of
+    // both their key events and their draw permission for up to that long,
+    // which is what produced the input lag, the client-side key-repeat storm
+    // (the release was queued but unflushed, so kitty kept repeating), and
+    // the near-frozen redraw rate on an all-tiled udev-backend desktop.
+    event_loop.run(None, &mut state, move |state| {
+        let _ = state.display_handle.flush_clients();
     })?;
 
     Ok(())

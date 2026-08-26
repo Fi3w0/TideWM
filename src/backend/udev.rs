@@ -1,8 +1,8 @@
 //! Standalone TTY/DRM backend: no host compositor, drives real display
 //! hardware directly via KMS/DRM, GBM and a libseat session.
 //!
-//! The backend deliberately drives one GPU with a direct `DrmCompositor`;
-//! multi-GPU rendering is outside its ownership model.
+//! One selected GPU drives every output and TideWM's concrete GLES effects;
+//! additional non-excluded GPUs are render/import nodes for client offload.
 //!
 //! Connector hotplug migrates window ownership and rebuilds the affected
 //! output state. Removing the managed GPU ends the session because this
@@ -22,9 +22,9 @@ use smithay::{
         drm::{
             compositor::{DrmCompositor, FrameError, FrameFlags, PrimaryPlaneElement},
             exporter::gbm::GbmFramebufferExporter,
-            DrmDevice, DrmDeviceFd, DrmEvent, DrmNode, NodeType,
+            DrmDevice, DrmDeviceFd, DrmDeviceNotifier, DrmEvent, DrmNode, NodeType,
         },
-        egl::{context::ContextPriority, EGLContext, EGLDevice, EGLDisplay},
+        egl::{context::ContextPriority, EGLDevice, EGLDisplay},
         input::InputEvent,
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
@@ -36,6 +36,8 @@ use smithay::{
                 Kind,
             },
             gles::{GlesRenderer, GlesTexture},
+            multigpu::GpuManager,
+            utils::import_surface_tree,
             ImportDma,
         },
         session::{libseat::LibSeatSession, Event as SessionEvent, Session},
@@ -48,7 +50,7 @@ use smithay::{
         calloop::{
             ping::make_ping,
             timer::{TimeoutAction, Timer},
-            EventLoop, LoopHandle,
+            EventLoop, LoopHandle, RegistrationToken,
         },
         drm::{
             control::{connector, crtc, Device as ControlDevice, Mode as DrmMode, ModeTypeFlags},
@@ -57,7 +59,7 @@ use smithay::{
         input::Libinput,
         rustix::fs::OFlags,
         wayland_protocols::wp::presentation_time::server::wp_presentation_feedback,
-        wayland_server::backend::GlobalId,
+        wayland_server::{backend::GlobalId, protocol::wl_surface::WlSurface},
     },
     utils::{DeviceFd, Transform},
     wayland::{compositor::with_states, dmabuf::DmabufFeedbackBuilder, presentation::Refresh},
@@ -65,7 +67,8 @@ use smithay::{
 use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
 
 use crate::{
-    config::OutputTransformConfig,
+    backend::multigpu::{GbmGlesApi, ImportBridge},
+    config::{GpuSelector, GpuVendor, OutputTransformConfig},
     cursor,
     output_layout::{logical_output_size, resolve_output_position},
     state::{LockRenderElement, SessionLock, Smallvil},
@@ -178,9 +181,10 @@ struct SurfaceData {
 
 struct DeviceData {
     drm: DrmDevice,
-    /// Shared with `Smallvil::udev_renderer` so `DmabufHandler::dmabuf_imported`
-    /// can use it too -- see handlers/mod.rs.
-    renderer: Rc<RefCell<GlesRenderer>>,
+    gpu: UdevGpu,
+    /// Open non-scanout devices stay alive so their render nodes remain
+    /// registered and PRIME/offload buffers can be copied by `GpuManager`.
+    render_only_devices: HashMap<DrmNode, RenderOnlyDevice>,
     surfaces: HashMap<crtc::Handle, SurfaceData>,
     libinput: Libinput,
     /// Retained for connector rescans on udev device changes.
@@ -191,6 +195,63 @@ struct DeviceData {
     /// than `SurfaceData` so disconnecting and recreating a surface on the
     /// same CRTC cannot let an old timer match the new surface by accident.
     next_empty_frame_retry_generation: u64,
+}
+
+#[derive(Clone)]
+pub(crate) struct UdevGpu {
+    manager: Rc<RefCell<GpuManager<GbmGlesApi>>>,
+    primary_render_node: DrmNode,
+}
+
+impl UdevGpu {
+    pub(crate) fn import_dmabuf(
+        &self,
+        dmabuf: &smithay::backend::allocator::dmabuf::Dmabuf,
+    ) -> bool {
+        let mut manager = self.manager.borrow_mut();
+        let Ok(renderer) = manager.single_renderer(&self.primary_render_node) else {
+            return false;
+        };
+        let imported = ImportBridge::new(renderer)
+            .import_dmabuf(dmabuf, None)
+            .is_ok();
+        if imported && dmabuf.node().is_none() {
+            dmabuf.set_node(Some(self.primary_render_node));
+        }
+        imported
+    }
+
+    pub(crate) fn prepare_surface(&self, surface: &WlSurface) {
+        let mut manager = self.manager.borrow_mut();
+        if let Err(error) = manager.early_import(self.primary_render_node, surface) {
+            tracing::debug!(%error, "Early multi-GPU surface import was not available");
+        }
+        match manager.single_renderer(&self.primary_render_node) {
+            Ok(renderer) => {
+                if let Err(error) = import_surface_tree(&mut ImportBridge::new(renderer), surface) {
+                    tracing::warn!(%error, "Failed to prepare a client surface on the primary GPU");
+                }
+            }
+            Err(error) => tracing::warn!(%error, "Primary GPU renderer is unavailable"),
+        }
+    }
+}
+
+struct OpenGpu {
+    path: PathBuf,
+    node: DrmNode,
+    render_node: DrmNode,
+    drm: DrmDevice,
+    notifier: DrmDeviceNotifier,
+    gbm: GbmDevice<DrmDeviceFd>,
+    connected: bool,
+}
+
+struct RenderOnlyDevice {
+    token: RegistrationToken,
+    render_node: DrmNode,
+    drm: DrmDevice,
+    _gbm: GbmDevice<DrmDeviceFd>,
 }
 
 pub fn init_udev(
@@ -238,114 +299,160 @@ pub fn init_udev(
 
     let open_flags = OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK;
 
-    let (mut drm, drm_notifier, gbm, renderer, render_formats, render_node) = 'found: {
-        for path in &gpu_paths {
-            let node = match DrmNode::from_path(path) {
-                Ok(n) => n,
-                Err(e) => {
-                    tracing::debug!(path = %path.display(), %e, "Not a DRM node, skipping");
-                    continue;
-                }
-            };
-            if node.ty() != NodeType::Primary {
+    let api: GbmGlesApi =
+        smithay::backend::renderer::multigpu::gbm::GbmGlesBackend::with_context_priority(
+            ContextPriority::High,
+        );
+    let mut gpu_manager = GpuManager::new(api)?;
+    let mut opened = Vec::new();
+    for path in &gpu_paths {
+        let node = match DrmNode::from_path(path) {
+            Ok(node) if node.ty() == NodeType::Primary => node,
+            Ok(_) => continue,
+            Err(error) => {
+                tracing::debug!(path = %path.display(), %error, "Not a DRM primary node, skipping");
                 continue;
             }
-
-            let fd = match session.open(path, open_flags) {
-                Ok(fd) => fd,
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), %e, "Failed to open GPU");
-                    continue;
-                }
-            };
-            let device_fd = DrmDeviceFd::new(DeviceFd::from(fd));
-
-            let (drm, drm_notifier) = match DrmDevice::new(device_fd.clone(), true) {
-                Ok(pair) => pair,
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), %e, "Failed to create DRM device");
-                    continue;
-                }
-            };
-
-            if !gpu_has_connected_display(&drm) {
-                tracing::info!(path = %path.display(), "No connected displays, trying next GPU");
-                continue;
-            }
-
-            let gbm = match GbmDevice::new(device_fd.clone()) {
-                Ok(g) => g,
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), %e, "Failed to create GBM device");
-                    continue;
-                }
-            };
-
-            // Safety: `gbm` is a valid GBM device for the lifetime of this
-            // EGLDisplay, and we keep it alive on `DeviceData` alongside it.
-            let egl_display = match unsafe { EGLDisplay::new(gbm.clone()) } {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), %e, "Failed to create EGL display");
-                    continue;
-                }
-            };
-            let egl_context =
-                match EGLContext::new_with_priority(&egl_display, ContextPriority::High) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::warn!(path = %path.display(), %e, "Failed to create EGL context");
-                        continue;
-                    }
-                };
-            let render_formats: Vec<Format> = egl_context
-                .dmabuf_render_formats()
-                .iter()
-                .copied()
-                .collect();
-
-            // On split KMS/render-node systems (the common case on AMD and
-            // Intel: card0 + renderD128) `node` above is the *display* node
-            // we opened for modesetting, not the one Mesa actually renders
-            // through. Advertising the wrong one to clients via dmabuf
-            // feedback makes them crash trying to use a node they can't
-            // render with. Ask EGL for the node it's actually using; fall
-            // back to `node` itself only if that fails.
-            let render_node = EGLDevice::device_for_display(&egl_display)
-                .ok()
-                .and_then(|d| d.try_get_render_node().ok().flatten())
-                .or_else(|| node.node_with_type(NodeType::Render).and_then(|n| n.ok()))
-                .unwrap_or_else(|| {
-                    tracing::warn!(
-                        path = %path.display(),
-                        "Could not resolve a DRM render node, falling back to the KMS node; \
-                         GPU clients may misbehave"
-                    );
-                    node
-                });
-
-            // Safety: `egl_context` was just created above and isn't used
-            // anywhere else.
-            let renderer = match unsafe { GlesRenderer::new(egl_context) } {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), %e, "Failed to create GLES renderer");
-                    continue;
-                }
-            };
-
-            tracing::info!(path = %path.display(), "Using GPU");
-            break 'found (
-                drm,
-                drm_notifier,
-                gbm,
-                renderer,
-                render_formats,
-                render_node,
-            );
+        };
+        let vendor = gpu_vendor(path);
+        if state
+            .config
+            .gpu
+            .exclude
+            .iter()
+            .any(|selector| gpu_selector_matches(selector, path, node, node, vendor))
+        {
+            tracing::info!(path = %path.display(), ?vendor, "GPU excluded by configuration");
+            continue;
         }
-        return Err("No GPU with a connected display found (are you running from a TTY?)".into());
+        let fd = match session.open(path, open_flags) {
+            Ok(fd) => fd,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "Failed to open GPU");
+                continue;
+            }
+        };
+        let device_fd = DrmDeviceFd::new(DeviceFd::from(fd));
+        let (drm, notifier) = match DrmDevice::new(device_fd.clone(), true) {
+            Ok(pair) => pair,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "Failed to create DRM device");
+                continue;
+            }
+        };
+        let gbm = match GbmDevice::new(device_fd) {
+            Ok(gbm) => gbm,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "Failed to create GBM device");
+                continue;
+            }
+        };
+        let egl_display = match unsafe { EGLDisplay::new(gbm.clone()) } {
+            Ok(display) => display,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "Failed to create EGL display");
+                continue;
+            }
+        };
+        let render_node = EGLDevice::device_for_display(&egl_display)
+            .ok()
+            .and_then(|device| device.try_get_render_node().ok().flatten())
+            .or_else(|| node.node_with_type(NodeType::Render).and_then(Result::ok))
+            .unwrap_or(node);
+        drop(egl_display);
+        if let Err(error) = gpu_manager.as_mut().add_node(render_node, gbm.clone()) {
+            tracing::warn!(path = %path.display(), %error, "Failed to register GPU renderer");
+            continue;
+        }
+        if let Err(error) = gpu_manager.single_renderer(&render_node) {
+            tracing::warn!(path = %path.display(), %error, "Failed to create GPU renderer");
+            gpu_manager.as_mut().remove_node(&render_node);
+            continue;
+        }
+        let connected = gpu_has_connected_display(&drm);
+        tracing::info!(path = %path.display(), ?render_node, ?vendor, connected, "Opened GPU");
+        opened.push(OpenGpu {
+            path: path.clone(),
+            node,
+            render_node,
+            drm,
+            notifier,
+            gbm,
+            connected,
+        });
+    }
+    if opened.is_empty() {
+        return Err("No usable non-excluded GPUs found".into());
+    }
+
+    let requested = &state.config.gpu.render;
+    let selected_explicit = if matches!(requested, GpuSelector::Auto) {
+        None
+    } else {
+        opened.iter().position(|gpu| {
+            gpu.connected
+                && gpu_selector_matches(
+                    requested,
+                    &gpu.path,
+                    gpu.node,
+                    gpu.render_node,
+                    gpu_vendor(&gpu.path),
+                )
+        })
     };
+    if !matches!(requested, GpuSelector::Auto) && selected_explicit.is_none() {
+        tracing::warn!(
+            ?requested,
+            "Requested render GPU is unavailable or has no connected display; using auto"
+        );
+    }
+    let mut candidates = Vec::new();
+    if let Some(index) = selected_explicit {
+        candidates.push(index);
+    }
+    candidates.extend(
+        opened
+            .iter()
+            .enumerate()
+            .filter(|(index, gpu)| gpu.connected && Some(*index) != selected_explicit)
+            .map(|(index, _)| index),
+    );
+    let mut selected: Option<(usize, Vec<Format>)> = None;
+    for index in candidates {
+        let gpu = &opened[index];
+        match gpu_manager.single_renderer(&gpu.render_node) {
+            Ok(mut renderer) => {
+                let render_formats = renderer
+                    .as_mut()
+                    .egl_context()
+                    .dmabuf_render_formats()
+                    .iter()
+                    .copied()
+                    .collect();
+                selected = Some((index, render_formats));
+                break;
+            }
+            Err(error) => tracing::warn!(
+                path = %gpu.path.display(),
+                %error,
+                "GPU has a connected display but its renderer could not be created; trying next"
+            ),
+        }
+    }
+    let (selected_index, render_formats) = selected.ok_or(
+        "No GPU with a connected display and usable renderer found (are you running from a TTY?)",
+    )?;
+    let selected = opened.remove(selected_index);
+    let OpenGpu {
+        path: selected_path,
+        node: selected_node,
+        render_node,
+        mut drm,
+        notifier: drm_notifier,
+        gbm,
+        ..
+    } = selected;
+    tracing::info!(path = %selected_path.display(), ?selected_node, ?render_node, "Using GPU for TideWM rendering and scanout");
 
     // Client-facing zwp_linux_dmabuf_v1 global: lets GPU-accelerated
     // clients hand us dmabuf-backed buffers instead of falling back to
@@ -353,8 +460,15 @@ pub fn init_udev(
     // clients), distinct from `render_formats` above (what we can use for
     // our own scanout swapchain).
     {
-        let dmabuf_formats = renderer.dmabuf_formats();
-        match DmabufFeedbackBuilder::new(render_node.dev_id(), dmabuf_formats).build() {
+        let primary_formats = gpu_manager.single_renderer(&render_node)?.dmabuf_formats();
+        let mut builder = DmabufFeedbackBuilder::new(render_node.dev_id(), primary_formats);
+        for gpu in &opened {
+            let formats = gpu_manager
+                .single_renderer(&gpu.render_node)?
+                .dmabuf_formats();
+            builder = builder.add_preference_tranche(gpu.render_node.dev_id(), None, formats);
+        }
+        match builder.build() {
             Ok(default_feedback) => {
                 let global = state
                     .dmabuf_state
@@ -434,12 +548,42 @@ pub fn init_udev(
         return Err("Display connected but failed to create any DRM surface".into());
     }
 
-    let renderer = Rc::new(RefCell::new(renderer));
-    state.udev_renderer = Some(Rc::clone(&renderer));
+    let manager = Rc::new(RefCell::new(gpu_manager));
+    let gpu = UdevGpu {
+        manager,
+        primary_render_node: render_node,
+    };
+    state.udev_gpu = Some(gpu.clone());
+
+    let mut render_only_devices = HashMap::new();
+    for extra in opened {
+        let node = extra.node;
+        let token = event_loop.handle().insert_source(
+            extra.notifier,
+            move |event, _, _state: &mut Smallvil| match event {
+                DrmEvent::VBlank(crtc) => {
+                    tracing::debug!(?node, ?crtc, "Unexpected VBlank on render-only GPU")
+                }
+                DrmEvent::Error(error) => {
+                    tracing::warn!(?node, %error, "DRM error on render-only GPU")
+                }
+            },
+        )?;
+        render_only_devices.insert(
+            node,
+            RenderOnlyDevice {
+                token,
+                render_node: extra.render_node,
+                drm: extra.drm,
+                _gbm: extra.gbm,
+            },
+        );
+    }
 
     let device = Rc::new(RefCell::new(DeviceData {
         drm,
-        renderer,
+        gpu,
+        render_only_devices,
         surfaces,
         libinput,
         gbm,
@@ -559,14 +703,13 @@ pub fn init_udev(
     // render.
     let initial_retries = {
         let mut dev = device.borrow_mut();
-        let DeviceData {
-            surfaces, renderer, ..
-        } = &mut *dev;
-        let mut renderer = renderer.borrow_mut();
-        surfaces
+        let gpu = dev.gpu.clone();
+        let mut manager = gpu.manager.borrow_mut();
+        let mut renderer = manager.single_renderer(&gpu.primary_render_node)?;
+        dev.surfaces
             .iter_mut()
             .filter_map(|(&crtc, surface)| {
-                render_surface(state, surface, &mut renderer).map(|delay| (crtc, delay))
+                render_surface(state, surface, renderer.as_mut()).map(|delay| (crtc, delay))
             })
             .collect::<Vec<_>>()
     };
@@ -583,10 +726,8 @@ pub fn init_udev(
             let retry = match event {
                 DrmEvent::VBlank(crtc) => {
                     let mut dev = device_for_drm.borrow_mut();
-                    let DeviceData {
-                        surfaces, renderer, ..
-                    } = &mut *dev;
-                    let Some(surface) = surfaces.get_mut(&crtc) else {
+                    let gpu = dev.gpu.clone();
+                    let Some(surface) = dev.surfaces.get_mut(&crtc) else {
                         return;
                     };
                     match surface.compositor.frame_submitted() {
@@ -632,8 +773,15 @@ pub fn init_udev(
                         state.update_float_physics_full();
                         state.update_currents();
                         state.update_buoyancy();
-                        render_surface(state, surface, &mut renderer.borrow_mut())
-                            .map(|delay| (crtc, delay))
+                        let mut manager = gpu.manager.borrow_mut();
+                        match manager.single_renderer(&gpu.primary_render_node) {
+                            Ok(mut renderer) => render_surface(state, surface, renderer.as_mut())
+                                .map(|delay| (crtc, delay)),
+                            Err(error) => {
+                                tracing::error!(%error, "Primary renderer unavailable at VBlank");
+                                None
+                            }
+                        }
                     } else {
                         None
                     }
@@ -668,6 +816,9 @@ pub fn init_udev(
                     tracing::info!("Session paused (VT switch away)");
                     dev.libinput.suspend();
                     dev.drm.pause();
+                    for device in dev.render_only_devices.values_mut() {
+                        device.drm.pause();
+                    }
                     Vec::new()
                 }
                 SessionEvent::ActivateSession => {
@@ -680,11 +831,19 @@ pub fn init_udev(
                         tracing::error!(%e, "Failed to reactivate DRM device");
                         return;
                     }
-                    let DeviceData {
-                        surfaces, renderer, ..
-                    } = &mut *dev;
+                    for device in dev.render_only_devices.values_mut() {
+                        if let Err(e) = device.drm.activate(false) {
+                            tracing::warn!(%e, "Failed to reactivate render-only DRM device");
+                        }
+                    }
+                    let gpu = dev.gpu.clone();
+                    let mut manager = gpu.manager.borrow_mut();
+                    let Ok(mut renderer) = manager.single_renderer(&gpu.primary_render_node) else {
+                        tracing::error!("Primary renderer unavailable after VT resume");
+                        return;
+                    };
                     let mut retries = Vec::new();
-                    for (&crtc, surface) in surfaces.iter_mut() {
+                    for (&crtc, surface) in dev.surfaces.iter_mut() {
                         if let Err(e) = surface.compositor.reset_state() {
                             tracing::warn!(%e, "Failed to reset DRM surface state");
                         }
@@ -702,9 +861,7 @@ pub fn init_udev(
                         state
                             .wlr_output_power_management_state
                             .force_on(&surface.output);
-                        if let Some(delay) =
-                            render_surface(state, surface, &mut renderer.borrow_mut())
-                        {
+                        if let Some(delay) = render_surface(state, surface, renderer.as_mut()) {
                             retries.push((crtc, delay));
                         }
                     }
@@ -723,24 +880,109 @@ pub fn init_udev(
         },
     )?;
 
-    // Hotplug: a monitor plugged/unplugged into a port on the GPU we're
-    // already driving fires `Changed`, which is the only case handled --
-    // see `handle_connector_change`. `Added`/`Removed` mean a whole GPU
-    // appeared or disappeared, out of scope for the single-GPU design this
-    // backend deliberately uses (see module docs): `Added` is logged and
-    // ignored, and `Removed` of the driven GPU ends the session, since a
-    // live compositor that can no longer render anything is worse than a
-    // clean teardown back to the session manager.
+    // Connector changes are meaningful only on the selected scanout GPU.
+    // Whole render-only GPUs may appear/disappear at runtime and are added to
+    // or removed from the import manager without changing output ownership.
     let device_for_udev = Rc::clone(&device);
     let display_handle_for_udev = display_handle.clone();
+    let loop_handle_for_udev = event_loop.handle();
+    let mut session_for_udev = session.clone();
     event_loop
         .handle()
         .insert_source(udev_backend, move |event, _, state: &mut Smallvil| match event {
             UdevEvent::Added { device_id, path } => {
-                tracing::info!(
-                    ?device_id, ?path,
-                    "udev device added; hot-added GPUs aren't supported (single-GPU design), ignoring"
+                let Ok(node) = DrmNode::from_path(&path) else {
+                    return;
+                };
+                if node.ty() != NodeType::Primary {
+                    return;
+                }
+                let vendor = gpu_vendor(&path);
+                if state.config.gpu.exclude.iter().any(|selector| {
+                    gpu_selector_matches(selector, &path, node, node, vendor)
+                }) {
+                    tracing::info!(?device_id, ?path, "Hot-added GPU is excluded");
+                    return;
+                }
+                let fd = match session_for_udev.open(&path, open_flags) {
+                    Ok(fd) => fd,
+                    Err(error) => {
+                        tracing::warn!(?path, %error, "Failed to open hot-added GPU");
+                        return;
+                    }
+                };
+                let device_fd = DrmDeviceFd::new(DeviceFd::from(fd));
+                let (drm, notifier) = match DrmDevice::new(device_fd.clone(), true) {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        tracing::warn!(?path, %error, "Failed to initialize hot-added DRM device");
+                        return;
+                    }
+                };
+                let gbm = match GbmDevice::new(device_fd) {
+                    Ok(gbm) => gbm,
+                    Err(error) => {
+                        tracing::warn!(?path, %error, "Failed to initialize hot-added GBM device");
+                        return;
+                    }
+                };
+                let display = match unsafe { EGLDisplay::new(gbm.clone()) } {
+                    Ok(display) => display,
+                    Err(error) => {
+                        tracing::warn!(?path, %error, "Failed to initialize hot-added EGL device");
+                        return;
+                    }
+                };
+                let render_node = EGLDevice::device_for_display(&display)
+                    .ok()
+                    .and_then(|device| device.try_get_render_node().ok().flatten())
+                    .or_else(|| node.node_with_type(NodeType::Render).and_then(Result::ok))
+                    .unwrap_or(node);
+                drop(display);
+
+                let mut dev = device_for_udev.borrow_mut();
+                if dev.render_only_devices.contains_key(&node) || device_id == dev.drm.device_id() {
+                    return;
+                }
+                if let Err(error) = dev.gpu.manager.borrow_mut().as_mut().add_node(render_node, gbm.clone()) {
+                    tracing::warn!(?path, %error, "Failed to register hot-added GPU renderer");
+                    return;
+                }
+                let renderer_error = {
+                    let mut manager = dev.gpu.manager.borrow_mut();
+                    manager.single_renderer(&render_node).err()
+                };
+                if let Some(error) = renderer_error {
+                    tracing::warn!(?path, %error, "Failed to create hot-added GPU renderer");
+                    dev.gpu.manager.borrow_mut().as_mut().remove_node(&render_node);
+                    return;
+                }
+                let token = match loop_handle_for_udev.insert_source(
+                    notifier,
+                    move |event, _, _state: &mut Smallvil| {
+                        if let DrmEvent::Error(error) = event {
+                            tracing::warn!(?node, %error, "DRM error on hot-added render-only GPU");
+                        }
+                    },
+                ) {
+                    Ok(token) => token,
+                    Err(error) => {
+                        tracing::warn!(%error, "Failed to register hot-added GPU event source");
+                        dev.gpu.manager.borrow_mut().as_mut().remove_node(&render_node);
+                        return;
+                    }
+                };
+                dev.render_only_devices.insert(
+                    node,
+                    RenderOnlyDevice {
+                        token,
+                        render_node,
+                        drm,
+                        _gbm: gbm,
+                    },
                 );
+                tracing::info!(?device_id, ?path, ?render_node, "Registered hot-added render-only GPU");
+                refresh_dmabuf_feedback(state, &dev.gpu, dev.render_only_devices.values());
             }
             UdevEvent::Changed { device_id } => {
                 let mut dev = device_for_udev.borrow_mut();
@@ -752,13 +994,13 @@ pub fn init_udev(
                 handle_connector_change(&mut dev, &display_handle_for_udev, state);
             }
             UdevEvent::Removed { device_id } => {
-                let dev = device_for_udev.borrow();
+                let mut dev = device_for_udev.borrow_mut();
                 if device_id == dev.drm.device_id() {
                     tracing::error!(
                         ?device_id,
                         "The GPU TideWM is driving was removed; ending the session so \
-                         control returns to the login/session manager (single-GPU design, \
-                         no fallback GPU to switch to)"
+                         control returns to the login/session manager (output ownership \
+                         cannot migrate between GPUs at runtime)"
                     );
                     drop(dev);
                     // The compositor cannot render anything without its only
@@ -768,7 +1010,29 @@ pub fn init_udev(
                     // session-lock client-crash path already uses.
                     state.loop_signal.stop();
                 } else {
-                    tracing::debug!(?device_id, "udev device removed (not the one we're driving)");
+                    let node = dev
+                        .render_only_devices
+                        .keys()
+                        .find(|node| node.dev_id() == device_id)
+                        .copied();
+                    if let Some(node) = node {
+                        if let Some(device) = dev.render_only_devices.remove(&node) {
+                            loop_handle_for_udev.remove(device.token);
+                            dev.gpu
+                                .manager
+                                .borrow_mut()
+                                .as_mut()
+                                .remove_node(&device.render_node);
+                            tracing::info!(?device_id, ?node, "Removed render-only GPU");
+                            refresh_dmabuf_feedback(
+                                state,
+                                &dev.gpu,
+                                dev.render_only_devices.values(),
+                            );
+                        }
+                    } else {
+                        tracing::debug!(?device_id, "udev device removed (not opened by TideWM)");
+                    }
                 }
             }
         })?;
@@ -797,7 +1061,6 @@ pub fn init_udev(
             state.popups.cleanup();
             state.refresh_popup_grab();
             state.cleanup_capture();
-            let _ = state.display_handle.flush_clients();
 
             let next = if active {
                 device_for_timer
@@ -837,12 +1100,14 @@ fn render_requested_surfaces(
         return Vec::new();
     }
 
-    let DeviceData {
-        surfaces, renderer, ..
-    } = &mut *dev;
-    let mut renderer = renderer.borrow_mut();
+    let gpu = dev.gpu.clone();
+    let mut manager = gpu.manager.borrow_mut();
+    let Ok(mut renderer) = manager.single_renderer(&gpu.primary_render_node) else {
+        tracing::error!("Primary GPU renderer unavailable");
+        return Vec::new();
+    };
     let mut retries = Vec::new();
-    for (&crtc, surface) in surfaces.iter_mut() {
+    for (&crtc, surface) in dev.surfaces.iter_mut() {
         if surface.powered_off {
             state.fail_captures_for_output(&surface.output);
             continue;
@@ -852,14 +1117,14 @@ fn render_requested_surfaces(
             surface.pending,
             surface.empty_frame_retry_pending.is_some(),
         ) {
-            if let Some(delay) = render_surface(state, surface, &mut renderer) {
+            if let Some(delay) = render_surface(state, surface, renderer.as_mut()) {
                 retries.push((crtc, delay));
             }
         }
         // Capture requests use the same redraw wakeup and need the active EGL
         // renderer even if scanout damage collapsed to an empty frame.
-        state.render_pending_captures(&mut renderer, &surface.output, true);
-        state.capture_pending_workspace_transition(&mut renderer, &surface.output);
+        state.render_pending_captures(renderer.as_mut(), &surface.output, true);
+        state.capture_pending_workspace_transition(renderer.as_mut(), &surface.output);
     }
     retries
 }
@@ -872,6 +1137,79 @@ fn gpu_has_connected_display(drm: &DrmDevice) -> bool {
         ControlDevice::get_connector(drm, handle, true)
             .is_ok_and(|c| c.state() == connector::State::Connected)
     })
+}
+
+fn gpu_vendor(path: &std::path::Path) -> Option<GpuVendor> {
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let card = path.file_name()?.to_str()?;
+    let vendor = std::fs::read_to_string(format!("/sys/class/drm/{card}/device/vendor")).ok()?;
+    match vendor
+        .trim()
+        .trim_start_matches("0x")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "1002" => Some(GpuVendor::Amd),
+        "10de" => Some(GpuVendor::Nvidia),
+        "8086" => Some(GpuVendor::Intel),
+        _ => None,
+    }
+}
+
+fn gpu_selector_matches(
+    selector: &GpuSelector,
+    path: &std::path::Path,
+    primary_node: DrmNode,
+    render_node: DrmNode,
+    vendor: Option<GpuVendor>,
+) -> bool {
+    match selector {
+        GpuSelector::Auto => false,
+        GpuSelector::Vendor(expected) => vendor == Some(*expected),
+        GpuSelector::Path(expected) => {
+            expected == path
+                || DrmNode::from_path(expected).is_ok_and(|node| {
+                    node == primary_node
+                        || node == render_node
+                        || node.node_with_type(NodeType::Primary).and_then(Result::ok)
+                            == Some(primary_node)
+                        || node.node_with_type(NodeType::Render).and_then(Result::ok)
+                            == Some(render_node)
+                })
+        }
+    }
+}
+
+fn refresh_dmabuf_feedback<'a>(
+    state: &mut Smallvil,
+    gpu: &UdevGpu,
+    devices: impl Iterator<Item = &'a RenderOnlyDevice>,
+) {
+    let Some(global) = state.dmabuf_global else {
+        return;
+    };
+    let mut manager = gpu.manager.borrow_mut();
+    let Ok(primary_renderer) = manager.single_renderer(&gpu.primary_render_node) else {
+        return;
+    };
+    let mut builder = DmabufFeedbackBuilder::new(
+        gpu.primary_render_node.dev_id(),
+        primary_renderer.dmabuf_formats(),
+    );
+    for device in devices {
+        let Ok(renderer) = manager.single_renderer(&device.render_node) else {
+            continue;
+        };
+        builder = builder.add_preference_tranche(
+            device.render_node.dev_id(),
+            None,
+            renderer.dmabuf_formats(),
+        );
+    }
+    match builder.build() {
+        Ok(feedback) => state.dmabuf_state.set_default_feedback(&global, &feedback),
+        Err(error) => tracing::warn!(%error, "Failed to refresh multi-GPU DMA-BUF feedback"),
+    }
 }
 
 fn connector_type_name(connector: &connector::Info) -> String {
@@ -1314,10 +1652,8 @@ fn schedule_empty_frame_retry<'l>(
                     return TimeoutAction::Drop;
                 }
 
-                let DeviceData {
-                    surfaces, renderer, ..
-                } = &mut *dev;
-                let Some(surface) = surfaces.get_mut(&crtc) else {
+                let gpu = dev.gpu.clone();
+                let Some(surface) = dev.surfaces.get_mut(&crtc) else {
                     return TimeoutAction::Drop;
                 };
                 // A successful queue may have cancelled this timer and a
@@ -1338,7 +1674,14 @@ fn schedule_empty_frame_retry<'l>(
                 if surface.powered_off {
                     return TimeoutAction::Drop;
                 }
-                let retry = render_surface(state, surface, &mut renderer.borrow_mut());
+                let mut manager = gpu.manager.borrow_mut();
+                let retry = match manager.single_renderer(&gpu.primary_render_node) {
+                    Ok(mut renderer) => render_surface(state, surface, renderer.as_mut()),
+                    Err(error) => {
+                        tracing::error!(%error, "Primary renderer unavailable for retry");
+                        None
+                    }
+                };
                 retry.filter(|_| surface.dirty)
             };
 

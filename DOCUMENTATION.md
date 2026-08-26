@@ -66,7 +66,7 @@ The line-based grammar is gone; Wave is the only grammar. Old configs were migra
 
 **Multi-file:** `include "path.wave"` as its own statement, repeatable (one per line), in any file (the main one, or one it includes). Each path resolves relative to the file that lists it; `~/` expands to your home directory. Rules:
 
-- `input { }`, `input { touchpad { } }`, `env { }`, `switch_events { }`, and a given `submap <name> { }` merge field-by-field across files — the same key set from two files combines rather than one replacing the other.
+- `input { }`, `input { touchpad { } }`, `env { }`, `gpu { }`, `switch_events { }`, and a given `submap <name> { }` merge field-by-field across files — the same key set from two files combines rather than one replacing the other.
 - `output <name> { }`, `rule { }`, and `layer_rule { }` blocks accumulate — entries from every file all end up present.
 - A later `include` overlays an earlier one.
 - **The including file's own keys always win over anything it includes.** If `config.wave` includes `overrides.wave`, and both set `gaps`, `config.wave`'s own value wins — put an override directly in the file doing the including, not in a file you list last.
@@ -1255,6 +1255,24 @@ output eDP-1 {
 }
 ```
 
+### `gpu { }`
+
+Standalone udev/DRM sessions can select the GPU that owns TideWM's own GLES rendering and every output. This block is startup-only; restart TideWM after changing it.
+
+| Key | Type | Default |
+| --- | --- | --- |
+| `render` | `auto`, `/dev/dri/...` path, or `vendor:amd`, `vendor:nvidia`, `vendor:intel` | `auto` |
+| `exclude` | list of device paths and/or vendor tags | `[]` |
+
+`auto` preserves the original primary-GPU-first heuristic and falls back to the first opened GPU with a connected display. An explicit selector is tried first and safely falls back to `auto` with a warning when it is missing or has no connected display. Excluded GPUs are never opened by TideWM. Every opened non-primary GPU remains render-only: clients may use it through PRIME/offload, and Smithay copies their DMA-BUF content onto the selected primary before TideWM's existing GLES effects render it. TideWM does not currently split outputs across GPUs.
+
+```wave
+gpu {
+    render = vendor:amd
+    exclude = ["/dev/dri/card2"]
+}
+```
+
 ### `switch_events { }`
 
 Laptop lid / tablet-mode switch bindings, **udev backend only** (winit has no host-independent access to libinput's switch capability). Each entry takes any [action string](#action-strings) — in practice almost always `spawn:...`, since the things you'd react with (suspend, lock, brightness, an onboard keyboard) live outside the compositor.
@@ -1266,11 +1284,11 @@ Laptop lid / tablet-mode switch bindings, **udev backend only** (winit has no ho
 | `tablet_mode_on` | action string, optional | unset |
 | `tablet_mode_off` | action string, optional | unset |
 
-systemd-logind's own `HandleLidSwitch=` policy (`/etc/systemd/logind.conf`) already triggers suspend on lid close independently of this — `lid_close` here is for whatever *extra* you want on top of that, not a replacement. No logind? Nothing suspends on lid-close on its own; put `spawn:systemctl suspend` or your init's equivalent here.
+A seat/session manager may already apply its own lid policy independently of TideWM — for example systemd-logind's or elogind's `HandleLidSwitch=` setting. Use `lid_close` for an extra action or when your setup has no such policy. `systemctl suspend` is systemd-specific; elogind users can use `loginctl suspend`, while Void/OpenRC setups commonly use a distro-appropriate command such as `zzz` or `s2ram`.
 
 ```
 switch_events {
-    lid_close = spawn:systemctl suspend
+    lid_close = spawn:zzz
     lid_open = spawn:brightnessctl s 50%
 }
 ```

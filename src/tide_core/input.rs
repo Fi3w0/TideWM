@@ -1037,7 +1037,7 @@ impl Smallvil {
                         },
                     );
                     pointer.frame(self);
-                    if self.udev_renderer.is_some() {
+                    if self.udev_gpu.is_some() {
                         self.request_redraw();
                     }
                     return;
@@ -1065,7 +1065,7 @@ impl Smallvil {
                         },
                     );
                     pointer.frame(self);
-                    if self.udev_renderer.is_some() {
+                    if self.udev_gpu.is_some() {
                         self.request_redraw();
                     }
                     return;
@@ -1134,7 +1134,7 @@ impl Smallvil {
                 // the cursor stays put; just close out the frame.
                 if locked {
                     pointer.frame(self);
-                    if self.udev_renderer.is_some() {
+                    if self.udev_gpu.is_some() {
                         self.request_redraw();
                     }
                     return;
@@ -1167,7 +1167,7 @@ impl Smallvil {
                     }
                     if drop_motion {
                         pointer.frame(self);
-                        if self.udev_renderer.is_some() {
+                        if self.udev_gpu.is_some() {
                             self.request_redraw();
                         }
                         return;
@@ -1212,7 +1212,7 @@ impl Smallvil {
                     });
                 }
 
-                if self.udev_renderer.is_some() {
+                if self.udev_gpu.is_some() {
                     self.request_redraw();
                 }
             }
@@ -1245,7 +1245,7 @@ impl Smallvil {
                         },
                     );
                     pointer.frame(self);
-                    if self.udev_renderer.is_some() {
+                    if self.udev_gpu.is_some() {
                         self.request_redraw();
                     }
                     return;
@@ -1273,7 +1273,7 @@ impl Smallvil {
                 // cursor.rs); under winit the host draws the real one, so
                 // marking every motion dirty there would just burn cycles
                 // recompositing a frame that looks identical either way.
-                if self.udev_renderer.is_some() {
+                if self.udev_gpu.is_some() {
                     self.request_redraw();
                 }
             }
@@ -1971,7 +1971,7 @@ impl Smallvil {
                     );
                 }
                 pointer.frame(self);
-                if self.udev_renderer.is_some() {
+                if self.udev_gpu.is_some() {
                     self.request_redraw();
                 }
             }
@@ -2017,7 +2017,7 @@ impl Smallvil {
                         ProximityState::Out => tool.proximity_out(event.time_msec()),
                     }
                 }
-                if self.udev_renderer.is_some() {
+                if self.udev_gpu.is_some() {
                     self.request_redraw();
                 }
             }

@@ -1,10 +1,8 @@
 //! Central compositor state and cross-subsystem coordination.
 
 use std::{
-    cell::RefCell,
     collections::{HashMap, HashSet},
     ffi::OsString,
-    rc::Rc,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -824,10 +822,10 @@ pub struct Smallvil {
     /// never fire.
     pub dmabuf_state: DmabufState,
     pub dmabuf_global: Option<DmabufGlobal>,
-    /// Shared with `backend::udev::DeviceData` so both the render loop and
-    /// `DmabufHandler::dmabuf_imported` (dispatched from client requests,
-    /// never re-entrantly with a render) can independently borrow it.
-    pub udev_renderer: Option<Rc<RefCell<GlesRenderer>>>,
+    /// Shared multi-GPU manager and selected primary render node. The udev
+    /// render loop and DMA-BUF handler borrow it only on the single calloop
+    /// thread, so imports cannot race a frame render.
+    pub(crate) udev_gpu: Option<crate::backend::udev::UdevGpu>,
     /// Only populated by the udev backend (`backend/udev.rs`), which is the
     /// only place VT switching means anything -- under winit a host
     /// compositor already owns that. `input.rs`'s VT-switch keybind
@@ -841,7 +839,7 @@ pub struct Smallvil {
 
     /// Loaded xcursor theme for `CursorImageStatus::Named`, only populated
     /// by the udev backend (`backend/udev.rs`, same pattern as `session`/
-    /// `udev_renderer` above). `None` under winit, and also under udev if no
+    /// `udev_gpu` above). `None` under winit, and also under udev if no
     /// theme could be loaded -- `cursor::fallback_glyph_element` covers that
     /// case, see `cursor.rs`.
     pub cursor_theme: Option<crate::cursor::Theme>,
@@ -3684,7 +3682,7 @@ impl Smallvil {
 
             dmabuf_state: DmabufState::new(),
             dmabuf_global: None,
-            udev_renderer: None,
+            udev_gpu: None,
             session: None,
             cursor_status: CursorImageStatus::default_named(),
             cursor_theme: None,
@@ -9662,12 +9660,12 @@ impl Smallvil {
     /// The timer only requests a redraw; the actual hide/show decision is
     /// re-derived fresh from `last_pointer_motion` at render time
     /// (`backend/udev.rs`), so a slightly-early/late fire can't itself
-    /// cause an incorrect result. No-op under winit (`udev_renderer` is
+    /// cause an incorrect result. No-op under winit (`udev_gpu` is
     /// `None` there) -- only the udev backend composites its own cursor at
     /// all.
     pub(crate) fn note_pointer_motion(&mut self) {
         self.last_pointer_motion = Instant::now();
-        if self.config.cursor_hide_after_ms <= 0 || self.udev_renderer.is_none() {
+        if self.config.cursor_hide_after_ms <= 0 || self.udev_gpu.is_none() {
             return;
         }
         if self.cursor_idle_timer_armed {

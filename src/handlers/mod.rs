@@ -16,7 +16,6 @@ use crate::Smallvil;
 // Wl Seat
 //
 
-use smithay::backend::renderer::ImportDma;
 use smithay::desktop::utils::surface_primary_scanout_output;
 use smithay::desktop::{PopupKind, PopupManager};
 use smithay::input::{pointer::PointerHandle, Seat, SeatHandler, SeatState};
@@ -188,7 +187,7 @@ delegate_output!(Smallvil);
 // Linux DMA-BUF
 //
 // Only relevant on the udev backend (see backend/udev.rs), the only place
-// that creates the global and populates `udev_renderer`. No global means
+// that creates the global and populates `udev_gpu`. No global means
 // no client ever binds it, so `dmabuf_imported` never fires under winit.
 //
 
@@ -203,11 +202,11 @@ impl DmabufHandler for Smallvil {
         dmabuf: smithay::backend::allocator::dmabuf::Dmabuf,
         notifier: ImportNotifier,
     ) {
-        let Some(renderer) = &self.udev_renderer else {
+        let Some(gpu) = &self.udev_gpu else {
             notifier.failed();
             return;
         };
-        if renderer.borrow_mut().import_dmabuf(&dmabuf, None).is_ok() {
+        if gpu.import_dmabuf(&dmabuf) {
             let _ = notifier.successful::<Smallvil>();
         } else {
             notifier.failed();

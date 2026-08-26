@@ -539,7 +539,6 @@ pub fn init_winit(
             state.popups.cleanup();
             state.refresh_popup_grab();
             state.cleanup_capture();
-            let _ = state.display_handle.flush_clients();
 
             // Re-arm at the host panel's reported frame period. The bounded
             // timer preserves the no-spin property while following the

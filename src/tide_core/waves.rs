@@ -43,7 +43,7 @@ pub(crate) enum Entry {
 fn block_is_keyed(keyword: &str) -> bool {
     matches!(
         keyword,
-        "input" | "touchpad" | "env" | "switch_events" | "mode" | "ripple_preset"
+        "input" | "touchpad" | "env" | "gpu" | "switch_events" | "mode" | "ripple_preset"
     )
 }
 
