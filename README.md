@@ -51,13 +51,17 @@ sudo dnf install pkgconf-pkg-config wayland-devel systemd-devel libinput-devel l
 
 # Debian / Ubuntu
 sudo apt install pkg-config libwayland-dev libudev-dev libinput-dev libxkbcommon-dev libegl1-mesa-dev libgbm-dev libdrm-dev libseat-dev
+
+# Gentoo (systemd or OpenRC -- TideWM only needs libseat/libudev, not systemd itself)
+sudo emerge --ask dev-util/pkgconf dev-libs/wayland dev-libs/libinput x11-libs/libxkbcommon media-libs/mesa x11-libs/libdrm sys-auth/seatd sys-fs/eudev
 ```
 
 ```bash
 git clone https://github.com/Fi3w0/TideWM.git
 cd TideWM
 # `--features screencast` enables the portal screen-share backend (off by
-# default: it pulls in the zbus async runtime and PipeWire threads).
+# default: it pulls in the zbus async runtime and PipeWire threads, and
+# needs `clang`/`libclang` on the machine for pipewire-sys's build step).
 # Without it, OBS/portal clients see no capture sources at all.
 cargo build --release --locked --features screencast
 cargo run --locked --features screencast   # opens nested inside your current session, safe to try

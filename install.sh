@@ -17,4 +17,10 @@ sudo install -Dm755 target/release/tidectl /usr/local/bin/tidectl
 sudo install -Dm644 share/wayland-sessions/tidewm.desktop /usr/share/wayland-sessions/tidewm.desktop
 sudo install -Dm644 share/icons/TideWM-logo-faithful-4k.png /usr/share/pixmaps/tidewm.png
 
+# The `screencast` feature built above is unreachable without these: they're
+# what tells xdg-desktop-portal TideWM implements ScreenCast itself, instead
+# of falling through to gtk and reporting no capture sources.
+sudo install -Dm644 share/xdg-desktop-portal/tidewm.portal /usr/share/xdg-desktop-portal/portals/tidewm.portal
+sudo install -Dm644 share/xdg-desktop-portal/tidewm-portals.conf /usr/share/xdg-desktop-portal/tidewm-portals.conf
+
 echo "Installed. Log out and pick TideWM in your display manager to use this build."

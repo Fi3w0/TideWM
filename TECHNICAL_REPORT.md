@@ -67,22 +67,29 @@ Current release: **0.90.104**, second major pre-release. 1.0 is intentionally re
 | `mesa` | `libEGL`, `libgbm` |
 | `libdrm` | |
 | `libseat` | The `seatd` package on most distros; also works against systemd-logind |
+| `clang`/`libclang` | Build-time only, and only if building with `--features screencast` -- `pipewire-sys`'s bindgen step needs it. `install.sh` always builds with this feature on, so it's needed for that path even if you don't care about screen-sharing. |
 
 ```bash
-# Arch
+# Arch (add `clang` if building with --features screencast, e.g. via install.sh)
 sudo pacman -S pkg-config wayland systemd-libs libinput libxkbcommon mesa libdrm seatd
 
-# Fedora
+# Fedora (add `clang` if building with --features screencast, e.g. via install.sh)
 sudo dnf install pkgconf-pkg-config wayland-devel systemd-devel libinput-devel \
     libxkbcommon-devel mesa-libEGL-devel mesa-libgbm-devel libdrm-devel libseat-devel
 
-# Debian / Ubuntu
+# Debian / Ubuntu (add `libclang-dev` if building with --features screencast, e.g. via install.sh)
 sudo apt install pkg-config libwayland-dev libudev-dev libinput-dev \
     libxkbcommon-dev libegl1-mesa-dev libgbm-dev libdrm-dev libseat-dev
 
-# openSUSE
+# openSUSE (add `clang` if building with --features screencast, e.g. via install.sh)
 sudo zypper install pkgconf-pkg-config wayland-devel libudev-devel libinput-devel \
     libxkbcommon-devel Mesa-libEGL-devel Mesa-libgbm-devel libdrm-devel libseat-devel
+
+# Gentoo (systemd or OpenRC profile -- sys-fs/eudev covers libudev on a
+# non-systemd profile; skip it if sys-apps/systemd is already merged. Add
+# sys-devel/clang if building with --features screencast, e.g. via install.sh)
+sudo emerge --ask dev-util/pkgconf dev-libs/wayland dev-libs/libinput \
+    x11-libs/libxkbcommon media-libs/mesa x11-libs/libdrm sys-auth/seatd sys-fs/eudev
 ```
 
 These package names are believed correct but only actually exercised on Arch (the maintainer's own distro) — if the build fails looking for one on your distro, that's exactly the kind of report worth [opening an issue](https://github.com/Fi3w0/TideWM/issues/new/choose) for. The library list above (not the package names) is what actually matters if you need to hunt one down yourself.
