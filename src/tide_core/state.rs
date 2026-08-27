@@ -986,6 +986,17 @@ pub struct Smallvil {
     /// in `detach_mapped_toplevel`, same lifecycle as `urgent`/`pinned`.
     pub window_tags: HashMap<WlSurface, HashSet<String>>,
 
+    /// Output-pin bindings (`rule { pin_output }`, `toggle-output-pin`),
+    /// keyed by surface, valued by connector name. No entry means "not
+    /// pinned" -- the common case costs nothing. Kept independent of
+    /// whether the named output is currently connected: a disconnect
+    /// leaves the entry alone (the window falls back like any other, but
+    /// still remembers where it belongs), and reconnecting that output
+    /// recalls the window via `recall_pinned_windows_to`. Cleared
+    /// per-surface in `detach_mapped_toplevel`, same lifecycle as
+    /// `window_tags`.
+    pub output_pins: HashMap<WlSurface, String>,
+
     /// (output, workspace) pairs that have already fired their
     /// `[[workspace_rule]] on_created_empty` command (see
     /// `apply_workspace_switch`). TideWM's numbered workspaces always
@@ -3707,6 +3718,7 @@ impl Smallvil {
             urgent_pulse_last: HashMap::new(),
             urgent_pulse_tick: Instant::now(),
             window_tags: HashMap::new(),
+            output_pins: HashMap::new(),
             workspace_created_empty_fired: HashSet::new(),
             focus_history: Vec::new(),
             cycling_focus: false,
@@ -8906,6 +8918,31 @@ impl Smallvil {
             self.toggle_floating(surface);
         }
         self.pinned.insert(surface.clone());
+        self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
+            surface: surface.clone(),
+        });
+        self.request_redraw();
+    }
+
+    /// Toggles `surface` pinned to whichever output it's currently
+    /// rendered on -- the interactive counterpart to `rule { pin_output }`.
+    /// Unlike `toggle_pin` (workspace-sticky, floating-only by necessity),
+    /// this has nothing to do with tiling state: a tiled window pins just
+    /// as well as a floating one, so nothing here changes float/tile
+    /// status. No-op if the window isn't currently rendered anywhere (not
+    /// mapped, or its output vanished).
+    pub fn toggle_output_pin(&mut self, surface: &WlSurface) {
+        if self.output_pins.remove(surface).is_some() {
+            self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
+                surface: surface.clone(),
+            });
+            self.request_redraw();
+            return;
+        }
+        let Some(output) = self.rendered_output_for_surface(surface) else {
+            return;
+        };
+        self.output_pins.insert(surface.clone(), output.name());
         self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
             surface: surface.clone(),
         });

@@ -1325,9 +1325,10 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 | `initial_title_regex` | regular expression, optional | Spawn-time-only regex title match. |
 | `at_startup` | bool, optional | Tri-state match on whether the window mapped within roughly 5 seconds of compositor launch (niri `at-startup`) — lets a rule target session-autostarted apps (`spawn`) differently from ones opened later by hand. |
 | `tag` | string or list, optional | Matches exactly (case-sensitive, unlike `app_id`) when the window carries any tag listed here (Hyprland `tag:name`, niri marks). Checked against the window's *current* tag set, not a spawn-time snapshot — a tag added mid-session (`tag-window`, `untag-window`, or another rule's `add_tag`) takes effect on the next resolve, the same live behavior `urgent` has. A window starts with no tags. |
-| `output` | string, optional | Initial output by connector name. Falls back to normal placement if unset or unconnected. |
 | `on_workspace` | integer, optional | Matches whichever workspace number the window currently lives on, on any output — the same "workspace number on any output" convention `workspace_gaps`/`workspace_rule` use. Re-checked live, like `tag`/`urgent`: moving a window on or off the matched workspace (`move-to-workspace`, `swap-workspaces-with-output`) takes effect immediately, and it's also resolved once at first map, after initial placement settles. `None` (a window not yet tracked, or under Ocean, which has no workspace concept) never matches. This is how a persistent, workspace-scoped window-rule override is built: unlike `workspace_rule { }`'s own border/rounding/shadow/layout base, a `rule { on_workspace = N }` block layers on top of `workspace_rule { }`'s base the same way an ordinary `app_id` rule already does. It can drive any *live* effect (`opacity`, `glass`, `viscosity`, `tag`, `shadow`/`rounding`/`border`, ...), but not a *placement* effect (`float`, `tile`, `size`, `position`, `workspace`, `output`, `pin_output`, `no_focus`) — placement is what decides which workspace a window lands on in the first place, so a rule can't match on the outcome of its own placement decision. |
 | `workspace` | integer, optional | Initial workspace, same numbering as `workspace:N` keybinds (including `0`, the scratchpad). This is a one-shot placement effect, not a match criterion — see `on_workspace` above for matching by current workspace. |
+| `output` | string, optional | Initial output by connector name. Falls back to normal placement if unset or unconnected. One-shot, like `workspace` — see `pin_output` below for a persistent binding. |
+| `pin_output` | string, optional | Pins the window to a specific output by connector name (niri's per-workspace `open-on-output` and Hyprland's `monitor:` windowrule are both spawn-time-only placement; TideWM's per-output-numbered-workspace model has no per-workspace equivalent to hang a persistent binding on, so this binds the *window* instead). Takes priority over `output` for initial placement, and is remembered in `Smallvil::output_pins` for the life of the window: if the pinned output disconnects, the window falls back like any other (see `migrate_output_windows`), but reconnecting that same output recalls it automatically. `swap-workspaces-with-output` is an explicit user action and moves everything on the swapped workspace, pins included — see the `toggle-output-pin` action below for the interactive equivalent. |
 | `float` | bool | Default `false`. |
 | `pseudo_tile` | bool | Default `false`. No-op unless the window ends up tiled; ignored if `float`/`pin` also apply. |
 | `pin` | bool | Default `false`. Implies `float`. |
@@ -1445,6 +1446,12 @@ rule {
     inactive_opacity = 0.8
 }
 
+rule {
+    # A monitoring dashboard always lives on the second monitor, even if
+    # it's unplugged and reconnected mid-session.
+    app_id = grafana
+    pin_output = "HDMI-A-1"
+}
 ```
 
 ### `layer_rule { }`
@@ -1563,6 +1570,7 @@ The same set of strings works after `bind ... =` at the top level or inside a `s
 - `toggle-floating`
 - `toggle-fullscreen`
 - `toggle-pin`
+- `toggle-output-pin` — pin/unpin the focused window to whichever output it's currently on, the runtime counterpart to `rule { pin_output }`. Unlike `toggle-pin` (workspace-sticky, floating-only), this has nothing to do with tiling state.
 - `toggle-pseudo-tile`
 - `toggle-scratchpad`
 - `move-to-scratchpad`

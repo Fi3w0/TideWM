@@ -1076,8 +1076,9 @@ impl Smallvil {
             .get(surface)
             .and_then(|entry| self.output_by_name(&entry.output))
             .or_else(|| {
-                rule.output
+                rule.pin_output
                     .as_deref()
+                    .or(rule.output.as_deref())
                     .and_then(|name| self.output_by_name(name))
             })
             .or_else(|| self.primary_output());
@@ -1088,6 +1089,14 @@ impl Smallvil {
             }
             return;
         };
+        // Recorded independent of whether `pin_output`'s named output was
+        // actually live above -- if it wasn't, this window just spawned on
+        // the fallback, but the pin remembers where it belongs so
+        // `recall_pinned_windows_to` can bring it home once that output
+        // connects.
+        if let Some(name) = &rule.pin_output {
+            self.output_pins.insert(surface.clone(), name.clone());
+        }
         // Parent dialogs and clients pinning either dimension float unless an
         // explicit tile rule overrides the heuristic.
         let implicit_float = !rule.tile
@@ -1483,6 +1492,7 @@ impl Smallvil {
         self.pseudo_tiled.remove(surface);
         self.urgent.remove(surface);
         self.window_tags.remove(surface);
+        self.output_pins.remove(surface);
         self.window_opacity.remove(surface);
         self.window_glass_modes.remove(surface);
         self.window_open_animations.remove(surface);

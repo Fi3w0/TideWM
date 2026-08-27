@@ -742,6 +742,12 @@ pub enum Action {
     /// this is deliberately not.
     ResizeToMonitor,
     TogglePin,
+    /// Pins/unpins the focused window to whichever output it's currently
+    /// on (the interactive counterpart to `rule { pin_output }`) -- see
+    /// `Smallvil::toggle_output_pin`. Unlike `TogglePin` (workspace-sticky,
+    /// floating-only), this has nothing to do with tiling state: a tiled
+    /// window pins just as well as a floating one.
+    ToggleOutputPin,
     /// `None` is the classic single scratchpad; `Some(name)` a named one
     /// (Hyprland's named special workspaces) -- see
     /// `Smallvil::scratchpad_workspace`.
@@ -1617,6 +1623,9 @@ impl Config {
             if rule.output.is_some() {
                 effective.output = rule.output.clone();
             }
+            if rule.pin_output.is_some() {
+                effective.pin_output = rule.pin_output.clone();
+            }
             effective.float |= rule.float;
             effective.pseudo_tile |= rule.pseudo_tile;
             effective.pin |= rule.pin;
@@ -2464,6 +2473,31 @@ pub struct WindowRule {
     /// your logs). Falls back to the usual placement logic if unset, or if
     /// no output with this name is currently connected.
     pub output: Option<String>,
+    /// Persistently pins the window to an output by connector name.
+    /// Neither niri (`window-rule { open-on-output }`) nor Hyprland
+    /// (`windowrule = monitor:`) actually persists this at the window
+    /// level -- both are spawn-time-only placement, the same thing
+    /// `output` above already gives TideWM. niri's real *persistent*
+    /// binding is a named workspace's `open-on-output`, which has nowhere
+    /// to hang in TideWM's per-output-numbered-workspace model (a
+    /// workspace number already exists independently on every output).
+    /// This is TideWM's own adaptation, at the window instead: takes
+    /// priority over `output` for initial placement (see `map_toplevel`)
+    /// and is remembered in `Smallvil::output_pins` for the surface's
+    /// whole lifetime, independent of whether the named output is
+    /// currently connected. A disconnect still falls the window back like
+    /// any other window on that output (`migrate_output_windows` can't do
+    /// anything else -- the output is physically gone), but reconnecting
+    /// the same output recalls it (see `Smallvil::recall_pinned_windows_to`,
+    /// called from the udev backend's output-added path alongside the
+    /// existing `adopt_orphaned_output_windows` -- winit's one simulated
+    /// output never hotplugs). See the `toggle-output-pin` action
+    /// for the interactive equivalent, and the DOCUMENTATION.md `rule { }`
+    /// entry for the explicit `swap-workspaces-with-output` exception:
+    /// that's an explicit user action that moves everything on the swapped
+    /// workspace, pins included, deliberately left alone rather than given
+    /// special per-window exemption logic.
+    pub pin_output: Option<String>,
     pub float: bool,
     /// No-op unless the window ends up tiled -- pseudo-tiling only has
     /// meaning as a rect override on a real tile, same as the interactive
@@ -7676,6 +7710,7 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                     Err(_) => tracing::warn!(value, "Expected an on_workspace number, ignoring"),
                 },
                 "output" => rule.output = Some(value.clone()),
+                "pin_output" => rule.pin_output = Some(value.clone()),
                 "float" => set_bool(&mut rule.float, key, value),
                 "pseudo_tile" => set_bool(&mut rule.pseudo_tile, key, value),
                 "pin" => set_bool(&mut rule.pin, key, value),
@@ -8435,6 +8470,7 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "toggle-border-fullscreen" | "toggle-maximize" => Some(Action::ToggleBorderFullscreen),
         "resize-to-monitor" => Some(Action::ResizeToMonitor),
         "toggle-pin" => Some(Action::TogglePin),
+        "toggle-output-pin" => Some(Action::ToggleOutputPin),
         "toggle-scratchpad" => Some(Action::ToggleScratchpad(None)),
         "move-to-scratchpad" => Some(Action::MoveToScratchpad(None)),
         "toggle-pseudo-tile" => Some(Action::TogglePseudoTile),
@@ -8899,6 +8935,35 @@ mod tests {
         assert!(parse_action("tag-window:").is_none());
         assert!(parse_action("untag-window:").is_none());
         assert!(parse_action("toggle-tag:").is_none());
+    }
+
+    #[test]
+    fn toggle_output_pin_action_parses() {
+        assert!(matches!(
+            parse_action("toggle-output-pin"),
+            Some(Action::ToggleOutputPin)
+        ));
+    }
+
+    #[test]
+    fn window_rule_pin_output_parses_and_resolves_last_match_wins() {
+        let rule =
+            lower_window_rule_block(&[waves::Entry::Assign("pin_output".into(), "DP-1".into())]);
+        assert_eq!(rule.pin_output.as_deref(), Some("DP-1"));
+
+        let entries = wave_entries(
+            "rule {\n\
+             app_id = grafana\n\
+             pin_output = \"DP-1\"\n\
+             }\n\
+             rule {\n\
+             app_id = grafana\n\
+             pin_output = \"HDMI-A-1\"\n\
+             }\n",
+        );
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        let resolved = config.resolve_window_rules(facts_for("grafana"));
+        assert_eq!(resolved.pin_output.as_deref(), Some("HDMI-A-1"));
     }
 
     #[test]

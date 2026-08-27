@@ -2737,6 +2737,12 @@ impl Smallvil {
                     self.toggle_pin(&surface);
                 }
             }
+            Action::ToggleOutputPin => {
+                let focused = self.focused_window_surface();
+                if let Some(surface) = focused {
+                    self.toggle_output_pin(&surface);
+                }
+            }
             Action::TogglePseudoTile => {
                 let focused = self.focused_window_surface();
                 if let Some(surface) = focused {
