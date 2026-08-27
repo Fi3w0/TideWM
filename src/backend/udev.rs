@@ -1456,6 +1456,7 @@ fn create_surface(
     let global = output.create_global::<Smallvil>(display_handle);
     state.space.map_output(&output, position);
     state.adopt_orphaned_output_windows(&output.name());
+    state.recall_pinned_windows_to(&output.name());
     #[cfg(feature = "screencast")]
     if let Some(screencast) = &state.screencast {
         screencast.refresh_outputs(state.space.outputs());

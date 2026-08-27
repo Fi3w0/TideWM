@@ -9181,6 +9181,177 @@ impl Smallvil {
         }
     }
 
+    /// The hotplug half of output pinning (`rule { pin_output }`,
+    /// `toggle-output-pin`): brings back any window pinned to `to_output`
+    /// that's currently sitting somewhere else because its own output was
+    /// disconnected when it last mapped or moved. A pin is never cleared by
+    /// `migrate_output_windows` falling a window back -- it's the only
+    /// memory of where the window belongs -- so this is what actually acts
+    /// on that memory once the named output reconnects. Distinct from
+    /// `adopt_orphaned_output_windows` just below: that one recovers
+    /// windows stranded on a now-dead output name onto *whatever* output
+    /// next appears; this one is selective, pulling only pinned windows
+    /// toward the specific output their pin names. Call order between the
+    /// two doesn't matter -- they act on disjoint window sets in the
+    /// common case. Called from `backend/udev.rs`'s output-added path,
+    /// same single call site `adopt_orphaned_output_windows` has -- the
+    /// winit backend's one simulated output never hotplugs (see its own
+    /// `output_count` comment), so there's nothing to recall there.
+    pub(crate) fn recall_pinned_windows_to(&mut self, to_output_name: &str) {
+        let Some(to_output) = self.output_by_name(to_output_name) else {
+            return;
+        };
+        let displaced: Vec<WlSurface> = self
+            .output_pins
+            .iter()
+            .filter(|(surface, pinned)| {
+                pinned.as_str() == to_output_name
+                    && self
+                        .layout
+                        .output_of(surface)
+                        .map(|current| current != to_output_name)
+                        .unwrap_or_else(|| {
+                            self.floating_workspace
+                                .get(*surface)
+                                .is_some_and(|tag| tag.output != to_output_name)
+                        })
+            })
+            .map(|(surface, _)| surface.clone())
+            .collect();
+        if displaced.is_empty() {
+            return;
+        }
+        for surface in &displaced {
+            tracing::info!(output = to_output_name, "Recalling output-pinned window");
+            self.move_window_to_output(surface, &to_output);
+        }
+        self.retile();
+    }
+
+    /// Moves exactly `surface` to `to`, wherever it currently lives --
+    /// the single-surface counterpart to `migrate_output_windows`'s bulk
+    /// per-output move, reusing the same idioms (tiled: `Layouts::remove`
+    /// and `insert`, letting the caller's `retile()` reconcile Space the same
+    /// way `move_to_workspace` does; floating: retag + translate by the
+    /// output-origin delta + explicit map/unmap; fullscreen/maximized:
+    /// `move_to_output` plus the same per-output exclusivity demotion
+    /// `migrate_output_windows`/`swap_workspaces` already take). Used by
+    /// `recall_pinned_windows_to`. No-op if `surface` isn't currently tiled
+    /// or floating anywhere, or is already on `to`. Acknowledged gap: unlike
+    /// `migrate_output_windows`, this doesn't re-send a fullscreen client's
+    /// configure at the destination output's exact size -- a recalled
+    /// fullscreen-pinned window keeps its old buffer size until some later
+    /// event (focus change, an explicit fullscreen toggle) triggers a
+    /// resize. Narrow enough (pinned *and* fullscreen *and* mid-recall) not
+    /// to be worth the extra plumbing here; revisit if it's ever hit for
+    /// real.
+    fn move_window_to_output(&mut self, surface: &WlSurface, to: &Output) {
+        let to_name = to.name();
+        let from_name = self
+            .layout
+            .output_of(surface)
+            .map(str::to_string)
+            .or_else(|| {
+                self.floating_workspace
+                    .get(surface)
+                    .map(|tag| tag.output.clone())
+            });
+        let Some(from_name) = from_name else {
+            return;
+        };
+        if from_name == to_name {
+            return;
+        }
+        let from_geometry = self
+            .output_by_name(&from_name)
+            .and_then(|output| self.space.output_geometry(&output));
+        let to_geometry = self.space.output_geometry(to);
+        let to_bounds = self.output_tiling_area(to).or(to_geometry);
+        let delta = match (from_geometry, to_geometry) {
+            (Some(from), Some(geo)) => Some(geo.loc - from.loc),
+            _ => None,
+        };
+
+        // Fullscreen is exclusive per output -- demote whatever's already
+        // fullscreen on the destination first, same precaution
+        // `migrate_output_windows`/`swap_workspaces` take.
+        if self.fullscreen.contains_key(surface) {
+            let destination_owner = self
+                .fullscreen
+                .iter()
+                .find(|(other, entry)| *other != surface && entry.output == to_name)
+                .map(|(other, _)| other.clone());
+            if let Some(owner) = destination_owner {
+                let toplevel = self
+                    .mapped_toplevel_window(&owner)
+                    .and_then(|window| window.toplevel().cloned());
+                if let Some(toplevel) = toplevel {
+                    self.do_unfullscreen(&toplevel);
+                } else {
+                    self.fullscreen.remove(&owner);
+                }
+            }
+        }
+        if let Some(entry) = self.fullscreen.get_mut(surface) {
+            entry.move_to_output(to_name.clone(), delta);
+            if let (Some(rect), Some(bounds)) = (&mut entry.restore_rect, to_bounds) {
+                *rect = clamp_rect_visible(*rect, bounds);
+            }
+        }
+        if let Some(entry) = self.maximized.get_mut(surface) {
+            entry.move_to_output(to_name.clone(), delta);
+            if let Some(bounds) = to_bounds {
+                entry.restore_rect = clamp_rect_visible(entry.restore_rect, bounds);
+            }
+        }
+
+        if let Some(window) = self.layout.window_of(surface) {
+            let workspace = self
+                .layout
+                .workspace_of(surface)
+                .unwrap_or_else(|| self.layout.active_workspace(&from_name));
+            self.layout.remove(surface);
+            self.layout
+                .insert(&to_name, workspace, window.clone(), None);
+            if workspace == self.layout.active_workspace(&to_name) {
+                self.set_window_fractional_scale(&window, to);
+            } else {
+                self.space.unmap_elem(&window);
+            }
+        } else if self.floating_workspace.contains_key(surface) {
+            let was_visible = self.window_is_visible(surface);
+            let live_rect = was_visible
+                .then(|| {
+                    let window = self.floating_workspace.get(surface)?.window.clone();
+                    self.space.element_geometry(&window)
+                })
+                .flatten();
+            let (window, workspace, loc) = {
+                let tag = self.floating_workspace.get_mut(surface).unwrap();
+                if !self.fullscreen.contains_key(surface) && !self.maximized.contains_key(surface) {
+                    if let Some(rect) = live_rect {
+                        tag.rect = rect;
+                    }
+                }
+                tag.output = to_name.clone();
+                if let Some(delta) = delta {
+                    tag.rect.loc += delta;
+                }
+                if let Some(bounds) = to_bounds {
+                    tag.rect = clamp_rect_visible(tag.rect, bounds);
+                }
+                (tag.window.clone(), tag.workspace, tag.rect.loc)
+            };
+            if self.pinned.contains(surface) || workspace == self.layout.active_workspace(&to_name)
+            {
+                self.space.map_element(window.clone(), loc, false);
+                self.set_window_fractional_scale(&window, to);
+            } else {
+                self.space.unmap_elem(&window);
+            }
+        }
+    }
+
     /// Adopt durable ownership left behind by a zero-output interval. A
     /// connector may return under a different kernel name (for example after
     /// moving the cable), so waiting for the old name would strand the whole
