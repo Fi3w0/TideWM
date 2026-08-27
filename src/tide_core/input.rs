@@ -13,6 +13,7 @@ use smithay::{
             TouchEvent,
         },
         session::Session,
+        winit::WinitVirtualDevice,
     },
     desktop::layer_map_for_output,
     input::{
@@ -27,6 +28,7 @@ use smithay::{
             DownEvent as TouchDownData, MotionEvent as TouchMotionData, UpEvent as TouchUpData,
         },
     },
+    output::Output,
     reexports::input::{
         AccelProfile, ClickMethod, Device as InputDevice, DeviceConfigResult, DragLockState,
         ScrollMethod,
@@ -42,10 +44,13 @@ use smithay::{
     },
 };
 
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use crate::{
-    config::{Action, Direction, Keybind, Mods, TouchpadConfig},
+    config::{Action, Direction, InputDeviceConfig, Keybind, Mods, TouchpadConfig},
     grabs::{
         resize_grab::ResizeEdge, CascadeResizeGrab, GrabCompletion, MoveSurfaceGrab, OceanPanGrab,
         OceanTileMoveGrab, ResizeSurfaceGrab, TileMoveGrab, TileResizeGrab, TileWindowResizeGrab,
@@ -56,6 +61,25 @@ use crate::{
 
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
+
+/// Lets the shared input path query the udev-only mapping cache without
+/// allocating a device id/name on every event. The nested backend has one
+/// simulated output and deliberately keeps its existing behavior.
+pub(crate) trait MappedInputDevice: SmithayInputDevice {
+    fn configured_output(&self, mappings: &HashMap<InputDevice, Output>) -> Option<Output>;
+}
+
+impl MappedInputDevice for InputDevice {
+    fn configured_output(&self, mappings: &HashMap<InputDevice, Output>) -> Option<Output> {
+        mappings.get(self).cloned()
+    }
+}
+
+impl MappedInputDevice for WinitVirtualDevice {
+    fn configured_output(&self, _mappings: &HashMap<InputDevice, Output>) -> Option<Output> {
+        None
+    }
+}
 
 /// Resolve one key press from an authoritative Waves table. When a user has
 /// both `H` and `P+H`, holding P must pick the more specific chord regardless
@@ -202,8 +226,35 @@ pub fn apply_touchpad_config(cfg: &TouchpadConfig, device: &mut InputDevice) {
 
 fn warn_on_config_err(result: DeviceConfigResult, setting: &str) {
     if let Err(e) = result {
-        tracing::warn!(setting, error = ?e, "Failed to apply touchpad setting");
+        tracing::warn!(setting, error = ?e, "Failed to apply libinput setting");
     }
+}
+
+fn apply_device_calibration(
+    config: &InputDeviceConfig,
+    device: &mut InputDevice,
+    reset_if_unset: bool,
+) {
+    let matrix = config.calibration_matrix.or_else(|| {
+        reset_if_unset.then(|| {
+            device
+                .config_calibration_default_matrix()
+                .unwrap_or([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+        })
+    });
+    if let Some(matrix) = matrix {
+        warn_on_config_err(
+            device.config_calibration_set_matrix(matrix),
+            "calibration_matrix",
+        );
+    }
+}
+
+fn absolute_position_on_output(
+    position: Point<f64, Logical>,
+    geometry: Rectangle<i32, Logical>,
+) -> Point<f64, Logical> {
+    position + geometry.loc.to_f64()
 }
 
 /// Hit-tests `point` (already known to be inside `rect`, since callers only
@@ -306,6 +357,57 @@ fn completed_swipe_direction(delta_x: f64, delta_y: f64, threshold: f64) -> Opti
 }
 
 impl Smallvil {
+    pub(crate) fn register_input_device(&mut self, device: &mut InputDevice) {
+        apply_touchpad_config(&self.config.input.touchpad, device);
+        let device_config = self.config.input.resolve_device(device.name().as_ref());
+        apply_device_calibration(&device_config, device, false);
+        if !self.known_input_devices.contains(device) {
+            self.known_input_devices.push(device.clone());
+        }
+        self.refresh_input_device_outputs();
+    }
+
+    pub(crate) fn unregister_input_device(&mut self, device: &InputDevice) {
+        self.known_input_devices.retain(|known| known != device);
+        self.input_device_outputs.remove(device);
+    }
+
+    pub(crate) fn reapply_input_device_config(&mut self, previous_rules: &[InputDeviceConfig]) {
+        let current_rules = &self.config.input.devices;
+        let touchpad = &self.config.input.touchpad;
+        for device in &mut self.known_input_devices {
+            apply_touchpad_config(touchpad, device);
+            let name = device.name().into_owned();
+            let previous = InputDeviceConfig::resolve(previous_rules, &name);
+            let current = InputDeviceConfig::resolve(current_rules, &name);
+            let reset =
+                previous.calibration_matrix.is_some() && current.calibration_matrix.is_none();
+            apply_device_calibration(&current, device, reset);
+        }
+        self.refresh_input_device_outputs();
+    }
+
+    pub(crate) fn refresh_input_device_outputs(&mut self) {
+        let mut mappings = HashMap::new();
+        for device in &self.known_input_devices {
+            let name = device.name();
+            let config = self.config.input.resolve_device(name.as_ref());
+            let Some(output_name) = config.map_to_output.as_deref() else {
+                continue;
+            };
+            if let Some(output) = self.output_by_name(output_name) {
+                mappings.insert(device.clone(), output);
+            } else {
+                tracing::debug!(
+                    device = %name,
+                    output = output_name,
+                    "Configured input output is not connected; using the ordinary fallback"
+                );
+            }
+        }
+        self.input_device_outputs = mappings;
+    }
+
     fn run_workspace_swipe(&mut self, delta_x: f64, delta_y: f64, threshold: f64) {
         if let Some(output) = self.primary_output() {
             let current = self.layout.active_workspace(&output.name());
@@ -546,20 +648,52 @@ impl Smallvil {
         Some(completion)
     }
 
-    /// Maps a touch (or any other absolute-position) event's normalized
-    /// coordinates onto logical space, the same way `PointerMotionAbsolute`
-    /// already does just below -- first output, no per-device output
-    /// binding. A real touch panel is virtually always the built-in one, so
-    /// this deliberately matches the existing absolute-pointer convention
-    /// rather than anvil's own "prefer eDP, else first" heuristic; revisit
-    /// if a real multi-touch-panel setup ever needs per-device binding.
+    fn absolute_location<I: InputBackend, E: AbsolutePositionEvent<I>>(
+        &self,
+        event: &E,
+    ) -> Option<Point<f64, Logical>>
+    where
+        I::Device: MappedInputDevice,
+    {
+        let output = event
+            .device()
+            .configured_output(&self.input_device_outputs)
+            .filter(|output| self.space.output_geometry(output).is_some())
+            .or_else(|| self.space.outputs().next().cloned())?;
+        let geometry = self.space.output_geometry(&output)?;
+        Some(absolute_position_on_output(
+            event.position_transformed(geometry.size),
+            geometry,
+        ))
+    }
+
+    fn clamp_input_device_position<D: MappedInputDevice>(
+        &self,
+        device: &D,
+        position: Point<f64, Logical>,
+    ) -> Point<f64, Logical> {
+        if let Some(geometry) = device
+            .configured_output(&self.input_device_outputs)
+            .and_then(|output| self.space.output_geometry(&output))
+        {
+            return crate::state::nearest_point_in_output_rects(position, [geometry])
+                .unwrap_or(position);
+        }
+        self.clamp_to_outputs(position)
+    }
+
+    /// Maps a touch (or any other absolute-position) event onto the output
+    /// cached for its libinput device. An unconfigured device, a disconnected
+    /// target, and the nested winit device all retain the old first-output
+    /// behavior.
     fn touch_location<I: InputBackend, E: AbsolutePositionEvent<I>>(
         &self,
         event: &E,
-    ) -> Option<Point<f64, Logical>> {
-        let output = self.space.outputs().next()?;
-        let output_geo = self.space.output_geometry(output)?;
-        Some(event.position_transformed(output_geo.size) + output_geo.loc.to_f64())
+    ) -> Option<Point<f64, Logical>>
+    where
+        I::Device: MappedInputDevice,
+    {
+        self.absolute_location(event)
     }
 
     /// Feeds this keystroke to the accessibility keyboard monitor (a
@@ -658,7 +792,10 @@ impl Smallvil {
         }
     }
 
-    pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) {
+    pub(crate) fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>)
+    where
+        I::Device: MappedInputDevice,
+    {
         // Device topology changes aren't user activity; every other variant
         // reaching this function is a real keyboard/pointer/touch event.
         if !matches!(
@@ -1016,6 +1153,7 @@ impl Smallvil {
             }
             InputEvent::PointerMotion { event, .. } => {
                 self.note_pointer_motion();
+                let device = event.device();
 
                 // The screencast source picker is compositor-owned modal
                 // chrome: while it is open, motion only moves the real
@@ -1025,7 +1163,10 @@ impl Smallvil {
                 #[cfg(feature = "screencast")]
                 if self.screencast_picker.is_some() {
                     let pointer = self.seat.get_pointer().unwrap();
-                    let new_loc = self.clamp_to_outputs(pointer.current_location() + event.delta());
+                    let new_loc = self.clamp_input_device_position(
+                        &device,
+                        pointer.current_location() + event.delta(),
+                    );
                     self.handle_screencast_picker_motion((new_loc.x, new_loc.y));
                     pointer.motion(
                         self,
@@ -1053,7 +1194,10 @@ impl Smallvil {
                 // target) so there's visual feedback while aiming a click.
                 if self.minimap_peek.is_some() {
                     let pointer = self.seat.get_pointer().unwrap();
-                    let new_loc = self.clamp_to_outputs(pointer.current_location() + event.delta());
+                    let new_loc = self.clamp_input_device_position(
+                        &device,
+                        pointer.current_location() + event.delta(),
+                    );
                     self.update_minimap_pointer(new_loc);
                     pointer.motion(
                         self,
@@ -1140,7 +1284,8 @@ impl Smallvil {
                     return;
                 }
 
-                let new_loc = self.clamp_to_outputs(current_loc + event.delta());
+                let new_loc =
+                    self.clamp_input_device_position(&device, current_loc + event.delta());
 
                 // Confined pointer: drop events that would leave either the
                 // constraint's region (if specified) or the surface itself
@@ -1223,14 +1368,9 @@ impl Smallvil {
                 // delivers a final motion event after outputs are already
                 // torn down. Nothing sensible to do with it; drop it rather
                 // than panic on the `Space` lookups below.
-                let Some(output) = self.space.outputs().next() else {
+                let Some(pos) = self.absolute_location(&event) else {
                     return;
                 };
-                let Some(output_geo) = self.space.output_geometry(output) else {
-                    return;
-                };
-
-                let pos = event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
 
                 if self.minimap_peek.is_some() {
                     let pointer = self.seat.get_pointer().unwrap();
@@ -3200,6 +3340,25 @@ mod tests {
 
     fn rect() -> Rectangle<i32, Logical> {
         Rectangle::new(Point::from((100, 100)), Size::from((200, 200)))
+    }
+
+    #[test]
+    fn absolute_device_position_uses_target_output_size_and_offset() {
+        let output = Rectangle::new((-1920, 240).into(), (1920, 1080).into());
+        let local = Point::from((960.0, 540.0));
+        assert_eq!(
+            absolute_position_on_output(local, output),
+            Point::from((-960.0, 780.0))
+        );
+    }
+
+    #[test]
+    fn mapped_relative_position_clamps_to_only_the_target_output() {
+        let output = Rectangle::new((2560, -100).into(), (1280, 720).into());
+        assert_eq!(
+            crate::state::nearest_point_in_output_rects(Point::from((100.0, 900.0)), [output],),
+            Some(Point::from((2560.0, 620.0_f64.next_down())))
+        );
     }
 
     #[test]

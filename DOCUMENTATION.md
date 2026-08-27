@@ -67,7 +67,7 @@ The line-based grammar is gone; Wave is the only grammar. Old configs were migra
 **Multi-file:** `include "path.wave"` as its own statement, repeatable (one per line), in any file (the main one, or one it includes). Each path resolves relative to the file that lists it; `~/` expands to your home directory. Rules:
 
 - `input { }`, `input { touchpad { } }`, `env { }`, `gpu { }`, `switch_events { }`, and a given `submap <name> { }` merge field-by-field across files — the same key set from two files combines rather than one replacing the other.
-- `output <name> { }`, `rule { }`, and `layer_rule { }` blocks accumulate — entries from every file all end up present.
+- `input { device <name> { } }`, `output <name> { }`, `rule { }`, and `layer_rule { }` blocks accumulate — entries from every file all end up present. Later device blocks with the same exact name replace only the fields they set.
 - A later `include` overlays an earlier one.
 - **The including file's own keys always win over anything it includes.** If `config.wave` includes `overrides.wave`, and both set `gaps`, `config.wave`'s own value wins — put an override directly in the file doing the including, not in a file you list last.
 - A broken include (missing, unreadable, unparseable, or a cycle) is skipped with a warning; it doesn't fail the whole config.
@@ -1182,6 +1182,30 @@ env {
 | `xkb_options` | string | unset | xkbcommon options, e.g. `grp:alt_shift_toggle` to cycle multiple layouts. |
 | `xkb_model` | string | unset | xkbcommon keyboard model. |
 | `xkb_rules` | string | unset | xkbcommon rules file. |
+
+### `input { device <name> { } }`
+
+Per-device output mapping and calibration are available on the standalone udev backend. The block header is the exact, case-sensitive descriptive name reported by `libinput list-devices`. This follows Hyprland's exact device-name selection while using niri's `map-to-output` and six-number calibration semantics. Multiple matching blocks fold in config order, with the last value for each field winning.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `map_to_output` | output name | unset | Maps absolute pointer, touch, and tablet coordinates into that output's logical geometry. Relative devices are confined to the same output. If the output is disconnected, the device temporarily uses TideWM's ordinary fallback and binds again when the output returns. |
+| `calibration_matrix` | list of 6 finite floats | unset | Sends `[a, b, c, d, e, f]` to libinput as the first two rows of its affine calibration matrix: `x' = ax + by + c`, `y' = dx + ey + f`. Removing the key on reload restores the device's libinput/udev default matrix. |
+
+```
+input {
+    device "ELAN Touchscreen" {
+        map_to_output = eDP-1
+        calibration_matrix = [1, 0, 0, 0, 1, 0]
+    }
+
+    device "Wacom Intuos Pro M Pen" {
+        map_to_output = DP-1
+    }
+}
+```
+
+An unmatched device takes the exact input path it used before these blocks existed. Mapping is cached on config/device/output changes, so motion does not allocate names or scan outputs per event. TideWM still exposes one implicit Wayland seat; independent multi-seat routing and per-seat cursor/idle policy are not implemented.
 
 ### `input { touchpad { } }`
 

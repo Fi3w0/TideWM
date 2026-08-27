@@ -2090,6 +2090,10 @@ pub struct InputConfig {
     pub xkb_variant: String,
     pub xkb_options: Option<String>,
     pub touchpad: TouchpadConfig,
+    /// Per-libinput-device overrides selected by the exact descriptive
+    /// device name. Matching blocks fold in config order, so a later block
+    /// can replace one field without repeating the other.
+    pub devices: Vec<InputDeviceConfig>,
 }
 
 impl Default for InputConfig {
@@ -2105,6 +2109,7 @@ impl Default for InputConfig {
             xkb_variant: String::new(),
             xkb_options: None,
             touchpad: TouchpadConfig::default(),
+            devices: Vec::new(),
         }
     }
 }
@@ -2123,6 +2128,41 @@ impl InputConfig {
             options: self.xkb_options.clone(),
         }
     }
+
+    pub(crate) fn resolve_device(&self, name: &str) -> InputDeviceConfig {
+        InputDeviceConfig::resolve(&self.devices, name)
+    }
+}
+
+impl InputDeviceConfig {
+    pub(crate) fn resolve(devices: &[Self], name: &str) -> Self {
+        let mut resolved = InputDeviceConfig {
+            name: name.to_string(),
+            ..Default::default()
+        };
+        for device in devices.iter().filter(|device| device.name == name) {
+            if let Some(output) = &device.map_to_output {
+                resolved.map_to_output = Some(output.clone());
+            }
+            if let Some(matrix) = device.calibration_matrix {
+                resolved.calibration_matrix = Some(matrix);
+            }
+        }
+        resolved
+    }
+}
+
+/// One exact-name libinput device selector inside `input { }`.
+///
+/// Output mapping is a compositor coordinate transform. Calibration is
+/// handed to libinput, which applies the six-element affine matrix before
+/// TideWM receives absolute events. Both are opt-in so an unmatched or
+/// unconfigured device keeps the existing input path unchanged.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct InputDeviceConfig {
+    pub name: String,
+    pub map_to_output: Option<String>,
+    pub calibration_matrix: Option<[f32; 6]>,
 }
 
 /// Global libinput touchpad settings (udev backend only -- winit's nested
@@ -2140,7 +2180,7 @@ impl InputConfig {
 /// the upgrade path.
 ///
 /// Re-applied to every already-known touchpad on a config reload too
-/// (`Smallvil::known_touchpads`, populated/pruned from `DeviceAdded`/
+/// (`Smallvil::known_input_devices`, populated/pruned from `DeviceAdded`/
 /// `DeviceRemoved` in `backend/udev.rs`), so editing this section reaches
 /// a laptop's built-in touchpad, not just one plugged in after the edit.
 #[derive(Debug, Clone, Default)]
@@ -5197,9 +5237,76 @@ fn apply_input_block(input: &mut InputConfig, body: &[waves::Entry]) {
             waves::Entry::Block(keyword, _, touchpad_body) if keyword == "touchpad" => {
                 apply_touchpad_block(&mut input.touchpad, touchpad_body);
             }
+            waves::Entry::Block(keyword, header, device_body) if keyword == "device" => {
+                if let Some(device) = lower_input_device_block(header, device_body) {
+                    input.devices.push(device);
+                }
+            }
             _ => tracing::warn!("Unexpected entry in `input` block, ignoring"),
         }
     }
+}
+
+fn lower_input_device_block(header: &str, body: &[waves::Entry]) -> Option<InputDeviceConfig> {
+    let name = header.trim();
+    if name.is_empty() {
+        tracing::warn!("An `input.device` block needs a libinput device name");
+        return None;
+    }
+
+    let mut device = InputDeviceConfig {
+        name: name.to_string(),
+        ..Default::default()
+    };
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!(
+                device = name,
+                "Unexpected entry in `input.device`, ignoring"
+            );
+            continue;
+        };
+        match key.as_str() {
+            "map_to_output" => {
+                if value.trim().is_empty() {
+                    tracing::warn!(device = name, "map_to_output cannot be empty, ignoring");
+                } else {
+                    device.map_to_output = Some(value.clone());
+                }
+            }
+            "calibration_matrix" => match parse_calibration_matrix(value) {
+                Some(matrix) => device.calibration_matrix = Some(matrix),
+                None => tracing::warn!(
+                    device = name,
+                    value,
+                    "calibration_matrix needs exactly six finite numbers, ignoring"
+                ),
+            },
+            other => tracing::warn!(
+                device = name,
+                key = %other,
+                "Unknown key in `input.device`, ignoring"
+            ),
+        }
+    }
+    Some(device)
+}
+
+fn parse_calibration_matrix(value: &str) -> Option<[f32; 6]> {
+    let values = parse_list_value(value)?;
+    if values.len() != 6 {
+        return None;
+    }
+
+    let mut matrix = [0.0; 6];
+    for (slot, value) in matrix.iter_mut().zip(values) {
+        let value = value.parse::<f32>().ok()?;
+        if !value.is_finite() {
+            return None;
+        }
+        *slot = value;
+    }
+    Some(matrix)
 }
 
 fn apply_touchpad_block(touchpad: &mut TouchpadConfig, body: &[waves::Entry]) {
@@ -9381,6 +9488,73 @@ mod tests {
         );
         assert!(touchpad.accel_speed.is_none());
         assert!(touchpad.workspace_swipe_distance.is_none());
+    }
+
+    #[test]
+    fn input_device_blocks_parse_exact_names_output_and_calibration() {
+        let raw = lower_entries(&wave_entries(
+            "input {\n\
+               device \"ELAN Touchscreen\" {\n\
+                 map_to_output = eDP-1\n\
+                 calibration_matrix = [0, -1, 1, 1, 0, 0]\n\
+               }\n\
+             }",
+        ));
+
+        let elan = raw.input.resolve_device("ELAN Touchscreen");
+        assert_eq!(elan.map_to_output.as_deref(), Some("eDP-1"));
+        assert_eq!(
+            elan.calibration_matrix,
+            Some([0.0, -1.0, 1.0, 1.0, 0.0, 0.0])
+        );
+        let differently_cased = raw.input.resolve_device("elan touchscreen");
+        assert!(differently_cased.map_to_output.is_none());
+        assert!(differently_cased.calibration_matrix.is_none());
+    }
+
+    #[test]
+    fn input_device_blocks_fold_fields_and_reject_malformed_matrices() {
+        let mut input = InputConfig::default();
+        apply_input_block(
+            &mut input,
+            &[
+                waves::Entry::Block(
+                    "device".into(),
+                    "Wacom Pen".into(),
+                    vec![
+                        waves::Entry::Assign("map_to_output".into(), "DP-1".into()),
+                        waves::Entry::Assign(
+                            "calibration_matrix".into(),
+                            "[1, 0, 0, 0, 1, 0]".into(),
+                        ),
+                    ],
+                ),
+                waves::Entry::Block(
+                    "device".into(),
+                    "Wacom Pen".into(),
+                    vec![waves::Entry::Assign(
+                        "map_to_output".into(),
+                        "HDMI-A-1".into(),
+                    )],
+                ),
+                waves::Entry::Block(
+                    "device".into(),
+                    "Broken".into(),
+                    vec![waves::Entry::Assign(
+                        "calibration_matrix".into(),
+                        "[1, 0, NaN, 0, 1, 0]".into(),
+                    )],
+                ),
+            ],
+        );
+
+        let wacom = input.resolve_device("Wacom Pen");
+        assert_eq!(wacom.map_to_output.as_deref(), Some("HDMI-A-1"));
+        assert_eq!(
+            wacom.calibration_matrix,
+            Some([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+        );
+        assert!(input.resolve_device("Broken").calibration_matrix.is_none());
     }
 
     #[test]

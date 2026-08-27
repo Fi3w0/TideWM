@@ -505,13 +505,10 @@ pub fn init_udev(
                 tracing::debug!(?event, "Input device topology changed");
             }
             if let InputEvent::DeviceAdded { device } = &mut event {
-                crate::input::apply_touchpad_config(&state.config.input.touchpad, device);
-                if device.config_tap_finger_count() > 0 {
-                    state.known_touchpads.push(device.clone());
-                }
+                state.register_input_device(device);
             }
             if let InputEvent::DeviceRemoved { device } = &event {
-                state.known_touchpads.retain(|d| d != device);
+                state.unregister_input_device(device);
             }
             state.process_input_event(event);
         })?;
@@ -1455,6 +1452,7 @@ fn create_surface(
     // mapped `wl_output` global that has no scanout surface behind it.
     let global = output.create_global::<Smallvil>(display_handle);
     state.space.map_output(&output, position);
+    state.refresh_input_device_outputs();
     state.adopt_orphaned_output_windows(&output.name());
     state.recall_pinned_windows_to(&output.name());
     #[cfg(feature = "screencast")]
@@ -1553,6 +1551,7 @@ fn handle_connector_change(
                         state.migrate_output_windows(&disconnected_name, fallback);
                     }
                     state.space.unmap_output(&surface.output);
+                    state.refresh_input_device_outputs();
                     let space = &state.space;
                     if let Some(theme) = state.cursor_theme.as_mut() {
                         theme.retain_scales(|scale| {

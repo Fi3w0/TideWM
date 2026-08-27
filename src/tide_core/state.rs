@@ -187,15 +187,17 @@ pub struct Smallvil {
     /// graph. Installed by `main` after backend initialization and updated
     /// transactionally after each successful reload.
     pub(crate) config_watcher: Option<crate::config::ConfigWatcher>,
-    /// Every touchpad-class device `apply_touchpad_config` has been run
-    /// against (populated on `DeviceAdded`, pruned on `DeviceRemoved` --
-    /// see `backend/udev.rs`), so `reload_config` can re-apply a live
-    /// `[input.touchpad]` edit to hardware that's already connected.
-    /// libinput's `Device` is cheaply `Clone` (ref-counted), so this holds
-    /// owned handles rather than re-deriving them some other way. Always
-    /// empty under winit: the nested backend never reports a real libinput
-    /// device.
-    pub known_touchpads: Vec<smithay::reexports::input::Device>,
+    /// Every libinput device currently attached to the udev seat. Keeping
+    /// the ref-counted handles lets config reload re-apply touchpad and
+    /// per-device calibration settings without waiting for another hotplug.
+    /// Always empty under winit.
+    pub known_input_devices: Vec<smithay::reexports::input::Device>,
+    /// Resolved libinput-device to live-output bindings. Rebuilt on device
+    /// topology, output topology, and config changes so input events only do
+    /// a hash lookup and clone an `Output` handle, with no per-event strings
+    /// or geometry search.
+    pub(crate) input_device_outputs:
+        HashMap<smithay::reexports::input::Device, smithay::output::Output>,
     /// Active compositor-consumed touchpad gesture. `None` means gesture
     /// events continue through the ordinary client protocol path.
     pub(crate) compositor_gesture: Option<CompositorGesture>,
@@ -3517,7 +3519,8 @@ impl Smallvil {
 
             config,
             config_watcher: None,
-            known_touchpads: Vec::new(),
+            known_input_devices: Vec::new(),
+            input_device_outputs: HashMap::new(),
             compositor_gesture: None,
             toast: None,
             config_error_overlay: startup_config_error
@@ -11918,6 +11921,7 @@ impl Smallvil {
         self.sync_tide();
         match Config::reload_staged(&self.tide) {
             Ok((staged_lua, mut new_config, mut warnings)) => {
+                let previous_input_device_rules = self.config.input.devices.clone();
                 // The staged runtime is complete and valid. Swap it in as
                 // one transaction so a failed parse/evaluation can never
                 // clear or partially replace the handlers and globals from
@@ -12144,13 +12148,11 @@ impl Smallvil {
                 self.layout.set_split_bias(self.config.bsp_split_bias);
                 self.layout
                     .set_workspace_algorithm_overrides(self.config.workspace_algorithm_overrides());
-                // The DeviceAdded path is the only other place this runs;
-                // an already-connected touchpad (a laptop's built-in one,
-                // which won't see another DeviceAdded short of a restart)
-                // otherwise never picks up an `[input.touchpad]` edit.
-                for device in self.known_touchpads.iter_mut() {
-                    crate::input::apply_touchpad_config(&self.config.input.touchpad, device);
-                }
+                // DeviceAdded is the only other configuration point for
+                // libinput hardware. Re-apply every live handle so touchpad,
+                // mapping, and calibration edits take effect immediately;
+                // removing a custom matrix restores libinput's own default.
+                self.reapply_input_device_config(&previous_input_device_rules);
                 tracing::info!(
                     changed = %diff.summary(),
                     reload_toast = self.config.show_config_reload_toast,
@@ -12522,7 +12524,7 @@ pub(crate) fn clamp_rect_visible(
     rect
 }
 
-fn nearest_point_in_output_rects(
+pub(crate) fn nearest_point_in_output_rects(
     pos: Point<f64, Logical>,
     rects: impl IntoIterator<Item = Rectangle<i32, Logical>>,
 ) -> Option<Point<f64, Logical>> {
