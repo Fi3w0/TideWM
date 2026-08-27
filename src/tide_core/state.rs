@@ -1504,6 +1504,7 @@ impl Smallvil {
             .unwrap_or_else(|| (app_id.clone(), title.clone()));
         let at_startup = self.start_time.elapsed() < STARTUP_GRACE_PERIOD;
         let tags = self.window_tags.get(surface);
+        let on_workspace = self.workspace_of_surface(surface);
         self.config
             .resolve_window_rules(crate::config::WindowMatchFacts {
                 app_id: app_id.as_deref(),
@@ -1515,6 +1516,7 @@ impl Smallvil {
                 initial_title: initial_title.as_deref(),
                 at_startup,
                 tags,
+                on_workspace,
             })
     }
 
@@ -8611,6 +8613,11 @@ impl Smallvil {
             if let Some(tag) = self.floating_workspace.get_mut(surface) {
                 tag.workspace = workspace;
             }
+            // The workspace number just changed, and `rule { on_workspace }`
+            // is a live match criterion feeding the cached opacity/glass
+            // maps -- re-resolve now rather than waiting for some later
+            // unrelated trigger.
+            self.refresh_window_opacity_and_glass_for(surface);
 
             // Pinned windows stay mapped and visible regardless of which
             // workspace they're nominally tagged with -- same exemption
@@ -8679,6 +8686,9 @@ impl Smallvil {
         };
         self.layout.remove(surface);
         self.layout.insert(&output, workspace, window.clone(), None);
+        // See the floating branch above: `on_workspace` is a live match
+        // criterion feeding cached opacity/glass.
+        self.refresh_window_opacity_and_glass_for(surface);
 
         if current == active {
             // Hide the departing tile before filling its active-tree slot.
@@ -9201,6 +9211,15 @@ impl Smallvil {
         // what should be visible; Classic retile intentionally does not walk
         // inactive workspaces to unmap stale Ocean placements.
         let mapped: Vec<Window> = self.space.elements().cloned().collect();
+        // `rule { on_workspace }` is a live match criterion feeding cached
+        // opacity/glass, and this migration is the one place a window's
+        // workspace-number-or-lack-thereof changes wholesale (Classic
+        // numbers vs. Ocean's no-workspace-concept) -- re-resolve everything
+        // that was visible going in once the migration lands below.
+        let migrated_surfaces: Vec<WlSurface> = mapped
+            .iter()
+            .filter_map(|window| window.toplevel().map(|t| t.wl_surface().clone()))
+            .collect();
         for window in mapped {
             self.space.unmap_elem(&window);
         }
@@ -9232,6 +9251,9 @@ impl Smallvil {
                     }
                 }
             }
+        }
+        for surface in &migrated_surfaces {
+            self.refresh_window_opacity_and_glass_for(surface);
         }
         self.request_redraw();
         true
@@ -10473,6 +10495,30 @@ impl Smallvil {
         let ws_a = self.layout.active_workspace(&name_a);
         let ws_b = self.layout.active_workspace(&name_b);
 
+        // Every window whose workspace *number* is about to change (tiled
+        // content at ws_a/ws_b is renumbered to the other output's active
+        // number by `swap_active` below; floating tags are retagged the
+        // same way further down). `rule { on_workspace }` is a live match
+        // criterion feeding the cached opacity/glass maps, so each of these
+        // needs a re-resolve once the swap actually lands -- see the loop
+        // at the end of this function.
+        let on_workspace_changed: Vec<WlSurface> = self
+            .layout
+            .windows_in(&name_a, ws_a)
+            .into_iter()
+            .chain(self.layout.windows_in(&name_b, ws_b))
+            .filter_map(|window| window.toplevel().map(|t| t.wl_surface().clone()))
+            .chain(
+                self.floating_workspace
+                    .iter()
+                    .filter(|(_, tag)| {
+                        (tag.output == name_a && tag.workspace == ws_a)
+                            || (tag.output == name_b && tag.workspace == ws_b)
+                    })
+                    .map(|(surface, _)| surface.clone()),
+            )
+            .collect();
+
         // Capture tiled membership before swapping the trees. Fullscreen is
         // an override keyed outside `Layouts`, so moving a tree does not move
         // its FullscreenEntry automatically.
@@ -10722,6 +10768,10 @@ impl Smallvil {
         }
         for (window, loc) in moved {
             self.space.map_element(window, loc, false);
+        }
+
+        for surface in &on_workspace_changed {
+            self.refresh_window_opacity_and_glass_for(surface);
         }
 
         self.retile();

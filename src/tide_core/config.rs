@@ -1181,6 +1181,11 @@ pub(crate) struct WindowMatchFacts<'a> {
     /// resolving rules for most windows borrows nothing new. See
     /// `WindowRule::matches_tags`.
     pub tags: Option<&'a HashSet<String>>,
+    /// The window's current workspace number, from
+    /// `Smallvil::workspace_of_surface` -- `None` if untracked by either
+    /// `Layouts` or `floating_workspace`, or under Ocean. See
+    /// `WindowRule::matches_on_workspace`.
+    pub on_workspace: Option<u32>,
 }
 
 impl Config {
@@ -1576,7 +1581,8 @@ impl Config {
             let has_live = rule.has_live_criteria();
             let has_initial = rule.has_initial_criteria();
             let has_tag = rule.has_tag_criteria();
-            if !has_live && !has_initial && !has_tag {
+            let has_on_workspace = rule.has_on_workspace_criteria();
+            if !has_live && !has_initial && !has_tag && !has_on_workspace {
                 continue;
             }
             if has_live
@@ -1600,6 +1606,9 @@ impl Config {
                 continue;
             }
             if has_tag && !rule.matches_tags(facts.tags) {
+                continue;
+            }
+            if has_on_workspace && !rule.matches_on_workspace(facts.on_workspace) {
                 continue;
             }
             if rule.workspace.is_some() {
@@ -2409,6 +2418,26 @@ pub struct WindowRule {
     /// gathers current urgency (`self.urgent.contains(surface)`) alongside
     /// every other match fact.
     pub urgent: Option<bool>,
+    /// Live match on the window's *current* workspace number (Hyprland
+    /// `onworkspace`, recalled from memory rather than read from a local
+    /// clone -- the reference repos are outside this sandbox's allowed
+    /// paths). Distinct from `workspace` below, which is a one-shot
+    /// initial-placement effect: this is a match criterion, re-checked on
+    /// every resolve via `Smallvil::workspace_of_surface`, so a rule keyed
+    /// on it applies to whatever happens to live on that workspace number
+    /// right now, on any output (same "workspace number on any output"
+    /// convention `workspace_gaps`/`[[workspace_rule]]` already use), and
+    /// stops applying the moment a window leaves. This is how "per-
+    /// workspace persistent window-rule overrides" are built: `rule {
+    /// on_workspace = N; ... }` layers its effects on top of
+    /// `[[workspace_rule]]`'s own border/rounding/shadow/layout base for
+    /// workspace N, the same precedence chain `border_config_for_surface`
+    /// already runs, just reusable for the rest of `WindowRule`'s effect
+    /// surface (opacity, glass, viscosity, tags, ...) instead of being
+    /// limited to decoration. `None` under Ocean, which has no workspace
+    /// concept -- an `on_workspace` rule simply never matches there. See
+    /// `WindowRule::matches_on_workspace`.
+    pub on_workspace: Option<u32>,
     /// Spawn-time-only class match (Hyprland `initialClass`). Checked
     /// against the app_id a window reported at its *first* map, captured
     /// once into `Smallvil::initial_toplevel_identity` and never updated
@@ -4298,6 +4327,19 @@ impl WindowRule {
     /// `Smallvil::resolve_window_rules_for`.
     pub(crate) fn matches_tags(&self, tags: Option<&HashSet<String>>) -> bool {
         tags.is_some_and(|tags| self.tag.iter().any(|t| tags.contains(t)))
+    }
+
+    /// Same idea as `has_tag_criteria`, gating `matches_on_workspace`.
+    fn has_on_workspace_criteria(&self) -> bool {
+        self.on_workspace.is_some()
+    }
+
+    /// Live current-workspace match (the `on_workspace` field): whether the
+    /// window's CURRENT workspace number equals this rule's. `None` (Ocean,
+    /// or an untracked window) never matches. Split out from `matches` for
+    /// the same reason `matches_tags` is its own method.
+    pub(crate) fn matches_on_workspace(&self, workspace: Option<u32>) -> bool {
+        self.on_workspace.is_some() && self.on_workspace == workspace
     }
 }
 
@@ -7629,6 +7671,10 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                     Ok(n) => rule.workspace = Some(n),
                     Err(_) => tracing::warn!(value, "Expected a workspace number, ignoring"),
                 },
+                "on_workspace" => match value.parse() {
+                    Ok(n) => rule.on_workspace = Some(n),
+                    Err(_) => tracing::warn!(value, "Expected an on_workspace number, ignoring"),
+                },
                 "output" => rule.output = Some(value.clone()),
                 "float" => set_bool(&mut rule.float, key, value),
                 "pseudo_tile" => set_bool(&mut rule.pseudo_tile, key, value),
@@ -9162,6 +9208,25 @@ mod tests {
     }
 
     #[test]
+    fn window_rule_on_workspace_parses_and_matches_live_current_workspace() {
+        let rule =
+            lower_window_rule_block(&[waves::Entry::Assign("on_workspace".into(), "3".into())]);
+        assert_eq!(rule.on_workspace, Some(3));
+        assert!(rule.matches_on_workspace(Some(3)));
+        // A different workspace, an untracked window (Ocean, or unmapped),
+        // and a rule with no `on_workspace` criterion never match.
+        assert!(!rule.matches_on_workspace(Some(4)));
+        assert!(!rule.matches_on_workspace(None));
+        assert!(!WindowRule::default().matches_on_workspace(Some(3)));
+
+        let malformed = lower_window_rule_block(&[waves::Entry::Assign(
+            "on_workspace".into(),
+            "not-a-number".into(),
+        )]);
+        assert!(malformed.on_workspace.is_none());
+    }
+
+    #[test]
     fn adaptive_sync_parses_global_and_per_output_with_aliases() {
         assert_eq!(parse_adaptive_sync("off"), Some(AdaptiveSync::Off));
         assert_eq!(parse_adaptive_sync("false"), Some(AdaptiveSync::Off));
@@ -10475,6 +10540,42 @@ mod tests {
             ..Default::default()
         });
         assert!(untagged.opacity.is_none());
+    }
+
+    #[test]
+    fn window_rule_on_workspace_resolves_by_live_workspace_number_not_app_id() {
+        // No app_id/title at all -- this rule matches purely on which
+        // workspace the window currently lives on, the "workspace-specific
+        // window-rule override" the config-parity audit asked for.
+        let entries = wave_entries(
+            "rule {\n\
+             on_workspace = 3\n\
+             opacity = 0.5\n\
+             }\n",
+        );
+        let config = Config::from_raw(lower_entries(&entries)).0;
+
+        let on_three = config.resolve_window_rules(WindowMatchFacts {
+            app_id: Some("anything"),
+            on_workspace: Some(3),
+            ..Default::default()
+        });
+        assert_eq!(on_three.opacity, Some(0.5));
+
+        let on_four = config.resolve_window_rules(WindowMatchFacts {
+            app_id: Some("anything"),
+            on_workspace: Some(4),
+            ..Default::default()
+        });
+        assert!(on_four.opacity.is_none());
+
+        // Ocean (or an untracked window) reports no workspace at all.
+        let no_workspace = config.resolve_window_rules(WindowMatchFacts {
+            app_id: Some("anything"),
+            on_workspace: None,
+            ..Default::default()
+        });
+        assert!(no_workspace.opacity.is_none());
     }
 
     #[test]

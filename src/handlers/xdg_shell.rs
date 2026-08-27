@@ -1277,6 +1277,15 @@ impl Smallvil {
 
         self.buoyancy_dirty = true;
 
+        // The opacity/glass resolve above (right after `resolve_window_rules_for`)
+        // ran before this window had a workspace: `rule { on_workspace }` needs
+        // `Smallvil::workspace_of_surface`, which only finds it once it's
+        // actually in `layout`/`floating_workspace`, both settled by now. Without
+        // this, a window that spawns straight onto its matched workspace would
+        // never pick up an `on_workspace`-keyed opacity/glass rule until some
+        // later unrelated live re-resolve (identity change, urgency).
+        self.refresh_window_opacity_and_glass_for(surface);
+
         self.announce_foreign_toplevel(surface);
     }
 
