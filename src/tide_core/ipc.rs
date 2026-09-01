@@ -997,6 +997,22 @@ fn diagnostics_json(state: &Smallvil) -> serde_json::Value {
     let screencast_feature = state.screencast.is_some();
     #[cfg(not(feature = "screencast"))]
     let screencast_feature = false;
+    let decorated = state.config.water_effects
+        || state.config.frost.enabled
+        || state.config.caustics.enabled
+        || state.config.shadow.enabled
+        || state.config.rounding.enabled
+        || state.config.border.enabled
+        || state.config.depth.enabled
+        || state.config.classic_depth.enabled
+        || state.config.animations.enabled;
+    let memory_tier = if state.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+        "ocean/full-rice"
+    } else if decorated {
+        "decorated"
+    } else {
+        "basic"
+    };
     json!({
         "version": env!("CARGO_PKG_VERSION"),
         "commit": option_env!("TIDEWM_GIT_COMMIT"),
@@ -1010,6 +1026,7 @@ fn diagnostics_json(state: &Smallvil) -> serde_json::Value {
             crate::config::SpatialEngine::Ocean => "ocean",
         },
         "water_effects": state.config.water_effects,
+        "memory_tier": memory_tier,
         "config_path": crate::config::Config::path(),
         "config_warnings": state.config_warnings,
         "xwayland_enabled": state.config.xwayland.enabled,
@@ -1057,6 +1074,12 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
         .fold(0_u64, |total, capture| {
             total.saturating_add(capture.estimated_texture_bytes())
         });
+    let layer_alpha_mask_bytes = state
+        .layer_alpha_masks
+        .values()
+        .fold(0_u64, |total, capture| {
+            total.saturating_add(capture.estimated_texture_bytes())
+        });
     let wallpaper_texture_bytes = state.builtin_wallpaper.estimated_texture_bytes();
     let caustics_texture_bytes = state.caustics.values().fold(0_u64, |total, caustics| {
         total.saturating_add(caustics.estimated_texture_bytes())
@@ -1076,6 +1099,7 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
                 }),
         );
     let tide_texture_estimate_bytes = backdrop_texture_bytes
+        .saturating_add(layer_alpha_mask_bytes)
         .saturating_add(wallpaper_texture_bytes)
         .saturating_add(caustics_texture_bytes)
         .saturating_add(transition_texture_bytes);
@@ -1111,6 +1135,8 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
             "bytes": tide_texture_estimate_bytes,
             "backdrop_bytes": backdrop_texture_bytes,
             "backdrop_count": state.backdrop_textures.len(),
+            "layer_alpha_mask_bytes": layer_alpha_mask_bytes,
+            "layer_alpha_mask_count": state.layer_alpha_masks.len(),
             "wallpaper_bytes": wallpaper_texture_bytes,
             "caustics_bytes": caustics_texture_bytes,
             "workspace_transition_bytes": transition_texture_bytes,

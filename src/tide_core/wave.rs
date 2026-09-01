@@ -1637,29 +1637,43 @@ pub(crate) struct TideInfo {
     pub workspace: i64,
 }
 
-/// The GPU vendor from sysfs: the first DRM card's PCI vendor id, mapped
-/// to a stable lowercase name for `tide.gpu.vendor`. `"unknown"` when
-/// there is no DRM card to read (the nested winit backend).
+/// Picks the lowest-numbered DRM card (`cardN`)
+/// out of `/sys/class/drm`'s raw entry names. `read_dir` order is
+/// filesystem-dependent, not numeric, so callers must not rely on the
+/// first entry returned being `card0`; this makes the choice deterministic
+/// and independent of directory order. Pure and directory-free so it's
+/// unit-testable without real sysfs entries.
+fn lowest_numbered_card<'a>(names: impl Iterator<Item = &'a str>) -> Option<u32> {
+    names
+        .filter_map(|name| name.strip_prefix("card")?.parse::<u32>().ok())
+        .min()
+}
+
+/// The startup GPU vendor fallback from sysfs: the lowest-numbered DRM card's PCI vendor id,
+/// mapped to a stable lowercase name for `tide.gpu.vendor`. `"unknown"` when
+/// there is no DRM card to read. The udev backend replaces this value with
+/// the GPU it actually selects once device probing completes.
 pub(crate) fn detect_gpu_vendor() -> &'static str {
     let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
         return "unknown";
     };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !name.starts_with("card") || name.len() != 5 {
-            continue;
-        }
-        let Ok(vendor) = std::fs::read_to_string(entry.path().join("device/vendor")) else {
-            continue;
-        };
-        return match vendor.trim().to_lowercase().as_str() {
-            "0x10de" => "nvidia",
-            "0x1002" | "0x1022" => "amd",
-            "0x8086" => "intel",
-            _ => "unknown",
-        };
+    let names: Vec<String> = entries
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    let Some(index) = lowest_numbered_card(names.iter().map(String::as_str)) else {
+        return "unknown";
+    };
+    let Ok(vendor) = std::fs::read_to_string(format!("/sys/class/drm/card{index}/device/vendor"))
+    else {
+        return "unknown";
+    };
+    match vendor.trim().to_lowercase().as_str() {
+        "0x10de" => "nvidia",
+        "0x1002" | "0x1022" => "amd",
+        "0x8086" => "intel",
+        _ => "unknown",
     }
-    "unknown"
 }
 
 fn install_env(
@@ -2428,6 +2442,27 @@ mod tests {
 
     fn compile_str(s: &str) -> String {
         compile(s, Path::new("test.wave")).expect("compile should succeed")
+    }
+
+    #[test]
+    fn lowest_numbered_card_picks_card0_regardless_of_directory_order() {
+        let names = ["card1", "card10", "card0", "renderD128"];
+        assert_eq!(lowest_numbered_card(names.into_iter()), Some(0));
+    }
+
+    #[test]
+    fn lowest_numbered_card_accepts_double_digit_card_numbers() {
+        // A "card" + exactly-one-digit check would silently drop card10+ on
+        // a system whose lowest card happens to be double-digit (e.g. a
+        // hybrid laptop with several render/virtual DRM nodes before it).
+        let names = ["card10", "card11"];
+        assert_eq!(lowest_numbered_card(names.into_iter()), Some(10));
+    }
+
+    #[test]
+    fn lowest_numbered_card_ignores_connector_and_render_entries() {
+        let names = ["card0-DP-1", "renderD128", "version"];
+        assert_eq!(lowest_numbered_card(names.into_iter()), None);
     }
 
     #[test]

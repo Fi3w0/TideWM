@@ -618,6 +618,9 @@ fn finish_configuration(
             if cfg.scale.is_some() {
                 state.refresh_layer_fractional_scales(output);
             }
+            if cfg.scale.is_some() || cfg.transform.is_some() {
+                state.refresh_lock_surface_geometry(output);
+            }
             // Transform/scale changes require fresh layer exclusive zones
             // before the retile uses the new logical size.
             smithay::desktop::layer_map_for_output(output).arrange();
@@ -652,6 +655,7 @@ fn finish_configuration(
         }
         state.retile();
         state.wlr_output_management_state.refresh(&state.space);
+        state.refresh_pointer_focus();
     }
 
     resource.succeeded();

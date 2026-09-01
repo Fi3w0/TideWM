@@ -517,21 +517,12 @@ pub fn run_checks(socket_override: Option<&Path>) -> (Vec<Check>, Option<Diagnos
         let pid = compositor_pid(&diag.socket);
         match pid.and_then(compositor_pss) {
             Some(pss) => {
-                // 2GB is AGENT.md's current absolute ceiling (Hard
-                // Constraints, revised 2026-07-30 from the old flat
-                // 1.5GB/3GB estimate): a tripwire for runaway feature
-                // growth, not a resting point. Real measured PSS scales
-                // with enabled effects -- basic tiling is ~50MB, the full
-                // water/decoration stack is ~60-70MB idle -- so this can't
-                // judge whether a given reading is normal for the
-                // maintainer's actual feature set, only whether it's blown
-                // well past what any configuration should ever reach.
-                let warn = pss > 2_000_000_000;
-                checks.push(Check::new(
-                    "memory",
-                    if warn { Verdict::Warn } else { Verdict::Pass },
-                    format!("compositor PSS {:.1} MiB", pss as f64 / (1024.0 * 1024.0)),
-                ));
+                let tier = diag.json["data"]
+                    .get("memory_tier")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                let (verdict, detail) = memory_assessment(pss, tier);
+                checks.push(Check::new("memory", verdict, detail));
             }
             None => checks.push(Check::new(
                 "memory",
@@ -542,6 +533,30 @@ pub fn run_checks(socket_override: Option<&Path>) -> (Vec<Check>, Option<Diagnos
     }
 
     (checks, diagnostics)
+}
+
+/// Compares live PSS with the selected config tier. The measured reference
+/// points are not hard budgets, so the warning threshold deliberately leaves
+/// four times their upper bound for workload/client variance. Ocean is still
+/// unmeasured at scale and gets a conservative 512 MiB investigation point;
+/// every tier retains the documented 2 GB absolute ceiling.
+fn memory_assessment(pss: u64, tier: &str) -> (Verdict, String) {
+    const MIB: u64 = 1024 * 1024;
+    const ABSOLUTE_CEILING: u64 = 2_000_000_000;
+    let (reference, investigation_mib) = match tier {
+        "basic" => ("~50 MiB measured", 200),
+        "decorated" => ("~60-70 MiB measured", 280),
+        "ocean/full-rice" => ("unmeasured at scale; expected same order", 512),
+        _ => ("unknown config tier", 512),
+    };
+    let warn = pss > ABSOLUTE_CEILING || pss > investigation_mib * MIB;
+    (
+        if warn { Verdict::Warn } else { Verdict::Pass },
+        format!(
+            "compositor PSS {:.1} MiB; tier {tier} ({reference}), investigate above {investigation_mib} MiB, absolute ceiling 2 GB",
+            pss as f64 / MIB as f64
+        ),
+    )
 }
 
 /// Runs a diagnostic helper without allowing a missing/wedged host utility
@@ -1131,5 +1146,21 @@ mod tests {
             Some(4242)
         );
         assert_eq!(compositor_pid(Path::new("/tmp/not-tidewm.sock")), None);
+    }
+
+    #[test]
+    fn memory_assessment_uses_the_selected_feature_tier() {
+        let pss = 250 * 1024 * 1024;
+        assert_eq!(memory_assessment(pss, "basic").0, Verdict::Warn);
+        assert_eq!(memory_assessment(pss, "decorated").0, Verdict::Pass);
+        assert_eq!(memory_assessment(pss, "ocean/full-rice").0, Verdict::Pass);
+    }
+
+    #[test]
+    fn memory_assessment_keeps_the_absolute_ceiling() {
+        assert_eq!(
+            memory_assessment(2_000_000_001, "ocean/full-rice").0,
+            Verdict::Warn
+        );
     }
 }

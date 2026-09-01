@@ -103,7 +103,14 @@ impl WlrOutputPowerManagementState {
     /// first time).
     pub fn output_removed(&mut self, output: &Output) {
         self.power.remove(output);
-        self.controls.retain(|(o, _)| o != output);
+        self.controls.retain(|(o, control)| {
+            if o == output {
+                control.failed();
+                false
+            } else {
+                true
+            }
+        });
     }
 }
 

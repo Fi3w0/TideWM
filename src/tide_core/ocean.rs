@@ -1480,6 +1480,30 @@ impl OceanSpace {
         self.screen_pins.contains_key(surface)
     }
 
+    /// Keeps screen-pinned windows reachable when an output's logical
+    /// viewport shrinks after a scale or transform change. Pins are stored
+    /// in output-local coordinates, so world geometry and camera state stay
+    /// untouched.
+    pub(crate) fn clamp_screen_pins(&mut self, output: &str, viewport: Size<i32, Logical>) {
+        let bounds = Rectangle::new((0, 0).into(), viewport);
+        for pin in self
+            .screen_pins
+            .values_mut()
+            .filter(|pin| pin.output == output)
+        {
+            let rect = Rectangle::new(
+                (
+                    pin.viewport_loc.x.round() as i32,
+                    pin.viewport_loc.y.round() as i32,
+                )
+                    .into(),
+                pin.size,
+            );
+            let clamped = crate::state::clamp_rect_visible(rect, bounds);
+            pin.viewport_loc = clamped.loc.to_f64();
+        }
+    }
+
     /// Rebuilds an existing screen pin from the floating window's current
     /// world rectangle. Unlike `unpin_from_screen`, this deliberately does
     /// not restore the old viewport position first: callers use it after an

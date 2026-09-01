@@ -52,7 +52,7 @@ use smithay::{
     },
     utils::{Clock, Logical, Monotonic, Physical, Point, Rectangle, Scale, Size, SERIAL_COUNTER},
     wayland::{
-        compositor::{get_parent, CompositorClientState, CompositorState},
+        compositor::{get_parent, with_states, CompositorClientState, CompositorState},
         cursor_shape::CursorShapeManagerState,
         dmabuf::{DmabufGlobal, DmabufState},
         foreign_toplevel_list::{ForeignToplevelHandle, ForeignToplevelListState},
@@ -319,6 +319,10 @@ pub struct Smallvil {
     /// `detach_mapped_toplevel` alongside `window_opacity`; render passes also
     /// drop it after its last output stops presenting the surface.
     pub(crate) backdrop_textures: HashMap<WlSurface, crate::backdrop::BackdropCapture>,
+    /// Native alpha captures for blurred layer surfaces whose rule sets
+    /// `ignore_alpha`. Kept separate from the backdrop so both textures can
+    /// be sampled by the frost shader in one pass.
+    pub(crate) layer_alpha_masks: HashMap<WlSurface, crate::backdrop::BackdropCapture>,
     /// Cached full-output solid fill for `layer_rule { dim_around = true }`,
     /// one per output -- same "own buffer per output, dedup only bumps its
     /// commit on real size/color change" shape as `lock_blank`. Pruned on
@@ -2341,12 +2345,17 @@ impl Smallvil {
         config: &crate::config::WindowAnimationConfig,
     ) -> Option<Point<f64, Logical>> {
         let window = self.mapped_toplevel_window(surface)?;
-        let output = self.output_for_window(&window)?;
+        let output = self
+            .rendered_output_for_surface(surface)
+            .or_else(|| self.output_for_window(&window))?;
         let output_rect = self.space.output_geometry(&output)?;
-        let window_rect = self
-            .tiled_rect_for_surface(surface)
-            .or_else(|| self.floating_workspace.get(surface).map(|tag| tag.rect))
-            .or_else(|| self.space.element_geometry(&window))?;
+        let window_rect = if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+            self.rendered_rect_on_output(surface, &output)?
+        } else {
+            self.tiled_rect_for_surface(surface)
+                .or_else(|| self.floating_workspace.get(surface).map(|tag| tag.rect))
+                .or_else(|| self.space.element_geometry(&window))?
+        };
         Some(crate::window_animation::lifecycle_offset(
             config,
             window_rect,
@@ -3578,6 +3587,7 @@ impl Smallvil {
             window_opacity: HashMap::new(),
             window_glass_modes: HashMap::new(),
             backdrop_textures: HashMap::new(),
+            layer_alpha_masks: HashMap::new(),
             layer_dim_buffers: HashMap::new(),
             water_glass_program: None,
             glass_anim: HashMap::new(),
@@ -4178,6 +4188,27 @@ impl Smallvil {
             .map(|(output, _)| output)
     }
 
+    /// The compositor-owned rectangle at which `surface` is actually drawn
+    /// on `output`. In Ocean this includes camera translation and screen-pin
+    /// placement; callers must not substitute the window's world `Space`
+    /// geometry when anchoring output-local effects.
+    fn rendered_rect_on_output(
+        &self,
+        surface: &WlSurface,
+        output: &Output,
+    ) -> Option<Rectangle<i32, Logical>> {
+        self.render_placements(output)?
+            .into_iter()
+            .find(|placement| {
+                placement
+                    .surface()
+                    .is_some_and(|candidate| candidate == surface)
+            })
+            .map(|placement| {
+                crate::placement::translated_rect(placement.rect, placement.view_offset)
+            })
+    }
+
     /// Prefer the output where the pointer is interacting with this exact
     /// toplevel (including one of its subsurfaces). This is intentionally
     /// stricter than merely using the pointer's output: click-to-focus users
@@ -4619,12 +4650,16 @@ impl Smallvil {
     }
 
     /// Re-resolves enter/leave at the current pointer location after the
-    /// surface stack changes without physical motion.
-    fn refresh_pointer_focus(&mut self) {
+    /// surface stack changes without physical motion. Also clamps that
+    /// location into the live output union first: an output-management
+    /// change or a disconnect can shrink, move, or remove the output the
+    /// pointer was last over, and nothing else re-validates its stored
+    /// position outside of a real subsequent motion event.
+    pub(crate) fn refresh_pointer_focus(&mut self) {
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
-        let pos = pointer.current_location();
+        let pos = self.clamp_to_outputs(pointer.current_location());
         let under = self.surface_under(pos);
         let serial = SERIAL_COUNTER.next_serial();
         let time = self.start_time.elapsed().as_millis() as u32;
@@ -5012,31 +5047,68 @@ impl Smallvil {
         }
 
         if self.window_focus.is_none() {
-            self.space.refresh();
-            self.window_focus = preferred_output
-                .and_then(|output_name| {
-                    self.space
-                        .elements()
-                        .rev()
-                        .find(|window| {
-                            self.output_for_window(window)
-                                .is_some_and(|output| output.name() == output_name)
-                        })
-                        .and_then(|window| {
+            if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+                self.window_focus = self.topmost_ocean_surface(preferred_output);
+            } else {
+                self.space.refresh();
+                self.window_focus = preferred_output
+                    .and_then(|output_name| {
+                        self.space
+                            .elements()
+                            .rev()
+                            .find(|window| {
+                                self.output_for_window(window)
+                                    .is_some_and(|output| output.name() == output_name)
+                            })
+                            .and_then(|window| {
+                                window
+                                    .toplevel()
+                                    .map(|toplevel| toplevel.wl_surface().clone())
+                            })
+                    })
+                    .or_else(|| {
+                        self.space.elements().rev().find_map(|window| {
                             window
                                 .toplevel()
                                 .map(|toplevel| toplevel.wl_surface().clone())
                         })
-                })
-                .or_else(|| {
-                    self.space.elements().rev().find_map(|window| {
-                        window
-                            .toplevel()
-                            .map(|toplevel| toplevel.wl_surface().clone())
-                    })
-                });
+                    });
+            }
         }
         self.reconcile_keyboard_focus(serial);
+    }
+
+    fn topmost_ocean_surface(&self, preferred_output: Option<&str>) -> Option<WlSurface> {
+        let mut outputs: Vec<Output> = self.space.outputs().cloned().collect();
+        outputs.sort_by_key(Output::name);
+        if let Some(preferred) = preferred_output {
+            outputs.sort_by_key(|output| output.name() != preferred);
+        }
+        outputs.into_iter().find_map(|output| {
+            self.render_placements(&output)?
+                .into_iter()
+                .find_map(|placement| placement.surface().cloned())
+        })
+    }
+
+    /// Repairs Ocean focus after an output disappears. `Space` retains every
+    /// Ocean window as a world/input cache, including windows that no
+    /// surviving camera can see, so ordinary mapped-state checks are not
+    /// sufficient here.
+    pub(crate) fn repair_keyboard_focus_after_output_change(
+        &mut self,
+        preferred_output: Option<&str>,
+        serial: smithay::utils::Serial,
+    ) {
+        if self.config.spatial_engine == crate::config::SpatialEngine::Ocean
+            && self
+                .window_focus
+                .as_ref()
+                .is_some_and(|surface| self.rendered_output_for_surface(surface).is_none())
+        {
+            self.window_focus = None;
+        }
+        self.repair_keyboard_focus(preferred_output, serial);
     }
 
     /// Drops a destroyed/unmapped window from retained focus intent before
@@ -5208,6 +5280,7 @@ impl Smallvil {
         // Backdrop textures also contain unlocked client pixels. Unlock
         // recaptures visible glass before composing its first desktop frame.
         self.backdrop_textures.clear();
+        self.layer_alpha_masks.clear();
         // Closing snapshots contain client pixels and normally render above
         // the desktop. They are irrelevant once the security boundary is
         // active and must never survive into a locked composition.
@@ -5327,6 +5400,48 @@ impl Smallvil {
         self.reconcile_keyboard_focus(serial);
         self.refresh_pointer_focus();
         self.request_redraw();
+    }
+
+    /// Reconfigures an existing lock surface after a live output scale or
+    /// transform change. Lock surfaces are compositor-sized, so leaving the
+    /// old logical size advertised can expose an uncovered strip.
+    pub(crate) fn refresh_lock_surface_geometry(&mut self, output: &Output) {
+        let Some(size) = self.space.output_geometry(output).map(|geo| geo.size) else {
+            return;
+        };
+        let Some(surface) = self.lock_surfaces.get(output) else {
+            return;
+        };
+        with_states(surface.wl_surface(), |states| {
+            with_fractional_scale(states, |scale| {
+                scale.set_preferred_scale(output.current_scale().fractional_scale());
+            });
+        });
+        surface.with_pending_state(|state| {
+            state.size = Some((size.w.max(0) as u32, size.h.max(0) as u32).into());
+        });
+        surface.send_configure();
+    }
+
+    /// Closes and forgets all layer-shell state owned by a departing output.
+    /// Destroy callbacks cannot find these surfaces after the output leaves
+    /// `Space`, so disconnect must perform the cleanup first.
+    pub(crate) fn remove_layer_output(&mut self, output: &Output) {
+        let layers: Vec<desktop::LayerSurface> =
+            layer_map_for_output(output).layers().cloned().collect();
+        if layers.is_empty() {
+            return;
+        }
+        let mut map = layer_map_for_output(output);
+        for layer in layers {
+            let surface = layer.wl_surface().clone();
+            layer.layer_surface().send_close();
+            map.unmap_layer(&layer);
+            self.unmapped_layer_surfaces.remove(&surface);
+            self.backdrop_textures.remove(&surface);
+            self.layer_alpha_masks.remove(&surface);
+            self.forget_layer_focus(&surface);
+        }
     }
 
     /// Called by both backends' render loops right after successfully
@@ -6475,13 +6590,14 @@ impl Smallvil {
         placements: &[crate::placement::PlacedWindow],
     ) {
         if !self.config.frost.enabled {
+            self.layer_alpha_masks.clear();
             return;
         }
         let output_scale = output.current_scale().fractional_scale();
         #[allow(clippy::mutable_key_type)]
-        let surfaces: Vec<(WlSurface, Rectangle<i32, Physical>)> = {
+        let (surfaces, alpha_surfaces) = {
             let layer_map = layer_map_for_output(output);
-            layer_map
+            let layers: Vec<_> = layer_map
                 .layers()
                 .filter(|layer| !self.unmapped_layer_surfaces.contains(layer.wl_surface()))
                 .filter(|layer| self.config.layer_blur(layer.namespace()))
@@ -6489,10 +6605,23 @@ impl Smallvil {
                     let geometry = layer_map.layer_geometry(layer)?;
                     Some((
                         layer.wl_surface().clone(),
+                        layer.clone(),
                         geometry.to_physical_precise_round(output_scale),
+                        self.config.layer_ignore_alpha(layer.namespace()),
                     ))
                 })
-                .collect()
+                .collect();
+            let surfaces: Vec<(WlSurface, Rectangle<i32, Physical>)> = layers
+                .iter()
+                .map(|(surface, _, rect, _)| (surface.clone(), *rect))
+                .collect();
+            let alpha_surfaces = layers
+                .into_iter()
+                .filter_map(|(surface, layer, rect, threshold)| {
+                    threshold.map(|threshold| (surface, layer, rect, threshold))
+                })
+                .collect::<Vec<_>>();
+            (surfaces, alpha_surfaces)
         };
         let output_name = output.name();
         let layer_surfaces: Vec<WlSurface> = surfaces
@@ -6500,8 +6629,42 @@ impl Smallvil {
             .map(|(surface, _)| surface.clone())
             .collect();
         self.reconcile_backdrop_visibility(&output_name, &layer_surfaces, false);
+        let current_output_layers: Vec<WlSurface> = layer_map_for_output(output)
+            .layers()
+            .map(|layer| layer.wl_surface().clone())
+            .collect();
+        let alpha_eligible: Vec<WlSurface> = alpha_surfaces
+            .iter()
+            .map(|(surface, _, _, _)| surface.clone())
+            .collect();
+        self.layer_alpha_masks.retain(|surface, _| {
+            !current_output_layers.contains(surface) || alpha_eligible.contains(surface)
+        });
         if surfaces.is_empty() {
             return;
+        }
+
+        // Alpha masks are rendered from the complete layer surface tree at
+        // the same origin and downscale as the backdrop capture. This keeps
+        // subsurfaces and viewport transforms aligned with the frost sample.
+        let scale = Scale::from(output_scale);
+        for (surface, layer, physical_rect, _) in &alpha_surfaces {
+            let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                layer.render_elements(renderer, physical_rect.loc, scale, 1.0);
+            let capture_scale = self.config.backdrop_capture_scale;
+            if !self.layer_alpha_masks.contains_key(surface) {
+                let Some(capture) = crate::backdrop::BackdropCapture::new(
+                    renderer,
+                    physical_rect.size,
+                    capture_scale,
+                ) else {
+                    continue;
+                };
+                self.layer_alpha_masks.insert(surface.clone(), capture);
+            }
+            if let Some(capture) = self.layer_alpha_masks.get_mut(surface) {
+                let _ = capture.capture(renderer, *physical_rect, &elements, capture_scale);
+            }
         }
 
         // Same shared-list shape as the floating-window pass above: blurred
@@ -6682,6 +6845,7 @@ impl Smallvil {
                                         corner_radii,
                                         rounding_power,
                                         corner_softness,
+                                        None,
                                     ),
                                     capture_texture.clone(),
                                     physical_rect,
@@ -6786,7 +6950,7 @@ impl Smallvil {
             return result;
         }
         let output_scale = output.current_scale().fractional_scale();
-        let eligible: Vec<(WlSurface, Rectangle<i32, Physical>)> = {
+        let eligible: Vec<(WlSurface, Rectangle<i32, Physical>, Option<f32>)> = {
             let layer_map = layer_map_for_output(output);
             layer_map
                 .layers()
@@ -6797,6 +6961,7 @@ impl Smallvil {
                     Some((
                         layer.wl_surface().clone(),
                         geometry.to_physical_precise_round(output_scale),
+                        self.config.layer_ignore_alpha(layer.namespace()),
                     ))
                 })
                 .collect()
@@ -6814,32 +6979,43 @@ impl Smallvil {
         let corner_radii = [frost.corner_radius * scale; 4];
         let rounding_power = 2.0;
         let corner_softness = frost.corner_softness * scale;
-        for (surface, physical_rect) in eligible {
+        for (surface, physical_rect, ignore_alpha) in eligible {
             let Some(capture) = self.backdrop_textures.get(&surface) else {
                 continue;
             };
             let (id, version, texture) =
                 (capture.id.clone(), capture.version, capture.texture.clone());
-            result.entry(surface).or_insert_with(Vec::new).push(
-                crate::backend::udev::OutputRenderElements::FrostGlass(
-                    crate::frost_glass::FrostGlassElement::new(
-                        id,
-                        crate::frost_glass::frost_glass_commit(
-                            version,
-                            &frost,
-                            corner_radii,
-                            rounding_power,
-                            corner_softness,
-                        ),
-                        texture,
-                        physical_rect,
-                        program.clone(),
-                        frost.clone(),
-                        corner_radii,
-                        rounding_power,
-                        corner_softness,
-                    ),
+            let alpha_mask = ignore_alpha.and_then(|threshold| {
+                self.layer_alpha_masks
+                    .get(&surface)
+                    .map(|mask| (mask.texture.clone(), mask.version, threshold))
+            });
+            let commit_mask = alpha_mask
+                .as_ref()
+                .map(|(_, version, threshold)| (*version, *threshold));
+            let mut element = crate::frost_glass::FrostGlassElement::new(
+                id,
+                crate::frost_glass::frost_glass_commit(
+                    version,
+                    &frost,
+                    corner_radii,
+                    rounding_power,
+                    corner_softness,
+                    commit_mask,
                 ),
+                texture,
+                physical_rect,
+                program.clone(),
+                frost.clone(),
+                corner_radii,
+                rounding_power,
+                corner_softness,
+            );
+            if let Some((mask, _, threshold)) = alpha_mask {
+                element = element.with_alpha_mask(mask, threshold);
+            }
+            result.entry(surface).or_insert_with(Vec::new).push(
+                crate::backend::udev::OutputRenderElements::FrostGlass(element),
             );
         }
         result
@@ -7585,7 +7761,10 @@ impl Smallvil {
         let Some(window) = self.mapped_toplevel_window(surface) else {
             return;
         };
-        let Some(output) = self.output_for_window(&window) else {
+        let Some(output) = self
+            .rendered_output_for_surface(surface)
+            .or_else(|| self.output_for_window(&window))
+        else {
             return;
         };
         let Some(output_geo) = self.space.output_geometry(&output) else {
@@ -7614,57 +7793,45 @@ impl Smallvil {
         // `retile()` overrides after reading it from `layout()` -- rarer,
         // and reusing the plain path here is a no-op change for them, not
         // a regression.
-        let win = self
-            .layout
-            .workspace_of(surface)
-            .filter(|_| {
-                !self.fullscreen.contains_key(surface) && !self.pseudo_tiled.contains(surface)
-            })
-            .zip(self.output_tiling_area(&output))
-            .and_then(|(workspace, area)| {
-                self.layout
-                    .layout(
-                        &output.name(),
-                        workspace,
-                        area,
-                        self.gaps_for(&output.name(), workspace),
-                    )
-                    .into_iter()
-                    .find(|(w, _)| w.toplevel().is_some_and(|t| t.wl_surface() == surface))
-                    .map(|(_, rect)| rect)
-            })
-            .or_else(|| {
-                (!self.fullscreen.contains_key(surface) && !self.maximized.contains_key(surface))
+        let win = if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+            self.rendered_rect_on_output(surface, &output)
+        } else {
+            self.layout
+                .workspace_of(surface)
+                .filter(|_| {
+                    !self.fullscreen.contains_key(surface) && !self.pseudo_tiled.contains(surface)
+                })
+                .zip(self.output_tiling_area(&output))
+                .and_then(|(workspace, area)| {
+                    self.layout
+                        .layout(
+                            &output.name(),
+                            workspace,
+                            area,
+                            self.gaps_for(&output.name(), workspace),
+                        )
+                        .into_iter()
+                        .find(|(w, _)| w.toplevel().is_some_and(|t| t.wl_surface() == surface))
+                        .map(|(_, rect)| rect)
+                })
+                .or_else(|| {
+                    (!self.fullscreen.contains_key(surface)
+                        && !self.maximized.contains_key(surface))
                     .then(|| self.floating_workspace.get(surface).map(|tag| tag.rect))
                     .flatten()
-            })
-            .or_else(|| {
-                self.space
-                    .element_location(&window)
-                    .map(|loc| Rectangle::new(loc, window.geometry().size))
-            });
+                })
+                .or_else(|| {
+                    self.space
+                        .element_location(&window)
+                        .map(|loc| Rectangle::new(loc, window.geometry().size))
+                })
+        };
         let Some(win) = win else {
             return;
         };
-        // Ocean windows render through the camera transform (see
-        // `ocean::placements`), but the fallbacks above return the window's
-        // world rect. Convert to the camera's view space before anchoring
-        // -- or the ripple lands somewhere off the window whenever the
-        // camera is zoomed in/out or panned, exactly the "ripple renders
-        // far away" reports. The pointer below is already view space, and
-        // running the radius through the view rect makes the ripple match
-        // the window's on-screen size at any zoom.
-        let win = if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
-            // Windows render at output-local view coords
-            // `(world - camera.origin) * zoom`; anchor the ripple there too.
-            crate::ocean::world_to_view_rect(
-                win,
-                self.ocean.camera(&output.name()),
-                Point::from((0, 0)),
-            )
-        } else {
-            Rectangle::new(win.loc - output_geo.loc, win.size)
-        };
+        // Ripple geometry is output-local. Ocean's authoritative placement
+        // above already includes its camera/pin transform.
+        let win = Rectangle::new(win.loc - output_geo.loc, win.size);
         cfg.peak_radius = Some(cfg.radius_for_window(win.size.w as f32, win.size.h as f32));
         let anchor = cfg.anchor.unwrap_or(RippleAnchor::Center);
         let (dx, dy) = cfg.offset.unwrap_or((0, 0));
@@ -7840,9 +8007,12 @@ impl Smallvil {
             return;
         };
         self.ocean.ensure_default_reef(seed_geo.size);
+        self.ocean
+            .clamp_screen_pins(&seed_output.name(), seed_geo.size);
         for output in outputs.iter().skip(1) {
             if let Some(geometry) = self.space.output_geometry(output) {
                 self.ocean.ensure_default_reef(geometry.size);
+                self.ocean.clamp_screen_pins(&output.name(), geometry.size);
             }
         }
 
@@ -7868,10 +8038,18 @@ impl Smallvil {
         for (window, rect, _) in self.ocean.world_layouts_from_tiled(tiled) {
             let output = window
                 .toplevel()
-                .and_then(|toplevel| self.ocean.entry_output(toplevel.wl_surface()))
-                .and_then(|name| outputs.iter().find(|output| output.name() == name))
-                .unwrap_or(seed_output);
-            self.set_window_fractional_scale(&window, output);
+                .and_then(|toplevel| {
+                    self.rendered_output_for_surface(toplevel.wl_surface())
+                        .or_else(|| {
+                            self.ocean
+                                .entry_output(toplevel.wl_surface())
+                                .and_then(|name| {
+                                    outputs.iter().find(|output| output.name() == name).cloned()
+                                })
+                        })
+                })
+                .unwrap_or_else(|| seed_output.clone());
+            self.set_window_fractional_scale(&window, &output);
             // Space remains a protocol/input cache in Ocean. The shared
             // renderer uses world rect + camera translation, never this
             // presentation coordinate as spatial ownership.
@@ -7985,6 +8163,7 @@ impl Smallvil {
                         });
                         toplevel.send_pending_configure();
                     }
+                    self.set_window_fractional_scale(&window, output);
                     self.space.map_element(window, full.loc, false);
                 }
             }
@@ -8019,7 +8198,55 @@ impl Smallvil {
                     });
                     toplevel.send_pending_configure();
                 }
+                self.set_window_fractional_scale(&window, output);
                 self.space.map_element(window, maximized_rect.loc, false);
+            }
+
+            // Floating ownership survives inactive workspaces, unlike
+            // `Space`. Reconcile every tagged window so hidden floaters and
+            // saved fullscreen/maximize geometry cannot retain a stale scale
+            // or become unreachable after the logical output shrinks.
+            if let Some(full) = full_output_geo {
+                let floating: Vec<(WlSurface, Window)> = self
+                    .floating_workspace
+                    .iter()
+                    .filter(|(_, tag)| tag.output == output.name())
+                    .map(|(surface, tag)| (surface.clone(), tag.window.clone()))
+                    .collect();
+                for (surface, window) in floating {
+                    self.set_window_fractional_scale(&window, output);
+
+                    if let Some(tag) = self.floating_workspace.get_mut(&surface) {
+                        tag.rect = clamp_rect_visible(tag.rect, full);
+                    }
+                    if let Some(entry) = self.fullscreen.get_mut(&surface) {
+                        if let Some(rect) = &mut entry.restore_rect {
+                            *rect = clamp_rect_visible(*rect, full);
+                        }
+                    }
+                    if let Some(entry) = self.maximized.get_mut(&surface) {
+                        entry.restore_rect = clamp_rect_visible(entry.restore_rect, full);
+                    }
+
+                    if !self.fullscreen.contains_key(&surface)
+                        && !self.maximized.contains_key(&surface)
+                        && self.window_is_visible(&surface)
+                    {
+                        let current = self
+                            .space
+                            .element_geometry(&window)
+                            .or_else(|| self.floating_workspace.get(&surface).map(|tag| tag.rect));
+                        if let Some(current) = current {
+                            let clamped = clamp_rect_visible(current, full);
+                            if let Some(tag) = self.floating_workspace.get_mut(&surface) {
+                                tag.rect = clamped;
+                            }
+                            if clamped.loc != current.loc {
+                                self.space.map_element(window, clamped.loc, false);
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -8768,8 +8995,8 @@ impl Smallvil {
 
     /// The effective adaptive-sync preference for `output_name`: its own
     /// `[[output]]` override if set, else the global `adaptive_sync`
-    /// default. See `AdaptiveSync`'s own doc -- this is config resolution
-    /// only today, not yet wired to a real `DrmSurface::use_vrr` call.
+    /// default. The udev render path consumes this resolution and applies it
+    /// through Smithay's DRM compositor.
     pub(crate) fn adaptive_sync_for(&self, output_name: &str) -> crate::config::AdaptiveSync {
         self.config
             .outputs
@@ -12129,6 +12356,7 @@ impl Smallvil {
                     // shared pre-frame pipeline to rebuild against the current
                     // window geometry instead of briefly showing stale content.
                     self.backdrop_textures.clear();
+                    self.layer_alpha_masks.clear();
                 }
                 // A reload that dropped or renamed the currently-active
                 // submap would otherwise leave every key silently

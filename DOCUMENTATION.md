@@ -104,7 +104,7 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | `master_side` | `left` \| `right` \| `top` \| `bottom` | `left` | Which side the master pane sits on under `layout = master`. `left`/`right` stack the other windows vertically in the remaining strip; `top`/`bottom` stack them horizontally instead. One global setting, not per-workspace. |
 | `split_bias` | `auto` \| `horizontal` \| `vertical` | `auto` | Manual override for `layout = bsp`'s per-split axis choice. `auto` is the existing aspect-ratio-driven behavior, unchanged. `horizontal`/`vertical` force every split one way regardless of window/output shape (Hyprland dwindle's `force_split` idea). One global setting, not per-workspace. |
 | `pseudo_tile_scale` | float, `0.05`–`1.0` | `0.7` | Fraction of its tile a pseudo-tiled window keeps, centered within it. Out-of-range values are clamped, not rejected. |
-| `adaptive_sync` (aliases `vrr`, `variable_refresh_rate`) | `off` \| `on` \| `on-demand` | `off` | Global adaptive-sync (VRR) preference; a `[[output]]`'s own `adaptive_sync` beats it. **Config surface only right now** — the udev backend queries and logs each connector's real hardware VRR capability but does not yet actually enable it. See AGENT.md's config-gap-audit section for the full reasoning and what's deferred. |
+| `adaptive_sync` (aliases `vrr`, `variable_refresh_rate`) | `off` \| `on` \| `on-demand` | `off` | Global adaptive-sync (VRR) preference; a `[[output]]`'s own `adaptive_sync` beats it. The udev backend applies the resolved value through DRM; `on-demand` enables VRR only while an unlocked fullscreen window owns the output. The nested winit backend has no DRM surface, so this setting is inert there. |
 | `spawn` | list | none | Commands launched once at startup, as a real list: `spawn = [waybar, "swaybg -i ~/wallpaper.png -m fill"]`. Args split on whitespace — no shell involved, so quoting/globs/pipes aren't supported; wrap in `sh -c "..."` yourself if you need those. |
 
 ### Workspace transitions
@@ -1268,7 +1268,7 @@ Per-connector overrides, **udev backend only** — winit's single simulated outp
 | `scale` | float | `1.0` | |
 | `transform` | string | `normal` | One of `normal`, `90`, `180`, `270`, `flipped`, `flipped-90`, `flipped-180`, `flipped-270`. |
 | `gaps` | integer, optional | global `gaps` | Per-output gap override for every workspace shown on this connector. A `workspace_gaps` entry beats it. |
-| `adaptive_sync` (aliases `vrr`, `variable_refresh_rate`) | `off` \| `on` \| `on-demand`, optional | global `adaptive_sync` | Per-output override. Same config-only scope as the global key — see that row above. |
+| `adaptive_sync` (aliases `vrr`, `variable_refresh_rate`) | `off` \| `on` \| `on-demand`, optional | global `adaptive_sync` | Per-output override; see the global key above for DRM and `on-demand` behavior. |
 
 ```
 output eDP-1 {
@@ -1491,7 +1491,8 @@ Matches a layer-shell surface (a bar, panel, or launcher, not an ordinary app wi
 | `dim_around` | bool | Default `false`. While a matching surface on the Overlay or Top stratum is mapped, dims everything rendered behind it — every non-fullscreen window, lower layers, and the wallpaper — Hyprland's `dimaround`. |
 | `dim_amount` | float 0.0-1.0, optional | The dim overlay's alpha. Default `0.35` when `dim_around` is on and this is unset. |
 | `above_lock_screen` | bool | Default `false`. Keeps the matched surface rendered on top of the session-lock surface instead of being blanked with everything else — Hyprland's `abovelock`. Render-only: input still never reaches anything but the lock surface itself while locked, so this cannot be used to bypass the lock. Screenshots/screencasts taken while locked still honor `block_capture` for an `above_lock_screen` surface. |
-| `blur` | bool | Default `false`. Frost-glasses the matched surface's own backdrop — Hyprland's `layerrule = blur`. Requires the global `frost { enabled = true }` (checked separately from this per-namespace opt-in); always frost, there's no water-refraction choice for a bar. No `ignore_alpha` knob yet: the frost rect covers the surface's full negotiated geometry, not just its opaque pixels, so a layer client whose logical size is much bigger than what it actually draws (an invisible full-output click-catcher) would blur the whole area behind it, same as Hyprland without `ignorealpha`. Doesn't affect an ordinary bar/launcher sized to its visible content. |
+| `blur` | bool | Default `false`. Frost-glasses the matched surface's own backdrop — Hyprland's `layerrule = blur`. Requires the global `frost { enabled = true }` (checked separately from this per-namespace opt-in); always frost, there's no water-refraction choice for a bar. |
+| `ignore_alpha` | float 0.0-1.0, optional | Masks layer blur using the composed alpha of the complete layer surface tree. Pixels below the threshold do not blur, which prevents a transparent full-output click-catcher from frosting the entire monitor. Has no effect unless `blur = true`. |
 
 ```
 layer_rule {
@@ -1518,6 +1519,7 @@ layer_rule {
 layer_rule {
     namespace = waybar
     blur = true
+    ignore_alpha = 0.1
 }
 ```
 

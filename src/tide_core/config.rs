@@ -100,23 +100,11 @@ pub enum LayoutAlgorithm {
     Cascade,
 }
 
-/// Adaptive-sync (VRR) preference -- niri's own three-way shape
-/// (`variable-refresh-rate off|on|on-demand`). **Config surface only as
-/// of this landing: the udev backend queries and logs each connector's
-/// real `DrmSurface::vrr_supported` capability but does not yet call
-/// `use_vrr` to actually toggle it.** Smithay's pinned rev exposes a
-/// clean, maintained wrapper for this (not raw property manipulation --
-/// confirmed by reading `backend/drm/surface/atomic.rs` directly), but
-/// Smithay's own source carries a real-hardware caveat next to it
-/// ("setting VRR for HDMI connectors will cause flickering despite not
-/// needing ALLOW_MODESET"), and this codebase's own history (`AGENT.md`'s
-/// Phase C `TileMoveGrab` freeze, the S4.5 Ocean freeze) is that "the
-/// wrapper is safe" and "this specific interaction is safe on real
-/// hardware" are different claims -- the second one needs the
-/// maintainer's own hands-on udev/DRM pass, which this sandbox cannot
-/// provide. `OnDemand` (VRR only while a fullscreen window owns the
-/// output) is expressible without new state -- `Smallvil::fullscreen`
-/// already tracks exactly that -- once the toggle itself is built.
+/// Adaptive-sync (VRR) preference -- niri's three-way shape
+/// (`variable-refresh-rate off|on|on-demand`). The udev render path applies
+/// this through Smithay's `DrmCompositor::use_vrr`; `OnDemand` enables VRR
+/// only while a fullscreen window owns the output. The nested winit backend
+/// has no DRM surface, so the setting is intentionally inert there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AdaptiveSync {
     #[default]
@@ -1787,6 +1775,16 @@ impl Config {
         self.layer_rules
             .iter()
             .any(|rule| rule.blur && rule.matches(namespace))
+    }
+
+    /// Last matching alpha threshold for a blurred layer. An unset value
+    /// leaves the full negotiated layer geometry blurred.
+    pub(crate) fn layer_ignore_alpha(&self, namespace: &str) -> Option<f32> {
+        self.layer_rules
+            .iter()
+            .rev()
+            .filter(|rule| rule.matches(namespace))
+            .find_map(|rule| rule.ignore_alpha)
     }
 
     /// The `layout` field of every `[[workspace_rule]]` that set one,
@@ -4450,19 +4448,9 @@ impl WindowRule {
 ///   precedent already makes, not part of the water identity. Always
 ///   frost -- there's no water-refraction mode for a bar, matching
 ///   Hyprland's own single "blur" effect rather than TideWM windows'
-///   water/frost choice. **No `ignore_alpha`, and this is a real gap, not
-///   a proven non-issue:** the captured frost rect is sized to the
-///   surface's full `layer_geometry` (its negotiated logical rect, e.g. a
-///   whole output for a `width = 100%; height = 100%` anchor), not a
-///   bounding box of its actually-opaque pixels, and it renders behind
-///   the surface unconditionally -- so wherever the surface itself draws
-///   fully transparent, the frost rect shows through in full, same as
-///   Hyprland *without* `ignorealpha`. This only matters for a layer
-///   client whose logical size is much larger than its visibly-drawn
-///   content (Hyprland's own motivating case: an invisible full-output
-///   click-catcher); an ordinary bar/launcher sized to what it draws
-///   isn't affected, which is why this shipped without the knob rather
-///   than blocking on it -- revisit if a real client hits the gap.
+///   water/frost choice. `ignore_alpha` optionally masks frost with a
+///   native alpha capture of the complete layer surface tree, discarding
+///   blur where the composed client alpha is below the configured threshold.
 #[derive(Debug, Clone, Default)]
 pub struct LayerRule {
     pub namespace: Option<String>,
@@ -4472,6 +4460,7 @@ pub struct LayerRule {
     pub dim_amount: Option<f32>,
     pub above_lock_screen: bool,
     pub blur: bool,
+    pub ignore_alpha: Option<f32>,
 }
 
 impl LayerRule {
@@ -8166,6 +8155,15 @@ fn lower_layer_rule_block(body: &[waves::Entry]) -> LayerRule {
             },
             "above_lock_screen" => set_bool(&mut rule.above_lock_screen, key, value),
             "blur" => set_bool(&mut rule.blur, key, value),
+            "ignore_alpha" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => {
+                    rule.ignore_alpha = Some(value.clamp(0.0, 1.0));
+                }
+                _ => tracing::warn!(
+                    value,
+                    "Expected layer_rule.ignore_alpha from 0.0 to 1.0, ignoring"
+                ),
+            },
             other => tracing::warn!(key = %other, "Unknown key in `layer_rule` block, ignoring"),
         }
     }
@@ -8941,11 +8939,11 @@ mode nav {
 # spatial_engine = ocean in config.wave anyway. Uncomment when you switch.
 # bind Ctrl+Left { ocean-pan-left }
 # bind Ctrl+Right { ocean-pan-right }
-# bind Ctrl+Up = ocean-pan-up
-# bind Ctrl+Down = ocean-pan-down
-# bind Ctrl+I = ocean-zoom-in
-# bind Ctrl+O = ocean-zoom-out
-# bind Ctrl+0 = ocean-zoom-reset
+# bind Ctrl+Up { ocean-pan-up }
+# bind Ctrl+Down { ocean-pan-down }
+# bind Ctrl+I { ocean-zoom-in }
+# bind Ctrl+O { ocean-zoom-out }
+# bind Ctrl+0 { ocean-zoom-reset }
 # bind $mod+Ctrl+D  { sink-window }
 # bind $mod+Ctrl+Shift+D  { ocean-dredge-window }
 # bind $mod+Ctrl+Shift+U  { ocean-surface-window }
@@ -8955,11 +8953,11 @@ mode nav {
 # Commented out since they assume tools this config can't verify you have
 # installed.
 # bind Print  { "spawn:grim ~/screenshot.png" }
-# bind XF86AudioRaiseVolume = spawn:pactl set-sink-volume @DEFAULT_SINK@ +5%
-# bind XF86AudioLowerVolume = spawn:pactl set-sink-volume @DEFAULT_SINK@ -5%
-# bind XF86AudioMute = spawn:pactl set-sink-mute @DEFAULT_SINK@ toggle
-# bind XF86MonBrightnessUp = spawn:brightnessctl set 10%+
-# bind XF86MonBrightnessDown = spawn:brightnessctl set 10%-
+# bind XF86AudioRaiseVolume { spawn:pactl set-sink-volume @DEFAULT_SINK@ +5% }
+# bind XF86AudioLowerVolume { spawn:pactl set-sink-volume @DEFAULT_SINK@ -5% }
+# bind XF86AudioMute { spawn:pactl set-sink-mute @DEFAULT_SINK@ toggle }
+# bind XF86MonBrightnessUp { spawn:brightnessctl set 10%+ }
+# bind XF86MonBrightnessDown { spawn:brightnessctl set 10%- }
 "#;
 
 #[cfg(test)]
@@ -9799,6 +9797,21 @@ mod tests {
         });
         assert!(config.layer_blur("waybar"));
         assert!(!config.layer_blur("some-other-bar"));
+
+        let ignore_alpha = lower_layer_rule_block(&[
+            waves::Entry::Assign("namespace".into(), "waybar".into()),
+            waves::Entry::Assign("ignore_alpha".into(), "0.25".into()),
+        ]);
+        assert_eq!(ignore_alpha.ignore_alpha, Some(0.25));
+        config.layer_rules.push(ignore_alpha);
+        assert_eq!(config.layer_ignore_alpha("waybar"), Some(0.25));
+        assert_eq!(config.layer_ignore_alpha("some-other-bar"), None);
+
+        let clamped = lower_layer_rule_block(&[
+            waves::Entry::Assign("namespace".into(), "waybar".into()),
+            waves::Entry::Assign("ignore_alpha".into(), "2.0".into()),
+        ]);
+        assert_eq!(clamped.ignore_alpha, Some(1.0));
     }
 
     #[test]

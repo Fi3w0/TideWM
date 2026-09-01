@@ -183,6 +183,7 @@ impl WlrLayerShellHandler for Smallvil {
         // any launcher) leaks one full-rect GLES texture per destroy, since
         // nothing else ever removes this map's entries for a layer surface.
         self.backdrop_textures.remove(surface.wl_surface());
+        self.layer_alpha_masks.remove(surface.wl_surface());
 
         // Unmap from whichever output actually has it, then let retile()
         // (which re-tiles every output, re-reading each one's fresh

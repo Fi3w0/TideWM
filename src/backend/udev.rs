@@ -177,6 +177,10 @@ struct SurfaceData {
     /// DPMS-off state. Rendering is skipped until power-on marks it dirty;
     /// the next ordinary queue re-enables scanout after `clear()`.
     powered_off: bool,
+    /// Last adaptive-sync target attempted for this surface. A failed DRM
+    /// property change is not retried every rendered frame; a policy change
+    /// (including entering/leaving fullscreen for on-demand mode) retries.
+    vrr_target: Option<bool>,
 }
 
 struct DeviceData {
@@ -245,6 +249,7 @@ struct OpenGpu {
     notifier: DrmDeviceNotifier,
     gbm: GbmDevice<DrmDeviceFd>,
     connected: bool,
+    vendor: Option<GpuVendor>,
 }
 
 struct RenderOnlyDevice {
@@ -379,6 +384,7 @@ pub fn init_udev(
             notifier,
             gbm,
             connected,
+            vendor,
         });
     }
     if opened.is_empty() {
@@ -450,8 +456,16 @@ pub fn init_udev(
         mut drm,
         notifier: drm_notifier,
         gbm,
+        vendor,
         ..
     } = selected;
+    state.tide.gpu_vendor = match vendor {
+        Some(GpuVendor::Amd) => "amd",
+        Some(GpuVendor::Nvidia) => "nvidia",
+        Some(GpuVendor::Intel) => "intel",
+        None => "unknown",
+    };
+    state.sync_tide();
     tracing::info!(path = %selected_path.display(), ?selected_node, ?render_node, "Using GPU for TideWM rendering and scanout");
 
     // Client-facing zwp_linux_dmabuf_v1 global: lets GPU-accelerated
@@ -1312,13 +1326,14 @@ fn create_surface(
         }
     };
 
-    // Report live VRR capability; scanout toggling is not implemented yet.
+    // Report live VRR capability. The requested policy is applied by
+    // `render_surface`, where on-demand fullscreen state is current.
     match drm_surface.vrr_supported(connector.handle()) {
         Ok(support) => tracing::info!(
             connector_name,
             configured = ?state.adaptive_sync_for(&connector_name),
             hardware_support = ?support,
-            "Adaptive-sync (VRR): capability queried, not yet toggled"
+            "Adaptive-sync (VRR) capability"
         ),
         Err(e) => tracing::debug!(%e, connector_name, "Could not query VRR support"),
     }
@@ -1470,6 +1485,7 @@ fn create_surface(
         dirty: true,
         empty_frame_retry_pending: None,
         powered_off: false,
+        vrr_target: None,
     })
 }
 
@@ -1550,6 +1566,7 @@ fn handle_connector_change(
                     if let Some(fallback) = fallback.as_deref() {
                         state.migrate_output_windows(&disconnected_name, fallback);
                     }
+                    state.remove_layer_output(&surface.output);
                     state.space.unmap_output(&surface.output);
                     state.refresh_input_device_outputs();
                     let space = &state.space;
@@ -1575,7 +1592,8 @@ fn handle_connector_change(
                         .wlr_gamma_control_state
                         .output_removed(&surface.output);
                     state.retile();
-                    state.repair_keyboard_focus(
+                    state.refresh_pointer_focus();
+                    state.repair_keyboard_focus_after_output_change(
                         fallback.as_deref(),
                         smithay::utils::SERIAL_COUNTER.next_serial(),
                     );
@@ -1724,6 +1742,37 @@ fn render_surface(
     let locked = !matches!(state.session_lock, SessionLock::Unlocked);
 
     let output = &surface.output;
+    let vrr_requested = match state.adaptive_sync_for(&output.name()) {
+        crate::config::AdaptiveSync::Off => false,
+        crate::config::AdaptiveSync::On => true,
+        crate::config::AdaptiveSync::OnDemand => {
+            !locked
+                && state
+                    .fullscreen
+                    .values()
+                    .any(|entry| entry.output == output.name())
+        }
+    };
+    if surface.compositor.vrr_enabled() != vrr_requested
+        && surface.vrr_target != Some(vrr_requested)
+    {
+        surface.vrr_target = Some(vrr_requested);
+        match surface.compositor.use_vrr(vrr_requested) {
+            Ok(()) => tracing::info!(
+                output = output.name(),
+                enabled = vrr_requested,
+                "Adaptive-sync (VRR) state changed"
+            ),
+            Err(error) => tracing::warn!(
+                %error,
+                output = output.name(),
+                enabled = vrr_requested,
+                "Failed to change adaptive-sync (VRR) state"
+            ),
+        }
+    } else if surface.compositor.vrr_enabled() == vrr_requested {
+        surface.vrr_target = Some(vrr_requested);
+    }
     let placements = if locked {
         Vec::new()
     } else {

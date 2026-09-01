@@ -13,8 +13,8 @@ use smithay::{
     backend::renderer::{
         element::{Element, Id, Kind, RenderElement},
         gles::{
-            GlesError, GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture, Uniform, UniformName,
-            UniformType,
+            ffi, GlesError, GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture, Uniform,
+            UniformName, UniformType,
         },
         utils::CommitCounter,
         Texture,
@@ -60,6 +60,8 @@ uniform float u_tint_alpha;
 uniform vec4 u_corner_radii;
 uniform float u_rounding_power;
 uniform float u_corner_softness;
+uniform sampler2D u_alpha_mask;
+uniform float u_ignore_alpha;
 varying vec2 v_coords;
 
 #if defined(DEBUG_FLAGS)
@@ -200,6 +202,9 @@ void main() {
 #endif
 
     color *= rounded_mask();
+    if (u_ignore_alpha >= 0.0) {
+        color *= step(u_ignore_alpha, texture2D(u_alpha_mask, v_coords).a);
+    }
 
 #if defined(DEBUG_FLAGS)
     if (tint == 1.0)
@@ -237,6 +242,8 @@ pub fn frost_glass_program(
             UniformName::new("u_corner_radii", UniformType::_4f),
             UniformName::new("u_rounding_power", UniformType::_1f),
             UniformName::new("u_corner_softness", UniformType::_1f),
+            UniformName::new("u_alpha_mask", UniformType::_1i),
+            UniformName::new("u_ignore_alpha", UniformType::_1f),
         ],
     ) {
         Ok(program) => {
@@ -262,6 +269,7 @@ pub fn frost_glass_commit(
     corner_radii: [f32; 4],
     rounding_power: f32,
     corner_softness: f32,
+    alpha_mask: Option<(usize, f32)>,
 ) -> CommitCounter {
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     capture_version.hash(&mut hash);
@@ -288,6 +296,10 @@ pub fn frost_glass_commit(
     }
     rounding_power.to_bits().hash(&mut hash);
     corner_softness.to_bits().hash(&mut hash);
+    if let Some((version, threshold)) = alpha_mask {
+        version.hash(&mut hash);
+        threshold.to_bits().hash(&mut hash);
+    }
     CommitCounter::from(hash.finish() as usize)
 }
 
@@ -302,6 +314,7 @@ pub struct FrostGlassElement {
     corner_radii: [f32; 4],
     rounding_power: f32,
     corner_softness: f32,
+    alpha_mask: Option<(GlesTexture, f32)>,
 }
 
 impl FrostGlassElement {
@@ -330,7 +343,13 @@ impl FrostGlassElement {
             corner_radii,
             rounding_power,
             corner_softness,
+            alpha_mask: None,
         }
+    }
+
+    pub fn with_alpha_mask(mut self, texture: GlesTexture, threshold: f32) -> Self {
+        self.alpha_mask = Some((texture, threshold.clamp(0.0, 1.0)));
+        self
     }
 }
 
@@ -370,7 +389,14 @@ impl RenderElement<GlesRenderer> for FrostGlassElement {
         opaque_regions: &[Rectangle<i32, Physical>],
         _cache: Option<&UserDataMap>,
     ) -> Result<(), GlesError> {
-        frame.render_texture_from_to(
+        if let Some((mask, _)) = &self.alpha_mask {
+            frame.with_context(|gl| unsafe {
+                gl.ActiveTexture(ffi::TEXTURE1);
+                gl.BindTexture(ffi::TEXTURE_2D, mask.tex_id());
+                gl.ActiveTexture(ffi::TEXTURE0);
+            })?;
+        }
+        let result = frame.render_texture_from_to(
             &self.texture,
             src,
             dst,
@@ -403,8 +429,24 @@ impl RenderElement<GlesRenderer> for FrostGlassElement {
                 Uniform::new("u_corner_radii", self.corner_radii),
                 Uniform::new("u_rounding_power", self.rounding_power),
                 Uniform::new("u_corner_softness", self.corner_softness),
+                Uniform::new("u_alpha_mask", 1_i32),
+                Uniform::new(
+                    "u_ignore_alpha",
+                    self.alpha_mask
+                        .as_ref()
+                        .map(|(_, threshold)| *threshold)
+                        .unwrap_or(-1.0),
+                ),
             ],
-        )
+        );
+        if self.alpha_mask.is_some() {
+            frame.with_context(|gl| unsafe {
+                gl.ActiveTexture(ffi::TEXTURE1);
+                gl.BindTexture(ffi::TEXTURE_2D, 0);
+                gl.ActiveTexture(ffi::TEXTURE0);
+            })?;
+        }
+        result
     }
 }
 
@@ -439,16 +481,33 @@ mod tests {
         // that stability is what stops the visible output redrawing a frosted
         // bar or window every frame while nothing behind it changed.
         let config = FrostConfig::default();
-        let baseline = frost_glass_commit(2, &config, [6.0; 4], 2.0, 1.0);
-        assert_eq!(baseline, frost_glass_commit(2, &config, [6.0; 4], 2.0, 1.0));
+        let baseline = frost_glass_commit(2, &config, [6.0; 4], 2.0, 1.0, None);
+        assert_eq!(
+            baseline,
+            frost_glass_commit(2, &config, [6.0; 4], 2.0, 1.0, None)
+        );
     }
 
     #[test]
     fn frost_glass_commit_advances_when_the_capture_re_renders() {
         let config = FrostConfig::default();
-        let before = frost_glass_commit(2, &config, [6.0; 4], 2.0, 1.0);
-        let after = frost_glass_commit(3, &config, [6.0; 4], 2.0, 1.0);
+        let before = frost_glass_commit(2, &config, [6.0; 4], 2.0, 1.0, None);
+        let after = frost_glass_commit(3, &config, [6.0; 4], 2.0, 1.0, None);
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn frost_glass_commit_tracks_alpha_mask_content_and_threshold() {
+        let config = FrostConfig::default();
+        let baseline = frost_glass_commit(2, &config, [6.0; 4], 2.0, 1.0, Some((3, 0.1)));
+        assert_ne!(
+            baseline,
+            frost_glass_commit(2, &config, [6.0; 4], 2.0, 1.0, Some((4, 0.1)))
+        );
+        assert_ne!(
+            baseline,
+            frost_glass_commit(2, &config, [6.0; 4], 2.0, 1.0, Some((3, 0.2)))
+        );
     }
 
     #[test]
@@ -458,8 +517,8 @@ mod tests {
         let config = FrostConfig::default();
         let mut changed = config.clone();
         changed.strength = 0.25;
-        let before = frost_glass_commit(2, &config, [6.0; 4], 2.0, 1.0);
-        let after = frost_glass_commit(2, &changed, [6.0; 4], 2.0, 1.0);
+        let before = frost_glass_commit(2, &config, [6.0; 4], 2.0, 1.0, None);
+        let after = frost_glass_commit(2, &changed, [6.0; 4], 2.0, 1.0, None);
         assert_ne!(before, after);
     }
 
@@ -468,8 +527,8 @@ mod tests {
         let config = FrostConfig::default();
         let mut changed = config.clone();
         changed.liquid = 0.0;
-        let before = frost_glass_commit(2, &config, [6.0; 4], 2.0, 1.0);
-        let after = frost_glass_commit(2, &changed, [6.0; 4], 2.0, 1.0);
+        let before = frost_glass_commit(2, &config, [6.0; 4], 2.0, 1.0, None);
+        let after = frost_glass_commit(2, &changed, [6.0; 4], 2.0, 1.0, None);
         assert_ne!(before, after);
     }
 }
