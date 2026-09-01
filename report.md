@@ -8,13 +8,13 @@ This is a static code review, not a claim that every issue below was reproduced 
 
 ## Implementation handoff
 
-- Updated: 2026-08-13
-- Implementation branch: `ai/codex/report-fixes`
-- Separate worktree: `/home/fiw/Proyects/TideWM-worktrees/report-fixes`
-- Latest behavioral head: `2ebf8c9`
-- Current TideWM version on the branch: `0.90.100`
-- Push status: local only; nothing from this branch has been pushed.
-- The branch was fast-forwarded to master `dfc00b7` before this pass, preserving the earlier audit-remediation history and incorporating the intervening render/visual-identity work.
+- Updated: 2026-09-01
+- Implementation branch: `master`
+- Worktree: `/home/fiw/Proyects/TideWM`
+- Latest behavioral head: `7c48188`
+- Current TideWM version: `0.90.105`
+- Push status: local only; nothing from this phase has been pushed.
+- Phase 3 continued from documentation/packaging head `b6805e2`, preserving all earlier remediation history.
 
 The finding text below is the original audit evidence. It is intentionally retained even when a finding is closed. Use this handoff ledger as the current status authority, then inspect the named commit and current code before changing a closed area. Do not repeat a fix merely because its original finding still says “confirmed.”
 
@@ -23,7 +23,8 @@ The finding text below is the original audit evidence. It is intentionally retai
 - Critical: all 7 closed.
 - High: H-01 through H-44 closed. H-45 was re-audited as a stale false positive because the current udev path already processes connector `Changed` events and rescans/retries surface creation.
 - Medium explicitly re-audited and closed: M-01, M-02, M-04 through M-10, M-12 through M-23, M-25 through M-30, and M-32 through M-36.
-- Medium still open or awaiting a fresh audit: M-24, M-37, M-48, and M-50 through M-73. (M-03 fixed 2026-08-13 in `7f97c04`; M-31 fixed 2026-08-13 in `854b223`; M-38 fixed 2026-08-13 in `b473f67`; M-39 fixed 2026-08-13 in `1e5348c`; M-40 fixed in `911b942` and completed in `5fe5db4`; M-41 fixed 2026-08-13 in `27c9489`; M-42 fixed 2026-08-13 in `bc38869`; M-43 fixed 2026-08-13 in `ef6cf33`; M-44 fixed 2026-08-13 in `52136de`; M-45 fixed 2026-08-13 in `f3eff65`; M-46 fixed 2026-08-13 in `5f0e15e`; M-47 fixed 2026-08-13 in `2ebf8c9`; M-49 fixed 2026-08-13 in `2c466d6`; M-74 fixed 2026-08-13 in `6e2f42e`; M-11 fixed 2026-08-09 in `441d559` — see their finding bodies.) M-24 and M-50 got **partial fixes/mitigations only, not full closes** — see their finding bodies before treating either as resolved: M-24's leak (`eb9107b`, 2026-08-13) is now observable and bounded, not eliminated; M-50's stale threshold (`bdbef36`, 2026-08-13) is corrected but the finding's "cannot judge the selected feature set" half is untouched.
+- Medium still open: M-24, M-37, M-51, M-53 through M-60, and M-72. M-24 remains mitigated rather than eliminated; M-37 remains blocked on the Smithay pin decision; M-51/M-53..M-60 remain deliberately measurement-led; M-72 still needs a maintainer scale-policy choice. Phase 3 closed M-48, M-50, M-61 through M-63, M-65 through M-68, M-70, M-71, and M-73 in `7c48188`; M-64 and M-69 had already been closed on 2026-08-14. See each finding body for proof and validation debt.
+- Phase 3 also closes the two executable config gaps in `7c48188`: layer blur's `ignore_alpha` now masks frost from a composed layer-surface alpha capture, and the udev renderer applies global/per-output adaptive-sync policy through Smithay's DRM `use_vrr`. Parser/commit tests and the all-feature build pass; a transparent full-output layer and real DRM VRR transitions remain explicitly unverified.
 - Performance re-audit (2026-08-13): P-01, P-02, P-03, P-06, P-07, P-08, and P-10 are fixed in `b6d829a`, `c211a17`, `193e63d`, `950d921`, `7e9a128`, and `c508041`. P-01 now shares one placement snapshot across an output render/capture pass and rejects off-camera reefs before BSP layout, without a persistent cache. P-04 was already single-search in the reconciled tree. P-05's remaining allocation is a bounded once-per-window history path, and P-09's picker rebuild happens only when selection state changes; neither justifies hot-path complexity without a profile. P-11 and P-14 are closed by the real-hardware results recorded below. P-12's scheduling fix is covered by nonstandard-cadence unit tests but still needs a real-DRM trace. P-13 remains a general low-end iGPU/client-buffer constraint, but TideWM's controlled side is now measurable, downscalable, wallpaper-optional, and reclaimed whenever the last output stops presenting a capture (`332cf1c`). A shared-per-output blur buffer remains a possible measured tradeoff, not an assumed win: it changes overlap/occlusion semantics and can allocate more than small tiled captures.
 - Lower-confidence re-audit (2026-08-13): every concrete U-01 through U-16 item has now been investigated. U-01 is fixed in `fc82fea`; U-04 in `1b14b48`; U-10 in `51c476e`; U-15 in `5fe5db4`; U-16 in `e6bf868`; U-02, U-03, U-05, and U-06 in `7edcc3b`; U-07 and U-08 in `7edc8c2`; U-11 in `9898128`; U-12 in `8efcdfe`; and the concrete hardware-facing U-14 ranges in `73d62ec`. U-09 and U-13 were already bounded in the reconciled tree. U-14 remains an ongoing parser-audit category for future fields, not permission to invent hardware defaults.
 - Formatter findings F-01 through F-04: closed.
@@ -683,6 +684,8 @@ Fix direction: make redraw propagation event-driven or run a per-output schedule
 
 **Confidence: confirmed.** `wave.rs:1545-1575` accepts only five-character `cardN` names, excluding `card10+`, and takes the first unspecified `read_dir` result. Hybrid systems can expose the wrong vendor to hardware-conditional config.
 
+**Fixed 2026-09-01, `7c48188`.** Startup detection now parses every exact `cardN` name, accepts multi-digit indices, and deterministically selects the lowest numeric card instead of filesystem iteration order; pure tests cover ordering, `card10+`, connector names, and render nodes. Once udev's configured GPU selection completes, `tide.gpu.vendor` is replaced with the vendor of the adapter TideWM actually opened for render/scanout. A hybrid real-hardware conditional-config pass remains owed.
+
 ### M-49 — Diagnostics report the oldest matching journal entries as newest
 
 **Confidence: confirmed.** `tidectl_diagnostics` uses default `journalctl` ordering but labels/consumes the first records as newest. It should pass reverse ordering or change the wording.
@@ -694,6 +697,8 @@ Fix direction: make redraw propagation event-driven or run a per-output schedule
 **Confidence: confirmed.** The doctor warns at a hard-coded 1.5 GB, while `AGENT.md` now defines feature-scaled reference points and a 2 GB absolute ceiling. This can falsely flag an allowed Ocean setup and cannot judge the selected feature set.
 
 **Partially fixed 2026-08-13, `bdbef36` (`ai/codex/report-fixes`).** Raised the threshold from the stale 1.5GB to the current 2GB absolute ceiling AGENT.md's Hard Constraints section actually documents, so a fully-decorated setup within the project's own stated bounds can no longer trip the warning. What's still open: the finding's other half, "cannot judge the selected feature set," is unresolved by design -- `doctor` would need to query the live config over IPC (`diagnostics`'s existing connection, currently unused for this check -- see the `if let Some(_diag) = &diagnostics` binding right above it) and map enabled effects to an expected PSS range to do that properly, which is real feature work, not a threshold tweak, and out of scope for this pass. `cargo test --all-features --all-targets` (415 compositor tests, 9 `wavefmt` tests), `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo fmt --all -- --check` all passed.
+
+**Closed 2026-09-01, `7c48188`.** The live diagnostics payload now classifies the selected config as `basic`, `decorated`, or `ocean/full-rice`; `tidectl doctor` applies tier-specific soft investigation points (~4× the measured upper reference, conservatively 512 MiB for Ocean) while preserving the documented 2 GB absolute ceiling. Tests prove the same 250 MiB reading warns for basic but passes decorated/Ocean, and that every tier still warns above the ceiling. The thresholds are diagnostics, not hard allocation budgets; Ocean-at-scale measurement remains useful but no longer blocks the finding's feature-awareness requirement.
 
 ### M-51 — One output's animation repaints every output
 
@@ -741,13 +746,19 @@ Fix direction: make redraw propagation event-driven or run a per-output schedule
 
 **Confidence: confirmed behavior.** `touch_location` and `PointerMotionAbsolute` use `self.space.outputs().next()` (`input.rs:544-545`, `:1209-1215`). On multi-monitor systems, a touchscreen/tablet mapped to another connector controls the first output. There is no per-device output binding, “first” depends on Space iteration order, and output transform is not applied to device axes.
 
+**Fixed 2026-08-27, `61398e0`; re-audited and closed 2026-09-01.** Exact-name `input { device "..." { map_to_output, calibration_matrix } }` rules now resolve at hotplug/config/topology changes. Absolute pointer, touch, and tablet events use the selected output's live logical geometry; libinput's affine calibration matrix is applied/reset through its native device API, which is the device-axis transform seam. A missing/disconnected configured output intentionally falls back to the ordinary path and reconnect refreshes the cache. Parser and coordinate tests pass; physical touchscreen/tablet and mixed-transform hardware remain untested.
+
 ### M-62 — Live scale/transform leaves floaters and layer surfaces at stale fractional scale
 
 **Confidence: confirmed.** Output management changes state and arranges/retiles (`wlr_output_management.rs:597-629`). Classic retile updates preferred scale for tiled windows (`state.rs:7164-7213`) but not ordinary floaters or floating fullscreen/maximized windows. Layer scale is explicitly set only once (`handlers/layer_shell.rs:166-175`, `state.rs:4642-4655`). Clients can keep rendering for the old scale until an unrelated drag/remap.
 
+**Fixed 2026-09-01, `7c48188`.** Retile now refreshes preferred fractional scale for every floating owner on the changed output, including hidden-workspace, fullscreen, and maximized floaters; the output-management path already refreshes mapped layer scales after a scale change. Mixed-scale live hardware validation remains owed.
+
 ### M-63 — Transform/scale changes can push floating content and pins off-screen
 
 **Confidence: confirmed.** The apply path translates floaters only when position changes (`wlr_output_management.rs:612-625`). Rotation or increased scale shrinks/swaps logical bounds while floating tags and restore rectangles remain unchanged; retile reconciles only fullscreen/maximized (`state.rs:7216-7282`). Ocean pins likewise render raw `viewport_loc` (`ocean.rs:1408-1427`).
+
+**Fixed 2026-09-01, `7c48188`.** Retile clamps every affected floating tag plus fullscreen/maximize restore rectangle into the new logical bounds without resizing the user's window, remaps visible ordinary floaters, and clamps Ocean screen pins in output-local coordinates. Hidden ownership is updated too, so a later workspace reveal cannot resurrect stale off-screen geometry.
 
 ### M-64 — `swap-workspaces` corrupts window-group ownership
 
@@ -759,17 +770,25 @@ Fix direction: make redraw propagation event-driven or run a per-output schedule
 
 **Confidence: confirmed.** Swap retags/repositions/map-elements floaters (`state.rs:9418-9524`) but never calls `set_window_fractional_scale`; final retile updates tiled surfaces only. Crossing 1×→2× leaves the floater advertising 1× until another movement/remap.
 
+**Fixed 2026-09-01, `7c48188`.** The generalized floating-owner reconciliation runs after workspace swaps and sets preferred scale from each floater's retagged output, covering visible and hidden floaters. A real 1×/2× swap pass remains owed.
+
 ### M-66 — Ocean preferred fractional scale is tied to admission, not visibility
 
 **Confidence: confirmed.** `retile_ocean` selects `entry_output` for every world window (`state.rs:7123-7133`). A window admitted on scale-1 output A but visible through scale-2 output B keeps A's preferred scale. Simultaneous shared-world visibility needs a defined primary-placement policy.
+
+**Fixed 2026-09-01, `7c48188`.** Ocean now defines the primary rendered output as the live output containing the largest visible placement area, with output name as the deterministic tie-break; entry output is only a no-visible-placement fallback. Preferred fractional scale follows that primary display rather than admission history.
 
 ### M-67 — Output changes/unplug do not rehome pointer or refresh pointer focus
 
 **Confidence: confirmed.** Udev removes/migrates/unmaps then repairs only keyboard focus (`backend/udev.rs:1141-1183`). Output-management apply likewise omits the explicit scene-change pointer helper (`wlr_output_management.rs:597-632`; helper `state.rs:4126-4152`). `pointer.button` can use retained old Smithay focus (`input.rs:1819-1828`) before the next motion, sending the first click to the wrong or unmapped client. Pointer coordinates may also remain outside all surviving outputs.
 
+**Fixed 2026-09-01, `7c48188`.** The scene-change pointer helper now clamps the retained location into the live output union and emits a fresh motion/frame to recompute enter/leave focus. Both successful output-management apply and udev disconnect call it after topology reconciliation and before returning to input dispatch.
+
 ### M-68 — Ocean disconnect can retain focus on an invisible off-camera window
 
 **Confidence: confirmed.** `ocean.rs:659-677` deletes the camera and retags entries without reconciling which world area the fallback camera shows. All Ocean windows remain Space-mapped, and `window_is_visible` checks only Space presence (`state.rs:4191-4195`). Keyboard-focus repair can therefore retain content invisible on the fallback (`:4509-4559`).
+
+**Fixed 2026-09-01, `7c48188`.** Disconnect-specific repair tests the focused surface against surviving Ocean render placements, clears invisible retained intent, and selects the frontmost actually rendered placement on the preferred surviving output (then deterministic fallbacks). It no longer treats membership in Ocean's world-Space cache as proof of visibility.
 
 ### M-69 — Hidden-workspace float/pin/maximize rules silently fail
 
@@ -781,9 +800,13 @@ Fix direction: make redraw propagation event-driven or run a per-output schedule
 
 **Confidence: confirmed.** Lock surface size is configured at registration (`state.rs:4791-4799`). Output-management transform/scale rearranges/retiles (`wlr_output_management.rs:605-628`) without reconfiguring it. The compositor black fill remains safe, but the lock UI can be cropped or misaligned.
 
+**Fixed 2026-09-01, `7c48188`.** Live scale/transform apply now refreshes the lock surface's preferred fractional scale, derives its new logical size from the updated output geometry, and sends a configure before the apply succeeds. A real rotated/scaled lock-client pass remains owed.
+
 ### M-71 — Output control/layer state is incompletely cleaned on unplug
 
 **Confidence: confirmed/likely.** Power cleanup removes controls without sending `failed` (`wlr_output_power_management.rs:97-107`) while gamma has no unplug hook and retains an `Output`-keyed map (`wlr_gamma_control.rs:41-54`); udev invokes only power cleanup (`udev.rs:1175-1178`). Ordinary layer surfaces are not explicitly closed/unmapped (`udev.rs:1167-1170`), and later destruction searches only live outputs (`handlers/layer_shell.rs:187-200`), leaving stale old-Output layer-map state possible.
+
+**Fixed 2026-09-01, `7c48188`.** Re-audit found the gamma half stale: the current udev disconnect path already calls its `output_removed` hook and gamma controls store weak outputs. The remaining gaps are closed: power controls receive `failed` before removal, and every departing output's layer surfaces are closed/unmapped while its layer map is still reachable, with focus, dim/backdrop, and alpha-mask caches pruned. Real hotplug with active gamma/power/layer clients remains owed.
 
 ### M-72 — Live output scale/position ranges are too broad
 
@@ -794,6 +817,8 @@ Fix direction: make redraw propagation event-driven or run a per-output schedule
 ### M-73 — Ocean ripples and lifecycle animation choose output from world-Space overlap
 
 **Confidence: confirmed.** Ripple output selection uses `output_for_window` (`state.rs:6831-6838`), then applies that output's camera (`:6903-6913`) and stores the ripple per output (`:6980-6987`). Lifecycle animation offset similarly uses wrong output geometry (`:1997-2013`). A window viewed through B can animate on A or nowhere.
+
+**Fixed 2026-09-01, `7c48188`.** Ripple and lifecycle anchoring now select the primary rendered output and its actual camera-translated/screen-pin placement rectangle. Classic retains its existing Space geometry path; Ocean no longer converts a stale world rectangle twice or attaches an effect to an admission output where the window is not visible.
 
 ### M-74 — `locked_outputs` retains disconnected Output objects until unlock
 
@@ -932,17 +957,11 @@ The roadmap itself is reasonable, but audit evidence changes the order:
 
 ### Multi-monitor
 
-**Verdict: the base udev architecture is genuinely multi-output, but the current implementation is not reliable across all multi-monitor paths.** Each CRTC has its own `SurfaceData`, damage tracker, pending/dirty state, KMS queue, VBlank completion, mode, scale, transform, and output object. Basic independent scanout is therefore structurally present. However, the audit found release-significant failures in:
+**Verdict: the udev architecture is genuinely multi-output, and the enumerated correctness failures in this section now have code fixes; release confidence still requires the real-connector matrix.** Each CRTC has its own `SurfaceData`, damage tracker, pending/dirty state, KMS queue, VBlank completion, mode, scale, transform, and output object. The remaining or unverified multi-output work is:
 
-- Classic↔Ocean migration (H-01 through H-06), and Ocean's static admission-output assumptions (H-38 through H-41).
-- Mixed-refresh frame callbacks and presentation routing (H-35, H-40).
-- Secondary-output compositor UIs and hit testing (H-16 through H-19).
-- Rotated capture and fractional cursor scale (M-01, M-29).
-- Output failure/hotplug rollback, fullscreen ownership, zero-output recovery, and retained subsystem state (H-10, H-36, H-37, H-42 through H-45, M-15, M-25, M-38, M-39, M-67 through M-74).
-- Live mixed-scale/transform and workspace-swap state (M-62 through M-66).
-- Global redraw/capture scheduling that repaints unrelated outputs (M-51, M-54).
-- Absolute devices hard-bound to the first output (M-61).
-- Half-open-boundary/L-shaped layout behavior (M-19).
+- Global redraw/capture scheduling can still repaint unrelated outputs (M-51, M-54); those findings remain measurement-led.
+- Phase 3's mixed-scale workspace swap, output-management, pointer/focus repair, lock resize, layer/control hotplug cleanup, Ocean rendered-output policy, and per-device absolute mapping have passed source/unit/build gates but still need the real hardware combinations recorded in their finding bodies.
+- Earlier closed Classic↔Ocean, mixed-refresh, secondary-output UI, rotated-capture, cursor-scale, hotplug rollback, zero-output, and L-shaped-layout findings retain their own live-validation caveats where noted; their original evidence is not a current open-finding list.
 
 Nested winit cannot verify multi-monitor behavior: it intentionally exposes one output because winit permits only one process-global EventLoop (`backend/winit.rs:59-73`). Real multi-monitor confidence therefore requires the udev backend and actual connectors.
 
