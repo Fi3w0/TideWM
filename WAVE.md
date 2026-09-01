@@ -167,12 +167,12 @@ Same function, same semantics, one registry. The node form is sugar, not a secon
 - **Quotes are literal.** No `$` processing inside `"..."`, so `"$HOME"` is verbatim and env vars can never collide with config variables. A bare `$name` that is not defined is a compile error, never silent text.
 - **Bare tokens are strings.** `spawn:rofi -show drun` needs quotes, because spaces end the token. The old grammar's "rest of the line" rule made that unnecessary; expressions made it impossible. Migration is one pass of quotes.
 - **`#` is a comment unless it starts a color.** `color = #8EDDFF` works, `# hello` is a comment. This is the one place the lexer looks ahead.
-- **Blocks are always multi-line.** The earlier grammar allowed one-line blocks; they were removed because they made `key = value` ambiguous.
+- **Blocks are multi-line except when empty.** The earlier grammar allowed one-line blocks with a body; that form was removed because it made `key = value` ambiguous. An empty one-liner (`vessels { }`, `output eDP-1 { }`) is still allowed and unambiguous, and means "all defaults" for that block.
 - **Config Lua is sandboxed.** No file, network, or process access from expressions. Config evaluation is deterministic on purpose, because diffing the old and new configs is what makes hot reload safe. Anything that touches the machine goes through TideWM actions (`spawn:...`), never through Lua IO.
 - **Execution and output are bounded.** Each config chunk, event handler, and `tidectl eval` runs with its own instruction and wall-clock budget on the compositor thread. Includes are bounded by nesting depth, file count, aggregate source bytes, and generated entries. A handler can queue at most 256 actions, and `spawn()`/`action()` are unavailable outside an active handler. Eval results reject table cycles and stop at 64 levels, 10,000 values, or a 1 MiB JSON response instead of exhausting the compositor's stack or memory.
-- **Durations need units.** `duration = 600` is an error. `duration = 600ms` is not. The unit is the type.
+- **A bare duration number is milliseconds.** `duration = 600` and `duration = 600ms` are the same value; the unit suffix is optional on a leaf assignment (it just isn't inferred inside an expression — see "Durations are values" below).
 - **Loops use `$i`.** A loop variable references through the same `$` in strings. It looks like a config variable and is not one, which is exactly why it uses the same marker.
-- **Aliases warn.** Renamed keys from the old format still parse, with a one-line deprecation warning in the panel. They go away after one release.
+- **An unrecognized top-level key warns and is dropped, not applied.** This now includes every old pre-Wave key/block/action spelling the format once accepted as a migration alias (that compatibility layer is fully removed) — a stale name gets a one-line "unknown config key" warning in the panel and its value never takes effect, so a config that still uses one silently keeps the default for that field. This is different from an unrecognized *block* keyword whose body only sets keys that aren't valid at the top level (e.g. a stale `connected_vessels { }`/`water_glass { }`): that's indistinguishable from a Lua computation block like `theme { }`, so it's dropped with no warning at all. See DOCUMENTATION.md's `vessels { }`/`glass { }`/`mode { }` sections.
 
 ## The desugaring contract (for implementers)
 
@@ -208,7 +208,7 @@ A line, after comment stripping, is dispatched on its first word:
 4. `key = value`: key is a bare identifier, `=` follows, the value is parsed as a value (see below).
 5. Anything else: an expression statement, which must be a call (`name(...)`). A bare word that is not a call is an error, so a typo reads as an error instead of a silent no-op.
 
-Blocks are always multi-line, with one exception: `bind X { a, b }` may be written on one line, actions split on commas. This is the only one-liner in the grammar.
+Blocks are always multi-line, with two exceptions: an empty block (`vessels { }`, meaning "all defaults") may be written on one line since nothing between the braces is ambiguous, and `bind X { a, b }` may be written on one line, actions split on commas. These are the only one-liners in the grammar.
 
 ### Values
 
@@ -248,7 +248,7 @@ A bind action line is a bare token, a quoted string, or a full expression that e
 
 ### Deprecated forms
 
-The old `bind X = rest-of-line` form parses and registers, with the action taken verbatim. It is removed one release after the rewrite lands (W8).
+The old `bind X = rest-of-line` form is removed: it no longer parses, and is a compile error rather than a deprecated alias (`bind <combo> { ... }` is the only accepted form now).
 
 ### Deferred
 
