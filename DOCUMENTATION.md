@@ -21,7 +21,7 @@ Full reference for configuring and controlling TideWM: every config key, every a
 
 ## Config file
 
-`$XDG_CONFIG_HOME/tidewm/config.wave`, or `~/.config/tidewm/config.wave` if `XDG_CONFIG_HOME` isn't set (or the path given to `--config`, see above). Written out with working defaults on first run. Almost every change hot-reloads on save — no restart needed — and a bad edit is shown in a persistent compositor-owned panel that reserves space above tiled windows (with file/line detail) while the previous config keeps running. Fixing the file clears the panel; the existing short reload/debug toast remains separate. `spatial_engine` is hot-reloadable too: a change migrates every live window between the Classic and Ocean models in place instead of requiring a restart (workspace stacks become reefs laid out on the lateral line, and back; see the Ocean section below for the mapping). Startup-owned exceptions are `xwayland { enabled }` and Ocean reef/bookmark declarations; changing one shows a restart-required warning. Ocean's `camera_step` remains hot-reloadable. Keyboard layout and already-connected touchpads also apply immediately.
+`$XDG_CONFIG_HOME/tidewm/config.wave`, or `~/.config/tidewm/config.wave` if `XDG_CONFIG_HOME` isn't set (or the path given to `--config`, see above). Written out with working defaults on first run. Almost every change hot-reloads on save — no restart needed — and a bad edit is shown in a persistent compositor-owned panel that reserves space above tiled windows (with file/line detail) while the previous config keeps running. Fixing the file clears the panel; the existing short reload/debug toast remains separate. `engine` is hot-reloadable too: a change migrates every live window between the Classic and Ocean models in place instead of requiring a restart (workspace stacks become reefs laid out on the lateral line, and back; see the Ocean section below for the mapping). Startup-owned exceptions are `xwayland { enabled }` and Ocean reef/bookmark declarations; changing one shows a restart-required warning. Ocean's `camera_step` remains hot-reloadable. Keyboard layout and already-connected touchpads also apply immediately.
 
 ### Wave format
 
@@ -46,7 +46,7 @@ bind $mod+D      { "spawn:rofi -show drun" }
 
 Binds are node form: `bind <combo> { <action> }`, one action per line (or comma-separated on one line). `terminal` is a top-level key, not a `@name` variable — reference it as `$terminal` only after defining `@terminal = ...`.
 
-**Typed values.** Durations and colors are real values with math: `600ms * 2` is `1200ms`, `1.5s * 2` is `3s`, `2 * 300ms` is `600ms`; `primary.darken(0.35)`, `primary.lighten(0.15)`, and `alpha(a)` derive palette colors. Every duration key accepts a unit (`cursor_hide_after = 2s`) or a bare millisecond number.
+**Typed values.** Durations and colors are real values with math: `600ms * 2` is `1200ms`, `1.5s * 2` is `3s`, `2 * 300ms` is `600ms`; `primary.darken(0.35)` and `primary.lighten(0.15)` derive real palette colors. `alpha(a)` is accepted in the same expressions but currently a no-op — it returns the color unchanged rather than adjusting its alpha, matching the config surface's own "alpha in the color form is ignored" behavior (see the `ripple { }` `color` field below). Every duration key accepts a unit (`cursor_hide_after = 2s`) or a bare millisecond number.
 
 **Reactive config.** `on "event" { ... }` registers a handler body that runs when the event fires, with the live `tide` table (`tide.backend`, `tide.gpu.vendor`, `tide.outputs`, `tide.workspace`) refreshed first:
 
@@ -66,12 +66,13 @@ The line-based grammar is gone; Wave is the only grammar. Old configs were migra
 
 **Multi-file:** `include "path.wave"` as its own statement, repeatable (one per line), in any file (the main one, or one it includes). Each path resolves relative to the file that lists it; `~/` expands to your home directory. Rules:
 
-- `input { }`, `input { touchpad { } }`, `env { }`, `gpu { }`, `switch_events { }`, and a given `submap <name> { }` merge field-by-field across files — the same key set from two files combines rather than one replacing the other.
+- `input { }`, `input { touchpad { } }`, `env { }`, `gpu { }`, `switch_events { }`, and a given `mode <name> { }` merge field-by-field across files — the same key set from two files combines rather than one replacing the other.
 - `input { device <name> { } }`, `output <name> { }`, `rule { }`, and `layer_rule { }` blocks accumulate — entries from every file all end up present. Later device blocks with the same exact name replace only the fields they set.
 - A later `include` overlays an earlier one.
 - **The including file's own keys always win over anything it includes.** If `config.wave` includes `overrides.wave`, and both set `gaps`, `config.wave`'s own value wins — put an override directly in the file doing the including, not in a file you list last.
 - A broken include (missing, unreadable, unparseable, or a cycle) is skipped with a warning; it doesn't fail the whole config.
 - The config directory is watched recursively (`*.wave` files only, dotfiles/dotdirs skipped) — editing any included file hot-reloads exactly like editing the main file.
+- An unrecognized *top-level key* (`key = value`) warns and is ignored — this is what happens to every old pre-Wave key/block/action spelling now (that migration-alias layer is fully removed). An unrecognized *block keyword* is different: if its body only sets keys that aren't valid at the top level, it's indistinguishable from a Lua computation block like `theme { }` and is silently dropped with **no warning at all** — this is what happens if you write a stale `connected_vessels { }`, `water_glass { }`, or `submap <name> { }` (the canonical spellings are `vessels { }`, `glass { }`, and `mode <name> { }`; see their sections below).
 
 ## Wallpaper behavior
 
@@ -84,7 +85,7 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `terminal` | string | `"kitty"` | Spawned by the shipped `$mod+Return` bind (`@mod = SUPER` in the generated file). The terminal fallback is `wave(kitty, alacritty, foot, xterm)` — see the Wave format section above. |
-| `engine` | `classic` \| `ocean` | `classic` | Selects one of TideWM's two WM ownership models. Classic keeps numbered workspaces. Ocean has no workspaces: outputs are cameras into one continuous 2D world. Hot-reloadable: a change migrates every live window in place. Classic→Ocean turns each output's populated workspace trees into reefs on the lateral line at `X = (N-1) * (output width + 128)` with the camera at the previously-active workspace; depth-deck windows are recalled to their tiles, floating windows translate to world coordinates around their workspace's reef, and pinned windows become Ocean screen pins. Ocean→Classic turns reefs sorted left-to-right into workspaces `1..N` on the output whose camera is nearest, selects the active workspace from each camera, clamps floating windows into the visible area, and restores pins. Tab groups and fullscreen/maximized entries carry across both directions; Ocean bookmarks and camera history are dropped (no Classic counterpart). |
+| `engine` (aliases `spatial_engine`, `wm_mode`) | `classic` \| `ocean` | `classic` | Selects one of TideWM's two WM ownership models. Classic keeps numbered workspaces. Ocean has no workspaces: outputs are cameras into one continuous 2D world. Hot-reloadable: a change migrates every live window in place. Classic→Ocean turns each output's populated workspace trees into reefs on the lateral line at `X = (N-1) * (output width + 128)` with the camera at the previously-active workspace; depth-deck windows are recalled to their tiles, floating windows translate to world coordinates around their workspace's reef, and pinned windows become Ocean screen pins. Ocean→Classic turns reefs sorted left-to-right into workspaces `1..N` on the output whose camera is nearest, selects the active workspace from each camera, clamps floating windows into the visible area, and restores pins. Tab groups and fullscreen/maximized entries carry across both directions; Ocean bookmarks and camera history are dropped (no Classic counterpart). |
 | `drag_modifier` | modifier or `+`-joined modifiers | `super` | Modifier physically held for compositor mouse actions: left-drag moves floating windows or drag-swaps tiles; right-drag resizes floating or tiled windows. Accepts `super`/`logo`/`mod4`, `alt`/`mod1`, `ctrl`/`control`, and `shift`. The shipped config sets it to `mod`. |
 | `welcome_hint` | bool | `true` | Shows a persistent empty-desktop card reminding you to use your configured terminal bind. Disappears when a real window maps; delete this key (or set it `false`) to stop it returning. |
 | `reload_toast` | bool | `true` | Shows the short compositor card after a successful hot reload. `false` hides that confirmation only; parse errors and configuration warnings remain visible so a bad config cannot silently lock itself in. |
@@ -100,8 +101,8 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | `workspace_gaps` | repeatable key | none | Per-workspace gap override — `workspace_gaps = 3 0` (workspace 3, no gaps), repeat the key once per workspace. Accepts a `workspace_name` alias in place of the number. Beats both the output-level `gaps` override and the global `gaps`. |
 | `workspace_count` | integer, `0`–`64` | `0` (off) | When set, workspaces `1..=N` are advertised as existing on every output even while empty — by the IPC `workspaces` query and the `ext-workspace-v1` protocol (see below), so a bar can show a persistent strip instead of only the workspaces that currently have windows. `0` restores the original behavior: only a workspace with a window, or the one currently active, is reported. Workspaces themselves stay lazily created either way — this only affects what gets advertised to external tooling, not `Layouts`' own on-demand tree creation, and a manual switch past `N` is still reported truthfully. |
 | `layout` | `bsp` \| `master` \| `cascade` | `bsp` | Starting tiling algorithm for a workspace with no runtime override (see `layout:bsp`/`layout:master`/`layout:cascade` actions below). `bsp` is dwindle-style: split orientation follows each window's own aspect ratio. `master` is one master pane plus an evenly-split stack. `cascade` wraps windows into rows left to right, top to bottom, choosing the row count so the grid's shape best matches the output's own aspect ratio -- TideWM's own "fills the basin" mode. Row height and cell width are manually draggable the same way as BSP (an empty-gap border drag, or a modifier+body drag on the window), except a drag only ever redistributes the two immediate neighbors either side of it, not BSP's wider connected-vessel chain; opening or closing a window keeps a row's manual sizing as long as that row's own window count didn't change. |
-| `master_side` | `left` \| `right` \| `top` \| `bottom` | `left` | Which side the master pane sits on under `default_layout = master`. `left`/`right` stack the other windows vertically in the remaining strip; `top`/`bottom` stack them horizontally instead. One global setting, not per-workspace. |
-| `split_bias` | `auto` \| `horizontal` \| `vertical` | `auto` | Manual override for `default_layout = bsp`'s per-split axis choice. `auto` is the existing aspect-ratio-driven behavior, unchanged. `horizontal`/`vertical` force every split one way regardless of window/output shape (Hyprland dwindle's `force_split` idea). One global setting, not per-workspace. |
+| `master_side` | `left` \| `right` \| `top` \| `bottom` | `left` | Which side the master pane sits on under `layout = master`. `left`/`right` stack the other windows vertically in the remaining strip; `top`/`bottom` stack them horizontally instead. One global setting, not per-workspace. |
+| `split_bias` | `auto` \| `horizontal` \| `vertical` | `auto` | Manual override for `layout = bsp`'s per-split axis choice. `auto` is the existing aspect-ratio-driven behavior, unchanged. `horizontal`/`vertical` force every split one way regardless of window/output shape (Hyprland dwindle's `force_split` idea). One global setting, not per-workspace. |
 | `pseudo_tile_scale` | float, `0.05`–`1.0` | `0.7` | Fraction of its tile a pseudo-tiled window keeps, centered within it. Out-of-range values are clamped, not rejected. |
 | `adaptive_sync` (aliases `vrr`, `variable_refresh_rate`) | `off` \| `on` \| `on-demand` | `off` | Global adaptive-sync (VRR) preference; a `[[output]]`'s own `adaptive_sync` beats it. **Config surface only right now** — the udev backend queries and logs each connector's real hardware VRR capability but does not yet actually enable it. See AGENT.md's config-gap-audit section for the full reasoning and what's deferred. |
 | `spawn` | list | none | Commands launched once at startup, as a real list: `spawn = [waybar, "swaybg -i ~/wallpaper.png -m fill"]`. Args split on whitespace — no shell involved, so quoting/globs/pipes aren't supported; wrap in `sh -c "..."` yourself if you need those. |
@@ -127,7 +128,7 @@ The enable/duration/curve split follows niri’s useful per-animation configurat
 | `wave_amplitude` | float, `0`–`500` | `34` | Maximum horizontal displacement of the moving boundary in physical pixels. `0` produces a straight wipe. `amplitude` is an alias. |
 | `wave_frequency` | float, `0`–`20` | `3` | Sine cycles from the output’s top edge to its bottom edge. `0` removes vertical waviness. `frequency` is an alias. |
 | `edge_width` | float, `0.5`–`250` | `18` | Half-width of the soft cross-fade boundary in physical pixels. Lower is sharper; higher is softer. |
-| `color` | color | `8EDDFF` | Main water color, or the wavefront tint under `glow`. Accepts bare `RRGGBB` or quoted `"#RRGGBB"`. |
+| `color` | color | `8EDDFF` | Main water color, or the wavefront tint under `glow`. Accepts bare `RRGGBB` or bare `#RRGGBB` — quoting is never required for a well-formed 6/8-digit hex color (see the `ripple { }` `color` field below for why). |
 | `wave_size` | float, `0`–`250` | `10` | Curl/lobe size under `water`, or colored core half-width under `glow`, in physical pixels. `size` is an alias. |
 | `wave_alpha` | float, `0`–`1` | `0.9` | Colored core opacity under `glow`. `alpha` is an alias. |
 | `glow_size` | float, `0`–`500` | `46` | `glow` style only: reach beyond the colored core in physical pixels. |
@@ -356,7 +357,7 @@ direct `half_life` takes precedence and works regardless of `water_effects`.
 A matching `rule { viscosity = ... }` overrides only the legacy liquid value
 for one app.
 
-### `vessels { }` (legacy: `connected_vessels { }`)
+### `vessels { }` (old spelling `connected_vessels { }` does not parse — see "Multi-file" above)
 
 Connected-vessel resize spreads BSP pressure beyond the nearest split. The
 split selected by a direct border drag, modifier-right-drag, or keyboard resize
@@ -379,7 +380,7 @@ allocates no render resources.
 | `max_splits` | integer, `1`–`8` | `4` | Maximum handles per resized axis, including the primary split. `depth` is an alias. |
 
 ```wave
-connected_vessels {
+vessels {
     enabled = true
     falloff = 0.5
     max_splits = 4
@@ -536,7 +537,7 @@ swim {
 ### `ocean { }`
 
 Configures the workspace-free Ocean engine selected with
-`spatial_engine = ocean`. Windows have stable world rectangles on both X and
+`engine = ocean`. Windows have stable world rectangles on both X and
 Y. Each output stores an independent continuous camera into that same world;
 moving a camera never moves or resizes a window. Reefs are named local BSP
 tiling zones, not pages, and bookmarks are named camera return points. The
@@ -561,7 +562,7 @@ runtime saved bookmarks last for the session. The remaining Ocean camera,
 zoom, guide, and depth toggles/tuning hot-reload.
 
 ```wave
-spatial_engine = ocean
+engine = ocean
 ocean {
     freeform_windows = true
     canvas_pan_button = left
@@ -1042,7 +1043,7 @@ Configures the Phase R1 impulse ripple shared by window-map, focus-change, and u
 | `urgent_repeat` | bool | `true` | When `true`, the urgent ripple re-fires every `urgent_repeat_interval_ms` until the window is focused or its hint clears, instead of firing once. `urgent_pulse` is an alias. |
 | `urgent_repeat_interval_ms` | integer | `1500` | Milliseconds between urgent-repeat pulses, clamped to `100`–`60000`. `urgent_interval_ms` and `urgent_interval` are aliases. |
 | `shapes` | space-separated list | `ring` | Compatibility mode: any combination of `ring`, `square`, `droplet`, and `cross`. Assigning this key automatically selects `preset = legacy`. `shape` and `form` are aliases. |
-| `color` | color | `8EDDFF` | RGB tint. Use bare `RRGGBB` or quoted `"#RRGGBB"`. A bare leading `#` starts a Wave comment, so it must be quoted. Alpha in the color form is currently ignored; use `peak_alpha`. |
+| `color` | color | `8EDDFF` | RGB tint. Use bare `RRGGBB` or bare `#RRGGBB`/`#RRGGBBAA` — the parser looks ahead for six or eight hex digits after `#` and only treats it as a comment when that lookahead fails, so quoting is never required for a well-formed hex color. A malformed one (wrong digit count, or extra characters right after the digits with no separating space/`,`/`]`/`)`/`}`) *is* read as `#` starting a comment, silently dropping everything after it on that line — the field then keeps its previous or default value with no warning, so a truncated hex color is a silent no-op, not a parse error. Alpha in the color form is currently ignored; use `peak_alpha`. |
 | `secondary_color` | color | `E8FCFF` | Gradient, membrane, and highlight tint. `accent_color` and `highlight_color` are aliases. |
 | `peak_radius` | positive float | `220` | Maximum radius in logical pixels. `radius` is an alias. |
 | `size_mode` | enum | `fixed` | `fixed` uses `peak_radius`; `window` uses half the diagonal; `width`, `height`, `min`, and `max` use half that window dimension. `radius_mode` and `scale_mode` are aliases. |
@@ -1100,7 +1101,7 @@ warn and safely fall back. Selection order is system defaults → named preset
 → global overrides → per-app named preset → per-app overrides, so a rule can
 reuse a bundle and still change one field locally.
 
-### `glass { }` (legacy: `water_glass { }`)
+### `glass { }` (old spelling `water_glass { }` does not parse — see "Multi-file" above)
 
 Controls how the water-glass refraction distortion moves over time. The glass
 layer itself is selected per window by the `glass` rule (or the legacy
@@ -1115,7 +1116,7 @@ once selected. `water_effects = false` bypasses the whole effect.
 | `settle_ms` | integer | `1200` | Reactive-mode settle time after the last disturbance, clamped to `100`–`10000`. `settle` is an alias. |
 
 ```
-water_glass {
+glass {
     animation = reactive
     speed = 1.0
     amplitude = 1.0
@@ -1567,14 +1568,17 @@ on the next successful config reload or TideWM restart.
 
 See [Action strings](#action-strings) for every value a bind can take. A later
 `bind` on the same chord overrides an earlier one. The old
-`bind <chord> = <action>` line form still parses as a deprecated alias.
+`bind <chord> = <action>` line form no longer parses at all — it is a compile
+error (`expected `bind <combo> { ... }``), not a deprecated alias, so an old
+config using it needs the mechanical `= action` → `{ action }` rewrite (see
+"The line-based grammar is gone" above) before it will load.
 
-### `mode <name> { }` (legacy: `submap <name> { }`)
+### `mode <name> { }` (old spelling `submap <name> { }` does not parse — see "Multi-file" above)
 
 A temporary alternate keybind table (sway/Hyprland's "mode" idea), same `bind` statements as the top level (no modifier prefix needed if the submap's own binds are unmodified, like the shipped `nav` example). Entered via a `submap:<name>` action, which **fully replaces** the base binds — not layered on top of them — until an explicit `exit-mode` bind. Not tied to focus; stays active until you explicitly leave it. A config reload that drops or renames the active submap auto-exits back to the base binds.
 
 ```
-submap nav {
+mode nav {
     bind h { focus-left }
     bind l { focus-right }
     bind k { focus-up }
@@ -1587,7 +1591,7 @@ Query which submap (if any) is active via `tidectl active-submap` or the IPC `ac
 
 ## Action strings
 
-The same set of strings works after `bind ... =` at the top level or inside a `submap { }`, in `switch_events { }`, and as `tidectl`'s action argument / the IPC `action` request — one dispatch mechanism, not four.
+The same set of strings works after `bind ... { }` at the top level or inside a `mode { }`, in `switch_events { }`, and as `tidectl`'s action argument / the IPC `action` request — one dispatch mechanism, not four.
 
 **Windows**
 - `close-window`
@@ -1626,7 +1630,7 @@ The same set of strings works after `bind ... =` at the top level or inside a `s
 - `swap-workspaces:<output-name>` — swap this output's and the named output's active-workspace content
 - `workspace:<name>` / `move-to-workspace:<name>` — same two actions, addressed by a `workspace_name` alias instead of a number (see below) — a workspace's real identity is always its number, this is just another way to spell it
 
-**Ocean camera** (removed from keyboard matching while Classic is selected)
+**Ocean camera** (removed from keyboard matching while Classic is selected). `depth-down`/`depth-up`/`sink-window` are engine-scoped: each is one action string dispatched on whichever engine is live, so the same bind means this section's behavior under Ocean and the Classic Depth Deck section's behavior under Classic — see that section below, not two separately named actions.
 - `ocean-pan-left` / `ocean-pan-right` / `ocean-pan-up` / `ocean-pan-down` — glide only the current output camera by `ocean.camera_step` screen pixels
 - `ocean-zoom-in` / `ocean-zoom-out` / `ocean-zoom-reset` — scale the continuous world around the output center
 - `ocean-center-focused` — center the camera on the focused window without moving that window in world space
@@ -1644,8 +1648,8 @@ synthesizes Ocean or Depth bindings behind the config, and deleting or
 rewriting a line removes or changes it completely.
 
 **Modes**
-- `mode:<name>` — enter a `mode <name> { }` block
-- `exit-mode` (legacy: `exit-submap`)
+- `mode:<name>` (alias `submap:<name>`, still accepted — the shipped default config uses this spelling) — enter a `mode <name> { }` block
+- `exit-mode` — `exit-submap` is not an alias for this; it does not parse as a valid action
 - `toggle-overview` — schematic grid of every workspace on the current output (see README's Features list; not live thumbnails)
 
 **Classic Depth Deck** (all no-op while `classic_depth.enabled = false`)
@@ -1747,7 +1751,7 @@ Full flag/command list: `tidectl --help`.
 | `wlr-output-power-management-unstable-v1` | Display on/off (DPMS) | Protocol + render-loop logic done; real CRTC power toggle unverified on hardware |
 | `zwlr-gamma-control-manager-v1` | Night-light tools (`wlsunset`, `gammastep`) | Protocol + DRM gamma ioctls done; real color-change unverified on hardware |
 | `org.freedesktop.a11y.KeyboardMonitor` (DBus, not a Wayland protocol) | Screen reader (Orca) grabbing/watching keys system-wide | Done, behind the `accessibility` Cargo feature (off by default, `cargo build --features accessibility`) — see CHANGELOG for the verification bar |
-| `org.gnome.Mutter.ScreenCast` + PipeWire | Monitor/window video streams for `xdg-desktop-portal-gnome`-based setups | Behind the `screencast` Cargo feature — DBus session lifecycle works, and the PipeWire MemFd/SHM path now delivers real frames under the nested (winit) backend (verified with a direct PipeWire consumer: correctly-oriented, live-updating content, PSS flat over a sustained stream). Not yet verified on a standalone TTY (udev/DRM) session. DMA-BUF export stays disabled (fails on real hardware). Not yet run through a real portal-mediated client (OBS/Discord) |
-| `org.freedesktop.impl.portal.ScreenCast` (DBus, the real `xdg-desktop-portal` backend interface) | Discord/OBS-style screen sharing | Behind the `screencast` Cargo feature, self-contained (no `xdg-desktop-portal-gnome` needed), with compositor-owned monitor/window/virtual-source selection, reusing the same now-working PipeWire path as the row above. Virtual sources still mirror the selected desktop dimensions rather than creating a headless DRM connector, and this exact entry point hasn't been exercised through a real `xdg-desktop-portal` process yet |
+| `org.gnome.Mutter.ScreenCast` + PipeWire | Monitor/window video streams for `xdg-desktop-portal-gnome`-based setups | Behind the `screencast` Cargo feature. DBus session lifecycle and the PipeWire MemFd/SHM frame path both work, verified end to end on a standalone TTY (udev/DRM) session through real OBS and real Discord (see TECHNICAL_REPORT.md's "Screen sharing" section and CHANGELOG). DMA-BUF export stays disabled by design — the PipeWire stream only ever advertises the MemFd buffer type, so a real GBM-backed allocation path would need to be added, not just enabled. |
+| `org.freedesktop.impl.portal.ScreenCast` (DBus, the real `xdg-desktop-portal` backend interface) | Discord/OBS-style screen sharing | Behind the `screencast` Cargo feature, self-contained (no `xdg-desktop-portal-gnome` needed), with a compositor-owned source picker over monitor/window/virtual-source selection, reusing the same PipeWire path as the row above. Virtual sources still mirror the selected desktop dimensions rather than creating a headless DRM connector. This is the exact entry point real OBS and Discord went through in the standalone verification above. |
 
-Everything else on the original protocol/rice compatibility list is implemented. Screencasting is the remaining loose end: the DBus/portal plumbing and PipeWire MemFd frame delivery both work now under the nested backend, verified directly, but the standalone udev/DRM backend and a real portal-mediated client (OBS/Discord) on real hardware haven't confirmed the full chain yet, and DMA-BUF export needs real GBM-backed allocation before it's usable.
+Everything else on the original protocol/rice compatibility list is implemented. Screencasting's remaining loose ends are multi-output capture and DMA-BUF export (see the entries above) — the DBus/portal plumbing, PipeWire MemFd frame delivery, and a real portal-mediated client on the standalone udev/DRM backend are all confirmed working end to end.
