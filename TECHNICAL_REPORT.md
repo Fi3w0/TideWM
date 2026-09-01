@@ -122,6 +122,8 @@ sudo cp share/xdg-desktop-portal/tidewm.portal /usr/share/xdg-desktop-portal/por
 sudo cp share/xdg-desktop-portal/tidewm-portals.conf /usr/share/xdg-desktop-portal/
 ```
 
+`tidewm-portals.conf`'s `default=gtk` line routes every portal interface *other* than ScreenCast (file chooser, print, settings/appearance, etc.) to `xdg-desktop-portal-gtk`, a separate, much lighter package than the `xdg-desktop-portal-gnome` chain mentioned above (GTK3, not GTK4/libadwaita/nautilus). Install it too, or those other portal requests have no backend to answer them: `sudo pacman -S xdg-desktop-portal-gtk` on Arch, `xdg-desktop-portal-gtk` on Fedora/Debian/openSUSE.
+
 `xdg-desktop-portal` itself must already be installed (most distros ship it by default). Log in through TideWM's own session entry so `xdg-desktop-portal` picks up `XDG_CURRENT_DESKTOP=tidewm` and reads the config above.
 
 ## Roadmap
