@@ -885,7 +885,8 @@ ACTIONS:
         submap:<name>, exit-submap, layout:bsp, layout:master,
         master-grow, master-shrink, resize-left/right/up/down,
         move-left/right/up/down, snap:left/right/top/bottom,
-        snap:top-left/top-right/bottom-left/bottom-right, toggle-overview
+        snap:top-left/top-right/bottom-left/bottom-right, snap:fullscreen,
+        toggle-overview
 
     A few space-separated shorthands, equivalent to the colon syntax above:
         tidectl workspace <N>              same as "workspace:N"
