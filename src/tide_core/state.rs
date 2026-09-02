@@ -145,6 +145,12 @@ impl RippleLayers {
     }
 }
 
+pub(crate) struct SnapPreview {
+    output: String,
+    rect: Rectangle<i32, Logical>,
+    buffer: SolidColorBuffer,
+}
+
 pub struct Smallvil {
     pub start_time: std::time::Instant,
     pub socket_name: OsString,
@@ -421,6 +427,9 @@ pub struct Smallvil {
     /// separately from viscosity because viscosity may be disabled or may
     /// keep settling briefly after the physical grab ends.
     pub(crate) floating_dragging: HashSet<WlSurface>,
+    /// One bounded analytical fill while a Classic floating drag is inside
+    /// a configured edge/corner snap zone. Dropped on every grab teardown.
+    pub(crate) snap_preview: Option<SnapPreview>,
     /// Render-only apparent weight, retained only for visible eligible
     /// floaters. Stable entries request no frames; `buoyancy_dirty` avoids
     /// rebuilding placements on idle backend maintenance ticks.
@@ -2014,6 +2023,130 @@ impl Smallvil {
         }
         self.buoyancy_dirty = true;
         self.request_redraw();
+    }
+
+    pub(crate) fn snap_enabled_for_surface(&self, surface: &WlSurface) -> bool {
+        if self.config.spatial_engine != crate::config::SpatialEngine::Classic
+            || !self.config.snap.enabled
+            || self.layout.contains(surface)
+            || !self.floating_workspace.contains_key(surface)
+            || self.fullscreen.contains_key(surface)
+            || self.maximized.contains_key(surface)
+        {
+            return false;
+        }
+        let workspace = self.workspace_of_surface(surface);
+        let workspace_enabled =
+            workspace.and_then(|workspace| self.config.resolve_workspace_rule(workspace).snap);
+        self.resolve_window_rules_for(surface)
+            .snap
+            .or(workspace_enabled)
+            .unwrap_or(true)
+    }
+
+    pub(crate) fn snap_target_at(
+        &self,
+        surface: &WlSurface,
+        point: Point<f64, Logical>,
+    ) -> Option<crate::snap::SnapTarget> {
+        let output = self.output_for_point(point)?;
+        let output_geometry = self.space.output_geometry(&output)?;
+        let zone = crate::snap::zone_at(point, output_geometry, &self.config.snap)?;
+        let output_name = output.name();
+        let workspace = self.layout.active_workspace(&output_name);
+        // A per-window decision keeps precedence over the destination
+        // workspace. Otherwise, crossing an output must honor the active
+        // workspace there rather than the workspace where the grab began.
+        if !self
+            .resolve_window_rules_for(surface)
+            .snap
+            .or(self.config.resolve_workspace_rule(workspace).snap)
+            .unwrap_or(true)
+        {
+            return None;
+        }
+        let area = self.output_tiling_area(&output)?;
+        let gap = self
+            .config
+            .snap
+            .gap
+            .unwrap_or_else(|| self.gaps_for(&output_name, workspace));
+        Some(crate::snap::SnapTarget {
+            output: output_name,
+            workspace,
+            zone,
+            rect: crate::snap::target_rect(area, zone, gap),
+        })
+    }
+
+    pub(crate) fn set_snap_preview(&mut self, target: Option<&crate::snap::SnapTarget>) {
+        if !self.config.snap.preview {
+            if self.snap_preview.take().is_some() {
+                self.request_redraw();
+            }
+            return;
+        }
+        let Some(target) = target else {
+            if self.snap_preview.take().is_some() {
+                self.request_redraw();
+            }
+            return;
+        };
+        let color = [
+            self.config.snap.preview_color[0],
+            self.config.snap.preview_color[1],
+            self.config.snap.preview_color[2],
+            1.0,
+        ];
+        match &mut self.snap_preview {
+            Some(preview) => {
+                preview.output.clone_from(&target.output);
+                preview.rect = target.rect;
+                preview.buffer.update(target.rect.size, color);
+            }
+            None => {
+                self.snap_preview = Some(SnapPreview {
+                    output: target.output.clone(),
+                    rect: target.rect,
+                    buffer: SolidColorBuffer::new(target.rect.size, color),
+                });
+            }
+        }
+        self.request_redraw();
+    }
+
+    pub(crate) fn apply_snap_target(
+        &mut self,
+        window: &Window,
+        target: &crate::snap::SnapTarget,
+    ) -> bool {
+        let Some(surface) = window
+            .toplevel()
+            .map(|toplevel| toplevel.wl_surface().clone())
+        else {
+            return false;
+        };
+        if !self.snap_enabled_for_surface(&surface) || !self.window_is_visible(&surface) {
+            return false;
+        }
+        let Some(output) = self.output_by_name(&target.output) else {
+            return false;
+        };
+        if let Some(toplevel) = window.toplevel() {
+            toplevel.with_pending_state(|state| state.size = Some(target.rect.size));
+            toplevel.send_pending_configure();
+        }
+        self.set_window_fractional_scale(window, &output);
+        self.space
+            .map_element(window.clone(), target.rect.loc, false);
+        if let Some(tag) = self.floating_workspace.get_mut(&surface) {
+            tag.output.clone_from(&target.output);
+            tag.workspace = target.workspace;
+            tag.rect = target.rect;
+        }
+        self.retarget_window_viscosity(&surface, target.rect);
+        self.request_redraw();
+        true
     }
 
     /// Advances Ocean currents from the existing backend clock. Only visible
@@ -3610,6 +3743,7 @@ impl Smallvil {
             float_physics_wave_clock: Instant::now(),
             window_currents: HashMap::new(),
             floating_dragging: HashSet::new(),
+            snap_preview: None,
             window_buoyancy: HashMap::new(),
             buoyancy_dirty: true,
             buoyancy_camera_revision: 0,
@@ -5959,6 +6093,25 @@ impl Smallvil {
         }
         area.loc += output_geo.loc;
         Some(area)
+    }
+
+    pub(crate) fn snap_preview_element(
+        &mut self,
+        output: &Output,
+    ) -> Option<SolidColorRenderElement> {
+        let preview = self.snap_preview.as_ref()?;
+        if preview.output != output.name() || self.config.snap.preview_opacity <= 0.0 {
+            return None;
+        }
+        let output_geometry = self.space.output_geometry(output)?;
+        let scale = output.current_scale().fractional_scale();
+        Some(SolidColorRenderElement::from_buffer(
+            &preview.buffer,
+            crate::snap::preview_physical_location(preview.rect.loc, output_geometry.loc, scale),
+            Scale::from(scale),
+            self.config.snap.preview_opacity,
+            Kind::Unspecified,
+        ))
     }
 
     /// Builds the persistent config-error render element at the top of the
@@ -11590,6 +11743,43 @@ impl Smallvil {
             tag.rect = rect;
         }
         self.retile();
+    }
+
+    /// Keyboard parity for Classic drag-to-snap. The focused floater uses
+    /// the same usable-area, gap, rule, and target geometry as a pointer drop.
+    pub fn keyboard_snap(&mut self, zone: crate::snap::SnapZone) {
+        if !crate::snap::zone_enabled(zone, &self.config.snap) {
+            return;
+        }
+        let Some(surface) = self.focused_window_surface() else {
+            return;
+        };
+        if !self.snap_enabled_for_surface(&surface) {
+            return;
+        }
+        let Some(window) = self.mapped_toplevel_window(&surface) else {
+            return;
+        };
+        let Some(output) = self.output_for_window(&window) else {
+            return;
+        };
+        let output_name = output.name();
+        let workspace = self.layout.active_workspace(&output_name);
+        let Some(area) = self.output_tiling_area(&output) else {
+            return;
+        };
+        let gap = self
+            .config
+            .snap
+            .gap
+            .unwrap_or_else(|| self.gaps_for(&output_name, workspace));
+        let target = crate::snap::SnapTarget {
+            output: output_name,
+            workspace,
+            zone,
+            rect: crate::snap::target_rect(area, zone, gap),
+        };
+        self.apply_snap_target(&window, &target);
     }
 
     /// Shows/hides the workspace overview on the current output (see

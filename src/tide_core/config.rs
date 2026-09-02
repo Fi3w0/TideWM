@@ -555,6 +555,35 @@ pub enum Direction {
     Down,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SnapConfig {
+    pub enabled: bool,
+    pub preset: crate::snap::SnapPreset,
+    /// Exact enabled-zone override. `None` uses the selected preset.
+    pub zones: Option<Vec<crate::snap::SnapZone>>,
+    pub distance: i32,
+    /// `None` inherits the current output/workspace gap.
+    pub gap: Option<i32>,
+    pub preview: bool,
+    pub preview_color: [f32; 3],
+    pub preview_opacity: f32,
+}
+
+impl Default for SnapConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            preset: crate::snap::SnapPreset::Quarters,
+            zones: None,
+            distance: 24,
+            gap: None,
+            preview: true,
+            preview_color: [46.0 / 255.0, 199.0 / 255.0, 1.0],
+            preview_opacity: 0.22,
+        }
+    }
+}
+
 /// A `"workspace:N"`/`"move-to-workspace:N"` target, addressed either by
 /// its raw number or by a `workspace_name` alias (niri's
 /// `set-workspace-name`, Hyprland's `workspace name:foo` -- purely an
@@ -786,6 +815,9 @@ pub enum Action {
     /// reasoning `RaiseWindow`/`TogglePseudoTile`'s tiled/floating-only
     /// restrictions already use. See `Smallvil::keyboard_move_floating`.
     MoveFloating(Direction),
+    /// Places the focused Classic floating window into one configured snap
+    /// zone. Pointer drops and keyboard actions share the same target math.
+    Snap(crate::snap::SnapZone),
     /// Groups the focused tiled window with its neighbor in `Direction`
     /// into one shared tab slot. See `Smallvil::group_direction`.
     GroupDirection(Direction),
@@ -969,6 +1001,8 @@ pub struct Config {
     /// broken configuration harder to repair.
     pub show_config_reload_toast: bool,
     pub water_effects: bool,
+    /// Classic floating-window edge/corner snap behavior and preview.
+    pub snap: SnapConfig,
     /// Embedded aqua fallback wallpaper on/off. See `RawConfig::builtin_wallpaper`.
     pub builtin_wallpaper: bool,
     /// Strength of TideWM's render-only interactive move/resize damping.
@@ -1461,6 +1495,7 @@ impl Config {
             show_welcome_hint: raw.show_welcome_hint,
             show_config_reload_toast: raw.show_config_reload_toast,
             water_effects: raw.water_effects,
+            snap: raw.snap,
             builtin_wallpaper: raw.builtin_wallpaper,
             viscosity: raw.viscosity.clamp(0.0, 4.0),
             backdrop_capture_scale: raw.backdrop_capture_scale.clamp(1, 4),
@@ -1677,6 +1712,9 @@ impl Config {
             if rule.depth.is_some() {
                 effective.depth = rule.depth;
             }
+            if rule.snap.is_some() {
+                effective.snap = rule.snap;
+            }
             if let Some(rule_frost) = &rule.frost {
                 effective.frost = Some(match effective.frost.take() {
                     Some(existing) => existing.merge_over(rule_frost),
@@ -1841,6 +1879,9 @@ impl Config {
             if rule.shadow.is_some() {
                 effective.shadow = rule.shadow.clone();
             }
+            if rule.snap.is_some() {
+                effective.snap = rule.snap;
+            }
             if rule.on_created_empty.is_some() {
                 effective.on_created_empty = rule.on_created_empty.clone();
             }
@@ -1860,6 +1901,7 @@ struct RawConfig {
     show_welcome_hint: bool,
     show_config_reload_toast: bool,
     water_effects: bool,
+    snap: SnapConfig,
     /// Whether the embedded 4K aqua fallback wallpaper is decoded and drawn.
     /// Default true (the water identity's backdrop); false skips the decode
     /// and GPU texture entirely so neither CPU nor VRAM is paid for it -- a
@@ -2036,6 +2078,7 @@ impl Default for RawConfig {
             show_welcome_hint: false,
             show_config_reload_toast: true,
             water_effects: true,
+            snap: SnapConfig::default(),
             builtin_wallpaper: true,
             viscosity: 1.0,
             connected_vessels: ConnectedVesselsConfig::default(),
@@ -2570,6 +2613,9 @@ pub struct WindowRule {
     /// way to counteract the heuristic per-app. No effect if `float`/`pin`
     /// also match, same as niri's own `open-floating false` precedence.
     pub tile: bool,
+    /// Per-app drag/keyboard snap opt-out or reaffirmation. Unset inherits
+    /// the workspace rule; the global `snap.enabled` value is the master.
+    pub snap: Option<bool>,
     /// Suppresses the automatic focus-on-map a newly-mapped window
     /// normally gets (niri's `open-focused false`) -- useful for a
     /// background/scanner-style app that shouldn't steal focus from
@@ -4521,6 +4567,8 @@ pub struct WorkspaceRule {
     pub border: Option<BorderOverrides>,
     pub rounding: Option<RoundingOverrides>,
     pub shadow: Option<ShadowOverrides>,
+    /// Per-workspace snap opt-in or opt-out. Window rules take precedence.
+    pub snap: Option<bool>,
     /// Command run the first time this workspace becomes active while
     /// having zero windows, once per (output, workspace) pair for the
     /// process lifetime (`Smallvil::workspace_created_empty_fired`) --
@@ -5120,6 +5168,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "input" => apply_input_block(&mut raw.input, body),
         "xwayland" => apply_xwayland_block(&mut raw.xwayland, body),
         "transition" => apply_workspace_transition_block(&mut raw.workspace_transition, body),
+        "snap" => apply_snap_block(&mut raw.snap, body),
         "vessels" => apply_connected_vessels_block(&mut raw.connected_vessels, body),
         "sway" => apply_sway_block(&mut raw.sway, body),
         "physics" => apply_float_physics_block(&mut raw.float_physics, body),
@@ -5200,6 +5249,66 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
             if !computation_only {
                 tracing::warn!(keyword = %other, "Unknown config block, ignoring");
             }
+        }
+    }
+}
+
+fn apply_snap_block(cfg: &mut SnapConfig, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `snap` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "enabled" => set_bool(&mut cfg.enabled, key, value),
+            "preset" => match value.trim().to_ascii_lowercase().as_str() {
+                "halves" => cfg.preset = crate::snap::SnapPreset::Halves,
+                "quarters" | "windows" => cfg.preset = crate::snap::SnapPreset::Quarters,
+                _ => tracing::warn!(value, "Expected snap preset halves or quarters, ignoring"),
+            },
+            "zones" => match parse_list_value(value) {
+                Some(values) => {
+                    let zones: Option<Vec<_>> = values
+                        .iter()
+                        .map(|value| crate::snap::SnapZone::parse(value))
+                        .collect();
+                    match zones {
+                        Some(zones) if !zones.is_empty() => cfg.zones = Some(zones),
+                        _ => tracing::warn!(
+                            value,
+                            "Expected a non-empty list of snap zones, ignoring"
+                        ),
+                    }
+                }
+                None => tracing::warn!(value, "Expected a list of snap zones, ignoring"),
+            },
+            "distance" => match value.parse::<i32>() {
+                Ok(value) => cfg.distance = value.clamp(0, 512),
+                Err(_) => tracing::warn!(value, "Expected snap distance from 0 to 512, ignoring"),
+            },
+            "gap" => match value.trim() {
+                "workspace" | "inherit" | "auto" => cfg.gap = None,
+                value => match value.parse::<i32>() {
+                    Ok(value) => cfg.gap = Some(value.clamp(0, 256)),
+                    Err(_) => tracing::warn!(
+                        value,
+                        "Expected snap gap from 0 to 256 or workspace, ignoring"
+                    ),
+                },
+            },
+            "preview" => set_bool(&mut cfg.preview, key, value),
+            "preview_color" | "color" => match parse_ripple_color(value) {
+                Some(color) => cfg.preview_color = color,
+                None => tracing::warn!(
+                    value,
+                    "Expected snap preview_color as #RRGGBB/rgb(...), ignoring"
+                ),
+            },
+            "preview_opacity" | "opacity" => match value.parse::<f32>() {
+                Ok(value) if value.is_finite() => cfg.preview_opacity = value.clamp(0.0, 1.0),
+                _ => tracing::warn!(value, "Expected snap preview_opacity from 0 to 1, ignoring"),
+            },
+            other => tracing::warn!(key = %other, "Unknown key in `snap` block, ignoring"),
         }
     }
 }
@@ -7829,6 +7938,7 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                 "pseudo_tile" => set_bool(&mut rule.pseudo_tile, key, value),
                 "pin" => set_bool(&mut rule.pin, key, value),
                 "tile" => set_bool(&mut rule.tile, key, value),
+                "snap" => set_opt_bool(&mut rule.snap, key, value),
                 "no_focus" => set_bool(&mut rule.no_focus, key, value),
                 "maximize" => set_bool(&mut rule.maximize, key, value),
                 "fullscreen" => set_bool(&mut rule.fullscreen, key, value),
@@ -8070,6 +8180,7 @@ fn lower_workspace_rule_block(body: &[waves::Entry]) -> WorkspaceRule {
                     ),
                 },
                 "on_created_empty" => rule.on_created_empty = Some(value.clone()),
+                "snap" => set_opt_bool(&mut rule.snap, key, value),
                 "shadow" => match value.as_str() {
                     "true" | "on" => {
                         rule.shadow
@@ -8542,6 +8653,15 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
             }
         };
     }
+    if let Some(zone) = action.strip_prefix("snap:") {
+        return match crate::snap::SnapZone::parse(zone) {
+            Some(zone) => Some(Action::Snap(zone)),
+            None => {
+                tracing::warn!(zone, "Unknown snap zone in keybind, skipping");
+                None
+            }
+        };
+    }
     if let Some(name) = action.strip_prefix("ocean-bookmark:") {
         return (!name.trim().is_empty()).then(|| Action::OceanBookmark(name.trim().to_string()));
     }
@@ -8791,6 +8911,16 @@ viscosity = 1.0                  # 0 turns off drag/resize settling, higher sett
 
 gaps = 8
 layout = bsp                     # bsp, master, cascade, or floating
+
+snap {
+    enabled = true
+    preset = quarters            # halves removes corner targets
+    distance = 24                # logical pixels from the output edge
+    gap = workspace              # inherit this workspace/output's gap
+    preview = true
+    preview_color = #2EC7FF
+    preview_opacity = 0.22
+}
 
 # ~~~~~~~~~~~~~~~~~ input ~~~~~~~~~~~~~~~~~
 
@@ -9885,6 +10015,7 @@ mod tests {
             show_welcome_hint: false,
             show_config_reload_toast: true,
             water_effects: true,
+            snap: SnapConfig::default(),
             builtin_wallpaper: true,
             viscosity: 1.0,
             backdrop_capture_scale: 1,
@@ -10904,6 +11035,56 @@ mod tests {
         assert!(defaults.enabled);
         assert_eq!(defaults.falloff, 0.5);
         assert_eq!(defaults.max_splits, 4);
+    }
+
+    #[test]
+    fn snap_block_actions_and_scope_overrides_parse() {
+        let entries = wave_entries(
+            "snap {\n\
+             enabled = true\n\
+             preset = halves\n\
+             zones = [left, bottom-right]\n\
+             distance = 999\n\
+             gap = 5\n\
+             preview = false\n\
+             preview_color = #123456\n\
+             preview_opacity = 2.0\n\
+             }\n\
+             rule {\n\
+             app_id = kitty\n\
+             snap = false\n\
+             }\n\
+             workspace_rule {\n\
+             workspace = 3\n\
+             snap = false\n\
+             }\n",
+        );
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        assert!(config.snap.enabled);
+        assert_eq!(config.snap.preset, crate::snap::SnapPreset::Halves);
+        assert_eq!(
+            config.snap.zones,
+            Some(vec![
+                crate::snap::SnapZone::Left,
+                crate::snap::SnapZone::BottomRight
+            ])
+        );
+        assert_eq!(config.snap.distance, 512);
+        assert_eq!(config.snap.gap, Some(5));
+        assert!(!config.snap.preview);
+        assert_eq!(config.snap.preview_opacity, 1.0);
+        assert_eq!(
+            config.resolve_window_rules(facts_for("kitty")).snap,
+            Some(false)
+        );
+        assert_eq!(config.resolve_workspace_rule(3).snap, Some(false));
+        assert!(matches!(
+            parse_action("snap:top-left"),
+            Some(Action::Snap(crate::snap::SnapZone::TopLeft))
+        ));
+        assert!(parse_action("snap:middle").is_none());
+
+        assert_eq!(parse_default_config().snap, SnapConfig::default());
     }
 
     #[test]

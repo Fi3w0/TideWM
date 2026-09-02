@@ -12,6 +12,7 @@ pub(crate) mod layout;
 pub(crate) mod ocean;
 pub(crate) mod output_layout;
 pub(crate) mod placement;
+pub(crate) mod snap;
 pub(crate) mod state;
 pub(crate) mod wave;
 pub(crate) mod wave_fmt;

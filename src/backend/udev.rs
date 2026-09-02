@@ -154,7 +154,7 @@ smithay::backend::renderer::element::render_elements! {
     WorkspaceTransition = crate::workspace_transition::WorkspaceTransitionElement,
     /// Non-water slide/fade of one outgoing workspace snapshot.
     WorkspaceGlide = crate::workspace_transition::WorkspaceGlideElement,
-    /// Full-output fill immediately behind a dim-around Overlay/Top surface.
+    /// Analytical solid fills: dim-around and Classic snap preview.
     Dim = SolidColorRenderElement,
 }
 
@@ -1940,6 +1940,11 @@ fn render_surface(
     } else {
         state.config_error_element(output, renderer)
     };
+    let snap_preview = if locked {
+        None
+    } else {
+        state.snap_preview_element(output)
+    };
 
     let (depth_elements, depth_surfaces) = if locked {
         (Vec::new(), Vec::new())
@@ -2058,6 +2063,7 @@ fn render_surface(
     );
     elements.extend(depth_transition);
     elements.extend(ripple_layers.above_windows);
+    elements.extend(snap_preview.map(OutputRenderElements::Dim));
     elements.extend(compass_elements);
     elements.extend(workspace_transition);
     elements.extend(workspace_glide);

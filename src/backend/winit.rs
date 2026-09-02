@@ -309,6 +309,7 @@ pub fn init_winit(
                             .and_then(|deck| deck.render_element(renderer));
                         let picker_element =
                             state.screencast_picker_element(&entry.output, renderer);
+                        let snap_preview = state.snap_preview_element(&entry.output);
                         // Behind toast/overview/tab-strip in the chain (see
                         // above for why index 0 is frontmost) -- it's a
                         // background-level placeholder, not transient UI.
@@ -425,6 +426,9 @@ pub fn init_winit(
                         );
                         elements.extend(depth_transition);
                         elements.extend(ripple_layers.above_windows);
+                        elements.extend(
+                            snap_preview.map(crate::backend::udev::OutputRenderElements::Dim),
+                        );
                         elements.extend(compass_elements);
                         elements.extend(workspace_transition);
                         elements.extend(workspace_glide);

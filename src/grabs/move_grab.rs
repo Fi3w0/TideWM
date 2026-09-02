@@ -17,6 +17,7 @@ pub struct MoveSurfaceGrab {
     pub initial_window_location: Point<i32, Logical>,
     pub view_scale: f64,
     pub smart_attach_ocean: bool,
+    pub classic_snap: bool,
     pub(crate) last_location: Point<f64, Logical>,
     pub(crate) completion: GrabCompletion,
 }
@@ -33,10 +34,12 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
         handle.motion(data, None, event);
 
         if !self.window.alive() {
+            data.set_snap_preview(None);
             return;
         }
         self.last_location = event.location;
         let Some(surface) = self.window.toplevel().map(|toplevel| toplevel.wl_surface()) else {
+            data.set_snap_preview(None);
             return;
         };
         data.set_floating_dragging(surface, true);
@@ -50,8 +53,16 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
             || data.fullscreen.contains_key(surface)
             || data.maximized.contains_key(surface)
         {
+            data.set_snap_preview(None);
             return;
         }
+
+        let snap_target = if self.classic_snap {
+            data.snap_target_at(surface, self.last_location)
+        } else {
+            None
+        };
+        data.set_snap_preview(snap_target.as_ref());
 
         let view_delta = event.location - self.start_data.location;
         let scale = self.view_scale.max(0.05);
@@ -237,15 +248,34 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
 
     fn unset(&mut self, data: &mut Smallvil) {
         let completed = self.completion.take_complete();
-        if let Some(surface) = self.window.toplevel().map(|toplevel| toplevel.wl_surface()) {
+        let surface = self
+            .window
+            .toplevel()
+            .map(|toplevel| toplevel.wl_surface().clone());
+        let snap_target = if self.classic_snap && completed {
+            surface
+                .as_ref()
+                .and_then(|surface| data.snap_target_at(surface, self.last_location))
+        } else {
+            None
+        };
+        data.set_snap_preview(None);
+        if let Some(surface) = surface.as_ref() {
             data.set_floating_dragging(surface, false);
         }
         if self.smart_attach_ocean && completed {
-            if let Some(surface) = self.window.toplevel().map(|toplevel| toplevel.wl_surface()) {
+            if let Some(surface) = surface.as_ref() {
                 data.smart_attach_ocean_floating(surface, self.last_location);
             }
         }
+        let snapped = if let Some(target) = snap_target.as_ref() {
+            data.apply_snap_target(&self.window, target)
+        } else {
+            false
+        };
         data.ocean.clear_tile_drag();
-        data.sync_visible_floating_window(&self.window);
+        if !snapped {
+            data.sync_visible_floating_window(&self.window);
+        }
     }
 }
