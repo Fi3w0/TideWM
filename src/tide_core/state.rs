@@ -2065,12 +2065,19 @@ impl Smallvil {
         {
             return None;
         }
-        let area = self.output_tiling_area(&output)?;
-        let gap = self
-            .config
-            .snap
-            .gap
-            .unwrap_or_else(|| self.gaps_for(&output_name, workspace));
+        // Fullscreen is edge-to-edge on the raw output, never the
+        // gap-inset tiling area every rect-snap zone uses.
+        let (area, gap) = if zone == crate::snap::SnapZone::Fullscreen {
+            (output_geometry, 0)
+        } else {
+            let area = self.output_tiling_area(&output)?;
+            let gap = self
+                .config
+                .snap
+                .gap
+                .unwrap_or_else(|| self.gaps_for(&output_name, workspace));
+            (area, gap)
+        };
         Some(crate::snap::SnapTarget {
             output: output_name,
             workspace,
@@ -2128,6 +2135,9 @@ impl Smallvil {
         };
         if !self.snap_enabled_for_surface(&surface) || !self.window_is_visible(&surface) {
             return false;
+        }
+        if target.zone == crate::snap::SnapZone::Fullscreen {
+            return self.enter_fullscreen(window);
         }
         let Some(output) = self.output_by_name(&target.output) else {
             return false;
@@ -11765,14 +11775,22 @@ impl Smallvil {
         };
         let output_name = output.name();
         let workspace = self.layout.active_workspace(&output_name);
-        let Some(area) = self.output_tiling_area(&output) else {
-            return;
+        let (area, gap) = if zone == crate::snap::SnapZone::Fullscreen {
+            let Some(output_geometry) = self.space.output_geometry(&output) else {
+                return;
+            };
+            (output_geometry, 0)
+        } else {
+            let Some(area) = self.output_tiling_area(&output) else {
+                return;
+            };
+            let gap = self
+                .config
+                .snap
+                .gap
+                .unwrap_or_else(|| self.gaps_for(&output_name, workspace));
+            (area, gap)
         };
-        let gap = self
-            .config
-            .snap
-            .gap
-            .unwrap_or_else(|| self.gaps_for(&output_name, workspace));
         let target = crate::snap::SnapTarget {
             output: output_name,
             workspace,

@@ -24,10 +24,14 @@ pub enum SnapZone {
     TopRight,
     BottomLeft,
     BottomRight,
+    /// A drop dead-center along the top edge, clear of the corner zones.
+    /// Unlike every other zone this isn't a rect resize -- it enters real
+    /// compositor fullscreen (see `Smallvil::enter_fullscreen`).
+    Fullscreen,
 }
 
 impl SnapZone {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Left,
         Self::Right,
         Self::Top,
@@ -36,6 +40,7 @@ impl SnapZone {
         Self::TopRight,
         Self::BottomLeft,
         Self::BottomRight,
+        Self::Fullscreen,
     ];
 
     pub fn parse(value: &str) -> Option<Self> {
@@ -48,6 +53,7 @@ impl SnapZone {
             "top-right" => Some(Self::TopRight),
             "bottom-left" => Some(Self::BottomLeft),
             "bottom-right" => Some(Self::BottomRight),
+            "fullscreen" | "full" | "maximize" => Some(Self::Fullscreen),
             _ => None,
         }
     }
@@ -110,6 +116,18 @@ pub fn zone_at(
         }
     }
 
+    // Dead-center along the top edge, clear of the corner zones: the same
+    // "drag to the top of the screen" affordance other WMs use for
+    // maximize, scoped to the middle third so it doesn't fight the ordinary
+    // top-edge half-snap on either side of it.
+    if horizontal.is_none() && matches!(vertical, Some((SnapZone::Top, _))) {
+        let center_x = f64::from(output.loc.x) + f64::from(output.size.w) / 2.0;
+        let half_band = f64::from(output.size.w) / 6.0;
+        if (point.x - center_x).abs() <= half_band && zone_enabled(SnapZone::Fullscreen, config) {
+            return Some(SnapZone::Fullscreen);
+        }
+    }
+
     horizontal
         .into_iter()
         .chain(vertical)
@@ -123,6 +141,13 @@ pub fn target_rect(
     zone: SnapZone,
     gap: i32,
 ) -> Rectangle<i32, Logical> {
+    // Fullscreen is edge-to-edge by definition and never actually resizes
+    // the window through this rect (see `Smallvil::enter_fullscreen`) --
+    // callers pass the raw output geometry here, used only to size the
+    // drop preview.
+    if zone == SnapZone::Fullscreen {
+        return area;
+    }
     let left_width = area.size.w / 2;
     let right_width = area.size.w - left_width;
     let top_height = area.size.h / 2;
@@ -151,6 +176,7 @@ pub fn target_rect(
         SnapZone::BottomRight => {
             Rectangle::new((x_mid, y_mid).into(), (right_width, bottom_height).into())
         }
+        SnapZone::Fullscreen => unreachable!("handled by the early return above"),
     };
     crate::layout::inset(raw, gap.max(0))
 }
@@ -158,6 +184,9 @@ pub fn target_rect(
 pub fn zone_enabled(zone: SnapZone, config: &SnapConfig) -> bool {
     if let Some(zones) = &config.zones {
         return zones.contains(&zone);
+    }
+    if zone == SnapZone::Fullscreen {
+        return config.fullscreen;
     }
     match config.preset {
         SnapPreset::Halves => !zone.is_corner(),
@@ -200,6 +229,34 @@ mod tests {
             zone_at((104.0, -42.0).into(), output, &halves),
             Some(SnapZone::Left)
         );
+    }
+
+    #[test]
+    fn top_center_band_fullscreens_and_the_flanks_stay_a_half_snap() {
+        let output = Rectangle::new((0, 0).into(), (1200, 800).into());
+        assert_eq!(
+            zone_at((600.0, 2.0).into(), output, &config()),
+            Some(SnapZone::Fullscreen)
+        );
+        assert_eq!(
+            zone_at((300.0, 2.0).into(), output, &config()),
+            Some(SnapZone::Top)
+        );
+
+        let no_fullscreen = SnapConfig {
+            fullscreen: false,
+            ..config()
+        };
+        assert_eq!(
+            zone_at((600.0, 2.0).into(), output, &no_fullscreen),
+            Some(SnapZone::Top)
+        );
+    }
+
+    #[test]
+    fn fullscreen_target_rect_is_the_untouched_output_geometry() {
+        let output = Rectangle::new((50, -20).into(), (1920, 1080).into());
+        assert_eq!(target_rect(output, SnapZone::Fullscreen, 8), output);
     }
 
     #[test]

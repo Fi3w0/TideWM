@@ -567,6 +567,11 @@ pub struct SnapConfig {
     pub preview: bool,
     pub preview_color: [f32; 3],
     pub preview_opacity: f32,
+    /// Whether dropping dead-center on the top edge enters real fullscreen
+    /// instead of the ordinary top-half snap. Independent of `preset`
+    /// (neither halves nor quarters implies it) so it can be turned off on
+    /// its own; an explicit `zones` list still overrides it either way.
+    pub fullscreen: bool,
 }
 
 impl Default for SnapConfig {
@@ -580,6 +585,7 @@ impl Default for SnapConfig {
             preview: true,
             preview_color: [46.0 / 255.0, 199.0 / 255.0, 1.0],
             preview_opacity: 0.22,
+            fullscreen: true,
         }
     }
 }
@@ -5297,6 +5303,7 @@ fn apply_snap_block(cfg: &mut SnapConfig, body: &[waves::Entry]) {
                 },
             },
             "preview" => set_bool(&mut cfg.preview, key, value),
+            "fullscreen" => set_bool(&mut cfg.fullscreen, key, value),
             "preview_color" | "color" => match parse_ripple_color(value) {
                 Some(color) => cfg.preview_color = color,
                 None => tracing::warn!(
@@ -8920,6 +8927,7 @@ snap {
     preview = true
     preview_color = #2EC7FF
     preview_opacity = 0.22
+    fullscreen = true            # drop dead-center on the top edge to fullscreen
 }
 
 # ~~~~~~~~~~~~~~~~~ input ~~~~~~~~~~~~~~~~~
@@ -11081,6 +11089,10 @@ mod tests {
         assert!(matches!(
             parse_action("snap:top-left"),
             Some(Action::Snap(crate::snap::SnapZone::TopLeft))
+        ));
+        assert!(matches!(
+            parse_action("snap:fullscreen"),
+            Some(Action::Snap(crate::snap::SnapZone::Fullscreen))
         ));
         assert!(parse_action("snap:middle").is_none());
 
