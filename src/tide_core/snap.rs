@@ -53,7 +53,7 @@ impl SnapZone {
             "top-right" => Some(Self::TopRight),
             "bottom-left" => Some(Self::BottomLeft),
             "bottom-right" => Some(Self::BottomRight),
-            "fullscreen" | "full" | "maximize" => Some(Self::Fullscreen),
+            "fullscreen" | "full" => Some(Self::Fullscreen),
             _ => None,
         }
     }
@@ -141,13 +141,6 @@ pub fn target_rect(
     zone: SnapZone,
     gap: i32,
 ) -> Rectangle<i32, Logical> {
-    // Fullscreen is edge-to-edge by definition and never actually resizes
-    // the window through this rect (see `Smallvil::enter_fullscreen`) --
-    // callers pass the raw output geometry here, used only to size the
-    // drop preview.
-    if zone == SnapZone::Fullscreen {
-        return area;
-    }
     let left_width = area.size.w / 2;
     let right_width = area.size.w - left_width;
     let top_height = area.size.h / 2;
@@ -176,8 +169,15 @@ pub fn target_rect(
         SnapZone::BottomRight => {
             Rectangle::new((x_mid, y_mid).into(), (right_width, bottom_height).into())
         }
-        SnapZone::Fullscreen => unreachable!("handled by the early return above"),
+        // Edge-to-edge by definition and never actually resizes the window
+        // through this rect (see `Smallvil::enter_fullscreen`) -- callers
+        // pass the raw output geometry here, used only to size the drop
+        // preview.
+        SnapZone::Fullscreen => area,
     };
+    if zone == SnapZone::Fullscreen {
+        return raw;
+    }
     crate::layout::inset(raw, gap.max(0))
 }
 
