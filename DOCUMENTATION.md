@@ -107,6 +107,49 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | `adaptive_sync` (aliases `vrr`, `variable_refresh_rate`) | `off` \| `on` \| `on-demand` | `off` | Global adaptive-sync (VRR) preference; a `[[output]]`'s own `adaptive_sync` beats it. The udev backend applies the resolved value through DRM; `on-demand` enables VRR only while an unlocked fullscreen window owns the output. The nested winit backend has no DRM surface, so this setting is inert there. |
 | `spawn` | list | none | Commands launched once at startup, as a real list: `spawn = [waybar, "swaybg -i ~/wallpaper.png -m fill"]`. Args split on whitespace — no shell involved, so quoting/globs/pipes aren't supported; wrap in `sh -c "..."` yourself if you need those. |
 
+### Classic edge and corner snap
+
+`snap { }` gives Classic floating windows a Windows-style manual placement
+gesture. While a compositor move grab is active, bringing the pointer within
+`distance` logical pixels of an output edge shows one bounded solid preview;
+releasing the initiating button commits the same rectangle. A cancelled grab,
+lock transition, disappearing window, or release outside a target only clears
+the preview. TideWM uses the pointer's output for detection and that output's
+usable tiling area for placement, so exclusive bars are respected. A
+cross-output drop moves the floater's durable ownership to the destination
+output's currently active workspace and updates its fractional scale.
+
+This is Classic-only. Ocean's freeform-window smart tiling remains separate.
+Only ordinary floating windows participate; tiled, fullscreen, and maximized
+windows do not. Client-requested XDG moves and TideWM's modifier+left drag share
+the same grab and release semantics. `snap:<zone>` actions provide keyboard
+parity using the focused floater's current output. `distance = 0` disables only
+pointer edge detection; keyboard actions remain available when their zone is
+enabled.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | Global master switch. A `rule`/`workspace_rule` can opt a window or workspace out while this is enabled; neither can turn snapping on when the master is off. |
+| `preset` | `halves` \| `quarters` | `quarters` | `halves` enables the four cardinal half-output targets. `quarters` additionally lets corners choose quarter-output targets. |
+| `zones` | list | preset | Exact replacement for the preset: any non-empty list of `left`, `right`, `top`, `bottom`, `top-left`, `top-right`, `bottom-left`, `bottom-right`. |
+| `distance` | integer, `0`–`512` | `24` | Pointer activation distance from the full logical output edge. |
+| `gap` | integer, `0`–`256`, or `workspace` | `workspace` | Insets the chosen half/quarter. `workspace` inherits the resolved destination workspace/output gap. |
+| `preview` | bool | `true` | Shows or hides the drop rectangle without changing drop behavior. |
+| `preview_color` | color | `#2EC7FF` | Solid preview color (`#RRGGBB` or `rgb(...)`). |
+| `preview_opacity` | float, `0`–`1` | `0.22` | Preview alpha. `0` makes it invisible without disabling snapping. |
+
+```wave
+snap {
+    enabled = true
+    preset = quarters
+    distance = 24
+    gap = workspace
+    preview = true
+    preview_color = #2EC7FF
+    preview_opacity = 0.22
+}
+```
+
 ### Workspace transitions
 
 Workspace actions use a directional wave wipe while both `water_effects` and `workspace_transition.enabled` are true. The default `water` style is a full-screen transition: a blue body with moving caustic streaks, a curling foamy crest, and spray floods across the outgoing workspace; once water covers the whole output, it continues across to reveal the incoming workspace. The alternate `glow` style retains the slimmer colored sinusoidal boundary wipe. Cursor and compositor chrome remain live above either style.
@@ -1358,6 +1401,7 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 | `pseudo_tile` | bool | Default `false`. No-op unless the window ends up tiled; ignored if `float`/`pin` also apply. |
 | `pin` | bool | Default `false`. Implies `float`. |
 | `tile` | bool | Default `false`. Forces tiled even if the auto-float heuristic (a window with a parent, e.g. a dialog, or one whose min/max size are equal, e.g. a splash screen) would otherwise float it. No effect if `float`/`pin` also match. |
+| `snap` | bool, optional | Live Classic snap opt-in/out for matching floating windows. A window rule wins over its `workspace_rule`; the global `snap.enabled` switch remains the master. For a cross-output pointer target, a window-rule decision wins first, otherwise the destination active workspace's rule is used. |
 | `no_focus` | bool | Default `false`. Maps without stealing focus — whatever was focused before stays focused. |
 | `maximize` | bool | Default `false`. Opens maximized and implies floating placement. |
 | `fullscreen` | bool | Default `false`. Opens fullscreen on its selected output. |
@@ -1534,6 +1578,7 @@ Per-workspace-number overrides — Hyprland's `workspace_rule` block. Matches by
 | `border` | bool, or a `border { }` sub-block | Same shorthand/sub-block shape as `rule { border }` above. Acts as the base every matching `[[window_rule]]`'s own `border` builds on for a window living on this workspace, underneath the global `border { }` block. |
 | `rounding` | bool, radii, or a `rounding { }` sub-block | Same shape as `rule { rounding }`, same base-layer role as `border` above. |
 | `shadow` | bool, or a `shadow { }` sub-block | Same shape as `rule { shadow }`, same base-layer role as `border` above. |
+| `snap` | bool, optional | Enables/disables Classic snap for floaters on this workspace. A matching window `rule { snap = ... }` wins; `snap.enabled = false` remains a global master off switch. Cross-output pointer targeting evaluates the destination output's active workspace. |
 | `on_created_empty` | string, optional | Command run the first time this workspace is switched into while it has zero windows. TideWM's numbered workspaces always exist as addressable slots — there's no real create/destroy lifecycle the way Hyprland has — so this fires once per (output, workspace) pair for the process lifetime, the closest honest analog available, rather than repeating on every later empty visit. |
 
 ```
@@ -1614,6 +1659,7 @@ The same set of strings works after `bind ... { }` at the top level or inside a 
 - `swap-left` / `swap-right` / `swap-up` / `swap-down`
 - `resize-left` / `resize-right` / `resize-up` / `resize-down` — shrink/grow the focused floating window by 24 logical pixels, or resize its nearest BSP split and connected parallel ancestors
 - `move-left` / `move-right` / `move-up` / `move-down` — step the focused floating window 24 logical pixels, no-op on a tiled one (spatial roadmap Phase 4's keyboard escape hatch alongside `toggle-floating`)
+- `snap:left` / `snap:right` / `snap:top` / `snap:bottom` / `snap:top-left` / `snap:top-right` / `snap:bottom-left` / `snap:bottom-right` — place the focused Classic floater with the same zone, usable-area, gap, and rule policy as pointer snapping; disabled zones no-op
 - `layout:bsp` / `layout:master` / `layout:cascade` / `layout:floating` — switch the current workspace's tiling algorithm
 - `master-grow` / `master-shrink` — nudge the master/stack ratio (master layout only, no-op under BSP)
 
