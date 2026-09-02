@@ -1926,29 +1926,6 @@ impl Smallvil {
         self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged { surface });
     }
 
-    /// Drag-to-snap's fullscreen zone (`SnapZone::Fullscreen`): enters real
-    /// fullscreen for a specific window, dropped mid-drag or reached via the
-    /// `snap:fullscreen` keyboard/IPC action, rather than the focused window
-    /// `toggle_fullscreen` always targets. Reuses the same
-    /// `fullscreen_request` path a client's own xdg_toplevel request would
-    /// take, so restore geometry and per-output exclusivity behave
-    /// identically either way.
-    pub(crate) fn enter_fullscreen(&mut self, window: &Window) -> bool {
-        if self.exclusive_layer().is_some() {
-            return false;
-        }
-        let Some(toplevel) = window.toplevel().cloned() else {
-            return false;
-        };
-        let surface = toplevel.wl_surface().clone();
-        if self.fullscreen.contains_key(&surface) {
-            return false;
-        }
-        self.fullscreen_request(toplevel, None);
-        self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged { surface });
-        true
-    }
-
     /// Keybind path to the same maximize/restore geometry a client's own
     /// xdg-shell request or a window rule already produces -- see
     /// `do_maximize_request`'s own doc comment for why it's a no-op for an

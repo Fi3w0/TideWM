@@ -567,10 +567,11 @@ pub struct SnapConfig {
     pub preview: bool,
     pub preview_color: [f32; 3],
     pub preview_opacity: f32,
-    /// Whether dropping dead-center on the top edge enters real fullscreen
-    /// instead of the ordinary top-half snap. Independent of `preset`
-    /// (neither halves nor quarters implies it) so it can be turned off on
-    /// its own; an explicit `zones` list still overrides it either way.
+    /// Whether dropping dead-center on the top edge resizes to fill the
+    /// whole usable area instead of the ordinary top-half snap. Independent
+    /// of `preset` (neither halves nor quarters implies it) so it can be
+    /// turned off on its own; an explicit `zones` list still overrides it
+    /// either way.
     pub fullscreen: bool,
 }
 
@@ -8927,7 +8928,7 @@ snap {
     preview = true
     preview_color = #2EC7FF
     preview_opacity = 0.22
-    fullscreen = true            # drop dead-center on the top edge to fullscreen
+    fullscreen = true            # drop dead-center on the top edge to fill the screen
 }
 
 # ~~~~~~~~~~~~~~~~~ input ~~~~~~~~~~~~~~~~~

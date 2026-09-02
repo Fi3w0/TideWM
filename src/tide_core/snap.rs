@@ -25,8 +25,8 @@ pub enum SnapZone {
     BottomLeft,
     BottomRight,
     /// A drop dead-center along the top edge, clear of the corner zones.
-    /// Unlike every other zone this isn't a rect resize -- it enters real
-    /// compositor fullscreen (see `Smallvil::enter_fullscreen`).
+    /// Resizes the floater to fill the whole usable area, same as every
+    /// other zone -- not real xdg-shell fullscreen protocol state.
     Fullscreen,
 }
 
@@ -169,15 +169,11 @@ pub fn target_rect(
         SnapZone::BottomRight => {
             Rectangle::new((x_mid, y_mid).into(), (right_width, bottom_height).into())
         }
-        // Edge-to-edge by definition and never actually resizes the window
-        // through this rect (see `Smallvil::enter_fullscreen`) -- callers
-        // pass the raw output geometry here, used only to size the drop
-        // preview.
+        // The whole usable area, same gap treatment as every other zone --
+        // a plain resize to fill the output, not real xdg-shell fullscreen
+        // protocol state.
         SnapZone::Fullscreen => area,
     };
-    if zone == SnapZone::Fullscreen {
-        return raw;
-    }
     crate::layout::inset(raw, gap.max(0))
 }
 
@@ -254,9 +250,13 @@ mod tests {
     }
 
     #[test]
-    fn fullscreen_target_rect_is_the_untouched_output_geometry() {
-        let output = Rectangle::new((50, -20).into(), (1920, 1080).into());
-        assert_eq!(target_rect(output, SnapZone::Fullscreen, 8), output);
+    fn fullscreen_target_rect_fills_the_area_with_the_ordinary_gap() {
+        let area = Rectangle::new((50, -20).into(), (1920, 1080).into());
+        assert_eq!(
+            target_rect(area, SnapZone::Fullscreen, 8),
+            Rectangle::new((58, -12).into(), (1904, 1064).into())
+        );
+        assert_eq!(target_rect(area, SnapZone::Fullscreen, 0), area);
     }
 
     #[test]

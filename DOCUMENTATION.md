@@ -128,10 +128,11 @@ pointer edge detection; keyboard actions remain available when their zone is
 enabled.
 
 Dropping dead-center on the top edge, clear of the corner targets, is its own
-`fullscreen` zone: instead of resizing to a rect it enters real compositor
-fullscreen (the same state a client's own `xdg_toplevel` fullscreen request or
-`toggle-fullscreen` produces), previewed as a full-output highlight. The
-center band is fixed at the middle third of the output's width, so it's
+`fullscreen` zone: it resizes the floater to fill the whole usable area, the
+same rect-resize mechanism every other zone uses -- not real xdg-shell
+fullscreen protocol state, so it stays a plain floating window and can be
+dragged/snapped away again immediately. Previewed as a full-output highlight.
+The center band is fixed at the middle third of the output's width, so it's
 comfortable to hit without fighting the ordinary top-edge half-snap on either
 side of it. `snap:fullscreen` gives it keyboard/IPC parity like every other
 zone.
@@ -142,11 +143,11 @@ zone.
 | `preset` | `halves` \| `quarters` | `quarters` | `halves` enables the four cardinal half-output targets. `quarters` additionally lets corners choose quarter-output targets. |
 | `zones` | list | preset | Exact replacement for the preset: any non-empty list of `left`, `right`, `top`, `bottom`, `top-left`, `top-right`, `bottom-left`, `bottom-right`, `fullscreen`. |
 | `distance` | integer, `0`–`512` | `24` | Pointer activation distance from the full logical output edge. |
-| `gap` | integer, `0`–`256`, or `workspace` | `workspace` | Insets the chosen half/quarter. `workspace` inherits the resolved destination workspace/output gap. Never applied to the `fullscreen` zone, which is always edge-to-edge. |
+| `gap` | integer, `0`–`256`, or `workspace` | `workspace` | Insets the chosen target, `fullscreen` included. `workspace` inherits the resolved destination workspace/output gap. |
 | `preview` | bool | `true` | Shows or hides the drop rectangle without changing drop behavior. |
 | `preview_color` | color | `#2EC7FF` | Solid preview color (`#RRGGBB` or `rgb(...)`). |
 | `preview_opacity` | float, `0`–`1` | `0.22` | Preview alpha. `0` makes it invisible without disabling snapping. |
-| `fullscreen` | bool | `true` | Whether the top-center drop zone enters fullscreen. Independent of `preset`; an explicit `zones` list still overrides it either way. |
+| `fullscreen` | bool | `true` | Whether the top-center drop zone is active. Independent of `preset`; an explicit `zones` list still overrides it either way. |
 
 ```wave
 snap {
@@ -1671,7 +1672,7 @@ The same set of strings works after `bind ... { }` at the top level or inside a 
 - `resize-left` / `resize-right` / `resize-up` / `resize-down` — shrink/grow the focused floating window by 24 logical pixels, or resize its nearest BSP split and connected parallel ancestors
 - `move-left` / `move-right` / `move-up` / `move-down` — step the focused floating window 24 logical pixels, no-op on a tiled one (spatial roadmap Phase 4's keyboard escape hatch alongside `toggle-floating`)
 - `snap:left` / `snap:right` / `snap:top` / `snap:bottom` / `snap:top-left` / `snap:top-right` / `snap:bottom-left` / `snap:bottom-right` — place the focused Classic floater with the same zone, usable-area, gap, and rule policy as pointer snapping; disabled zones no-op
-- `snap:fullscreen` — enters real fullscreen for the focused Classic floater, the same as the drag-to-snap top-center drop zone
+- `snap:fullscreen` — resizes the focused Classic floater to fill the whole usable area, the same as the drag-to-snap top-center drop zone; not real fullscreen protocol state
 - `layout:bsp` / `layout:master` / `layout:cascade` / `layout:floating` — switch the current workspace's tiling algorithm
 - `master-grow` / `master-shrink` — nudge the master/stack ratio (master layout only, no-op under BSP)
 
