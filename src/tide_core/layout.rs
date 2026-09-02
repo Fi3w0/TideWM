@@ -712,7 +712,13 @@ impl Layouts {
             return Vec::new();
         };
         match self.algorithm(output, workspace) {
-            LayoutAlgorithm::Bsp => tree.layout(area, gap, self.split_bias),
+            // `Floating` only changes a new window's spawn default
+            // (`map_toplevel`'s `implicit_float`); a window manually tiled
+            // into this tree (an explicit `rule { tile = true }` or
+            // `toggle-floating` back in) lays out exactly like `Bsp`.
+            LayoutAlgorithm::Bsp | LayoutAlgorithm::Floating => {
+                tree.layout(area, gap, self.split_bias)
+            }
             LayoutAlgorithm::Master => layout_master(
                 tree.windows(),
                 area,
@@ -2374,6 +2380,25 @@ mod tests {
 
         layouts.set_default_algorithm(LayoutAlgorithm::Master);
         assert_eq!(layouts.algorithm("DP-1", 2), LayoutAlgorithm::Master);
+
+        // `Floating` (Phase 4) resolves through the exact same override
+        // chain as every other algorithm -- no special-casing.
+        layouts.set_algorithm("DP-1", 3, LayoutAlgorithm::Floating);
+        assert_eq!(layouts.algorithm("DP-1", 3), LayoutAlgorithm::Floating);
+        assert_eq!(layouts.algorithm("HDMI-1", 3), LayoutAlgorithm::Master);
+    }
+
+    #[test]
+    fn floating_algorithm_layout_matches_bsp_on_an_empty_tree() {
+        // `layout()`'s `Floating` arm shares `Bsp`'s call; an empty tree
+        // (the steady state once every window has been auto-floated out at
+        // map time -- see `map_toplevel`'s `implicit_float` extension)
+        // returns the same empty geometry list either way.
+        let mut layouts = Layouts::default();
+        layouts.set_algorithm("DP-1", 1, LayoutAlgorithm::Floating);
+        layouts.insert_migrated_tree("DP-1".to_string(), 1, BspLayout::default());
+        let area = Rectangle::new(Point::from((0, 0)), (1920, 1080).into());
+        assert!(layouts.layout("DP-1", 1, area, 8).is_empty());
     }
 
     #[test]

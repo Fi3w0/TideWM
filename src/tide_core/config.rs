@@ -98,6 +98,17 @@ pub enum LayoutAlgorithm {
     /// over row count) best matches the output's own aspect ratio, so a
     /// wide monitor gets wider rows and a tall one gets more of them.
     Cascade,
+    /// Classic floating-default (spatial roadmap Phase 4): the workspace's
+    /// BSP tree exists exactly as it does under `Bsp` (`layout()` shares
+    /// that arm below), but a window mapping here is converted to floating
+    /// immediately, the same `implicit_float` conversion path a parented
+    /// dialog already takes -- see `map_toplevel`'s `implicit_float`
+    /// computation. `rule { tile = true }` still force-tiles a specific
+    /// window, and `toggle-floating`/drag-to-tile still move a window
+    /// between floating and this same tree by hand, exactly as under any
+    /// other algorithm -- this variant only changes a new window's
+    /// *default*, not the tree's capabilities.
+    Floating,
 }
 
 /// Adaptive-sync (VRR) preference -- niri's three-way shape
@@ -768,6 +779,13 @@ pub enum Action {
     /// focused window along that axis; floating windows change by pixels,
     /// BSP windows move their nearest enclosing split.
     Resize(Direction),
+    /// Keyboard-driven move, floating windows only (spatial roadmap Phase
+    /// 4's escape hatch alongside `toggle-floating`): steps the focused
+    /// floating window 24 logical pixels in `Direction`. A no-op on a tiled
+    /// window -- tiled windows have no independent position to move, same
+    /// reasoning `RaiseWindow`/`TogglePseudoTile`'s tiled/floating-only
+    /// restrictions already use. See `Smallvil::keyboard_move_floating`.
+    MoveFloating(Direction),
     /// Groups the focused tiled window with its neighbor in `Direction`
     /// into one shared tab slot. See `Smallvil::group_direction`.
     GroupDirection(Direction),
@@ -8597,6 +8615,10 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "resize-right" => Some(Action::Resize(Direction::Right)),
         "resize-up" => Some(Action::Resize(Direction::Up)),
         "resize-down" => Some(Action::Resize(Direction::Down)),
+        "move-left" => Some(Action::MoveFloating(Direction::Left)),
+        "move-right" => Some(Action::MoveFloating(Direction::Right)),
+        "move-up" => Some(Action::MoveFloating(Direction::Up)),
+        "move-down" => Some(Action::MoveFloating(Direction::Down)),
         "group-left" => Some(Action::GroupDirection(Direction::Left)),
         "group-right" => Some(Action::GroupDirection(Direction::Right)),
         "group-up" => Some(Action::GroupDirection(Direction::Up)),
@@ -8612,18 +8634,20 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
     }
 }
 
-/// Parses `"bsp"`/`"master"`/`"cascade"` into a `LayoutAlgorithm`. Shared by
-/// `"layout:<name>"` keybind actions and the top-level `default_layout`
-/// config key; callers differ in what they do with an unrecognized name
-/// (a keybind drops the whole bind, same as any other bad action string;
-/// the top-level default warns and falls back to `Bsp` instead of failing
-/// the whole config over one typo, matching `pseudo_tile_scale`'s
-/// clamp-rather-than-reject precedent for a plain scalar setting).
+/// Parses `"bsp"`/`"master"`/`"cascade"`/`"floating"` into a
+/// `LayoutAlgorithm`. Shared by `"layout:<name>"` keybind actions and the
+/// top-level `default_layout` config key; callers differ in what they do
+/// with an unrecognized name (a keybind drops the whole bind, same as any
+/// other bad action string; the top-level default warns and falls back to
+/// `Bsp` instead of failing the whole config over one typo, matching
+/// `pseudo_tile_scale`'s clamp-rather-than-reject precedent for a plain
+/// scalar setting).
 fn parse_layout_algorithm(s: &str) -> Option<LayoutAlgorithm> {
     match s {
         "bsp" => Some(LayoutAlgorithm::Bsp),
         "master" => Some(LayoutAlgorithm::Master),
         "cascade" => Some(LayoutAlgorithm::Cascade),
+        "floating" => Some(LayoutAlgorithm::Floating),
         _ => None,
     }
 }
@@ -8766,7 +8790,7 @@ viscosity = 1.0                  # 0 turns off drag/resize settling, higher sett
 # ~~~~~~~~~~~~~~~~~ the layout ~~~~~~~~~~~~~~~~~
 
 gaps = 8
-layout = bsp                     # bsp, master, or cascade
+layout = bsp                     # bsp, master, cascade, or floating
 
 # ~~~~~~~~~~~~~~~~~ input ~~~~~~~~~~~~~~~~~
 
@@ -9048,6 +9072,38 @@ mod tests {
             parse_action("toggle-output-pin"),
             Some(Action::ToggleOutputPin)
         ));
+    }
+
+    #[test]
+    fn move_floating_actions_parse_all_four_directions() {
+        assert!(matches!(
+            parse_action("move-left"),
+            Some(Action::MoveFloating(Direction::Left))
+        ));
+        assert!(matches!(
+            parse_action("move-right"),
+            Some(Action::MoveFloating(Direction::Right))
+        ));
+        assert!(matches!(
+            parse_action("move-up"),
+            Some(Action::MoveFloating(Direction::Up))
+        ));
+        assert!(matches!(
+            parse_action("move-down"),
+            Some(Action::MoveFloating(Direction::Down))
+        ));
+    }
+
+    #[test]
+    fn layout_floating_parses_as_a_keybind_and_a_default() {
+        assert!(matches!(
+            parse_action("layout:floating"),
+            Some(Action::SetLayout(LayoutAlgorithm::Floating))
+        ));
+        assert_eq!(
+            parse_layout_algorithm("floating"),
+            Some(LayoutAlgorithm::Floating)
+        );
     }
 
     #[test]

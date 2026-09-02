@@ -2951,6 +2951,9 @@ impl Smallvil {
             Action::Resize(direction) => {
                 self.keyboard_resize(direction);
             }
+            Action::MoveFloating(direction) => {
+                self.keyboard_move_floating(direction);
+            }
             Action::GroupDirection(direction) => {
                 self.group_direction(direction);
             }

@@ -1126,6 +1126,15 @@ impl Smallvil {
         let workspace = rule
             .workspace
             .unwrap_or_else(|| self.layout.active_workspace(&output.name()));
+        // A `LayoutAlgorithm::Floating` workspace floats every new window by
+        // default, the same conversion path a parented dialog already takes
+        // below -- `rule { tile = true }` still force-tiles a specific
+        // window, same override `implicit_float` above already honors.
+        let implicit_float = implicit_float
+            || (!ocean_engine
+                && !rule.tile
+                && self.layout.algorithm(&output.name(), workspace)
+                    == crate::config::LayoutAlgorithm::Floating);
         // Insert beside a tiled swallower before detaching it so tree collapse
         // leaves the child in the same slot. Floating children do not swallow.
         let swallow_target =

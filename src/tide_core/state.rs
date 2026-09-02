@@ -11549,6 +11549,49 @@ impl Smallvil {
         self.retile();
     }
 
+    /// Keyboard-driven move for the focused *floating* window only (spatial
+    /// roadmap Phase 4's escape hatch alongside `toggle-floating`; see
+    /// `Action::MoveFloating`). A no-op on a tiled window, mirroring
+    /// `keyboard_resize`'s per-engine floating/tiled split just above.
+    pub fn keyboard_move_floating(&mut self, direction: Direction) {
+        const STEP: i32 = 24;
+        let Some(surface) = self.focused_window_surface() else {
+            return;
+        };
+
+        if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+            let Some(mut rect) = self.ocean.floating_rect(&surface) else {
+                return;
+            };
+            rect.loc = saturating_translate(rect.loc, direction_delta(direction, STEP));
+            self.ocean.set_floating_rect(&surface, rect);
+            self.retile();
+            return;
+        }
+
+        if self.layout.contains(&surface) {
+            return;
+        }
+        let Some(window) = self.mapped_toplevel_window(&surface) else {
+            return;
+        };
+        // Same reasoning `translate_floating_windows_on_output` documents:
+        // the live `Space` rect (not `Window::geometry().loc`, surface-local
+        // and usually `0,0`) is the window's real global position, and
+        // `floating_workspace`'s own `rect` must move with it or a later
+        // hidden-workspace/restore read (workspace switch, fullscreen
+        // restore) would snap the window back to its pre-move position.
+        let Some(mut rect) = self.space.element_geometry(&window) else {
+            return;
+        };
+        rect.loc = saturating_translate(rect.loc, direction_delta(direction, STEP));
+        self.space.map_element(window, rect.loc, false);
+        if let Some(tag) = self.floating_workspace.get_mut(&surface) {
+            tag.rect = rect;
+        }
+        self.retile();
+    }
+
     /// Shows/hides the workspace overview on the current output (see
     /// `overview.rs`, `Action::ToggleOverview`). Built fresh each time it's
     /// toggled on -- it doesn't animate or otherwise need to stay in sync
@@ -12500,6 +12543,18 @@ fn keyboard_resized_size(
     size
 }
 
+/// The `keyboard_move_floating` step vector for `direction`: `step` logical
+/// pixels toward that edge, zero on the other axis.
+fn direction_delta(direction: Direction, step: i32) -> Point<i32, Logical> {
+    match direction {
+        Direction::Left => (-step, 0),
+        Direction::Right => (step, 0),
+        Direction::Up => (0, -step),
+        Direction::Down => (0, step),
+    }
+    .into()
+}
+
 fn is_window(window: &Window, surface: &WlSurface) -> bool {
     window
         .toplevel()
@@ -12826,6 +12881,15 @@ mod tests {
         let ordinary: Point<i32, Logical> = (40, -7).into();
         let step: Point<i32, Logical> = (12, 5).into();
         assert_eq!(saturating_translate(ordinary, step), (52, -2).into());
+    }
+
+    #[test]
+    fn direction_delta_steps_one_axis() {
+        let delta: Point<i32, Logical> = (-24, 0).into();
+        assert_eq!(direction_delta(Direction::Left, 24), delta);
+        assert_eq!(direction_delta(Direction::Right, 24), (24, 0).into());
+        assert_eq!(direction_delta(Direction::Up, 24), (0, -24).into());
+        assert_eq!(direction_delta(Direction::Down, 24), (0, 24).into());
     }
 
     #[test]
