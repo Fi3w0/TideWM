@@ -26,7 +26,7 @@ use smithay::{
 };
 
 use crate::{
-    animation::ease_progress,
+    animation::{curve_duration, ease_progress},
     cascade_transition::{CascadeSample, CascadeTransition},
     config::{
         WindowAnimationConfig, WindowAnimationCurve, WindowAnimationEffect, WindowAnimationOrigin,
@@ -91,18 +91,15 @@ impl WindowVisualAnimation {
         to_offset: Point<f64, Logical>,
         sizes: Option<(Size<f64, Logical>, Size<f64, Logical>)>,
     ) -> Self {
-        let scaled_duration = |duration_ms: u32| {
-            (duration_ms as f32 * slowdown)
-                .round()
-                .clamp(1.0, 100_000.0) as u64
-        };
         Self {
             start: Instant::now(),
-            duration: Duration::from_millis(scaled_duration(config.duration_ms)),
+            duration: curve_duration(config.curve, config.duration_ms, slowdown),
             curve: config.curve,
-            opacity_duration: Duration::from_millis(scaled_duration(
+            opacity_duration: curve_duration(
+                config.opacity_curve.unwrap_or(config.curve),
                 config.opacity_duration_ms.unwrap_or(config.duration_ms),
-            )),
+                slowdown,
+            ),
             opacity_curve: config.opacity_curve.unwrap_or(config.curve),
             from_offset,
             to_offset,
@@ -149,19 +146,25 @@ impl WindowVisualAnimation {
         )
     }
 
-    fn progress_for(&self, duration: Duration) -> f32 {
+    fn progress_for(duration: Duration, elapsed: Duration) -> f32 {
         if duration.is_zero() {
             1.0
         } else {
-            (self.start.elapsed().as_secs_f32() / duration.as_secs_f32()).clamp(0.0, 1.0)
+            (elapsed.as_secs_f32() / duration.as_secs_f32()).clamp(0.0, 1.0)
         }
     }
 
     pub fn sample(&self) -> VisualSample {
-        let raw_progress = self.progress_for(self.duration);
+        self.sample_elapsed(self.start.elapsed())
+    }
+
+    fn sample_elapsed(&self, elapsed: Duration) -> VisualSample {
+        let raw_progress = Self::progress_for(self.duration, elapsed);
         let progress = ease_progress(self.curve, raw_progress);
-        let opacity_progress =
-            ease_progress(self.opacity_curve, self.progress_for(self.opacity_duration));
+        let opacity_progress = ease_progress(
+            self.opacity_curve,
+            Self::progress_for(self.opacity_duration, elapsed),
+        );
         let base_x = self.from_offset.x + (self.to_offset.x - self.from_offset.x) * progress as f64;
         let base_y = self.from_offset.y + (self.to_offset.y - self.from_offset.y) * progress as f64;
         let delta_x = self.to_offset.x - self.from_offset.x;
@@ -561,6 +564,49 @@ mod tests {
             wave_cycles: 1.0,
             wave_decay: 1.5,
         }
+    }
+
+    #[test]
+    fn spring_sampling_is_cadence_independent_and_retargets_without_a_position_jump() {
+        let mut config = linear_config();
+        config.curve = WindowAnimationCurve::Spring(
+            crate::visual::spring::SpringCurve::new(1.0, 400.0, 20.0).unwrap(),
+        );
+        let animation = WindowVisualAnimation::movement(
+            &config,
+            1.0,
+            (-120.0, 35.0).into(),
+            (800.0, 600.0).into(),
+            (400.0, 300.0).into(),
+        );
+        let elapsed = Duration::from_millis(137);
+        let expected = animation.sample_elapsed(elapsed);
+        for hz in [30, 60, 144, 165] {
+            for frame in 0..hz {
+                let time = Duration::from_secs_f64(f64::from(frame) / f64::from(hz));
+                if time >= elapsed {
+                    break;
+                }
+                assert!((0.0..=1.0).contains(&animation.sample_elapsed(time).opacity));
+            }
+            assert_eq!(animation.sample_elapsed(elapsed), expected);
+        }
+        let target_delta: Point<f64, Logical> = (70.0, -20.0).into();
+        let retarget = WindowVisualAnimation::movement(
+            &config,
+            1.0,
+            expected.offset + target_delta,
+            expected.size.unwrap(),
+            (600.0, 400.0).into(),
+        );
+        let first = retarget.sample_elapsed(Duration::ZERO);
+        assert!((first.offset.x - target_delta.x - expected.offset.x).abs() < 1e-10);
+        assert!((first.offset.y - target_delta.y - expected.offset.y).abs() < 1e-10);
+        assert_eq!(first.size, expected.size);
+        let last = retarget.sample_elapsed(retarget.duration.max(retarget.opacity_duration));
+        assert_eq!(last.offset, (0.0, 0.0).into());
+        assert_eq!(last.size, Some((600.0, 400.0).into()));
+        assert_eq!(last.opacity, 1.0);
     }
 
     #[test]

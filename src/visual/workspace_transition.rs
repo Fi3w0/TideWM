@@ -619,14 +619,12 @@ impl WorkspaceGlide {
         config: &WorkspaceAnimationConfig,
         slowdown: f32,
     ) -> Self {
-        let duration_ms = (config.duration_ms as f32 * slowdown)
-            .round()
-            .clamp(1.0, 100_000.0) as u64;
+        let duration = crate::animation::curve_duration(config.curve, config.duration_ms, slowdown);
         Self {
             id: Id::new(),
             commit: CommitCounter::default(),
             outgoing_texture,
-            animation: Animation::new(0.0, 1.0, Instant::now(), Duration::from_millis(duration_ms)),
+            animation: Animation::new(0.0, 1.0, Instant::now(), duration),
             curve: config.curve,
             direction,
             style: config.style,

@@ -25,6 +25,7 @@ pub(crate) mod ripple;
 pub(crate) mod shadow;
 #[cfg(feature = "screencast")]
 pub(crate) mod source_picker;
+pub(crate) mod spring;
 pub(crate) mod sway;
 pub(crate) mod swim;
 pub(crate) mod tab_strip;

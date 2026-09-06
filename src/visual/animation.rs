@@ -59,6 +59,7 @@ impl Animation {
 pub fn ease_progress(curve: WindowAnimationCurve, progress: f32) -> f32 {
     let progress = progress.clamp(0.0, 1.0);
     match curve {
+        WindowAnimationCurve::Spring(spring) => spring.progress(progress),
         WindowAnimationCurve::Linear => progress,
         WindowAnimationCurve::QuadOut => 1.0 - (1.0 - progress).powi(2),
         WindowAnimationCurve::CubicOut => 1.0 - (1.0 - progress).powi(3),
@@ -97,8 +98,41 @@ pub fn ease_progress(curve: WindowAnimationCurve, progress: f32) -> f32 {
     }
 }
 
+/// Springs own their natural settling time; fixed-duration curves retain the
+/// configured duration. Slowdown scales either clock without changing shape.
+pub fn curve_duration(curve: WindowAnimationCurve, duration_ms: u32, slowdown: f32) -> Duration {
+    match curve {
+        WindowAnimationCurve::Spring(spring) => Duration::from_secs_f64(
+            (spring.duration_seconds() * f64::from(slowdown)).clamp(0.001, 100.0),
+        ),
+        _ => Duration::from_millis(
+            (duration_ms as f32 * slowdown)
+                .round()
+                .clamp(1.0, 100_000.0) as u64,
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn spring_duration_uses_physics_and_preserves_slowdown() {
+        use super::*;
+        let curve = WindowAnimationCurve::Spring(
+            crate::visual::spring::SpringCurve::new(1.0, 400.0, 30.0).unwrap(),
+        );
+        let normal = curve_duration(curve, 100, 1.0);
+        assert_eq!(normal, curve_duration(curve, 900, 1.0));
+        assert!(
+            (curve_duration(curve, 100, 2.0).as_secs_f64() - normal.as_secs_f64() * 2.0).abs()
+                < 1e-8
+        );
+        assert_eq!(
+            curve_duration(WindowAnimationCurve::Linear, 333, 1.5),
+            Duration::from_millis(500)
+        );
+    }
+
     use super::*;
 
     #[test]

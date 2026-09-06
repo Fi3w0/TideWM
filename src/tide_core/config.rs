@@ -3491,6 +3491,7 @@ pub enum WindowAnimationCurve {
     ExpOut,
     CubicInOut,
     CubicBezier([f32; 4]),
+    Spring(crate::visual::spring::SpringCurve),
 }
 
 /// Extra trajectory layered over the normal eased start-to-end path.
@@ -5661,7 +5662,7 @@ fn apply_workspace_animation_block(cfg: &mut WorkspaceAnimationConfig, body: &[w
                 Some(value) => cfg.curve = value,
                 None => tracing::warn!(
                     value,
-                    "Expected a workspace easing or cubic-bezier(x1,y1,x2,y2), ignoring"
+                    "Expected workspace easing, cubic-bezier(x1,y1,x2,y2), or spring(mass,stiffness,damping), ignoring"
                 ),
             },
             "travel" | "distance" => match value.parse::<f32>() {
@@ -5732,7 +5733,7 @@ fn apply_window_animation_block(cfg: &mut WindowAnimationConfig, body: &[waves::
                 Some(value) => cfg.curve = value,
                 None => tracing::warn!(
                     value,
-                    "Expected a built-in easing or cubic-bezier(x1,y1,x2,y2), ignoring"
+                    "Expected built-in easing, cubic-bezier(x1,y1,x2,y2), or spring(mass,stiffness,damping), ignoring"
                 ),
             },
             "opacity_duration" => match parse_duration_ms(value) {
@@ -5749,7 +5750,7 @@ fn apply_window_animation_block(cfg: &mut WindowAnimationConfig, body: &[waves::
                     Some(value) => cfg.opacity_curve = Some(value),
                     None => tracing::warn!(
                         value,
-                        "Expected an opacity easing or cubic-bezier(x1,y1,x2,y2), ignoring"
+                        "Expected opacity easing, cubic-bezier(x1,y1,x2,y2), or spring(mass,stiffness,damping), ignoring"
                     ),
                 }
             }
@@ -5817,6 +5818,21 @@ fn apply_window_animation_block(cfg: &mut WindowAnimationConfig, body: &[waves::
 
 fn parse_window_animation_curve(value: &str) -> Option<WindowAnimationCurve> {
     let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    if let Some(inner) = normalized
+        .strip_prefix("spring(")
+        .and_then(|v| v.strip_suffix(')'))
+    {
+        let values = inner
+            .split(',')
+            .map(|v| v.trim().parse::<f64>())
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        if let [mass, stiffness, damping] = values.as_slice() {
+            return crate::visual::spring::SpringCurve::new(*mass, *stiffness, *damping)
+                .map(WindowAnimationCurve::Spring);
+        }
+        return None;
+    }
     match normalized.as_str() {
         "linear" => return Some(WindowAnimationCurve::Linear),
         "quad-out" | "ease-out-quad" => return Some(WindowAnimationCurve::QuadOut),
@@ -11596,6 +11612,46 @@ mod tests {
         assert_eq!(animations.workspace.travel, 0.42);
         assert!(animations.interactive.enabled);
         assert_eq!(animations.interactive.half_life_ms, 37);
+    }
+
+    #[test]
+    fn spring_curves_parse_through_wave_without_changing_presets_or_disable_flags() {
+        let entries = wave_entries(
+            r#"
+animations {
+    enabled = false
+    open {
+        curve = "spring(1, 400, 30)"
+    }
+    movement {
+        curve = "spring(0, 400, 30)"
+    }
+    workspace {
+        curve = "spring(1, 400, 40)"
+    }
+    preset = silk
+}
+"#,
+        );
+        let config = Config::from_raw(lower_entries(&entries)).0.animations;
+        let baseline = WindowAnimationsConfig::silk();
+        assert!(!config.enabled);
+        assert!(matches!(config.open.curve, WindowAnimationCurve::Spring(_)));
+        assert!(matches!(
+            config.workspace.curve,
+            WindowAnimationCurve::Spring(_)
+        ));
+        assert_eq!(config.open.duration_ms, baseline.open.duration_ms);
+        assert_eq!(config.close.curve, baseline.close.curve);
+        assert_eq!(config.movement.curve, baseline.movement.curve);
+        for invalid in [
+            "spring(1,2)",
+            "spring(1,2,3,4)",
+            "spring(NaN,400,30)",
+            "spring(100,0.01,0.01)",
+        ] {
+            assert!(parse_window_animation_curve(invalid).is_none());
+        }
     }
 
     #[test]
