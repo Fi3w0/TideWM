@@ -27,6 +27,18 @@ use spa::pod::Pod;
 
 use super::{FrameTarget, ScreencastEvent, ScreencastSource};
 
+// One source of truth for the fixed format offered below and its producer
+// clock. This is the stream's negotiated rate, not an output refresh rate.
+const STREAM_FRAMERATE: u32 = 30;
+
+/// Wait until the next frame boundary measured from a fixed stream epoch.
+/// Round upwards to nanoseconds so a boundary is never retriggered early.
+/// Missed frames are skipped in constant time, without a catch-up burst.
+fn next_frame_delay(elapsed: Duration) -> Duration {
+    let phase = (elapsed.as_nanos() * u128::from(STREAM_FRAMERATE)) % 1_000_000_000;
+    Duration::from_nanos((1_000_000_000 - phase).div_ceil(u128::from(STREAM_FRAMERATE)) as u64)
+}
+
 #[derive(Clone, Copy)]
 struct BuffersProperty(u32);
 
@@ -430,7 +442,10 @@ fn run_connection(
             pw::spa::pod::property!(
                 pw::spa::param::format::FormatProperties::VideoFramerate,
                 Fraction,
-                pw::spa::utils::Fraction { num: 30, denom: 1 }
+                pw::spa::utils::Fraction {
+                    num: STREAM_FRAMERATE,
+                    denom: 1
+                }
             ),
         ]
     }
@@ -461,8 +476,8 @@ fn run_connection(
     let deadline = Instant::now() + Duration::from_secs(5);
     // DRIVER streams must trigger each graph cycle. `is_driving()` limits this
     // to an actively linked consumer.
-    let frame_interval = Duration::from_millis(1000 / 30);
-    let mut next_trigger = Instant::now();
+    let frame_epoch = Instant::now();
+    let mut next_trigger = frame_epoch;
     loop {
         if target.is_closed() {
             return Ok(ConnectionOutcome::Stopped);
@@ -492,11 +507,56 @@ fn run_connection(
             if stream.is_driving() {
                 let _ = stream.trigger_process();
             }
-            next_trigger = Instant::now() + frame_interval;
+            let now = Instant::now();
+            next_trigger = now + next_frame_delay(now.saturating_duration_since(frame_epoch));
         }
         if Instant::now() >= deadline && stream.node_id() == pw::constants::ID_ANY {
             let _ = started.try_send(Err("PipeWire did not assign a node id".into()));
             return Err("PipeWire did not assign a node id".into());
         }
+    }
+}
+
+#[cfg(test)]
+mod cadence_tests {
+    use super::*;
+
+    #[test]
+    fn rational_frame_grid_does_not_accumulate_rounding_or_work_time() {
+        let mut deadline = Duration::ZERO;
+        for frame in 1..=300 {
+            // Simulate producer work after each deadline, without sleeping.
+            let completed = deadline + Duration::from_millis(2);
+            deadline = completed + next_frame_delay(completed);
+            assert_eq!(
+                deadline.as_nanos(),
+                (frame * 1_000_000_000_u128).div_ceil(u128::from(STREAM_FRAMERATE))
+            );
+        }
+        assert_eq!(deadline, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn overdue_frames_skip_to_a_future_boundary_without_a_burst() {
+        for elapsed in [
+            Duration::ZERO,
+            Duration::from_millis(534),
+            Duration::from_secs(60 * 60 * 24 * 365),
+            Duration::new(u64::MAX, 999_999_999),
+        ] {
+            let delay = next_frame_delay(elapsed);
+            assert!(!delay.is_zero());
+            assert!(
+                delay
+                    <= Duration::from_nanos(
+                        1_000_000_000_u64.div_ceil(u64::from(STREAM_FRAMERATE))
+                    )
+            );
+        }
+        let elapsed = Duration::from_millis(534);
+        assert_eq!(
+            elapsed + next_frame_delay(elapsed),
+            Duration::from_nanos(566_666_667)
+        );
     }
 }

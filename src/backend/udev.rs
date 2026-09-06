@@ -1244,28 +1244,39 @@ fn pick_preferred_mode(modes: &[DrmMode]) -> Option<DrmMode> {
         .iter()
         .find(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
         .or_else(|| {
-            modes
-                .iter()
-                .max_by_key(|m| (m.size().0 as u32 * m.size().1 as u32, m.vrefresh()))
+            modes.iter().max_by_key(|m| {
+                (
+                    m.size().0 as u32 * m.size().1 as u32,
+                    Mode::from(**m).refresh,
+                )
+            })
         })
         .copied()
 }
 
 /// Config-driven mode selection: `requested` (an `OutputConfig::mode` string
 /// like `"1920x1080@60"`) is matched against every mode the connector
-/// actually reports. Refresh is matched to the nearest whole Hz since KMS
-/// modes carry an exact millihertz value that rarely matches a
-/// hand-typed integer exactly. Falls back to the connector's preferred
+/// actually reports. Choose the closest calculated refresh within half a Hz,
+/// preserving whole-Hz config compatibility while distinguishing fractional
+/// modes such as 59.94 and 60. Falls back to the connector's preferred
 /// mode if `requested` is `None` or matches nothing.
 fn pick_mode(modes: &[DrmMode], requested: Option<&str>) -> Option<DrmMode> {
     if let Some(requested) = requested {
         if let Some((w, h, refresh)) = crate::config::parse_mode_str(requested) {
-            let found = modes.iter().find(|m| {
-                let (mw, mh) = m.size();
-                mw as i32 == w
-                    && mh as i32 == h
-                    && refresh.is_none_or(|r| (m.vrefresh() as f64 - r).abs() < 0.5)
-            });
+            let found = modes
+                .iter()
+                .filter(|m| {
+                    let (mw, mh) = m.size();
+                    mw as i32 == w && mh as i32 == h
+                })
+                .filter_map(|m| {
+                    let difference = refresh
+                        .map(|r| (f64::from(Mode::from(*m).refresh) / 1000.0 - r).abs())
+                        .unwrap_or(0.0);
+                    (difference < 0.5).then_some((m, difference))
+                })
+                .min_by(|(_, a), (_, b)| a.total_cmp(b))
+                .map(|(mode, _)| mode);
             if let Some(m) = found {
                 return Some(*m);
             }
@@ -1349,10 +1360,9 @@ fn create_surface(
             serial_number: "Unknown".into(),
         },
     );
-    let output_mode = Mode {
-        size: (mode.size().0 as i32, mode.size().1 as i32).into(),
-        refresh: mode.vrefresh() as i32 * 1000,
-    };
+    // Smithay derives millihertz from pixel clock, horizontal/vertical totals,
+    // and scan flags; DRM's integer vrefresh field loses fractional rates.
+    let output_mode = Mode::from(mode);
     let scale = Scale::Fractional(output_config.as_ref().map(|c| c.scale).unwrap_or(1.0));
     let transform = match output_config
         .as_ref()
@@ -2177,22 +2187,24 @@ mod tests {
                 serial_number: "test".to_string(),
             },
         );
-        output.change_current_state(
-            Some(Mode {
-                // Deliberately arbitrary: scheduling must not depend on a
-                // familiar monitor resolution.
-                size: (37, 23).into(),
-                refresh: 165_000,
-            }),
-            None,
-            None,
-            None,
-        );
+        for refresh in [59_940, 60_000, 119_880, 165_000] {
+            output.change_current_state(
+                Some(Mode {
+                    // Deliberately arbitrary: scheduling must not depend on a
+                    // familiar monitor resolution.
+                    size: (37, 23).into(),
+                    refresh,
+                }),
+                None,
+                None,
+                None,
+            );
 
-        assert_eq!(
-            output_refresh_period(&output),
-            Duration::from_nanos(1_000_000_000_000 / 165_000)
-        );
+            assert_eq!(
+                output_refresh_period(&output),
+                Duration::from_nanos(1_000_000_000_000 / refresh as u64)
+            );
+        }
     }
 
     #[test]
