@@ -160,7 +160,6 @@ impl XdgShellHandler for Smallvil {
                 smart_attach_ocean: self.config.spatial_engine
                     == crate::config::SpatialEngine::Ocean
                     && self.config.ocean.smart_tiling,
-                classic_snap: self.snap_enabled_for_surface(wl_surface),
                 last_location,
                 completion: GrabCompletion::default(),
             };

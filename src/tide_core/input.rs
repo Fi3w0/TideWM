@@ -596,7 +596,6 @@ impl Smallvil {
                     initial_window_location: model_rect.loc,
                     view_scale,
                     smart_attach_ocean: self.config.ocean.smart_tiling,
-                    classic_snap: false,
                     last_location,
                     completion: completion.clone(),
                 },
@@ -629,7 +628,6 @@ impl Smallvil {
                     smart_attach_ocean: self.config.spatial_engine
                         == crate::config::SpatialEngine::Ocean
                         && self.config.ocean.smart_tiling,
-                    classic_snap: self.snap_enabled_for_surface(&wl_surface),
                     last_location,
                     completion: completion.clone(),
                 },
@@ -1652,7 +1650,6 @@ impl Smallvil {
                                             initial_window_location: model_rect.loc,
                                             view_scale,
                                             smart_attach_ocean: self.config.ocean.smart_tiling,
-                                            classic_snap: false,
                                             last_location,
                                             completion: GrabCompletion::default(),
                                         },
@@ -1706,7 +1703,6 @@ impl Smallvil {
                                         smart_attach_ocean: self.config.spatial_engine
                                             == crate::config::SpatialEngine::Ocean
                                             && self.config.ocean.smart_tiling,
-                                        classic_snap: self.snap_enabled_for_surface(&wl_surface),
                                         last_location,
                                         completion: GrabCompletion::default(),
                                     };

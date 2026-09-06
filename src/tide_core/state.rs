@@ -2025,9 +2025,10 @@ impl Smallvil {
         self.request_redraw();
     }
 
-    pub(crate) fn snap_enabled_for_surface(&self, surface: &WlSurface) -> bool {
+    fn snap_eligible_surface(&self, surface: &WlSurface) -> bool {
         if self.config.spatial_engine != crate::config::SpatialEngine::Classic
             || !self.config.snap.enabled
+            || !matches!(self.session_lock, SessionLock::Unlocked)
             || self.layout.contains(surface)
             || !self.floating_workspace.contains_key(surface)
             || self.fullscreen.contains_key(surface)
@@ -2035,13 +2036,7 @@ impl Smallvil {
         {
             return false;
         }
-        let workspace = self.workspace_of_surface(surface);
-        let workspace_enabled =
-            workspace.and_then(|workspace| self.config.resolve_workspace_rule(workspace).snap);
-        self.resolve_window_rules_for(surface)
-            .snap
-            .or(workspace_enabled)
-            .unwrap_or(true)
+        self.window_is_visible(surface)
     }
 
     pub(crate) fn snap_target_at(
@@ -2049,9 +2044,29 @@ impl Smallvil {
         surface: &WlSurface,
         point: Point<f64, Logical>,
     ) -> Option<crate::snap::SnapTarget> {
+        if !self.snap_eligible_surface(surface) {
+            return None;
+        }
         let output = self.output_for_point(point)?;
         let output_geometry = self.space.output_geometry(&output)?;
         let zone = crate::snap::zone_at(point, output_geometry, &self.config.snap)?;
+        self.snap_target_for_zone(surface, &output, zone)
+    }
+
+    /// Resolve policy and geometry at the destination for both input paths.
+    /// Safe inside pointer callbacks: output and coordinates come from the
+    /// caller, never from a query of the pointer handle.
+    fn snap_target_for_zone(
+        &self,
+        surface: &WlSurface,
+        output: &Output,
+        zone: crate::snap::SnapZone,
+    ) -> Option<crate::snap::SnapTarget> {
+        if !self.snap_eligible_surface(surface)
+            || !crate::snap::zone_enabled(zone, &self.config.snap)
+        {
+            return None;
+        }
         let output_name = output.name();
         let workspace = self.layout.active_workspace(&output_name);
         // A per-window decision keeps precedence over the destination
@@ -2065,7 +2080,7 @@ impl Smallvil {
         {
             return None;
         }
-        let area = self.output_tiling_area(&output)?;
+        let area = self.output_tiling_area(output)?;
         let gap = self
             .config
             .snap
@@ -2126,10 +2141,11 @@ impl Smallvil {
         else {
             return false;
         };
-        if !self.snap_enabled_for_surface(&surface) || !self.window_is_visible(&surface) {
-            return false;
-        }
         let Some(output) = self.output_by_name(&target.output) else {
+            return false;
+        };
+        // Revalidate against current config, workspace, and output geometry.
+        let Some(target) = self.snap_target_for_zone(&surface, &output, target.zone) else {
             return false;
         };
         if let Some(toplevel) = window.toplevel() {
@@ -2144,6 +2160,7 @@ impl Smallvil {
             tag.workspace = target.workspace;
             tag.rect = target.rect;
         }
+        self.refresh_window_opacity_and_glass_for(&surface);
         self.retarget_window_viscosity(&surface, target.rect);
         self.request_redraw();
         true
@@ -4894,11 +4911,17 @@ impl Smallvil {
         let Some(rect) = self.space.element_geometry(window) else {
             return;
         };
-        // A fully off-output rectangle inherits the action output so durable
-        // ownership does not remain attached to the output it left.
+        // Grab teardown holds the pointer mutex. If the window overlaps no
+        // output, retain its live owner or use a stable remaining output;
+        // primary_output() would re-enter that mutex through its fallback.
         let owner = self
             .output_for_window(window)
-            .or_else(|| self.primary_output())
+            .or_else(|| {
+                self.floating_workspace
+                    .get(&surface)
+                    .and_then(|tag| self.output_by_name(&tag.output))
+            })
+            .or_else(|| stable_output_by_name(self.space.outputs()).cloned())
             .map(|output| {
                 // The window may have just been dragged onto a different
                 // output; its surfaces need to hear about that output's scale.
@@ -4918,6 +4941,7 @@ impl Smallvil {
             tag.output = output;
             tag.workspace = workspace;
         }
+        self.refresh_window_opacity_and_glass_for(&surface);
     }
 
     /// Reattaches an Ocean floater when its final world rectangle is close to
@@ -11748,13 +11772,10 @@ impl Smallvil {
     /// Keyboard parity for Classic drag-to-snap. The focused floater uses
     /// the same usable-area, gap, rule, and target geometry as a pointer drop.
     pub fn keyboard_snap(&mut self, zone: crate::snap::SnapZone) {
-        if !crate::snap::zone_enabled(zone, &self.config.snap) {
-            return;
-        }
         let Some(surface) = self.focused_window_surface() else {
             return;
         };
-        if !self.snap_enabled_for_surface(&surface) {
+        if !self.snap_eligible_surface(&surface) {
             return;
         }
         let Some(window) = self.mapped_toplevel_window(&surface) else {
@@ -11763,21 +11784,8 @@ impl Smallvil {
         let Some(output) = self.output_for_window(&window) else {
             return;
         };
-        let output_name = output.name();
-        let workspace = self.layout.active_workspace(&output_name);
-        let Some(area) = self.output_tiling_area(&output) else {
+        let Some(target) = self.snap_target_for_zone(&surface, &output, zone) else {
             return;
-        };
-        let gap = self
-            .config
-            .snap
-            .gap
-            .unwrap_or_else(|| self.gaps_for(&output_name, workspace));
-        let target = crate::snap::SnapTarget {
-            output: output_name,
-            workspace,
-            zone,
-            rect: crate::snap::target_rect(area, zone, gap),
         };
         self.apply_snap_target(&window, &target);
     }

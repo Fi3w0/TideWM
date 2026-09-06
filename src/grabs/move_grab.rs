@@ -17,7 +17,6 @@ pub struct MoveSurfaceGrab {
     pub initial_window_location: Point<i32, Logical>,
     pub view_scale: f64,
     pub smart_attach_ocean: bool,
-    pub classic_snap: bool,
     pub(crate) last_location: Point<f64, Logical>,
     pub(crate) completion: GrabCompletion,
 }
@@ -57,11 +56,7 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
             return;
         }
 
-        let snap_target = if self.classic_snap {
-            data.snap_target_at(surface, self.last_location)
-        } else {
-            None
-        };
+        let snap_target = data.snap_target_at(surface, self.last_location);
         data.set_snap_preview(snap_target.as_ref());
 
         let view_delta = event.location - self.start_data.location;
@@ -252,7 +247,7 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
             .window
             .toplevel()
             .map(|toplevel| toplevel.wl_surface().clone());
-        let snap_target = if self.classic_snap && completed {
+        let snap_target = if completed {
             surface
                 .as_ref()
                 .and_then(|surface| data.snap_target_at(surface, self.last_location))
