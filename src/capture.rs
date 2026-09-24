@@ -734,6 +734,8 @@ impl Smallvil {
             #[allow(clippy::mutable_key_type)]
             let mut glass_layers =
                 self.glass_layer_elements(renderer, &output, &placements, &glass_surfaces);
+            // Layer frost and layer shaders, as both visible backends add them.
+            glass_layers.extend(self.layer_glass_elements(renderer, &output));
             let (depth_elements, depth_surfaces) =
                 self.depth_frame_elements(renderer, &output, &placements);
             // Glass windows render in their normal z-slot; only
