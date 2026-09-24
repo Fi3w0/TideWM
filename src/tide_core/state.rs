@@ -11782,9 +11782,11 @@ impl Smallvil {
     }
 
     /// Cycles keyboard focus to the next mapped window (tiled or floating)
-    /// and raises it to the top of the stack. This is the only way to reach
-    /// a window that's fully covered by another one, since you can't click
-    /// something you can't see.
+    /// and raises it to the top of the stack if it floats. This is the only
+    /// way to reach a window that's fully covered by another one, since you
+    /// can't click something you can't see. A tiled window is focused where
+    /// it is: raising it would lift it above every floating window and break
+    /// the floating-above-tiled z-order until the next retile.
     pub fn cycle_focus(&mut self) {
         // Don't let a keybind tab focus away from an exclusive-interactivity
         // layer (e.g. a lock screen) while it's still mapped.
@@ -11831,7 +11833,9 @@ impl Smallvil {
             return;
         };
 
-        self.space.raise_element(next, false);
+        if !self.spatial_is_tiled(&next_surface) {
+            self.space.raise_element(next, false);
+        }
         self.cycling_focus = true;
         self.focus_window(Some(next_surface), SERIAL_COUNTER.next_serial());
         self.cycling_focus = false;
