@@ -324,9 +324,13 @@ pub struct Smallvil {
     /// `resolved_shader_assignment`, so toggling `shaders { enabled }`, a
     /// definition or a workspace default needs no per-window re-resolve.
     pub(crate) window_shader_assignments: HashMap<WlSurface, crate::config::ShaderAssignment>,
-    /// Definition names from `layer_rule { shader }`, refreshed for each
-    /// output's mapped layers during its capture pass.
-    pub(crate) layer_shader_assignments: HashMap<WlSurface, String>,
+    /// Assignments from `layer_rule { shader }`, refreshed for each output's
+    /// mapped layers during its capture pass and cleared on reload.
+    pub(crate) layer_shader_assignments: HashMap<WlSurface, crate::config::ShaderAssignment>,
+    /// New custom programs still allowed to compile in this output's frame,
+    /// shared by the chain passes, the glass slots and any capture served
+    /// before the next frame.
+    pub(crate) custom_shader_compile_budget: usize,
     /// Last-good compiled program per custom effect definition.
     pub(crate) custom_shader_programs: crate::shader_effect::CustomShaderPrograms,
     /// `u_time`/`u_delta` clocks for windows currently drawing an effect.
@@ -3762,6 +3766,7 @@ impl Smallvil {
             window_glass_modes: HashMap::new(),
             window_shader_assignments: HashMap::new(),
             layer_shader_assignments: HashMap::new(),
+            custom_shader_compile_budget: 0,
             custom_shader_programs: Default::default(),
             custom_shader_instances: HashMap::new(),
             custom_shader_bypassed: HashSet::new(),
@@ -6233,16 +6238,11 @@ impl Smallvil {
         &self,
         surface: &WlSurface,
     ) -> Option<(&str, &crate::config::ShaderDefinition)> {
-        if let Some(name) = self.layer_shader_assignments.get(surface) {
-            return self
-                .config
-                .shaders_enabled
-                .then(|| self.config.shader_definitions.get_key_value(name))
-                .flatten()
-                .map(|(name, definition)| (name.as_str(), definition));
-        }
-        self.config.shader_for(
-            self.window_shader_assignments.get(surface),
+        surface_shader(
+            &self.config,
+            &self.layer_shader_assignments,
+            &self.window_shader_assignments,
+            surface,
             self.workspace_of_surface(surface),
         )
     }
@@ -6301,9 +6301,19 @@ impl Smallvil {
         // Windows admitted earlier in this pass count at their wanted size
         // even though nothing is allocated for them yet.
         let mut admitted_now: Vec<(WlSurface, u64)> = Vec::new();
+        if !self.custom_shader_bypassed.is_empty() {
+            let unwanted: Vec<WlSurface> = self
+                .custom_shader_bypassed
+                .iter()
+                .filter(|surface| !self.custom_shader_wanted(surface))
+                .cloned()
+                .collect();
+            for surface in unwanted {
+                self.custom_shader_bypassed.remove(&surface);
+            }
+        }
         for (surface, physical_rect) in candidates {
             if !self.custom_shader_wanted(surface) {
-                self.custom_shader_bypassed.remove(surface);
                 continue;
             }
             let Some((name, render_scale, stage_count)) = self
@@ -6833,17 +6843,22 @@ impl Smallvil {
         output: &Output,
         placements: &[crate::placement::PlacedWindow],
     ) {
-        let candidates: Vec<(WlSurface, Rectangle<i32, Physical>)> = placements
-            .iter()
-            .filter(|placement| placement.replacement_eligible())
-            .filter_map(|placement| {
-                Some((
-                    placement.surface()?.clone(),
-                    self.placement_physical_rect(placement, output)?,
-                ))
-            })
-            .collect();
-        self.admit_custom_shader_captures(&candidates);
+        self.custom_shader_compile_budget = 1;
+        if self.config.shaders_enabled {
+            let candidates: Vec<(WlSurface, Rectangle<i32, Physical>)> = placements
+                .iter()
+                .filter(|placement| placement.replacement_eligible())
+                .filter_map(|placement| {
+                    let surface = placement.surface()?;
+                    self.custom_shader_wanted(surface).then_some(())?;
+                    Some((
+                        surface.clone(),
+                        self.placement_physical_rect(placement, output)?,
+                    ))
+                })
+                .collect();
+            self.admit_custom_shader_captures(&candidates);
+        }
         let surfaces: Vec<WlSurface> = placements
             .iter()
             .filter(|placement| placement.replacement_eligible())
@@ -6859,10 +6874,20 @@ impl Smallvil {
             .collect();
         let output_name = output.name();
         self.reconcile_backdrop_visibility(&output_name, &surfaces, true);
-        // A window whose capture was released (hidden, off every output,
-        // or no longer shaded) drops its stage textures with it.
-        self.custom_shader_instances
-            .retain(|surface, _| self.backdrop_textures.contains_key(surface));
+        // A window whose capture was released (hidden, off every output) or
+        // that no longer has an effect drops its stage textures.
+        let unshaded: Vec<WlSurface> = self
+            .custom_shader_instances
+            .keys()
+            .filter(|surface| {
+                !self.backdrop_textures.contains_key(*surface)
+                    || self.resolved_shader_assignment(surface).is_none()
+            })
+            .cloned()
+            .collect();
+        for surface in unshaded {
+            self.custom_shader_instances.remove(&surface);
+        }
         if surfaces.is_empty() {
             return;
         }
@@ -6973,7 +6998,6 @@ impl Smallvil {
     fn run_custom_shader_chains(&mut self, renderer: &mut GlesRenderer, surfaces: &[WlSurface]) {
         let mut failures = Vec::new();
         let mut deferred = false;
-        let mut compile_budget = 1usize;
         let work: Vec<(WlSurface, String)> = surfaces
             .iter()
             .filter_map(|surface| {
@@ -7000,7 +7024,7 @@ impl Smallvil {
                 definition,
                 &capture.texture,
                 (&capture.id, capture.version),
-                &mut compile_budget,
+                &mut self.custom_shader_compile_budget,
             );
             failures.extend(outcome.failures);
             deferred |= outcome.deferred;
@@ -7023,40 +7047,44 @@ impl Smallvil {
         output: &Output,
         placements: &[crate::placement::PlacedWindow],
     ) {
+        let frost_enabled = self.config.frost.enabled;
+        if !frost_enabled && !self.config.shaders_enabled {
+            self.layer_alpha_masks.clear();
+            return;
+        }
         let output_scale = output.current_scale().fractional_scale();
-        let mapped: Vec<(WlSurface, Option<String>, Rectangle<i32, Physical>)> = {
+        let mut candidates = Vec::new();
+        if self.config.shaders_enabled {
             let layer_map = layer_map_for_output(output);
-            layer_map
+            for layer in layer_map
                 .layers()
                 .filter(|layer| !self.unmapped_layer_surfaces.contains(layer.wl_surface()))
-                .filter_map(|layer| {
-                    let geometry = layer_map.layer_geometry(layer)?;
-                    Some((
-                        layer.wl_surface().clone(),
-                        self.config
-                            .layer_shader(layer.namespace())
-                            .map(str::to_string),
-                        geometry.to_physical_precise_round(output_scale),
-                    ))
-                })
-                .collect()
-        };
-        let mut candidates = Vec::new();
-        for (surface, name, rect) in mapped {
-            match name {
-                Some(name) => {
-                    if self.layer_shader_assignments.get(&surface) != Some(&name) {
-                        self.layer_shader_assignments.insert(surface.clone(), name);
+            {
+                let surface = layer.wl_surface();
+                match self.config.layer_shader(layer.namespace()) {
+                    Some(name) => {
+                        let current = self.layer_shader_assignments.get(surface);
+                        if !matches!(current, Some(crate::config::ShaderAssignment::Named(existing)) if existing == name)
+                        {
+                            self.layer_shader_assignments.insert(
+                                surface.clone(),
+                                crate::config::ShaderAssignment::Named(name.to_string()),
+                            );
+                        }
+                        if let Some(geometry) = layer_map.layer_geometry(layer) {
+                            candidates.push((
+                                surface.clone(),
+                                geometry.to_physical_precise_round(output_scale),
+                            ));
+                        }
                     }
-                    candidates.push((surface, rect));
-                }
-                None => {
-                    self.layer_shader_assignments.remove(&surface);
+                    None => {
+                        self.layer_shader_assignments.remove(surface);
+                    }
                 }
             }
         }
         self.admit_custom_shader_captures(&candidates);
-        let frost_enabled = self.config.frost.enabled;
         #[allow(clippy::mutable_key_type)]
         let (surfaces, alpha_surfaces) = {
             let layer_map = layer_map_for_output(output);
@@ -7277,7 +7305,6 @@ impl Smallvil {
         let Some(output_geo) = self.space.output_geometry(output) else {
             return layers;
         };
-        let mut compile_budget = 1usize;
         for surface in surfaces {
             let Some((capture_id, capture_version, capture_texture)) = self
                 .backdrop_textures
@@ -7299,112 +7326,22 @@ impl Smallvil {
             let visual = self.placement_visual_sample(placement);
             // A custom effect replaces the glass pass. Without a program yet
             // (or ever) the window takes its normal glass path instead.
-            let workspace = self.workspace_of_surface(surface);
-            let lookup = (!self.custom_shader_bypassed.contains(surface))
-                .then(|| {
-                    self.config
-                        .shader_for(self.window_shader_assignments.get(surface), workspace)
-                })
-                .flatten()
-                .and_then(|(name, definition)| {
-                    let stages = &definition.stages;
-                    let index = stages.len().checked_sub(1)?;
-                    let lookup = self.custom_shader_programs.lookup(
-                        renderer,
-                        name,
-                        index,
-                        stages.len(),
-                        &stages[index],
-                        &mut compile_budget,
-                    );
-                    // The last stage reads the backdrop or the chain's
-                    // outputs; a chain that hasn't rendered can't draw yet.
-                    let instance = self.custom_shader_instances.get(surface);
-                    let targets = instance.map(|instance| instance.targets()).unwrap_or(&[]);
-                    let chain_version = instance.and_then(|instance| instance.chain_version());
-                    let inputs = lookup.program.as_ref().and_then(|program| {
-                        if index > 0 && chain_version.is_none() {
-                            return None;
-                        }
-                        let input = crate::shader_effect::stage_input(
-                            index,
-                            stages,
-                            targets,
-                            &capture_texture,
-                        )?;
-                        let textures = crate::shader_effect::stage_textures(
-                            program,
-                            stages,
-                            targets,
-                            &capture_texture,
-                        )?;
-                        let content_version = crate::shader_effect::stage_content_version(
-                            chain_version.unwrap_or(capture_version as u64),
-                            &stages[index],
-                            program,
-                        );
-                        Some((input, textures, chain_version, content_version))
-                    });
-                    Some((lookup, inputs))
-                });
-            if let Some((lookup, inputs)) = lookup {
-                if lookup.deferred {
-                    self.request_redraw();
-                }
-                if let Some(message) = lookup.failure {
-                    self.queue_shader_failure(message);
-                }
-                if let Some((program, (input, textures, chain_version, content_version))) =
-                    lookup.program.zip(inputs)
-                {
-                    let rounding = self.rounding_config_for_surface(surface);
-                    let output_scale = output.current_scale().fractional_scale() as f32;
-                    let corner_radii = if rounding.enabled {
-                        rounding.radii.map(|radius| radius * output_scale)
-                    } else {
-                        [0.0; 4]
-                    };
-                    let antialias = rounding.antialias * output_scale;
-                    let commit = crate::shader_effect::custom_shader_commit(
-                        content_version,
-                        program.generation,
-                        (physical_rect.size.w, physical_rect.size.h),
-                        &program.params,
-                        corner_radii,
-                        rounding.power,
-                        antialias,
-                        visual.opacity,
-                    );
-                    let instance = self
-                        .custom_shader_instances
-                        .entry(surface.clone())
-                        .or_insert_with(crate::shader_effect::ShaderInstance::new);
-                    // A chain sampled its clock when its stages rendered.
-                    let timing = if chain_version.is_some() {
-                        instance.timing()
-                    } else {
-                        instance.sample(commit)
-                    };
-                    self.glass_anim.remove(surface);
-                    layers.entry(surface.clone()).or_default().push(
-                        crate::backend::udev::OutputRenderElements::CustomShader(
-                            crate::shader_effect::CustomShaderElement::new(
-                                capture_id,
-                                commit,
-                                input,
-                                physical_rect,
-                                program,
-                                corner_radii,
-                                rounding.power,
-                                antialias,
-                                visual.opacity,
-                                timing,
-                            )
-                            .with_textures(textures),
-                        ),
-                    );
-                    continue;
-                }
+            if let Some(element) = self.custom_shader_last_stage(
+                renderer,
+                surface,
+                (capture_id.clone(), capture_version, &capture_texture),
+                physical_rect,
+                Some((
+                    visual.opacity,
+                    output.current_scale().fractional_scale() as f32,
+                )),
+                None,
+            ) {
+                self.glass_anim.remove(surface);
+                layers.entry(surface.clone()).or_default().push(
+                    crate::backend::udev::OutputRenderElements::CustomShader(element),
+                );
+                continue;
             }
             if !self.config.water_effects
                 || self
@@ -7583,7 +7520,6 @@ impl Smallvil {
         let corner_radii = [frost.corner_radius * scale; 4];
         let rounding_power = 2.0;
         let corner_softness = frost.corner_softness * scale;
-        let mut compile_budget = 1usize;
         for (surface, physical_rect, ignore_alpha, blur) in eligible {
             let Some(capture) = self.backdrop_textures.get(&surface) else {
                 continue;
@@ -7597,13 +7533,13 @@ impl Smallvil {
             });
             // A layer's own effect replaces its frost; without a program yet
             // it falls back to frost if its rule also blurs.
-            if let Some(element) = self.layer_custom_shader_element(
+            if let Some(element) = self.custom_shader_last_stage(
                 renderer,
                 &surface,
                 (id.clone(), version, &texture),
                 physical_rect,
+                None,
                 alpha_mask.as_ref(),
-                &mut compile_budget,
             ) {
                 result.entry(surface).or_insert_with(Vec::new).push(
                     crate::backend::udev::OutputRenderElements::CustomShader(element),
@@ -7644,10 +7580,12 @@ impl Smallvil {
         result
     }
 
-    /// A shaded layer's last stage, drawn like a window's but with no
-    /// rounding and with the layer's `ignore_alpha` mask. `None` when the
-    /// layer has no drawable effect this frame.
-    fn layer_custom_shader_element(
+    /// A shaded window's or layer's last stage, or `None` when it has no
+    /// drawable effect this frame (unassigned, over budget, no program yet,
+    /// or a chain that hasn't rendered). `window` carries a window's visual
+    /// opacity and output scale for its rounding; layers draw unrounded at
+    /// full opacity, masked by their `ignore_alpha` capture when set.
+    fn custom_shader_last_stage(
         &mut self,
         renderer: &mut GlesRenderer,
         surface: &WlSurface,
@@ -7657,14 +7595,21 @@ impl Smallvil {
             &GlesTexture,
         ),
         physical_rect: Rectangle<i32, Physical>,
+        window: Option<(f32, f32)>,
         alpha_mask: Option<&(GlesTexture, usize, f32)>,
-        compile_budget: &mut usize,
     ) -> Option<crate::shader_effect::CustomShaderElement> {
-        if !self.custom_shader_drawable(surface) {
+        if self.custom_shader_bypassed.contains(surface) {
             return None;
         }
-        let name = self.layer_shader_assignments.get(surface)?;
-        let stages = &self.config.shader_definitions.get(name)?.stages;
+        let workspace = self.workspace_of_surface(surface);
+        let (name, definition) = surface_shader(
+            &self.config,
+            &self.layer_shader_assignments,
+            &self.window_shader_assignments,
+            surface,
+            workspace,
+        )?;
+        let stages = &definition.stages;
         let index = stages.len().checked_sub(1)?;
         let lookup = self.custom_shader_programs.lookup(
             renderer,
@@ -7672,8 +7617,10 @@ impl Smallvil {
             index,
             stages.len(),
             &stages[index],
-            compile_budget,
+            &mut self.custom_shader_compile_budget,
         );
+        // The last stage reads the backdrop or the chain's outputs; a chain
+        // that hasn't rendered can't draw yet.
         let instance = self.custom_shader_instances.get(surface);
         let targets = instance.map(|instance| instance.targets()).unwrap_or(&[]);
         let chain_version = instance.and_then(|instance| instance.chain_version());
@@ -7699,20 +7646,38 @@ impl Smallvil {
             self.queue_shader_failure(message);
         }
         let (program, (input, textures, content_version)) = lookup.program.zip(resolved)?;
+        let (corner_radii, rounding_power, antialias, opacity) = match window {
+            Some((opacity, output_scale)) => {
+                let rounding = self.rounding_config_for_surface(surface);
+                let corner_radii = if rounding.enabled {
+                    rounding.radii.map(|radius| radius * output_scale)
+                } else {
+                    [0.0; 4]
+                };
+                (
+                    corner_radii,
+                    rounding.power,
+                    rounding.antialias * output_scale,
+                    opacity,
+                )
+            }
+            None => ([0.0; 4], 2.0, 0.0, 1.0),
+        };
         let commit = crate::shader_effect::custom_shader_commit(
             content_version,
             program.generation,
             (physical_rect.size.w, physical_rect.size.h),
             &program.params,
-            [0.0; 4],
-            2.0,
-            0.0,
-            1.0,
+            corner_radii,
+            rounding_power,
+            antialias,
+            opacity,
         );
         let instance = self
             .custom_shader_instances
             .entry(surface.clone())
             .or_insert_with(crate::shader_effect::ShaderInstance::new);
+        // A chain sampled its clock when its stages rendered.
         let timing = if chain_version.is_some() {
             instance.timing()
         } else {
@@ -7724,10 +7689,10 @@ impl Smallvil {
             input,
             physical_rect,
             program,
-            [0.0; 4],
-            2.0,
-            0.0,
-            1.0,
+            corner_radii,
+            rounding_power,
+            antialias,
+            opacity,
             timing,
         )
         .with_textures(textures);
@@ -13137,6 +13102,7 @@ impl Smallvil {
                     self.window_opacity.clear();
                     self.window_glass_modes.clear();
                     self.window_shader_assignments.clear();
+                    self.layer_shader_assignments.clear();
                     let surfaces: Vec<WlSurface> = self.foreign_toplevels.keys().cloned().collect();
                     for surface in surfaces {
                         self.refresh_window_opacity_and_glass_for(&surface);
@@ -13907,4 +13873,21 @@ pub(crate) fn trusted_client(client: &Client) -> bool {
     client
         .get_data::<ClientState>()
         .is_none_or(|state| state.security_context.is_none())
+}
+
+/// A surface's effect: a layer's `layer_rule { shader }` assignment, or a
+/// window's rule assignment and workspace default. Takes the fields it reads
+/// so render code can resolve while holding other `Smallvil` state mutably.
+#[allow(clippy::mutable_key_type)] // WlSurface keys, same as every other map here
+fn surface_shader<'a>(
+    config: &'a crate::config::Config,
+    layers: &'a HashMap<WlSurface, crate::config::ShaderAssignment>,
+    windows: &'a HashMap<WlSurface, crate::config::ShaderAssignment>,
+    surface: &WlSurface,
+    workspace: Option<u32>,
+) -> Option<(&'a str, &'a crate::config::ShaderDefinition)> {
+    match layers.get(surface) {
+        Some(assignment) => config.shader_for(Some(assignment), None),
+        None => config.shader_for(windows.get(surface), workspace),
+    }
 }

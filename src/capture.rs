@@ -23,7 +23,7 @@ use smithay::{
             element::{
                 surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
                 utils::{Relocate, RelocateRenderElement},
-                AsRenderElements, Kind,
+                AsRenderElements, Element, Kind,
             },
             gles::{GlesRenderer, GlesTarget, GlesTexture},
             Bind, ExportMem, Offscreen,
@@ -736,6 +736,7 @@ impl Smallvil {
                 self.glass_layer_elements(renderer, &output, &placements, &glass_surfaces);
             // Layer frost and layer shaders, as both visible backends add them.
             glass_layers.extend(self.layer_glass_elements(renderer, &output));
+            self.drop_glass_over_blocked_layers(&output, &mut glass_layers);
             let (depth_elements, depth_surfaces) =
                 self.depth_frame_elements(renderer, &output, &placements);
             // Glass windows render in their normal z-slot; only
@@ -897,6 +898,40 @@ impl Smallvil {
                 .collect()
         };
         self.finish_capture_readback(renderer, target, size, rect, excluded_rects, completion);
+    }
+
+    /// Output captures black out a `block_capture` layer's rect after
+    /// rendering, but frost or a displacing shader over it would have spread
+    /// its pixels beyond that rect. Glass overlapping one is left out.
+    #[allow(clippy::mutable_key_type)]
+    fn drop_glass_over_blocked_layers(
+        &self,
+        output: &Output,
+        glass_layers: &mut std::collections::HashMap<WlSurface, Vec<OutputRenderElements>>,
+    ) {
+        if !self.config.has_layer_capture_exclusions() {
+            return;
+        }
+        let scale = output.current_scale().fractional_scale();
+        let blocked: Vec<Rectangle<i32, Physical>> = {
+            let layer_map = layer_map_for_output(output);
+            let rects = layer_map
+                .layers()
+                .filter(|layer| self.config.layer_blocks_capture(layer.namespace()))
+                .filter_map(|layer| layer_map.layer_geometry(layer))
+                .map(|geometry| geometry.to_physical_precise_round(scale))
+                .collect();
+            rects
+        };
+        if blocked.is_empty() {
+            return;
+        }
+        glass_layers.retain(|_, elements| {
+            !elements.iter().any(|element| {
+                let geometry = element.geometry(Scale::from(scale));
+                blocked.iter().any(|rect| rect.overlaps(geometry))
+            })
+        });
     }
 
     /// Whether `surface`'s captured backdrop could contain `block_capture`
