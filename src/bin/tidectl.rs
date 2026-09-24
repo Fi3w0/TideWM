@@ -440,7 +440,7 @@ fn print_perf_summary(snap: &Value, cpu_pct: Option<f64>, wall: Duration) {
             "  custom shaders: {} windows, {} programs, {:.1} MiB captures, {} bypassed, {} compile failures",
             count("instances"),
             count("programs"),
-            count("capture_bytes") as f64 / (1024.0 * 1024.0),
+            (count("capture_bytes") + count("stage_bytes")) as f64 / (1024.0 * 1024.0),
             count("bypassed"),
             count("compile_failures"),
         );

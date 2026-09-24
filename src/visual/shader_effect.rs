@@ -40,6 +40,10 @@ pub const MAX_DEFINITIONS: usize = 32;
 pub const MAX_STAGES: usize = 4;
 pub const MAX_PARAMS_PER_STAGE: usize = 8;
 pub const MAX_NAME_BYTES: usize = 64;
+/// Extra `textures { }` sampler bindings one stage may declare. With the
+/// implicit `tex` that is five texture units, inside GLES2's guaranteed
+/// minimum of eight, so no driver query is needed yet.
+pub const MAX_TEXTURES_PER_STAGE: usize = 4;
 /// Windows that may draw a custom effect at once.
 pub const MAX_ACTIVE_INSTANCES: usize = 128;
 /// Aggregate RGBA8-equivalent payload of every custom effect capture.
@@ -189,6 +193,27 @@ const GLSL_KEYWORDS: &[&str] = &[
     "namespace",
     "using",
 ];
+
+/// Where a stage reads a texture from: the window's captured backdrop, or
+/// the output of an earlier stage that `save`d it (`"get:name"`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StageTexture {
+    Backdrop,
+    Saved(String),
+}
+
+impl StageTexture {
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        if value == "backdrop" {
+            return Some(Self::Backdrop);
+        }
+        value
+            .strip_prefix("get:")
+            .filter(|name| valid_param_name(name))
+            .map(|name| Self::Saved(name.to_string()))
+    }
+}
 
 /// One user parameter, lowered to a GLSL uniform type.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -497,7 +522,11 @@ fn check_declared_name(name: &str, line_no: usize) -> Result<(), String> {
 /// Wraps a validated user source into a Smithay texture-shader program:
 /// host prelude (source string 0), the user file from line 1 (string 1),
 /// then the host epilogue (string 2) so driver logs name the right file.
-pub fn wrap_texture_fragment(user_source: &str, params: &[(String, ShaderParam)]) -> String {
+pub fn wrap_texture_fragment(
+    user_source: &str,
+    params: &[(String, ShaderParam)],
+    textures: &[(String, StageTexture)],
+) -> String {
     let code = strip_comments(user_source).unwrap_or_else(|_| user_source.to_string());
     let mut out = String::with_capacity(code.len() + 2048);
     out.push_str(
@@ -523,6 +552,9 @@ pub fn wrap_texture_fragment(user_source: &str, params: &[(String, ShaderParam)]
     }
     for (name, value) in params {
         out.push_str(&format!("uniform {} {name};\n", value.glsl_type()));
+    }
+    for (name, _) in textures {
+        out.push_str(&format!("uniform sampler2D {name};\n"));
     }
     out.push_str("#line 1 1\n");
     out.push_str(&code);
@@ -613,14 +645,16 @@ fn source_hash(source: &str) -> u64 {
     hash.finish()
 }
 
-/// A compiled program together with the parameter schema it was built for.
-/// Drawing with any other schema would bind uniforms the program lacks.
+/// A compiled program together with the schema it was built for: its
+/// parameters and texture bindings. Drawing with any other schema would bind
+/// uniforms the program lacks.
 #[derive(Clone)]
 pub struct ShaderProgram {
     /// Hash of the wrapped source, for damage identity.
     pub generation: u64,
     pub program: GlesTexProgram,
     pub params: Arc<[(String, ShaderParam)]>,
+    pub textures: Arc<[(String, StageTexture)]>,
 }
 
 #[derive(Default)]
@@ -631,6 +665,18 @@ struct CachedProgram {
     failed: Option<Arc<str>>,
     /// The driver's reason for `failed`, re-reported after a reload.
     failure_reason: Option<String>,
+}
+
+impl CachedProgram {
+    /// A last-good program, or a source that hasn't failed yet.
+    fn can_draw(&self, source: Option<&Arc<str>>) -> bool {
+        self.good.is_some()
+            || source.is_some_and(|source| {
+                self.failed
+                    .as_ref()
+                    .is_none_or(|failed| !Arc::ptr_eq(failed, source) && **failed != **source)
+            })
+    }
 }
 
 /// Pointer equality first so a steady frame never rereads the source; a
@@ -654,13 +700,21 @@ pub struct ProgramLookup {
     pub deferred: bool,
 }
 
-/// Last-good compiled program per definition name. A changed source
+fn stage_label(name: &str, index: usize, stage_count: usize) -> String {
+    if stage_count > 1 {
+        format!("Shader {name:?} stage {}", index + 1)
+    } else {
+        format!("Shader {name:?}")
+    }
+}
+
+/// Last-good compiled program per definition stage. A changed source
 /// compiles once; a failure is remembered so a broken file never recompiles
 /// every frame, and the previous program stays in use until the file is
-/// fixed. Removing a definition drops its entry.
+/// fixed. Removing a definition drops its entries.
 #[derive(Default)]
 pub struct CustomShaderPrograms {
-    entries: HashMap<String, CachedProgram>,
+    entries: HashMap<String, Vec<CachedProgram>>,
     /// Programs belong to one GL context; a replacement renderer drops them.
     context: Option<ContextId<GlesTexture>>,
     compiles: u64,
@@ -673,36 +727,35 @@ impl CustomShaderPrograms {
         let programs = self
             .entries
             .values()
+            .flatten()
             .filter(|entry| entry.good.is_some())
             .count();
         (programs, self.compiles, self.compile_failures)
     }
 
-    /// Whether `lookup` could return a program without compiling anything
-    /// known to fail: a last-good program, or a source not yet tried.
-    pub fn can_draw(&self, name: &str, source: Option<&Arc<str>>) -> bool {
-        let Some(entry) = self.entries.get(name) else {
-            return source.is_some();
-        };
-        entry.good.is_some()
-            || source.is_some_and(|source| {
-                entry
-                    .failed
-                    .as_ref()
-                    .is_none_or(|failed| !Arc::ptr_eq(failed, source) && **failed != **source)
-            })
+    /// Whether every stage could draw without compiling anything known to
+    /// fail: each has a last-good program or a source not yet tried.
+    pub fn can_draw(&self, name: &str, stages: &[crate::config::ShaderStage]) -> bool {
+        let cached = self.entries.get(name);
+        stages.iter().enumerate().all(|(index, stage)| {
+            match cached.and_then(|entries| entries.get(index)) {
+                Some(entry) => entry.can_draw(stage.source.as_ref()),
+                None => stage.source.is_some(),
+            }
+        })
     }
 
-    /// The program to draw `name` with this frame. `source` is the current
-    /// wrapped source, `None` after a read or contract failure; either way a
-    /// last-good program keeps drawing. At most `compile_budget` new
-    /// programs compile per call site and frame.
+    /// The program to draw stage `index` of `name` with this frame. A stage
+    /// whose source failed to load or compile keeps drawing its last-good
+    /// program. At most `compile_budget` new programs compile per call site
+    /// and frame.
     pub fn lookup(
         &mut self,
         renderer: &mut GlesRenderer,
         name: &str,
-        source: Option<&Arc<str>>,
-        params: &Arc<[(String, ShaderParam)]>,
+        index: usize,
+        stage_count: usize,
+        stage: &crate::config::ShaderStage,
         compile_budget: &mut usize,
     ) -> ProgramLookup {
         let context = renderer.context_id();
@@ -711,8 +764,7 @@ impl CustomShaderPrograms {
             self.context = Some(context);
         }
         if !self.entries.contains_key(name) {
-            self.entries
-                .insert(name.to_string(), CachedProgram::default());
+            self.entries.insert(name.to_string(), Vec::new());
         }
         let Self {
             entries,
@@ -720,20 +772,22 @@ impl CustomShaderPrograms {
             compile_failures,
             ..
         } = self;
-        let entry = entries.get_mut(name).expect("entry inserted above");
+        let stages = entries.get_mut(name).expect("entry inserted above");
+        stages.resize_with(stage_count, CachedProgram::default);
+        let entry = &mut stages[index];
         let mut lookup = ProgramLookup {
             program: None,
             failure: None,
             deferred: false,
         };
-        let Some(source) = source else {
+        let Some(source) = stage.source.as_ref() else {
             lookup.program = entry.good.clone();
             return lookup;
         };
         if same_source(&mut entry.good_source, source) {
             if let Some(good) = &mut entry.good {
                 // Same source means the same declarations, so only values moved.
-                good.params = params.clone();
+                good.params = stage.params.clone();
             }
             lookup.program = entry.good.clone();
             return lookup;
@@ -753,9 +807,16 @@ impl CustomShaderPrograms {
             .iter()
             .map(|(name, ty)| UniformName::new(*name, contract_uniform_type(ty)))
             .chain(
-                params
+                stage
+                    .params
                     .iter()
                     .map(|(name, value)| UniformName::new(name.as_str(), value.uniform_type())),
+            )
+            .chain(
+                stage
+                    .textures
+                    .iter()
+                    .map(|(name, _)| UniformName::new(name.as_str(), UniformType::_1i)),
             )
             .collect();
         match renderer.compile_custom_texture_shader(&**source, &uniforms) {
@@ -765,7 +826,8 @@ impl CustomShaderPrograms {
                 entry.good = Some(ShaderProgram {
                     generation: source_hash(source),
                     program,
-                    params: params.clone(),
+                    params: stage.params.clone(),
+                    textures: stage.textures.clone(),
                 });
                 lookup.program = entry.good.clone();
             }
@@ -773,7 +835,11 @@ impl CustomShaderPrograms {
                 *compile_failures += 1;
                 let reason = driver_compile_log(renderer, source)
                     .unwrap_or_else(|| format!("{err}; the driver log is in the journal"));
-                lookup.failure = Some(compile_failure_message(name, &reason, entry.good.is_some()));
+                lookup.failure = Some(compile_failure_message(
+                    &stage_label(name, index, stage_count),
+                    &reason,
+                    entry.good.is_some(),
+                ));
                 entry.failed = Some(source.clone());
                 entry.failure_reason = Some(reason);
                 lookup.program = entry.good.clone();
@@ -782,8 +848,8 @@ impl CustomShaderPrograms {
         lookup
     }
 
-    /// Drops entries for removed definitions and reports every definition
-    /// whose current source is still the one that failed, so a reload
+    /// Drops entries for removed definitions and stages and reports every
+    /// stage whose current source is still the one that failed, so a reload
     /// doesn't clear a live compile diagnostic from the panel.
     pub fn retain_definitions(
         &mut self,
@@ -791,28 +857,31 @@ impl CustomShaderPrograms {
     ) -> Vec<String> {
         self.entries
             .retain(|name, _| definitions.contains_key(name));
-        let mut failures: Vec<String> = self
-            .entries
-            .iter_mut()
-            .filter_map(|(name, entry)| {
-                let source = definitions[name].single_stage_source()?;
-                same_source(&mut entry.failed, source).then(|| {
-                    compile_failure_message(
-                        name,
+        let mut failures = Vec::new();
+        for (name, entries) in &mut self.entries {
+            let stages = &definitions[name].stages;
+            entries.truncate(stages.len());
+            for (index, (entry, stage)) in entries.iter_mut().zip(stages.iter()).enumerate() {
+                let Some(source) = stage.source.as_ref() else {
+                    continue;
+                };
+                if same_source(&mut entry.failed, source) {
+                    failures.push(compile_failure_message(
+                        &stage_label(name, index, stages.len()),
                         entry.failure_reason.as_deref().unwrap_or("compile error"),
                         entry.good.is_some(),
-                    )
-                })
-            })
-            .collect();
+                    ));
+                }
+            }
+        }
         failures.sort_unstable();
         failures
     }
 }
 
-fn compile_failure_message(name: &str, reason: &str, has_previous: bool) -> String {
+fn compile_failure_message(label: &str, reason: &str, has_previous: bool) -> String {
     format!(
-        "Shader {name:?} did not compile: {reason}; {}",
+        "{label} did not compile: {reason}; {}",
         if has_previous {
             "keeping the previous program"
         } else {
@@ -897,9 +966,10 @@ fn summarize_driver_log(log: &str) -> Option<String> {
     Some(line)
 }
 
-/// Per-window clock behind `u_time` and `u_delta`. Both are sampled only
-/// when the element's content commit changes: time alone never schedules a
-/// redraw under damage-driven invalidation.
+/// Per-window effect state: the clock behind `u_time` and `u_delta`, and a
+/// chained definition's offscreen stage outputs. Time is sampled only when
+/// the content changes, so time alone never schedules a redraw under
+/// damage-driven invalidation.
 pub struct ShaderInstance {
     epoch: Instant,
     last_update: Option<Instant>,
@@ -907,6 +977,11 @@ pub struct ShaderInstance {
     time: f32,
     delta: f32,
     updates: u64,
+    /// Outputs of every stage but the last, each sized to the capture.
+    targets: Vec<GlesTexture>,
+    /// Content identity the targets were last rendered for; `None` until a
+    /// chain has rendered completely.
+    chain_version: Option<u64>,
 }
 
 impl ShaderInstance {
@@ -918,6 +993,8 @@ impl ShaderInstance {
             time: 0.0,
             delta: 0.0,
             updates: 0,
+            targets: Vec::new(),
+            chain_version: None,
         }
     }
 
@@ -939,16 +1016,209 @@ impl ShaderInstance {
         (self.time, self.delta)
     }
 
+    /// The last sampled `(u_time, u_delta)`, shared by a chain's final stage.
+    pub fn timing(&self) -> (f32, f32) {
+        (self.time, self.delta)
+    }
+
     /// Content updates this instance has drawn.
     pub fn updates(&self) -> u64 {
         self.updates
     }
+
+    pub fn chain_version(&self) -> Option<u64> {
+        self.chain_version
+    }
+
+    pub fn targets(&self) -> &[GlesTexture] {
+        &self.targets
+    }
+
+    /// RGBA payload of the stage targets.
+    pub fn target_bytes(&self) -> u64 {
+        self.targets.iter().fold(0, |total, target| {
+            let size = target.size();
+            total.saturating_add(capture_payload_bytes(size.w, size.h, 1))
+        })
+    }
+}
+
+/// A stage's texture source, resolved against the backdrop and the chain's
+/// stage outputs. `"get:name"` reads the output of the stage that saved it.
+fn stage_texture(
+    which: &StageTexture,
+    stages: &[crate::config::ShaderStage],
+    targets: &[GlesTexture],
+    backdrop: &GlesTexture,
+) -> Option<GlesTexture> {
+    match which {
+        StageTexture::Backdrop => Some(backdrop.clone()),
+        StageTexture::Saved(name) => stages
+            .iter()
+            .position(|stage| stage.save.as_deref() == Some(name.as_str()))
+            .and_then(|index| targets.get(index))
+            .cloned(),
+    }
+}
+
+/// Stage `index`'s positional input: its `source`, else the previous stage's
+/// output, else (for the first stage) the backdrop.
+pub fn stage_input(
+    index: usize,
+    stages: &[crate::config::ShaderStage],
+    targets: &[GlesTexture],
+    backdrop: &GlesTexture,
+) -> Option<GlesTexture> {
+    match stages.get(index)?.input.as_ref() {
+        Some(which) => stage_texture(which, stages, targets, backdrop),
+        None if index == 0 => Some(backdrop.clone()),
+        None => targets.get(index - 1).cloned(),
+    }
+}
+
+/// The extra textures a compiled program binds, in its declared order.
+pub fn stage_textures(
+    program: &ShaderProgram,
+    stages: &[crate::config::ShaderStage],
+    targets: &[GlesTexture],
+    backdrop: &GlesTexture,
+) -> Option<Vec<GlesTexture>> {
+    program
+        .textures
+        .iter()
+        .map(|(_, which)| stage_texture(which, stages, targets, backdrop))
+        .collect()
+}
+
+/// What a chain pass produced for the panel and the frame pump.
+#[derive(Default)]
+pub struct ChainOutcome {
+    pub failures: Vec<String>,
+    pub deferred: bool,
+}
+
+/// Renders every stage of a chained definition but the last into the
+/// instance's offscreen targets, in written order, when anything feeding
+/// them changed. Offscreen work must happen before the visible bind, so the
+/// callers run this with the backdrop captures.
+#[allow(clippy::too_many_arguments)]
+pub fn run_chain(
+    renderer: &mut GlesRenderer,
+    programs: &mut CustomShaderPrograms,
+    instance: &mut ShaderInstance,
+    name: &str,
+    definition: &crate::config::ShaderDefinition,
+    backdrop: &GlesTexture,
+    capture_version: usize,
+    compile_budget: &mut usize,
+) -> ChainOutcome {
+    use smithay::backend::{
+        allocator::Fourcc,
+        renderer::{damage::OutputDamageTracker, Bind, Offscreen},
+    };
+    let mut outcome = ChainOutcome::default();
+    let stages = &definition.stages;
+    let count = stages.len();
+    if count < 2 {
+        return outcome;
+    }
+    let mut chain = Vec::with_capacity(count - 1);
+    for (index, stage) in stages[..count - 1].iter().enumerate() {
+        let lookup = programs.lookup(renderer, name, index, count, stage, compile_budget);
+        outcome.deferred |= lookup.deferred;
+        outcome.failures.extend(lookup.failure);
+        match lookup.program {
+            Some(program) => chain.push(program),
+            None => {
+                instance.chain_version = None;
+                return outcome;
+            }
+        }
+    }
+    let size = backdrop.size();
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    capture_version.hash(&mut hash);
+    (size.w, size.h).hash(&mut hash);
+    for program in &chain {
+        program.generation.hash(&mut hash);
+        for (param, value) in program.params.iter() {
+            param.hash(&mut hash);
+            value.hash_bits(&mut hash);
+        }
+    }
+    let version = hash.finish();
+    if instance.chain_version == Some(version) {
+        return outcome;
+    }
+    instance.chain_version = None;
+    if instance.targets.len() != count - 1
+        || instance.targets.iter().any(|target| target.size() != size)
+    {
+        instance.targets.clear();
+        for _ in 1..count {
+            match renderer.create_buffer(Fourcc::Argb8888, size) {
+                Ok(target) => instance.targets.push(target),
+                Err(err) => {
+                    tracing::warn!(%err, "Failed to allocate a custom shader stage texture");
+                    instance.targets.clear();
+                    return outcome;
+                }
+            }
+        }
+    }
+    let timing = instance.sample(CommitCounter::from(version as usize));
+    let geometry = Rectangle::from_size((size.w, size.h).into());
+    for (index, program) in chain.into_iter().enumerate() {
+        let inputs = stage_input(index, stages, &instance.targets, backdrop).zip(stage_textures(
+            &program,
+            stages,
+            &instance.targets,
+            backdrop,
+        ));
+        let Some((input, textures)) = inputs else {
+            return outcome;
+        };
+        // Intermediate stages are never clipped or faded; the last stage
+        // applies the window's rounding and opacity once.
+        let element = CustomShaderElement::new(
+            Id::new(),
+            CommitCounter::default(),
+            input,
+            geometry,
+            program,
+            [0.0; 4],
+            2.0,
+            0.0,
+            1.0,
+            timing,
+        )
+        .with_textures(textures);
+        let rendered = renderer
+            .bind(&mut instance.targets[index])
+            .map_err(|err| err.to_string())
+            .and_then(|mut target| {
+                OutputDamageTracker::new((size.w, size.h), 1.0, Transform::Normal)
+                    .render_output(renderer, &mut target, 0, &[element], [0.0; 4])
+                    .map(|_| ())
+                    .map_err(|err| format!("{err:?}"))
+            });
+        if let Err(err) = rendered {
+            outcome.failures.push(format!(
+                "{} could not render ({err}); rendering the window without it",
+                stage_label(name, index, count)
+            ));
+            return outcome;
+        }
+    }
+    instance.chain_version = Some(version);
+    outcome
 }
 
 /// Everything that changes a custom effect's pixels, except time.
+/// `content_version` is the capture version, or a chain's version.
 #[allow(clippy::too_many_arguments)]
 pub fn custom_shader_commit(
-    capture_version: usize,
+    content_version: u64,
     generation: u64,
     size: (i32, i32),
     params: &[(String, ShaderParam)],
@@ -958,7 +1228,7 @@ pub fn custom_shader_commit(
     opacity: f32,
 ) -> CommitCounter {
     let mut hash = std::collections::hash_map::DefaultHasher::new();
-    capture_version.hash(&mut hash);
+    content_version.hash(&mut hash);
     generation.hash(&mut hash);
     size.hash(&mut hash);
     for (name, value) in params {
@@ -974,8 +1244,9 @@ pub fn custom_shader_commit(
     CommitCounter::from(hash.finish() as usize)
 }
 
-/// One window's custom effect over its captured backdrop, drawn in the
-/// glass layer's z-slot directly behind the window's own surfaces.
+/// One stage of a window's custom effect. The last stage draws in the glass
+/// layer's z-slot directly behind the window's own surfaces; earlier stages
+/// draw the same element into offscreen targets.
 pub struct CustomShaderElement {
     id: Id,
     commit: CommitCounter,
@@ -988,6 +1259,8 @@ pub struct CustomShaderElement {
     opacity: f32,
     time: f32,
     delta: f32,
+    /// Bound to texture units 1.. in the program's `textures` order.
+    textures: Vec<GlesTexture>,
 }
 
 impl CustomShaderElement {
@@ -1016,13 +1289,21 @@ impl CustomShaderElement {
             opacity,
             time,
             delta,
+            textures: Vec::new(),
         }
+    }
+
+    pub fn with_textures(mut self, textures: Vec<GlesTexture>) -> Self {
+        self.textures = textures;
+        self
     }
 
     fn uniforms(&self) -> Vec<Uniform<'_>> {
         let size = self.texture.size();
         let (texture_w, texture_h) = (size.w.max(1) as f32, size.h.max(1) as f32);
-        let mut uniforms = Vec::with_capacity(CONTRACT_UNIFORMS.len() + self.program.params.len());
+        let mut uniforms = Vec::with_capacity(
+            CONTRACT_UNIFORMS.len() + self.program.params.len() + self.program.textures.len(),
+        );
         uniforms.extend([
             Uniform::new(
                 "u_size",
@@ -1046,7 +1327,44 @@ impl CustomShaderElement {
                 .iter()
                 .map(|(name, value)| Uniform::new(name.as_str(), value.uniform_value())),
         );
+        uniforms.extend(
+            self.program
+                .textures
+                .iter()
+                .enumerate()
+                .map(|(unit, (name, _))| Uniform::new(name.as_str(), unit as i32 + 1)),
+        );
         uniforms
+    }
+
+    fn bind_textures(&self, frame: &mut GlesFrame<'_, '_>, bind: bool) -> Result<(), GlesError> {
+        if self.textures.is_empty() {
+            return Ok(());
+        }
+        frame.with_context(|gl| {
+            for (unit, texture) in self.textures.iter().enumerate() {
+                // SAFETY: plain texture-unit state on the frame's current
+                // context, restored to unit 0 for Smithay's own draws.
+                unsafe {
+                    gl.ActiveTexture(ffi::TEXTURE1 + unit as u32);
+                    gl.BindTexture(ffi::TEXTURE_2D, if bind { texture.tex_id() } else { 0 });
+                    if bind {
+                        // Smithay only sets sampling state on the unit-0
+                        // texture it draws; a target read solely through an
+                        // extra unit would keep GL's mipmapped default and
+                        // sample as an incomplete (black) texture.
+                        let linear = ffi::LINEAR as i32;
+                        let clamp = ffi::CLAMP_TO_EDGE as i32;
+                        gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, linear);
+                        gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, linear);
+                        gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_S, clamp);
+                        gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_T, clamp);
+                    }
+                }
+            }
+            // SAFETY: as above.
+            unsafe { gl.ActiveTexture(ffi::TEXTURE0) };
+        })
     }
 }
 
@@ -1086,7 +1404,8 @@ impl RenderElement<GlesRenderer> for CustomShaderElement {
         opaque_regions: &[Rectangle<i32, Physical>],
         _cache: Option<&UserDataMap>,
     ) -> Result<(), GlesError> {
-        frame.render_texture_from_to(
+        self.bind_textures(frame, true)?;
+        let result = frame.render_texture_from_to(
             &self.texture,
             src,
             dst,
@@ -1096,7 +1415,9 @@ impl RenderElement<GlesRenderer> for CustomShaderElement {
             self.alpha(),
             Some(&self.program.program),
             &self.uniforms(),
-        )
+        );
+        self.bind_textures(frame, false)?;
+        result
     }
 }
 
@@ -1204,7 +1525,9 @@ vec4 tide_effect(vec2 uv) {
             ("tint_color".to_string(), ShaderParam::Vec4([1.0; 4])),
         ];
         let source = format!("// //_DEFINES_ in a user comment\n{PASSTHROUGH}");
-        let wrapped = wrap_texture_fragment(&source, &params);
+        let textures = vec![("mask".to_string(), StageTexture::Backdrop)];
+        let wrapped = wrap_texture_fragment(&source, &params, &textures);
+        assert!(wrapped.contains("uniform sampler2D mask;"));
         assert!(wrapped.starts_with("#version 100\n"));
         assert_eq!(wrapped.matches("//_DEFINES_").count(), 1);
         assert!(wrapped.contains("uniform sampler2D tex;"));
@@ -1376,6 +1699,29 @@ vec4 tide_effect(vec2 uv) {
         unsafe { GlesRenderer::new(context) }.ok()
     }
 
+    fn stage(
+        user_source: &str,
+        params: &[(String, ShaderParam)],
+        textures: &[(String, StageTexture)],
+        input: Option<StageTexture>,
+        save: Option<&str>,
+    ) -> crate::config::ShaderStage {
+        validate_fragment_contract(user_source).expect("fixture passes the contract");
+        crate::config::ShaderStage {
+            file: String::new(),
+            path: Default::default(),
+            params: params.to_vec().into(),
+            input,
+            save: save.map(str::to_string),
+            textures: textures.to_vec().into(),
+            source: Some(Arc::from(wrap_texture_fragment(
+                user_source,
+                params,
+                textures,
+            ))),
+        }
+    }
+
     fn compile(
         renderer: &mut GlesRenderer,
         programs: &mut CustomShaderPrograms,
@@ -1383,10 +1729,8 @@ vec4 tide_effect(vec2 uv) {
         user_source: &str,
         params: &[(String, ShaderParam)],
     ) -> ProgramLookup {
-        validate_fragment_contract(user_source).expect("fixture passes the contract");
-        let params: Arc<[(String, ShaderParam)]> = params.to_vec().into();
-        let wrapped: Arc<str> = Arc::from(wrap_texture_fragment(user_source, &params));
-        programs.lookup(renderer, name, Some(&wrapped), &params, &mut 1)
+        let stage = stage(user_source, params, &[], None, None);
+        programs.lookup(renderer, name, 0, 1, &stage, &mut 1)
     }
 
     const SIZE: i32 = 8;
@@ -1405,14 +1749,23 @@ vec4 tide_effect(vec2 uv) {
         opacity: f32,
         corner_radii: [f32; 4],
     ) -> Vec<u8> {
+        let input = import_gradient(renderer);
+        render_texture(renderer, input, Vec::new(), program, opacity, corner_radii)
+    }
+
+    fn render_texture(
+        renderer: &mut GlesRenderer,
+        input: GlesTexture,
+        textures: Vec<GlesTexture>,
+        program: ShaderProgram,
+        opacity: f32,
+        corner_radii: [f32; 4],
+    ) -> Vec<u8> {
         use smithay::backend::{
             allocator::Fourcc,
-            renderer::{damage::OutputDamageTracker, Bind, ExportMem, ImportMem, Offscreen},
+            renderer::{damage::OutputDamageTracker, Bind, ExportMem, Offscreen},
         };
         let size = smithay::utils::Size::<i32, Buffer>::from((SIZE, SIZE));
-        let input = renderer
-            .import_memory(&gradient(), Fourcc::Abgr8888, size, false)
-            .expect("import fixture");
         let mut output: GlesTexture = renderer
             .create_buffer(Fourcc::Abgr8888, size)
             .expect("allocate target");
@@ -1427,7 +1780,8 @@ vec4 tide_effect(vec2 uv) {
             0.5,
             opacity,
             (0.0, 0.0),
-        );
+        )
+        .with_textures(textures);
         let mut target = renderer.bind(&mut output).expect("bind target");
         OutputDamageTracker::new((SIZE, SIZE), 1.0, Transform::Normal)
             .render_output(renderer, &mut target, 0, &[element], [0.0, 0.0, 0.0, 0.0])
@@ -1542,13 +1896,148 @@ vec4 tide_effect(vec2 uv) {
             .is_some_and(|message| message.contains("keeping the previous program")));
 
         // The budget defers a compile instead of stalling one frame on several.
-        let deferred = programs.lookup(
-            &mut renderer,
-            "other",
-            Some(&Arc::from(wrap_texture_fragment(PASSTHROUGH, &[]))),
-            &Arc::from(Vec::new()),
-            &mut 0,
-        );
+        let pass = stage(PASSTHROUGH, &[], &[], None, None);
+        let deferred = programs.lookup(&mut renderer, "other", 0, 1, &pass, &mut 0);
         assert!(deferred.deferred && deferred.program.is_none());
+    }
+
+    fn import_gradient(renderer: &mut GlesRenderer) -> GlesTexture {
+        use smithay::backend::{allocator::Fourcc, renderer::ImportMem};
+        renderer
+            .import_memory(&gradient(), Fourcc::Abgr8888, (SIZE, SIZE).into(), false)
+            .expect("import fixture")
+    }
+
+    const INVERT: &str =
+        "vec4 tide_effect(vec2 uv) {\n    vec4 c = texture2D(tex, uv);\n    return vec4(c.a - c.rgb, c.a);\n}\n";
+
+    /// Runs a chained definition's offscreen stages, then draws its last
+    /// stage the way `glass_layer_elements` does.
+    fn render_chain(
+        renderer: &mut GlesRenderer,
+        stages: Vec<crate::config::ShaderStage>,
+    ) -> Vec<u8> {
+        let definition = crate::config::ShaderDefinition {
+            render_scale: 1,
+            stages,
+        };
+        let backdrop = import_gradient(renderer);
+        let mut programs = CustomShaderPrograms::default();
+        let mut instance = ShaderInstance::new();
+        let outcome = run_chain(
+            renderer,
+            &mut programs,
+            &mut instance,
+            "chain",
+            &definition,
+            &backdrop,
+            1,
+            &mut 8,
+        );
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert!(instance.chain_version().is_some());
+        let last = definition.stages.len() - 1;
+        let program = programs
+            .lookup(
+                renderer,
+                "chain",
+                last,
+                definition.stages.len(),
+                &definition.stages[last],
+                &mut 1,
+            )
+            .program
+            .expect("last stage compiles");
+        let input = stage_input(last, &definition.stages, instance.targets(), &backdrop)
+            .expect("last stage input resolves");
+        let textures = stage_textures(&program, &definition.stages, instance.targets(), &backdrop)
+            .expect("last stage textures resolve");
+        render_texture(renderer, input, textures, program, 1.0, [0.0; 4])
+    }
+
+    fn inverted(image: &[u8]) -> Vec<u8> {
+        image
+            .chunks(4)
+            .flat_map(|px| [255 - px[0], 255 - px[1], 255 - px[2], px[3]])
+            .collect()
+    }
+
+    #[test]
+    fn chains_pass_stage_outputs_forward_in_written_order_and_upright() {
+        let Some(mut renderer) = software_renderer() else {
+            eprintln!("no software EGL device; skipping the real compile and draw");
+            return;
+        };
+        // Two inversions through an offscreen target give the input back,
+        // pixel for pixel, so the intermediate kept its orientation.
+        let image = render_chain(
+            &mut renderer,
+            vec![
+                stage(INVERT, &[], &[], None, None),
+                stage(INVERT, &[], &[], None, None),
+            ],
+        );
+        assert_eq!(image, gradient());
+        let image = render_chain(
+            &mut renderer,
+            vec![
+                stage(INVERT, &[], &[], None, None),
+                stage(PASSTHROUGH, &[], &[], None, None),
+            ],
+        );
+        assert_eq!(image, inverted(&gradient()));
+    }
+
+    #[test]
+    fn saved_outputs_and_extra_textures_bind_where_the_stage_asks() {
+        let Some(mut renderer) = software_renderer() else {
+            eprintln!("no software EGL device; skipping the real compile and draw");
+            return;
+        };
+        let pick = |name: &str| {
+            format!("vec4 tide_effect(vec2 uv) {{\n    return texture2D({name}, uv);\n}}\n")
+        };
+        let saved = |name: &str| StageTexture::Saved(name.to_string());
+        let chain = |last: crate::config::ShaderStage| {
+            vec![
+                stage(INVERT, &[], &[], None, Some("inverse")),
+                stage(
+                    PASSTHROUGH,
+                    &[],
+                    &[],
+                    Some(StageTexture::Backdrop),
+                    Some("copy"),
+                ),
+                last,
+            ]
+        };
+        // An extra binding reads a saved output other than the previous one.
+        let textures = [("inverse".to_string(), saved("inverse"))];
+        let image = render_chain(
+            &mut renderer,
+            chain(stage(&pick("inverse"), &[], &textures, None, None)),
+        );
+        assert_eq!(image, inverted(&gradient()));
+        // `tex` is the previous stage's output unless `source` says otherwise.
+        let image = render_chain(
+            &mut renderer,
+            chain(stage(PASSTHROUGH, &[], &[], None, None)),
+        );
+        assert_eq!(image, gradient());
+        let image = render_chain(
+            &mut renderer,
+            chain(stage(PASSTHROUGH, &[], &[], Some(saved("inverse")), None)),
+        );
+        assert_eq!(image, inverted(&gradient()));
+        // Two extra units at once, mixed half and half.
+        let textures = [
+            ("inverse".to_string(), saved("inverse")),
+            ("original".to_string(), StageTexture::Backdrop),
+        ];
+        let mix = "vec4 tide_effect(vec2 uv) {\n    return mix(texture2D(inverse, uv), texture2D(original, uv), 0.5);\n}\n";
+        let image = render_chain(&mut renderer, chain(stage(mix, &[], &textures, None, None)));
+        assert!(image
+            .chunks(4)
+            .all(|px| px[..3].iter().all(|channel| channel.abs_diff(128) <= 1) && px[3] == 255));
     }
 }

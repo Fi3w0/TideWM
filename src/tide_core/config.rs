@@ -461,14 +461,22 @@ pub struct ShaderStage {
     /// `file` resolved against the main config directory at load time.
     pub path: PathBuf,
     pub params: Arc<[(String, crate::shader_effect::ShaderParam)]>,
+    /// Positional input (`tex`). `None` reads the previous stage's output,
+    /// or the backdrop for the first stage.
+    pub input: Option<crate::shader_effect::StageTexture>,
+    /// Name this stage's output can be read back by with `"get:name"`.
+    pub save: Option<String>,
+    /// Extra `sampler2D` bindings, declared by the host.
+    pub textures: Arc<[(String, crate::shader_effect::StageTexture)]>,
     /// Host-wrapped GLSL once `path` passed the fragment contract. `None`
     /// before loading and after a read or contract failure.
     pub source: Option<Arc<str>>,
 }
 
 /// A named custom effect (`shader "name" { }`), selected per window with
-/// `rule { shader = name }`. Only the first render slice is accepted so far:
-/// one stage on a window's captured backdrop, damage-driven.
+/// `rule { shader = name }` or a workspace default: up to four ordered
+/// stages over a window's captured backdrop, damage-driven. Every stage but
+/// the last renders offscreen; the last draws in the window's glass slot.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShaderDefinition {
     /// Processing divisor for the effect's own capture, `1..=4`.
@@ -477,12 +485,9 @@ pub struct ShaderDefinition {
 }
 
 impl ShaderDefinition {
-    /// The wrapped source of a single-stage definition that loaded cleanly.
-    pub fn single_stage_source(&self) -> Option<&Arc<str>> {
-        match self.stages.as_slice() {
-            [stage] => stage.source.as_ref(),
-            _ => None,
-        }
+    /// Whether every stage's file loaded and passed the contract.
+    pub fn fully_loaded(&self) -> bool {
+        self.stages.iter().all(|stage| stage.source.is_some())
     }
 }
 
@@ -1475,8 +1480,11 @@ impl Config {
                 let loaded =
                     crate::shader_effect::read_fragment_file(&stage.path).and_then(|source| {
                         crate::shader_effect::validate_fragment_contract(&source)?;
-                        let wrapped =
-                            crate::shader_effect::wrap_texture_fragment(&source, &stage.params);
+                        let wrapped = crate::shader_effect::wrap_texture_fragment(
+                            &source,
+                            &stage.params,
+                            &stage.textures,
+                        );
                         if loaded_bytes + wrapped.len() > crate::shader_effect::MAX_CANDIDATE_BYTES
                         {
                             return Err(format!(
@@ -5559,19 +5567,90 @@ fn parse_shader_definition(name: &str, body: &[waves::Entry]) -> Result<ShaderDe
             _ => return Err("only settings and `stage` blocks are allowed".to_string()),
         }
     }
-    match definition.stages.len() {
-        0 => Err("needs a `stage { file = \"...\" }` block".to_string()),
-        1 => Ok(definition),
-        _ => Err("multi-stage chains are not supported yet".to_string()),
+    let Some(last) = definition.stages.len().checked_sub(1) else {
+        return Err("needs a `stage { file = \"...\" }` block".to_string());
+    };
+    // The written order is the dependency order: a stage may only read
+    // names saved by stages above it, so there is never a cycle to detect.
+    let mut saved: Vec<&str> = Vec::new();
+    for (index, stage) in definition.stages.iter().enumerate() {
+        let reads = stage
+            .input
+            .iter()
+            .chain(stage.textures.iter().map(|(_, texture)| texture));
+        for texture in reads {
+            if let crate::shader_effect::StageTexture::Saved(name) = texture {
+                if !saved.contains(&name.as_str()) {
+                    return Err(format!(
+                        "stage {} reads \"get:{name}\", which no earlier stage saves",
+                        index + 1
+                    ));
+                }
+            }
+        }
+        if let Some(name) = &stage.save {
+            if index == last {
+                return Err("the last stage draws on screen and cannot `save`".to_string());
+            }
+            if saved.contains(&name.as_str()) {
+                return Err(format!("\"{name}\" is saved by more than one stage"));
+            }
+            saved.push(name);
+        }
     }
+    Ok(definition)
 }
 
 fn parse_shader_stage(body: &[waves::Entry]) -> Result<ShaderStage, String> {
+    use crate::shader_effect::StageTexture;
     let mut file = None;
     let mut params = Vec::new();
+    let mut input = None;
+    let mut save = None;
+    let mut textures: Vec<(String, StageTexture)> = Vec::new();
     for entry in body {
         match entry {
             waves::Entry::Assign(key, value) if key == "file" => file = Some(value.clone()),
+            waves::Entry::Assign(key, value) if key == "source" => {
+                input = Some(StageTexture::parse(value).ok_or_else(|| {
+                    format!("stage source must be backdrop or \"get:name\", got {value}")
+                })?);
+            }
+            waves::Entry::Assign(key, value) if key == "save" => {
+                let name = value.trim();
+                if !crate::shader_effect::valid_param_name(name) {
+                    return Err(format!("`{name}` cannot be a saved texture name"));
+                }
+                save = Some(name.to_string());
+            }
+            waves::Entry::Block(keyword, _, texture_body) if keyword == "textures" => {
+                for binding in texture_body {
+                    let waves::Entry::Assign(name, value) = binding else {
+                        return Err(
+                            "`textures` may only contain `name = source` entries".to_string()
+                        );
+                    };
+                    if !crate::shader_effect::valid_param_name(name) {
+                        return Err(format!("`{name}` cannot be a texture binding name"));
+                    }
+                    let texture = StageTexture::parse(value).ok_or_else(|| {
+                        format!("texture `{name}` must be backdrop or \"get:name\", got {value}")
+                    })?;
+                    if let Some(existing) =
+                        textures.iter_mut().find(|(existing, _)| existing == name)
+                    {
+                        existing.1 = texture;
+                    } else {
+                        textures.push((name.clone(), texture));
+                    }
+                }
+                if textures.len() > crate::shader_effect::MAX_TEXTURES_PER_STAGE {
+                    return Err(format!(
+                        "at most {} extra textures per stage are allowed",
+                        crate::shader_effect::MAX_TEXTURES_PER_STAGE
+                    ));
+                }
+            }
             waves::Entry::Block(keyword, _, param_body) if keyword == "params" => {
                 for param in param_body {
                     let waves::Entry::Assign(name, value) = param else {
@@ -5606,10 +5685,19 @@ fn parse_shader_stage(body: &[waves::Entry]) -> Result<ShaderStage, String> {
     let file = file
         .filter(|file| !file.trim().is_empty())
         .ok_or_else(|| "a stage needs `file = \"path.frag\"`".to_string())?;
+    if let Some((name, _)) = textures
+        .iter()
+        .find(|(name, _)| params.iter().any(|(param, _)| param == name))
+    {
+        return Err(format!("`{name}` is both a parameter and a texture"));
+    }
     Ok(ShaderStage {
         file,
         path: PathBuf::new(),
         params: params.into(),
+        input,
+        save,
+        textures: textures.into(),
         source: None,
     })
 }
@@ -12068,14 +12156,53 @@ animations {
             (format!("render_scale = 5\n{stage}"), "render_scale"),
             (format!("blend = add\n{stage}"), "unknown key"),
             (String::new(), "needs a `stage"),
-            (format!("{stage}{stage}"), "multi-stage"),
             (
                 format!("{stage}{stage}{stage}{stage}{stage}"),
                 "at most 4 stages",
             ),
             (
-                "stage {\n save = \"x\"\n file = \"a.frag\"\n }\n".to_string(),
-                "`save`",
+                "stage {\n save = x\n file = \"a.frag\"\n }\n".to_string(),
+                "cannot `save`",
+            ),
+            (
+                "stage {\n file = \"a.frag\"\n source = \"get:x\"\n }\n".to_string(),
+                "no earlier stage saves",
+            ),
+            (
+                format!(
+                    "stage {{\n file = \"a.frag\"\n save = x\n }}\n\
+                     stage {{\n file = \"a.frag\"\n save = x\n }}\n{stage}"
+                ),
+                "more than one stage",
+            ),
+            (
+                format!("{stage}stage {{\n file = \"a.frag\"\n save = later\n }}\n"),
+                "cannot `save`",
+            ),
+            (
+                format!(
+                    "stage {{\n file = \"a.frag\"\n textures {{\n m = \"get:later\"\n }}\n save = later\n }}\n{stage}"
+                ),
+                "no earlier stage saves",
+            ),
+            (
+                "stage {\n file = \"a.frag\"\n source = elsewhere\n }\n".to_string(),
+                "stage source must be",
+            ),
+            (
+                "stage {\n file = \"a.frag\"\n textures {\n u_m = backdrop\n }\n }\n"
+                    .to_string(),
+                "cannot be a texture binding",
+            ),
+            (
+                "stage {\n file = \"a.frag\"\n textures {\n a = backdrop\n b = backdrop\n c = backdrop\n d = backdrop\n e = backdrop\n }\n }\n"
+                    .to_string(),
+                "at most 4 extra textures",
+            ),
+            (
+                "stage {\n file = \"a.frag\"\n params {\n m = 1\n }\n textures {\n m = backdrop\n }\n }\n"
+                    .to_string(),
+                "both a parameter and a texture",
             ),
             (
                 "stage {\n params {\n x = 1\n }\n }\n".to_string(),
@@ -12121,6 +12248,50 @@ animations {
             .0
             .shader_definitions
             .is_empty());
+    }
+
+    #[test]
+    fn shader_chains_parse_saves_sources_and_texture_bindings() {
+        use crate::shader_effect::StageTexture;
+        let entries = wave_entries(
+            "shader wet {\n\
+             stage {\n\
+             file = \"blur.frag\"\n\
+             save = \"blurred\"\n\
+             }\n\
+             stage {\n\
+             file = \"mask.frag\"\n\
+             source = backdrop\n\
+             save = mask\n\
+             }\n\
+             stage {\n\
+             file = \"composite.frag\"\n\
+             source = \"get:blurred\"\n\
+             textures {\n\
+             mask = \"get:mask\"\n\
+             original = backdrop\n\
+             }\n\
+             }\n\
+             }\n",
+        );
+        let (config, warnings) = Config::from_raw(lower_entries(&entries));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let stages = &config.shader_definitions["wet"].stages;
+        assert_eq!(stages.len(), 3);
+        assert_eq!(stages[0].save.as_deref(), Some("blurred"));
+        assert_eq!(stages[0].input, None);
+        assert_eq!(stages[1].input, Some(StageTexture::Backdrop));
+        assert_eq!(
+            stages[2].input,
+            Some(StageTexture::Saved("blurred".to_string()))
+        );
+        assert_eq!(
+            stages[2].textures.to_vec(),
+            vec![
+                ("mask".to_string(), StageTexture::Saved("mask".to_string())),
+                ("original".to_string(), StageTexture::Backdrop),
+            ]
+        );
     }
 
     #[test]
@@ -12267,15 +12438,17 @@ animations {
 
         let pass = &config.shader_definitions["pass"];
         assert_eq!(pass.stages[0].path, dir.0.join("shaders/pass.frag"));
-        let source = pass.single_stage_source().expect("pass.frag loads");
+        let source = pass.stages[0].source.as_ref().expect("pass.frag loads");
         assert!(source.contains("uniform float strength;"));
         assert!(source.contains("return texture2D(tex, uv) * strength;"));
 
-        assert!(config.shader_definitions["bad"]
-            .single_stage_source()
+        assert!(config.shader_definitions["bad"].stages[0]
+            .source
+            .as_ref()
             .is_none());
-        assert!(config.shader_definitions["missing"]
-            .single_stage_source()
+        assert!(config.shader_definitions["missing"].stages[0]
+            .source
+            .as_ref()
             .is_none());
         assert!(warnings
             .iter()

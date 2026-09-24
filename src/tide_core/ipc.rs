@@ -1105,6 +1105,12 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
         .fold(0_u64, |total, (_, capture)| {
             total.saturating_add(capture.estimated_texture_bytes())
         });
+    let shader_stage_bytes = state
+        .custom_shader_instances
+        .values()
+        .fold(0_u64, |total, instance| {
+            total.saturating_add(instance.target_bytes())
+        });
     let (shader_programs, shader_compiles, shader_compile_failures) =
         state.custom_shader_programs.stats();
     let shader_updates = state
@@ -1114,6 +1120,7 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
             total.saturating_add(instance.updates())
         });
     let tide_texture_estimate_bytes = backdrop_texture_bytes
+        .saturating_add(shader_stage_bytes)
         .saturating_add(layer_alpha_mask_bytes)
         .saturating_add(wallpaper_texture_bytes)
         .saturating_add(caustics_texture_bytes)
@@ -1165,10 +1172,11 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
             "compile_failures": shader_compile_failures,
             "instances": state.custom_shader_instances.len(),
             "capture_bytes": shader_capture_bytes,
+            "stage_bytes": shader_stage_bytes,
             "bypassed": state.custom_shader_bypassed.len(),
             "bypasses": state.custom_shader_bypasses,
             "updates": shader_updates,
-            "scope": "capture_bytes is the share of backdrop_bytes feeding custom effects; updates count redraws with new content by live instances",
+            "scope": "capture_bytes is the share of backdrop_bytes feeding custom effects; stage_bytes are chained effects' offscreen stage outputs, included in the total; updates count redraws with new content by live instances",
         },
         "outputs": outputs,
     })

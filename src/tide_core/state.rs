@@ -6279,7 +6279,7 @@ impl Smallvil {
         self.resolved_shader_assignment(surface)
             .is_some_and(|(name, definition)| {
                 self.custom_shader_programs
-                    .can_draw(name, definition.single_stage_source())
+                    .can_draw(name, &definition.stages)
             })
     }
 
@@ -6303,20 +6303,28 @@ impl Smallvil {
                 self.custom_shader_bypassed.remove(surface);
                 continue;
             }
-            let Some((name, render_scale)) = self
+            let Some((name, render_scale, stage_count)) = self
                 .resolved_shader_assignment(surface)
-                .map(|(name, definition)| (name.to_string(), definition.render_scale))
+                .map(|(name, definition)| {
+                    (
+                        name.to_string(),
+                        definition.render_scale,
+                        definition.stages.len(),
+                    )
+                })
             else {
                 continue;
             };
             let Some(physical_rect) = self.placement_physical_rect(placement, output) else {
                 continue;
             };
+            // The capture plus one same-sized target per offscreen stage.
             let wanted = crate::shader_effect::capture_payload_bytes(
                 physical_rect.size.w,
                 physical_rect.size.h,
                 render_scale,
-            );
+            )
+            .saturating_mul(stage_count as u64);
             let admitted = |other: &WlSurface| {
                 other != surface
                     && self.custom_shader_instances.contains_key(other)
@@ -6326,8 +6334,14 @@ impl Smallvil {
                 .backdrop_textures
                 .iter()
                 .filter(|(other, _)| admitted(other))
-                .fold(0_u64, |total, (_, capture)| {
-                    total.saturating_add(capture.estimated_texture_bytes())
+                .fold(0_u64, |total, (other, capture)| {
+                    let targets = self
+                        .custom_shader_instances
+                        .get(other)
+                        .map_or(0, |instance| instance.target_bytes());
+                    total
+                        .saturating_add(capture.estimated_texture_bytes())
+                        .saturating_add(targets)
                 });
             let instances = self
                 .custom_shader_instances
@@ -6862,6 +6876,16 @@ impl Smallvil {
             )
             .collect();
 
+        let chained: Vec<WlSurface> = surfaces
+            .iter()
+            .filter(|surface| {
+                self.custom_shader_drawable(surface)
+                    && self
+                        .resolved_shader_assignment(surface)
+                        .is_some_and(|(_, definition)| definition.stages.len() > 1)
+            })
+            .cloned()
+            .collect();
         let mut rendered = 0usize;
         let mut skipped = 0usize;
         let mut captured_first_backdrop = false;
@@ -6913,12 +6937,58 @@ impl Smallvil {
             skipped,
             "Window backdrop captures"
         );
+        self.run_custom_shader_chains(renderer, &chained);
         // The frame that triggered the first capture could otherwise be the
         // last dirty frame on a static desktop. Schedule exactly one more so
         // the newly available texture is actually consumed; later capture
         // replacements do not self-sustain an idle redraw loop.
         if captured_first_backdrop {
             self.request_redraw();
+        }
+    }
+
+    /// Renders the offscreen stages of every chained effect on this output
+    /// from its fresh capture, still before the visible bind.
+    fn run_custom_shader_chains(&mut self, renderer: &mut GlesRenderer, surfaces: &[WlSurface]) {
+        let mut failures = Vec::new();
+        let mut deferred = false;
+        let mut compile_budget = 1usize;
+        for surface in surfaces {
+            let workspace = self.workspace_of_surface(surface);
+            let Some(name) = crate::config::ShaderAssignment::resolve(
+                self.window_shader_assignments.get(surface),
+                workspace.and_then(|workspace| self.config.workspace_shader(workspace)),
+            ) else {
+                continue;
+            };
+            let (Some(definition), Some(capture)) = (
+                self.config.shader_definitions.get(name),
+                self.backdrop_textures.get(surface),
+            ) else {
+                continue;
+            };
+            let instance = self
+                .custom_shader_instances
+                .entry(surface.clone())
+                .or_insert_with(crate::shader_effect::ShaderInstance::new);
+            let outcome = crate::shader_effect::run_chain(
+                renderer,
+                &mut self.custom_shader_programs,
+                instance,
+                name,
+                definition,
+                &capture.texture,
+                capture.version,
+                &mut compile_budget,
+            );
+            failures.extend(outcome.failures);
+            deferred |= outcome.deferred;
+        }
+        if deferred {
+            self.request_redraw();
+        }
+        for message in failures {
+            self.queue_shader_failure(message);
         }
     }
 
@@ -7170,23 +7240,51 @@ impl Smallvil {
                 })
                 .flatten()
                 .and_then(|name| {
-                    let stage = self.config.shader_definitions.get(name)?.stages.first()?;
-                    Some(self.custom_shader_programs.lookup(
+                    let stages = &self.config.shader_definitions.get(name)?.stages;
+                    let index = stages.len().checked_sub(1)?;
+                    let lookup = self.custom_shader_programs.lookup(
                         renderer,
                         name,
-                        stage.source.as_ref(),
-                        &stage.params,
+                        index,
+                        stages.len(),
+                        &stages[index],
                         &mut compile_budget,
-                    ))
+                    );
+                    // The last stage reads the backdrop or the chain's
+                    // outputs; a chain that hasn't rendered can't draw yet.
+                    let instance = self.custom_shader_instances.get(surface);
+                    let targets = instance.map(|instance| instance.targets()).unwrap_or(&[]);
+                    let chain_version = instance.and_then(|instance| instance.chain_version());
+                    let inputs = lookup.program.as_ref().and_then(|program| {
+                        if index > 0 && chain_version.is_none() {
+                            return None;
+                        }
+                        let input = crate::shader_effect::stage_input(
+                            index,
+                            stages,
+                            targets,
+                            &capture_texture,
+                        )?;
+                        let textures = crate::shader_effect::stage_textures(
+                            program,
+                            stages,
+                            targets,
+                            &capture_texture,
+                        )?;
+                        Some((input, textures, chain_version))
+                    });
+                    Some((lookup, inputs))
                 });
-            if let Some(lookup) = lookup {
+            if let Some((lookup, inputs)) = lookup {
                 if lookup.deferred {
                     self.request_redraw();
                 }
                 if let Some(message) = lookup.failure {
                     self.queue_shader_failure(message);
                 }
-                if let Some(program) = lookup.program {
+                if let Some((program, (input, textures, chain_version))) =
+                    lookup.program.zip(inputs)
+                {
                     let rounding = self.rounding_config_for_surface(surface);
                     let output_scale = output.current_scale().fractional_scale() as f32;
                     let corner_radii = if rounding.enabled {
@@ -7196,7 +7294,7 @@ impl Smallvil {
                     };
                     let antialias = rounding.antialias * output_scale;
                     let commit = crate::shader_effect::custom_shader_commit(
-                        capture_version,
+                        chain_version.unwrap_or(capture_version as u64),
                         program.generation,
                         (physical_rect.size.w, physical_rect.size.h),
                         &program.params,
@@ -7205,18 +7303,23 @@ impl Smallvil {
                         antialias,
                         visual.opacity,
                     );
-                    let timing = self
+                    let instance = self
                         .custom_shader_instances
                         .entry(surface.clone())
-                        .or_insert_with(crate::shader_effect::ShaderInstance::new)
-                        .sample(commit);
+                        .or_insert_with(crate::shader_effect::ShaderInstance::new);
+                    // A chain sampled its clock when its stages rendered.
+                    let timing = if chain_version.is_some() {
+                        instance.timing()
+                    } else {
+                        instance.sample(commit)
+                    };
                     self.glass_anim.remove(surface);
                     layers.entry(surface.clone()).or_default().push(
                         crate::backend::udev::OutputRenderElements::CustomShader(
                             crate::shader_effect::CustomShaderElement::new(
                                 capture_id,
                                 commit,
-                                capture_texture,
+                                input,
                                 physical_rect,
                                 program,
                                 corner_radii,
@@ -7224,7 +7327,8 @@ impl Smallvil {
                                 antialias,
                                 visual.opacity,
                                 timing,
-                            ),
+                            )
+                            .with_textures(textures),
                         ),
                     );
                     continue;
