@@ -537,8 +537,10 @@ impl Smallvil {
                 // The glass layer is built by the live desktop path at the
                 // window's output-local rect, then moved onto this canvas at
                 // the window geometry's own origin, behind its surfaces.
-                if let Some(surface) = &surface {
-                    let placements = self.render_placements(&output).unwrap_or_default();
+                let placements = self.render_placements(&output).unwrap_or_default();
+                if let Some(surface) = surface.as_ref().filter(|surface| {
+                    !self.backdrop_may_hold_blocked_content(&output, &placements, surface)
+                }) {
                     let glass_surfaces: Vec<WlSurface> = self
                         .glass_eligible_surfaces(&placements)
                         .into_iter()
@@ -893,6 +895,50 @@ impl Smallvil {
                 .collect()
         };
         self.finish_capture_readback(renderer, target, size, rect, excluded_rects, completion);
+    }
+
+    /// Whether `surface`'s captured backdrop could contain `block_capture`
+    /// content: a blocked window or layer overlapping its placement. That
+    /// backdrop is shared with the live frame, so a per-window capture leaves
+    /// the glass out rather than letting blocked pixels through it.
+    fn backdrop_may_hold_blocked_content(
+        &self,
+        output: &Output,
+        placements: &[crate::placement::PlacedWindow],
+        surface: &WlSurface,
+    ) -> bool {
+        let Some(target) = placements
+            .iter()
+            .find(|placement| placement.surface() == Some(surface))
+            .map(|placement| placement.rect)
+        else {
+            return false;
+        };
+        let blocked_window = placements.iter().any(|placement| {
+            placement.surface().is_some_and(|other| {
+                other != surface
+                    && placement.rect.overlaps(target)
+                    && self.resolve_window_rules_for(other).block_capture
+            })
+        });
+        if blocked_window {
+            return true;
+        }
+        if !self.config.has_layer_capture_exclusions() {
+            return false;
+        }
+        let output_loc = self
+            .space
+            .output_geometry(output)
+            .map(|geo| geo.loc)
+            .unwrap_or_default();
+        let layer_map = layer_map_for_output(output);
+        let blocked_layer = layer_map
+            .layers()
+            .filter(|layer| self.config.layer_blocks_capture(layer.namespace()))
+            .filter_map(|layer| layer_map.layer_geometry(layer))
+            .any(|geo| Rectangle::new(geo.loc + output_loc, geo.size).overlaps(target));
+        blocked_layer
     }
 
     fn finish_capture_readback(
