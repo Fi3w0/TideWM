@@ -319,10 +319,11 @@ pub struct Smallvil {
     /// entries preserve the original behavior: translucent floating windows
     /// use water refraction.
     pub(crate) window_glass_modes: HashMap<WlSurface, crate::config::GlassMode>,
-    /// Custom effect name from the last matching `rule { shader = name }`.
-    /// Kept as written and resolved per frame by `resolved_shader_assignment`,
-    /// so toggling `shaders { enabled }` or a definition needs no re-resolve.
-    pub(crate) window_shader_assignments: HashMap<WlSurface, String>,
+    /// The last matching `rule { shader = ... }`, including an explicit
+    /// `none` that opts out of the workspace default. Resolved per frame by
+    /// `resolved_shader_assignment`, so toggling `shaders { enabled }`, a
+    /// definition or a workspace default needs no per-window re-resolve.
+    pub(crate) window_shader_assignments: HashMap<WlSurface, crate::config::ShaderAssignment>,
     /// Last-good compiled program per custom effect definition.
     pub(crate) custom_shader_programs: crate::shader_effect::CustomShaderPrograms,
     /// `u_time`/`u_delta` clocks for windows currently drawing an effect.
@@ -1589,10 +1590,11 @@ impl Smallvil {
             }
         }
         match rule.shader {
-            Some(crate::config::ShaderAssignment::Named(name)) => {
-                self.window_shader_assignments.insert(surface.clone(), name);
+            Some(assignment) => {
+                self.window_shader_assignments
+                    .insert(surface.clone(), assignment);
             }
-            Some(crate::config::ShaderAssignment::None) | None => {
+            None => {
                 self.window_shader_assignments.remove(surface);
             }
         }
@@ -6230,11 +6232,15 @@ impl Smallvil {
         if !self.config.shaders_enabled {
             return None;
         }
-        let name = self.window_shader_assignments.get(surface)?;
+        let name = crate::config::ShaderAssignment::resolve(
+            self.window_shader_assignments.get(surface),
+            self.workspace_of_surface(surface)
+                .and_then(|workspace| self.config.workspace_shader(workspace)),
+        )?;
         self.config
             .shader_definitions
-            .get(name)
-            .map(|definition| (name.as_str(), definition))
+            .get_key_value(name)
+            .map(|(name, definition)| (name.as_str(), definition))
     }
 
     /// Puts a render-time compile failure on the persistent warning panel.
@@ -7152,10 +7158,16 @@ impl Smallvil {
             let visual = self.placement_visual_sample(placement);
             // A custom effect replaces the glass pass. Without a program yet
             // (or ever) the window takes its normal glass path instead.
+            let workspace = self.workspace_of_surface(surface);
             let lookup = self
                 .config
                 .shaders_enabled
-                .then(|| self.window_shader_assignments.get(surface))
+                .then(|| {
+                    crate::config::ShaderAssignment::resolve(
+                        self.window_shader_assignments.get(surface),
+                        workspace.and_then(|workspace| self.config.workspace_shader(workspace)),
+                    )
+                })
                 .flatten()
                 .and_then(|name| {
                     let stage = self.config.shader_definitions.get(name)?.stages.first()?;
@@ -12831,8 +12843,15 @@ impl Smallvil {
                     for surface in surfaces {
                         self.refresh_window_opacity_and_glass_for(&surface);
                     }
-                    self.custom_shader_instances
-                        .retain(|surface, _| self.window_shader_assignments.contains_key(surface));
+                    let unshaded: Vec<WlSurface> = self
+                        .custom_shader_instances
+                        .keys()
+                        .filter(|surface| self.resolved_shader_assignment(surface).is_none())
+                        .cloned()
+                        .collect();
+                    for surface in unshaded {
+                        self.custom_shader_instances.remove(&surface);
+                    }
                     self.custom_shader_bypassed.clear();
                     // The mode or frost tuning may have changed. Force the
                     // shared pre-frame pipeline to rebuild against the current

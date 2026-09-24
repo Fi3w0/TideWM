@@ -1070,9 +1070,9 @@ impl Smallvil {
         } else {
             self.window_glass_modes.remove(surface);
         }
-        if let Some(crate::config::ShaderAssignment::Named(name)) = &rule.shader {
+        if let Some(assignment) = &rule.shader {
             self.window_shader_assignments
-                .insert(surface.clone(), name.clone());
+                .insert(surface.clone(), assignment.clone());
         } else {
             self.window_shader_assignments.remove(surface);
         }
@@ -1596,9 +1596,9 @@ impl Smallvil {
         if let Some(mode) = rule.glass {
             self.window_glass_modes.insert(entry.surface.clone(), mode);
         }
-        if let Some(crate::config::ShaderAssignment::Named(name)) = &rule.shader {
+        if let Some(assignment) = &rule.shader {
             self.window_shader_assignments
-                .insert(entry.surface.clone(), name.clone());
+                .insert(entry.surface.clone(), assignment.clone());
         }
         self.window_depths
             .insert(entry.surface.clone(), crate::depth::WindowDepth::new());

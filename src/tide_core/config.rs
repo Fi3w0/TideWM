@@ -426,11 +426,31 @@ impl Default for WaterGlassConfig {
     }
 }
 
-/// A window rule's `shader` value.
+/// A window or workspace rule's `shader` value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShaderAssignment {
     None,
     Named(String),
+}
+
+impl ShaderAssignment {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_lowercase() {
+            name if name == "none" => Some(Self::None),
+            name if valid_ripple_preset_name(&name) => Some(Self::Named(name)),
+            _ => None,
+        }
+    }
+
+    /// The effect name a window uses: its rule's assignment, else its
+    /// workspace's default. `none` at the window level also opts out of the
+    /// workspace default.
+    pub fn resolve<'a>(rule: Option<&'a Self>, workspace: Option<&'a Self>) -> Option<&'a str> {
+        match rule.or(workspace)? {
+            Self::Named(name) => Some(name),
+            Self::None => None,
+        }
+    }
 }
 
 /// One ordered stage of a custom effect (`shader "name" { stage { } }`).
@@ -1975,6 +1995,16 @@ impl Config {
     /// effective rule, last-match-wins per field -- same fold shape as
     /// `resolve_window_rules`, just against a single numeric match instead
     /// of several identity criteria.
+    /// `resolve_workspace_rule(workspace).shader` without the fold's clones,
+    /// for the per-frame shader resolution.
+    pub(crate) fn workspace_shader(&self, workspace: u32) -> Option<&ShaderAssignment> {
+        self.workspace_rules
+            .iter()
+            .rev()
+            .filter(|rule| rule.workspace == Some(workspace))
+            .find_map(|rule| rule.shader.as_ref())
+    }
+
     pub(crate) fn resolve_workspace_rule(&self, workspace: u32) -> WorkspaceRule {
         let mut effective = WorkspaceRule::default();
         for rule in &self.workspace_rules {
@@ -1995,6 +2025,9 @@ impl Config {
             }
             if rule.snap.is_some() {
                 effective.snap = rule.snap;
+            }
+            if rule.shader.is_some() {
+                effective.shader = rule.shader.clone();
             }
             if rule.on_created_empty.is_some() {
                 effective.on_created_empty = rule.on_created_empty.clone();
@@ -4697,6 +4730,9 @@ pub struct WorkspaceRule {
     pub shadow: Option<ShadowOverrides>,
     /// Per-workspace snap opt-in or opt-out. Window rules take precedence.
     pub snap: Option<bool>,
+    /// Default custom effect for windows on this workspace. A window rule's
+    /// own `shader` (including `none`) takes precedence.
+    pub shader: Option<ShaderAssignment>,
     /// Command run the first time this workspace becomes active while
     /// having zero windows, once per (output, workspace) pair for the
     /// process lifetime (`Smallvil::workspace_created_empty_fired`) --
@@ -8283,12 +8319,9 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                         "Expected a rule glass mode: water frost none, ignoring"
                     ),
                 },
-                "shader" => match value.trim().to_lowercase() {
-                    name if name == "none" => rule.shader = Some(ShaderAssignment::None),
-                    name if valid_ripple_preset_name(&name) => {
-                        rule.shader = Some(ShaderAssignment::Named(name))
-                    }
-                    _ => {
+                "shader" => match ShaderAssignment::parse(value) {
+                    Some(assignment) => rule.shader = Some(assignment),
+                    None => {
                         tracing::warn!(value, "Expected a shader definition name or none, ignoring")
                     }
                 },
@@ -8491,6 +8524,12 @@ fn lower_workspace_rule_block(body: &[waves::Entry]) -> WorkspaceRule {
                 },
                 "on_created_empty" => rule.on_created_empty = Some(value.clone()),
                 "snap" => set_opt_bool(&mut rule.snap, key, value),
+                "shader" => match ShaderAssignment::parse(value) {
+                    Some(assignment) => rule.shader = Some(assignment),
+                    None => {
+                        tracing::warn!(value, "Expected a shader definition name or none, ignoring")
+                    }
+                },
                 "shadow" => match value.as_str() {
                     "true" | "on" => {
                         rule.shadow
@@ -12159,6 +12198,38 @@ animations {
             config.resolve_window_rules(facts_for("alacritty")).shader,
             None
         );
+    }
+
+    #[test]
+    fn workspace_shader_is_a_default_the_window_rule_overrides() {
+        let entries = wave_entries(
+            "workspace_rule {\n workspace = 2\n shader = crt\n }\n\
+             workspace_rule {\n workspace = 2\n shader = glow\n }\n\
+             workspace_rule {\n workspace = 3\n shader = none\n }\n\
+             workspace_rule {\n workspace = 3\n snap = false\n }\n",
+        );
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        let glow = ShaderAssignment::Named("glow".to_string());
+        assert_eq!(config.workspace_shader(2), Some(&glow));
+        assert_eq!(config.resolve_workspace_rule(2).shader, Some(glow.clone()));
+        assert_eq!(config.workspace_shader(3), Some(&ShaderAssignment::None));
+        assert_eq!(config.workspace_shader(4), None);
+
+        let crt = ShaderAssignment::Named("crt".to_string());
+        assert_eq!(ShaderAssignment::resolve(None, Some(&glow)), Some("glow"));
+        assert_eq!(
+            ShaderAssignment::resolve(Some(&crt), Some(&glow)),
+            Some("crt")
+        );
+        assert_eq!(
+            ShaderAssignment::resolve(Some(&ShaderAssignment::None), Some(&glow)),
+            None
+        );
+        assert_eq!(
+            ShaderAssignment::resolve(None, Some(&ShaderAssignment::None)),
+            None
+        );
+        assert_eq!(ShaderAssignment::resolve(None, None), None);
     }
 
     #[test]
