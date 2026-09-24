@@ -1422,6 +1422,22 @@ impl RenderElement<GlesRenderer> for CustomShaderElement {
 }
 
 #[cfg(test)]
+/// A headless renderer on Mesa's software EGL device. Tests that need
+/// one skip where it's missing, so they prove a real GLSL ES compile and
+/// draw where they run, without making a bare CI image fail.
+pub(crate) fn software_renderer() -> Option<GlesRenderer> {
+    use smithay::backend::egl::{EGLContext, EGLDevice, EGLDisplay};
+    let device = EGLDevice::enumerate()
+        .ok()?
+        .find(|device| device.is_software())?;
+    // SAFETY: the display owns the device handle for the renderer's life.
+    let display = unsafe { EGLDisplay::new(device) }.ok()?;
+    let context = EGLContext::new(&display).ok()?;
+    // SAFETY: the context is fresh and used only by this renderer.
+    unsafe { GlesRenderer::new(context) }.ok()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1682,21 +1698,6 @@ vec4 tide_effect(vec2 uv) {
         assert!(Arc::ptr_eq(cached.as_ref().unwrap(), &reloaded));
         assert!(!same_source(&mut cached, &Arc::from("vec4 b;")));
         assert!(!same_source(&mut None, &original));
-    }
-
-    /// A headless renderer on Mesa's software EGL device. Tests that need
-    /// one skip where it's missing, so they prove a real GLSL ES compile and
-    /// draw where they run, without making a bare CI image fail.
-    fn software_renderer() -> Option<GlesRenderer> {
-        use smithay::backend::egl::{EGLContext, EGLDevice, EGLDisplay};
-        let device = EGLDevice::enumerate()
-            .ok()?
-            .find(|device| device.is_software())?;
-        // SAFETY: the display owns the device handle for the renderer's life.
-        let display = unsafe { EGLDisplay::new(device) }.ok()?;
-        let context = EGLContext::new(&display).ok()?;
-        // SAFETY: the context is fresh and used only by this renderer.
-        unsafe { GlesRenderer::new(context) }.ok()
     }
 
     fn stage(
