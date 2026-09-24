@@ -1252,7 +1252,7 @@ rule {
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `scope` | `window` | `window` | The only scope so far. |
-| `source` | `backdrop` | `backdrop` | The scene behind the window, captured the same way frost glass captures it. |
+| `source` | `backdrop` or `"shader:<name>"` | `backdrop` | `backdrop` is the scene behind the window, captured the same way frost glass captures it. `"shader:<name>"` starts from another definition's output instead; see below. |
 | `invalidate` | `damage-box` | `damage-box` | Redraws only when the captured backdrop, geometry, rounding, opacity, parameters or the program change. `always` and `manual` are not supported yet. |
 | `render_scale` | int, `1`–`4` | `2` | Downscale for this effect's capture and stage textures. Each costs `ceil(w / scale) * ceil(h / scale) * 4` bytes. |
 | `stage { }` | block, 1 to 4 | | Ordered; see below. |
@@ -1296,6 +1296,23 @@ shader edged {
     }
 }
 ```
+
+**Building on another definition.** With `source = "shader:<name>"`, the named definition's stages run first and this definition's stages run on their result, so `soft-blur` above can be tinted without copying its stages:
+
+```wave
+shader tinted-blur {
+    source = "shader:soft-blur"
+    stage {
+        file = "shaders/tint.frag"
+        params {
+            strength = 0.3
+            tint_color = 88CCFF
+        }
+    }
+}
+```
+
+The first stage's `tex` is the source's output, and `backdrop` anywhere in this definition (a stage `source` or a `textures` binding) also means that output. The source's own stages still see the real backdrop. This definition's `render_scale` applies to the whole chain, the four-stage limit counts the source's stages too, and sources can themselves have sources. The source's parameters are its own, so a definition that needs different ones is written as its own block. A source that doesn't exist, a loop of sources, going over four stages, or saving a name the source already saves leaves the definition out with a warning. If one of the source's files fails to load, windows using this definition render without it, the same as windows using the source.
 
 **The fragment contract.** A file defines `vec4 tide_effect(vec2 uv)` and may add its own helper functions, structs and constants. It returns premultiplied RGBA; TideWM clamps alpha to `0`–`1` and RGB to alpha. `uv` addresses the input texture with `(0, 0)` at its top-left on both backends. TideWM writes everything else: the `#version 100` GLSL ES 1.00 header, precision, every uniform declaration, `main`, rounding and opacity. So a file may not contain `#version`, `#extension`, `#include`, `#line` or `#pragma` (`#define`, `#undef`, `#if`/`#ifdef`/`#ifndef`/`#elif`/`#else`/`#endif` and `#error` are fine), token pasting (`##`), `uniform`, `attribute`, `varying`, `precision` or `invariant`, and it may not use `main`, `alpha`, `tint`, `v_coords`, `gl_FragColor` or `gl_FragData`, or declare `tex`, `size` or anything starting with `u_`, `gl_` or `tide_`. The check reads GLSL tokens, so comments may mention any of these.
 

@@ -481,6 +481,10 @@ pub struct ShaderStage {
 pub struct ShaderDefinition {
     /// Processing divisor for the effect's own capture, `1..=4`.
     pub render_scale: i32,
+    /// `source = "shader:<name>"`: another definition whose output stands in
+    /// for the backdrop. Its stages are spliced in front of this one's at
+    /// load time, so `stages` is then the whole chain.
+    pub source: Option<String>,
     pub stages: Vec<ShaderStage>,
 }
 
@@ -1508,6 +1512,7 @@ impl Config {
                 }
             }
         }
+        warnings.extend(expand_shader_sources(&mut self.shader_definitions));
         warnings
     }
 
@@ -5572,12 +5577,20 @@ fn parse_shader_definition(name: &str, body: &[waves::Entry]) -> Result<ShaderDe
     }
     let mut definition = ShaderDefinition {
         render_scale: 2,
+        source: None,
         stages: Vec::new(),
     };
     for entry in body {
         match entry {
             waves::Entry::Assign(key, value) => match (key.as_str(), value.trim()) {
                 ("scope", "window") | ("source", "backdrop") | ("invalidate", "damage-box") => {}
+                ("source", value) if value.starts_with("shader:") => {
+                    let source = value["shader:".len()..].trim().to_lowercase();
+                    if !valid_ripple_preset_name(&source) {
+                        return Err(format!("source = {value} does not name a definition"));
+                    }
+                    definition.source = Some(source);
+                }
                 ("scope" | "source" | "invalidate", other) => {
                     return Err(format!("{key} = {other} is not supported yet"));
                 }
@@ -5635,6 +5648,107 @@ fn parse_shader_definition(name: &str, body: &[waves::Entry]) -> Result<ShaderDe
         }
     }
     Ok(definition)
+}
+
+/// Splices every `source = "shader:<name>"` definition's source chain in
+/// front of its own stages, after files have loaded so each file is read
+/// once. The source's last output is saved under a host-reserved name (save
+/// names starting with `tide_` can't be written by hand), the definition's
+/// first stage reads it positionally, and its explicit `backdrop` reads
+/// become reads of that output. Unknown names, cycles, clashing save names
+/// and chains over the stage cap reject the definition, and everything that
+/// sources it, with a warning.
+pub(crate) fn expand_shader_sources(
+    definitions: &mut HashMap<String, ShaderDefinition>,
+) -> Vec<String> {
+    use crate::shader_effect::StageTexture;
+    type Expanded = Result<Vec<ShaderStage>, String>;
+    fn expand(
+        name: &str,
+        definitions: &HashMap<String, ShaderDefinition>,
+        visiting: &mut Vec<String>,
+        done: &mut HashMap<String, Expanded>,
+    ) -> Expanded {
+        if let Some(result) = done.get(name) {
+            return result.clone();
+        }
+        if visiting.iter().any(|visited| visited == name) {
+            return Err(format!("its source chain loops back to {name:?}"));
+        }
+        let definition = definitions
+            .get(name)
+            .ok_or_else(|| format!("its source {name:?} is not a loaded definition"))?;
+        let Some(source) = &definition.source else {
+            return Ok(definition.stages.clone());
+        };
+        visiting.push(name.to_string());
+        let base = expand(source, definitions, visiting, done);
+        visiting.pop();
+        let mut stages = base?;
+        let saved = format!("tide_source_{}", stages.len());
+        if let Some(last) = stages.last_mut() {
+            last.save = Some(saved.clone());
+        }
+        let redirect = |texture: &StageTexture| match texture {
+            StageTexture::Backdrop => StageTexture::Saved(saved.clone()),
+            other => other.clone(),
+        };
+        for stage in &definition.stages {
+            if let Some(name) = stage.save.as_ref().filter(|name| {
+                stages
+                    .iter()
+                    .any(|earlier| earlier.save.as_ref() == Some(*name))
+            }) {
+                return Err(format!("it and its source both save \"{name}\""));
+            }
+            let mut stage = stage.clone();
+            stage.input = stage.input.as_ref().map(redirect);
+            stage.textures = stage
+                .textures
+                .iter()
+                .map(|(binding, texture)| (binding.clone(), redirect(texture)))
+                .collect::<Vec<_>>()
+                .into();
+            stages.push(stage);
+        }
+        if stages.len() > crate::shader_effect::MAX_STAGES {
+            return Err(format!(
+                "with its source it has {} stages, more than {}",
+                stages.len(),
+                crate::shader_effect::MAX_STAGES
+            ));
+        }
+        Ok(stages)
+    }
+
+    let mut names: Vec<String> = definitions
+        .iter()
+        .filter(|(_, definition)| definition.source.is_some())
+        .map(|(name, _)| name.clone())
+        .collect();
+    names.sort_unstable();
+    let mut done = HashMap::new();
+    let mut results = Vec::new();
+    for name in names {
+        let result = expand(&name, definitions, &mut Vec::new(), &mut done);
+        done.insert(name.clone(), result.clone());
+        results.push((name, result));
+    }
+    let mut warnings = Vec::new();
+    for (name, result) in results {
+        match result {
+            Ok(stages) => {
+                if let Some(definition) = definitions.get_mut(&name) {
+                    definition.stages = stages;
+                }
+            }
+            Err(reason) => {
+                definitions.remove(&name);
+                warnings.push(format!("Shader {name:?} skipped: {reason}"));
+            }
+        }
+    }
+    warnings
 }
 
 fn parse_shader_stage(body: &[waves::Entry]) -> Result<ShaderStage, String> {
@@ -12245,6 +12359,7 @@ animations {
         for (body, reason) in [
             (format!("scope = desktop\n{stage}"), "scope = desktop"),
             (format!("source = surface\n{stage}"), "source = surface"),
+            (format!("source = \"shader:\"\n{stage}"), "does not name a definition"),
             (
                 format!("invalidate = always\n{stage}"),
                 "invalidate = always",
@@ -12445,17 +12560,80 @@ shader edged {
         }
     }
 }
+
+shader tinted-blur {
+    source = "shader:soft-blur"
+    stage {
+        file = "shaders/tint.frag"
+        params {
+            strength = 0.3
+            tint_color = 88CCFF
+        }
+    }
+}
 "#,
         );
-        let (config, warnings) = Config::from_raw(lower_entries(&entries));
+        let (mut config, mut warnings) = Config::from_raw(lower_entries(&entries));
+        warnings.extend(expand_shader_sources(&mut config.shader_definitions));
         assert!(warnings.is_empty(), "{warnings:?}");
         assert!(config.shaders_enabled);
         assert_eq!(config.shader_definitions["soft-blur"].stages.len(), 2);
         assert_eq!(config.shader_definitions["edged"].stages.len(), 3);
+        assert_eq!(config.shader_definitions["tinted-blur"].stages.len(), 3);
         assert_eq!(
             config.resolve_window_rules(facts_for("kitty")).shader,
             Some(ShaderAssignment::Named("soft-blur".to_string()))
         );
+    }
+
+    #[test]
+    fn shader_sources_splice_the_source_chain_in_front() {
+        use crate::shader_effect::StageTexture;
+        let entries = wave_entries(
+            "shader blur {\n\
+             stage {\n file = \"h.frag\"\n }\n\
+             stage {\n file = \"v.frag\"\n }\n\
+             }\n\
+             shader wet {\n\
+             source = \"shader:blur\"\n\
+             stage {\n file = \"mix.frag\"\n textures {\n original = backdrop\n }\n }\n\
+             }\n\
+             shader looped-a {\n source = \"shader:looped-b\"\n stage {\n file = \"a.frag\"\n }\n }\n\
+             shader looped-b {\n source = \"shader:looped-a\"\n stage {\n file = \"b.frag\"\n }\n }\n\
+             shader orphan {\n source = \"shader:missing\"\n stage {\n file = \"a.frag\"\n }\n }\n\
+             shader long {\n source = \"shader:wet\"\n stage {\n file = \"a.frag\"\n }\n stage {\n file = \"b.frag\"\n }\n }\n\
+             shader clash-base {\n stage {\n file = \"a.frag\"\n save = x\n }\n stage {\n file = \"b.frag\"\n }\n }\n\
+             shader clash {\n source = \"shader:clash-base\"\n stage {\n file = \"a.frag\"\n save = x\n }\n stage {\n file = \"b.frag\"\n }\n }\n",
+        );
+        let (mut config, warnings) = Config::from_raw(lower_entries(&entries));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let warnings = expand_shader_sources(&mut config.shader_definitions);
+        let wet = &config.shader_definitions["wet"].stages;
+        let files: Vec<&str> = wet.iter().map(|stage| stage.file.as_str()).collect();
+        assert_eq!(files, ["h.frag", "v.frag", "mix.frag"]);
+        assert_eq!(wet[1].save.as_deref(), Some("tide_source_2"));
+        // `backdrop` in the definition means its source's output.
+        assert_eq!(
+            wet[2].textures[0].1,
+            StageTexture::Saved("tide_source_2".to_string())
+        );
+        assert_eq!(wet[2].input, None);
+        assert_eq!(config.shader_definitions["blur"].stages.len(), 2);
+        for (name, reason) in [
+            ("looped-a", "loops back"),
+            ("looped-b", "loops back"),
+            ("orphan", "not a loaded definition"),
+            ("long", "more than 4"),
+            ("clash", "both save"),
+        ] {
+            assert!(!config.shader_definitions.contains_key(name), "{name}");
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning.contains(name) && warning.contains(reason)),
+                "{name}: {warnings:?}"
+            );
+        }
     }
 
     #[test]
@@ -12611,6 +12789,15 @@ shader edged {
              stage {\n\
              file = \"shaders/later.frag\"\n\
              }\n\
+             }\n\
+             shader dimmer {\n\
+             source = \"shader:pass\"\n\
+             stage {\n\
+             file = \"shaders/pass.frag\"\n\
+             params {\n\
+             strength = 0.25\n\
+             }\n\
+             }\n\
              }\n",
         );
         let (_, config, warnings) =
@@ -12634,6 +12821,19 @@ shader edged {
             .iter()
             .any(|w| w.contains("\"bad\" stage 1") && w.contains("`main` is reserved")));
         assert!(warnings.iter().any(|w| w.contains("\"missing\" stage 1")));
+        // A sourced definition carries its source's loaded stages in front.
+        let dimmer = &config.shader_definitions["dimmer"].stages;
+        assert_eq!(dimmer.len(), 2);
+        assert!(dimmer.iter().all(|stage| stage.source.is_some()));
+        assert_eq!(
+            dimmer[0].params[0].1,
+            crate::shader_effect::ShaderParam::Float(0.5)
+        );
+        assert_eq!(
+            dimmer[1].params[0].1,
+            crate::shader_effect::ShaderParam::Float(0.25)
+        );
+        assert_eq!(dimmer[0].save.as_deref(), Some("tide_source_1"));
 
         for name in ["pass.frag", "bad.frag", "later.frag"] {
             assert!(

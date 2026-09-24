@@ -2004,6 +2004,7 @@ vec4 tide_effect(vec2 uv) {
     ) -> Vec<u8> {
         let definition = crate::config::ShaderDefinition {
             render_scale: 1,
+            source: None,
             stages,
         };
         let backdrop = import_gradient(renderer);
@@ -2071,6 +2072,44 @@ vec4 tide_effect(vec2 uv) {
             ],
         );
         assert_eq!(image, inverted(&gradient()));
+    }
+
+    #[test]
+    fn a_sourced_definition_reads_its_sources_output_as_the_backdrop() {
+        let Some(mut renderer) = software_renderer() else {
+            eprintln!("no software EGL device; skipping the real compile and draw");
+            return;
+        };
+        let pick = "vec4 tide_effect(vec2 uv) {\n    return texture2D(other, uv);\n}\n";
+        let mut definitions = std::collections::HashMap::from([
+            (
+                "inverse".to_string(),
+                crate::config::ShaderDefinition {
+                    render_scale: 1,
+                    source: None,
+                    stages: vec![stage(INVERT, &[], &[], None, None)],
+                },
+            ),
+            (
+                "picked".to_string(),
+                crate::config::ShaderDefinition {
+                    render_scale: 1,
+                    source: Some("inverse".to_string()),
+                    stages: vec![stage(
+                        pick,
+                        &[],
+                        &[("other".to_string(), StageTexture::Backdrop)],
+                        None,
+                        None,
+                    )],
+                },
+            ),
+        ]);
+        let warnings = crate::config::expand_shader_sources(&mut definitions);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        // Without the source, `backdrop` would be the gradient itself.
+        let stages = definitions.remove("picked").expect("expanded").stages;
+        assert_eq!(render_chain(&mut renderer, stages), inverted(&gradient()));
     }
 
     #[test]
@@ -2153,6 +2192,7 @@ vec4 tide_effect(vec2 uv) {
         let definition =
             |binding: StageTexture, input: Option<StageTexture>| crate::config::ShaderDefinition {
                 render_scale: 1,
+                source: None,
                 stages: vec![
                     stage(INVERT, &[], &[], None, Some("inverse")),
                     stage(pick, &[], &[("other".to_string(), binding)], input, None),
