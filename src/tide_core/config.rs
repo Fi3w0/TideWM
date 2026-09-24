@@ -6090,10 +6090,13 @@ fn apply_workspace_animation_block(cfg: &mut WorkspaceAnimationConfig, body: &[w
             },
             "curve" | "ease" => match parse_window_animation_curve(value) {
                 Some(value) => cfg.curve = value,
-                None => tracing::warn!(
-                    value,
-                    "Expected workspace easing, cubic-bezier(x1,y1,x2,y2), or spring(mass,stiffness,damping), ignoring"
-                ),
+                None => match spring_curve_rejection(value) {
+                    Some(reason) => tracing::warn!(value, reason, "Invalid workspace spring, ignoring"),
+                    None => tracing::warn!(
+                        value,
+                        "Expected workspace easing, cubic-bezier(x1,y1,x2,y2), or spring(mass,stiffness,damping), ignoring"
+                    ),
+                },
             },
             "travel" | "distance" => match value.parse::<f32>() {
                 Ok(value) if value.is_finite() && (0.0..=1.0).contains(&value) => {
@@ -6161,10 +6164,13 @@ fn apply_window_animation_block(cfg: &mut WindowAnimationConfig, body: &[waves::
             },
             "curve" | "ease" => match parse_window_animation_curve(value) {
                 Some(value) => cfg.curve = value,
-                None => tracing::warn!(
-                    value,
-                    "Expected built-in easing, cubic-bezier(x1,y1,x2,y2), or spring(mass,stiffness,damping), ignoring"
-                ),
+                None => match spring_curve_rejection(value) {
+                    Some(reason) => tracing::warn!(value, reason, "Invalid animation spring, ignoring"),
+                    None => tracing::warn!(
+                        value,
+                        "Expected built-in easing, cubic-bezier(x1,y1,x2,y2), or spring(mass,stiffness,damping), ignoring"
+                    ),
+                },
             },
             "opacity_duration" => match parse_duration_ms(value) {
                 Some(value) if (1..=10_000).contains(&value) => {
@@ -6178,10 +6184,15 @@ fn apply_window_animation_block(cfg: &mut WindowAnimationConfig, body: &[waves::
             "opacity_curve" | "fade_curve" | "opacity_ease" => {
                 match parse_window_animation_curve(value) {
                     Some(value) => cfg.opacity_curve = Some(value),
-                    None => tracing::warn!(
-                        value,
-                        "Expected opacity easing, cubic-bezier(x1,y1,x2,y2), or spring(mass,stiffness,damping), ignoring"
-                    ),
+                    None => match spring_curve_rejection(value) {
+                        Some(reason) => {
+                            tracing::warn!(value, reason, "Invalid opacity spring, ignoring")
+                        }
+                        None => tracing::warn!(
+                            value,
+                            "Expected opacity easing, cubic-bezier(x1,y1,x2,y2), or spring(mass,stiffness,damping), ignoring"
+                        ),
+                    },
                 }
             }
             "offset" | "travel" => match parse_position(value) {
@@ -6243,6 +6254,26 @@ fn apply_window_animation_block(cfg: &mut WindowAnimationConfig, body: &[waves::
                 "Unknown animation setting, ignoring"
             ),
         }
+    }
+}
+
+/// Why a `spring(...)` curve was refused, for its warning. `None` for a
+/// value that isn't a spring or is a valid one.
+fn spring_curve_rejection(value: &str) -> Option<&'static str> {
+    let normalized = value.trim().to_ascii_lowercase();
+    let inner = normalized
+        .strip_prefix("spring(")?
+        .strip_suffix(')')
+        .unwrap_or_default();
+    let values: Option<Vec<f64>> = inner
+        .split(',')
+        .map(|value| value.trim().parse::<f64>().ok())
+        .collect();
+    match values.as_deref() {
+        Some([mass, stiffness, damping]) => {
+            crate::visual::spring::SpringCurve::try_new(*mass, *stiffness, *damping).err()
+        }
+        _ => Some("spring needs three numbers: spring(mass, stiffness, damping)"),
     }
 }
 
@@ -12096,6 +12127,16 @@ animations {
         ] {
             assert!(parse_window_animation_curve(invalid).is_none());
         }
+        // The two refusal reasons from the 2026-09-12 live pass are told apart.
+        let range = spring_curve_rejection("spring(200, 400, 30)").unwrap();
+        let settle = spring_curve_rejection("spring(1, 0.01, 0.01)").unwrap();
+        assert!(range.contains("mass 0.01 to 100"), "{range}");
+        assert!(settle.contains("does not settle"), "{settle}");
+        assert!(spring_curve_rejection("spring(1,2)")
+            .unwrap()
+            .contains("three numbers"));
+        assert_eq!(spring_curve_rejection("spring(1, 400, 30)"), None);
+        assert_eq!(spring_curve_rejection("cubic-out"), None);
     }
 
     #[test]

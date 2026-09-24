@@ -14,6 +14,11 @@ impl SpringCurve {
     /// in mass/s. Require positive finite coefficients and a conservative
     /// position/velocity settling bound within ten seconds before slowdown.
     pub fn new(mass: f64, stiffness: f64, damping: f64) -> Option<Self> {
+        Self::try_new(mass, stiffness, damping).ok()
+    }
+
+    /// `new`, saying which check a rejected spring failed.
+    pub fn try_new(mass: f64, stiffness: f64, damping: f64) -> Result<Self, &'static str> {
         if !mass.is_finite()
             || !stiffness.is_finite()
             || !damping.is_finite()
@@ -21,7 +26,9 @@ impl SpringCurve {
             || !(0.01..=100_000.0).contains(&stiffness)
             || !(0.01..=10_000.0).contains(&damping)
         {
-            return None;
+            return Err(
+                "spring needs mass 0.01 to 100, stiffness 0.01 to 100000 and damping 0.01 to 10000",
+            );
         }
         let mut spring = Self {
             beta: damping / (2.0 * mass),
@@ -29,7 +36,9 @@ impl SpringCurve {
             settle: 0.0,
         };
         if !spring.settled_bound(10.0) {
-            return None;
+            return Err(
+                "spring does not settle within ten seconds; raise its stiffness or damping",
+            );
         }
         let mut low = 0.0;
         let mut high = 10.0;
@@ -42,7 +51,7 @@ impl SpringCurve {
             }
         }
         spring.settle = high;
-        Some(spring)
+        Ok(spring)
     }
 
     fn discriminant(self) -> f64 {
