@@ -32,6 +32,7 @@ Current release: **0.90.104**, second major pre-release. 1.0 is intentionally re
 | IPC: request/response plus an event-stream subscribe mode | Done |
 | `tidectl` CLI, including `doctor`/`report` for bug triage | Done |
 | Water/decoration render stack: impulse ripples, wave workspace transitions, tiled/floating water-glass and per-app liquid frost glass, analytical shadows, animated gradient borders, rounded clipping, configurable window animations, move/resize viscosity, connected-vessel BSP resizing, opt-in floating sway, automatic depth/buoyancy, ambient caustics | Done; tiled/liquid frost is release-GLES nested-verified in Classic/Ocean, standalone AMD remains, and the earlier stack is standalone-AMD-verified |
+| Custom shaders (`shaders { }`, `shader "<name>" { }`): opt-in user `.frag` effects over a window's backdrop, up to four chained stages with `save`/`get` and extra texture bindings, per-window and per-workspace assignment, bounded budgets | Done through Phase 7B; compile/draw covered by Mesa software-GLES tests, not yet run in a nested or native session |
 | Classic Depth Deck (tiled-window park/swap recall) | Done, standalone-AMD-verified |
 | Ocean spatial engine: reefs, per-output cameras, sink/dredge/surface depth, bookmarks, freeform window detach, smart tiling, live Classic↔Ocean migration | Done, standalone-AMD-verified |
 | Ocean compass (off-screen urgent/deep glow cues) and whole-world overview minimap | Done, nested-verified only |
