@@ -431,6 +431,20 @@ fn print_perf_summary(snap: &Value, cpu_pct: Option<f64>, wall: Duration) {
             texture_mib("workspace_transition_bytes"),
         );
     }
+    if let Some(shaders) = snap
+        .get("custom_shaders")
+        .filter(|shaders| shaders.get("enabled").and_then(Value::as_bool) == Some(true))
+    {
+        let count = |key: &str| shaders.get(key).and_then(Value::as_u64).unwrap_or(0);
+        println!(
+            "  custom shaders: {} windows, {} programs, {:.1} MiB captures, {} bypassed, {} compile failures",
+            count("instances"),
+            count("programs"),
+            count("capture_bytes") as f64 / (1024.0 * 1024.0),
+            count("bypassed"),
+            count("compile_failures"),
+        );
+    }
     if let Some(outputs) = outputs {
         for o in outputs {
             let hz = o.get("refresh_hz").and_then(Value::as_f64).unwrap_or(0.0);

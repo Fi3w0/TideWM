@@ -1098,6 +1098,21 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
                     total.saturating_add(transition.estimated_texture_bytes())
                 }),
         );
+    let shader_capture_bytes = state
+        .backdrop_textures
+        .iter()
+        .filter(|(surface, _)| state.custom_shader_instances.contains_key(*surface))
+        .fold(0_u64, |total, (_, capture)| {
+            total.saturating_add(capture.estimated_texture_bytes())
+        });
+    let (shader_programs, shader_compiles, shader_compile_failures) =
+        state.custom_shader_programs.stats();
+    let shader_updates = state
+        .custom_shader_instances
+        .values()
+        .fold(0_u64, |total, instance| {
+            total.saturating_add(instance.updates())
+        });
     let tide_texture_estimate_bytes = backdrop_texture_bytes
         .saturating_add(layer_alpha_mask_bytes)
         .saturating_add(wallpaper_texture_bytes)
@@ -1141,6 +1156,19 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
             "caustics_bytes": caustics_texture_bytes,
             "workspace_transition_bytes": transition_texture_bytes,
             "scope": "ARGB payload for TideWM-owned backdrop, wallpaper, caustics, and active water/non-water workspace-transition textures; excludes client buffers and driver overhead",
+        },
+        "custom_shaders": {
+            "enabled": state.config.shaders_enabled,
+            "definitions": state.config.shader_definitions.len(),
+            "programs": shader_programs,
+            "compiles": shader_compiles,
+            "compile_failures": shader_compile_failures,
+            "instances": state.custom_shader_instances.len(),
+            "capture_bytes": shader_capture_bytes,
+            "bypassed": state.custom_shader_bypassed.len(),
+            "bypasses": state.custom_shader_bypasses,
+            "updates": shader_updates,
+            "scope": "capture_bytes is the share of backdrop_bytes feeding custom effects; updates count redraws with new content by live instances",
         },
         "outputs": outputs,
     })

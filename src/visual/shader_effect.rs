@@ -40,6 +40,19 @@ pub const MAX_DEFINITIONS: usize = 32;
 pub const MAX_STAGES: usize = 4;
 pub const MAX_PARAMS_PER_STAGE: usize = 8;
 pub const MAX_NAME_BYTES: usize = 64;
+/// Windows that may draw a custom effect at once.
+pub const MAX_ACTIVE_INSTANCES: usize = 128;
+/// Aggregate RGBA8-equivalent payload of every custom effect capture.
+pub const MAX_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
+
+/// `ceil(w / divisor) * ceil(h / divisor) * 4`, saturating.
+pub fn capture_payload_bytes(width: i32, height: i32, divisor: i32) -> u64 {
+    let divisor = i64::from(divisor.max(1));
+    let side = |length: i32| {
+        u64::try_from((i64::from(length.max(0)) + divisor - 1) / divisor).unwrap_or(0)
+    };
+    side(width).saturating_mul(side(height)).saturating_mul(4)
+}
 
 /// The only function a user file must define.
 pub const ENTRY_POINT: &str = "tide_effect";
@@ -646,9 +659,21 @@ pub struct ProgramLookup {
 #[derive(Default)]
 pub struct CustomShaderPrograms {
     entries: HashMap<String, CachedProgram>,
+    compiles: u64,
+    compile_failures: u64,
 }
 
 impl CustomShaderPrograms {
+    /// `(programs, compiles, compile_failures)` for `tidectl perf`.
+    pub fn stats(&self) -> (usize, u64, u64) {
+        let programs = self
+            .entries
+            .values()
+            .filter(|entry| entry.good.is_some())
+            .count();
+        (programs, self.compiles, self.compile_failures)
+    }
+
     /// Whether `lookup` could return a program without compiling anything
     /// known to fail: a last-good program, or a source not yet tried.
     pub fn can_draw(&self, name: &str, source: Option<&Arc<str>>) -> bool {
@@ -680,7 +705,12 @@ impl CustomShaderPrograms {
             self.entries
                 .insert(name.to_string(), CachedProgram::default());
         }
-        let entry = self.entries.get_mut(name).expect("entry inserted above");
+        let Self {
+            entries,
+            compiles,
+            compile_failures,
+        } = self;
+        let entry = entries.get_mut(name).expect("entry inserted above");
         let mut lookup = ProgramLookup {
             program: None,
             failure: None,
@@ -708,6 +738,7 @@ impl CustomShaderPrograms {
             return lookup;
         }
         *compile_budget -= 1;
+        *compiles += 1;
         let uniforms: Vec<UniformName<'_>> = CONTRACT_UNIFORMS
             .iter()
             .map(|(name, ty)| UniformName::new(*name, contract_uniform_type(ty)))
@@ -729,6 +760,7 @@ impl CustomShaderPrograms {
                 lookup.program = entry.good.clone();
             }
             Err(err) => {
+                *compile_failures += 1;
                 entry.failed = Some(source.clone());
                 lookup.failure = Some(compile_failure_message(name, &err, entry.good.is_some()));
                 lookup.program = entry.good.clone();
@@ -785,6 +817,7 @@ pub struct ShaderInstance {
     commit: Option<CommitCounter>,
     time: f32,
     delta: f32,
+    updates: u64,
 }
 
 impl ShaderInstance {
@@ -795,6 +828,7 @@ impl ShaderInstance {
             commit: None,
             time: 0.0,
             delta: 0.0,
+            updates: 0,
         }
     }
 
@@ -811,8 +845,14 @@ impl ShaderInstance {
                 .unwrap_or(0.0);
             self.last_update = Some(now);
             self.commit = Some(commit);
+            self.updates += 1;
         }
         (self.time, self.delta)
+    }
+
+    /// Content updates this instance has drawn.
+    pub fn updates(&self) -> u64 {
+        self.updates
     }
 }
 
@@ -1145,6 +1185,21 @@ vec4 tide_effect(vec2 uv) {
 
         assert!(read_fragment_file(&dir.join("missing.frag")).is_err());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn capture_payload_rounds_each_axis_up_and_saturates() {
+        assert_eq!(capture_payload_bytes(1920, 1080, 1), 1920 * 1080 * 4);
+        assert_eq!(capture_payload_bytes(1921, 1081, 2), 961 * 541 * 4);
+        assert_eq!(capture_payload_bytes(3, 3, 4), 4);
+        assert_eq!(capture_payload_bytes(-5, 10, 1), 0);
+        assert_eq!(
+            capture_payload_bytes(i32::MAX, i32::MAX, 1),
+            (i32::MAX as u64).pow(2) * 4
+        );
+        // Two native 4K captures already use most of the aggregate budget.
+        assert!(2 * capture_payload_bytes(3840, 2160, 1) < MAX_PAYLOAD_BYTES);
+        assert!(3 * capture_payload_bytes(3840, 2160, 1) > MAX_PAYLOAD_BYTES);
     }
 
     #[test]

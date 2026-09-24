@@ -328,6 +328,10 @@ pub struct Smallvil {
     /// `u_time`/`u_delta` clocks for windows currently drawing an effect.
     /// Evicted in `detach_mapped_toplevel`, pruned on reload, cleared on lock.
     pub(crate) custom_shader_instances: HashMap<WlSurface, crate::shader_effect::ShaderInstance>,
+    /// Windows refused a custom effect by the instance or payload cap. They
+    /// take their normal path until a later capture pass admits them.
+    pub(crate) custom_shader_bypassed: HashSet<WlSurface>,
+    pub(crate) custom_shader_bypasses: u64,
     /// Captured immediately before a visible frame and sampled by
     /// water/frost glass while building that same frame's elements. The
     /// window-sized texture is reused until its dimensions change. Evicted in
@@ -3754,6 +3758,8 @@ impl Smallvil {
             window_shader_assignments: HashMap::new(),
             custom_shader_programs: Default::default(),
             custom_shader_instances: HashMap::new(),
+            custom_shader_bypassed: HashSet::new(),
+            custom_shader_bypasses: 0,
             backdrop_textures: HashMap::new(),
             layer_alpha_masks: HashMap::new(),
             layer_dim_buffers: HashMap::new(),
@@ -5458,6 +5464,7 @@ impl Smallvil {
         self.backdrop_textures.clear();
         self.layer_alpha_masks.clear();
         self.custom_shader_instances.clear();
+        self.custom_shader_bypassed.clear();
         // Closing snapshots contain client pixels and normally render above
         // the desktop. They are irrelevant once the security boundary is
         // active and must never survive into a locked composition.
@@ -6258,11 +6265,83 @@ impl Smallvil {
     /// Whether a custom effect can draw for this window this frame: assigned
     /// with the master on, and a last-good program or an untried source.
     fn custom_shader_drawable(&self, surface: &WlSurface) -> bool {
+        !self.custom_shader_bypassed.contains(surface) && self.custom_shader_wanted(surface)
+    }
+
+    /// `custom_shader_drawable` before the budget: what admission judges.
+    fn custom_shader_wanted(&self, surface: &WlSurface) -> bool {
         self.resolved_shader_assignment(surface)
             .is_some_and(|(name, definition)| {
                 self.custom_shader_programs
                     .can_draw(name, definition.single_stage_source())
             })
+    }
+
+    /// Admits or bypasses each shaded window on this output against the
+    /// instance and payload caps, before any capture allocates. Payload is
+    /// what the window's capture will cost at its definition's
+    /// `render_scale`, plus every other admitted window's current capture.
+    fn admit_custom_shader_captures(
+        &mut self,
+        output: &Output,
+        placements: &[crate::placement::PlacedWindow],
+    ) {
+        for placement in placements {
+            let Some(surface) = placement
+                .surface()
+                .filter(|_| placement.replacement_eligible())
+            else {
+                continue;
+            };
+            if !self.custom_shader_wanted(surface) {
+                self.custom_shader_bypassed.remove(surface);
+                continue;
+            }
+            let Some((name, render_scale)) = self
+                .resolved_shader_assignment(surface)
+                .map(|(name, definition)| (name.to_string(), definition.render_scale))
+            else {
+                continue;
+            };
+            let Some(physical_rect) = self.placement_physical_rect(placement, output) else {
+                continue;
+            };
+            let wanted = crate::shader_effect::capture_payload_bytes(
+                physical_rect.size.w,
+                physical_rect.size.h,
+                render_scale,
+            );
+            let admitted = |other: &WlSurface| {
+                other != surface
+                    && self.custom_shader_instances.contains_key(other)
+                    && !self.custom_shader_bypassed.contains(other)
+            };
+            let others = self
+                .backdrop_textures
+                .iter()
+                .filter(|(other, _)| admitted(other))
+                .fold(0_u64, |total, (_, capture)| {
+                    total.saturating_add(capture.estimated_texture_bytes())
+                });
+            let instances = self
+                .custom_shader_instances
+                .keys()
+                .filter(|other| admitted(other))
+                .count()
+                + 1;
+            if instances <= crate::shader_effect::MAX_ACTIVE_INSTANCES
+                && others.saturating_add(wanted) <= crate::shader_effect::MAX_PAYLOAD_BYTES
+            {
+                self.custom_shader_bypassed.remove(surface);
+            } else if self.custom_shader_bypassed.insert(surface.clone()) {
+                self.custom_shader_bypasses += 1;
+                self.queue_shader_failure(format!(
+                    "Shader {name:?} skipped on a window: custom effects are capped at {} windows and {} MiB of captures",
+                    crate::shader_effect::MAX_ACTIVE_INSTANCES,
+                    crate::shader_effect::MAX_PAYLOAD_BYTES / (1024 * 1024)
+                ));
+            }
+        }
     }
 
     /// Whether a window's captured backdrop feeds anything: a custom effect
@@ -6727,6 +6806,7 @@ impl Smallvil {
         output: &Output,
         placements: &[crate::placement::PlacedWindow],
     ) {
+        self.admit_custom_shader_captures(output, placements);
         let surfaces: Vec<WlSurface> = placements
             .iter()
             .filter(|placement| placement.replacement_eligible())
@@ -6790,7 +6870,13 @@ impl Smallvil {
                 continue;
             };
 
-            let capture_scale = self.config.backdrop_capture_scale;
+            // A custom effect processes its capture at its own divisor.
+            let capture_scale = self
+                .custom_shader_drawable(&surface)
+                .then(|| self.resolved_shader_assignment(&surface))
+                .flatten()
+                .map(|(_, definition)| definition.render_scale)
+                .unwrap_or(self.config.backdrop_capture_scale);
             let first_capture = !self.backdrop_textures.contains_key(&surface);
             if first_capture {
                 let Some(mut capture) = crate::backdrop::BackdropCapture::new(
@@ -12747,6 +12833,7 @@ impl Smallvil {
                     }
                     self.custom_shader_instances
                         .retain(|surface, _| self.window_shader_assignments.contains_key(surface));
+                    self.custom_shader_bypassed.clear();
                     // The mode or frost tuning may have changed. Force the
                     // shared pre-frame pipeline to rebuild against the current
                     // window geometry instead of briefly showing stale content.
