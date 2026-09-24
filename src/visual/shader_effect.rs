@@ -44,6 +44,8 @@ pub const MAX_NAME_BYTES: usize = 64;
 /// implicit `tex` that is five texture units, inside GLES2's guaranteed
 /// minimum of eight, so no driver query is needed yet.
 pub const MAX_TEXTURES_PER_STAGE: usize = 4;
+/// Texture unit of a layer's `ignore_alpha` mask, after the extra textures.
+const ALPHA_MASK_UNIT: usize = 1 + MAX_TEXTURES_PER_STAGE;
 /// Windows that may draw a custom effect at once.
 pub const MAX_ACTIVE_INSTANCES: usize = 128;
 /// Aggregate RGBA8-equivalent payload of every custom effect capture.
@@ -545,7 +547,9 @@ pub fn wrap_texture_fragment(
          #if defined(DEBUG_FLAGS)\n\
          uniform float tint;\n\
          #endif\n\
-         varying vec2 v_coords;\n",
+         varying vec2 v_coords;\n\
+         uniform sampler2D u_alpha_mask;\n\
+         uniform float u_ignore_alpha;\n",
     );
     for (name, ty) in CONTRACT_UNIFORMS {
         out.push_str(&format!("uniform {ty} {name};\n"));
@@ -595,6 +599,8 @@ pub fn wrap_texture_fragment(
          color.a = clamp(color.a, 0.0, 1.0);\n\
          color.rgb = clamp(color.rgb, vec3(0.0), vec3(color.a));\n\
          color *= tide_rounded_mask() * alpha;\n\
+         if (u_ignore_alpha >= 0.0)\n\
+         color *= step(u_ignore_alpha, texture2D(u_alpha_mask, v_coords).a);\n\
          #if defined(DEBUG_FLAGS)\n\
          if (tint == 1.0)\n\
          color = vec4(0.0, 0.2, 0.0, 0.2) + color * 0.8;\n\
@@ -820,6 +826,10 @@ impl CustomShaderPrograms {
                     .iter()
                     .map(|(name, _)| UniformName::new(name.as_str(), UniformType::_1i)),
             )
+            .chain([
+                UniformName::new("u_alpha_mask", UniformType::_1i),
+                UniformName::new("u_ignore_alpha", UniformType::_1f),
+            ])
             .collect();
         match renderer.compile_custom_texture_shader(&**source, &uniforms) {
             Ok(program) => {
@@ -1116,6 +1126,19 @@ pub fn stage_content_version(
     hash.finish()
 }
 
+/// `base` extended with a layer mask's content version and threshold, so a
+/// changed mask redraws the effect.
+pub fn with_mask_version(base: u64, mask: Option<(usize, f32)>) -> u64 {
+    let Some((version, threshold)) = mask else {
+        return base;
+    };
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    base.hash(&mut hash);
+    version.hash(&mut hash);
+    threshold.to_bits().hash(&mut hash);
+    hash.finish()
+}
+
 /// What a chain pass produced for the panel and the frame pump.
 #[derive(Default)]
 pub struct ChainOutcome {
@@ -1291,6 +1314,9 @@ pub struct CustomShaderElement {
     delta: f32,
     /// Bound to texture units 1.. in the program's `textures` order.
     textures: Vec<GlesTexture>,
+    /// A layer's composed alpha and `ignore_alpha` threshold. Pixels whose
+    /// layer alpha is below the threshold draw nothing.
+    alpha_mask: Option<(GlesTexture, f32)>,
 }
 
 impl CustomShaderElement {
@@ -1320,11 +1346,17 @@ impl CustomShaderElement {
             time,
             delta,
             textures: Vec::new(),
+            alpha_mask: None,
         }
     }
 
     pub fn with_textures(mut self, textures: Vec<GlesTexture>) -> Self {
         self.textures = textures;
+        self
+    }
+
+    pub fn with_alpha_mask(mut self, mask: GlesTexture, threshold: f32) -> Self {
+        self.alpha_mask = Some((mask, threshold.clamp(0.0, 1.0)));
         self
     }
 
@@ -1364,19 +1396,36 @@ impl CustomShaderElement {
                 .enumerate()
                 .map(|(unit, (name, _))| Uniform::new(name.as_str(), unit as i32 + 1)),
         );
+        uniforms.push(Uniform::new("u_alpha_mask", ALPHA_MASK_UNIT as i32));
+        uniforms.push(Uniform::new(
+            "u_ignore_alpha",
+            self.alpha_mask
+                .as_ref()
+                .map_or(-1.0, |(_, threshold)| *threshold),
+        ));
         uniforms
     }
 
     fn bind_textures(&self, frame: &mut GlesFrame<'_, '_>, bind: bool) -> Result<(), GlesError> {
-        if self.textures.is_empty() {
+        if self.textures.is_empty() && self.alpha_mask.is_none() {
             return Ok(());
         }
+        let units = self
+            .textures
+            .iter()
+            .enumerate()
+            .map(|(index, texture)| (index + 1, texture))
+            .chain(
+                self.alpha_mask
+                    .as_ref()
+                    .map(|(mask, _)| (ALPHA_MASK_UNIT, mask)),
+            );
         frame.with_context(|gl| {
-            for (unit, texture) in self.textures.iter().enumerate() {
+            for (unit, texture) in units {
                 // SAFETY: plain texture-unit state on the frame's current
                 // context, restored to unit 0 for Smithay's own draws.
                 unsafe {
-                    gl.ActiveTexture(ffi::TEXTURE1 + unit as u32);
+                    gl.ActiveTexture(ffi::TEXTURE0 + unit as u32);
                     gl.BindTexture(ffi::TEXTURE_2D, if bind { texture.tex_id() } else { 0 });
                     if bind {
                         // Smithay only sets sampling state on the unit-0
@@ -1792,14 +1841,6 @@ vec4 tide_effect(vec2 uv) {
         opacity: f32,
         corner_radii: [f32; 4],
     ) -> Vec<u8> {
-        use smithay::backend::{
-            allocator::Fourcc,
-            renderer::{damage::OutputDamageTracker, Bind, ExportMem, Offscreen},
-        };
-        let size = smithay::utils::Size::<i32, Buffer>::from((SIZE, SIZE));
-        let mut output: GlesTexture = renderer
-            .create_buffer(Fourcc::Abgr8888, size)
-            .expect("allocate target");
         let element = CustomShaderElement::new(
             Id::new(),
             CommitCounter::default(),
@@ -1813,6 +1854,19 @@ vec4 tide_effect(vec2 uv) {
             (0.0, 0.0),
         )
         .with_textures(textures);
+        draw_element(renderer, element)
+    }
+
+    /// Draws one element into a fresh `SIZE`-square target and reads it back.
+    fn draw_element(renderer: &mut GlesRenderer, element: CustomShaderElement) -> Vec<u8> {
+        use smithay::backend::{
+            allocator::Fourcc,
+            renderer::{damage::OutputDamageTracker, Bind, ExportMem, Offscreen},
+        };
+        let size = smithay::utils::Size::<i32, Buffer>::from((SIZE, SIZE));
+        let mut output: GlesTexture = renderer
+            .create_buffer(Fourcc::Abgr8888, size)
+            .expect("allocate target");
         let mut target = renderer.bind(&mut output).expect("bind target");
         OutputDamageTracker::new((SIZE, SIZE), 1.0, Transform::Normal)
             .render_output(renderer, &mut target, 0, &[element], [0.0, 0.0, 0.0, 0.0])
@@ -2142,6 +2196,62 @@ vec4 tide_effect(vec2 uv) {
             .expect("no recompile needed");
         assert_eq!(program.textures.to_vec(), last.textures.to_vec());
         assert_ne!(before, stage_content_version(chain_base, last, &program));
+    }
+
+    #[test]
+    fn a_layer_alpha_mask_hides_the_effect_where_the_layer_is_transparent() {
+        use smithay::backend::{
+            allocator::Fourcc,
+            renderer::{damage::OutputDamageTracker, Bind, Offscreen},
+        };
+        let Some(mut renderer) = software_renderer() else {
+            eprintln!("no software EGL device; skipping the real compile and draw");
+            return;
+        };
+        let mut programs = CustomShaderPrograms::default();
+        let program = compile(&mut renderer, &mut programs, "mask", PASSTHROUGH, &[])
+            .program
+            .expect("compiled");
+        let size = smithay::utils::Size::<i32, Buffer>::from((SIZE, SIZE));
+        let mut mask = |alpha: f32| {
+            let mut mask: GlesTexture = renderer
+                .create_buffer(Fourcc::Argb8888, size)
+                .expect("allocate mask");
+            let mut target = renderer.bind(&mut mask).expect("bind mask");
+            OutputDamageTracker::new((SIZE, SIZE), 1.0, Transform::Normal)
+                .render_output(
+                    &mut renderer,
+                    &mut target,
+                    0,
+                    &Vec::<CustomShaderElement>::new(),
+                    [0.0, 0.0, 0.0, alpha],
+                )
+                .expect("clear mask");
+            drop(target);
+            mask
+        };
+        let (transparent, opaque) = (mask(0.0), mask(1.0));
+        let masked = |renderer: &mut GlesRenderer, mask: GlesTexture| {
+            let input = import_gradient(renderer);
+            let element = CustomShaderElement::new(
+                Id::new(),
+                CommitCounter::default(),
+                input,
+                Rectangle::from_size((SIZE, SIZE).into()),
+                program.clone(),
+                [0.0; 4],
+                2.0,
+                0.5,
+                1.0,
+                (0.0, 0.0),
+            )
+            .with_alpha_mask(mask, 0.5);
+            draw_element(renderer, element)
+        };
+        assert!(masked(&mut renderer, transparent)
+            .chunks(4)
+            .all(|px| px[3] == 0));
+        assert_eq!(masked(&mut renderer, opaque), gradient());
     }
 
     #[test]

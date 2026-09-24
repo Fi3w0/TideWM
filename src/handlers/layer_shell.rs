@@ -184,6 +184,9 @@ impl WlrLayerShellHandler for Smallvil {
         // nothing else ever removes this map's entries for a layer surface.
         self.backdrop_textures.remove(surface.wl_surface());
         self.layer_alpha_masks.remove(surface.wl_surface());
+        self.layer_shader_assignments.remove(surface.wl_surface());
+        self.custom_shader_instances.remove(surface.wl_surface());
+        self.custom_shader_bypassed.remove(surface.wl_surface());
 
         // Unmap from whichever output actually has it, then let retile()
         // (which re-tiles every output, re-reading each one's fresh

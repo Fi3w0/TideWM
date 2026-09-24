@@ -1245,7 +1245,7 @@ rule {
 }
 ```
 
-`rule { shader = <name> }` assigns a definition to matching windows, last matching rule wins. `workspace_rule { shader = <name> }` sets a default for every window on that workspace, and a window rule's own `shader` (including `shader = none`) takes precedence over it. An unknown name, or a definition that failed to load and never compiled, leaves the window on its normal render path. The repository ships example files in `share/shaders/` (`tint.frag`, `blur-h.frag`, `blur-v.frag`, `edge-mix.frag`); copy the ones you want next to your `config.wave`.
+`rule { shader = <name> }` assigns a definition to matching windows, last matching rule wins. `workspace_rule { shader = <name> }` sets a default for every window on that workspace, and a window rule's own `shader` (including `shader = none`) takes precedence over it. Bars, launchers and other layer surfaces only get an effect from an explicit `layer_rule { shader = <name> }`; there `ignore_alpha` masks the effect out of the layer's transparent pixels, and the last stage draws without rounding. An unknown name, or a definition that failed to load and never compiled, leaves the window on its normal render path. The repository ships example files in `share/shaders/` (`tint.frag`, `blur-h.frag`, `blur-v.frag`, `edge-mix.frag`); copy the ones you want next to your `config.wave`.
 
 **Definitions.** A later `shader` block with the same name replaces the earlier one whole, so a definition's stages are always the ones written in one block. At most 32 definitions load.
 
@@ -1308,7 +1308,7 @@ shader edged {
 | `u_texel` | `vec2` | `1.0 / u_texture_size`. |
 | `u_time` | `float` | Seconds since the effect started on this window, modulo 4096, sampled once per update. Under `damage-box` it does not by itself cause redraws. |
 | `u_delta` | `float` | Seconds since the previous update, clamped to `0`–`0.1`; `0` on the first. |
-| `u_corner_radii` | `vec4` | Destination corner radii in physical pixels, top-left, top-right, bottom-right, bottom-left. Zero in earlier stages. |
+| `u_corner_radii` | `vec4` | Destination corner radii in physical pixels, top-left, top-right, bottom-right, bottom-left. Zero in earlier stages and on layers. |
 | `u_rounding_power`, `u_antialias` | `float` | The resolved rounding shape and edge softness. |
 
 Porting a Hyprland `screen_shader` usually means deleting its `precision` line and the `varying`/`uniform` declarations TideWM already provides, renaming `void main()` to `vec4 tide_effect(vec2 uv)`, using `uv` for `v_texcoord`, and turning `gl_FragColor = x;` into `return x;`. Shaders written for desktop GLSL (`#version 330`, `texture(...)`, `textureSize(...)`) need rewriting for GLSL ES 1.00 (`texture2D`, `u_texture_size`).
@@ -1654,7 +1654,8 @@ Matches a layer-shell surface (a bar, panel, or launcher, not an ordinary app wi
 | `dim_amount` | float 0.0-1.0, optional | The dim overlay's alpha. Default `0.35` when `dim_around` is on and this is unset. |
 | `above_lock_screen` | bool | Default `false`. Keeps the matched surface rendered on top of the session-lock surface instead of being blanked with everything else — Hyprland's `abovelock`. Render-only: input still never reaches anything but the lock surface itself while locked, so this cannot be used to bypass the lock. Screenshots/screencasts taken while locked still honor `block_capture` for an `above_lock_screen` surface. |
 | `blur` | bool | Default `false`. Frost-glasses the matched surface's own backdrop — Hyprland's `layerrule = blur`. Requires the global `frost { enabled = true }` (checked separately from this per-namespace opt-in); always frost, there's no water-refraction choice for a bar. |
-| `ignore_alpha` | float 0.0-1.0, optional | Masks layer blur using the composed alpha of the complete layer surface tree. Pixels below the threshold do not blur, which prevents a transparent full-output click-catcher from frosting the entire monitor. Has no effect unless `blur = true`. |
+| `ignore_alpha` | float 0.0-1.0, optional | Masks layer blur (or a layer's `shader`) using the composed alpha of the complete layer surface tree. Pixels below the threshold do not blur, which prevents a transparent full-output click-catcher from frosting the entire monitor. Has no effect unless `blur = true` or `shader` is set. |
+| `shader` | definition name, or `none`, optional | Custom effect from a `shader "<name>" { }` definition over the layer's backdrop while `shaders { enabled = true }`, in place of its frost if `blur = true` is also set (frost takes over again while the shader has no compiled program). Last matching rule with a `shader` wins; layers never inherit a window or workspace shader. See "Custom shaders". |
 
 ```
 layer_rule {

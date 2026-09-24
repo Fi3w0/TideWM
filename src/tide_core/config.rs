@@ -1975,6 +1975,18 @@ impl Config {
             .any(|rule| rule.blur && rule.matches(namespace))
     }
 
+    /// The custom effect a layer's last matching `layer_rule { shader }`
+    /// names, `None` for `shader = none` or no matching assignment.
+    pub(crate) fn layer_shader(&self, namespace: &str) -> Option<&str> {
+        let assignment = self
+            .layer_rules
+            .iter()
+            .rev()
+            .filter(|rule| rule.matches(namespace))
+            .find_map(|rule| rule.shader.as_ref());
+        ShaderAssignment::resolve(assignment, None)
+    }
+
     /// Last matching alpha threshold for a blurred layer. An unset value
     /// leaves the full negotiated layer geometry blurred.
     pub(crate) fn layer_ignore_alpha(&self, namespace: &str) -> Option<f32> {
@@ -4715,6 +4727,9 @@ pub struct LayerRule {
     pub above_lock_screen: bool,
     pub blur: bool,
     pub ignore_alpha: Option<f32>,
+    /// Custom effect for the matched layer, or `none` to clear an earlier
+    /// match. Layers never inherit a window or workspace shader.
+    pub shader: Option<ShaderAssignment>,
 }
 
 impl LayerRule {
@@ -8781,6 +8796,12 @@ fn lower_layer_rule_block(body: &[waves::Entry]) -> LayerRule {
             },
             "above_lock_screen" => set_bool(&mut rule.above_lock_screen, key, value),
             "blur" => set_bool(&mut rule.blur, key, value),
+            "shader" => match ShaderAssignment::parse(value) {
+                Some(assignment) => rule.shader = Some(assignment),
+                None => {
+                    tracing::warn!(value, "Expected a shader definition name or none, ignoring")
+                }
+            },
             "ignore_alpha" => match value.parse::<f32>() {
                 Ok(value) if value.is_finite() => {
                     rule.ignore_alpha = Some(value.clamp(0.0, 1.0));
@@ -12544,6 +12565,22 @@ shader edged {
             None
         );
         assert_eq!(ShaderAssignment::resolve(None, None), None);
+    }
+
+    #[test]
+    fn layer_shader_is_explicit_and_last_match_wins() {
+        let entries = wave_entries(
+            "layer_rule {\n namespace = waybar\n shader = glow\n }\n\
+             layer_rule {\n namespace = waybar\n ignore_alpha = 0.1\n }\n\
+             layer_rule {\n namespace = rofi\n shader = glow\n }\n\
+             layer_rule {\n namespace = rofi\n shader = none\n }\n",
+        );
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        // A later rule without `shader` leaves the earlier assignment alone.
+        assert_eq!(config.layer_shader("waybar"), Some("glow"));
+        assert_eq!(config.layer_ignore_alpha("waybar"), Some(0.1));
+        assert_eq!(config.layer_shader("rofi"), None);
+        assert_eq!(config.layer_shader("mako"), None);
     }
 
     #[test]
