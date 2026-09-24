@@ -196,7 +196,7 @@ const GLSL_KEYWORDS: &[&str] = &[
 
 /// Where a stage reads a texture from: the window's captured backdrop, or
 /// the output of an earlier stage that `save`d it (`"get:name"`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StageTexture {
     Backdrop,
     Saved(String),
@@ -786,8 +786,10 @@ impl CustomShaderPrograms {
         };
         if same_source(&mut entry.good_source, source) {
             if let Some(good) = &mut entry.good {
-                // Same source means the same declarations, so only values moved.
+                // Same source means the same declarations, so only parameter
+                // values and texture binding sources can have moved.
                 good.params = stage.params.clone();
+                good.textures = stage.textures.clone();
             }
             lookup.program = entry.good.clone();
             return lookup;
@@ -1090,6 +1092,30 @@ pub fn stage_textures(
         .collect()
 }
 
+/// Hashes which textures a stage reads, so rewiring `source` or
+/// `textures { }` without touching the file still counts as a change.
+pub fn hash_stage_bindings(
+    hash: &mut impl Hasher,
+    stage: &crate::config::ShaderStage,
+    program: &ShaderProgram,
+) {
+    stage.input.hash(hash);
+    program.textures.hash(hash);
+}
+
+/// The last stage's content identity: what feeds it (the capture or the
+/// chain's version) plus which textures it reads.
+pub fn stage_content_version(
+    base: u64,
+    stage: &crate::config::ShaderStage,
+    program: &ShaderProgram,
+) -> u64 {
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    base.hash(&mut hash);
+    hash_stage_bindings(&mut hash, stage, program);
+    hash.finish()
+}
+
 /// What a chain pass produced for the panel and the frame pump.
 #[derive(Default)]
 pub struct ChainOutcome {
@@ -1109,7 +1135,7 @@ pub fn run_chain(
     name: &str,
     definition: &crate::config::ShaderDefinition,
     backdrop: &GlesTexture,
-    capture_version: usize,
+    (capture_id, capture_version): (&Id, usize),
     compile_budget: &mut usize,
 ) -> ChainOutcome {
     use smithay::backend::{
@@ -1136,11 +1162,15 @@ pub fn run_chain(
         }
     }
     let size = backdrop.size();
+    // A capture's version restarts in every new capture, so its identity
+    // is part of the key too.
     let mut hash = std::collections::hash_map::DefaultHasher::new();
+    capture_id.hash(&mut hash);
     capture_version.hash(&mut hash);
     (size.w, size.h).hash(&mut hash);
-    for program in &chain {
+    for (stage, program) in stages.iter().zip(&chain) {
         program.generation.hash(&mut hash);
+        hash_stage_bindings(&mut hash, stage, program);
         for (param, value) in program.params.iter() {
             param.hash(&mut hash);
             value.hash_bits(&mut hash);
@@ -1932,7 +1962,7 @@ vec4 tide_effect(vec2 uv) {
             "chain",
             &definition,
             &backdrop,
-            1,
+            (&Id::new(), 1),
             &mut 8,
         );
         assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
@@ -2056,6 +2086,62 @@ vec4 tide_effect(vec2 uv) {
         assert!(image.chunks(4).all(|px| px[0].abs_diff(64) <= 1
             && px[1].abs_diff(128) <= 1
             && px[2].abs_diff(191) <= 1));
+    }
+
+    #[test]
+    fn rewiring_bindings_or_a_new_capture_counts_as_a_change() {
+        let Some(mut renderer) = software_renderer() else {
+            eprintln!("no software EGL device; skipping the real compile and draw");
+            return;
+        };
+        let saved = |name: &str| StageTexture::Saved(name.to_string());
+        let pick = "vec4 tide_effect(vec2 uv) {\n    return texture2D(other, uv);\n}\n";
+        let definition =
+            |binding: StageTexture, input: Option<StageTexture>| crate::config::ShaderDefinition {
+                render_scale: 1,
+                stages: vec![
+                    stage(INVERT, &[], &[], None, Some("inverse")),
+                    stage(pick, &[], &[("other".to_string(), binding)], input, None),
+                ],
+            };
+        let backdrop = import_gradient(&mut renderer);
+        let mut programs = CustomShaderPrograms::default();
+        let mut instance = ShaderInstance::new();
+        let first_capture = Id::new();
+        let mut version = |definition: &crate::config::ShaderDefinition, capture: &Id| {
+            run_chain(
+                &mut renderer,
+                &mut programs,
+                &mut instance,
+                "rewire",
+                definition,
+                &backdrop,
+                (capture, 1),
+                &mut 8,
+            );
+            instance.chain_version().expect("chain rendered")
+        };
+        let original = definition(StageTexture::Backdrop, None);
+        let baseline = version(&original, &first_capture);
+        assert_eq!(baseline, version(&original, &first_capture));
+        // A new capture restarts its version at the same number.
+        assert_ne!(baseline, version(&original, &Id::new()));
+
+        let chain_base = 7;
+        let last = &original.stages[1];
+        let lookup = programs.lookup(&mut renderer, "rewire", 1, 2, last, &mut 1);
+        let program = lookup.program.expect("last stage compiles");
+        let before = stage_content_version(chain_base, last, &program);
+        // Same file and params, different wiring: the cached program adopts
+        // the new binding sources and the content identity moves.
+        let rewired = definition(saved("inverse"), Some(StageTexture::Backdrop));
+        let last = &rewired.stages[1];
+        let program = programs
+            .lookup(&mut renderer, "rewire", 1, 2, last, &mut 0)
+            .program
+            .expect("no recompile needed");
+        assert_eq!(program.textures.to_vec(), last.textures.to_vec());
+        assert_ne!(before, stage_content_version(chain_base, last, &program));
     }
 
     #[test]

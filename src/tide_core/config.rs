@@ -1999,10 +1999,6 @@ impl Config {
         map
     }
 
-    /// Folds every `[[workspace_rule]]` naming `workspace` into one
-    /// effective rule, last-match-wins per field -- same fold shape as
-    /// `resolve_window_rules`, just against a single numeric match instead
-    /// of several identity criteria.
     /// `resolve_workspace_rule(workspace).shader` without the fold's clones,
     /// for the per-frame shader resolution.
     pub(crate) fn workspace_shader(&self, workspace: u32) -> Option<&ShaderAssignment> {
@@ -2013,6 +2009,31 @@ impl Config {
             .find_map(|rule| rule.shader.as_ref())
     }
 
+    /// The definition a window draws with: its rule's assignment, else its
+    /// workspace's default, live against the master switch. Takes the
+    /// window's own assignment rather than the window so render code can
+    /// call it while holding other state mutably.
+    pub(crate) fn shader_for<'a>(
+        &'a self,
+        assignment: Option<&'a ShaderAssignment>,
+        workspace: Option<u32>,
+    ) -> Option<(&'a str, &'a ShaderDefinition)> {
+        if !self.shaders_enabled {
+            return None;
+        }
+        let name = ShaderAssignment::resolve(
+            assignment,
+            workspace.and_then(|workspace| self.workspace_shader(workspace)),
+        )?;
+        self.shader_definitions
+            .get_key_value(name)
+            .map(|(name, definition)| (name.as_str(), definition))
+    }
+
+    /// Folds every `[[workspace_rule]]` naming `workspace` into one
+    /// effective rule, last-match-wins per field -- same fold shape as
+    /// `resolve_window_rules`, just against a single numeric match instead
+    /// of several identity criteria.
     pub(crate) fn resolve_workspace_rule(&self, workspace: u32) -> WorkspaceRule {
         let mut effective = WorkspaceRule::default();
         for rule in &self.workspace_rules {
@@ -5702,11 +5723,19 @@ fn parse_shader_stage(body: &[waves::Entry]) -> Result<ShaderStage, String> {
     })
 }
 
-/// A number stays a float. Otherwise a list of 2 to 4 numbers, or a color.
-/// Wave serializes colors without the `#`, so a color whose hex digits are
-/// all decimal digits has to be quoted with its `#` to read as a color.
+/// A color, a number, or a list of 2 to 4 numbers. Wave serializes colors
+/// without the `#`, so six or eight hex digits with a letter among them read
+/// as a color (even `1E0000`, which would also parse as a float), and a
+/// color whose digits are all decimal has to be quoted with its `#`.
 fn parse_shader_param(value: &str) -> Option<crate::shader_effect::ShaderParam> {
     use crate::shader_effect::ShaderParam;
+    let bare = value.trim();
+    if matches!(bare.len(), 6 | 8)
+        && bare.chars().all(|c| c.is_ascii_hexdigit())
+        && bare.chars().any(|c| c.is_ascii_alphabetic())
+    {
+        return parse_rgba_color(bare).map(ShaderParam::Vec4);
+    }
     let finite = |item: &str| item.trim().parse::<f32>().ok().filter(|v| v.is_finite());
     if let Some(number) = finite(value) {
         return Some(ShaderParam::Float(number));
@@ -12106,6 +12135,7 @@ animations {
              strength = 0.25\n\
              offset = [1, 2]\n\
              tint_color = #8EDDFF\n\
+             exponent_like = #1E0000\n\
              quoted = \"#123456\"\n\
              }\n\
              }\n\
@@ -12130,6 +12160,10 @@ animations {
                 (
                     "tint_color".to_string(),
                     ShaderParam::Vec4([142.0 / 255.0, 221.0 / 255.0, 1.0, 1.0])
+                ),
+                (
+                    "exponent_like".to_string(),
+                    ShaderParam::Vec4([30.0 / 255.0, 0.0, 0.0, 1.0])
                 ),
                 (
                     "quoted".to_string(),

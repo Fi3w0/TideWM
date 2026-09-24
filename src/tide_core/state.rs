@@ -6229,18 +6229,10 @@ impl Smallvil {
         &self,
         surface: &WlSurface,
     ) -> Option<(&str, &crate::config::ShaderDefinition)> {
-        if !self.config.shaders_enabled {
-            return None;
-        }
-        let name = crate::config::ShaderAssignment::resolve(
+        self.config.shader_for(
             self.window_shader_assignments.get(surface),
-            self.workspace_of_surface(surface)
-                .and_then(|workspace| self.config.workspace_shader(workspace)),
-        )?;
-        self.config
-            .shader_definitions
-            .get_key_value(name)
-            .map(|(name, definition)| (name.as_str(), definition))
+            self.workspace_of_surface(surface),
+        )
     }
 
     /// Puts a render-time compile failure on the persistent warning panel.
@@ -6250,6 +6242,9 @@ impl Smallvil {
     fn queue_shader_failure(&mut self, message: String) {
         tracing::warn!(%message, "Custom shader unavailable");
         self.loop_handle.insert_idle(move |state| {
+            if state.config_warnings.contains(&message) {
+                return;
+            }
             state.config_warnings.push(message);
             if state.config_error_overlay.as_ref().is_some_and(|overlay| {
                 overlay.severity() == crate::error_overlay::OverlaySeverity::Error
@@ -6292,6 +6287,9 @@ impl Smallvil {
         output: &Output,
         placements: &[crate::placement::PlacedWindow],
     ) {
+        // Windows admitted earlier in this pass count at their wanted size
+        // even though nothing is allocated for them yet.
+        let mut admitted_now: Vec<(WlSurface, u64)> = Vec::new();
         for placement in placements {
             let Some(surface) = placement
                 .surface()
@@ -6325,35 +6323,42 @@ impl Smallvil {
                 render_scale,
             )
             .saturating_mul(stage_count as u64);
-            let admitted = |other: &WlSurface| {
+            let counted = |other: &WlSurface| {
                 other != surface
-                    && self.custom_shader_instances.contains_key(other)
                     && !self.custom_shader_bypassed.contains(other)
+                    && !admitted_now.iter().any(|(admitted, _)| admitted == other)
             };
-            let others = self
-                .backdrop_textures
-                .iter()
-                .filter(|(other, _)| admitted(other))
-                .fold(0_u64, |total, (other, capture)| {
-                    let targets = self
-                        .custom_shader_instances
-                        .get(other)
-                        .map_or(0, |instance| instance.target_bytes());
-                    total
-                        .saturating_add(capture.estimated_texture_bytes())
-                        .saturating_add(targets)
-                });
-            let instances = self
+            let existing = self
                 .custom_shader_instances
-                .keys()
-                .filter(|other| admitted(other))
-                .count()
-                + 1;
+                .iter()
+                .filter(|(other, _)| counted(other));
+            let (existing_count, existing_bytes) =
+                existing.fold((0usize, 0_u64), |(count, bytes), (other, instance)| {
+                    let capture = self
+                        .backdrop_textures
+                        .get(other)
+                        .map_or(0, |capture| capture.estimated_texture_bytes());
+                    (
+                        count + 1,
+                        bytes
+                            .saturating_add(capture)
+                            .saturating_add(instance.target_bytes()),
+                    )
+                });
+            let pass_bytes = admitted_now
+                .iter()
+                .fold(0_u64, |total, (_, bytes)| total.saturating_add(*bytes));
+            let instances = existing_count + admitted_now.len() + 1;
+            let bytes = existing_bytes
+                .saturating_add(pass_bytes)
+                .saturating_add(wanted);
             if instances <= crate::shader_effect::MAX_ACTIVE_INSTANCES
-                && others.saturating_add(wanted) <= crate::shader_effect::MAX_PAYLOAD_BYTES
+                && bytes <= crate::shader_effect::MAX_PAYLOAD_BYTES
             {
                 self.custom_shader_bypassed.remove(surface);
+                admitted_now.push((surface.clone(), wanted));
             } else if self.custom_shader_bypassed.insert(surface.clone()) {
+                self.custom_shader_instances.remove(surface);
                 self.custom_shader_bypasses += 1;
                 self.queue_shader_failure(format!(
                     "Shader {name:?} skipped on a window: custom effects are capped at {} windows and {} MiB of captures",
@@ -6842,6 +6847,10 @@ impl Smallvil {
             .collect();
         let output_name = output.name();
         self.reconcile_backdrop_visibility(&output_name, &surfaces, true);
+        // A window whose capture was released (hidden, off every output,
+        // or no longer shaded) drops its stage textures with it.
+        self.custom_shader_instances
+            .retain(|surface, _| self.backdrop_textures.contains_key(surface));
         if surfaces.is_empty() {
             return;
         }
@@ -6955,14 +6964,9 @@ impl Smallvil {
         let mut compile_budget = 1usize;
         for surface in surfaces {
             let workspace = self.workspace_of_surface(surface);
-            let Some(name) = crate::config::ShaderAssignment::resolve(
-                self.window_shader_assignments.get(surface),
-                workspace.and_then(|workspace| self.config.workspace_shader(workspace)),
-            ) else {
-                continue;
-            };
-            let (Some(definition), Some(capture)) = (
-                self.config.shader_definitions.get(name),
+            let (Some((name, definition)), Some(capture)) = (
+                self.config
+                    .shader_for(self.window_shader_assignments.get(surface), workspace),
                 self.backdrop_textures.get(surface),
             ) else {
                 continue;
@@ -6978,7 +6982,7 @@ impl Smallvil {
                 name,
                 definition,
                 &capture.texture,
-                capture.version,
+                (&capture.id, capture.version),
                 &mut compile_budget,
             );
             failures.extend(outcome.failures);
@@ -7229,18 +7233,14 @@ impl Smallvil {
             // A custom effect replaces the glass pass. Without a program yet
             // (or ever) the window takes its normal glass path instead.
             let workspace = self.workspace_of_surface(surface);
-            let lookup = self
-                .config
-                .shaders_enabled
+            let lookup = (!self.custom_shader_bypassed.contains(surface))
                 .then(|| {
-                    crate::config::ShaderAssignment::resolve(
-                        self.window_shader_assignments.get(surface),
-                        workspace.and_then(|workspace| self.config.workspace_shader(workspace)),
-                    )
+                    self.config
+                        .shader_for(self.window_shader_assignments.get(surface), workspace)
                 })
                 .flatten()
-                .and_then(|name| {
-                    let stages = &self.config.shader_definitions.get(name)?.stages;
+                .and_then(|(name, definition)| {
+                    let stages = &definition.stages;
                     let index = stages.len().checked_sub(1)?;
                     let lookup = self.custom_shader_programs.lookup(
                         renderer,
@@ -7271,7 +7271,12 @@ impl Smallvil {
                             targets,
                             &capture_texture,
                         )?;
-                        Some((input, textures, chain_version))
+                        let content_version = crate::shader_effect::stage_content_version(
+                            chain_version.unwrap_or(capture_version as u64),
+                            &stages[index],
+                            program,
+                        );
+                        Some((input, textures, chain_version, content_version))
                     });
                     Some((lookup, inputs))
                 });
@@ -7282,7 +7287,7 @@ impl Smallvil {
                 if let Some(message) = lookup.failure {
                     self.queue_shader_failure(message);
                 }
-                if let Some((program, (input, textures, chain_version))) =
+                if let Some((program, (input, textures, chain_version, content_version))) =
                     lookup.program.zip(inputs)
                 {
                     let rounding = self.rounding_config_for_surface(surface);
@@ -7294,7 +7299,7 @@ impl Smallvil {
                     };
                     let antialias = rounding.antialias * output_scale;
                     let commit = crate::shader_effect::custom_shader_commit(
-                        chain_version.unwrap_or(capture_version as u64),
+                        content_version,
                         program.generation,
                         (physical_rect.size.w, physical_rect.size.h),
                         &program.params,
