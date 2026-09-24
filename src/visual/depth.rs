@@ -434,6 +434,7 @@ mod tests {
     #[test]
     fn depth_tiers_advance_at_configured_boundaries_and_cap() {
         let cfg = DepthConfig {
+            enabled: true,
             sink_after_ms: 100,
             tier_interval_ms: 50,
             max_tier: 3,

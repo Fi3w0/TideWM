@@ -833,7 +833,7 @@ A matching `rule { depth = false }` pins that window buoyant: it stays at tier 0
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `enabled` | bool | `true` | Disables only automatic depth/buoyancy; other water effects remain active. |
+| `enabled` | bool | `false` | Opt-in. Enables only automatic depth/buoyancy; other water effects are unaffected. |
 | `sink_after_ms` | integer, `0`–`86400000` | `30000` | Inactivity before entering tier 1. `delay_ms` is an alias. |
 | `tier_interval_ms` | integer, `1`–`86400000` | `30000` | Additional inactivity per deeper tier. `interval_ms` is an alias. |
 | `max_tier` | integer, `1`–`8` | `2` | Deepest tier a window may reach. `tiers` is an alias. |

@@ -4250,7 +4250,8 @@ pub struct DepthConfig {
 impl Default for DepthConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            // Opt-in: the blue wash / title cards surprise people who didn't ask for them.
+            enabled: false,
             sink_after_ms: 30_000,
             tier_interval_ms: 30_000,
             max_tier: 2,
@@ -9539,6 +9540,13 @@ viscosity = 1.0                  # 0 turns off drag/resize settling, higher sett
 # backdrop_capture_scale = 2     # 1 (default, full detail) to 4; lower the frost/water-glass
                                   # capture texture's resolution to cut VRAM on many glass windows
 
+# Automatic attention depth: unfocused windows fade into a blue wash after
+# 30 s and turn into title cards after 60 s. Off by default; set true (and
+# tune sink_after_ms / cool_color in DOCUMENTATION.md's depth { }) to opt in.
+depth {
+    enabled = false
+}
+
 # ~~~~~~~~~~~~~~~~~ the layout ~~~~~~~~~~~~~~~~~
 
 gaps = 8
@@ -13209,7 +13217,7 @@ shader tinted-blur {
             parse_default_config(),
         ] {
             let depth = config.depth;
-            assert!(depth.enabled);
+            assert!(!depth.enabled);
             assert_eq!(depth.sink_after_ms, 30_000);
             assert_eq!(depth.tier_interval_ms, 30_000);
             assert_eq!(depth.max_tier, 2);
