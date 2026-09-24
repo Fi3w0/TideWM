@@ -89,7 +89,7 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | `drag_modifier` | modifier or `+`-joined modifiers | `super` | Modifier physically held for compositor mouse actions: left-drag moves floating windows or drag-swaps tiles; right-drag resizes floating or tiled windows. Accepts `super`/`logo`/`mod4`, `alt`/`mod1`, `ctrl`/`control`, and `shift`. The shipped config sets it to `mod`. |
 | `welcome_hint` | bool | `true` | Shows a persistent empty-desktop card reminding you to use your configured terminal bind. Disappears when a real window maps; delete this key (or set it `false`) to stop it returning. |
 | `reload_toast` | bool | `true` | Shows the short compositor card after a successful hot reload. `false` hides that confirmation only; parse errors and configuration warnings remain visible so a bad config cannot silently lock itself in. |
-| `water_effects` | bool | `true` | Master toggle for TideWM's water/aqua render identity. Disables water-glass, backdrop capture, impulse ripples, wave workspace transitions, Cascade pour/drain, automatic depth/buoyancy, interactive viscosity, connected-vessel resize, and floating sway when `false`. |
+| `water_effects` | bool | `true` | Master toggle for TideWM's water/aqua render identity. Disables water-glass, frost, glass backdrop capture (custom shaders keep theirs under `shaders { enabled }`), impulse ripples, wave workspace transitions, Cascade pour/drain, automatic depth/buoyancy, interactive viscosity, connected-vessel resize, and floating sway when `false`. |
 | `builtin_wallpaper` | bool | `true` | Whether the embedded 4K aqua fallback wallpaper is decoded and drawn. A layer-shell wallpaper (swaybg/swww/hyprpaper) renders above it regardless, so set this `false` to skip the decode and its GPU texture entirely and reclaim the CPU and VRAM it would otherwise cost — useful on low-RAM machines or when an external wallpaper daemon is always present. Live-reloadable: a running session stops drawing it the moment this becomes `false`. |
 | `viscosity` | float, `0`–`4` | `1.0` | Interactive window move/resize damping. `0` follows the pointer immediately; higher values settle more slowly. Render-only: logical geometry and hit-testing stay at the pointer target. Disabled by `water_effects = false`. |
 | `backdrop_capture_scale` | int, `1`–`4` | `1` | Linear downscale for the per-window backdrop capture that feeds frost glass, water glass, and layer-shell blur. `1` captures at native resolution (unchanged look). `2`/`4` allocate a texture with 1/4 or 1/16 the area — real VRAM/GPU savings with several glass windows open at once — at the cost of a visibly softer captured image once magnified back up to the window's size. Changes how the water identity looks, so it defaults to the unchanged behavior rather than a pre-picked value. Captures are also released automatically after their last output stops presenting the surface, including hidden Classic workspaces and off-camera Ocean windows. See `report.md`'s P-13/P-14 entries for the measurements behind this knob. |
@@ -1212,6 +1212,111 @@ caustics {
 }
 ```
 
+### Custom shaders
+
+`shaders { }` and `shader "<name>" { }`: your own GLSL effects, drawn over a window's captured backdrop in the slot its frost or water glass would use. The feature is off by default and follows its own master switch, so it works with `water_effects = false` and leaves that toggle's meaning alone.
+
+Custom shaders are trusted native GPU programs. TideWM checks that a file keeps to the contract below and caps how much memory effects may use, but it cannot sandbox GPU execution: a slow or looping shader can stall or hang the GPU driver. Only load shaders you have read.
+
+```wave
+shaders {
+    enabled = true
+}
+
+shader soft-blur {
+    render_scale = 2
+    stage {
+        file = "shaders/blur-h.frag"
+        params {
+            radius = 2
+        }
+    }
+    stage {
+        file = "shaders/blur-v.frag"
+        params {
+            radius = 2
+        }
+    }
+}
+
+rule {
+    app_id = kitty
+    shader = soft-blur
+}
+```
+
+`rule { shader = <name> }` assigns a definition to matching windows, last matching rule wins. `workspace_rule { shader = <name> }` sets a default for every window on that workspace, and a window rule's own `shader` (including `shader = none`) takes precedence over it. An unknown name, or a definition that failed to load and never compiled, leaves the window on its normal render path. The repository ships example files in `share/shaders/` (`tint.frag`, `blur-h.frag`, `blur-v.frag`, `edge-mix.frag`); copy the ones you want next to your `config.wave`.
+
+**Definitions.** A later `shader` block with the same name replaces the earlier one whole, so a definition's stages are always the ones written in one block. At most 32 definitions load.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `scope` | `window` | `window` | The only scope so far. |
+| `source` | `backdrop` | `backdrop` | The scene behind the window, captured the same way frost glass captures it. |
+| `invalidate` | `damage-box` | `damage-box` | Redraws only when the captured backdrop, geometry, rounding, opacity, parameters or the program change. `always` and `manual` are not supported yet. |
+| `render_scale` | int, `1`–`4` | `2` | Downscale for this effect's capture and stage textures. Each costs `ceil(w / scale) * ceil(h / scale) * 4` bytes. |
+| `stage { }` | block, 1 to 4 | | Ordered; see below. |
+
+A definition that asks for anything unsupported, or breaks a rule below, is left out with a warning on the config panel instead of drawing something other than what it asked for.
+
+**Stages.** Every stage but the last renders into an offscreen texture sized to the capture, in written order, before the visible frame is drawn. The last stage draws on screen and applies the window's rounding and opacity once; earlier stages are never clipped or faded.
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `file` | string, required | A `.frag` file. Relative paths resolve from the directory of the main `config.wave` (not the including file); `~/` and absolute paths also work. Must be a regular UTF-8 file of at most 64 KiB; all shader files together are capped at 1 MiB. The file is watched like an include, so saving it reloads the effect. |
+| `params { }` | block | Up to 8 `name = value` uniforms: a number (`float`), a list of 2 to 4 numbers (`vec2`–`vec4`), or a color (`vec4` RGBA). A color whose hex digits are all numbers must be quoted with its `#` (`"#123456"`), or it reads as a number. Names are GLSL identifiers of at most 64 bytes and may not start with `u_`, `gl_` or `tide_`. Changing a value does not recompile. |
+| `source` | `backdrop` or `"get:<name>"` | The stage's `tex`. Defaults to the previous stage's output (the backdrop for the first stage). |
+| `save` | name | Lets later stages read this stage's output with `"get:<name>"`. A name must be saved by an earlier stage before anything reads it, and the last stage cannot save. |
+| `textures { }` | block | Up to 4 extra `sampler2D` uniforms, each `name = backdrop` or `name = "get:<name>"`, bound to texture units 1 to 4. |
+
+```wave
+shader edged {
+    stage {
+        file = "shaders/blur-h.frag"
+        params {
+            radius = 3
+        }
+    }
+    stage {
+        file = "shaders/blur-v.frag"
+        params {
+            radius = 3
+        }
+        save = "blurred"
+    }
+    stage {
+        file = "shaders/edge-mix.frag"
+        source = "get:blurred"
+        params {
+            margin = 0.08
+        }
+        textures {
+            original = backdrop
+        }
+    }
+}
+```
+
+**The fragment contract.** A file defines `vec4 tide_effect(vec2 uv)` and may add its own helper functions, structs and constants. It returns premultiplied RGBA; TideWM clamps alpha to `0`–`1` and RGB to alpha. `uv` addresses the input texture with `(0, 0)` at its top-left on both backends. TideWM writes everything else: the `#version 100` GLSL ES 1.00 header, precision, every uniform declaration, `main`, rounding and opacity. So a file may not contain `#version`, `#extension`, `#include`, `#line` or `#pragma` (`#define`, `#undef`, `#if`/`#ifdef`/`#ifndef`/`#elif`/`#else`/`#endif` and `#error` are fine), token pasting (`##`), `uniform`, `attribute`, `varying`, `precision` or `invariant`, and it may not use `main`, `alpha`, `tint`, `v_coords`, `gl_FragColor` or `gl_FragData`, or declare `tex`, `size` or anything starting with `u_`, `gl_` or `tide_`. The check reads GLSL tokens, so comments may mention any of these.
+
+| Uniform | Type | Meaning |
+| --- | --- | --- |
+| `tex` | `sampler2D` | The stage input. |
+| `u_size` | `vec2` | Destination size in physical pixels: the window's rect for the last stage, the stage texture for earlier ones. |
+| `u_texture_size` | `vec2` | Size of `tex` in texels. |
+| `u_content_rect` | `vec4` | Content origin and extent inside `tex`, in texels. Currently always the whole texture. |
+| `u_texel` | `vec2` | `1.0 / u_texture_size`. |
+| `u_time` | `float` | Seconds since the effect started on this window, modulo 4096, sampled once per update. Under `damage-box` it does not by itself cause redraws. |
+| `u_delta` | `float` | Seconds since the previous update, clamped to `0`–`0.1`; `0` on the first. |
+| `u_corner_radii` | `vec4` | Destination corner radii in physical pixels, top-left, top-right, bottom-right, bottom-left. Zero in earlier stages. |
+| `u_rounding_power`, `u_antialias` | `float` | The resolved rounding shape and edge softness. |
+
+Porting a Hyprland `screen_shader` usually means deleting its `precision` line and the `varying`/`uniform` declarations TideWM already provides, renaming `void main()` to `vec4 tide_effect(vec2 uv)`, using `uv` for `v_texcoord`, and turning `gl_FragColor = x;` into `return x;`. Shaders written for desktop GLSL (`#version 330`, `texture(...)`, `textureSize(...)`) need rewriting for GLSL ES 1.00 (`texture2D`, `u_texture_size`).
+
+**Errors and reloads.** A file that can't be read or breaks the contract shows on the config warning panel with its definition, stage and path. A compile failure shows the driver's first error line, with Mesa's line number rewritten to the line in your file. A failed stage never recompiles until its source changes, and until then the effect keeps drawing with the last program that compiled; if none has, the window renders without the effect. At most one new program compiles per frame. Removing a definition or turning `shaders.enabled` off always takes effect immediately.
+
+**Budgets and privacy.** At most 128 windows draw a custom effect at once, and all effect captures and stage textures together are capped at 64 MiB. A window over either cap renders normally with a warning until there is room. Locking the session clears every effect's state and stage textures. Screenshots and screencasts of a whole output include effects exactly as shown on screen. A window captured on its own includes its effect too, unless a `block_capture` window or layer overlaps it, in which case the capture leaves the effect (and any glass) out so blocked content can't show through it. `tidectl perf` reports definitions, compiled programs, compiles and failures, live windows, capture and stage bytes, windows over budget and update counts under `custom_shaders`.
+
 ### `env { }`
 
 `KEY = VALUE` pairs, applied to TideWM's own process before the backend starts (so e.g. `XCURSOR_THEME` here actually changes the cursor theme TideWM itself loads, not just what child processes see) and exported on standalone sessions to the systemd/D-Bus activation environment alongside `WAYLAND_DISPLAY`. That external export is an ordered, best-effort background task: direct children receive TideWM's process environment immediately, while a missing or wedged session helper may delay session-activated services seeing the update without delaying the compositor, input, or startup commands. Invalid Unix environment names/values are ignored with a config warning; values are never repeated in that diagnostic because they may contain secrets.
@@ -1424,6 +1529,7 @@ Per-app placement applied the moment a window first maps, before it's ever tiled
 | `inactive_opacity` | float | Extra multiplier while the window is unfocused. `unfocused_opacity` is an alias. |
 | `fullscreen_opacity` | float | Extra multiplier while fullscreen; takes priority over active/inactive state. |
 | `glass` | `water`, `frost`, or `none` | Captured-backdrop treatment for tiled and floating windows. Explicit `water`/`frost` works with client-provided alpha; when unset, a TideWM `opacity` below `1.0` implicitly selects `water`. `none` preserves plain transparency. Gaps stay unblurred. `glass_mode` is an alias. |
+| `shader` | definition name, or `none` | Custom effect from a `shader "<name>" { }` definition, drawn in place of the window's glass while `shaders { enabled = true }`. `none` also opts out of a `workspace_rule` default. See "Custom shaders". |
 | `viscosity` | float, `0`–`4` | Per-app interactive move/resize damping. Last matching rule wins; `0` disables it for the matched app. |
 | `sway` | bool | Per-app opt-in/out for floating sway. Last matching rule wins; unset falls back to `sway.enabled`. |
 | `weight` | float, `0`–`1` | Per-app apparent weight for `buoyancy { }`. Last matching rule wins; unset falls back to `buoyancy.default_weight`; `0` opts the matched floater out. |
@@ -1591,6 +1697,7 @@ Per-workspace-number overrides — Hyprland's `workspace_rule` block. Matches by
 | `rounding` | bool, radii, or a `rounding { }` sub-block | Same shape as `rule { rounding }`, same base-layer role as `border` above. |
 | `shadow` | bool, or a `shadow { }` sub-block | Same shape as `rule { shadow }`, same base-layer role as `border` above. |
 | `snap` | bool, optional | Enables/disables Classic snap for floaters on this workspace. A matching window `rule { snap = ... }` wins; `snap.enabled = false` remains a global master off switch. Cross-output pointer targeting evaluates the destination output's active workspace. |
+| `shader` | definition name, or `none`, optional | Default custom effect for windows on this workspace. A matching window `rule { shader = ... }` wins. See "Custom shaders". |
 | `on_created_empty` | string, optional | Command run the first time this workspace is switched into while it has zero windows. TideWM's numbered workspaces always exist as addressable slots — there's no real create/destroy lifecycle the way Hyprland has — so this fires once per (output, workspace) pair for the process lifetime, the closest honest analog available, rather than repeating on every later empty visit. |
 
 ```
@@ -1771,7 +1878,7 @@ tidectl subscribe focus workspace window   # long-lived event stream, one JSON l
 
 `tidectl subscribe [event...]` is the one long-lived CLI command: it opens the subscribe mode above and prints each `{"event": "<kind>", "data": ...}` line verbatim until TideWM exits (socket EOF ends the process cleanly, so a supervisor can restart it). With no event names every channel is subscribed. A bar or panel runs it as a persistent process and parses stdout — instant, event-driven updates with no polling; the QuickShell Tide rice uses exactly this instead of its old fixed-rate `tidectl` polls.
 
-`tidectl perf [--window <secs>] [--json]` takes two IPC `perf` snapshots spaced by the window (default 3s) and prints a compact PSS/RSS/thread-count/render-state summary. CPU% comes from the delta of the compositor's own `getrusage` microsecond counters between the two snapshots, so it's always about the right process and needs no `CLK_TCK` constant. It also reports the ARGB pixel payload of TideWM-owned backdrop, built-in-wallpaper, caustics, and active workspace-transition textures, derived from their live allocations. That estimate excludes client buffers and driver metadata, while GPU-busy% still requires a vendor-specific tool.
+`tidectl perf [--window <secs>] [--json]` takes two IPC `perf` snapshots spaced by the window (default 3s) and prints a compact PSS/RSS/thread-count/render-state summary. CPU% comes from the delta of the compositor's own `getrusage` microsecond counters between the two snapshots, so it's always about the right process and needs no `CLK_TCK` constant. It also reports the ARGB pixel payload of TideWM-owned backdrop, custom shader stage, built-in-wallpaper, caustics, and active workspace-transition textures, derived from their live allocations, plus a `custom_shaders` summary while that feature is on. That estimate excludes client buffers and driver metadata, while GPU-busy% still requires a vendor-specific tool.
 
 **Diagnostics.** Two host-side commands run entirely outside the socket, so they work even when TideWM won't start:
 
