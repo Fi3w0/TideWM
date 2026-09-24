@@ -440,7 +440,7 @@ pub struct ShaderStage {
     pub file: String,
     /// `file` resolved against the main config directory at load time.
     pub path: PathBuf,
-    pub params: Vec<(String, crate::shader_effect::ShaderParam)>,
+    pub params: Arc<[(String, crate::shader_effect::ShaderParam)]>,
     /// Host-wrapped GLSL once `path` passed the fragment contract. `None`
     /// before loading and after a read or contract failure.
     pub source: Option<Arc<str>>,
@@ -5573,7 +5573,7 @@ fn parse_shader_stage(body: &[waves::Entry]) -> Result<ShaderStage, String> {
     Ok(ShaderStage {
         file,
         path: PathBuf::new(),
-        params,
+        params: params.into(),
         source: None,
     })
 }
@@ -11996,7 +11996,7 @@ animations {
         assert_eq!(stage.source, None);
         use crate::shader_effect::ShaderParam;
         assert_eq!(
-            stage.params,
+            stage.params.to_vec(),
             vec![
                 ("strength".to_string(), ShaderParam::Float(0.25)),
                 ("offset".to_string(), ShaderParam::Vec2([1.0, 2.0])),

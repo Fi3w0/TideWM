@@ -119,6 +119,8 @@ smithay::backend::renderer::element::render_elements! {
     WaterGlass = crate::water_glass::WaterGlassElement,
     /// Frosted-glass mode over the same captured backdrop as water glass.
     FrostGlass = crate::frost_glass::FrostGlassElement,
+    /// A window's custom `.frag` effect over the same captured backdrop.
+    CustomShader = crate::shader_effect::CustomShaderElement,
     /// Fixed-cost analytical shadow inserted directly behind each window.
     Shadow = crate::shadow::ShadowElement,
     /// Client surface tree clipped to compositor-owned rounded geometry.

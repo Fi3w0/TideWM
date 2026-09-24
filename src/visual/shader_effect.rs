@@ -8,7 +8,29 @@
 //! hygiene over a small GLSL token stream, not an execution sandbox; custom
 //! shaders are trusted native GPU programs.
 
-use std::{collections::HashSet, fs, io::Read, os::unix::fs::OpenOptionsExt, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    hash::{Hash, Hasher},
+    io::Read,
+    os::unix::fs::OpenOptionsExt,
+    path::Path,
+    sync::Arc,
+    time::Instant,
+};
+
+use smithay::{
+    backend::renderer::{
+        element::{Element, Id, Kind, RenderElement},
+        gles::{
+            GlesError, GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture, Uniform, UniformName,
+            UniformType, UniformValue,
+        },
+        utils::CommitCounter,
+        Texture,
+    },
+    utils::{user_data::UserDataMap, Buffer, Physical, Rectangle, Scale, Transform},
+};
 
 /// Largest accepted `.frag` source.
 pub const MAX_SOURCE_BYTES: usize = 64 * 1024;
@@ -171,6 +193,38 @@ impl ShaderParam {
             Self::Vec2(_) => "vec2",
             Self::Vec3(_) => "vec3",
             Self::Vec4(_) => "vec4",
+        }
+    }
+}
+
+impl ShaderParam {
+    fn uniform_type(&self) -> UniformType {
+        match self {
+            Self::Float(_) => UniformType::_1f,
+            Self::Vec2(_) => UniformType::_2f,
+            Self::Vec3(_) => UniformType::_3f,
+            Self::Vec4(_) => UniformType::_4f,
+        }
+    }
+
+    fn uniform_value(&self) -> UniformValue {
+        match *self {
+            Self::Float(value) => value.into(),
+            Self::Vec2(value) => value.into(),
+            Self::Vec3(value) => value.into(),
+            Self::Vec4(value) => value.into(),
+        }
+    }
+
+    fn hash_bits(&self, hash: &mut impl Hasher) {
+        let values: &[f32] = match self {
+            Self::Float(value) => std::slice::from_ref(value),
+            Self::Vec2(value) => value,
+            Self::Vec3(value) => value,
+            Self::Vec4(value) => value,
+        };
+        for value in values {
+            value.to_bits().hash(hash);
         }
     }
 }
@@ -532,6 +586,391 @@ pub fn read_fragment_file(path: &Path) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "not valid UTF-8".to_string())
 }
 
+fn contract_uniform_type(glsl_type: &str) -> UniformType {
+    match glsl_type {
+        "vec2" => UniformType::_2f,
+        "vec4" => UniformType::_4f,
+        _ => UniformType::_1f,
+    }
+}
+
+fn source_hash(source: &str) -> u64 {
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    source.hash(&mut hash);
+    hash.finish()
+}
+
+/// A compiled program together with the parameter schema it was built for.
+/// Drawing with any other schema would bind uniforms the program lacks.
+#[derive(Clone)]
+pub struct ShaderProgram {
+    /// Hash of the wrapped source, for damage identity.
+    pub generation: u64,
+    pub program: GlesTexProgram,
+    pub params: Arc<[(String, ShaderParam)]>,
+}
+
+#[derive(Default)]
+struct CachedProgram {
+    good: Option<ShaderProgram>,
+    good_source: Option<Arc<str>>,
+    /// Source that failed to compile, never retried until it changes.
+    failed: Option<Arc<str>>,
+}
+
+/// Pointer equality first so a steady frame never rereads the source; a
+/// reload hands in a fresh `Arc`, which is adopted once it compares equal.
+fn same_source(cached: &mut Option<Arc<str>>, source: &Arc<str>) -> bool {
+    match cached {
+        Some(cached) if Arc::ptr_eq(cached, source) => true,
+        Some(cached) if **cached == **source => {
+            *cached = source.clone();
+            true
+        }
+        _ => false,
+    }
+}
+
+pub struct ProgramLookup {
+    pub program: Option<ShaderProgram>,
+    /// Set once, the first time a new source fails to compile.
+    pub failure: Option<String>,
+    /// A compile was needed but this frame's budget was spent.
+    pub deferred: bool,
+}
+
+/// Last-good compiled program per definition name. A changed source
+/// compiles once; a failure is remembered so a broken file never recompiles
+/// every frame, and the previous program stays in use until the file is
+/// fixed. Removing a definition drops its entry.
+#[derive(Default)]
+pub struct CustomShaderPrograms {
+    entries: HashMap<String, CachedProgram>,
+}
+
+impl CustomShaderPrograms {
+    /// Whether `lookup` could return a program without compiling anything
+    /// known to fail: a last-good program, or a source not yet tried.
+    pub fn can_draw(&self, name: &str, source: Option<&Arc<str>>) -> bool {
+        let Some(entry) = self.entries.get(name) else {
+            return source.is_some();
+        };
+        entry.good.is_some()
+            || source.is_some_and(|source| {
+                entry
+                    .failed
+                    .as_ref()
+                    .is_none_or(|failed| !Arc::ptr_eq(failed, source) && **failed != **source)
+            })
+    }
+
+    /// The program to draw `name` with this frame. `source` is the current
+    /// wrapped source, `None` after a read or contract failure; either way a
+    /// last-good program keeps drawing. At most `compile_budget` new
+    /// programs compile per call site and frame.
+    pub fn lookup(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        name: &str,
+        source: Option<&Arc<str>>,
+        params: &Arc<[(String, ShaderParam)]>,
+        compile_budget: &mut usize,
+    ) -> ProgramLookup {
+        if !self.entries.contains_key(name) {
+            self.entries
+                .insert(name.to_string(), CachedProgram::default());
+        }
+        let entry = self.entries.get_mut(name).expect("entry inserted above");
+        let mut lookup = ProgramLookup {
+            program: None,
+            failure: None,
+            deferred: false,
+        };
+        let Some(source) = source else {
+            lookup.program = entry.good.clone();
+            return lookup;
+        };
+        if same_source(&mut entry.good_source, source) {
+            if let Some(good) = &mut entry.good {
+                // Same source means the same declarations, so only values moved.
+                good.params = params.clone();
+            }
+            lookup.program = entry.good.clone();
+            return lookup;
+        }
+        if same_source(&mut entry.failed, source) {
+            lookup.program = entry.good.clone();
+            return lookup;
+        }
+        if *compile_budget == 0 {
+            lookup.deferred = true;
+            lookup.program = entry.good.clone();
+            return lookup;
+        }
+        *compile_budget -= 1;
+        let uniforms: Vec<UniformName<'_>> = CONTRACT_UNIFORMS
+            .iter()
+            .map(|(name, ty)| UniformName::new(*name, contract_uniform_type(ty)))
+            .chain(
+                params
+                    .iter()
+                    .map(|(name, value)| UniformName::new(name.as_str(), value.uniform_type())),
+            )
+            .collect();
+        match renderer.compile_custom_texture_shader(&**source, &uniforms) {
+            Ok(program) => {
+                entry.failed = None;
+                entry.good_source = Some(source.clone());
+                entry.good = Some(ShaderProgram {
+                    generation: source_hash(source),
+                    program,
+                    params: params.clone(),
+                });
+                lookup.program = entry.good.clone();
+            }
+            Err(err) => {
+                entry.failed = Some(source.clone());
+                lookup.failure = Some(compile_failure_message(name, &err, entry.good.is_some()));
+                lookup.program = entry.good.clone();
+            }
+        }
+        lookup
+    }
+
+    /// Drops entries for removed definitions and reports every definition
+    /// whose current source is still the one that failed, so a reload
+    /// doesn't clear a live compile diagnostic from the panel.
+    pub fn retain_definitions(
+        &mut self,
+        definitions: &HashMap<String, crate::config::ShaderDefinition>,
+    ) -> Vec<String> {
+        self.entries
+            .retain(|name, _| definitions.contains_key(name));
+        let mut failures: Vec<String> = self
+            .entries
+            .iter_mut()
+            .filter_map(|(name, entry)| {
+                let source = definitions[name].single_stage_source()?;
+                same_source(&mut entry.failed, source).then(|| {
+                    compile_failure_message(
+                        name,
+                        &GlesError::ShaderCompileError,
+                        entry.good.is_some(),
+                    )
+                })
+            })
+            .collect();
+        failures.sort_unstable();
+        failures
+    }
+}
+
+fn compile_failure_message(name: &str, err: &GlesError, has_previous: bool) -> String {
+    format!(
+        "Shader {name:?} did not compile ({err}; the driver log is in the journal); {}",
+        if has_previous {
+            "keeping the previous program"
+        } else {
+            "rendering the window without it"
+        }
+    )
+}
+
+/// Per-window clock behind `u_time` and `u_delta`. Both are sampled only
+/// when the element's content commit changes: time alone never schedules a
+/// redraw under damage-driven invalidation.
+pub struct ShaderInstance {
+    epoch: Instant,
+    last_update: Option<Instant>,
+    commit: Option<CommitCounter>,
+    time: f32,
+    delta: f32,
+}
+
+impl ShaderInstance {
+    pub fn new() -> Self {
+        Self {
+            epoch: Instant::now(),
+            last_update: None,
+            commit: None,
+            time: 0.0,
+            delta: 0.0,
+        }
+    }
+
+    /// `(u_time, u_delta)` for this update: seconds since the instance
+    /// started, modulo 4096, and seconds since the previous update clamped
+    /// to `0..=0.1`, zero on the first.
+    pub fn sample(&mut self, commit: CommitCounter) -> (f32, f32) {
+        if self.commit != Some(commit) {
+            let now = Instant::now();
+            self.time = now.duration_since(self.epoch).as_secs_f32() % 4096.0;
+            self.delta = self
+                .last_update
+                .map(|last| now.duration_since(last).as_secs_f32().clamp(0.0, 0.1))
+                .unwrap_or(0.0);
+            self.last_update = Some(now);
+            self.commit = Some(commit);
+        }
+        (self.time, self.delta)
+    }
+}
+
+/// Everything that changes a custom effect's pixels, except time.
+#[allow(clippy::too_many_arguments)]
+pub fn custom_shader_commit(
+    capture_version: usize,
+    generation: u64,
+    size: (i32, i32),
+    params: &[(String, ShaderParam)],
+    corner_radii: [f32; 4],
+    rounding_power: f32,
+    antialias: f32,
+    opacity: f32,
+) -> CommitCounter {
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    capture_version.hash(&mut hash);
+    generation.hash(&mut hash);
+    size.hash(&mut hash);
+    for (name, value) in params {
+        name.hash(&mut hash);
+        value.hash_bits(&mut hash);
+    }
+    for radius in corner_radii {
+        radius.to_bits().hash(&mut hash);
+    }
+    rounding_power.to_bits().hash(&mut hash);
+    antialias.to_bits().hash(&mut hash);
+    opacity.to_bits().hash(&mut hash);
+    CommitCounter::from(hash.finish() as usize)
+}
+
+/// One window's custom effect over its captured backdrop, drawn in the
+/// glass layer's z-slot directly behind the window's own surfaces.
+pub struct CustomShaderElement {
+    id: Id,
+    commit: CommitCounter,
+    texture: GlesTexture,
+    geometry: Rectangle<i32, Physical>,
+    program: ShaderProgram,
+    corner_radii: [f32; 4],
+    rounding_power: f32,
+    antialias: f32,
+    opacity: f32,
+    time: f32,
+    delta: f32,
+}
+
+impl CustomShaderElement {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: Id,
+        commit: CommitCounter,
+        texture: GlesTexture,
+        geometry: Rectangle<i32, Physical>,
+        program: ShaderProgram,
+        corner_radii: [f32; 4],
+        rounding_power: f32,
+        antialias: f32,
+        opacity: f32,
+        (time, delta): (f32, f32),
+    ) -> Self {
+        Self {
+            id,
+            commit,
+            texture,
+            geometry,
+            program,
+            corner_radii,
+            rounding_power,
+            antialias,
+            opacity,
+            time,
+            delta,
+        }
+    }
+
+    fn uniforms(&self) -> Vec<Uniform<'_>> {
+        let size = self.texture.size();
+        let (texture_w, texture_h) = (size.w.max(1) as f32, size.h.max(1) as f32);
+        let mut uniforms = Vec::with_capacity(CONTRACT_UNIFORMS.len() + self.program.params.len());
+        uniforms.extend([
+            Uniform::new(
+                "u_size",
+                [
+                    self.geometry.size.w.max(1) as f32,
+                    self.geometry.size.h.max(1) as f32,
+                ],
+            ),
+            Uniform::new("u_texture_size", [texture_w, texture_h]),
+            Uniform::new("u_content_rect", [0.0, 0.0, texture_w, texture_h]),
+            Uniform::new("u_texel", [1.0 / texture_w, 1.0 / texture_h]),
+            Uniform::new("u_time", self.time),
+            Uniform::new("u_delta", self.delta),
+            Uniform::new("u_corner_radii", self.corner_radii),
+            Uniform::new("u_rounding_power", self.rounding_power),
+            Uniform::new("u_antialias", self.antialias),
+        ]);
+        uniforms.extend(
+            self.program
+                .params
+                .iter()
+                .map(|(name, value)| Uniform::new(name.as_str(), value.uniform_value())),
+        );
+        uniforms
+    }
+}
+
+impl Element for CustomShaderElement {
+    fn id(&self) -> &Id {
+        &self.id
+    }
+
+    fn current_commit(&self) -> CommitCounter {
+        self.commit
+    }
+
+    fn src(&self) -> Rectangle<f64, Buffer> {
+        Rectangle::from_size(self.texture.size().to_f64())
+    }
+
+    fn geometry(&self, _scale: Scale<f64>) -> Rectangle<i32, Physical> {
+        self.geometry
+    }
+
+    fn alpha(&self) -> f32 {
+        self.opacity
+    }
+
+    fn kind(&self) -> Kind {
+        Kind::Unspecified
+    }
+}
+
+impl RenderElement<GlesRenderer> for CustomShaderElement {
+    fn draw(
+        &self,
+        frame: &mut GlesFrame<'_, '_>,
+        src: Rectangle<f64, Buffer>,
+        dst: Rectangle<i32, Physical>,
+        damage: &[Rectangle<i32, Physical>],
+        opaque_regions: &[Rectangle<i32, Physical>],
+        _cache: Option<&UserDataMap>,
+    ) -> Result<(), GlesError> {
+        frame.render_texture_from_to(
+            &self.texture,
+            src,
+            dst,
+            damage,
+            opaque_regions,
+            Transform::Normal,
+            self.alpha(),
+            Some(&self.program.program),
+            &self.uniforms(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -706,5 +1145,244 @@ vec4 tide_effect(vec2 uv) {
 
         assert!(read_fragment_file(&dir.join("missing.frag")).is_err());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn commit_tracks_content_but_not_time() {
+        let params = [("strength".to_string(), ShaderParam::Float(0.5))];
+        let commit = |version, generation, params: &[(String, ShaderParam)], opacity| {
+            custom_shader_commit(
+                version,
+                generation,
+                (100, 80),
+                params,
+                [4.0; 4],
+                2.0,
+                1.0,
+                opacity,
+            )
+        };
+        let baseline = commit(3, 7, &params, 1.0);
+        assert_eq!(baseline, commit(3, 7, &params, 1.0));
+        assert_ne!(baseline, commit(4, 7, &params, 1.0));
+        assert_ne!(baseline, commit(3, 8, &params, 1.0));
+        assert_ne!(baseline, commit(3, 7, &params, 0.5));
+        let changed = [("strength".to_string(), ShaderParam::Float(0.75))];
+        assert_ne!(baseline, commit(3, 7, &changed, 1.0));
+    }
+
+    #[test]
+    fn instance_clock_advances_only_on_a_new_commit() {
+        let mut instance = ShaderInstance::new();
+        let first = CommitCounter::from(1usize);
+        let (time, delta) = instance.sample(first);
+        assert_eq!(delta, 0.0);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert_eq!(instance.sample(first), (time, delta));
+        let (later, delta) = instance.sample(CommitCounter::from(2usize));
+        assert!(later > time);
+        assert!(delta > 0.0 && delta <= 0.1);
+    }
+
+    #[test]
+    fn source_identity_adopts_an_equal_reloaded_source() {
+        let original: Arc<str> = Arc::from("vec4 a;");
+        let reloaded: Arc<str> = Arc::from("vec4 a;");
+        let mut cached = Some(original.clone());
+        assert!(same_source(&mut cached, &original));
+        assert!(same_source(&mut cached, &reloaded));
+        assert!(Arc::ptr_eq(cached.as_ref().unwrap(), &reloaded));
+        assert!(!same_source(&mut cached, &Arc::from("vec4 b;")));
+        assert!(!same_source(&mut None, &original));
+    }
+
+    /// A headless renderer on Mesa's software EGL device. Tests that need
+    /// one skip where it's missing, so they prove a real GLSL ES compile and
+    /// draw where they run, without making a bare CI image fail.
+    fn software_renderer() -> Option<GlesRenderer> {
+        use smithay::backend::egl::{EGLContext, EGLDevice, EGLDisplay};
+        let device = EGLDevice::enumerate()
+            .ok()?
+            .find(|device| device.is_software())?;
+        // SAFETY: the display owns the device handle for the renderer's life.
+        let display = unsafe { EGLDisplay::new(device) }.ok()?;
+        let context = EGLContext::new(&display).ok()?;
+        // SAFETY: the context is fresh and used only by this renderer.
+        unsafe { GlesRenderer::new(context) }.ok()
+    }
+
+    fn compile(
+        renderer: &mut GlesRenderer,
+        programs: &mut CustomShaderPrograms,
+        name: &str,
+        user_source: &str,
+        params: &[(String, ShaderParam)],
+    ) -> ProgramLookup {
+        validate_fragment_contract(user_source).expect("fixture passes the contract");
+        let params: Arc<[(String, ShaderParam)]> = params.to_vec().into();
+        let wrapped: Arc<str> = Arc::from(wrap_texture_fragment(user_source, &params));
+        programs.lookup(renderer, name, Some(&wrapped), &params, &mut 1)
+    }
+
+    const SIZE: i32 = 8;
+
+    /// RGBA with red rising left to right and green top to bottom, so any
+    /// flip or transpose shows up in the readback.
+    fn gradient() -> Vec<u8> {
+        (0..SIZE)
+            .flat_map(|y| (0..SIZE).flat_map(move |x| [x as u8 * 32, y as u8 * 32, 128, 255]))
+            .collect()
+    }
+
+    fn render(
+        renderer: &mut GlesRenderer,
+        program: ShaderProgram,
+        opacity: f32,
+        corner_radii: [f32; 4],
+    ) -> Vec<u8> {
+        use smithay::backend::{
+            allocator::Fourcc,
+            renderer::{damage::OutputDamageTracker, Bind, ExportMem, ImportMem, Offscreen},
+        };
+        let size = smithay::utils::Size::<i32, Buffer>::from((SIZE, SIZE));
+        let input = renderer
+            .import_memory(&gradient(), Fourcc::Abgr8888, size, false)
+            .expect("import fixture");
+        let mut output: GlesTexture = renderer
+            .create_buffer(Fourcc::Abgr8888, size)
+            .expect("allocate target");
+        let element = CustomShaderElement::new(
+            Id::new(),
+            CommitCounter::default(),
+            input,
+            Rectangle::from_size((SIZE, SIZE).into()),
+            program,
+            corner_radii,
+            2.0,
+            0.5,
+            opacity,
+            (0.0, 0.0),
+        );
+        let mut target = renderer.bind(&mut output).expect("bind target");
+        OutputDamageTracker::new((SIZE, SIZE), 1.0, Transform::Normal)
+            .render_output(renderer, &mut target, 0, &[element], [0.0, 0.0, 0.0, 0.0])
+            .expect("draw");
+        let mapping = renderer
+            .copy_framebuffer(&target, Rectangle::from_size(size), Fourcc::Abgr8888)
+            .expect("read back");
+        drop(target);
+        renderer
+            .map_texture(&mapping)
+            .expect("map readback")
+            .to_vec()
+    }
+
+    fn pixel(image: &[u8], x: i32, y: i32) -> [u8; 4] {
+        let index = ((y * SIZE + x) * 4) as usize;
+        image[index..index + 4].try_into().unwrap()
+    }
+
+    #[test]
+    fn passthrough_draws_the_input_unchanged_and_upright() {
+        let Some(mut renderer) = software_renderer() else {
+            eprintln!("no software EGL device; skipping the real compile and draw");
+            return;
+        };
+        let mut programs = CustomShaderPrograms::default();
+        let lookup = compile(&mut renderer, &mut programs, "pass", PASSTHROUGH, &[]);
+        assert!(lookup.failure.is_none());
+        let image = render(
+            &mut renderer,
+            lookup.program.expect("compiled"),
+            1.0,
+            [0.0; 4],
+        );
+        assert_eq!(image, gradient());
+
+        let uv = "vec4 tide_effect(vec2 uv) {\n    return vec4(uv, 0.0, 1.0);\n}\n";
+        let lookup = compile(&mut renderer, &mut programs, "uv", uv, &[]);
+        let image = render(
+            &mut renderer,
+            lookup.program.expect("compiled"),
+            1.0,
+            [0.0; 4],
+        );
+        // uv (0, 0) is the top-left of the captured input.
+        assert!(pixel(&image, 0, 0)[0] < 32 && pixel(&image, 0, 0)[1] < 32);
+        assert!(pixel(&image, SIZE - 1, 0)[0] > 220 && pixel(&image, SIZE - 1, 0)[1] < 32);
+        assert!(pixel(&image, 0, SIZE - 1)[1] > 220);
+    }
+
+    #[test]
+    fn host_applies_params_opacity_premultiplication_and_rounding() {
+        let Some(mut renderer) = software_renderer() else {
+            eprintln!("no software EGL device; skipping the real compile and draw");
+            return;
+        };
+        let mut programs = CustomShaderPrograms::default();
+        let source = "vec4 tide_effect(vec2 uv) {\n    return vec4(tint_color.rgb * 4.0, tint_color.a);\n}\n";
+        let params = [(
+            "tint_color".to_string(),
+            ShaderParam::Vec4([0.5, 0.25, 0.0, 0.5]),
+        )];
+        let program = compile(&mut renderer, &mut programs, "tint", source, &params)
+            .program
+            .expect("compiled");
+
+        // RGB is bounded by alpha, then opacity scales the whole premultiplied color.
+        let image = render(&mut renderer, program.clone(), 1.0, [0.0; 4]);
+        assert_eq!(pixel(&image, 4, 4), [128, 128, 0, 128]);
+        let image = render(&mut renderer, program.clone(), 0.5, [0.0; 4]);
+        let faded = pixel(&image, 4, 4);
+        assert!(faded
+            .iter()
+            .zip([64, 64, 0, 64])
+            .all(|(got, want)| got.abs_diff(want) <= 1));
+
+        // Rounding clips even though the shader never reads the radii.
+        let image = render(&mut renderer, program, 1.0, [4.0; 4]);
+        assert_eq!(pixel(&image, 0, 0)[3], 0);
+        assert_eq!(pixel(&image, 4, 4)[3], 128);
+    }
+
+    #[test]
+    fn compile_failures_are_reported_once_and_keep_the_last_good_program() {
+        let Some(mut renderer) = software_renderer() else {
+            eprintln!("no software EGL device; skipping the real compile and draw");
+            return;
+        };
+        let mut programs = CustomShaderPrograms::default();
+        // Passes the token contract, fails GLSL type checking.
+        let broken = "vec4 tide_effect(vec2 uv) {\n    return 1.0;\n}\n";
+        let first = compile(&mut renderer, &mut programs, "fx", broken, &[]);
+        assert!(first.program.is_none());
+        assert!(first
+            .failure
+            .as_deref()
+            .is_some_and(|message| message.contains("without it")));
+        let again = compile(&mut renderer, &mut programs, "fx", broken, &[]);
+        assert!(again.program.is_none() && again.failure.is_none());
+
+        let good = compile(&mut renderer, &mut programs, "fx", PASSTHROUGH, &[]);
+        let good_generation = good.program.expect("compiled").generation;
+        let regressed = compile(&mut renderer, &mut programs, "fx", broken, &[]);
+        assert_eq!(
+            regressed.program.map(|program| program.generation),
+            Some(good_generation)
+        );
+        assert!(regressed
+            .failure
+            .as_deref()
+            .is_some_and(|message| message.contains("keeping the previous program")));
+
+        // The budget defers a compile instead of stalling one frame on several.
+        let deferred = programs.lookup(
+            &mut renderer,
+            "other",
+            Some(&Arc::from(wrap_texture_fragment(PASSTHROUGH, &[]))),
+            &Arc::from(Vec::new()),
+            &mut 0,
+        );
+        assert!(deferred.deferred && deferred.program.is_none());
     }
 }

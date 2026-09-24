@@ -1511,6 +1511,7 @@ impl Smallvil {
         self.window_opacity.remove(surface);
         self.window_glass_modes.remove(surface);
         self.window_shader_assignments.remove(surface);
+        self.custom_shader_instances.remove(surface);
         self.window_open_animations.remove(surface);
         self.cascade_window_animations.remove(surface);
         self.window_move_animations.remove(surface);

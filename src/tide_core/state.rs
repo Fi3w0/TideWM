@@ -323,6 +323,11 @@ pub struct Smallvil {
     /// Kept as written and resolved per frame by `resolved_shader_assignment`,
     /// so toggling `shaders { enabled }` or a definition needs no re-resolve.
     pub(crate) window_shader_assignments: HashMap<WlSurface, String>,
+    /// Last-good compiled program per custom effect definition.
+    pub(crate) custom_shader_programs: crate::shader_effect::CustomShaderPrograms,
+    /// `u_time`/`u_delta` clocks for windows currently drawing an effect.
+    /// Evicted in `detach_mapped_toplevel`, pruned on reload, cleared on lock.
+    pub(crate) custom_shader_instances: HashMap<WlSurface, crate::shader_effect::ShaderInstance>,
     /// Captured immediately before a visible frame and sampled by
     /// water/frost glass while building that same frame's elements. The
     /// window-sized texture is reused until its dimensions change. Evicted in
@@ -1587,10 +1592,7 @@ impl Smallvil {
                 self.window_shader_assignments.remove(surface);
             }
         }
-        if self
-            .glass_mode_for_surface(surface, self.fullscreen.contains_key(surface))
-            .is_none()
-        {
+        if !self.backdrop_effect_for_surface(surface, self.fullscreen.contains_key(surface)) {
             self.backdrop_textures.remove(surface);
             self.glass_anim.remove(surface);
         }
@@ -3750,6 +3752,8 @@ impl Smallvil {
             window_opacity: HashMap::new(),
             window_glass_modes: HashMap::new(),
             window_shader_assignments: HashMap::new(),
+            custom_shader_programs: Default::default(),
+            custom_shader_instances: HashMap::new(),
             backdrop_textures: HashMap::new(),
             layer_alpha_masks: HashMap::new(),
             layer_dim_buffers: HashMap::new(),
@@ -5453,6 +5457,7 @@ impl Smallvil {
         // recaptures visible glass before composing its first desktop frame.
         self.backdrop_textures.clear();
         self.layer_alpha_masks.clear();
+        self.custom_shader_instances.clear();
         // Closing snapshots contain client pixels and normally render above
         // the desktop. They are irrelevant once the security boundary is
         // active and must never survive into a locked composition.
@@ -6209,6 +6214,65 @@ impl Smallvil {
         Some(logical_rect.to_physical_precise_round(output_scale))
     }
 
+    /// The custom effect a window's rule assigns, live against the
+    /// `shaders { enabled }` master and the current definitions.
+    pub(crate) fn resolved_shader_assignment(
+        &self,
+        surface: &WlSurface,
+    ) -> Option<(&str, &crate::config::ShaderDefinition)> {
+        if !self.config.shaders_enabled {
+            return None;
+        }
+        let name = self.window_shader_assignments.get(surface)?;
+        self.config
+            .shader_definitions
+            .get(name)
+            .map(|definition| (name.as_str(), definition))
+    }
+
+    /// Puts a render-time compile failure on the persistent warning panel.
+    /// Deferred to idle: the panel reserves tiling space, so it must not
+    /// appear while a frame is being assembled. A hard config error on the
+    /// panel stays in front.
+    fn queue_shader_failure(&mut self, message: String) {
+        tracing::warn!(%message, "Custom shader unavailable");
+        self.loop_handle.insert_idle(move |state| {
+            state.config_warnings.push(message);
+            if state.config_error_overlay.as_ref().is_some_and(|overlay| {
+                overlay.severity() == crate::error_overlay::OverlaySeverity::Error
+            }) {
+                return;
+            }
+            let ui_theme = crate::ui_theme::UiTheme::from_config(&state.config);
+            state.config_error_overlay = Some(crate::error_overlay::ConfigErrorOverlay::new(
+                state.config_warnings.join("; "),
+                crate::error_overlay::OverlaySeverity::Warning,
+                ui_theme,
+            ));
+            state.toast = None;
+            state.retile();
+            state.request_redraw();
+        });
+    }
+
+    /// Whether a custom effect can draw for this window this frame: assigned
+    /// with the master on, and a last-good program or an untried source.
+    fn custom_shader_drawable(&self, surface: &WlSurface) -> bool {
+        self.resolved_shader_assignment(surface)
+            .is_some_and(|(name, definition)| {
+                self.custom_shader_programs
+                    .can_draw(name, definition.single_stage_source())
+            })
+    }
+
+    /// Whether a window's captured backdrop feeds anything: a custom effect
+    /// under its own master, or water/frost glass under `water_effects`.
+    fn backdrop_effect_for_surface(&self, surface: &WlSurface, fullscreen: bool) -> bool {
+        self.custom_shader_drawable(surface)
+            || (self.config.water_effects
+                && self.glass_mode_for_surface(surface, fullscreen).is_some())
+    }
+
     fn glass_mode_for_surface(
         &self,
         surface: &WlSurface,
@@ -6663,9 +6727,6 @@ impl Smallvil {
         output: &Output,
         placements: &[crate::placement::PlacedWindow],
     ) {
-        if !self.config.water_effects {
-            return;
-        }
         let surfaces: Vec<WlSurface> = placements
             .iter()
             .filter(|placement| placement.replacement_eligible())
@@ -6675,9 +6736,7 @@ impl Smallvil {
                     .window_depths
                     .get(surface)
                     .is_none_or(|depth| depth.tier() < 2)
-                    && self
-                        .glass_mode_for_surface(surface, placement.is_fullscreen())
-                        .is_some())
+                    && self.backdrop_effect_for_surface(surface, placement.is_fullscreen()))
                 .then(|| surface.clone())
             })
             .collect();
@@ -6920,19 +6979,17 @@ impl Smallvil {
     }
 
     /// Windows on `output` eligible for a captured glass layer this frame:
-    /// `water_effects` on, either an explicit `glass` mode or the
-    /// backward-compatible implicit trigger (`opacity` below 1.0 means
-    /// water), and a backdrop already captured for them. Tiled and floating
-    /// placements share this path; ordinary opaque tiles never enter it.
+    /// a drawable custom effect, or `water_effects` on with either an
+    /// explicit `glass` mode or the backward-compatible implicit trigger
+    /// (`opacity` below 1.0 means water), and a backdrop already captured.
+    /// Tiled and floating placements share this path; ordinary opaque tiles
+    /// never enter it.
     /// Callers use this list to build glass layers that are inserted directly
     /// behind each surface in its normal z-slot.
     pub(crate) fn glass_eligible_surfaces(
         &self,
         placements: &[crate::placement::PlacedWindow],
     ) -> Vec<WlSurface> {
-        if !self.config.water_effects {
-            return Vec::new();
-        }
         placements
             .iter()
             .filter(|placement| placement.replacement_eligible())
@@ -6942,9 +6999,7 @@ impl Smallvil {
                     .window_depths
                     .get(surface)
                     .is_none_or(|depth| depth.tier() < 2)
-                    && self
-                        .glass_mode_for_surface(surface, placement.is_fullscreen())
-                        .is_some()
+                    && self.backdrop_effect_for_surface(surface, placement.is_fullscreen())
                     && self.backdrop_textures.contains_key(surface))
                 .then(|| surface.clone())
             })
@@ -6966,14 +7021,16 @@ impl Smallvil {
         if surfaces.is_empty() {
             return layers;
         }
-        let needs_water = surfaces.iter().any(|surface| {
-            self.window_glass_modes
-                .get(surface)
-                .is_none_or(|mode| *mode == crate::config::GlassMode::Water)
-        });
-        let needs_frost = surfaces.iter().any(|surface| {
-            self.window_glass_modes.get(surface) == Some(&crate::config::GlassMode::Frost)
-        });
+        let needs_water = self.config.water_effects
+            && surfaces.iter().any(|surface| {
+                self.window_glass_modes
+                    .get(surface)
+                    .is_none_or(|mode| *mode == crate::config::GlassMode::Water)
+            });
+        let needs_frost = self.config.water_effects
+            && surfaces.iter().any(|surface| {
+                self.window_glass_modes.get(surface) == Some(&crate::config::GlassMode::Frost)
+            });
         let water_program = needs_water
             .then(|| {
                 crate::water_glass::water_glass_program(&mut self.water_glass_program, renderer)
@@ -6987,6 +7044,7 @@ impl Smallvil {
         let Some(output_geo) = self.space.output_geometry(output) else {
             return layers;
         };
+        let mut compile_budget = 1usize;
         for surface in surfaces {
             let Some((capture_id, capture_version, capture_texture)) = self
                 .backdrop_textures
@@ -7006,6 +7064,81 @@ impl Smallvil {
             };
             let location = placement.rect.loc;
             let visual = self.placement_visual_sample(placement);
+            // A custom effect replaces the glass pass. Without a program yet
+            // (or ever) the window takes its normal glass path instead.
+            let lookup = self
+                .config
+                .shaders_enabled
+                .then(|| self.window_shader_assignments.get(surface))
+                .flatten()
+                .and_then(|name| {
+                    let stage = self.config.shader_definitions.get(name)?.stages.first()?;
+                    Some(self.custom_shader_programs.lookup(
+                        renderer,
+                        name,
+                        stage.source.as_ref(),
+                        &stage.params,
+                        &mut compile_budget,
+                    ))
+                });
+            if let Some(lookup) = lookup {
+                if lookup.deferred {
+                    self.request_redraw();
+                }
+                if let Some(message) = lookup.failure {
+                    self.queue_shader_failure(message);
+                }
+                if let Some(program) = lookup.program {
+                    let rounding = self.rounding_config_for_surface(surface);
+                    let output_scale = output.current_scale().fractional_scale() as f32;
+                    let corner_radii = if rounding.enabled {
+                        rounding.radii.map(|radius| radius * output_scale)
+                    } else {
+                        [0.0; 4]
+                    };
+                    let antialias = rounding.antialias * output_scale;
+                    let commit = crate::shader_effect::custom_shader_commit(
+                        capture_version,
+                        program.generation,
+                        (physical_rect.size.w, physical_rect.size.h),
+                        &program.params,
+                        corner_radii,
+                        rounding.power,
+                        antialias,
+                        visual.opacity,
+                    );
+                    let timing = self
+                        .custom_shader_instances
+                        .entry(surface.clone())
+                        .or_insert_with(crate::shader_effect::ShaderInstance::new)
+                        .sample(commit);
+                    self.glass_anim.remove(surface);
+                    layers.entry(surface.clone()).or_default().push(
+                        crate::backend::udev::OutputRenderElements::CustomShader(
+                            crate::shader_effect::CustomShaderElement::new(
+                                capture_id,
+                                commit,
+                                capture_texture,
+                                physical_rect,
+                                program,
+                                corner_radii,
+                                rounding.power,
+                                antialias,
+                                visual.opacity,
+                                timing,
+                            ),
+                        ),
+                    );
+                    continue;
+                }
+            }
+            if !self.config.water_effects
+                || self
+                    .glass_mode_for_surface(surface, placement.is_fullscreen())
+                    .is_none()
+            {
+                continue;
+            }
             match self.window_glass_modes.get(surface).copied() {
                 Some(crate::config::GlassMode::Frost) => {
                     if let Some(program) = &frost_program {
@@ -12471,6 +12604,10 @@ impl Smallvil {
                 }
                 self.config = new_config;
                 self.sync_config_watch_paths();
+                warnings.extend(
+                    self.custom_shader_programs
+                        .retain_definitions(&self.config.shader_definitions),
+                );
                 self.rescue_keybinds_active = false;
                 self.helper_keys_down.clear();
                 // A live `workspace_count` change should show up in the
@@ -12608,6 +12745,8 @@ impl Smallvil {
                     for surface in surfaces {
                         self.refresh_window_opacity_and_glass_for(&surface);
                     }
+                    self.custom_shader_instances
+                        .retain(|surface, _| self.window_shader_assignments.contains_key(surface));
                     // The mode or frost tuning may have changed. Force the
                     // shared pre-frame pipeline to rebuild against the current
                     // window geometry instead of briefly showing stale content.
