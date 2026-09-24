@@ -1070,6 +1070,12 @@ impl Smallvil {
         } else {
             self.window_glass_modes.remove(surface);
         }
+        if let Some(crate::config::ShaderAssignment::Named(name)) = &rule.shader {
+            self.window_shader_assignments
+                .insert(surface.clone(), name.clone());
+        } else {
+            self.window_shader_assignments.remove(surface);
+        }
 
         let output = self
             .fullscreen
@@ -1504,6 +1510,7 @@ impl Smallvil {
         self.output_pins.remove(surface);
         self.window_opacity.remove(surface);
         self.window_glass_modes.remove(surface);
+        self.window_shader_assignments.remove(surface);
         self.window_open_animations.remove(surface);
         self.cascade_window_animations.remove(surface);
         self.window_move_animations.remove(surface);
@@ -1586,6 +1593,10 @@ impl Smallvil {
         }
         if let Some(mode) = rule.glass {
             self.window_glass_modes.insert(entry.surface.clone(), mode);
+        }
+        if let Some(crate::config::ShaderAssignment::Named(name)) = &rule.shader {
+            self.window_shader_assignments
+                .insert(entry.surface.clone(), name.clone());
         }
         self.window_depths
             .insert(entry.surface.clone(), crate::depth::WindowDepth::new());

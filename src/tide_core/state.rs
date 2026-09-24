@@ -319,6 +319,10 @@ pub struct Smallvil {
     /// entries preserve the original behavior: translucent floating windows
     /// use water refraction.
     pub(crate) window_glass_modes: HashMap<WlSurface, crate::config::GlassMode>,
+    /// Custom effect name from the last matching `rule { shader = name }`.
+    /// Kept as written and resolved per frame by `resolved_shader_assignment`,
+    /// so toggling `shaders { enabled }` or a definition needs no re-resolve.
+    pub(crate) window_shader_assignments: HashMap<WlSurface, String>,
     /// Captured immediately before a visible frame and sampled by
     /// water/frost glass while building that same frame's elements. The
     /// window-sized texture is reused until its dimensions change. Evicted in
@@ -1546,7 +1550,8 @@ impl Smallvil {
             })
     }
 
-    /// Re-derives `window_opacity`/`window_glass_modes` for one window from
+    /// Re-derives `window_opacity`/`window_glass_modes`/
+    /// `window_shader_assignments` for one window from
     /// its currently-resolved rule. Shared by the full post-reload battery
     /// (`reload_config`, one call per mapped window) and by anything that
     /// needs a single window's opacity/glass to react to a live
@@ -1572,6 +1577,14 @@ impl Smallvil {
             }
             None => {
                 self.window_glass_modes.remove(surface);
+            }
+        }
+        match rule.shader {
+            Some(crate::config::ShaderAssignment::Named(name)) => {
+                self.window_shader_assignments.insert(surface.clone(), name);
+            }
+            Some(crate::config::ShaderAssignment::None) | None => {
+                self.window_shader_assignments.remove(surface);
             }
         }
         if self
@@ -3736,6 +3749,7 @@ impl Smallvil {
             space,
             window_opacity: HashMap::new(),
             window_glass_modes: HashMap::new(),
+            window_shader_assignments: HashMap::new(),
             backdrop_textures: HashMap::new(),
             layer_alpha_masks: HashMap::new(),
             layer_dim_buffers: HashMap::new(),
@@ -12589,6 +12603,7 @@ impl Smallvil {
                     }
                     self.window_opacity.clear();
                     self.window_glass_modes.clear();
+                    self.window_shader_assignments.clear();
                     let surfaces: Vec<WlSurface> = self.foreign_toplevels.keys().cloned().collect();
                     for surface in surfaces {
                         self.refresh_window_opacity_and_glass_for(&surface);

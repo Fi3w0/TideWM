@@ -426,6 +426,13 @@ impl Default for WaterGlassConfig {
     }
 }
 
+/// A window rule's `shader` value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShaderAssignment {
+    None,
+    Named(String),
+}
+
 /// One ordered stage of a custom effect (`shader "name" { stage { } }`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShaderStage {
@@ -1801,6 +1808,9 @@ impl Config {
             if rule.glass.is_some() {
                 effective.glass = rule.glass;
             }
+            if rule.shader.is_some() {
+                effective.shader = rule.shader.clone();
+            }
             if rule.viscosity.is_some() {
                 effective.viscosity = rule.viscosity;
             }
@@ -2762,6 +2772,11 @@ pub struct WindowRule {
     /// behavior where compositor `opacity` below one implies water;
     /// `Plain` disables backdrop substitution while preserving `opacity`.
     pub glass: Option<GlassMode>,
+    /// Custom effect by definition name, or `shader = none` to clear an
+    /// earlier match. Last matching rule wins. The name resolves live
+    /// against `shaders { enabled }` and `shader_definitions`, so a typo
+    /// or a removed definition leaves the window on its normal path.
+    pub shader: Option<ShaderAssignment>,
     /// Per-window interactive move/resize damping. Last matching rule wins;
     /// `0.0` disables damping for the matched app.
     pub viscosity: Option<f64>,
@@ -8268,6 +8283,15 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                         "Expected a rule glass mode: water frost none, ignoring"
                     ),
                 },
+                "shader" => match value.trim().to_lowercase() {
+                    name if name == "none" => rule.shader = Some(ShaderAssignment::None),
+                    name if valid_ripple_preset_name(&name) => {
+                        rule.shader = Some(ShaderAssignment::Named(name))
+                    }
+                    _ => {
+                        tracing::warn!(value, "Expected a shader definition name or none, ignoring")
+                    }
+                },
                 "viscosity" => match parse_viscosity(value) {
                     Some(value) => rule.viscosity = Some(value),
                     None => {
@@ -12106,6 +12130,35 @@ animations {
         assert!(warnings
             .iter()
             .any(|warning| warning.contains("at most 32 definitions")));
+    }
+
+    #[test]
+    fn rule_shader_is_last_match_wins_and_none_clears() {
+        let entries = wave_entries(
+            "rule {\n app_id = kitty\n shader = Soft-Glass\n }\n\
+             rule {\n app_id = foot\n shader = crt\n }\n\
+             rule {\n app_id = foot\n shader = none\n }\n\
+             rule {\n app_id = mpv\n shader = crt\n }\n\
+             rule {\n app_id = mpv\n shader = \"bad name!\"\n }\n",
+        );
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        assert_eq!(
+            config.resolve_window_rules(facts_for("kitty")).shader,
+            Some(ShaderAssignment::Named("soft-glass".to_string()))
+        );
+        assert_eq!(
+            config.resolve_window_rules(facts_for("foot")).shader,
+            Some(ShaderAssignment::None)
+        );
+        // An invalid later value is ignored, not treated as `none`.
+        assert_eq!(
+            config.resolve_window_rules(facts_for("mpv")).shader,
+            Some(ShaderAssignment::Named("crt".to_string()))
+        );
+        assert_eq!(
+            config.resolve_window_rules(facts_for("alacritty")).shader,
+            None
+        );
     }
 
     #[test]
