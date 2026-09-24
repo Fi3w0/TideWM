@@ -22,6 +22,7 @@ use smithay::{
             damage::OutputDamageTracker,
             element::{
                 surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
+                utils::{Relocate, RelocateRenderElement},
                 AsRenderElements, Kind,
             },
             gles::{GlesRenderer, GlesTarget, GlesTexture},
@@ -38,7 +39,10 @@ use smithay::{
             protocol::{wl_buffer::WlBuffer, wl_surface::WlSurface},
         },
     },
-    utils::{Buffer as BufferCoords, IsAlive, Logical, Point, Rectangle, Scale, Size, Transform},
+    utils::{
+        Buffer as BufferCoords, IsAlive, Logical, Physical, Point, Rectangle, Scale, Size,
+        Transform,
+    },
     wayland::{
         compositor::with_states,
         image_copy_capture::{CaptureFailureReason, Frame},
@@ -60,6 +64,14 @@ const MAX_PENDING_CAPTURES_PER_CLIENT: usize = 8;
 /// still allowing both screencast cursor variants and ordinary screenshots
 /// to make progress together.
 const MAX_CAPTURE_RENDERS_PER_OUTPUT_FRAME: usize = 4;
+
+smithay::backend::renderer::element::render_elements! {
+    WindowCaptureElements<=GlesRenderer>;
+    Surface = WaylandSurfaceRenderElement<GlesRenderer>,
+    /// A glass layer from `glass_layer_elements`, moved from its output-local
+    /// rect onto the toplevel capture canvas.
+    Glass = RelocateRenderElement<OutputRenderElements>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CaptureQueueLimit {
@@ -493,27 +505,63 @@ impl Smallvil {
         // A toplevel source is rendered on its own transparent/black canvas
         // at the scale of its owning output. It includes subsurfaces and
         // popups belonging to that toplevel, but no neighboring windows,
-        // compositor chrome, wallpaper, or pointer.
+        // compositor chrome, wallpaper, or pointer. The one exception is the
+        // window's own glass layer, which shows its captured backdrop just
+        // as the live frame does.
         if let Some(window_target) = window_target {
-            let blocked = window_target.toplevel().is_some_and(|toplevel| {
-                self.resolve_window_rules_for(toplevel.wl_surface())
-                    .block_capture
-            });
-            let opacity = window_target
+            let surface = window_target
                 .toplevel()
-                .map(|toplevel| self.window_render_alpha(toplevel.wl_surface()))
+                .map(|toplevel| toplevel.wl_surface().clone());
+            let blocked = surface
+                .as_ref()
+                .is_some_and(|surface| self.resolve_window_rules_for(surface).block_capture);
+            let opacity = surface
+                .as_ref()
+                .map(|surface| self.window_render_alpha(surface))
                 .unwrap_or(1.0);
-            let window_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = if blocked {
-                Vec::new()
-            } else {
-                AsRenderElements::render_elements(
-                    &window_target,
-                    renderer,
-                    window_origin,
-                    Scale::from(scale),
-                    opacity,
-                )
-            };
+            let mut window_elements: Vec<WindowCaptureElements> = Vec::new();
+            if !blocked {
+                window_elements.extend(
+                    AsRenderElements::<GlesRenderer>::render_elements::<
+                        WaylandSurfaceRenderElement<GlesRenderer>,
+                    >(
+                        &window_target,
+                        renderer,
+                        window_origin,
+                        Scale::from(scale),
+                        opacity,
+                    )
+                    .into_iter()
+                    .map(WindowCaptureElements::Surface),
+                );
+                // The glass layer is built by the live desktop path at the
+                // window's output-local rect, then moved onto this canvas at
+                // the window geometry's own origin, behind its surfaces.
+                if let Some(surface) = &surface {
+                    let placements = self.render_placements(&output).unwrap_or_default();
+                    let glass_surfaces: Vec<WlSurface> = self
+                        .glass_eligible_surfaces(&placements)
+                        .into_iter()
+                        .filter(|eligible| eligible == surface)
+                        .collect();
+                    let glass_origin: Point<i32, Physical> = (window_target.geometry().loc
+                        - window_target.bbox_with_popups().loc)
+                        .to_physical_precise_round(scale);
+                    window_elements.extend(
+                        self.glass_layer_elements(renderer, &output, &placements, &glass_surfaces)
+                            .remove(surface)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|layer| {
+                                WindowCaptureElements::Glass(RelocateRenderElement::from_element(
+                                    layer,
+                                    glass_origin,
+                                    Relocate::Absolute,
+                                ))
+                            }),
+                    );
+                }
+            }
             let mut damage_tracker =
                 OutputDamageTracker::new((size.w, size.h), 1.0, Transform::Normal);
             if let Err(err) = damage_tracker.render_output(
