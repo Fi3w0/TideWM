@@ -23,11 +23,11 @@ use smithay::{
     backend::renderer::{
         element::{Element, Id, Kind, RenderElement},
         gles::{
-            GlesError, GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture, Uniform, UniformName,
-            UniformType, UniformValue,
+            ffi, GlesError, GlesFrame, GlesRenderer, GlesTexProgram, GlesTexture, Uniform,
+            UniformName, UniformType, UniformValue,
         },
         utils::CommitCounter,
-        Texture,
+        ContextId, Renderer, Texture,
     },
     utils::{user_data::UserDataMap, Buffer, Physical, Rectangle, Scale, Transform},
 };
@@ -629,6 +629,8 @@ struct CachedProgram {
     good_source: Option<Arc<str>>,
     /// Source that failed to compile, never retried until it changes.
     failed: Option<Arc<str>>,
+    /// The driver's reason for `failed`, re-reported after a reload.
+    failure_reason: Option<String>,
 }
 
 /// Pointer equality first so a steady frame never rereads the source; a
@@ -659,6 +661,8 @@ pub struct ProgramLookup {
 #[derive(Default)]
 pub struct CustomShaderPrograms {
     entries: HashMap<String, CachedProgram>,
+    /// Programs belong to one GL context; a replacement renderer drops them.
+    context: Option<ContextId<GlesTexture>>,
     compiles: u64,
     compile_failures: u64,
 }
@@ -701,6 +705,11 @@ impl CustomShaderPrograms {
         params: &Arc<[(String, ShaderParam)]>,
         compile_budget: &mut usize,
     ) -> ProgramLookup {
+        let context = renderer.context_id();
+        if self.context.as_ref() != Some(&context) {
+            self.entries.clear();
+            self.context = Some(context);
+        }
         if !self.entries.contains_key(name) {
             self.entries
                 .insert(name.to_string(), CachedProgram::default());
@@ -709,6 +718,7 @@ impl CustomShaderPrograms {
             entries,
             compiles,
             compile_failures,
+            ..
         } = self;
         let entry = entries.get_mut(name).expect("entry inserted above");
         let mut lookup = ProgramLookup {
@@ -761,8 +771,11 @@ impl CustomShaderPrograms {
             }
             Err(err) => {
                 *compile_failures += 1;
+                let reason = driver_compile_log(renderer, source)
+                    .unwrap_or_else(|| format!("{err}; the driver log is in the journal"));
+                lookup.failure = Some(compile_failure_message(name, &reason, entry.good.is_some()));
                 entry.failed = Some(source.clone());
-                lookup.failure = Some(compile_failure_message(name, &err, entry.good.is_some()));
+                entry.failure_reason = Some(reason);
                 lookup.program = entry.good.clone();
             }
         }
@@ -786,7 +799,7 @@ impl CustomShaderPrograms {
                 same_source(&mut entry.failed, source).then(|| {
                     compile_failure_message(
                         name,
-                        &GlesError::ShaderCompileError,
+                        entry.failure_reason.as_deref().unwrap_or("compile error"),
                         entry.good.is_some(),
                     )
                 })
@@ -797,15 +810,91 @@ impl CustomShaderPrograms {
     }
 }
 
-fn compile_failure_message(name: &str, err: &GlesError, has_previous: bool) -> String {
+fn compile_failure_message(name: &str, reason: &str, has_previous: bool) -> String {
     format!(
-        "Shader {name:?} did not compile ({err}; the driver log is in the journal); {}",
+        "Shader {name:?} did not compile: {reason}; {}",
         if has_previous {
             "keeping the previous program"
         } else {
             "rendering the window without it"
         }
     )
+}
+
+/// Longest driver diagnostic carried onto the panel.
+const MAX_DRIVER_LOG_BYTES: usize = 240;
+
+/// Smithay reports a failed compile only as `ShaderCompileError` and sends
+/// the driver's text to the journal, so a failure is compiled once more
+/// here, alone, to read that text for the panel. Runs only after a failure,
+/// never per frame.
+fn driver_compile_log(renderer: &mut GlesRenderer, source: &str) -> Option<String> {
+    let source = source.replace("//_DEFINES_", "");
+    let log = renderer
+        .with_context(|gl| {
+            // SAFETY: `with_context` made this renderer's context current;
+            // the pointers stay valid for these calls and the shader object
+            // is deleted before returning.
+            unsafe {
+                let shader = gl.CreateShader(ffi::FRAGMENT_SHADER);
+                if shader == 0 {
+                    return None;
+                }
+                let pointer = source.as_ptr() as *const ffi::types::GLchar;
+                let length = source.len() as ffi::types::GLint;
+                gl.ShaderSource(shader, 1, &pointer, &length);
+                gl.CompileShader(shader);
+                let mut log_length = 0;
+                gl.GetShaderiv(shader, ffi::INFO_LOG_LENGTH, &mut log_length);
+                let mut log = vec![0u8; log_length.max(0) as usize];
+                let mut written = 0;
+                gl.GetShaderInfoLog(
+                    shader,
+                    log_length,
+                    &mut written,
+                    log.as_mut_ptr() as *mut ffi::types::GLchar,
+                );
+                gl.DeleteShader(shader);
+                log.truncate(written.max(0) as usize);
+                Some(String::from_utf8_lossy(&log).into_owned())
+            }
+        })
+        .ok()??;
+    summarize_driver_log(&log)
+}
+
+/// First error line of a driver log, with Mesa's `1:LINE(COL)` source
+/// prefix rewritten to the user's file (source string 1 in the wrapper).
+fn summarize_driver_log(log: &str) -> Option<String> {
+    let line = log
+        .lines()
+        .map(str::trim)
+        .find(|line| line.to_ascii_lowercase().contains("error"))
+        .or_else(|| log.lines().map(str::trim).find(|line| !line.is_empty()))?;
+    let line = match line.split_once(':') {
+        Some(("1", rest)) if rest.starts_with(|c: char| c.is_ascii_digit()) => {
+            let digits = rest
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len());
+            let (number, rest) = rest.split_at(digits);
+            format!("line {number}{rest}")
+        }
+        Some(("0" | "2", rest)) => match rest.split_once(": ") {
+            Some((_, message)) => format!("host wrapper: {message}"),
+            None => line.to_string(),
+        },
+        _ => line.to_string(),
+    };
+    let mut line: String = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.len() > MAX_DRIVER_LOG_BYTES {
+        let mut end = MAX_DRIVER_LOG_BYTES;
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        line.truncate(end);
+        line.push_str("...");
+    }
+    Some(line)
 }
 
 /// Per-window clock behind `u_time` and `u_delta`. Both are sampled only
@@ -1203,6 +1292,27 @@ vec4 tide_effect(vec2 uv) {
     }
 
     #[test]
+    fn driver_logs_are_summarized_onto_the_users_file() {
+        assert_eq!(
+            summarize_driver_log("1:2(12): error: `return' with wrong type float\n1:3: warning: x")
+                .as_deref(),
+            Some("line 2(12): error: `return' with wrong type float")
+        );
+        assert_eq!(
+            summarize_driver_log("0:40(1): error: something in the prelude").as_deref(),
+            Some("host wrapper: error: something in the prelude")
+        );
+        assert_eq!(
+            summarize_driver_log("some vendor text\nERROR: 1(2) : bad").as_deref(),
+            Some("ERROR: 1(2) : bad")
+        );
+        assert_eq!(summarize_driver_log("  \n"), None);
+        let long = format!("1:1(1): error: {}", "é".repeat(400));
+        let summary = summarize_driver_log(&long).unwrap();
+        assert!(summary.len() <= MAX_DRIVER_LOG_BYTES + 3 && summary.ends_with("..."));
+    }
+
+    #[test]
     fn commit_tracks_content_but_not_time() {
         let params = [("strength".to_string(), ShaderParam::Float(0.5))];
         let commit = |version, generation, params: &[(String, ShaderParam)], opacity| {
@@ -1411,10 +1521,11 @@ vec4 tide_effect(vec2 uv) {
         let broken = "vec4 tide_effect(vec2 uv) {\n    return 1.0;\n}\n";
         let first = compile(&mut renderer, &mut programs, "fx", broken, &[]);
         assert!(first.program.is_none());
-        assert!(first
-            .failure
-            .as_deref()
-            .is_some_and(|message| message.contains("without it")));
+        let message = first.failure.expect("first failure is reported");
+        assert!(message.contains("without it"), "{message}");
+        // Mesa names the user's own line and column, not wrapper-relative ones.
+        assert!(message.contains(": line 2("), "{message}");
+        assert!(message.contains("error"), "{message}");
         let again = compile(&mut renderer, &mut programs, "fx", broken, &[]);
         assert!(again.program.is_none() && again.failure.is_none());
 
