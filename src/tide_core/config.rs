@@ -12294,6 +12294,74 @@ animations {
         );
     }
 
+    /// The two examples in DOCUMENTATION.md's "Custom shaders" section,
+    /// verbatim, so the documented syntax can't drift from what parses.
+    #[test]
+    fn documented_shader_examples_parse_without_warnings() {
+        let entries = wave_entries(
+            r#"shaders {
+    enabled = true
+}
+
+shader soft-blur {
+    render_scale = 2
+    stage {
+        file = "shaders/blur-h.frag"
+        params {
+            radius = 2
+        }
+    }
+    stage {
+        file = "shaders/blur-v.frag"
+        params {
+            radius = 2
+        }
+    }
+}
+
+rule {
+    app_id = kitty
+    shader = soft-blur
+}
+
+shader edged {
+    stage {
+        file = "shaders/blur-h.frag"
+        params {
+            radius = 3
+        }
+    }
+    stage {
+        file = "shaders/blur-v.frag"
+        params {
+            radius = 3
+        }
+        save = "blurred"
+    }
+    stage {
+        file = "shaders/edge-mix.frag"
+        source = "get:blurred"
+        params {
+            margin = 0.08
+        }
+        textures {
+            original = backdrop
+        }
+    }
+}
+"#,
+        );
+        let (config, warnings) = Config::from_raw(lower_entries(&entries));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(config.shaders_enabled);
+        assert_eq!(config.shader_definitions["soft-blur"].stages.len(), 2);
+        assert_eq!(config.shader_definitions["edged"].stages.len(), 3);
+        assert_eq!(
+            config.resolve_window_rules(facts_for("kitty")).shader,
+            Some(ShaderAssignment::Named("soft-blur".to_string()))
+        );
+    }
+
     #[test]
     fn a_later_shader_definition_replaces_the_earlier_one_whole() {
         let entries = wave_entries(

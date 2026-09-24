@@ -1990,6 +1990,75 @@ vec4 tide_effect(vec2 uv) {
     }
 
     #[test]
+    fn shipped_example_shaders_pass_the_contract_and_compile() {
+        let radius = [("radius".to_string(), ShaderParam::Float(2.0))];
+        type Example = (
+            &'static str,
+            &'static str,
+            Vec<(String, ShaderParam)>,
+            Vec<(String, StageTexture)>,
+        );
+        let examples: [Example; 4] = [
+            (
+                "tint",
+                include_str!("../../share/shaders/tint.frag"),
+                vec![
+                    ("strength".to_string(), ShaderParam::Float(0.3)),
+                    (
+                        "tint_color".to_string(),
+                        ShaderParam::Vec4([0.5, 0.8, 1.0, 1.0]),
+                    ),
+                ],
+                Vec::new(),
+            ),
+            (
+                "blur-h",
+                include_str!("../../share/shaders/blur-h.frag"),
+                radius.to_vec(),
+                Vec::new(),
+            ),
+            (
+                "blur-v",
+                include_str!("../../share/shaders/blur-v.frag"),
+                radius.to_vec(),
+                Vec::new(),
+            ),
+            (
+                "edge-mix",
+                include_str!("../../share/shaders/edge-mix.frag"),
+                vec![("margin".to_string(), ShaderParam::Float(0.1))],
+                vec![("original".to_string(), StageTexture::Backdrop)],
+            ),
+        ];
+        for (name, source, _, _) in &examples {
+            assert_eq!(validate_fragment_contract(source), Ok(()), "{name}");
+        }
+        let Some(mut renderer) = software_renderer() else {
+            eprintln!("no software EGL device; skipping the real compile and draw");
+            return;
+        };
+        let mut programs = CustomShaderPrograms::default();
+        for (name, source, params, textures) in &examples {
+            let stage = stage(source, params, textures, None, None);
+            let lookup = programs.lookup(&mut renderer, name, 0, 1, &stage, &mut 1);
+            assert!(lookup.program.is_some(), "{name}: {:?}", lookup.failure);
+        }
+        // The documented two-pass blur keeps a flat input flat.
+        let flat = "vec4 tide_effect(vec2 uv) {\n    return vec4(0.25, 0.5, 0.75, 1.0);\n}\n";
+        let image = render_chain(
+            &mut renderer,
+            vec![
+                stage(flat, &[], &[], None, None),
+                stage(examples[1].1, &radius, &[], None, None),
+                stage(examples[2].1, &radius, &[], None, None),
+            ],
+        );
+        assert!(image.chunks(4).all(|px| px[0].abs_diff(64) <= 1
+            && px[1].abs_diff(128) <= 1
+            && px[2].abs_diff(191) <= 1));
+    }
+
+    #[test]
     fn saved_outputs_and_extra_textures_bind_where_the_stage_asks() {
         let Some(mut renderer) = software_renderer() else {
             eprintln!("no software EGL device; skipping the real compile and draw");
