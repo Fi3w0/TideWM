@@ -2562,6 +2562,22 @@ pub enum OutputTransformConfig {
     Flipped270,
 }
 
+impl OutputTransformConfig {
+    pub fn to_transform(self) -> smithay::utils::Transform {
+        use smithay::utils::Transform;
+        match self {
+            Self::Normal => Transform::Normal,
+            Self::Rotate90 => Transform::_90,
+            Self::Rotate180 => Transform::_180,
+            Self::Rotate270 => Transform::_270,
+            Self::Flipped => Transform::Flipped,
+            Self::Flipped90 => Transform::Flipped90,
+            Self::Flipped180 => Transform::Flipped180,
+            Self::Flipped270 => Transform::Flipped270,
+        }
+    }
+}
+
 /// Which DRM device TideWM should use for its own GLES rendering and
 /// scanout. Paths may name either a primary (`cardN`) or render node; the
 /// backend resolves both to the same physical device.

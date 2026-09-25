@@ -12927,6 +12927,67 @@ impl Smallvil {
     /// Re-reads the config file and applies what can be applied live
     /// (keybinds, input repeat rate). Shows a toast either way so a reload
     /// is never silent, success or failure.
+    /// Re-applies `output <name> { }` blocks to connected outputs after a
+    /// reload: transform, scale and position go through the same validated
+    /// transaction as wlr-output-management. Outputs without a block keep
+    /// their current state. A different `mode` or `enabled = false` needs a
+    /// DRM modeset, which only happens at output setup, so those produce a
+    /// notice instead of being ignored silently.
+    fn apply_output_blocks_live(&mut self) -> Vec<String> {
+        use crate::handlers::wlr_output_management::{apply_output_changes, OutputChange};
+        let mut notices = Vec::new();
+        let outputs: Vec<Output> = self.space.outputs().cloned().collect();
+        let changes: Vec<(Output, OutputChange)> = outputs
+            .into_iter()
+            .map(|output| {
+                let name = output.name();
+                let change = match self.config.outputs.iter().find(|cfg| cfg.name == name) {
+                    None => OutputChange::default(),
+                    Some(cfg) => {
+                        if !cfg.enabled {
+                            notices.push(format!(
+                                "output {name}: enabled = false applies after restarting TideWM"
+                            ));
+                        }
+                        if let (Some(requested), Some(current)) =
+                            (cfg.mode.as_deref(), output.current_mode())
+                        {
+                            let differs = match crate::config::parse_mode_str(requested) {
+                                Some((w, h, refresh)) => {
+                                    w != current.size.w
+                                        || h != current.size.h
+                                        || refresh.is_some_and(|r| {
+                                            (f64::from(current.refresh) / 1000.0 - r).abs() >= 0.5
+                                        })
+                                }
+                                None => false,
+                            };
+                            if differs {
+                                notices.push(format!(
+                                    "output {name}: mode {requested} applies after restarting TideWM"
+                                ));
+                            }
+                        }
+                        OutputChange {
+                            position: cfg.position.map(Into::into),
+                            transform: Some(cfg.transform.to_transform()),
+                            scale: Some(cfg.scale),
+                            custom_mode: None,
+                        }
+                    }
+                };
+                (output, change)
+            })
+            .collect();
+        if !apply_output_changes(self, &changes) {
+            notices.push(
+                "output blocks: the new layout is invalid (overlap or out of range); kept the current one"
+                    .to_string(),
+            );
+        }
+        notices
+    }
+
     pub fn reload_config(&mut self) {
         self.sync_tide();
         match Config::reload_staged(&self.tide) {
@@ -12997,8 +13058,13 @@ impl Smallvil {
                 } else {
                     self.welcome_hint = None;
                 }
+                let outputs_changed =
+                    format!("{:?}", self.config.outputs) != format!("{:?}", new_config.outputs);
                 self.config = new_config;
                 self.sync_config_watch_paths();
+                if outputs_changed {
+                    warnings.extend(self.apply_output_blocks_live());
+                }
                 warnings.extend(
                     self.custom_shader_programs
                         .retain_definitions(&self.config.shader_definitions),
