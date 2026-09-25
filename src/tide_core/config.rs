@@ -5339,7 +5339,8 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
         "backdrop_capture_scale" => set_i32(&mut raw.backdrop_capture_scale, key, value),
         "cursor_always_visible" => set_bool(&mut raw.cursor_always_visible, key, value),
         "cursor_hide_after" => {
-            if let Some(ms) = parse_duration_ms(value) {
+            // `0` is documented as "never hide", so zero must parse.
+            if let Some(ms) = parse_duration_ms_including_zero(value) {
                 raw.cursor_hide_after_ms = ms as i32;
             } else {
                 tracing::warn!(
@@ -13208,6 +13209,18 @@ shader tinted-blur {
         );
         assert_eq!(depth.urgent_color, [1.0, 238.0 / 255.0, 221.0 / 255.0]);
         assert_eq!(depth.urgent_alpha, 0.84);
+    }
+
+    #[test]
+    fn cursor_hide_after_accepts_zero_as_disabled() {
+        for (value, expected) in [("0", 0), ("0ms", 0), ("2s", 2000), ("1500ms", 1500)] {
+            let mut raw = RawConfig {
+                cursor_hide_after_ms: 777,
+                ..RawConfig::default()
+            };
+            apply_top_level_assign(&mut raw, "cursor_hide_after", value);
+            assert_eq!(raw.cursor_hide_after_ms, expected, "{value}");
+        }
     }
 
     #[test]
