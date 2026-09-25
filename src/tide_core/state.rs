@@ -872,6 +872,8 @@ pub struct Smallvil {
     /// Under winit the host compositor draws the real cursor, so this is
     /// tracked but never rendered from.
     pub cursor_status: CursorImageStatus,
+    /// Icon surface of the active client drag'n'drop, drawn at the pointer.
+    pub dnd_icon: Option<WlSurface>,
 
     /// Loaded xcursor theme for `CursorImageStatus::Named`, only populated
     /// by the udev backend (`backend/udev.rs`, same pattern as `session`/
@@ -3897,6 +3899,7 @@ impl Smallvil {
             udev_gpu: None,
             session: None,
             cursor_status: CursorImageStatus::default_named(),
+            dnd_icon: None,
             cursor_theme: None,
             fullscreen: HashMap::new(),
             maximized: HashMap::new(),
@@ -5435,6 +5438,17 @@ impl Smallvil {
                 Some(Duration::ZERO),
                 |_, _| Some(output.clone()),
             );
+        }
+    }
+
+    /// Frame callbacks for the active drag'n'drop icon, a bare `wl_surface`
+    /// like the lock surface above. Without them a client that animates its
+    /// drag image (Firefox tab previews) would freeze after the first commit.
+    pub fn send_dnd_icon_frames(&self, output: &Output, time: Duration) {
+        if let Some(icon) = self.dnd_icon.as_ref() {
+            send_frames_surface_tree(icon, output, time, Some(Duration::ZERO), |_, _| {
+                Some(output.clone())
+            });
         }
     }
 

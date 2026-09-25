@@ -13,6 +13,7 @@
 
 use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, time::Duration};
 
+use smithay::reexports::wayland_server::Resource;
 use smithay::{
     backend::{
         allocator::{
@@ -1901,6 +1902,28 @@ fn render_surface(
         }
     };
 
+    // A client drag'n'drop icon rides with the pointer, drawn with the cursor
+    // elements. Never over the lock screen, same as client cursor surfaces.
+    let mut cursor_surface_element = cursor_surface_element;
+    if !locked {
+        if let Some(icon) = state.dnd_icon.as_ref().filter(|icon| icon.is_alive()) {
+            let pointer_loc = state
+                .seat
+                .get_pointer()
+                .map(|p| p.current_location())
+                .unwrap_or_default();
+            let local = (pointer_loc - output_loc.to_f64()).to_physical(scale);
+            cursor_surface_element.extend(render_elements_from_surface_tree(
+                renderer,
+                icon,
+                local.to_i32_round(),
+                scale,
+                1.0,
+                Kind::Unspecified,
+            ));
+        }
+    }
+
     // Locked: skip window/layer-shell rendering (and the group tab strip,
     // which would otherwise leak window titles over the lock screen)
     // entirely, rather than rendering them and relying on the lock
@@ -2156,6 +2179,7 @@ fn render_surface(
     // sees; the lock surface gets its own frame callback instead.
     if locked {
         state.send_lock_frames(output, state.start_time.elapsed());
+        state.send_dnd_icon_frames(output, state.start_time.elapsed());
     } else {
         state.send_window_frames(output, state.start_time.elapsed());
         state.send_layer_frames(output, state.start_time.elapsed());
