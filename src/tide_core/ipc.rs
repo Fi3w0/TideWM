@@ -471,64 +471,22 @@ fn register_connection(
             let mut chunk = [0u8; 4096];
             loop {
                 let mut reader: &UnixStream = stream;
-                match reader.read(&mut chunk) {
-                    Ok(0) => finish!(),
+                let eof = match reader.read(&mut chunk) {
+                    // EOF ends the last line: a client that closes its write
+                    // side without a trailing newline still gets a reply (an
+                    // `invalid request` error when the JSON is truncated).
+                    Ok(0) if buf.is_empty() => finish!(),
+                    Ok(0) => {
+                        buf.push(b'\n');
+                        true
+                    }
                     Ok(n) => {
                         buf.extend_from_slice(&chunk[..n]);
                         if buf.len() > MAX_REQUEST_BYTES {
                             tracing::warn!("IPC request exceeded size cap; dropping connection");
                             finish!();
                         }
-                        if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-                            let line = buf[..pos].to_vec();
-                            // Subscribe takes a different lifecycle than the
-                            // one-line-in/one-line-out requests: the connection
-                            // stays open and gets converted into a long-lived
-                            // subscriber. Detected here, before
-                            // `response_payload` runs, so a Subscribe doesn't
-                            // get formatted into the standard ok/error
-                            // envelope (its ack is written by
-                            // `register_subscriber` directly through the new
-                            // subscriber's own pending buffer).
-                            match serde_json::from_slice::<Request>(&line) {
-                                Ok(Request::Subscribe { events }) => {
-                                    let filter = events
-                                        .unwrap_or_default()
-                                        .into_iter()
-                                        .collect();
-                                    // This callback is removed immediately
-                                    // afterwards, so transfer its existing
-                                    // connection slot to the long-lived
-                                    // subscriber instead of dropping it.
-                                    let subscriber_lease = lease
-                                        .take()
-                                        .expect("IPC request lease must exist until conversion");
-                                    register_subscriber(
-                                        &connection_handle,
-                                        stream,
-                                        filter,
-                                        subscriber_lease,
-                                        state,
-                                    );
-                                    finish!();
-                                }
-                                _ => {
-                                    let payload = response_payload(&line, state);
-                                    match stream.try_clone() {
-                                        Ok(stream) => register_response(
-                                            &connection_handle,
-                                            stream,
-                                            payload,
-                                            response_connections.clone(),
-                                        ),
-                                        Err(err) => {
-                                            tracing::warn!(%err, "Failed to clone IPC response stream")
-                                        }
-                                    }
-                                    finish!();
-                                }
-                            }
-                        }
+                        false
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                         return Ok(PostAction::Continue);
@@ -537,6 +495,55 @@ fn register_connection(
                         tracing::warn!(%err, "IPC connection read error");
                         finish!();
                     }
+                };
+                if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                    let line = buf[..pos].to_vec();
+                    // Subscribe takes a different lifecycle than the
+                    // one-line-in/one-line-out requests: the connection
+                    // stays open and gets converted into a long-lived
+                    // subscriber. Detected here, before
+                    // `response_payload` runs, so a Subscribe doesn't
+                    // get formatted into the standard ok/error
+                    // envelope (its ack is written by
+                    // `register_subscriber` directly through the new
+                    // subscriber's own pending buffer).
+                    match serde_json::from_slice::<Request>(&line) {
+                        Ok(Request::Subscribe { events }) => {
+                            let filter = events.unwrap_or_default().into_iter().collect();
+                            // This callback is removed immediately
+                            // afterwards, so transfer its existing
+                            // connection slot to the long-lived
+                            // subscriber instead of dropping it.
+                            let subscriber_lease = lease
+                                .take()
+                                .expect("IPC request lease must exist until conversion");
+                            register_subscriber(
+                                &connection_handle,
+                                stream,
+                                filter,
+                                subscriber_lease,
+                                state,
+                            );
+                            finish!();
+                        }
+                        _ => {
+                            let payload = response_payload(&line, state);
+                            match stream.try_clone() {
+                                Ok(stream) => register_response(
+                                    &connection_handle,
+                                    stream,
+                                    payload,
+                                    response_connections.clone(),
+                                ),
+                                Err(err) => {
+                                    tracing::warn!(%err, "Failed to clone IPC response stream")
+                                }
+                            }
+                            finish!();
+                        }
+                    }
+                } else if eof {
+                    finish!();
                 }
             }
         },

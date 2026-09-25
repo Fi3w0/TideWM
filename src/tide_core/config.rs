@@ -2562,6 +2562,22 @@ pub enum OutputTransformConfig {
     Flipped270,
 }
 
+impl OutputTransformConfig {
+    pub fn to_transform(self) -> smithay::utils::Transform {
+        use smithay::utils::Transform;
+        match self {
+            Self::Normal => Transform::Normal,
+            Self::Rotate90 => Transform::_90,
+            Self::Rotate180 => Transform::_180,
+            Self::Rotate270 => Transform::_270,
+            Self::Flipped => Transform::Flipped,
+            Self::Flipped90 => Transform::Flipped90,
+            Self::Flipped180 => Transform::Flipped180,
+            Self::Flipped270 => Transform::Flipped270,
+        }
+    }
+}
+
 /// Which DRM device TideWM should use for its own GLES rendering and
 /// scanout. Paths may name either a primary (`cardN`) or render node; the
 /// backend resolves both to the same physical device.
@@ -4250,7 +4266,8 @@ pub struct DepthConfig {
 impl Default for DepthConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            // Opt-in: the blue wash / title cards surprise people who didn't ask for them.
+            enabled: false,
             sink_after_ms: 30_000,
             tier_interval_ms: 30_000,
             max_tier: 2,
@@ -5338,7 +5355,8 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
         "backdrop_capture_scale" => set_i32(&mut raw.backdrop_capture_scale, key, value),
         "cursor_always_visible" => set_bool(&mut raw.cursor_always_visible, key, value),
         "cursor_hide_after" => {
-            if let Some(ms) = parse_duration_ms(value) {
+            // `0` is documented as "never hide", so zero must parse.
+            if let Some(ms) = parse_duration_ms_including_zero(value) {
                 raw.cursor_hide_after_ms = ms as i32;
             } else {
                 tracing::warn!(
@@ -9539,6 +9557,13 @@ viscosity = 1.0                  # 0 turns off drag/resize settling, higher sett
 # backdrop_capture_scale = 2     # 1 (default, full detail) to 4; lower the frost/water-glass
                                   # capture texture's resolution to cut VRAM on many glass windows
 
+# Automatic attention depth: unfocused windows fade into a blue wash after
+# 30 s and turn into title cards after 60 s. Off by default; set true (and
+# tune sink_after_ms / cool_color in DOCUMENTATION.md's depth { }) to opt in.
+depth {
+    enabled = false
+}
+
 # ~~~~~~~~~~~~~~~~~ the layout ~~~~~~~~~~~~~~~~~
 
 gaps = 8
@@ -13203,13 +13228,25 @@ shader tinted-blur {
     }
 
     #[test]
+    fn cursor_hide_after_accepts_zero_as_disabled() {
+        for (value, expected) in [("0", 0), ("0ms", 0), ("2s", 2000), ("1500ms", 1500)] {
+            let mut raw = RawConfig {
+                cursor_hide_after_ms: 777,
+                ..RawConfig::default()
+            };
+            apply_top_level_assign(&mut raw, "cursor_hide_after", value);
+            assert_eq!(raw.cursor_hide_after_ms, expected, "{value}");
+        }
+    }
+
+    #[test]
     fn depth_defaults_match_generated_config() {
         for config in [
             Config::from_raw(RawConfig::default()).0,
             parse_default_config(),
         ] {
             let depth = config.depth;
-            assert!(depth.enabled);
+            assert!(!depth.enabled);
             assert_eq!(depth.sink_after_ms, 30_000);
             assert_eq!(depth.tier_interval_ms, 30_000);
             assert_eq!(depth.max_tier, 2);

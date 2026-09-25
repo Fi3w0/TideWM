@@ -16,7 +16,7 @@ use smithay::reexports::wayland_server::{
     protocol::wl_output::Transform as WlTransform,
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource, WEnum,
 };
-use smithay::utils::{Logical, Rectangle, Transform};
+use smithay::utils::{Logical, Point, Rectangle, Transform};
 use wayland_protocols_wlr::output_management::v1::server::{
     zwlr_output_configuration_head_v1::{self, ZwlrOutputConfigurationHeadV1},
     zwlr_output_configuration_v1::{self, ZwlrOutputConfigurationV1},
@@ -535,6 +535,121 @@ impl Dispatch<ZwlrOutputConfigurationHeadV1, ConfigHeadData> for Smallvil {
 /// replying. Never applies a partial batch: either everything requested is
 /// supported and all of it lands, or none of it does and the client gets
 /// `failed`.
+/// A live change to one output: `None` keeps the current value. Shared by
+/// the wlr-output-management protocol and config hot reload so both go
+/// through the same validation and apply path.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct OutputChange {
+    pub position: Option<Point<i32, Logical>>,
+    pub transform: Option<Transform>,
+    pub scale: Option<f64>,
+    /// Only the current mode can be kept; anything else is unsupported here.
+    pub custom_mode: Option<(i32, i32, i32)>,
+}
+
+/// Proposed logical rectangle of every changed output, or `None` when a
+/// change needs a modeset or leaves the logical desktop invalid.
+fn proposed_output_layout(
+    state: &Smallvil,
+    changes: &[(Output, OutputChange)],
+) -> Option<Vec<Rectangle<i32, Logical>>> {
+    changes
+        .iter()
+        .map(|(output, change)| {
+            let mode = output.current_mode()?;
+            if change.custom_mode.is_some_and(|(w, h, r)| {
+                mode.size.w != w || mode.size.h != h || (r != 0 && mode.refresh != r)
+            }) {
+                return None;
+            }
+            let transform = change
+                .transform
+                .unwrap_or_else(|| output.current_transform());
+            let scale = change
+                .scale
+                .unwrap_or_else(|| output.current_scale().fractional_scale());
+            let size = logical_output_size(mode.size, transform, scale)?;
+            let position = change
+                .position
+                .or_else(|| state.space.output_geometry(output).map(|geo| geo.loc))?;
+            let old_position = state.space.output_geometry(output)?.loc;
+            checked_output_delta(old_position, position)?;
+            Some(Rectangle::new(position, size))
+        })
+        .collect()
+}
+
+/// Whether `changes` (one entry per live output) would be applied.
+pub(crate) fn output_changes_supported(
+    state: &Smallvil,
+    changes: &[(Output, OutputChange)],
+) -> bool {
+    proposed_output_layout(state, changes)
+        .is_some_and(|rects| validate_desktop_layout(rects.iter().copied()).is_ok())
+}
+
+/// Validates `changes` as one transaction and applies them: transform,
+/// scale and position, floating windows follow their output, layer shells
+/// re-arrange, and the desktop retiles. Returns `false` (and changes
+/// nothing) when the result would need a modeset or an invalid layout.
+pub(crate) fn apply_output_changes(
+    state: &mut Smallvil,
+    changes: &[(Output, OutputChange)],
+) -> bool {
+    if !output_changes_supported(state, changes) {
+        return false;
+    }
+    for (output, change) in changes {
+        if change.transform.is_none() && change.scale.is_none() && change.position.is_none() {
+            continue;
+        }
+        let scale = change.scale.map(Scale::Fractional);
+        let old_position = state.space.output_geometry(output).map(|geo| geo.loc);
+        output.change_current_state(None, change.transform, scale, change.position);
+        if change.scale.is_some() {
+            state.refresh_layer_fractional_scales(output);
+        }
+        if change.scale.is_some() || change.transform.is_some() {
+            state.refresh_lock_surface_geometry(output);
+        }
+        // Transform/scale changes require fresh layer exclusive zones
+        // before the retile uses the new logical size.
+        smithay::desktop::layer_map_for_output(output).arrange();
+        if let Some(pos) = change.position {
+            state.space.map_output(output, pos);
+            // Tiling recomputes from the output area; floating geometry
+            // must be translated by the same output movement explicitly.
+            if let Some(old_position) = old_position {
+                // The transaction validator proved this exact translation
+                // fits the coordinate domain before any output state was
+                // mutated.
+                let delta =
+                    checked_output_delta(old_position, pos).expect("validated output translation");
+                if delta != (0, 0).into() {
+                    state.translate_floating_windows_on_output(&output.name(), delta);
+                }
+            }
+        }
+    }
+    // Applying a new live scale switches cursor asset/cache keys. Drop
+    // prepared buffers for scales no output advertises anymore so repeated
+    // output changes cannot accumulate CPU buffers or per-renderer textures.
+    // Connector removal performs the same reconciliation after unmapping
+    // its output in the udev backend.
+    let space = &state.space;
+    if let Some(theme) = state.cursor_theme.as_mut() {
+        theme.retain_scales(|scale| {
+            space
+                .outputs()
+                .any(|output| output.current_scale().integer_scale() == scale)
+        });
+    }
+    state.retile();
+    state.wlr_output_management_state.refresh(&state.space);
+    state.refresh_pointer_focus();
+    true
+}
+
 fn finish_configuration(
     state: &mut Smallvil,
     resource: &ZwlrOutputConfigurationV1,
@@ -566,96 +681,34 @@ fn finish_configuration(
         return;
     }
 
-    let proposed_layout: Option<Vec<Rectangle<i32, Logical>>> = inner
+    let changes: Option<Vec<(Output, OutputChange)>> = inner
         .ops
         .iter()
-        .map(|(output, op)| {
-            let HeadOp::Enabled(cfg) = op else {
-                return None;
-            };
-            let mode = output.current_mode()?;
-            if cfg.custom_mode.is_some_and(|(w, h, r)| {
-                mode.size.w != w || mode.size.h != h || (r != 0 && mode.refresh != r)
-            }) {
-                return None;
-            }
-
-            let transform = cfg.transform.unwrap_or_else(|| output.current_transform());
-            let scale = cfg
-                .scale
-                .unwrap_or_else(|| output.current_scale().fractional_scale());
-            let size = logical_output_size(mode.size, transform, scale)?;
-            let position = cfg
-                .position
-                .map(Into::into)
-                .or_else(|| state.space.output_geometry(output).map(|geo| geo.loc))?;
-            let old_position = state.space.output_geometry(output)?.loc;
-            checked_output_delta(old_position, position)?;
-            Some(Rectangle::new(position, size))
+        .map(|(output, op)| match op {
+            HeadOp::Enabled(cfg) => Some((
+                output.clone(),
+                OutputChange {
+                    position: cfg.position.map(Into::into),
+                    transform: cfg.transform,
+                    scale: cfg.scale,
+                    custom_mode: cfg.custom_mode,
+                },
+            )),
+            // Disabling heads needs a DRM modeset this layer does not own.
+            HeadOp::Disabled => None,
         })
         .collect();
-    let supported = proposed_layout
-        .as_ref()
-        .is_some_and(|rects| validate_desktop_layout(rects.iter().copied()).is_ok());
-
+    let supported = match changes {
+        Some(changes) if is_apply => apply_output_changes(state, &changes),
+        Some(changes) => output_changes_supported(state, &changes),
+        None => false,
+    };
     if !supported {
         tracing::warn!(
             "Rejected output configuration whose mode or complete logical desktop is unsupported"
         );
         resource.failed();
         return;
-    }
-
-    if is_apply {
-        for (output, op) in inner.ops.iter() {
-            let HeadOp::Enabled(cfg) = op else { continue };
-            if cfg.transform.is_none() && cfg.scale.is_none() && cfg.position.is_none() {
-                continue;
-            }
-            let scale = cfg.scale.map(Scale::Fractional);
-            let old_position = state.space.output_geometry(output).map(|geo| geo.loc);
-            output.change_current_state(None, cfg.transform, scale, cfg.position.map(Into::into));
-            if cfg.scale.is_some() {
-                state.refresh_layer_fractional_scales(output);
-            }
-            if cfg.scale.is_some() || cfg.transform.is_some() {
-                state.refresh_lock_surface_geometry(output);
-            }
-            // Transform/scale changes require fresh layer exclusive zones
-            // before the retile uses the new logical size.
-            smithay::desktop::layer_map_for_output(output).arrange();
-            if let Some(pos) = cfg.position {
-                state.space.map_output(output, pos);
-                // Tiling recomputes from the output area; floating geometry
-                // must be translated by the same output movement explicitly.
-                if let Some(old_position) = old_position {
-                    // The transaction validator proved this exact
-                    // translation fits the coordinate domain before any
-                    // output state was mutated.
-                    let delta = checked_output_delta(old_position, pos.into())
-                        .expect("validated output translation");
-                    if delta != (0, 0).into() {
-                        state.translate_floating_windows_on_output(&output.name(), delta);
-                    }
-                }
-            }
-        }
-        // Applying a new live scale switches cursor asset/cache keys. Drop
-        // prepared buffers for scales no output advertises anymore so
-        // repeated output-management changes cannot accumulate CPU buffers
-        // or per-renderer textures. Connector removal performs the same
-        // reconciliation after unmapping its output in the udev backend.
-        let space = &state.space;
-        if let Some(theme) = state.cursor_theme.as_mut() {
-            theme.retain_scales(|scale| {
-                space
-                    .outputs()
-                    .any(|output| output.current_scale().integer_scale() == scale)
-            });
-        }
-        state.retile();
-        state.wlr_output_management_state.refresh(&state.space);
-        state.refresh_pointer_focus();
     }
 
     resource.succeeded();

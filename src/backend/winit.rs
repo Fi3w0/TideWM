@@ -523,6 +523,7 @@ pub fn init_winit(
                 let output = &entry.output;
                 if locked {
                     state.send_lock_frames(output, state.start_time.elapsed());
+                    state.send_dnd_icon_frames(output, state.start_time.elapsed());
                 } else {
                     state.send_window_frames(output, state.start_time.elapsed());
                     state.send_layer_frames(output, state.start_time.elapsed());

@@ -56,6 +56,12 @@ fn main() {
     let mut args: Vec<String> = Vec::with_capacity(raw_args.len());
     let mut iter = raw_args.into_iter();
     while let Some(arg) = iter.next() {
+        // Global flags only before the command: everything after it belongs
+        // to the command (`tidectl spawn mpv --help` must not print ours).
+        if !args.is_empty() {
+            args.push(arg);
+            continue;
+        }
         match arg.as_str() {
             "--json" | "-j" => json_output = true,
             "--socket" => match iter.next() {
@@ -74,11 +80,19 @@ fn main() {
         print_help();
         std::process::exit(1);
     }
+    if args[0] == "help" {
+        print_help();
+        std::process::exit(0);
+    }
 
     // Host-side commands: run before any socket work, so a compositor that
     // won't even start can still be diagnosed.
     match args[0].as_str() {
-        "doctor" => return cmd_doctor(json_output, socket_override.as_deref()),
+        "doctor" => {
+            let json_output =
+                parse_doctor_args(&args[1..], json_output).unwrap_or_else(|message| fail(&message));
+            return cmd_doctor(json_output, socket_override.as_deref());
+        }
         "report" => return cmd_report(&args[1..], socket_override.as_deref()),
         _ => {}
     }
@@ -230,6 +244,20 @@ fn cmd_doctor(json_output: bool, socket_override: Option<&Path>) {
     });
 }
 
+/// Accepts the documented command-local spelling (`doctor --json`) while the
+/// global parser deliberately leaves every argument after the command alone.
+/// This keeps flags intended for actions such as `spawn` out of tidectl's
+/// parser without breaking doctor scripts.
+fn parse_doctor_args(args: &[String], mut json_output: bool) -> Result<bool, String> {
+    for arg in args {
+        match arg.as_str() {
+            "--json" | "-j" => json_output = true,
+            other => return Err(format!("unrecognized argument '{other}' for doctor")),
+        }
+    }
+    Ok(json_output)
+}
+
 /// `tidectl report [--output <path>]`: writes the full diagnostic report
 /// to a file (default `tidewm-report.txt` in the current directory) and
 /// prints where it went. The quick check runs first and is embedded; the
@@ -291,7 +319,7 @@ fn parse_report_output(args: &[String]) -> Result<PathBuf, String> {
 /// process and needs no CLK_TCK). PSS/RSS/threads and the render
 /// self-stats come from the second snapshot. No GPU-busy%: that needs a
 /// vendor-specific source the compositor can't read portably.
-fn cmd_perf(socket: &Path, args: &[String], json_output: bool) -> ! {
+fn cmd_perf(socket: &Path, args: &[String], mut json_output: bool) -> ! {
     let mut window_secs: f64 = 3.0;
     let mut iter = args.iter().map(String::as_str);
     while let Some(arg) = iter.next() {
@@ -309,8 +337,7 @@ fn cmd_perf(socket: &Path, args: &[String], json_output: bool) -> ! {
                 std::process::exit(0);
             }
             "--json" | "-j" => {
-                // Already consumed by the global flag parser; accept quietly
-                // in case it appears after the subcommand.
+                json_output = true;
             }
             other => fail(&format!("unrecognized argument '{other}' for perf")),
         }
@@ -640,10 +667,30 @@ fn build_request(args: &[String]) -> Result<Value, String> {
             "swap-workspaces:{}",
             rest.join(" ")
         ))),
-        "spawn" if !rest.is_empty() => Ok(action_request(&format!("spawn:{}", rest.join(" ")))),
+        "spawn" if !rest.is_empty() => Ok(action_request(&format!("spawn:{}", join_quoted(rest)))),
         "submap" if !rest.is_empty() => Ok(action_request(&format!("submap:{}", rest.join(" ")))),
         _ => Ok(action_request(&args.join(" "))),
     }
+}
+
+/// Joins argv back into one spawn string the compositor's quote-aware
+/// splitter reads back verbatim: arguments with whitespace, quotes or
+/// backslashes are single-quoted (`'` itself as `'\''`).
+fn join_quoted(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| {
+            if !arg.is_empty()
+                && !arg
+                    .chars()
+                    .any(|c| c.is_whitespace() || matches!(c, '\'' | '"' | '\\'))
+            {
+                arg.clone()
+            } else {
+                format!("'{}'", arg.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn action_request(action: &str) -> Value {
@@ -925,6 +972,31 @@ tidewm-*.sock under $XDG_RUNTIME_DIR."#
 mod tests {
     use super::*;
 
+    fn spawn_action(args: &[&str]) -> String {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        build_request(&args).unwrap()["action"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn spawn_quotes_arguments_that_need_it() {
+        assert_eq!(
+            spawn_action(&["spawn", "kitty", "-e", "fish"]),
+            "spawn:kitty -e fish"
+        );
+        assert_eq!(
+            spawn_action(&["spawn", "kitty", "sh", "-c", "fastfetch; sleep 5"]),
+            "spawn:kitty sh -c 'fastfetch; sleep 5'"
+        );
+        assert_eq!(
+            spawn_action(&["spawn", "notify-send", "it's here"]),
+            r"spawn:notify-send 'it'\''s here'"
+        );
+        assert_eq!(spawn_action(&["spawn", "foo", ""]), "spawn:foo ''");
+    }
+
     #[test]
     fn cpu_percent_is_delta_over_wall_as_one_core_fraction() {
         // 200_000 us of CPU over 1_000_000 us of wall == 20% of one core.
@@ -962,6 +1034,14 @@ mod tests {
             Ok(PathBuf::from("tidewm-report.txt"))
         );
         assert!(parse_report_output(&["/run/user/1000/tidewm.sock".into()]).is_err());
+    }
+
+    #[test]
+    fn doctor_accepts_json_before_or_after_the_subcommand() {
+        assert_eq!(parse_doctor_args(&[], true), Ok(true));
+        assert_eq!(parse_doctor_args(&["--json".into()], false), Ok(true));
+        assert_eq!(parse_doctor_args(&["-j".into()], false), Ok(true));
+        assert!(parse_doctor_args(&["--bogus".into()], false).is_err());
     }
 
     #[test]

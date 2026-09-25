@@ -872,6 +872,8 @@ pub struct Smallvil {
     /// Under winit the host compositor draws the real cursor, so this is
     /// tracked but never rendered from.
     pub cursor_status: CursorImageStatus,
+    /// Icon surface of the active client drag'n'drop, drawn at the pointer.
+    pub dnd_icon: Option<WlSurface>,
 
     /// Loaded xcursor theme for `CursorImageStatus::Named`, only populated
     /// by the udev backend (`backend/udev.rs`, same pattern as `session`/
@@ -3897,6 +3899,7 @@ impl Smallvil {
             udev_gpu: None,
             session: None,
             cursor_status: CursorImageStatus::default_named(),
+            dnd_icon: None,
             cursor_theme: None,
             fullscreen: HashMap::new(),
             maximized: HashMap::new(),
@@ -5438,6 +5441,17 @@ impl Smallvil {
         }
     }
 
+    /// Frame callbacks for the active drag'n'drop icon, a bare `wl_surface`
+    /// like the lock surface above. Without them a client that animates its
+    /// drag image (Firefox tab previews) would freeze after the first commit.
+    pub fn send_dnd_icon_frames(&self, output: &Output, time: Duration) {
+        if let Some(icon) = self.dnd_icon.as_ref() {
+            send_frames_surface_tree(icon, output, time, Some(Duration::ZERO), |_, _| {
+                Some(output.clone())
+            });
+        }
+    }
+
     /// Entry point for `SessionLockHandler::lock` (`handlers/mod.rs`):
     /// cancels whatever interactive pointer/popup grab was live (grabs
     /// bypass `surface_under`-based routing entirely, so locking alone
@@ -6210,6 +6224,26 @@ impl Smallvil {
             .render_element(renderer, logical_size)
     }
 
+    /// The wallpaper for an offscreen capture (glass/layer backdrops, custom
+    /// shader sources, workspace-transition snapshots). Captures render at
+    /// scale 1.0 in output-local physical pixels, but `wallpaper_element` is
+    /// sized in logical pixels for the scaled output frame, so under a
+    /// fractional scale it came out `1/scale` too small inside every capture
+    /// (glass showed a shrunken, top-left-anchored wallpaper at 1.25x).
+    pub(crate) fn wallpaper_capture_element(
+        &mut self,
+        output: &Output,
+        renderer: &mut GlesRenderer,
+    ) -> Option<smithay::backend::renderer::element::texture::TextureRenderElement<GlesTexture>>
+    {
+        if !self.config.builtin_wallpaper {
+            return None;
+        }
+        let logical_size = self.space.output_geometry(output)?.size;
+        let size = capture_wallpaper_size(logical_size, output.current_scale().fractional_scale());
+        self.builtin_wallpaper.render_element(renderer, size)
+    }
+
     /// The output-local physical rectangle produced by the shared placement
     /// and visual-animation contract. Backdrop capture and glass rendering
     /// use this same helper so they cannot drift from the window itself when
@@ -6917,7 +6951,7 @@ impl Smallvil {
         let behind: Vec<crate::backend::udev::OutputRenderElements> = space_elements
             .into_iter()
             .chain(
-                self.wallpaper_element(output, renderer)
+                self.wallpaper_capture_element(output, renderer)
                     .map(crate::backend::udev::OutputRenderElements::Wallpaper),
             )
             .collect();
@@ -7176,7 +7210,7 @@ impl Smallvil {
         ) else {
             return;
         };
-        let wallpaper = self.wallpaper_element(output, renderer);
+        let wallpaper = self.wallpaper_capture_element(output, renderer);
         let behind: Vec<crate::backend::udev::OutputRenderElements> = space_elements
             .into_iter()
             .chain(wallpaper.map(crate::backend::udev::OutputRenderElements::Wallpaper))
@@ -7738,7 +7772,7 @@ impl Smallvil {
             .chain(depth_elements)
             .chain(space_elements)
             .chain(
-                self.wallpaper_element(output, renderer)
+                self.wallpaper_capture_element(output, renderer)
                     .map(crate::backend::udev::OutputRenderElements::Wallpaper),
             )
             .collect();
@@ -12893,6 +12927,67 @@ impl Smallvil {
     /// Re-reads the config file and applies what can be applied live
     /// (keybinds, input repeat rate). Shows a toast either way so a reload
     /// is never silent, success or failure.
+    /// Re-applies `output <name> { }` blocks to connected outputs after a
+    /// reload: transform, scale and position go through the same validated
+    /// transaction as wlr-output-management. Outputs without a block keep
+    /// their current state. A different `mode` or `enabled = false` needs a
+    /// DRM modeset, which only happens at output setup, so those produce a
+    /// notice instead of being ignored silently.
+    fn apply_output_blocks_live(&mut self) -> Vec<String> {
+        use crate::handlers::wlr_output_management::{apply_output_changes, OutputChange};
+        let mut notices = Vec::new();
+        let outputs: Vec<Output> = self.space.outputs().cloned().collect();
+        let changes: Vec<(Output, OutputChange)> = outputs
+            .into_iter()
+            .map(|output| {
+                let name = output.name();
+                let change = match self.config.outputs.iter().find(|cfg| cfg.name == name) {
+                    None => OutputChange::default(),
+                    Some(cfg) => {
+                        if !cfg.enabled {
+                            notices.push(format!(
+                                "output {name}: enabled = false applies after restarting TideWM"
+                            ));
+                        }
+                        if let (Some(requested), Some(current)) =
+                            (cfg.mode.as_deref(), output.current_mode())
+                        {
+                            let differs = match crate::config::parse_mode_str(requested) {
+                                Some((w, h, refresh)) => {
+                                    w != current.size.w
+                                        || h != current.size.h
+                                        || refresh.is_some_and(|r| {
+                                            (f64::from(current.refresh) / 1000.0 - r).abs() >= 0.5
+                                        })
+                                }
+                                None => false,
+                            };
+                            if differs {
+                                notices.push(format!(
+                                    "output {name}: mode {requested} applies after restarting TideWM"
+                                ));
+                            }
+                        }
+                        OutputChange {
+                            position: cfg.position.map(Into::into),
+                            transform: Some(cfg.transform.to_transform()),
+                            scale: Some(cfg.scale),
+                            custom_mode: None,
+                        }
+                    }
+                };
+                (output, change)
+            })
+            .collect();
+        if !apply_output_changes(self, &changes) {
+            notices.push(
+                "output blocks: the new layout is invalid (overlap or out of range); kept the current one"
+                    .to_string(),
+            );
+        }
+        notices
+    }
+
     pub fn reload_config(&mut self) {
         self.sync_tide();
         match Config::reload_staged(&self.tide) {
@@ -12963,8 +13058,13 @@ impl Smallvil {
                 } else {
                     self.welcome_hint = None;
                 }
+                let outputs_changed =
+                    format!("{:?}", self.config.outputs) != format!("{:?}", new_config.outputs);
                 self.config = new_config;
                 self.sync_config_watch_paths();
+                if outputs_changed {
+                    warnings.extend(self.apply_output_blocks_live());
+                }
                 warnings.extend(
                     self.custom_shader_programs
                         .retain_definitions(&self.config.shader_definitions),
@@ -13574,10 +13674,39 @@ fn tide_workspace_value(engine: crate::config::SpatialEngine, first_workspace: O
     }
 }
 
+/// Physical size of an output's wallpaper for scale-1.0 offscreen captures,
+/// rounded the same way the scaled on-screen frame rounds it. Returned as a
+/// `Logical` size because the wallpaper element takes one; at the capture's
+/// 1.0 scale logical and physical coincide.
+fn capture_wallpaper_size(logical: Size<i32, Logical>, scale: f64) -> Size<i32, Logical> {
+    let physical = logical
+        .to_f64()
+        .to_physical_precise_round::<f64, i32>(scale);
+    Size::from((physical.w, physical.h))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use smithay::output::{PhysicalProperties, Subpixel};
+
+    #[test]
+    fn capture_wallpaper_matches_the_scaled_output_in_physical_pixels() {
+        // 1440p at 1.25x: the frame draws 2560x1440, so must every capture.
+        assert_eq!(
+            capture_wallpaper_size(Size::from((2048, 1152)), 1.25),
+            Size::from((2560, 1440))
+        );
+        assert_eq!(
+            capture_wallpaper_size(Size::from((1920, 1080)), 1.0),
+            Size::from((1920, 1080))
+        );
+        // Rounds like to_physical_precise_round on the visible path.
+        assert_eq!(
+            capture_wallpaper_size(Size::from((1707, 960)), 1.5),
+            Size::from((2561, 1440))
+        );
+    }
 
     fn named_output(name: &str) -> Output {
         Output::new(
