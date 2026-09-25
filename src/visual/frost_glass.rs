@@ -393,6 +393,30 @@ impl RenderElement<GlesRenderer> for FrostGlassElement {
             frame.with_context(|gl| unsafe {
                 gl.ActiveTexture(ffi::TEXTURE1);
                 gl.BindTexture(ffi::TEXTURE_2D, mask.tex_id());
+                // Smithay sets sampling state only on the texture it binds
+                // to unit 0. The mask is never drawn there, so without this
+                // it keeps GL's mipmapped default, samples as an incomplete
+                // texture reading alpha 1, and masks nothing.
+                gl.TexParameteri(
+                    ffi::TEXTURE_2D,
+                    ffi::TEXTURE_MIN_FILTER,
+                    ffi::NEAREST as i32,
+                );
+                gl.TexParameteri(
+                    ffi::TEXTURE_2D,
+                    ffi::TEXTURE_MAG_FILTER,
+                    ffi::NEAREST as i32,
+                );
+                gl.TexParameteri(
+                    ffi::TEXTURE_2D,
+                    ffi::TEXTURE_WRAP_S,
+                    ffi::CLAMP_TO_EDGE as i32,
+                );
+                gl.TexParameteri(
+                    ffi::TEXTURE_2D,
+                    ffi::TEXTURE_WRAP_T,
+                    ffi::CLAMP_TO_EDGE as i32,
+                );
                 gl.ActiveTexture(ffi::TEXTURE0);
             })?;
         }
@@ -520,6 +544,86 @@ mod tests {
         let before = frost_glass_commit(2, &config, [6.0; 4], 2.0, 1.0, None);
         let after = frost_glass_commit(2, &changed, [6.0; 4], 2.0, 1.0, None);
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn ignore_alpha_masks_the_frost_where_the_layer_is_transparent() {
+        use smithay::backend::{
+            allocator::Fourcc,
+            renderer::{damage::OutputDamageTracker, Bind, ExportMem, ImportMem, Offscreen},
+        };
+        let Some(mut renderer) = crate::shader_effect::software_renderer() else {
+            eprintln!("no software EGL device; skipping the real compile and draw");
+            return;
+        };
+        const SIZE: i32 = 8;
+        let size = smithay::utils::Size::<i32, Buffer>::from((SIZE, SIZE));
+        let program = frost_glass_program(&mut None, &mut renderer).expect("frost compiles");
+        let backdrop = renderer
+            .import_memory(
+                &[96; (SIZE * SIZE * 4) as usize],
+                Fourcc::Abgr8888,
+                size,
+                false,
+            )
+            .expect("import backdrop");
+        // Built the way `capture_layer_backdrops` builds a mask: an offscreen
+        // target that is only ever sampled through texture unit 1.
+        let mut mask = |alpha: f32| {
+            let mut mask: GlesTexture = renderer
+                .create_buffer(Fourcc::Argb8888, size)
+                .expect("allocate mask");
+            let mut target = renderer.bind(&mut mask).expect("bind mask");
+            OutputDamageTracker::new((SIZE, SIZE), 1.0, Transform::Normal)
+                .render_output(
+                    &mut renderer,
+                    &mut target,
+                    0,
+                    &Vec::<FrostGlassElement>::new(),
+                    [0.0, 0.0, 0.0, alpha],
+                )
+                .expect("clear mask");
+            drop(target);
+            mask
+        };
+        let transparent = mask(0.0);
+        let opaque = mask(1.0);
+        let mut alpha_through = |mask: GlesTexture| {
+            let element = FrostGlassElement::new(
+                Id::new(),
+                CommitCounter::default(),
+                backdrop.clone(),
+                Rectangle::from_size((SIZE, SIZE).into()),
+                program.clone(),
+                FrostConfig::default(),
+                [0.0; 4],
+                2.0,
+                0.0,
+            )
+            .with_alpha_mask(mask, 0.5);
+            let mut output: GlesTexture = renderer
+                .create_buffer(Fourcc::Abgr8888, size)
+                .expect("allocate target");
+            let mut target = renderer.bind(&mut output).expect("bind target");
+            OutputDamageTracker::new((SIZE, SIZE), 1.0, Transform::Normal)
+                .render_output(&mut renderer, &mut target, 0, &[element], [0.0; 4])
+                .expect("draw frost");
+            let mapping = renderer
+                .copy_framebuffer(&target, Rectangle::from_size(size), Fourcc::Abgr8888)
+                .expect("read back");
+            drop(target);
+            let pixels = renderer.map_texture(&mapping).expect("map readback");
+            pixels.chunks(4).map(|pixel| pixel[3]).max().unwrap_or(0)
+        };
+        assert_eq!(
+            alpha_through(transparent),
+            0,
+            "a transparent layer must not frost"
+        );
+        assert!(
+            alpha_through(opaque) > 0,
+            "an opaque layer frosts as before"
+        );
     }
 
     #[test]

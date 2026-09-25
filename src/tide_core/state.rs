@@ -319,6 +319,27 @@ pub struct Smallvil {
     /// entries preserve the original behavior: translucent floating windows
     /// use water refraction.
     pub(crate) window_glass_modes: HashMap<WlSurface, crate::config::GlassMode>,
+    /// The last matching `rule { shader = ... }`, including an explicit
+    /// `none` that opts out of the workspace default. Resolved per frame by
+    /// `resolved_shader_assignment`, so toggling `shaders { enabled }`, a
+    /// definition or a workspace default needs no per-window re-resolve.
+    pub(crate) window_shader_assignments: HashMap<WlSurface, crate::config::ShaderAssignment>,
+    /// Assignments from `layer_rule { shader }`, refreshed for each output's
+    /// mapped layers during its capture pass and cleared on reload.
+    pub(crate) layer_shader_assignments: HashMap<WlSurface, crate::config::ShaderAssignment>,
+    /// New custom programs still allowed to compile in this output's frame,
+    /// shared by the chain passes, the glass slots and any capture served
+    /// before the next frame.
+    pub(crate) custom_shader_compile_budget: usize,
+    /// Last-good compiled program per custom effect definition.
+    pub(crate) custom_shader_programs: crate::shader_effect::CustomShaderPrograms,
+    /// `u_time`/`u_delta` clocks for windows currently drawing an effect.
+    /// Evicted in `detach_mapped_toplevel`, pruned on reload, cleared on lock.
+    pub(crate) custom_shader_instances: HashMap<WlSurface, crate::shader_effect::ShaderInstance>,
+    /// Windows refused a custom effect by the instance or payload cap. They
+    /// take their normal path until a later capture pass admits them.
+    pub(crate) custom_shader_bypassed: HashSet<WlSurface>,
+    pub(crate) custom_shader_bypasses: u64,
     /// Captured immediately before a visible frame and sampled by
     /// water/frost glass while building that same frame's elements. The
     /// window-sized texture is reused until its dimensions change. Evicted in
@@ -851,6 +872,8 @@ pub struct Smallvil {
     /// Under winit the host compositor draws the real cursor, so this is
     /// tracked but never rendered from.
     pub cursor_status: CursorImageStatus,
+    /// Icon surface of the active client drag'n'drop, drawn at the pointer.
+    pub dnd_icon: Option<WlSurface>,
 
     /// Loaded xcursor theme for `CursorImageStatus::Named`, only populated
     /// by the udev backend (`backend/udev.rs`, same pattern as `session`/
@@ -1546,7 +1569,8 @@ impl Smallvil {
             })
     }
 
-    /// Re-derives `window_opacity`/`window_glass_modes` for one window from
+    /// Re-derives `window_opacity`/`window_glass_modes`/
+    /// `window_shader_assignments` for one window from
     /// its currently-resolved rule. Shared by the full post-reload battery
     /// (`reload_config`, one call per mapped window) and by anything that
     /// needs a single window's opacity/glass to react to a live
@@ -1574,10 +1598,16 @@ impl Smallvil {
                 self.window_glass_modes.remove(surface);
             }
         }
-        if self
-            .glass_mode_for_surface(surface, self.fullscreen.contains_key(surface))
-            .is_none()
-        {
+        match rule.shader {
+            Some(assignment) => {
+                self.window_shader_assignments
+                    .insert(surface.clone(), assignment);
+            }
+            None => {
+                self.window_shader_assignments.remove(surface);
+            }
+        }
+        if !self.backdrop_effect_for_surface(surface, self.fullscreen.contains_key(surface)) {
             self.backdrop_textures.remove(surface);
             self.glass_anim.remove(surface);
         }
@@ -3736,6 +3766,13 @@ impl Smallvil {
             space,
             window_opacity: HashMap::new(),
             window_glass_modes: HashMap::new(),
+            window_shader_assignments: HashMap::new(),
+            layer_shader_assignments: HashMap::new(),
+            custom_shader_compile_budget: 0,
+            custom_shader_programs: Default::default(),
+            custom_shader_instances: HashMap::new(),
+            custom_shader_bypassed: HashSet::new(),
+            custom_shader_bypasses: 0,
             backdrop_textures: HashMap::new(),
             layer_alpha_masks: HashMap::new(),
             layer_dim_buffers: HashMap::new(),
@@ -3862,6 +3899,7 @@ impl Smallvil {
             udev_gpu: None,
             session: None,
             cursor_status: CursorImageStatus::default_named(),
+            dnd_icon: None,
             cursor_theme: None,
             fullscreen: HashMap::new(),
             maximized: HashMap::new(),
@@ -5403,6 +5441,17 @@ impl Smallvil {
         }
     }
 
+    /// Frame callbacks for the active drag'n'drop icon, a bare `wl_surface`
+    /// like the lock surface above. Without them a client that animates its
+    /// drag image (Firefox tab previews) would freeze after the first commit.
+    pub fn send_dnd_icon_frames(&self, output: &Output, time: Duration) {
+        if let Some(icon) = self.dnd_icon.as_ref() {
+            send_frames_surface_tree(icon, output, time, Some(Duration::ZERO), |_, _| {
+                Some(output.clone())
+            });
+        }
+    }
+
     /// Entry point for `SessionLockHandler::lock` (`handlers/mod.rs`):
     /// cancels whatever interactive pointer/popup grab was live (grabs
     /// bypass `surface_under`-based routing entirely, so locking alone
@@ -5439,6 +5488,8 @@ impl Smallvil {
         // recaptures visible glass before composing its first desktop frame.
         self.backdrop_textures.clear();
         self.layer_alpha_masks.clear();
+        self.custom_shader_instances.clear();
+        self.custom_shader_bypassed.clear();
         // Closing snapshots contain client pixels and normally render above
         // the desktop. They are irrelevant once the security boundary is
         // active and must never survive into a locked composition.
@@ -6173,6 +6224,26 @@ impl Smallvil {
             .render_element(renderer, logical_size)
     }
 
+    /// The wallpaper for an offscreen capture (glass/layer backdrops, custom
+    /// shader sources, workspace-transition snapshots). Captures render at
+    /// scale 1.0 in output-local physical pixels, but `wallpaper_element` is
+    /// sized in logical pixels for the scaled output frame, so under a
+    /// fractional scale it came out `1/scale` too small inside every capture
+    /// (glass showed a shrunken, top-left-anchored wallpaper at 1.25x).
+    pub(crate) fn wallpaper_capture_element(
+        &mut self,
+        output: &Output,
+        renderer: &mut GlesRenderer,
+    ) -> Option<smithay::backend::renderer::element::texture::TextureRenderElement<GlesTexture>>
+    {
+        if !self.config.builtin_wallpaper {
+            return None;
+        }
+        let logical_size = self.space.output_geometry(output)?.size;
+        let size = capture_wallpaper_size(logical_size, output.current_scale().fractional_scale());
+        self.builtin_wallpaper.render_element(renderer, size)
+    }
+
     /// The output-local physical rectangle produced by the shared placement
     /// and visual-animation contract. Backdrop capture and glass rendering
     /// use this same helper so they cannot drift from the window itself when
@@ -6193,6 +6264,163 @@ impl Smallvil {
         let logical_rect =
             Rectangle::new(placement.rect.loc - output_geo.loc + visual_offset, size);
         Some(logical_rect.to_physical_precise_round(output_scale))
+    }
+
+    /// The custom effect a window's rule assigns, live against the
+    /// `shaders { enabled }` master and the current definitions.
+    pub(crate) fn resolved_shader_assignment(
+        &self,
+        surface: &WlSurface,
+    ) -> Option<(&str, &crate::config::ShaderDefinition)> {
+        surface_shader(
+            &self.config,
+            &self.layer_shader_assignments,
+            &self.window_shader_assignments,
+            surface,
+            self.workspace_of_surface(surface),
+        )
+    }
+
+    /// Puts a render-time compile failure on the persistent warning panel.
+    /// Deferred to idle: the panel reserves tiling space, so it must not
+    /// appear while a frame is being assembled. A hard config error on the
+    /// panel stays in front.
+    fn queue_shader_failure(&mut self, message: String) {
+        tracing::warn!(%message, "Custom shader unavailable");
+        self.loop_handle.insert_idle(move |state| {
+            if state.config_warnings.contains(&message) {
+                return;
+            }
+            state.config_warnings.push(message);
+            if state.config_error_overlay.as_ref().is_some_and(|overlay| {
+                overlay.severity() == crate::error_overlay::OverlaySeverity::Error
+            }) {
+                return;
+            }
+            let ui_theme = crate::ui_theme::UiTheme::from_config(&state.config);
+            state.config_error_overlay = Some(crate::error_overlay::ConfigErrorOverlay::new(
+                state.config_warnings.join("; "),
+                crate::error_overlay::OverlaySeverity::Warning,
+                ui_theme,
+            ));
+            state.toast = None;
+            state.retile();
+            state.request_redraw();
+        });
+    }
+
+    /// Whether a custom effect can draw for this window this frame: assigned
+    /// with the master on, and a last-good program or an untried source.
+    fn custom_shader_drawable(&self, surface: &WlSurface) -> bool {
+        !self.custom_shader_bypassed.contains(surface) && self.custom_shader_wanted(surface)
+    }
+
+    /// `custom_shader_drawable` before the budget: what admission judges.
+    fn custom_shader_wanted(&self, surface: &WlSurface) -> bool {
+        self.resolved_shader_assignment(surface)
+            .is_some_and(|(name, definition)| {
+                self.custom_shader_programs
+                    .can_draw(name, &definition.stages)
+            })
+    }
+
+    /// Admits or bypasses each shaded window on this output against the
+    /// instance and payload caps, before any capture allocates. Payload is
+    /// what the window's capture will cost at its definition's
+    /// `render_scale`, plus every other admitted window's current capture.
+    fn admit_custom_shader_captures(
+        &mut self,
+        candidates: &[(WlSurface, Rectangle<i32, Physical>)],
+    ) {
+        // Windows admitted earlier in this pass count at their wanted size
+        // even though nothing is allocated for them yet.
+        let mut admitted_now: Vec<(WlSurface, u64)> = Vec::new();
+        if !self.custom_shader_bypassed.is_empty() {
+            let unwanted: Vec<WlSurface> = self
+                .custom_shader_bypassed
+                .iter()
+                .filter(|surface| !self.custom_shader_wanted(surface))
+                .cloned()
+                .collect();
+            for surface in unwanted {
+                self.custom_shader_bypassed.remove(&surface);
+            }
+        }
+        for (surface, physical_rect) in candidates {
+            if !self.custom_shader_wanted(surface) {
+                continue;
+            }
+            let Some((name, render_scale, stage_count)) = self
+                .resolved_shader_assignment(surface)
+                .map(|(name, definition)| {
+                    (
+                        name.to_string(),
+                        definition.render_scale,
+                        definition.stages.len(),
+                    )
+                })
+            else {
+                continue;
+            };
+            // The capture plus one same-sized target per offscreen stage.
+            let wanted = crate::shader_effect::capture_payload_bytes(
+                physical_rect.size.w,
+                physical_rect.size.h,
+                render_scale,
+            )
+            .saturating_mul(stage_count as u64);
+            let counted = |other: &WlSurface| {
+                other != surface
+                    && !self.custom_shader_bypassed.contains(other)
+                    && !admitted_now.iter().any(|(admitted, _)| admitted == other)
+            };
+            let existing = self
+                .custom_shader_instances
+                .iter()
+                .filter(|(other, _)| counted(other));
+            let (existing_count, existing_bytes) =
+                existing.fold((0usize, 0_u64), |(count, bytes), (other, instance)| {
+                    let capture = self
+                        .backdrop_textures
+                        .get(other)
+                        .map_or(0, |capture| capture.estimated_texture_bytes());
+                    (
+                        count + 1,
+                        bytes
+                            .saturating_add(capture)
+                            .saturating_add(instance.target_bytes()),
+                    )
+                });
+            let pass_bytes = admitted_now
+                .iter()
+                .fold(0_u64, |total, (_, bytes)| total.saturating_add(*bytes));
+            let instances = existing_count + admitted_now.len() + 1;
+            let bytes = existing_bytes
+                .saturating_add(pass_bytes)
+                .saturating_add(wanted);
+            if instances <= crate::shader_effect::MAX_ACTIVE_INSTANCES
+                && bytes <= crate::shader_effect::MAX_PAYLOAD_BYTES
+            {
+                self.custom_shader_bypassed.remove(surface);
+                admitted_now.push((surface.clone(), wanted));
+            } else if self.custom_shader_bypassed.insert(surface.clone()) {
+                self.custom_shader_instances.remove(surface);
+                self.custom_shader_bypasses += 1;
+                self.queue_shader_failure(format!(
+                    "Shader {name:?} skipped on a window: custom effects are capped at {} windows and {} MiB of captures",
+                    crate::shader_effect::MAX_ACTIVE_INSTANCES,
+                    crate::shader_effect::MAX_PAYLOAD_BYTES / (1024 * 1024)
+                ));
+            }
+        }
+    }
+
+    /// Whether a window's captured backdrop feeds anything: a custom effect
+    /// under its own master, or water/frost glass under `water_effects`.
+    fn backdrop_effect_for_surface(&self, surface: &WlSurface, fullscreen: bool) -> bool {
+        self.custom_shader_drawable(surface)
+            || (self.config.water_effects
+                && self.glass_mode_for_surface(surface, fullscreen).is_some())
     }
 
     fn glass_mode_for_surface(
@@ -6649,8 +6877,21 @@ impl Smallvil {
         output: &Output,
         placements: &[crate::placement::PlacedWindow],
     ) {
-        if !self.config.water_effects {
-            return;
+        self.custom_shader_compile_budget = 1;
+        if self.config.shaders_enabled {
+            let candidates: Vec<(WlSurface, Rectangle<i32, Physical>)> = placements
+                .iter()
+                .filter(|placement| placement.replacement_eligible())
+                .filter_map(|placement| {
+                    let surface = placement.surface()?;
+                    self.custom_shader_wanted(surface).then_some(())?;
+                    Some((
+                        surface.clone(),
+                        self.placement_physical_rect(placement, output)?,
+                    ))
+                })
+                .collect();
+            self.admit_custom_shader_captures(&candidates);
         }
         let surfaces: Vec<WlSurface> = placements
             .iter()
@@ -6661,14 +6902,26 @@ impl Smallvil {
                     .window_depths
                     .get(surface)
                     .is_none_or(|depth| depth.tier() < 2)
-                    && self
-                        .glass_mode_for_surface(surface, placement.is_fullscreen())
-                        .is_some())
+                    && self.backdrop_effect_for_surface(surface, placement.is_fullscreen()))
                 .then(|| surface.clone())
             })
             .collect();
         let output_name = output.name();
         self.reconcile_backdrop_visibility(&output_name, &surfaces, true);
+        // A window whose capture was released (hidden, off every output) or
+        // that no longer has an effect drops its stage textures.
+        let unshaded: Vec<WlSurface> = self
+            .custom_shader_instances
+            .keys()
+            .filter(|surface| {
+                !self.backdrop_textures.contains_key(*surface)
+                    || self.resolved_shader_assignment(surface).is_none()
+            })
+            .cloned()
+            .collect();
+        for surface in unshaded {
+            self.custom_shader_instances.remove(&surface);
+        }
         if surfaces.is_empty() {
             return;
         }
@@ -6698,11 +6951,21 @@ impl Smallvil {
         let behind: Vec<crate::backend::udev::OutputRenderElements> = space_elements
             .into_iter()
             .chain(
-                self.wallpaper_element(output, renderer)
+                self.wallpaper_capture_element(output, renderer)
                     .map(crate::backend::udev::OutputRenderElements::Wallpaper),
             )
             .collect();
 
+        let chained: Vec<WlSurface> = surfaces
+            .iter()
+            .filter(|surface| {
+                self.custom_shader_drawable(surface)
+                    && self
+                        .resolved_shader_assignment(surface)
+                        .is_some_and(|(_, definition)| definition.stages.len() > 1)
+            })
+            .cloned()
+            .collect();
         let mut rendered = 0usize;
         let mut skipped = 0usize;
         let mut captured_first_backdrop = false;
@@ -6717,7 +6980,13 @@ impl Smallvil {
                 continue;
             };
 
-            let capture_scale = self.config.backdrop_capture_scale;
+            // A custom effect processes its capture at its own divisor.
+            let capture_scale = self
+                .custom_shader_drawable(&surface)
+                .then(|| self.resolved_shader_assignment(&surface))
+                .flatten()
+                .map(|(_, definition)| definition.render_scale)
+                .unwrap_or(self.config.backdrop_capture_scale);
             let first_capture = !self.backdrop_textures.contains_key(&surface);
             if first_capture {
                 let Some(mut capture) = crate::backdrop::BackdropCapture::new(
@@ -6748,6 +7017,7 @@ impl Smallvil {
             skipped,
             "Window backdrop captures"
         );
+        self.run_custom_shader_chains(renderer, &chained);
         // The frame that triggered the first capture could otherwise be the
         // last dirty frame on a static desktop. Schedule exactly one more so
         // the newly available texture is actually consumed; later capture
@@ -6757,27 +7027,108 @@ impl Smallvil {
         }
     }
 
-    /// Captures backdrops for mapped layer surfaces whose rule enables blur.
-    /// Window and layer surfaces safely share the `WlSurface`-keyed cache.
-    /// Layer frost is independent of the water-effects master toggle.
+    /// Renders the offscreen stages of every chained effect on this output
+    /// from its fresh capture, still before the visible bind.
+    fn run_custom_shader_chains(&mut self, renderer: &mut GlesRenderer, surfaces: &[WlSurface]) {
+        let mut failures = Vec::new();
+        let mut deferred = false;
+        let work: Vec<(WlSurface, String)> = surfaces
+            .iter()
+            .filter_map(|surface| {
+                self.resolved_shader_assignment(surface)
+                    .map(|(name, _)| (surface.clone(), name.to_string()))
+            })
+            .collect();
+        for (surface, name) in &work {
+            let (Some(definition), Some(capture)) = (
+                self.config.shader_definitions.get(name),
+                self.backdrop_textures.get(surface),
+            ) else {
+                continue;
+            };
+            let instance = self
+                .custom_shader_instances
+                .entry(surface.clone())
+                .or_insert_with(crate::shader_effect::ShaderInstance::new);
+            let outcome = crate::shader_effect::run_chain(
+                renderer,
+                &mut self.custom_shader_programs,
+                instance,
+                name,
+                definition,
+                &capture.texture,
+                (&capture.id, capture.version),
+                &mut self.custom_shader_compile_budget,
+            );
+            failures.extend(outcome.failures);
+            deferred |= outcome.deferred;
+        }
+        if deferred {
+            self.request_redraw();
+        }
+        for message in failures {
+            self.queue_shader_failure(message);
+        }
+    }
+
+    /// Captures backdrops for mapped layer surfaces whose rule enables blur
+    /// or names a custom effect. Window and layer surfaces safely share the
+    /// `WlSurface`-keyed cache. Layer frost is independent of the
+    /// water-effects master toggle; layer shaders follow `shaders.enabled`.
     pub(crate) fn capture_layer_backdrops(
         &mut self,
         renderer: &mut GlesRenderer,
         output: &Output,
         placements: &[crate::placement::PlacedWindow],
     ) {
-        if !self.config.frost.enabled {
+        let frost_enabled = self.config.frost.enabled;
+        if !frost_enabled && !self.config.shaders_enabled {
             self.layer_alpha_masks.clear();
             return;
         }
         let output_scale = output.current_scale().fractional_scale();
+        let mut candidates = Vec::new();
+        if self.config.shaders_enabled {
+            let layer_map = layer_map_for_output(output);
+            for layer in layer_map
+                .layers()
+                .filter(|layer| !self.unmapped_layer_surfaces.contains(layer.wl_surface()))
+            {
+                let surface = layer.wl_surface();
+                match self.config.layer_shader(layer.namespace()) {
+                    Some(name) => {
+                        let current = self.layer_shader_assignments.get(surface);
+                        if !matches!(current, Some(crate::config::ShaderAssignment::Named(existing)) if existing == name)
+                        {
+                            self.layer_shader_assignments.insert(
+                                surface.clone(),
+                                crate::config::ShaderAssignment::Named(name.to_string()),
+                            );
+                        }
+                        if let Some(geometry) = layer_map.layer_geometry(layer) {
+                            candidates.push((
+                                surface.clone(),
+                                geometry.to_physical_precise_round(output_scale),
+                            ));
+                        }
+                    }
+                    None => {
+                        self.layer_shader_assignments.remove(surface);
+                    }
+                }
+            }
+        }
+        self.admit_custom_shader_captures(&candidates);
         #[allow(clippy::mutable_key_type)]
         let (surfaces, alpha_surfaces) = {
             let layer_map = layer_map_for_output(output);
             let layers: Vec<_> = layer_map
                 .layers()
                 .filter(|layer| !self.unmapped_layer_surfaces.contains(layer.wl_surface()))
-                .filter(|layer| self.config.layer_blur(layer.namespace()))
+                .filter(|layer| {
+                    self.custom_shader_drawable(layer.wl_surface())
+                        || (frost_enabled && self.config.layer_blur(layer.namespace()))
+                })
                 .filter_map(|layer| {
                     let geometry = layer_map.layer_geometry(layer)?;
                     Some((
@@ -6859,17 +7210,33 @@ impl Smallvil {
         ) else {
             return;
         };
-        let wallpaper = self.wallpaper_element(output, renderer);
+        let wallpaper = self.wallpaper_capture_element(output, renderer);
         let behind: Vec<crate::backend::udev::OutputRenderElements> = space_elements
             .into_iter()
             .chain(wallpaper.map(crate::backend::udev::OutputRenderElements::Wallpaper))
             .collect();
 
+        let chained: Vec<WlSurface> = surfaces
+            .iter()
+            .map(|(surface, _)| surface)
+            .filter(|surface| {
+                self.custom_shader_drawable(surface)
+                    && self
+                        .resolved_shader_assignment(surface)
+                        .is_some_and(|(_, definition)| definition.stages.len() > 1)
+            })
+            .cloned()
+            .collect();
         let mut rendered = 0usize;
         let mut skipped = 0usize;
         let mut captured_first_backdrop = false;
         for (surface, physical_rect) in surfaces {
-            let capture_scale = self.config.backdrop_capture_scale;
+            let capture_scale = self
+                .custom_shader_drawable(&surface)
+                .then(|| self.resolved_shader_assignment(&surface))
+                .flatten()
+                .map(|(_, definition)| definition.render_scale)
+                .unwrap_or(self.config.backdrop_capture_scale);
             let first_capture = !self.backdrop_textures.contains_key(&surface);
             if first_capture {
                 let Some(mut capture) = crate::backdrop::BackdropCapture::new(
@@ -6900,25 +7267,24 @@ impl Smallvil {
             skipped,
             "Layer backdrop captures"
         );
+        self.run_custom_shader_chains(renderer, &chained);
         if captured_first_backdrop {
             self.request_redraw();
         }
     }
 
     /// Windows on `output` eligible for a captured glass layer this frame:
-    /// `water_effects` on, either an explicit `glass` mode or the
-    /// backward-compatible implicit trigger (`opacity` below 1.0 means
-    /// water), and a backdrop already captured for them. Tiled and floating
-    /// placements share this path; ordinary opaque tiles never enter it.
+    /// a drawable custom effect, or `water_effects` on with either an
+    /// explicit `glass` mode or the backward-compatible implicit trigger
+    /// (`opacity` below 1.0 means water), and a backdrop already captured.
+    /// Tiled and floating placements share this path; ordinary opaque tiles
+    /// never enter it.
     /// Callers use this list to build glass layers that are inserted directly
     /// behind each surface in its normal z-slot.
     pub(crate) fn glass_eligible_surfaces(
         &self,
         placements: &[crate::placement::PlacedWindow],
     ) -> Vec<WlSurface> {
-        if !self.config.water_effects {
-            return Vec::new();
-        }
         placements
             .iter()
             .filter(|placement| placement.replacement_eligible())
@@ -6928,9 +7294,7 @@ impl Smallvil {
                     .window_depths
                     .get(surface)
                     .is_none_or(|depth| depth.tier() < 2)
-                    && self
-                        .glass_mode_for_surface(surface, placement.is_fullscreen())
-                        .is_some()
+                    && self.backdrop_effect_for_surface(surface, placement.is_fullscreen())
                     && self.backdrop_textures.contains_key(surface))
                 .then(|| surface.clone())
             })
@@ -6952,14 +7316,16 @@ impl Smallvil {
         if surfaces.is_empty() {
             return layers;
         }
-        let needs_water = surfaces.iter().any(|surface| {
-            self.window_glass_modes
-                .get(surface)
-                .is_none_or(|mode| *mode == crate::config::GlassMode::Water)
-        });
-        let needs_frost = surfaces.iter().any(|surface| {
-            self.window_glass_modes.get(surface) == Some(&crate::config::GlassMode::Frost)
-        });
+        let needs_water = self.config.water_effects
+            && surfaces.iter().any(|surface| {
+                self.window_glass_modes
+                    .get(surface)
+                    .is_none_or(|mode| *mode == crate::config::GlassMode::Water)
+            });
+        let needs_frost = self.config.water_effects
+            && surfaces.iter().any(|surface| {
+                self.window_glass_modes.get(surface) == Some(&crate::config::GlassMode::Frost)
+            });
         let water_program = needs_water
             .then(|| {
                 crate::water_glass::water_glass_program(&mut self.water_glass_program, renderer)
@@ -6992,6 +7358,32 @@ impl Smallvil {
             };
             let location = placement.rect.loc;
             let visual = self.placement_visual_sample(placement);
+            // A custom effect replaces the glass pass. Without a program yet
+            // (or ever) the window takes its normal glass path instead.
+            if let Some(element) = self.custom_shader_last_stage(
+                renderer,
+                surface,
+                (capture_id.clone(), capture_version, &capture_texture),
+                physical_rect,
+                Some((
+                    visual.opacity,
+                    output.current_scale().fractional_scale() as f32,
+                )),
+                None,
+            ) {
+                self.glass_anim.remove(surface);
+                layers.entry(surface.clone()).or_default().push(
+                    crate::backend::udev::OutputRenderElements::CustomShader(element),
+                );
+                continue;
+            }
+            if !self.config.water_effects
+                || self
+                    .glass_mode_for_surface(surface, placement.is_fullscreen())
+                    .is_none()
+            {
+                continue;
+            }
             match self.window_glass_modes.get(surface).copied() {
                 Some(crate::config::GlassMode::Frost) => {
                     if let Some(program) = &frost_program {
@@ -7123,22 +7515,26 @@ impl Smallvil {
         output: &Output,
     ) -> HashMap<WlSurface, Vec<crate::backend::udev::OutputRenderElements>> {
         let mut result = HashMap::new();
-        if !self.config.frost.enabled {
-            return result;
-        }
         let output_scale = output.current_scale().fractional_scale();
-        let eligible: Vec<(WlSurface, Rectangle<i32, Physical>, Option<f32>)> = {
+        let frost_enabled = self.config.frost.enabled;
+        // Surface, physical rect, `ignore_alpha` threshold, frost fallback.
+        type LayerEffect = (WlSurface, Rectangle<i32, Physical>, Option<f32>, bool);
+        let eligible: Vec<LayerEffect> = {
             let layer_map = layer_map_for_output(output);
             layer_map
                 .layers()
                 .filter(|layer| !self.unmapped_layer_surfaces.contains(layer.wl_surface()))
-                .filter(|layer| self.config.layer_blur(layer.namespace()))
                 .filter_map(|layer| {
+                    let blur = frost_enabled && self.config.layer_blur(layer.namespace());
+                    if !blur && !self.custom_shader_drawable(layer.wl_surface()) {
+                        return None;
+                    }
                     let geometry = layer_map.layer_geometry(layer)?;
                     Some((
                         layer.wl_surface().clone(),
                         geometry.to_physical_precise_round(output_scale),
                         self.config.layer_ignore_alpha(layer.namespace()),
+                        blur,
                     ))
                 })
                 .collect()
@@ -7146,17 +7542,19 @@ impl Smallvil {
         if eligible.is_empty() {
             return result;
         }
-        let Some(program) =
-            crate::frost_glass::frost_glass_program(&mut self.frost_glass_program, renderer)
-        else {
-            return result;
-        };
+        let program = eligible
+            .iter()
+            .any(|(_, _, _, blur)| *blur)
+            .then(|| {
+                crate::frost_glass::frost_glass_program(&mut self.frost_glass_program, renderer)
+            })
+            .flatten();
         let frost = self.config.frost.clone();
         let scale = output_scale as f32;
         let corner_radii = [frost.corner_radius * scale; 4];
         let rounding_power = 2.0;
         let corner_softness = frost.corner_softness * scale;
-        for (surface, physical_rect, ignore_alpha) in eligible {
+        for (surface, physical_rect, ignore_alpha, blur) in eligible {
             let Some(capture) = self.backdrop_textures.get(&surface) else {
                 continue;
             };
@@ -7167,6 +7565,24 @@ impl Smallvil {
                     .get(&surface)
                     .map(|mask| (mask.texture.clone(), mask.version, threshold))
             });
+            // A layer's own effect replaces its frost; without a program yet
+            // it falls back to frost if its rule also blurs.
+            if let Some(element) = self.custom_shader_last_stage(
+                renderer,
+                &surface,
+                (id.clone(), version, &texture),
+                physical_rect,
+                None,
+                alpha_mask.as_ref(),
+            ) {
+                result.entry(surface).or_insert_with(Vec::new).push(
+                    crate::backend::udev::OutputRenderElements::CustomShader(element),
+                );
+                continue;
+            }
+            let Some(program) = program.as_ref().filter(|_| blur) else {
+                continue;
+            };
             let commit_mask = alpha_mask
                 .as_ref()
                 .map(|(_, version, threshold)| (*version, *threshold));
@@ -7196,6 +7612,128 @@ impl Smallvil {
             );
         }
         result
+    }
+
+    /// A shaded window's or layer's last stage, or `None` when it has no
+    /// drawable effect this frame (unassigned, over budget, no program yet,
+    /// or a chain that hasn't rendered). `window` carries a window's visual
+    /// opacity and output scale for its rounding; layers draw unrounded at
+    /// full opacity, masked by their `ignore_alpha` capture when set.
+    fn custom_shader_last_stage(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        surface: &WlSurface,
+        (capture_id, capture_version, capture_texture): (
+            smithay::backend::renderer::element::Id,
+            usize,
+            &GlesTexture,
+        ),
+        physical_rect: Rectangle<i32, Physical>,
+        window: Option<(f32, f32)>,
+        alpha_mask: Option<&(GlesTexture, usize, f32)>,
+    ) -> Option<crate::shader_effect::CustomShaderElement> {
+        if self.custom_shader_bypassed.contains(surface) {
+            return None;
+        }
+        let workspace = self.workspace_of_surface(surface);
+        let (name, definition) = surface_shader(
+            &self.config,
+            &self.layer_shader_assignments,
+            &self.window_shader_assignments,
+            surface,
+            workspace,
+        )?;
+        let stages = &definition.stages;
+        let index = stages.len().checked_sub(1)?;
+        let lookup = self.custom_shader_programs.lookup(
+            renderer,
+            name,
+            index,
+            stages.len(),
+            &stages[index],
+            &mut self.custom_shader_compile_budget,
+        );
+        // The last stage reads the backdrop or the chain's outputs; a chain
+        // that hasn't rendered can't draw yet.
+        let instance = self.custom_shader_instances.get(surface);
+        let targets = instance.map(|instance| instance.targets()).unwrap_or(&[]);
+        let chain_version = instance.and_then(|instance| instance.chain_version());
+        let resolved = lookup.program.as_ref().and_then(|program| {
+            if index > 0 && chain_version.is_none() {
+                return None;
+            }
+            let input = crate::shader_effect::stage_input(index, stages, targets, capture_texture)?;
+            let textures =
+                crate::shader_effect::stage_textures(program, stages, targets, capture_texture)?;
+            let base = crate::shader_effect::with_mask_version(
+                chain_version.unwrap_or(capture_version as u64),
+                alpha_mask.map(|(_, version, threshold)| (*version, *threshold)),
+            );
+            let content_version =
+                crate::shader_effect::stage_content_version(base, &stages[index], program);
+            Some((input, textures, content_version))
+        });
+        if lookup.deferred {
+            self.request_redraw();
+        }
+        if let Some(message) = lookup.failure {
+            self.queue_shader_failure(message);
+        }
+        let (program, (input, textures, content_version)) = lookup.program.zip(resolved)?;
+        let (corner_radii, rounding_power, antialias, opacity) = match window {
+            Some((opacity, output_scale)) => {
+                let rounding = self.rounding_config_for_surface(surface);
+                let corner_radii = if rounding.enabled {
+                    rounding.radii.map(|radius| radius * output_scale)
+                } else {
+                    [0.0; 4]
+                };
+                (
+                    corner_radii,
+                    rounding.power,
+                    rounding.antialias * output_scale,
+                    opacity,
+                )
+            }
+            None => ([0.0; 4], 2.0, 0.0, 1.0),
+        };
+        let commit = crate::shader_effect::custom_shader_commit(
+            content_version,
+            program.generation,
+            (physical_rect.size.w, physical_rect.size.h),
+            &program.params,
+            corner_radii,
+            rounding_power,
+            antialias,
+            opacity,
+        );
+        let instance = self
+            .custom_shader_instances
+            .entry(surface.clone())
+            .or_insert_with(crate::shader_effect::ShaderInstance::new);
+        // A chain sampled its clock when its stages rendered.
+        let timing = if chain_version.is_some() {
+            instance.timing()
+        } else {
+            instance.sample(commit)
+        };
+        let mut element = crate::shader_effect::CustomShaderElement::new(
+            capture_id,
+            commit,
+            input,
+            physical_rect,
+            program,
+            corner_radii,
+            rounding_power,
+            antialias,
+            opacity,
+            timing,
+        )
+        .with_textures(textures);
+        if let Some((mask, _, threshold)) = alpha_mask {
+            element = element.with_alpha_mask(mask.clone(), *threshold);
+        }
+        Some(element)
     }
 
     fn capture_workspace_desktop(
@@ -7234,7 +7772,7 @@ impl Smallvil {
             .chain(depth_elements)
             .chain(space_elements)
             .chain(
-                self.wallpaper_element(output, renderer)
+                self.wallpaper_capture_element(output, renderer)
                     .map(crate::backend::udev::OutputRenderElements::Wallpaper),
             )
             .collect();
@@ -11428,9 +11966,11 @@ impl Smallvil {
     }
 
     /// Cycles keyboard focus to the next mapped window (tiled or floating)
-    /// and raises it to the top of the stack. This is the only way to reach
-    /// a window that's fully covered by another one, since you can't click
-    /// something you can't see.
+    /// and raises it to the top of the stack if it floats. This is the only
+    /// way to reach a window that's fully covered by another one, since you
+    /// can't click something you can't see. A tiled window is focused where
+    /// it is: raising it would lift it above every floating window and break
+    /// the floating-above-tiled z-order until the next retile.
     pub fn cycle_focus(&mut self) {
         // Don't let a keybind tab focus away from an exclusive-interactivity
         // layer (e.g. a lock screen) while it's still mapped.
@@ -11477,7 +12017,9 @@ impl Smallvil {
             return;
         };
 
-        self.space.raise_element(next, false);
+        if !self.spatial_is_tiled(&next_surface) {
+            self.space.raise_element(next, false);
+        }
         self.cycling_focus = true;
         self.focus_window(Some(next_surface), SERIAL_COUNTER.next_serial());
         self.cycling_focus = false;
@@ -12385,6 +12927,67 @@ impl Smallvil {
     /// Re-reads the config file and applies what can be applied live
     /// (keybinds, input repeat rate). Shows a toast either way so a reload
     /// is never silent, success or failure.
+    /// Re-applies `output <name> { }` blocks to connected outputs after a
+    /// reload: transform, scale and position go through the same validated
+    /// transaction as wlr-output-management. Outputs without a block keep
+    /// their current state. A different `mode` or `enabled = false` needs a
+    /// DRM modeset, which only happens at output setup, so those produce a
+    /// notice instead of being ignored silently.
+    fn apply_output_blocks_live(&mut self) -> Vec<String> {
+        use crate::handlers::wlr_output_management::{apply_output_changes, OutputChange};
+        let mut notices = Vec::new();
+        let outputs: Vec<Output> = self.space.outputs().cloned().collect();
+        let changes: Vec<(Output, OutputChange)> = outputs
+            .into_iter()
+            .map(|output| {
+                let name = output.name();
+                let change = match self.config.outputs.iter().find(|cfg| cfg.name == name) {
+                    None => OutputChange::default(),
+                    Some(cfg) => {
+                        if !cfg.enabled {
+                            notices.push(format!(
+                                "output {name}: enabled = false applies after restarting TideWM"
+                            ));
+                        }
+                        if let (Some(requested), Some(current)) =
+                            (cfg.mode.as_deref(), output.current_mode())
+                        {
+                            let differs = match crate::config::parse_mode_str(requested) {
+                                Some((w, h, refresh)) => {
+                                    w != current.size.w
+                                        || h != current.size.h
+                                        || refresh.is_some_and(|r| {
+                                            (f64::from(current.refresh) / 1000.0 - r).abs() >= 0.5
+                                        })
+                                }
+                                None => false,
+                            };
+                            if differs {
+                                notices.push(format!(
+                                    "output {name}: mode {requested} applies after restarting TideWM"
+                                ));
+                            }
+                        }
+                        OutputChange {
+                            position: cfg.position.map(Into::into),
+                            transform: Some(cfg.transform.to_transform()),
+                            scale: Some(cfg.scale),
+                            custom_mode: None,
+                        }
+                    }
+                };
+                (output, change)
+            })
+            .collect();
+        if !apply_output_changes(self, &changes) {
+            notices.push(
+                "output blocks: the new layout is invalid (overlap or out of range); kept the current one"
+                    .to_string(),
+            );
+        }
+        notices
+    }
+
     pub fn reload_config(&mut self) {
         self.sync_tide();
         match Config::reload_staged(&self.tide) {
@@ -12455,8 +13058,17 @@ impl Smallvil {
                 } else {
                     self.welcome_hint = None;
                 }
+                let outputs_changed =
+                    format!("{:?}", self.config.outputs) != format!("{:?}", new_config.outputs);
                 self.config = new_config;
                 self.sync_config_watch_paths();
+                if outputs_changed {
+                    warnings.extend(self.apply_output_blocks_live());
+                }
+                warnings.extend(
+                    self.custom_shader_programs
+                        .retain_definitions(&self.config.shader_definitions),
+                );
                 self.rescue_keybinds_active = false;
                 self.helper_keys_down.clear();
                 // A live `workspace_count` change should show up in the
@@ -12589,10 +13201,22 @@ impl Smallvil {
                     }
                     self.window_opacity.clear();
                     self.window_glass_modes.clear();
+                    self.window_shader_assignments.clear();
+                    self.layer_shader_assignments.clear();
                     let surfaces: Vec<WlSurface> = self.foreign_toplevels.keys().cloned().collect();
                     for surface in surfaces {
                         self.refresh_window_opacity_and_glass_for(&surface);
                     }
+                    let unshaded: Vec<WlSurface> = self
+                        .custom_shader_instances
+                        .keys()
+                        .filter(|surface| self.resolved_shader_assignment(surface).is_none())
+                        .cloned()
+                        .collect();
+                    for surface in unshaded {
+                        self.custom_shader_instances.remove(&surface);
+                    }
+                    self.custom_shader_bypassed.clear();
                     // The mode or frost tuning may have changed. Force the
                     // shared pre-frame pipeline to rebuild against the current
                     // window geometry instead of briefly showing stale content.
@@ -13050,10 +13674,39 @@ fn tide_workspace_value(engine: crate::config::SpatialEngine, first_workspace: O
     }
 }
 
+/// Physical size of an output's wallpaper for scale-1.0 offscreen captures,
+/// rounded the same way the scaled on-screen frame rounds it. Returned as a
+/// `Logical` size because the wallpaper element takes one; at the capture's
+/// 1.0 scale logical and physical coincide.
+fn capture_wallpaper_size(logical: Size<i32, Logical>, scale: f64) -> Size<i32, Logical> {
+    let physical = logical
+        .to_f64()
+        .to_physical_precise_round::<f64, i32>(scale);
+    Size::from((physical.w, physical.h))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use smithay::output::{PhysicalProperties, Subpixel};
+
+    #[test]
+    fn capture_wallpaper_matches_the_scaled_output_in_physical_pixels() {
+        // 1440p at 1.25x: the frame draws 2560x1440, so must every capture.
+        assert_eq!(
+            capture_wallpaper_size(Size::from((2048, 1152)), 1.25),
+            Size::from((2560, 1440))
+        );
+        assert_eq!(
+            capture_wallpaper_size(Size::from((1920, 1080)), 1.0),
+            Size::from((1920, 1080))
+        );
+        // Rounds like to_physical_precise_round on the visible path.
+        assert_eq!(
+            capture_wallpaper_size(Size::from((1707, 960)), 1.5),
+            Size::from((2561, 1440))
+        );
+    }
 
     fn named_output(name: &str) -> Output {
         Output::new(
@@ -13349,4 +14002,21 @@ pub(crate) fn trusted_client(client: &Client) -> bool {
     client
         .get_data::<ClientState>()
         .is_none_or(|state| state.security_context.is_none())
+}
+
+/// A surface's effect: a layer's `layer_rule { shader }` assignment, or a
+/// window's rule assignment and workspace default. Takes the fields it reads
+/// so render code can resolve while holding other `Smallvil` state mutably.
+#[allow(clippy::mutable_key_type)] // WlSurface keys, same as every other map here
+fn surface_shader<'a>(
+    config: &'a crate::config::Config,
+    layers: &'a HashMap<WlSurface, crate::config::ShaderAssignment>,
+    windows: &'a HashMap<WlSurface, crate::config::ShaderAssignment>,
+    surface: &WlSurface,
+    workspace: Option<u32>,
+) -> Option<(&'a str, &'a crate::config::ShaderDefinition)> {
+    match layers.get(surface) {
+        Some(assignment) => config.shader_for(Some(assignment), None),
+        None => config.shader_for(windows.get(surface), workspace),
+    }
 }

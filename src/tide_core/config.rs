@@ -426,6 +426,75 @@ impl Default for WaterGlassConfig {
     }
 }
 
+/// A window or workspace rule's `shader` value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShaderAssignment {
+    None,
+    Named(String),
+}
+
+impl ShaderAssignment {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_lowercase() {
+            name if name == "none" => Some(Self::None),
+            name if valid_ripple_preset_name(&name) => Some(Self::Named(name)),
+            _ => None,
+        }
+    }
+
+    /// The effect name a window uses: its rule's assignment, else its
+    /// workspace's default. `none` at the window level also opts out of the
+    /// workspace default.
+    pub fn resolve<'a>(rule: Option<&'a Self>, workspace: Option<&'a Self>) -> Option<&'a str> {
+        match rule.or(workspace)? {
+            Self::Named(name) => Some(name),
+            Self::None => None,
+        }
+    }
+}
+
+/// One ordered stage of a custom effect (`shader "name" { stage { } }`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShaderStage {
+    /// The `file` value exactly as written.
+    pub file: String,
+    /// `file` resolved against the main config directory at load time.
+    pub path: PathBuf,
+    pub params: Arc<[(String, crate::shader_effect::ShaderParam)]>,
+    /// Positional input (`tex`). `None` reads the previous stage's output,
+    /// or the backdrop for the first stage.
+    pub input: Option<crate::shader_effect::StageTexture>,
+    /// Name this stage's output can be read back by with `"get:name"`.
+    pub save: Option<String>,
+    /// Extra `sampler2D` bindings, declared by the host.
+    pub textures: Arc<[(String, crate::shader_effect::StageTexture)]>,
+    /// Host-wrapped GLSL once `path` passed the fragment contract. `None`
+    /// before loading and after a read or contract failure.
+    pub source: Option<Arc<str>>,
+}
+
+/// A named custom effect (`shader "name" { }`), selected per window with
+/// `rule { shader = name }` or a workspace default: up to four ordered
+/// stages over a window's captured backdrop, damage-driven. Every stage but
+/// the last renders offscreen; the last draws in the window's glass slot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShaderDefinition {
+    /// Processing divisor for the effect's own capture, `1..=4`.
+    pub render_scale: i32,
+    /// `source = "shader:<name>"`: another definition whose output stands in
+    /// for the backdrop. Its stages are spliced in front of this one's at
+    /// load time, so `stages` is then the whole chain.
+    pub source: Option<String>,
+    pub stages: Vec<ShaderStage>,
+}
+
+impl ShaderDefinition {
+    /// Whether every stage's file loaded and passed the contract.
+    pub fn fully_loaded(&self) -> bool {
+        self.stages.iter().all(|stage| stage.source.is_some())
+    }
+}
+
 /// Continuous lateral "swim" between workspaces (spatial roadmap S0).
 /// Instead of the discrete one-shot switch (and its wave transition), a
 /// horizontal trackpad swipe pans the viewport continuously: neighboring
@@ -1085,6 +1154,11 @@ pub struct Config {
     /// Water-glass refraction motion: static, disturbance-reactive
     /// (default), or constant ambient drift.
     pub water_glass: WaterGlassConfig,
+    /// Master switch for custom `.frag` effects (`shaders { enabled }`),
+    /// off by default and independent of `water_effects`.
+    pub shaders_enabled: bool,
+    /// Named custom effects that parsed and passed the definition caps.
+    pub shader_definitions: HashMap<String, ShaderDefinition>,
     /// Ambient caustic light over the wallpaper, below windows.
     pub caustics: CausticsConfig,
     /// Analytical window shadows. Independent of `water_effects`: shadows
@@ -1331,6 +1405,7 @@ impl Config {
         warnings.extend(include_warnings);
         config.loaded_entries = entries;
         config.source_paths = source_paths;
+        warnings.extend(config.load_shader_sources(&path));
         (config, error, warnings)
     }
 
@@ -1350,12 +1425,13 @@ impl Config {
         lua: &mlua::Lua,
         tide: &wave::TideInfo,
     ) -> Result<(Self, Vec<String>), String> {
-        let (raw, include_warnings, entries, source_paths) =
-            load_raw_config_in(lua, tide, &config_path())?;
+        let path = config_path();
+        let (raw, include_warnings, entries, source_paths) = load_raw_config_in(lua, tide, &path)?;
         let (mut config, mut warnings) = Self::from_raw(raw);
         warnings.extend(include_warnings);
         config.loaded_entries = entries;
         config.source_paths = source_paths;
+        warnings.extend(config.load_shader_sources(&path));
         Ok((config, warnings))
     }
 
@@ -1379,7 +1455,65 @@ impl Config {
         warnings.extend(include_warnings);
         config.loaded_entries = entries;
         config.source_paths = source_paths;
+        warnings.extend(config.load_shader_sources(path));
         Ok((lua, config, warnings))
+    }
+
+    /// Reads, checks and wraps every definition's `.frag` files. Relative
+    /// paths resolve from the main config's directory (lowered entries carry
+    /// no per-include provenance). Each path joins `source_paths`, so the
+    /// watcher reloads on a shader edit, deletion or late creation exactly
+    /// like an include. A failed stage keeps its definition with no source,
+    /// which leaves any last-good program to the renderer's cache.
+    fn load_shader_sources(&mut self, config_path: &Path) -> Vec<String> {
+        let base_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+        let mut warnings = Vec::new();
+        let mut loaded_bytes = 0usize;
+        let mut names: Vec<&String> = self.shader_definitions.keys().collect();
+        names.sort_unstable();
+        let names: Vec<String> = names.into_iter().cloned().collect();
+        for name in names {
+            let Some(definition) = self.shader_definitions.get_mut(&name) else {
+                continue;
+            };
+            for (index, stage) in definition.stages.iter_mut().enumerate() {
+                stage.path = waves::resolve_include_path(base_dir, stage.file.trim());
+                if !self.source_paths.contains(&stage.path) {
+                    self.source_paths.push(stage.path.clone());
+                }
+                let loaded =
+                    crate::shader_effect::read_fragment_file(&stage.path).and_then(|source| {
+                        crate::shader_effect::validate_fragment_contract(&source)?;
+                        let wrapped = crate::shader_effect::wrap_texture_fragment(
+                            &source,
+                            &stage.params,
+                            &stage.textures,
+                        );
+                        if loaded_bytes + wrapped.len() > crate::shader_effect::MAX_CANDIDATE_BYTES
+                        {
+                            return Err(format!(
+                                "all shader sources together exceed {} bytes",
+                                crate::shader_effect::MAX_CANDIDATE_BYTES
+                            ));
+                        }
+                        loaded_bytes += wrapped.len();
+                        Ok(wrapped)
+                    });
+                match loaded {
+                    Ok(wrapped) => stage.source = Some(Arc::from(wrapped)),
+                    Err(reason) => {
+                        stage.source = None;
+                        warnings.push(format!(
+                            "Shader {name:?} stage {} ({}): {reason}",
+                            index + 1,
+                            stage.path.display()
+                        ));
+                    }
+                }
+            }
+        }
+        warnings.extend(expand_shader_sources(&mut self.shader_definitions));
+        warnings
     }
 
     /// The path being watched/loaded, so callers can set up a file watcher on it.
@@ -1390,7 +1524,7 @@ impl Config {
     /// Returns the parsed config plus any diagnostics worth showing on the
     /// compositor-owned panel (dropped keybind entries, footgun lints) --
     /// see `parse_keybind`. Empty when nothing needs a second look.
-    fn from_raw(raw: RawConfig) -> (Self, Vec<String>) {
+    fn from_raw(mut raw: RawConfig) -> (Self, Vec<String>) {
         let mut warnings = Vec::new();
         let ocean_selected = raw.spatial_engine.trim().eq_ignore_ascii_case("ocean");
         let classic_depth_enabled = raw.classic_depth.enabled;
@@ -1480,6 +1614,7 @@ impl Config {
             .filter_map(|(combo, action)| parse_keybind(combo, action, false, &mut Vec::new()))
             .filter(|bind| !matches!(bind.action, Action::EnterSubmap(_)))
             .collect();
+        warnings.append(&mut raw.shader_warnings);
         let env = raw
             .env
             .into_iter()
@@ -1521,6 +1656,8 @@ impl Config {
             classic_depth: raw.classic_depth,
             frost: raw.frost,
             water_glass: raw.water_glass,
+            shaders_enabled: raw.shaders_enabled,
+            shader_definitions: raw.shader_definitions,
             caustics: raw.caustics,
             shadow: raw.shadow,
             rounding: raw.rounding,
@@ -1704,6 +1841,9 @@ impl Config {
             if rule.glass.is_some() {
                 effective.glass = rule.glass;
             }
+            if rule.shader.is_some() {
+                effective.shader = rule.shader.clone();
+            }
             if rule.viscosity.is_some() {
                 effective.viscosity = rule.viscosity;
             }
@@ -1840,6 +1980,18 @@ impl Config {
             .any(|rule| rule.blur && rule.matches(namespace))
     }
 
+    /// The custom effect a layer's last matching `layer_rule { shader }`
+    /// names, `None` for `shader = none` or no matching assignment.
+    pub(crate) fn layer_shader(&self, namespace: &str) -> Option<&str> {
+        let assignment = self
+            .layer_rules
+            .iter()
+            .rev()
+            .filter(|rule| rule.matches(namespace))
+            .find_map(|rule| rule.shader.as_ref());
+        ShaderAssignment::resolve(assignment, None)
+    }
+
     /// Last matching alpha threshold for a blurred layer. An unset value
     /// leaves the full negotiated layer geometry blurred.
     pub(crate) fn layer_ignore_alpha(&self, namespace: &str) -> Option<f32> {
@@ -1862,6 +2014,37 @@ impl Config {
             }
         }
         map
+    }
+
+    /// `resolve_workspace_rule(workspace).shader` without the fold's clones,
+    /// for the per-frame shader resolution.
+    pub(crate) fn workspace_shader(&self, workspace: u32) -> Option<&ShaderAssignment> {
+        self.workspace_rules
+            .iter()
+            .rev()
+            .filter(|rule| rule.workspace == Some(workspace))
+            .find_map(|rule| rule.shader.as_ref())
+    }
+
+    /// The definition a window draws with: its rule's assignment, else its
+    /// workspace's default, live against the master switch. Takes the
+    /// window's own assignment rather than the window so render code can
+    /// call it while holding other state mutably.
+    pub(crate) fn shader_for<'a>(
+        &'a self,
+        assignment: Option<&'a ShaderAssignment>,
+        workspace: Option<u32>,
+    ) -> Option<(&'a str, &'a ShaderDefinition)> {
+        if !self.shaders_enabled {
+            return None;
+        }
+        let name = ShaderAssignment::resolve(
+            assignment,
+            workspace.and_then(|workspace| self.workspace_shader(workspace)),
+        )?;
+        self.shader_definitions
+            .get_key_value(name)
+            .map(|(name, definition)| (name.as_str(), definition))
     }
 
     /// Folds every `[[workspace_rule]]` naming `workspace` into one
@@ -1888,6 +2071,9 @@ impl Config {
             }
             if rule.snap.is_some() {
                 effective.snap = rule.snap;
+            }
+            if rule.shader.is_some() {
+                effective.shader = rule.shader.clone();
             }
             if rule.on_created_empty.is_some() {
                 effective.on_created_empty = rule.on_created_empty.clone();
@@ -1934,6 +2120,11 @@ struct RawConfig {
     classic_depth: ClassicDepthConfig,
     frost: FrostConfig,
     water_glass: WaterGlassConfig,
+    shaders_enabled: bool,
+    shader_definitions: HashMap<String, ShaderDefinition>,
+    /// Definition problems for the error panel. A rejected definition is
+    /// left out entirely instead of rendering something other than asked.
+    shader_warnings: Vec<String>,
     caustics: CausticsConfig,
     shadow: ShadowConfig,
     rounding: RoundingConfig,
@@ -2103,6 +2294,9 @@ impl Default for RawConfig {
             classic_depth: ClassicDepthConfig::default(),
             frost: FrostConfig::default(),
             water_glass: WaterGlassConfig::default(),
+            shaders_enabled: false,
+            shader_definitions: HashMap::new(),
+            shader_warnings: Vec::new(),
             caustics: CausticsConfig::default(),
             shadow: ShadowConfig::default(),
             rounding: RoundingConfig::default(),
@@ -2366,6 +2560,22 @@ pub enum OutputTransformConfig {
     Flipped90,
     Flipped180,
     Flipped270,
+}
+
+impl OutputTransformConfig {
+    pub fn to_transform(self) -> smithay::utils::Transform {
+        use smithay::utils::Transform;
+        match self {
+            Self::Normal => Transform::Normal,
+            Self::Rotate90 => Transform::_90,
+            Self::Rotate180 => Transform::_180,
+            Self::Rotate270 => Transform::_270,
+            Self::Flipped => Transform::Flipped,
+            Self::Flipped90 => Transform::Flipped90,
+            Self::Flipped180 => Transform::Flipped180,
+            Self::Flipped270 => Transform::Flipped270,
+        }
+    }
 }
 
 /// Which DRM device TideWM should use for its own GLES rendering and
@@ -2657,6 +2867,11 @@ pub struct WindowRule {
     /// behavior where compositor `opacity` below one implies water;
     /// `Plain` disables backdrop substitution while preserving `opacity`.
     pub glass: Option<GlassMode>,
+    /// Custom effect by definition name, or `shader = none` to clear an
+    /// earlier match. Last matching rule wins. The name resolves live
+    /// against `shaders { enabled }` and `shader_definitions`, so a typo
+    /// or a removed definition leaves the window on its normal path.
+    pub shader: Option<ShaderAssignment>,
     /// Per-window interactive move/resize damping. Last matching rule wins;
     /// `0.0` disables damping for the matched app.
     pub viscosity: Option<f64>,
@@ -4051,7 +4266,8 @@ pub struct DepthConfig {
 impl Default for DepthConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            // Opt-in: the blue wash / title cards surprise people who didn't ask for them.
+            enabled: false,
             sink_after_ms: 30_000,
             tier_interval_ms: 30_000,
             max_tier: 2,
@@ -4533,6 +4749,9 @@ pub struct LayerRule {
     pub above_lock_screen: bool,
     pub blur: bool,
     pub ignore_alpha: Option<f32>,
+    /// Custom effect for the matched layer, or `none` to clear an earlier
+    /// match. Layers never inherit a window or workspace shader.
+    pub shader: Option<ShaderAssignment>,
 }
 
 impl LayerRule {
@@ -4577,6 +4796,9 @@ pub struct WorkspaceRule {
     pub shadow: Option<ShadowOverrides>,
     /// Per-workspace snap opt-in or opt-out. Window rules take precedence.
     pub snap: Option<bool>,
+    /// Default custom effect for windows on this workspace. A window rule's
+    /// own `shader` (including `none`) takes precedence.
+    pub shader: Option<ShaderAssignment>,
     /// Command run the first time this workspace becomes active while
     /// having zero windows, once per (output, workspace) pair for the
     /// process lifetime (`Smallvil::workspace_created_empty_fired`) --
@@ -5133,7 +5355,8 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
         "backdrop_capture_scale" => set_i32(&mut raw.backdrop_capture_scale, key, value),
         "cursor_always_visible" => set_bool(&mut raw.cursor_always_visible, key, value),
         "cursor_hide_after" => {
-            if let Some(ms) = parse_duration_ms(value) {
+            // `0` is documented as "never hide", so zero must parse.
+            if let Some(ms) = parse_duration_ms_including_zero(value) {
                 raw.cursor_hide_after_ms = ms as i32;
             } else {
                 tracing::warn!(
@@ -5177,6 +5400,8 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "xwayland" => apply_xwayland_block(&mut raw.xwayland, body),
         "transition" => apply_workspace_transition_block(&mut raw.workspace_transition, body),
         "snap" => apply_snap_block(&mut raw.snap, body),
+        "shaders" => apply_shaders_block(raw, body),
+        "shader" => lower_shader_block(raw, header, body),
         "vessels" => apply_connected_vessels_block(&mut raw.connected_vessels, body),
         "sway" => apply_sway_block(&mut raw.sway, body),
         "physics" => apply_float_physics_block(&mut raw.float_physics, body),
@@ -5320,6 +5545,358 @@ fn apply_snap_block(cfg: &mut SnapConfig, body: &[waves::Entry]) {
             other => tracing::warn!(key = %other, "Unknown key in `snap` block, ignoring"),
         }
     }
+}
+
+fn apply_shaders_block(raw: &mut RawConfig, body: &[waves::Entry]) {
+    for entry in body {
+        match entry {
+            waves::Entry::Assign(key, value) if key == "enabled" => {
+                set_bool(&mut raw.shaders_enabled, key, value)
+            }
+            _ => raw.shader_warnings.push(
+                "Only `enabled` is valid in a `shaders` block; ignoring an entry".to_string(),
+            ),
+        }
+    }
+}
+
+/// Lowers one named custom effect. A later definition with the same name
+/// replaces the earlier one whole, so `stage` order is always the written
+/// order of a single block. Anything this slice can't render as written
+/// rejects the definition with a panel warning.
+fn lower_shader_block(raw: &mut RawConfig, header: &str, body: &[waves::Entry]) {
+    let name = header.trim().to_lowercase();
+    match parse_shader_definition(&name, body) {
+        Ok(definition) => {
+            if !raw.shader_definitions.contains_key(&name)
+                && raw.shader_definitions.len() >= crate::shader_effect::MAX_DEFINITIONS
+            {
+                raw.shader_warnings.push(format!(
+                    "Shader {name:?} skipped: at most {} definitions are allowed",
+                    crate::shader_effect::MAX_DEFINITIONS
+                ));
+                return;
+            }
+            raw.shader_definitions.insert(name, definition);
+        }
+        Err(reason) => {
+            raw.shader_definitions.remove(&name);
+            raw.shader_warnings
+                .push(format!("Shader {name:?} skipped: {reason}"));
+        }
+    }
+}
+
+fn parse_shader_definition(name: &str, body: &[waves::Entry]) -> Result<ShaderDefinition, String> {
+    if !valid_ripple_preset_name(name) || name == "none" {
+        return Err(
+            "needs an alphanumeric, dash, or underscore name other than `none`".to_string(),
+        );
+    }
+    let mut definition = ShaderDefinition {
+        render_scale: 2,
+        source: None,
+        stages: Vec::new(),
+    };
+    for entry in body {
+        match entry {
+            waves::Entry::Assign(key, value) => match (key.as_str(), value.trim()) {
+                ("scope", "window") | ("source", "backdrop") | ("invalidate", "damage-box") => {}
+                ("source", value) if value.starts_with("shader:") => {
+                    let source = value["shader:".len()..].trim().to_lowercase();
+                    if !valid_ripple_preset_name(&source) {
+                        return Err(format!("source = {value} does not name a definition"));
+                    }
+                    definition.source = Some(source);
+                }
+                ("scope" | "source" | "invalidate", other) => {
+                    return Err(format!("{key} = {other} is not supported yet"));
+                }
+                ("render_scale", value) => match value.parse::<i32>() {
+                    Ok(scale @ 1..=4) => definition.render_scale = scale,
+                    _ => {
+                        return Err(format!(
+                            "render_scale must be an integer from 1 to 4, got {value}"
+                        ))
+                    }
+                },
+                (other, _) => return Err(format!("unknown key `{other}`")),
+            },
+            waves::Entry::Block(keyword, _, stage_body) if keyword == "stage" => {
+                if definition.stages.len() == crate::shader_effect::MAX_STAGES {
+                    return Err(format!(
+                        "at most {} stages are allowed",
+                        crate::shader_effect::MAX_STAGES
+                    ));
+                }
+                definition.stages.push(parse_shader_stage(stage_body)?);
+            }
+            _ => return Err("only settings and `stage` blocks are allowed".to_string()),
+        }
+    }
+    let Some(last) = definition.stages.len().checked_sub(1) else {
+        return Err("needs a `stage { file = \"...\" }` block".to_string());
+    };
+    // The written order is the dependency order: a stage may only read
+    // names saved by stages above it, so there is never a cycle to detect.
+    let mut saved: Vec<&str> = Vec::new();
+    for (index, stage) in definition.stages.iter().enumerate() {
+        let reads = stage
+            .input
+            .iter()
+            .chain(stage.textures.iter().map(|(_, texture)| texture));
+        for texture in reads {
+            if let crate::shader_effect::StageTexture::Saved(name) = texture {
+                if !saved.contains(&name.as_str()) {
+                    return Err(format!(
+                        "stage {} reads \"get:{name}\", which no earlier stage saves",
+                        index + 1
+                    ));
+                }
+            }
+        }
+        if let Some(name) = &stage.save {
+            if index == last {
+                return Err("the last stage draws on screen and cannot `save`".to_string());
+            }
+            if saved.contains(&name.as_str()) {
+                return Err(format!("\"{name}\" is saved by more than one stage"));
+            }
+            saved.push(name);
+        }
+    }
+    Ok(definition)
+}
+
+/// Splices every `source = "shader:<name>"` definition's source chain in
+/// front of its own stages, after files have loaded so each file is read
+/// once. The source's last output is saved under a host-reserved name (save
+/// names starting with `tide_` can't be written by hand), the definition's
+/// first stage reads it positionally, and its explicit `backdrop` reads
+/// become reads of that output. Unknown names, cycles, clashing save names
+/// and chains over the stage cap reject the definition, and everything that
+/// sources it, with a warning.
+pub(crate) fn expand_shader_sources(
+    definitions: &mut HashMap<String, ShaderDefinition>,
+) -> Vec<String> {
+    use crate::shader_effect::StageTexture;
+    type Expanded = Result<Vec<ShaderStage>, String>;
+    fn expand(
+        name: &str,
+        definitions: &HashMap<String, ShaderDefinition>,
+        visiting: &mut Vec<String>,
+        done: &mut HashMap<String, Expanded>,
+    ) -> Expanded {
+        if let Some(result) = done.get(name) {
+            return result.clone();
+        }
+        if visiting.iter().any(|visited| visited == name) {
+            return Err(format!("its source chain loops back to {name:?}"));
+        }
+        let definition = definitions
+            .get(name)
+            .ok_or_else(|| format!("its source {name:?} is not a loaded definition"))?;
+        let Some(source) = &definition.source else {
+            return Ok(definition.stages.clone());
+        };
+        visiting.push(name.to_string());
+        let base = expand(source, definitions, visiting, done);
+        visiting.pop();
+        let mut stages = base?;
+        let saved = format!("tide_source_{}", stages.len());
+        if let Some(last) = stages.last_mut() {
+            last.save = Some(saved.clone());
+        }
+        let redirect = |texture: &StageTexture| match texture {
+            StageTexture::Backdrop => StageTexture::Saved(saved.clone()),
+            other => other.clone(),
+        };
+        for stage in &definition.stages {
+            if let Some(name) = stage.save.as_ref().filter(|name| {
+                stages
+                    .iter()
+                    .any(|earlier| earlier.save.as_ref() == Some(*name))
+            }) {
+                return Err(format!("it and its source both save \"{name}\""));
+            }
+            let mut stage = stage.clone();
+            stage.input = stage.input.as_ref().map(redirect);
+            stage.textures = stage
+                .textures
+                .iter()
+                .map(|(binding, texture)| (binding.clone(), redirect(texture)))
+                .collect::<Vec<_>>()
+                .into();
+            stages.push(stage);
+        }
+        if stages.len() > crate::shader_effect::MAX_STAGES {
+            return Err(format!(
+                "with its source it has {} stages, more than {}",
+                stages.len(),
+                crate::shader_effect::MAX_STAGES
+            ));
+        }
+        Ok(stages)
+    }
+
+    let mut names: Vec<String> = definitions
+        .iter()
+        .filter(|(_, definition)| definition.source.is_some())
+        .map(|(name, _)| name.clone())
+        .collect();
+    names.sort_unstable();
+    let mut done = HashMap::new();
+    let mut results = Vec::new();
+    for name in names {
+        let result = expand(&name, definitions, &mut Vec::new(), &mut done);
+        done.insert(name.clone(), result.clone());
+        results.push((name, result));
+    }
+    let mut warnings = Vec::new();
+    for (name, result) in results {
+        match result {
+            Ok(stages) => {
+                if let Some(definition) = definitions.get_mut(&name) {
+                    definition.stages = stages;
+                }
+            }
+            Err(reason) => {
+                definitions.remove(&name);
+                warnings.push(format!("Shader {name:?} skipped: {reason}"));
+            }
+        }
+    }
+    warnings
+}
+
+fn parse_shader_stage(body: &[waves::Entry]) -> Result<ShaderStage, String> {
+    use crate::shader_effect::StageTexture;
+    let mut file = None;
+    let mut params = Vec::new();
+    let mut input = None;
+    let mut save = None;
+    let mut textures: Vec<(String, StageTexture)> = Vec::new();
+    for entry in body {
+        match entry {
+            waves::Entry::Assign(key, value) if key == "file" => file = Some(value.clone()),
+            waves::Entry::Assign(key, value) if key == "source" => {
+                input = Some(StageTexture::parse(value).ok_or_else(|| {
+                    format!("stage source must be backdrop or \"get:name\", got {value}")
+                })?);
+            }
+            waves::Entry::Assign(key, value) if key == "save" => {
+                let name = value.trim();
+                if !crate::shader_effect::valid_param_name(name) {
+                    return Err(format!("`{name}` cannot be a saved texture name"));
+                }
+                save = Some(name.to_string());
+            }
+            waves::Entry::Block(keyword, _, texture_body) if keyword == "textures" => {
+                for binding in texture_body {
+                    let waves::Entry::Assign(name, value) = binding else {
+                        return Err(
+                            "`textures` may only contain `name = source` entries".to_string()
+                        );
+                    };
+                    if !crate::shader_effect::valid_param_name(name) {
+                        return Err(format!("`{name}` cannot be a texture binding name"));
+                    }
+                    let texture = StageTexture::parse(value).ok_or_else(|| {
+                        format!("texture `{name}` must be backdrop or \"get:name\", got {value}")
+                    })?;
+                    if let Some(existing) =
+                        textures.iter_mut().find(|(existing, _)| existing == name)
+                    {
+                        existing.1 = texture;
+                    } else {
+                        textures.push((name.clone(), texture));
+                    }
+                }
+                if textures.len() > crate::shader_effect::MAX_TEXTURES_PER_STAGE {
+                    return Err(format!(
+                        "at most {} extra textures per stage are allowed",
+                        crate::shader_effect::MAX_TEXTURES_PER_STAGE
+                    ));
+                }
+            }
+            waves::Entry::Block(keyword, _, param_body) if keyword == "params" => {
+                for param in param_body {
+                    let waves::Entry::Assign(name, value) = param else {
+                        return Err("`params` may only contain `name = value` entries".to_string());
+                    };
+                    if !crate::shader_effect::valid_param_name(name) {
+                        return Err(format!("`{name}` cannot be a parameter name"));
+                    }
+                    let value = parse_shader_param(value).ok_or_else(|| {
+                        format!("parameter `{name}` needs a finite number, a list of 2 to 4 numbers, or a color")
+                    })?;
+                    if let Some(existing) = params.iter_mut().find(|(existing, _)| existing == name)
+                    {
+                        existing.1 = value;
+                    } else {
+                        params.push((name.clone(), value));
+                    }
+                }
+                if params.len() > crate::shader_effect::MAX_PARAMS_PER_STAGE {
+                    return Err(format!(
+                        "at most {} parameters per stage are allowed",
+                        crate::shader_effect::MAX_PARAMS_PER_STAGE
+                    ));
+                }
+            }
+            waves::Entry::Assign(key, _) | waves::Entry::Block(key, _, _) => {
+                return Err(format!("`{key}` is not supported in a stage yet"));
+            }
+            _ => return Err("unexpected entry in a stage".to_string()),
+        }
+    }
+    let file = file
+        .filter(|file| !file.trim().is_empty())
+        .ok_or_else(|| "a stage needs `file = \"path.frag\"`".to_string())?;
+    if let Some((name, _)) = textures
+        .iter()
+        .find(|(name, _)| params.iter().any(|(param, _)| param == name))
+    {
+        return Err(format!("`{name}` is both a parameter and a texture"));
+    }
+    Ok(ShaderStage {
+        file,
+        path: PathBuf::new(),
+        params: params.into(),
+        input,
+        save,
+        textures: textures.into(),
+        source: None,
+    })
+}
+
+/// A color, a number, or a list of 2 to 4 numbers. Wave serializes colors
+/// without the `#`, so six or eight hex digits with a letter among them read
+/// as a color (even `1E0000`, which would also parse as a float), and a
+/// color whose digits are all decimal has to be quoted with its `#`.
+fn parse_shader_param(value: &str) -> Option<crate::shader_effect::ShaderParam> {
+    use crate::shader_effect::ShaderParam;
+    let bare = value.trim();
+    if matches!(bare.len(), 6 | 8)
+        && bare.chars().all(|c| c.is_ascii_hexdigit())
+        && bare.chars().any(|c| c.is_ascii_alphabetic())
+    {
+        return parse_rgba_color(bare).map(ShaderParam::Vec4);
+    }
+    let finite = |item: &str| item.trim().parse::<f32>().ok().filter(|v| v.is_finite());
+    if let Some(number) = finite(value) {
+        return Some(ShaderParam::Float(number));
+    }
+    if let Some(items) = parse_list_value(value) {
+        let items: Option<Vec<f32>> = items.iter().map(|item| finite(item)).collect();
+        return match items?.as_slice() {
+            [x, y] => Some(ShaderParam::Vec2([*x, *y])),
+            [x, y, z] => Some(ShaderParam::Vec3([*x, *y, *z])),
+            [x, y, z, w] => Some(ShaderParam::Vec4([*x, *y, *z, *w])),
+            _ => None,
+        };
+    }
+    parse_rgba_color(value).map(ShaderParam::Vec4)
 }
 
 fn apply_gpu_block(gpu: &mut GpuConfigRaw, body: &[waves::Entry]) {
@@ -5660,10 +6237,13 @@ fn apply_workspace_animation_block(cfg: &mut WorkspaceAnimationConfig, body: &[w
             },
             "curve" | "ease" => match parse_window_animation_curve(value) {
                 Some(value) => cfg.curve = value,
-                None => tracing::warn!(
-                    value,
-                    "Expected workspace easing, cubic-bezier(x1,y1,x2,y2), or spring(mass,stiffness,damping), ignoring"
-                ),
+                None => match spring_curve_rejection(value) {
+                    Some(reason) => tracing::warn!(value, reason, "Invalid workspace spring, ignoring"),
+                    None => tracing::warn!(
+                        value,
+                        "Expected workspace easing, cubic-bezier(x1,y1,x2,y2), or spring(mass,stiffness,damping), ignoring"
+                    ),
+                },
             },
             "travel" | "distance" => match value.parse::<f32>() {
                 Ok(value) if value.is_finite() && (0.0..=1.0).contains(&value) => {
@@ -5731,10 +6311,13 @@ fn apply_window_animation_block(cfg: &mut WindowAnimationConfig, body: &[waves::
             },
             "curve" | "ease" => match parse_window_animation_curve(value) {
                 Some(value) => cfg.curve = value,
-                None => tracing::warn!(
-                    value,
-                    "Expected built-in easing, cubic-bezier(x1,y1,x2,y2), or spring(mass,stiffness,damping), ignoring"
-                ),
+                None => match spring_curve_rejection(value) {
+                    Some(reason) => tracing::warn!(value, reason, "Invalid animation spring, ignoring"),
+                    None => tracing::warn!(
+                        value,
+                        "Expected built-in easing, cubic-bezier(x1,y1,x2,y2), or spring(mass,stiffness,damping), ignoring"
+                    ),
+                },
             },
             "opacity_duration" => match parse_duration_ms(value) {
                 Some(value) if (1..=10_000).contains(&value) => {
@@ -5748,10 +6331,15 @@ fn apply_window_animation_block(cfg: &mut WindowAnimationConfig, body: &[waves::
             "opacity_curve" | "fade_curve" | "opacity_ease" => {
                 match parse_window_animation_curve(value) {
                     Some(value) => cfg.opacity_curve = Some(value),
-                    None => tracing::warn!(
-                        value,
-                        "Expected opacity easing, cubic-bezier(x1,y1,x2,y2), or spring(mass,stiffness,damping), ignoring"
-                    ),
+                    None => match spring_curve_rejection(value) {
+                        Some(reason) => {
+                            tracing::warn!(value, reason, "Invalid opacity spring, ignoring")
+                        }
+                        None => tracing::warn!(
+                            value,
+                            "Expected opacity easing, cubic-bezier(x1,y1,x2,y2), or spring(mass,stiffness,damping), ignoring"
+                        ),
+                    },
                 }
             }
             "offset" | "travel" => match parse_position(value) {
@@ -5813,6 +6401,26 @@ fn apply_window_animation_block(cfg: &mut WindowAnimationConfig, body: &[waves::
                 "Unknown animation setting, ignoring"
             ),
         }
+    }
+}
+
+/// Why a `spring(...)` curve was refused, for its warning. `None` for a
+/// value that isn't a spring or is a valid one.
+fn spring_curve_rejection(value: &str) -> Option<&'static str> {
+    let normalized = value.trim().to_ascii_lowercase();
+    let inner = normalized
+        .strip_prefix("spring(")?
+        .strip_suffix(')')
+        .unwrap_or_default();
+    let values: Option<Vec<f64>> = inner
+        .split(',')
+        .map(|value| value.trim().parse::<f64>().ok())
+        .collect();
+    match values.as_deref() {
+        Some([mass, stiffness, damping]) => {
+            crate::visual::spring::SpringCurve::try_new(*mass, *stiffness, *damping).err()
+        }
+        _ => Some("spring needs three numbers: spring(mass, stiffness, damping)"),
     }
 }
 
@@ -8006,6 +8614,12 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                         "Expected a rule glass mode: water frost none, ignoring"
                     ),
                 },
+                "shader" => match ShaderAssignment::parse(value) {
+                    Some(assignment) => rule.shader = Some(assignment),
+                    None => {
+                        tracing::warn!(value, "Expected a shader definition name or none, ignoring")
+                    }
+                },
                 "viscosity" => match parse_viscosity(value) {
                     Some(value) => rule.viscosity = Some(value),
                     None => {
@@ -8205,6 +8819,12 @@ fn lower_workspace_rule_block(body: &[waves::Entry]) -> WorkspaceRule {
                 },
                 "on_created_empty" => rule.on_created_empty = Some(value.clone()),
                 "snap" => set_opt_bool(&mut rule.snap, key, value),
+                "shader" => match ShaderAssignment::parse(value) {
+                    Some(assignment) => rule.shader = Some(assignment),
+                    None => {
+                        tracing::warn!(value, "Expected a shader definition name or none, ignoring")
+                    }
+                },
                 "shadow" => match value.as_str() {
                     "true" | "on" => {
                         rule.shadow
@@ -8308,6 +8928,12 @@ fn lower_layer_rule_block(body: &[waves::Entry]) -> LayerRule {
             },
             "above_lock_screen" => set_bool(&mut rule.above_lock_screen, key, value),
             "blur" => set_bool(&mut rule.blur, key, value),
+            "shader" => match ShaderAssignment::parse(value) {
+                Some(assignment) => rule.shader = Some(assignment),
+                None => {
+                    tracing::warn!(value, "Expected a shader definition name or none, ignoring")
+                }
+            },
             "ignore_alpha" => match value.parse::<f32>() {
                 Ok(value) if value.is_finite() => {
                     rule.ignore_alpha = Some(value.clamp(0.0, 1.0));
@@ -8930,6 +9556,13 @@ water_effects = true
 viscosity = 1.0                  # 0 turns off drag/resize settling, higher settles slower
 # backdrop_capture_scale = 2     # 1 (default, full detail) to 4; lower the frost/water-glass
                                   # capture texture's resolution to cut VRAM on many glass windows
+
+# Automatic attention depth: unfocused windows fade into a blue wash after
+# 30 s and turn into title cards after 60 s. Off by default; set true (and
+# tune sink_after_ms / cool_color in DOCUMENTATION.md's depth { }) to opt in.
+depth {
+    enabled = false
+}
 
 # ~~~~~~~~~~~~~~~~~ the layout ~~~~~~~~~~~~~~~~~
 
@@ -10059,6 +10692,8 @@ mod tests {
             classic_depth: ClassicDepthConfig::default(),
             frost: FrostConfig::default(),
             water_glass: WaterGlassConfig::default(),
+            shaders_enabled: false,
+            shader_definitions: HashMap::new(),
             caustics: CausticsConfig::default(),
             shadow: ShadowConfig::default(),
             rounding: RoundingConfig::default(),
@@ -11652,6 +12287,16 @@ animations {
         ] {
             assert!(parse_window_animation_curve(invalid).is_none());
         }
+        // The two refusal reasons from the 2026-09-12 live pass are told apart.
+        let range = spring_curve_rejection("spring(200, 400, 30)").unwrap();
+        let settle = spring_curve_rejection("spring(1, 0.01, 0.01)").unwrap();
+        assert!(range.contains("mass 0.01 to 100"), "{range}");
+        assert!(settle.contains("does not settle"), "{settle}");
+        assert!(spring_curve_rejection("spring(1,2)")
+            .unwrap()
+            .contains("three numbers"));
+        assert_eq!(spring_curve_rejection("spring(1, 400, 30)"), None);
+        assert_eq!(spring_curve_rejection("cubic-out"), None);
     }
 
     #[test]
@@ -11672,6 +12317,557 @@ animations {
         }
         assert!(!WindowAnimationsConfig::tide().workspace.enabled);
         assert!(!WindowAnimationsConfig::hypr_smooth().interactive.enabled);
+    }
+
+    #[test]
+    fn shader_definitions_parse_and_default_off() {
+        let entries = wave_entries(
+            "shaders {\n\
+             enabled = true\n\
+             }\n\
+             shader \"Soft-Glass\" {\n\
+             scope = window\n\
+             source = backdrop\n\
+             invalidate = damage-box\n\
+             render_scale = 3\n\
+             stage {\n\
+             file = \"shaders/soft.frag\"\n\
+             params {\n\
+             strength = 0.25\n\
+             offset = [1, 2]\n\
+             tint_color = #8EDDFF\n\
+             exponent_like = #1E0000\n\
+             quoted = \"#123456\"\n\
+             }\n\
+             }\n\
+             }\n",
+        );
+        let (config, warnings) = Config::from_raw(lower_entries(&entries));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(config.shaders_enabled);
+        let definition = &config.shader_definitions["soft-glass"];
+        assert_eq!(definition.render_scale, 3);
+        let [stage] = definition.stages.as_slice() else {
+            panic!("one stage expected");
+        };
+        assert_eq!(stage.file, "shaders/soft.frag");
+        assert_eq!(stage.source, None);
+        use crate::shader_effect::ShaderParam;
+        assert_eq!(
+            stage.params.to_vec(),
+            vec![
+                ("strength".to_string(), ShaderParam::Float(0.25)),
+                ("offset".to_string(), ShaderParam::Vec2([1.0, 2.0])),
+                (
+                    "tint_color".to_string(),
+                    ShaderParam::Vec4([142.0 / 255.0, 221.0 / 255.0, 1.0, 1.0])
+                ),
+                (
+                    "exponent_like".to_string(),
+                    ShaderParam::Vec4([30.0 / 255.0, 0.0, 0.0, 1.0])
+                ),
+                (
+                    "quoted".to_string(),
+                    ShaderParam::Vec4([18.0 / 255.0, 52.0 / 255.0, 86.0 / 255.0, 1.0])
+                ),
+            ]
+        );
+
+        let defaults = parse_default_config();
+        assert!(!defaults.shaders_enabled);
+        assert!(defaults.shader_definitions.is_empty());
+    }
+
+    #[test]
+    fn unsupported_or_malformed_shader_definitions_are_rejected_visibly() {
+        let stage = "stage {\n file = \"a.frag\"\n }\n";
+        for (body, reason) in [
+            (format!("scope = desktop\n{stage}"), "scope = desktop"),
+            (format!("source = surface\n{stage}"), "source = surface"),
+            (format!("source = \"shader:\"\n{stage}"), "does not name a definition"),
+            (
+                format!("invalidate = always\n{stage}"),
+                "invalidate = always",
+            ),
+            (format!("render_scale = 5\n{stage}"), "render_scale"),
+            (format!("blend = add\n{stage}"), "unknown key"),
+            (String::new(), "needs a `stage"),
+            (
+                format!("{stage}{stage}{stage}{stage}{stage}"),
+                "at most 4 stages",
+            ),
+            (
+                "stage {\n save = x\n file = \"a.frag\"\n }\n".to_string(),
+                "cannot `save`",
+            ),
+            (
+                "stage {\n file = \"a.frag\"\n source = \"get:x\"\n }\n".to_string(),
+                "no earlier stage saves",
+            ),
+            (
+                format!(
+                    "stage {{\n file = \"a.frag\"\n save = x\n }}\n\
+                     stage {{\n file = \"a.frag\"\n save = x\n }}\n{stage}"
+                ),
+                "more than one stage",
+            ),
+            (
+                format!("{stage}stage {{\n file = \"a.frag\"\n save = later\n }}\n"),
+                "cannot `save`",
+            ),
+            (
+                format!(
+                    "stage {{\n file = \"a.frag\"\n textures {{\n m = \"get:later\"\n }}\n save = later\n }}\n{stage}"
+                ),
+                "no earlier stage saves",
+            ),
+            (
+                "stage {\n file = \"a.frag\"\n source = elsewhere\n }\n".to_string(),
+                "stage source must be",
+            ),
+            (
+                "stage {\n file = \"a.frag\"\n textures {\n u_m = backdrop\n }\n }\n"
+                    .to_string(),
+                "cannot be a texture binding",
+            ),
+            (
+                "stage {\n file = \"a.frag\"\n textures {\n a = backdrop\n b = backdrop\n c = backdrop\n d = backdrop\n e = backdrop\n }\n }\n"
+                    .to_string(),
+                "at most 4 extra textures",
+            ),
+            (
+                "stage {\n file = \"a.frag\"\n params {\n m = 1\n }\n textures {\n m = backdrop\n }\n }\n"
+                    .to_string(),
+                "both a parameter and a texture",
+            ),
+            (
+                "stage {\n params {\n x = 1\n }\n }\n".to_string(),
+                "needs `file",
+            ),
+            (
+                "stage {\n file = \"a.frag\"\n params {\n u_time = 1\n }\n }\n".to_string(),
+                "cannot be a parameter",
+            ),
+            (
+                "stage {\n file = \"a.frag\"\n params {\n x = [1, 2, 3, 4, 5]\n }\n }\n"
+                    .to_string(),
+                "finite number",
+            ),
+            (
+                "stage {\n file = \"a.frag\"\n params {\n x = wide\n }\n }\n".to_string(),
+                "finite number",
+            ),
+        ] {
+            let entries = wave_entries(&format!("shader broken {{\n{body}}}\n"));
+            let (config, warnings) = Config::from_raw(lower_entries(&entries));
+            assert!(config.shader_definitions.is_empty(), "{body}");
+            assert!(
+                warnings.iter().any(|warning| warning.contains(reason)),
+                "{body}: {warnings:?}"
+            );
+        }
+
+        let params: String = (0..=crate::shader_effect::MAX_PARAMS_PER_STAGE)
+            .map(|index| format!(" p{index} = 1\n"))
+            .collect();
+        let entries = wave_entries(&format!(
+            "shader many {{\n stage {{\n file = \"a.frag\"\n params {{\n{params} }}\n }}\n}}\n"
+        ));
+        let (config, warnings) = Config::from_raw(lower_entries(&entries));
+        assert!(config.shader_definitions.is_empty());
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("at most 8 parameters")));
+
+        let entries = wave_entries(&format!("shader none {{\n{stage}}}\n"));
+        assert!(Config::from_raw(lower_entries(&entries))
+            .0
+            .shader_definitions
+            .is_empty());
+    }
+
+    #[test]
+    fn shader_chains_parse_saves_sources_and_texture_bindings() {
+        use crate::shader_effect::StageTexture;
+        let entries = wave_entries(
+            "shader wet {\n\
+             stage {\n\
+             file = \"blur.frag\"\n\
+             save = \"blurred\"\n\
+             }\n\
+             stage {\n\
+             file = \"mask.frag\"\n\
+             source = backdrop\n\
+             save = mask\n\
+             }\n\
+             stage {\n\
+             file = \"composite.frag\"\n\
+             source = \"get:blurred\"\n\
+             textures {\n\
+             mask = \"get:mask\"\n\
+             original = backdrop\n\
+             }\n\
+             }\n\
+             }\n",
+        );
+        let (config, warnings) = Config::from_raw(lower_entries(&entries));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let stages = &config.shader_definitions["wet"].stages;
+        assert_eq!(stages.len(), 3);
+        assert_eq!(stages[0].save.as_deref(), Some("blurred"));
+        assert_eq!(stages[0].input, None);
+        assert_eq!(stages[1].input, Some(StageTexture::Backdrop));
+        assert_eq!(
+            stages[2].input,
+            Some(StageTexture::Saved("blurred".to_string()))
+        );
+        assert_eq!(
+            stages[2].textures.to_vec(),
+            vec![
+                ("mask".to_string(), StageTexture::Saved("mask".to_string())),
+                ("original".to_string(), StageTexture::Backdrop),
+            ]
+        );
+    }
+
+    /// The two examples in DOCUMENTATION.md's "Custom shaders" section,
+    /// verbatim, so the documented syntax can't drift from what parses.
+    #[test]
+    fn documented_shader_examples_parse_without_warnings() {
+        let entries = wave_entries(
+            r#"shaders {
+    enabled = true
+}
+
+shader soft-blur {
+    render_scale = 2
+    stage {
+        file = "shaders/blur-h.frag"
+        params {
+            radius = 2
+        }
+    }
+    stage {
+        file = "shaders/blur-v.frag"
+        params {
+            radius = 2
+        }
+    }
+}
+
+rule {
+    app_id = kitty
+    shader = soft-blur
+}
+
+shader edged {
+    stage {
+        file = "shaders/blur-h.frag"
+        params {
+            radius = 3
+        }
+    }
+    stage {
+        file = "shaders/blur-v.frag"
+        params {
+            radius = 3
+        }
+        save = "blurred"
+    }
+    stage {
+        file = "shaders/edge-mix.frag"
+        source = "get:blurred"
+        params {
+            margin = 0.08
+        }
+        textures {
+            original = backdrop
+        }
+    }
+}
+
+shader tinted-blur {
+    source = "shader:soft-blur"
+    stage {
+        file = "shaders/tint.frag"
+        params {
+            strength = 0.3
+            tint_color = 88CCFF
+        }
+    }
+}
+"#,
+        );
+        let (mut config, mut warnings) = Config::from_raw(lower_entries(&entries));
+        warnings.extend(expand_shader_sources(&mut config.shader_definitions));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(config.shaders_enabled);
+        assert_eq!(config.shader_definitions["soft-blur"].stages.len(), 2);
+        assert_eq!(config.shader_definitions["edged"].stages.len(), 3);
+        assert_eq!(config.shader_definitions["tinted-blur"].stages.len(), 3);
+        assert_eq!(
+            config.resolve_window_rules(facts_for("kitty")).shader,
+            Some(ShaderAssignment::Named("soft-blur".to_string()))
+        );
+    }
+
+    #[test]
+    fn shader_sources_splice_the_source_chain_in_front() {
+        use crate::shader_effect::StageTexture;
+        let entries = wave_entries(
+            "shader blur {\n\
+             stage {\n file = \"h.frag\"\n }\n\
+             stage {\n file = \"v.frag\"\n }\n\
+             }\n\
+             shader wet {\n\
+             source = \"shader:blur\"\n\
+             stage {\n file = \"mix.frag\"\n textures {\n original = backdrop\n }\n }\n\
+             }\n\
+             shader looped-a {\n source = \"shader:looped-b\"\n stage {\n file = \"a.frag\"\n }\n }\n\
+             shader looped-b {\n source = \"shader:looped-a\"\n stage {\n file = \"b.frag\"\n }\n }\n\
+             shader orphan {\n source = \"shader:missing\"\n stage {\n file = \"a.frag\"\n }\n }\n\
+             shader long {\n source = \"shader:wet\"\n stage {\n file = \"a.frag\"\n }\n stage {\n file = \"b.frag\"\n }\n }\n\
+             shader clash-base {\n stage {\n file = \"a.frag\"\n save = x\n }\n stage {\n file = \"b.frag\"\n }\n }\n\
+             shader clash {\n source = \"shader:clash-base\"\n stage {\n file = \"a.frag\"\n save = x\n }\n stage {\n file = \"b.frag\"\n }\n }\n",
+        );
+        let (mut config, warnings) = Config::from_raw(lower_entries(&entries));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let warnings = expand_shader_sources(&mut config.shader_definitions);
+        let wet = &config.shader_definitions["wet"].stages;
+        let files: Vec<&str> = wet.iter().map(|stage| stage.file.as_str()).collect();
+        assert_eq!(files, ["h.frag", "v.frag", "mix.frag"]);
+        assert_eq!(wet[1].save.as_deref(), Some("tide_source_2"));
+        // `backdrop` in the definition means its source's output.
+        assert_eq!(
+            wet[2].textures[0].1,
+            StageTexture::Saved("tide_source_2".to_string())
+        );
+        assert_eq!(wet[2].input, None);
+        assert_eq!(config.shader_definitions["blur"].stages.len(), 2);
+        for (name, reason) in [
+            ("looped-a", "loops back"),
+            ("looped-b", "loops back"),
+            ("orphan", "not a loaded definition"),
+            ("long", "more than 4"),
+            ("clash", "both save"),
+        ] {
+            assert!(!config.shader_definitions.contains_key(name), "{name}");
+            assert!(
+                warnings
+                    .iter()
+                    .any(|warning| warning.contains(name) && warning.contains(reason)),
+                "{name}: {warnings:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_later_shader_definition_replaces_the_earlier_one_whole() {
+        let entries = wave_entries(
+            "shader glass {\n\
+             render_scale = 1\n\
+             stage {\n\
+             file = \"first.frag\"\n\
+             }\n\
+             }\n\
+             shader glass {\n\
+             stage {\n\
+             file = \"second.frag\"\n\
+             }\n\
+             }\n",
+        );
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        let definition = &config.shader_definitions["glass"];
+        assert_eq!(definition.render_scale, 2);
+        assert_eq!(definition.stages.len(), 1);
+        assert_eq!(definition.stages[0].file, "second.frag");
+
+        // A broken redefinition removes the name instead of keeping the
+        // earlier, different effect around under it.
+        let entries = wave_entries(
+            "shader glass {\n stage {\n file = \"first.frag\"\n }\n }\n\
+             shader glass {\n scope = output\n stage {\n file = \"first.frag\"\n }\n }\n",
+        );
+        assert!(Config::from_raw(lower_entries(&entries))
+            .0
+            .shader_definitions
+            .is_empty());
+    }
+
+    #[test]
+    fn shader_definition_count_is_capped() {
+        let source: String = (0..=crate::shader_effect::MAX_DEFINITIONS)
+            .map(|index| format!("shader s{index} {{\n stage {{\n file = \"a.frag\"\n }}\n}}\n"))
+            .collect();
+        let (config, warnings) = Config::from_raw(lower_entries(&wave_entries(&source)));
+        assert_eq!(
+            config.shader_definitions.len(),
+            crate::shader_effect::MAX_DEFINITIONS
+        );
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("at most 32 definitions")));
+    }
+
+    #[test]
+    fn rule_shader_is_last_match_wins_and_none_clears() {
+        let entries = wave_entries(
+            "rule {\n app_id = kitty\n shader = Soft-Glass\n }\n\
+             rule {\n app_id = foot\n shader = crt\n }\n\
+             rule {\n app_id = foot\n shader = none\n }\n\
+             rule {\n app_id = mpv\n shader = crt\n }\n\
+             rule {\n app_id = mpv\n shader = \"bad name!\"\n }\n",
+        );
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        assert_eq!(
+            config.resolve_window_rules(facts_for("kitty")).shader,
+            Some(ShaderAssignment::Named("soft-glass".to_string()))
+        );
+        assert_eq!(
+            config.resolve_window_rules(facts_for("foot")).shader,
+            Some(ShaderAssignment::None)
+        );
+        // An invalid later value is ignored, not treated as `none`.
+        assert_eq!(
+            config.resolve_window_rules(facts_for("mpv")).shader,
+            Some(ShaderAssignment::Named("crt".to_string()))
+        );
+        assert_eq!(
+            config.resolve_window_rules(facts_for("alacritty")).shader,
+            None
+        );
+    }
+
+    #[test]
+    fn workspace_shader_is_a_default_the_window_rule_overrides() {
+        let entries = wave_entries(
+            "workspace_rule {\n workspace = 2\n shader = crt\n }\n\
+             workspace_rule {\n workspace = 2\n shader = glow\n }\n\
+             workspace_rule {\n workspace = 3\n shader = none\n }\n\
+             workspace_rule {\n workspace = 3\n snap = false\n }\n",
+        );
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        let glow = ShaderAssignment::Named("glow".to_string());
+        assert_eq!(config.workspace_shader(2), Some(&glow));
+        assert_eq!(config.resolve_workspace_rule(2).shader, Some(glow.clone()));
+        assert_eq!(config.workspace_shader(3), Some(&ShaderAssignment::None));
+        assert_eq!(config.workspace_shader(4), None);
+
+        let crt = ShaderAssignment::Named("crt".to_string());
+        assert_eq!(ShaderAssignment::resolve(None, Some(&glow)), Some("glow"));
+        assert_eq!(
+            ShaderAssignment::resolve(Some(&crt), Some(&glow)),
+            Some("crt")
+        );
+        assert_eq!(
+            ShaderAssignment::resolve(Some(&ShaderAssignment::None), Some(&glow)),
+            None
+        );
+        assert_eq!(
+            ShaderAssignment::resolve(None, Some(&ShaderAssignment::None)),
+            None
+        );
+        assert_eq!(ShaderAssignment::resolve(None, None), None);
+    }
+
+    #[test]
+    fn layer_shader_is_explicit_and_last_match_wins() {
+        let entries = wave_entries(
+            "layer_rule {\n namespace = waybar\n shader = glow\n }\n\
+             layer_rule {\n namespace = waybar\n ignore_alpha = 0.1\n }\n\
+             layer_rule {\n namespace = rofi\n shader = glow\n }\n\
+             layer_rule {\n namespace = rofi\n shader = none\n }\n",
+        );
+        let config = Config::from_raw(lower_entries(&entries)).0;
+        // A later rule without `shader` leaves the earlier assignment alone.
+        assert_eq!(config.layer_shader("waybar"), Some("glow"));
+        assert_eq!(config.layer_ignore_alpha("waybar"), Some(0.1));
+        assert_eq!(config.layer_shader("rofi"), None);
+        assert_eq!(config.layer_shader("mako"), None);
+    }
+
+    #[test]
+    fn shader_files_load_relative_to_the_config_and_join_the_watch_set() {
+        let dir = TestDir::new("shader-load");
+        fs::create_dir_all(dir.0.join("shaders")).unwrap();
+        dir.write(
+            "shaders/pass.frag",
+            "vec4 tide_effect(vec2 uv) {\n    return texture2D(tex, uv) * strength;\n}\n",
+        );
+        dir.write("shaders/bad.frag", "void main() {}\n");
+        let main = dir.write(
+            "config.wave",
+            "shader pass {\n\
+             stage {\n\
+             file = \"shaders/pass.frag\"\n\
+             params {\n\
+             strength = 0.5\n\
+             }\n\
+             }\n\
+             }\n\
+             shader bad {\n\
+             stage {\n\
+             file = \"shaders/bad.frag\"\n\
+             }\n\
+             }\n\
+             shader missing {\n\
+             stage {\n\
+             file = \"shaders/later.frag\"\n\
+             }\n\
+             }\n\
+             shader dimmer {\n\
+             source = \"shader:pass\"\n\
+             stage {\n\
+             file = \"shaders/pass.frag\"\n\
+             params {\n\
+             strength = 0.25\n\
+             }\n\
+             }\n\
+             }\n",
+        );
+        let (_, config, warnings) =
+            Config::reload_staged_from(&main, &wave::TideInfo::default()).expect("config loads");
+
+        let pass = &config.shader_definitions["pass"];
+        assert_eq!(pass.stages[0].path, dir.0.join("shaders/pass.frag"));
+        let source = pass.stages[0].source.as_ref().expect("pass.frag loads");
+        assert!(source.contains("uniform float strength;"));
+        assert!(source.contains("return texture2D(tex, uv) * strength;"));
+
+        assert!(config.shader_definitions["bad"].stages[0]
+            .source
+            .as_ref()
+            .is_none());
+        assert!(config.shader_definitions["missing"].stages[0]
+            .source
+            .as_ref()
+            .is_none());
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("\"bad\" stage 1") && w.contains("`main` is reserved")));
+        assert!(warnings.iter().any(|w| w.contains("\"missing\" stage 1")));
+        // A sourced definition carries its source's loaded stages in front.
+        let dimmer = &config.shader_definitions["dimmer"].stages;
+        assert_eq!(dimmer.len(), 2);
+        assert!(dimmer.iter().all(|stage| stage.source.is_some()));
+        assert_eq!(
+            dimmer[0].params[0].1,
+            crate::shader_effect::ShaderParam::Float(0.5)
+        );
+        assert_eq!(
+            dimmer[1].params[0].1,
+            crate::shader_effect::ShaderParam::Float(0.25)
+        );
+        assert_eq!(dimmer[0].save.as_deref(), Some("tide_source_1"));
+
+        for name in ["pass.frag", "bad.frag", "later.frag"] {
+            assert!(
+                config
+                    .source_paths
+                    .contains(&dir.0.join("shaders").join(name)),
+                "{name} must be watched"
+            );
+        }
     }
 
     #[test]
@@ -12032,13 +13228,25 @@ animations {
     }
 
     #[test]
+    fn cursor_hide_after_accepts_zero_as_disabled() {
+        for (value, expected) in [("0", 0), ("0ms", 0), ("2s", 2000), ("1500ms", 1500)] {
+            let mut raw = RawConfig {
+                cursor_hide_after_ms: 777,
+                ..RawConfig::default()
+            };
+            apply_top_level_assign(&mut raw, "cursor_hide_after", value);
+            assert_eq!(raw.cursor_hide_after_ms, expected, "{value}");
+        }
+    }
+
+    #[test]
     fn depth_defaults_match_generated_config() {
         for config in [
             Config::from_raw(RawConfig::default()).0,
             parse_default_config(),
         ] {
             let depth = config.depth;
-            assert!(depth.enabled);
+            assert!(!depth.enabled);
             assert_eq!(depth.sink_after_ms, 30_000);
             assert_eq!(depth.tier_interval_ms, 30_000);
             assert_eq!(depth.max_tier, 2);

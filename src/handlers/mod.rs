@@ -18,12 +18,16 @@ use crate::Smallvil;
 
 use smithay::desktop::utils::surface_primary_scanout_output;
 use smithay::desktop::{PopupKind, PopupManager};
-use smithay::input::{pointer::PointerHandle, Seat, SeatHandler, SeatState};
+use smithay::input::dnd::{DnDGrab, DndGrabHandler, DndTarget, GrabType, Source};
+use smithay::input::{
+    pointer::{Focus, PointerHandle},
+    Seat, SeatHandler, SeatState,
+};
 use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
-use smithay::utils::{Logical, Rectangle};
+use smithay::utils::{Logical, Point, Rectangle, Serial};
 use smithay::wayland::compositor::{get_parent, with_states};
 use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier};
 use smithay::wayland::foreign_toplevel_list::{
@@ -141,7 +145,64 @@ impl DataDeviceHandler for Smallvil {
     }
 }
 
-impl WaylandDndGrabHandler for Smallvil {}
+// Client-initiated drag'n'drop (files out of Dolphin, Firefox tabs, text).
+// Smithay's default `dnd_requested` cancels the source immediately, which is
+// why every drag used to die on the spot and Firefox detached dragged tabs.
+impl WaylandDndGrabHandler for Smallvil {
+    fn dnd_requested<S: Source>(
+        &mut self,
+        source: S,
+        icon: Option<WlSurface>,
+        seat: Seat<Self>,
+        serial: Serial,
+        type_: GrabType,
+    ) {
+        match type_ {
+            GrabType::Pointer => {
+                let Some(pointer) = seat.get_pointer() else {
+                    source.cancel();
+                    return;
+                };
+                let Some(start_data) = pointer.grab_start_data() else {
+                    source.cancel();
+                    return;
+                };
+                self.dnd_icon = icon;
+                let grab = DnDGrab::new_pointer(&self.display_handle, start_data, source, seat);
+                pointer.set_grab(self, grab, serial, Focus::Keep);
+            }
+            GrabType::Touch => {
+                let Some(touch) = seat.get_touch() else {
+                    source.cancel();
+                    return;
+                };
+                let Some(start_data) = touch.grab_start_data() else {
+                    source.cancel();
+                    return;
+                };
+                self.dnd_icon = icon;
+                let grab = DnDGrab::new_touch(&self.display_handle, start_data, source, seat);
+                touch.set_grab(self, grab, serial);
+            }
+        }
+    }
+}
+
+impl DndGrabHandler for Smallvil {
+    fn dropped(
+        &mut self,
+        _target: Option<DndTarget<'_, Self>>,
+        _validated: bool,
+        _seat: Seat<Self>,
+        _location: Point<f64, Logical>,
+    ) {
+        self.dnd_icon = None;
+    }
+
+    fn cancelled(&mut self, _seat: Seat<Self>, _location: Point<f64, Logical>) {
+        self.dnd_icon = None;
+    }
+}
 
 delegate_data_device!(Smallvil);
 

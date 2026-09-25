@@ -22,7 +22,8 @@ use smithay::{
             damage::OutputDamageTracker,
             element::{
                 surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
-                AsRenderElements, Kind,
+                utils::{Relocate, RelocateRenderElement},
+                AsRenderElements, Element, Kind,
             },
             gles::{GlesRenderer, GlesTarget, GlesTexture},
             Bind, ExportMem, Offscreen,
@@ -38,7 +39,10 @@ use smithay::{
             protocol::{wl_buffer::WlBuffer, wl_surface::WlSurface},
         },
     },
-    utils::{Buffer as BufferCoords, IsAlive, Logical, Point, Rectangle, Scale, Size, Transform},
+    utils::{
+        Buffer as BufferCoords, IsAlive, Logical, Physical, Point, Rectangle, Scale, Size,
+        Transform,
+    },
     wayland::{
         compositor::with_states,
         image_copy_capture::{CaptureFailureReason, Frame},
@@ -60,6 +64,14 @@ const MAX_PENDING_CAPTURES_PER_CLIENT: usize = 8;
 /// still allowing both screencast cursor variants and ordinary screenshots
 /// to make progress together.
 const MAX_CAPTURE_RENDERS_PER_OUTPUT_FRAME: usize = 4;
+
+smithay::backend::renderer::element::render_elements! {
+    WindowCaptureElements<=GlesRenderer>;
+    Surface = WaylandSurfaceRenderElement<GlesRenderer>,
+    /// A glass layer from `glass_layer_elements`, moved from its output-local
+    /// rect onto the toplevel capture canvas.
+    Glass = RelocateRenderElement<OutputRenderElements>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CaptureQueueLimit {
@@ -493,27 +505,65 @@ impl Smallvil {
         // A toplevel source is rendered on its own transparent/black canvas
         // at the scale of its owning output. It includes subsurfaces and
         // popups belonging to that toplevel, but no neighboring windows,
-        // compositor chrome, wallpaper, or pointer.
+        // compositor chrome, wallpaper, or pointer. The one exception is the
+        // window's own glass layer, which shows its captured backdrop just
+        // as the live frame does.
         if let Some(window_target) = window_target {
-            let blocked = window_target.toplevel().is_some_and(|toplevel| {
-                self.resolve_window_rules_for(toplevel.wl_surface())
-                    .block_capture
-            });
-            let opacity = window_target
+            let surface = window_target
                 .toplevel()
-                .map(|toplevel| self.window_render_alpha(toplevel.wl_surface()))
+                .map(|toplevel| toplevel.wl_surface().clone());
+            let blocked = surface
+                .as_ref()
+                .is_some_and(|surface| self.resolve_window_rules_for(surface).block_capture);
+            let opacity = surface
+                .as_ref()
+                .map(|surface| self.window_render_alpha(surface))
                 .unwrap_or(1.0);
-            let window_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = if blocked {
-                Vec::new()
-            } else {
-                AsRenderElements::render_elements(
-                    &window_target,
-                    renderer,
-                    window_origin,
-                    Scale::from(scale),
-                    opacity,
-                )
-            };
+            let mut window_elements: Vec<WindowCaptureElements> = Vec::new();
+            if !blocked {
+                window_elements.extend(
+                    AsRenderElements::<GlesRenderer>::render_elements::<
+                        WaylandSurfaceRenderElement<GlesRenderer>,
+                    >(
+                        &window_target,
+                        renderer,
+                        window_origin,
+                        Scale::from(scale),
+                        opacity,
+                    )
+                    .into_iter()
+                    .map(WindowCaptureElements::Surface),
+                );
+                // The glass layer is built by the live desktop path at the
+                // window's output-local rect, then moved onto this canvas at
+                // the window geometry's own origin, behind its surfaces.
+                let placements = self.render_placements(&output).unwrap_or_default();
+                if let Some(surface) = surface.as_ref().filter(|surface| {
+                    !self.backdrop_may_hold_blocked_content(&output, &placements, surface)
+                }) {
+                    let glass_surfaces: Vec<WlSurface> = self
+                        .glass_eligible_surfaces(&placements)
+                        .into_iter()
+                        .filter(|eligible| eligible == surface)
+                        .collect();
+                    let glass_origin: Point<i32, Physical> = (window_target.geometry().loc
+                        - window_target.bbox_with_popups().loc)
+                        .to_physical_precise_round(scale);
+                    window_elements.extend(
+                        self.glass_layer_elements(renderer, &output, &placements, &glass_surfaces)
+                            .remove(surface)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|layer| {
+                                WindowCaptureElements::Glass(RelocateRenderElement::from_element(
+                                    layer,
+                                    glass_origin,
+                                    Relocate::Absolute,
+                                ))
+                            }),
+                    );
+                }
+            }
             let mut damage_tracker =
                 OutputDamageTracker::new((size.w, size.h), 1.0, Transform::Normal);
             if let Err(err) = damage_tracker.render_output(
@@ -684,6 +734,9 @@ impl Smallvil {
             #[allow(clippy::mutable_key_type)]
             let mut glass_layers =
                 self.glass_layer_elements(renderer, &output, &placements, &glass_surfaces);
+            // Layer frost and layer shaders, as both visible backends add them.
+            glass_layers.extend(self.layer_glass_elements(renderer, &output));
+            self.drop_glass_over_blocked_layers(&output, &mut glass_layers);
             let (depth_elements, depth_surfaces) =
                 self.depth_frame_elements(renderer, &output, &placements);
             // Glass windows render in their normal z-slot; only
@@ -845,6 +898,84 @@ impl Smallvil {
                 .collect()
         };
         self.finish_capture_readback(renderer, target, size, rect, excluded_rects, completion);
+    }
+
+    /// Output captures black out a `block_capture` layer's rect after
+    /// rendering, but frost or a displacing shader over it would have spread
+    /// its pixels beyond that rect. Glass overlapping one is left out.
+    #[allow(clippy::mutable_key_type)]
+    fn drop_glass_over_blocked_layers(
+        &self,
+        output: &Output,
+        glass_layers: &mut std::collections::HashMap<WlSurface, Vec<OutputRenderElements>>,
+    ) {
+        if !self.config.has_layer_capture_exclusions() {
+            return;
+        }
+        let scale = output.current_scale().fractional_scale();
+        let blocked: Vec<Rectangle<i32, Physical>> = {
+            let layer_map = layer_map_for_output(output);
+            let rects = layer_map
+                .layers()
+                .filter(|layer| self.config.layer_blocks_capture(layer.namespace()))
+                .filter_map(|layer| layer_map.layer_geometry(layer))
+                .map(|geometry| geometry.to_physical_precise_round(scale))
+                .collect();
+            rects
+        };
+        if blocked.is_empty() {
+            return;
+        }
+        glass_layers.retain(|_, elements| {
+            !elements.iter().any(|element| {
+                let geometry = element.geometry(Scale::from(scale));
+                blocked.iter().any(|rect| rect.overlaps(geometry))
+            })
+        });
+    }
+
+    /// Whether `surface`'s captured backdrop could contain `block_capture`
+    /// content: a blocked window or layer overlapping its placement. That
+    /// backdrop is shared with the live frame, so a per-window capture leaves
+    /// the glass out rather than letting blocked pixels through it.
+    fn backdrop_may_hold_blocked_content(
+        &self,
+        output: &Output,
+        placements: &[crate::placement::PlacedWindow],
+        surface: &WlSurface,
+    ) -> bool {
+        let Some(target) = placements
+            .iter()
+            .find(|placement| placement.surface() == Some(surface))
+            .map(|placement| placement.rect)
+        else {
+            return false;
+        };
+        let blocked_window = placements.iter().any(|placement| {
+            placement.surface().is_some_and(|other| {
+                other != surface
+                    && placement.rect.overlaps(target)
+                    && self.resolve_window_rules_for(other).block_capture
+            })
+        });
+        if blocked_window {
+            return true;
+        }
+        if !self.config.has_layer_capture_exclusions() {
+            return false;
+        }
+        let output_loc = self
+            .space
+            .output_geometry(output)
+            .map(|geo| geo.loc)
+            .unwrap_or_default();
+        let layer_map = layer_map_for_output(output);
+        let blocked_layer = layer_map
+            .layers()
+            .filter(|layer| self.config.layer_blocks_capture(layer.namespace()))
+            .filter_map(|layer| layer_map.layer_geometry(layer))
+            .any(|geo| Rectangle::new(geo.loc + output_loc, geo.size).overlaps(target));
+        blocked_layer
     }
 
     fn finish_capture_readback(

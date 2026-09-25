@@ -358,19 +358,29 @@ pub fn run_checks(socket_override: Option<&Path>) -> (Vec<Check>, Option<Diagnos
     }
 
     // --- GPU -------------------------------------------------------------------------
-    let dri_paths = [
-        PathBuf::from("/dev/dri/renderD128"),
-        PathBuf::from("/dev/dri/renderD129"),
-        PathBuf::from("/dev/dri/card0"),
-    ];
-    let dri_present = dri_paths.iter().any(|p| p.exists());
+    // Read /dev/dri instead of guessing names: a render node is what clients
+    // need (renderD*), a card node is what the compositor drives (card*).
+    let mut render_nodes: Vec<String> = Vec::new();
+    let mut card_nodes: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/dev/dri") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("renderD") {
+                render_nodes.push(format!("/dev/dri/{name}"));
+            } else if name.starts_with("card") {
+                card_nodes.push(format!("/dev/dri/{name}"));
+            }
+        }
+    }
+    render_nodes.sort();
+    card_nodes.sort();
+    let dri_present = !render_nodes.is_empty();
     let dri_detail = if dri_present {
-        dri_paths
-            .iter()
-            .filter(|p| p.exists())
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
+        let mut detail = format!("render nodes: {}", render_nodes.join(", "));
+        if !card_nodes.is_empty() {
+            detail.push_str(&format!("; cards: {}", card_nodes.join(", ")));
+        }
+        detail
     } else {
         "/dev/dri has no render nodes".to_string()
     };
@@ -413,7 +423,7 @@ pub fn run_checks(socket_override: Option<&Path>) -> (Vec<Check>, Option<Diagnos
     checks.push(Check::new(
         "gpu",
         verdict,
-        format!("render nodes: {dri_detail}; {gpu_detail}"),
+        format!("{dri_detail}; {gpu_detail}"),
     ));
 
     // --- XWayland ----------------------------------------------------------------------

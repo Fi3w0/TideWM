@@ -65,6 +65,10 @@ impl ConfigErrorOverlay {
         &self.message
     }
 
+    pub fn severity(&self) -> OverlaySeverity {
+        self.severity
+    }
+
     pub fn render_element(
         &mut self,
         renderer: &mut GlesRenderer,

@@ -22,6 +22,7 @@ pub(crate) mod minimap;
 pub(crate) mod ocean_canvas;
 pub(crate) mod overview;
 pub(crate) mod ripple;
+pub(crate) mod shader_effect;
 pub(crate) mod shadow;
 #[cfg(feature = "screencast")]
 pub(crate) mod source_picker;

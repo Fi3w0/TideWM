@@ -13,6 +13,7 @@
 
 use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, time::Duration};
 
+use smithay::reexports::wayland_server::Resource;
 use smithay::{
     backend::{
         allocator::{
@@ -61,14 +62,14 @@ use smithay::{
         wayland_protocols::wp::presentation_time::server::wp_presentation_feedback,
         wayland_server::{backend::GlobalId, protocol::wl_surface::WlSurface},
     },
-    utils::{DeviceFd, Transform},
+    utils::DeviceFd,
     wayland::{compositor::with_states, dmabuf::DmabufFeedbackBuilder, presentation::Refresh},
 };
 use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
 
 use crate::{
     backend::multigpu::{GbmGlesApi, ImportBridge},
-    config::{GpuSelector, GpuVendor, OutputTransformConfig},
+    config::{GpuSelector, GpuVendor},
     cursor,
     output_layout::{logical_output_size, resolve_output_position},
     state::{LockRenderElement, SessionLock, Smallvil},
@@ -119,6 +120,8 @@ smithay::backend::renderer::element::render_elements! {
     WaterGlass = crate::water_glass::WaterGlassElement,
     /// Frosted-glass mode over the same captured backdrop as water glass.
     FrostGlass = crate::frost_glass::FrostGlassElement,
+    /// A window's custom `.frag` effect over the same captured backdrop.
+    CustomShader = crate::shader_effect::CustomShaderElement,
     /// Fixed-cost analytical shadow inserted directly behind each window.
     Shadow = crate::shadow::ShadowElement,
     /// Client surface tree clipped to compositor-owned rounded geometry.
@@ -1364,20 +1367,11 @@ fn create_surface(
     // and scan flags; DRM's integer vrefresh field loses fractional rates.
     let output_mode = Mode::from(mode);
     let scale = Scale::Fractional(output_config.as_ref().map(|c| c.scale).unwrap_or(1.0));
-    let transform = match output_config
+    let transform = output_config
         .as_ref()
         .map(|c| c.transform)
         .unwrap_or_default()
-    {
-        OutputTransformConfig::Normal => Transform::Normal,
-        OutputTransformConfig::Rotate90 => Transform::_90,
-        OutputTransformConfig::Rotate180 => Transform::_180,
-        OutputTransformConfig::Rotate270 => Transform::_270,
-        OutputTransformConfig::Flipped => Transform::Flipped,
-        OutputTransformConfig::Flipped90 => Transform::Flipped90,
-        OutputTransformConfig::Flipped180 => Transform::Flipped180,
-        OutputTransformConfig::Flipped270 => Transform::Flipped270,
-    };
+        .to_transform();
     let Some(logical_size) =
         logical_output_size(output_mode.size, transform, scale.fractional_scale())
     else {
@@ -1899,6 +1893,28 @@ fn render_surface(
         }
     };
 
+    // A client drag'n'drop icon rides with the pointer, drawn with the cursor
+    // elements. Never over the lock screen, same as client cursor surfaces.
+    let mut cursor_surface_element = cursor_surface_element;
+    if !locked {
+        if let Some(icon) = state.dnd_icon.as_ref().filter(|icon| icon.is_alive()) {
+            let pointer_loc = state
+                .seat
+                .get_pointer()
+                .map(|p| p.current_location())
+                .unwrap_or_default();
+            let local = (pointer_loc - output_loc.to_f64()).to_physical(scale);
+            cursor_surface_element.extend(render_elements_from_surface_tree(
+                renderer,
+                icon,
+                local.to_i32_round(),
+                scale,
+                1.0,
+                Kind::Unspecified,
+            ));
+        }
+    }
+
     // Locked: skip window/layer-shell rendering (and the group tab strip,
     // which would otherwise leak window titles over the lock screen)
     // entirely, rather than rendering them and relying on the lock
@@ -2154,6 +2170,7 @@ fn render_surface(
     // sees; the lock surface gets its own frame callback instead.
     if locked {
         state.send_lock_frames(output, state.start_time.elapsed());
+        state.send_dnd_icon_frames(output, state.start_time.elapsed());
     } else {
         state.send_window_frames(output, state.start_time.elapsed());
         state.send_layer_frames(output, state.start_time.elapsed());

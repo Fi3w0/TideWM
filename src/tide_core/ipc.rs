@@ -471,64 +471,22 @@ fn register_connection(
             let mut chunk = [0u8; 4096];
             loop {
                 let mut reader: &UnixStream = stream;
-                match reader.read(&mut chunk) {
-                    Ok(0) => finish!(),
+                let eof = match reader.read(&mut chunk) {
+                    // EOF ends the last line: a client that closes its write
+                    // side without a trailing newline still gets a reply (an
+                    // `invalid request` error when the JSON is truncated).
+                    Ok(0) if buf.is_empty() => finish!(),
+                    Ok(0) => {
+                        buf.push(b'\n');
+                        true
+                    }
                     Ok(n) => {
                         buf.extend_from_slice(&chunk[..n]);
                         if buf.len() > MAX_REQUEST_BYTES {
                             tracing::warn!("IPC request exceeded size cap; dropping connection");
                             finish!();
                         }
-                        if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-                            let line = buf[..pos].to_vec();
-                            // Subscribe takes a different lifecycle than the
-                            // one-line-in/one-line-out requests: the connection
-                            // stays open and gets converted into a long-lived
-                            // subscriber. Detected here, before
-                            // `response_payload` runs, so a Subscribe doesn't
-                            // get formatted into the standard ok/error
-                            // envelope (its ack is written by
-                            // `register_subscriber` directly through the new
-                            // subscriber's own pending buffer).
-                            match serde_json::from_slice::<Request>(&line) {
-                                Ok(Request::Subscribe { events }) => {
-                                    let filter = events
-                                        .unwrap_or_default()
-                                        .into_iter()
-                                        .collect();
-                                    // This callback is removed immediately
-                                    // afterwards, so transfer its existing
-                                    // connection slot to the long-lived
-                                    // subscriber instead of dropping it.
-                                    let subscriber_lease = lease
-                                        .take()
-                                        .expect("IPC request lease must exist until conversion");
-                                    register_subscriber(
-                                        &connection_handle,
-                                        stream,
-                                        filter,
-                                        subscriber_lease,
-                                        state,
-                                    );
-                                    finish!();
-                                }
-                                _ => {
-                                    let payload = response_payload(&line, state);
-                                    match stream.try_clone() {
-                                        Ok(stream) => register_response(
-                                            &connection_handle,
-                                            stream,
-                                            payload,
-                                            response_connections.clone(),
-                                        ),
-                                        Err(err) => {
-                                            tracing::warn!(%err, "Failed to clone IPC response stream")
-                                        }
-                                    }
-                                    finish!();
-                                }
-                            }
-                        }
+                        false
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                         return Ok(PostAction::Continue);
@@ -537,6 +495,55 @@ fn register_connection(
                         tracing::warn!(%err, "IPC connection read error");
                         finish!();
                     }
+                };
+                if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                    let line = buf[..pos].to_vec();
+                    // Subscribe takes a different lifecycle than the
+                    // one-line-in/one-line-out requests: the connection
+                    // stays open and gets converted into a long-lived
+                    // subscriber. Detected here, before
+                    // `response_payload` runs, so a Subscribe doesn't
+                    // get formatted into the standard ok/error
+                    // envelope (its ack is written by
+                    // `register_subscriber` directly through the new
+                    // subscriber's own pending buffer).
+                    match serde_json::from_slice::<Request>(&line) {
+                        Ok(Request::Subscribe { events }) => {
+                            let filter = events.unwrap_or_default().into_iter().collect();
+                            // This callback is removed immediately
+                            // afterwards, so transfer its existing
+                            // connection slot to the long-lived
+                            // subscriber instead of dropping it.
+                            let subscriber_lease = lease
+                                .take()
+                                .expect("IPC request lease must exist until conversion");
+                            register_subscriber(
+                                &connection_handle,
+                                stream,
+                                filter,
+                                subscriber_lease,
+                                state,
+                            );
+                            finish!();
+                        }
+                        _ => {
+                            let payload = response_payload(&line, state);
+                            match stream.try_clone() {
+                                Ok(stream) => register_response(
+                                    &connection_handle,
+                                    stream,
+                                    payload,
+                                    response_connections.clone(),
+                                ),
+                                Err(err) => {
+                                    tracing::warn!(%err, "Failed to clone IPC response stream")
+                                }
+                            }
+                            finish!();
+                        }
+                    }
+                } else if eof {
+                    finish!();
                 }
             }
         },
@@ -1098,7 +1105,29 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
                     total.saturating_add(transition.estimated_texture_bytes())
                 }),
         );
+    let shader_capture_bytes = state
+        .backdrop_textures
+        .iter()
+        .filter(|(surface, _)| state.custom_shader_instances.contains_key(*surface))
+        .fold(0_u64, |total, (_, capture)| {
+            total.saturating_add(capture.estimated_texture_bytes())
+        });
+    let shader_stage_bytes = state
+        .custom_shader_instances
+        .values()
+        .fold(0_u64, |total, instance| {
+            total.saturating_add(instance.target_bytes())
+        });
+    let (shader_programs, shader_compiles, shader_compile_failures) =
+        state.custom_shader_programs.stats();
+    let shader_updates = state
+        .custom_shader_instances
+        .values()
+        .fold(0_u64, |total, instance| {
+            total.saturating_add(instance.updates())
+        });
     let tide_texture_estimate_bytes = backdrop_texture_bytes
+        .saturating_add(shader_stage_bytes)
         .saturating_add(layer_alpha_mask_bytes)
         .saturating_add(wallpaper_texture_bytes)
         .saturating_add(caustics_texture_bytes)
@@ -1141,6 +1170,20 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
             "caustics_bytes": caustics_texture_bytes,
             "workspace_transition_bytes": transition_texture_bytes,
             "scope": "ARGB payload for TideWM-owned backdrop, wallpaper, caustics, and active water/non-water workspace-transition textures; excludes client buffers and driver overhead",
+        },
+        "custom_shaders": {
+            "enabled": state.config.shaders_enabled,
+            "definitions": state.config.shader_definitions.len(),
+            "programs": shader_programs,
+            "compiles": shader_compiles,
+            "compile_failures": shader_compile_failures,
+            "instances": state.custom_shader_instances.len(),
+            "capture_bytes": shader_capture_bytes,
+            "stage_bytes": shader_stage_bytes,
+            "bypassed": state.custom_shader_bypassed.len(),
+            "bypasses": state.custom_shader_bypasses,
+            "updates": shader_updates,
+            "scope": "capture_bytes is the share of backdrop_bytes feeding custom effects; stage_bytes are chained effects' offscreen stage outputs, included in the total; updates count redraws with new content by live instances",
         },
         "outputs": outputs,
     })

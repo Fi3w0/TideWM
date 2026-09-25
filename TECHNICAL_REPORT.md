@@ -32,6 +32,7 @@ Current release: **0.90.104**, second major pre-release. 1.0 is intentionally re
 | IPC: request/response plus an event-stream subscribe mode | Done |
 | `tidectl` CLI, including `doctor`/`report` for bug triage | Done |
 | Water/decoration render stack: impulse ripples, wave workspace transitions, tiled/floating water-glass and per-app liquid frost glass, analytical shadows, animated gradient borders, rounded clipping, configurable window animations, move/resize viscosity, connected-vessel BSP resizing, opt-in floating sway, automatic depth/buoyancy, ambient caustics | Done; tiled/liquid frost is release-GLES nested-verified in Classic/Ocean, standalone AMD remains, and the earlier stack is standalone-AMD-verified |
+| Custom shaders (`shaders { }`, `shader "<name>" { }`): opt-in user `.frag` effects over a window's backdrop, up to four chained stages with `save`/`get` and extra texture bindings, per-window and per-workspace assignment, bounded budgets | Done through Phase 7B; compile/draw covered by Mesa software-GLES tests, not yet run in a nested or native session |
 | Classic Depth Deck (tiled-window park/swap recall) | Done, standalone-AMD-verified |
 | Ocean spatial engine: reefs, per-output cameras, sink/dredge/surface depth, bookmarks, freeform window detach, smart tiling, live Classic↔Ocean migration | Done, standalone-AMD-verified |
 | Ocean compass (off-screen urgent/deep glow cues) and whole-world overview minimap | Done, nested-verified only |
@@ -39,14 +40,15 @@ Current release: **0.90.104**, second major pre-release. 1.0 is intentionally re
 | Floating-window ocean physics (`float_physics { tier = light|full }`): disturbance-driven bob/drift, `full` adds mass/collisions/a traveling wave field | Done, nested-verified only |
 | Ocean currents: bounded render-only downstream drift for visible unfocused floating windows, with focus/drag pause | Done, release-GLES nested-verified on AMD |
 | Weighted buoyancy: per-app render-only mass/sink for Classic and Ocean floaters, with Ocean flow attenuation | Done, release-GLES nested-verified on AMD under Ocean; Classic shares the validated render path |
-| Nvidia support | Nested (EGL/GLES) verified on a real RTX 3060; standalone DRM backend not yet run natively on Nvidia |
+| Nvidia support | Standalone DRM backend verified on a real RTX 3060 (proprietary 595.99.02, two outputs at mixed scale, 2026-09-25); nested verified earlier |
 | AUR package | Not yet |
 
 ## Hardware verification
 
 - **AMD**: primary development and test hardware. The standalone `udev`/DRM backend, the full water/decoration render stack, swim's real-touchpad gesture path, and Ocean's core navigation (reefs, cameras, freeform drag) are all verified here.
 - **Latest standalone AMD health pass (2026-08-13)**: release 0.90.72 on Renoir completed full-output and cursor-overlay screencopy, reversible workspace transitions with ordered IPC events, invalid-action/batch/eval handling, and 100 one-shot plus 20 interrupted subscription connections without descriptor or PSS growth. Doctor remained all-pass with no TideWM panic/error or coredump. One-window PSS settled at 86.8 MiB after the reload/capture pass. The configured 24-fps caustics were the dominant continuous CPU/GPU cost; see `report.md` for the measured A/B and its whole-GPU caveat.
-- **Nvidia**: nested backend verified on a real RTX 3060 (proprietary driver): clean EGL/GLES context, correct rendering, no crashes. The standalone DRM backend and its Nvidia overlay-plane workaround are unverified on real Nvidia hardware.
+- **Latest standalone NVIDIA pass (2026-09-25)**: 0.90.106 (`13b104e`, `fiw/testing-fixes`) on the RTX 3060 above: doctor all-pass; full-output and cursor-overlay `grim`; unknown actions, an invalid mixed batch, eval syntax errors and a runaway eval loop (execution budget) all failed cleanly; oversized, garbage and truncated IPC requests left the compositor running; 100 one-shot queries plus 20 interrupted subscribers left PSS and descriptors unchanged. Idle ~1% of one core, 131 MiB TideWM VRAM; nine frost windows ~0-1% CPU and 139 MiB. PSS plateaus near 180 MiB after warm-up, of which ~60-95 MiB is `/dev/nvidia*` mappings; open/close cycles returned to the same value with a flat heap, so this is not a leak.
+- **Nvidia**: standalone `udev`/DRM backend verified on a real RTX 3060 (proprietary 595.99.02 with the open kernel modules, Gentoo, kernel 7.2.7), logged in from the display manager as a real session. GLES renders on the dGPU with the Radeon iGPU excluded through `gpu { render = vendor:nvidia; exclude = [vendor:amd] }`; two outputs run together (2560×1440@144 at 1.25×, 1920×1080@180 at 1.0×). The overlay-plane workaround branch runs for every output on this driver and scanout is correct on both; no overlay-specific test was done. Frost glass, custom shaders, screencopy, xwayland-satellite, portal and drag and drop worked. Measured cost is in `report.md`. The nested backend was verified earlier on the same card.
 - **Hybrid GPU**: selection/exclusion, render-node feedback, cross-device import, hot add/remove, and VT lifecycle compile and unit-test clean. The required end-to-end AMD+Nvidia PRIME/offload run is pending on the handoff laptop; do not call this hardware-verified until a non-primary game buffer displays correctly there at sustained frame rate.
 - **Intel**: untested so far.
 - **Still nested-only**: Ocean compass/overview, floating-window ocean physics (both tiers), `canvas_pan_button`, `modifier_pan_fingers`.
@@ -133,7 +135,6 @@ sudo cp share/xdg-desktop-portal/tidewm-portals.conf /usr/share/xdg-desktop-port
 - **Non-water motion presets**: smooth window move/resize and workspace motion that works with `water_effects = false`, exposed as Wave-selectable presets and tunable fields. Exact feel and defaults require maintainer approval before implementation.
 - **Feel-tuning** across viscosity, sway, depth timings, cascade's drag feel, floating-window ocean physics, and the transition/ripple presets. All ship with working defaults; the actual feel still gets refined against real use.
 - **Standalone hardware pass** for what's still nested-only: the Ocean compass/overview, and both floating-window ocean physics tiers.
-- **Nvidia native run**: the standalone DRM backend and its overlay-plane workaround still need a real TTY session on Nvidia.
 - **AUR package**: build from source for now.
 - **Design-pending identity features** (parking lot, needs a design conversation before pickup): tide contexts and workspace depth-moods. Currents, Cascade's pour/drain visual, and non-sorting weighted buoyancy are implemented with their approved contracts.
 
