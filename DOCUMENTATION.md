@@ -15,7 +15,7 @@ Full reference for configuring and controlling TideWM: every config key, every a
 | Flag | Notes |
 | --- | --- |
 | `-c, --config <path>` | Load this file instead of `$XDG_CONFIG_HOME/tidewm/config.wave`. Applies to the hot-reload watcher too, not just the initial load. |
-| `-s, --spawn <command>` | Spawn one specific command right after startup, instead of nothing. No shell parsing (same rule as the `spawn` config key). |
+| `-s, --spawn <command>` | Spawn one specific command right after startup, instead of nothing. Quoted arguments work, but no shell parsing (same rule as the `spawn` config key). |
 | `-v, --version` | Print the version and exit. |
 | `-h, --help` | Print usage and exit. |
 
@@ -85,6 +85,7 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `terminal` | string | `"kitty"` | Spawned by the shipped `$mod+Return` bind (`@mod = SUPER` in the generated file). The terminal fallback is `wave(kitty, alacritty, foot, xterm)` — see the Wave format section above. |
+| `pointer_modifier` (aliases `drag_modifier`, `mouse_modifier`) | modifier | `SUPER` | Held with left-drag to move and right-drag to resize windows, and for pointer-anchored zoom/pan. Independent of `@mod`: the generated config sets `drag_modifier = mod` so it follows `@mod`, but a config without the key keeps `SUPER` even when `@mod = ALT`. |
 | `engine` (aliases `spatial_engine`, `wm_mode`) | `classic` \| `ocean` | `classic` | Selects one of TideWM's two WM ownership models. Classic keeps numbered workspaces. Ocean has no workspaces: outputs are cameras into one continuous 2D world. Hot-reloadable: a change migrates every live window in place. Classic→Ocean turns each output's populated workspace trees into reefs on the lateral line at `X = (N-1) * (output width + 128)` with the camera at the previously-active workspace; depth-deck windows are recalled to their tiles, floating windows translate to world coordinates around their workspace's reef, and pinned windows become Ocean screen pins. Ocean→Classic turns reefs sorted left-to-right into workspaces `1..N` on the output whose camera is nearest, selects the active workspace from each camera, clamps floating windows into the visible area, and restores pins. Tab groups and fullscreen/maximized entries carry across both directions; Ocean bookmarks and camera history are dropped (no Classic counterpart). |
 | `drag_modifier` | modifier or `+`-joined modifiers | `super` | Modifier physically held for compositor mouse actions: left-drag moves floating windows or drag-swaps tiles; right-drag resizes floating or tiled windows. Accepts `super`/`logo`/`mod4`, `alt`/`mod1`, `ctrl`/`control`, and `shift`. The shipped config sets it to `mod`. |
 | `welcome_hint` | bool | `true` | Shows a persistent empty-desktop card reminding you to use your configured terminal bind. Disappears when a real window maps; delete this key (or set it `false`) to stop it returning. |
@@ -105,7 +106,7 @@ TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh
 | `split_bias` | `auto` \| `horizontal` \| `vertical` | `auto` | Manual override for `layout = bsp`'s per-split axis choice. `auto` is the existing aspect-ratio-driven behavior, unchanged. `horizontal`/`vertical` force every split one way regardless of window/output shape (Hyprland dwindle's `force_split` idea). One global setting, not per-workspace. |
 | `pseudo_tile_scale` | float, `0.05`–`1.0` | `0.7` | Fraction of its tile a pseudo-tiled window keeps, centered within it. Out-of-range values are clamped, not rejected. |
 | `adaptive_sync` (aliases `vrr`, `variable_refresh_rate`) | `off` \| `on` \| `on-demand` | `off` | Global adaptive-sync (VRR) preference; a `[[output]]`'s own `adaptive_sync` beats it. The udev backend applies the resolved value through DRM; `on-demand` enables VRR only while an unlocked fullscreen window owns the output. The nested winit backend has no DRM surface, so this setting is inert there. |
-| `spawn` | list | none | Commands launched once at startup, as a real list: `spawn = [waybar, "swaybg -i ~/wallpaper.png -m fill"]`. Args split on whitespace — no shell involved, so quoting/globs/pipes aren't supported; wrap in `sh -c "..."` yourself if you need those. |
+| `spawn` | list | none | Commands launched once at startup, as a real list: `spawn = [waybar, "swaybg -i ~/wallpaper.png -m fill"]`. Args split on whitespace, with quoting for arguments that contain spaces: `'...'` is literal, `"..."` honors `\"` and `\\`, and `\` escapes the next character outside quotes. No shell is involved, so `$VARS`, globs and pipes stay literal; use `sh -c '...'` when you need those, e.g. `spawn = ["kitty sh -c 'fastfetch; exec fish'"]`. An unterminated quote falls back to a plain whitespace split. |
 
 ### Classic edge and corner snap
 
@@ -1851,7 +1852,7 @@ rewriting a line removes or changes it completely.
 - `toggle-dpms` — toggle every output's power together (all on, or all off)
 
 **Process and session**
-- `spawn:<command>` — args split on whitespace, no shell
+- `spawn:<command>` — args split on whitespace with `'...'`/`"..."` quoting and `\` escapes (see the `spawn` key); no shell
 - `quit`
 
 ## IPC and `tidectl`
