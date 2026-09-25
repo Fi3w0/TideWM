@@ -88,7 +88,11 @@ fn main() {
     // Host-side commands: run before any socket work, so a compositor that
     // won't even start can still be diagnosed.
     match args[0].as_str() {
-        "doctor" => return cmd_doctor(json_output, socket_override.as_deref()),
+        "doctor" => {
+            let json_output =
+                parse_doctor_args(&args[1..], json_output).unwrap_or_else(|message| fail(&message));
+            return cmd_doctor(json_output, socket_override.as_deref());
+        }
         "report" => return cmd_report(&args[1..], socket_override.as_deref()),
         _ => {}
     }
@@ -240,6 +244,20 @@ fn cmd_doctor(json_output: bool, socket_override: Option<&Path>) {
     });
 }
 
+/// Accepts the documented command-local spelling (`doctor --json`) while the
+/// global parser deliberately leaves every argument after the command alone.
+/// This keeps flags intended for actions such as `spawn` out of tidectl's
+/// parser without breaking doctor scripts.
+fn parse_doctor_args(args: &[String], mut json_output: bool) -> Result<bool, String> {
+    for arg in args {
+        match arg.as_str() {
+            "--json" | "-j" => json_output = true,
+            other => return Err(format!("unrecognized argument '{other}' for doctor")),
+        }
+    }
+    Ok(json_output)
+}
+
 /// `tidectl report [--output <path>]`: writes the full diagnostic report
 /// to a file (default `tidewm-report.txt` in the current directory) and
 /// prints where it went. The quick check runs first and is embedded; the
@@ -301,7 +319,7 @@ fn parse_report_output(args: &[String]) -> Result<PathBuf, String> {
 /// process and needs no CLK_TCK). PSS/RSS/threads and the render
 /// self-stats come from the second snapshot. No GPU-busy%: that needs a
 /// vendor-specific source the compositor can't read portably.
-fn cmd_perf(socket: &Path, args: &[String], json_output: bool) -> ! {
+fn cmd_perf(socket: &Path, args: &[String], mut json_output: bool) -> ! {
     let mut window_secs: f64 = 3.0;
     let mut iter = args.iter().map(String::as_str);
     while let Some(arg) = iter.next() {
@@ -319,8 +337,7 @@ fn cmd_perf(socket: &Path, args: &[String], json_output: bool) -> ! {
                 std::process::exit(0);
             }
             "--json" | "-j" => {
-                // Already consumed by the global flag parser; accept quietly
-                // in case it appears after the subcommand.
+                json_output = true;
             }
             other => fail(&format!("unrecognized argument '{other}' for perf")),
         }
@@ -1017,6 +1034,14 @@ mod tests {
             Ok(PathBuf::from("tidewm-report.txt"))
         );
         assert!(parse_report_output(&["/run/user/1000/tidewm.sock".into()]).is_err());
+    }
+
+    #[test]
+    fn doctor_accepts_json_before_or_after_the_subcommand() {
+        assert_eq!(parse_doctor_args(&[], true), Ok(true));
+        assert_eq!(parse_doctor_args(&["--json".into()], false), Ok(true));
+        assert_eq!(parse_doctor_args(&["-j".into()], false), Ok(true));
+        assert!(parse_doctor_args(&["--bogus".into()], false).is_err());
     }
 
     #[test]
