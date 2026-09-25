@@ -127,21 +127,82 @@ fn reap_spawned_children(state: &mut Smallvil) {
         });
 }
 
-/// Spawns `cmd`, splitting on whitespace so a simple invocation with
-/// arguments (`"kitty -e fish"`) works. Deliberately not shell-parsed --
-/// no quoting/globs/pipes, and no injection surprise from untrusted
-/// config content -- spawn `sh -c "..."` directly if you need those.
-/// Shared by every spawn call site in the compositor (`-s`/`--spawn`
-/// below, `config.spawn_at_startup`, and `Action::Spawn` in `input.rs`)
-/// so they all get the same argument support for free.
+/// Spawns `cmd`. Arguments split on whitespace, with POSIX-style quoting so
+/// an argument can contain spaces: `'...'` is literal, `"..."` honors `\"`
+/// and `\\`, and a backslash outside quotes escapes the next character
+/// (`kitty sh -c 'fastfetch; sleep 5'`). Deliberately not a shell -- no
+/// `$` expansion, globs, pipes or redirection, and no injection surprise
+/// from untrusted config content. An unterminated quote falls back to the
+/// plain whitespace split, so a config that relied on a literal quote keeps
+/// working. Shared by every spawn call site in the compositor
+/// (`-s`/`--spawn` below, `config.spawn_at_startup`, and `Action::Spawn`
+/// in `input.rs`) so they all get the same argument support for free.
 pub(crate) fn spawn(cmd: &str) -> std::io::Result<()> {
-    let mut parts = cmd.split_whitespace();
+    let parts =
+        split_command(cmd).unwrap_or_else(|| cmd.split_whitespace().map(str::to_string).collect());
+    let mut parts = parts.into_iter();
     let program = parts
         .next()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "empty command"))?;
-    let child = child_command(program).args(parts).spawn()?;
+    let child = child_command(&program).args(parts).spawn()?;
     track_child(child);
     Ok(())
+}
+
+/// Splits a spawn command into argv (see [`spawn`]). `None` for an
+/// unterminated quote or a trailing lone backslash.
+fn split_command(cmd: &str) -> Option<Vec<String>> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_arg = false;
+    let mut chars = cmd.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                in_arg = true;
+                loop {
+                    match chars.next()? {
+                        '\'' => break,
+                        c => current.push(c),
+                    }
+                }
+            }
+            '"' => {
+                in_arg = true;
+                loop {
+                    match chars.next()? {
+                        '"' => break,
+                        '\\' => match chars.next()? {
+                            c @ ('"' | '\\') => current.push(c),
+                            c => {
+                                current.push('\\');
+                                current.push(c);
+                            }
+                        },
+                        c => current.push(c),
+                    }
+                }
+            }
+            '\\' => {
+                in_arg = true;
+                current.push(chars.next()?);
+            }
+            c if c.is_whitespace() => {
+                if in_arg {
+                    args.push(std::mem::take(&mut current));
+                    in_arg = false;
+                }
+            }
+            c => {
+                in_arg = true;
+                current.push(c);
+            }
+        }
+    }
+    if in_arg {
+        args.push(current);
+    }
+    Some(args)
 }
 
 /// Applies `[env]` (`config.env`) to this process via `set_var`, before the
@@ -970,5 +1031,49 @@ mod session_environment_tests {
             validated_session_environment_keys(&env),
             vec!["VALID_KEY".to_string()]
         );
+    }
+}
+
+#[cfg(test)]
+mod spawn_split_tests {
+    use super::split_command as argv;
+
+    #[test]
+    fn keeps_plain_whitespace_behavior() {
+        assert_eq!(argv("kitty -e fish").unwrap(), ["kitty", "-e", "fish"]);
+        assert_eq!(argv("  foot   --server  ").unwrap(), ["foot", "--server"]);
+        assert_eq!(argv("").unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn honors_quotes_and_escapes() {
+        assert_eq!(
+            argv("kitty sh -c 'fastfetch; sleep 5'").unwrap(),
+            ["kitty", "sh", "-c", "fastfetch; sleep 5"]
+        );
+        assert_eq!(
+            argv(r#"notify-send "hi \"there\"" done"#).unwrap(),
+            ["notify-send", r#"hi "there""#, "done"]
+        );
+        assert_eq!(argv(r"foo a\ b").unwrap(), ["foo", "a b"]);
+        assert_eq!(argv("foo ''").unwrap(), ["foo", ""]);
+        assert_eq!(argv("foo x'y z'w").unwrap(), ["foo", "xy zw"]);
+        // tidectl's quoting of an apostrophe round-trips.
+        assert_eq!(
+            argv(r"notify-send 'it'\''s here'").unwrap(),
+            ["notify-send", "it's here"]
+        );
+        // Not a shell: variables and globs stay literal.
+        assert_eq!(
+            argv("echo $HOME *.png").unwrap(),
+            ["echo", "$HOME", "*.png"]
+        );
+    }
+
+    #[test]
+    fn unterminated_quotes_return_none_for_the_fallback() {
+        assert!(argv("sh -c 'oops").is_none());
+        assert!(argv(r#"say "unfinished"#).is_none());
+        assert!(argv(r"trailing \").is_none());
     }
 }

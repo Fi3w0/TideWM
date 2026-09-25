@@ -56,6 +56,12 @@ fn main() {
     let mut args: Vec<String> = Vec::with_capacity(raw_args.len());
     let mut iter = raw_args.into_iter();
     while let Some(arg) = iter.next() {
+        // Global flags only before the command: everything after it belongs
+        // to the command (`tidectl spawn mpv --help` must not print ours).
+        if !args.is_empty() {
+            args.push(arg);
+            continue;
+        }
         match arg.as_str() {
             "--json" | "-j" => json_output = true,
             "--socket" => match iter.next() {
@@ -73,6 +79,10 @@ fn main() {
     if args.is_empty() {
         print_help();
         std::process::exit(1);
+    }
+    if args[0] == "help" {
+        print_help();
+        std::process::exit(0);
     }
 
     // Host-side commands: run before any socket work, so a compositor that
@@ -640,10 +650,30 @@ fn build_request(args: &[String]) -> Result<Value, String> {
             "swap-workspaces:{}",
             rest.join(" ")
         ))),
-        "spawn" if !rest.is_empty() => Ok(action_request(&format!("spawn:{}", rest.join(" ")))),
+        "spawn" if !rest.is_empty() => Ok(action_request(&format!("spawn:{}", join_quoted(rest)))),
         "submap" if !rest.is_empty() => Ok(action_request(&format!("submap:{}", rest.join(" ")))),
         _ => Ok(action_request(&args.join(" "))),
     }
+}
+
+/// Joins argv back into one spawn string the compositor's quote-aware
+/// splitter reads back verbatim: arguments with whitespace, quotes or
+/// backslashes are single-quoted (`'` itself as `'\''`).
+fn join_quoted(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| {
+            if !arg.is_empty()
+                && !arg
+                    .chars()
+                    .any(|c| c.is_whitespace() || matches!(c, '\'' | '"' | '\\'))
+            {
+                arg.clone()
+            } else {
+                format!("'{}'", arg.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn action_request(action: &str) -> Value {
@@ -924,6 +954,31 @@ tidewm-*.sock under $XDG_RUNTIME_DIR."#
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn spawn_action(args: &[&str]) -> String {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        build_request(&args).unwrap()["action"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn spawn_quotes_arguments_that_need_it() {
+        assert_eq!(
+            spawn_action(&["spawn", "kitty", "-e", "fish"]),
+            "spawn:kitty -e fish"
+        );
+        assert_eq!(
+            spawn_action(&["spawn", "kitty", "sh", "-c", "fastfetch; sleep 5"]),
+            "spawn:kitty sh -c 'fastfetch; sleep 5'"
+        );
+        assert_eq!(
+            spawn_action(&["spawn", "notify-send", "it's here"]),
+            r"spawn:notify-send 'it'\''s here'"
+        );
+        assert_eq!(spawn_action(&["spawn", "foo", ""]), "spawn:foo ''");
+    }
 
     #[test]
     fn cpu_percent_is_delta_over_wall_as_one_core_fraction() {
