@@ -4,6 +4,11 @@ Each one installs the same files as the top-level `install.sh` (`TideWM`, `tidec
 
 All of them build from git, so re-running the installer upgrades to the latest commit.
 
+The compositor code is GPL-3.0-or-later. The bundled logo is CC BY-NC-SA 4.0
+and the embedded font is OFL-1.1; packages install their notices alongside
+the GPL text. See [LICENSING.md](../LICENSING.md). The logo's NonCommercial
+condition applies separately from the software's GPL rights.
+
 | Distro | Files | One command |
 | --- | --- | --- |
 | Gentoo | `gentoo/` (overlay with a live ebuild) | `packaging/gentoo/install.sh` |
@@ -24,6 +29,14 @@ The script copies the overlay to `/var/db/repos/tidewm`, registers it in `/etc/p
 `--local` writes `TIDEWM_SRC=<checkout>` to `/etc/portage/env/gui-wm/tidewm`. A file there that the script didn't write is left untouched.
 
 Manual route: point a `repos.conf` entry at `packaging/gentoo`, then `emerge gui-wm/tidewm::tidewm`.
+
+If Portage's license policy masks the logo, read its terms and add this
+package-specific entry to `/etc/portage/package.license` (or a file in that
+directory):
+
+```text
+gui-wm/tidewm::tidewm CC-BY-NC-SA-4.0
+```
 
 ## Arch
 
@@ -47,7 +60,12 @@ Add the flake to your system flake and enable the module:
     nixosConfigurations.<host> = nixpkgs.lib.nixosSystem {
       modules = [
         tidewm.nixosModules.default
-        { programs.tidewm.enable = true; }
+        {
+          programs.tidewm.enable = true;
+          # The bundled noncommercial logo makes this package unfree.
+          nixpkgs.config.allowUnfreePredicate = pkg:
+            nixpkgs.lib.getName pkg == "tidewm";
+        }
       ];
     };
   };
@@ -59,9 +77,9 @@ Add the flake to your system flake and enable the module:
 Without the module:
 
 ```bash
-nix run github:Fi3w0/TideWM            # try it nested inside your current session
-nix profile install github:Fi3w0/TideWM
-nix develop                            # dev shell with every build dependency
+NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:Fi3w0/TideWM
+NIXPKGS_ALLOW_UNFREE=1 nix profile install --impure github:Fi3w0/TideWM
+NIXPKGS_ALLOW_UNFREE=1 nix develop --impure
 ```
 
 To change the build options, override the package: `tidewm.packages.x86_64-linux.default.override { withAccessibility = true; }`.

@@ -2,6 +2,7 @@
 name = "tidewm"
 version = "0.90.141"
 edition = "2021"
+license = "GPL-3.0-or-later"
 # Verified floor: wayland-protocols 0.32.13 requires 1.86 (1.85 fails to
 # compile it). The optional `screencast`/`accessibility` features need
 # newer still (zbus 5.18 requires 1.87) -- documented in README, not

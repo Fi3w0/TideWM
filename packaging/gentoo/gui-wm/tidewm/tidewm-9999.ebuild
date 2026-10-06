@@ -14,7 +14,7 @@ EGIT_REPO_URI="https://github.com/Fi3w0/TideWM.git"
 # Follow the upstream default branch.
 EGIT_BRANCH="master"
 
-LICENSE="GPL-3+"
+LICENSE="GPL-3+ CC-BY-NC-SA-4.0 OFL-1.1"
 # Dependent crate licenses
 LICENSE+=" Apache-2.0 BSD CC0-1.0 ISC MIT Unicode-3.0 ZLIB"
 SLOT="0"
@@ -81,7 +81,10 @@ src_install() {
 		doins share/xdg-desktop-portal/tidewm-portals.conf
 	fi
 
-	dodoc README.md CHANGELOG.md DOCUMENTATION.md WAVE.md
+	dodoc README.md CHANGELOG.md DOCUMENTATION.md WAVE.md LICENSING.md
+	insinto /usr/share/licenses/tidewm
+	doins LICENSE LICENSES/CC-BY-NC-SA-4.0.txt assets/fonts/OFL-LICENSE.txt
+	newins share/icons/LICENSE LOGO-NOTICE
 }
 
 pkg_postinst() {

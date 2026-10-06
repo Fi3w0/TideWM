@@ -6,7 +6,7 @@
 
 **A Wayland desktop that feels like water.**
 
-![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=for-the-badge)
+[![Code license](https://img.shields.io/badge/code-GPL--3.0-blue?style=for-the-badge)](LICENSE)
 ![Status](https://img.shields.io/badge/status-beta-orange?style=for-the-badge)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/ZhkxA83cKk)
 
@@ -45,7 +45,7 @@ Underneath the water is a real tiling window manager: fast keyboard-driven layou
 ```bash
 packaging/gentoo/install.sh     # Gentoo
 packaging/arch/install.sh       # Arch and derivatives
-nix run github:Fi3w0/TideWM    # Nix; NixOS module: programs.tidewm.enable
+NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:Fi3w0/TideWM  # Nix; bundled logo is noncommercial
 ```
 
 **From source** on anything else: Rust stable plus a handful of Wayland/GPU dev libraries, then `./install.sh`:
@@ -124,7 +124,12 @@ The gates are open: issues, forks, and pull requests are all genuinely welcome. 
 
 ## License
 
-GPL-3.0, see [LICENSE](LICENSE). Copyright (C) 2026 Fi3w0.
+- **TideWM code, including its bundled Wave configuration engine:** GPL-3.0-or-later, see [LICENSE](LICENSE).
+- **TideWM logo:** [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International](LICENSES/CC-BY-NC-SA-4.0.txt), see the [logo notice](share/icons/LICENSE).
+- **Standalone Scorium:** a separate project with its own [custom source-available license](https://github.com/Scorium-lang/scorium-rs/blob/main/LICENSE), labelled PolyForm Strict 1.0.0. Its restrictions apply to that project; TideWM's bundled Wave code stays GPL.
+- **Bundled Adwaita Sans font:** [SIL Open Font License 1.1](assets/fonts/OFL-LICENSE.txt).
+
+Copyright (C) 2026 Fi3w0 and contributors. See [LICENSING.md](LICENSING.md) for scope, attribution and packaging details.
 
 &nbsp;
 

@@ -2,6 +2,11 @@
 
 TideWM is a solo/free-time project, and the gates are open. Issues, forks, and pull requests are all genuinely welcome, not just tolerated — bug reports and hardware/driver testing especially, since real-hardware coverage is the thing a solo maintainer can least scale alone. These are the ground rules.
 
+Contributions follow the license of the component being changed: GPL-3.0-or-later
+for TideWM software and its bundled Wave engine, CC BY-NC-SA 4.0 for the logo,
+and the existing OFL terms for the bundled font. See [LICENSING.md](LICENSING.md)
+for scope and the separately published Scorium project's own terms.
+
 ## Getting Started
 
 1. Fork and clone the repo.

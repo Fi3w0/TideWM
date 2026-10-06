@@ -27,7 +27,11 @@
         { pkgs, lib, ... }:
         {
           imports = [ ./packaging/nix/module.nix ];
-          programs.tidewm.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.tidewm;
+          # Use the system's package set so its license policy applies to
+          # the noncommercial logo bundled with the GPL compositor.
+          programs.tidewm.package = lib.mkDefault (
+            pkgs.callPackage ./packaging/nix/package.nix { inherit gitCommit; }
+          );
         };
 
       devShells = forAllSystems (pkgs: {

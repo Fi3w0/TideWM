@@ -6,7 +6,13 @@ Wave is a config format that is data on the surface and Lua underneath. This fil
 
 Wave is TideWM's config format. The line-based grammar it replaced was removed with the rewrite; `WAVE.md` describes the format as it is, and the rewrite's roadmap lives in `AGENT.md`.
 
-The name "Wave" was already taken by another language, so the standalone, tool-agnostic version of this format is **Scorium**: same grammar, its own parser crate, embeddable in any project that uses YAML or JSON today. TideWM keeps calling its config format Wave; outside TideWM it is Scorium.
+The name "Wave" was already taken by another language, so the standalone, tool-agnostic version of this format is **[Scorium](https://github.com/Scorium-lang/scorium-rs)**: same grammar, its own parser crate, embeddable in any project that uses YAML or JSON today. TideWM keeps calling its config format Wave; outside TideWM it is Scorium.
+
+TideWM's bundled Wave implementation and `wavefmt` remain GPL-licensed with
+TideWM. Standalone Scorium has its own [custom source-available
+license](https://github.com/Scorium-lang/scorium-rs/blob/main/LICENSE); those
+terms do not change the license of this bundled implementation or of users'
+configuration files. See [LICENSING.md](LICENSING.md#wave-and-standalone-scorium).
 
 ## What Wave is
 

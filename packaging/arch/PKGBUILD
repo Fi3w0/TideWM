@@ -8,7 +8,7 @@ pkgrel=1
 pkgdesc="Water-themed Wayland tiling compositor built on Smithay"
 arch=('x86_64' 'aarch64')
 url="https://github.com/Fi3w0/TideWM"
-license=('GPL-3.0-or-later')
+license=('GPL-3.0-or-later' 'CC-BY-NC-SA-4.0' 'OFL-1.1')
 depends=(
   'gcc-libs'
   'glibc'
@@ -70,5 +70,9 @@ package() {
   install -Dm644 share/xdg-desktop-portal/tidewm.portal "$pkgdir/usr/share/xdg-desktop-portal/portals/tidewm.portal"
   install -Dm644 share/xdg-desktop-portal/tidewm-portals.conf "$pkgdir/usr/share/xdg-desktop-portal/tidewm-portals.conf"
 
-  install -Dm644 README.md CHANGELOG.md DOCUMENTATION.md WAVE.md -t "$pkgdir/usr/share/doc/$pkgname/"
+  install -Dm644 README.md CHANGELOG.md DOCUMENTATION.md WAVE.md LICENSING.md -t "$pkgdir/usr/share/doc/$pkgname/"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 share/icons/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LOGO-NOTICE"
+  install -Dm644 LICENSES/CC-BY-NC-SA-4.0.txt "$pkgdir/usr/share/licenses/$pkgname/CC-BY-NC-SA-4.0.txt"
+  install -Dm644 assets/fonts/OFL-LICENSE.txt "$pkgdir/usr/share/licenses/$pkgname/OFL-LICENSE.txt"
 }

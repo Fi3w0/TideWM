@@ -35,6 +35,9 @@ rustPlatform.buildRustPackage {
       (root + "/src")
       (root + "/assets")
       (root + "/share")
+      (root + "/LICENSE")
+      (root + "/LICENSES")
+      (root + "/LICENSING.md")
       (root + "/README.md")
       (root + "/CHANGELOG.md")
       (root + "/DOCUMENTATION.md")
@@ -90,13 +93,17 @@ rustPlatform.buildRustPackage {
     substituteInPlace $out/share/wayland-sessions/tidewm.desktop \
       --replace-fail "Exec=TideWM" "Exec=$out/bin/TideWM"
     install -Dm644 share/icons/TideWM-logo-faithful-4k.png $out/share/pixmaps/tidewm.png
+    install -Dm644 LICENSE $out/share/licenses/tidewm/LICENSE
+    install -Dm644 share/icons/LICENSE $out/share/licenses/tidewm/LOGO-NOTICE
+    install -Dm644 LICENSES/CC-BY-NC-SA-4.0.txt $out/share/licenses/tidewm/CC-BY-NC-SA-4.0.txt
+    install -Dm644 assets/fonts/OFL-LICENSE.txt $out/share/licenses/tidewm/OFL-LICENSE.txt
   ''
   + lib.optionalString withScreencast ''
     install -Dm644 share/xdg-desktop-portal/tidewm.portal -t $out/share/xdg-desktop-portal/portals
     install -Dm644 share/xdg-desktop-portal/tidewm-portals.conf -t $out/share/xdg-desktop-portal
   ''
   + ''
-    install -Dm644 README.md CHANGELOG.md DOCUMENTATION.md WAVE.md -t $out/share/doc/tidewm
+    install -Dm644 README.md CHANGELOG.md DOCUMENTATION.md WAVE.md LICENSING.md -t $out/share/doc/tidewm
   '';
 
   # Lets services.displayManager.sessionPackages find tidewm.desktop.
@@ -105,7 +112,11 @@ rustPlatform.buildRustPackage {
   meta = {
     description = "Water-themed Wayland tiling compositor built on Smithay";
     homepage = "https://github.com/Fi3w0/TideWM";
-    license = lib.licenses.gpl3Plus;
+    license = with lib.licenses; [
+      gpl3Plus
+      cc-by-nc-sa-40
+      ofl
+    ];
     mainProgram = "TideWM";
     platforms = lib.platforms.linux;
   };
