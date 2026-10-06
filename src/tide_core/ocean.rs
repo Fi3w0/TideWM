@@ -2,8 +2,9 @@
 //!
 //! Ocean is intentionally not implemented as a tall stack of Classic
 //! workspaces. Windows belong to local [`OceanReef`] tiling zones in stable
-//! world coordinates, while each physical output owns only a camera position
-//! into that shared world. Rendering converts the resulting world rectangles
+//! world coordinates. Each output has a camera; windows belong to their output
+//! by default, or can appear through other cameras with `shared_canvas` enabled.
+//! Rendering converts the resulting world rectangles
 //! into the shared [`PlacedWindow`](crate::placement::PlacedWindow) boundary.
 
 use std::{
@@ -143,6 +144,7 @@ impl OceanCameraMotion {
     }
 }
 
+#[derive(Clone)]
 pub struct OceanReef {
     _name: String,
     pub rect: Rectangle<i32, Logical>,
@@ -165,7 +167,7 @@ pub type ClassicMigrationSnapshot = (
     Vec<(WlSurface, Window, Rectangle<i32, Logical>)>,
     HashMap<String, OceanCamera>,
     HashMap<WlSurface, String>,
-    Vec<WlSurface>,
+    HashMap<WlSurface, (String, Rectangle<i32, Logical>)>,
 );
 
 struct OceanScreenPin {
@@ -194,10 +196,11 @@ impl OceanReef {
     }
 }
 
-/// Ocean's complete spatial state. It has no workspace number, active page,
-/// or output-owned window tree: those concepts belong exclusively to Classic.
+/// Ocean's complete spatial state. It has no workspace number or active page.
+/// Cameras travel continuously; output membership can be independent or shared.
 #[derive(Default)]
 pub struct OceanSpace {
+    shared_canvas: bool,
     reefs: Vec<OceanReef>,
     cameras: HashMap<String, OceanCamera>,
     camera_motions: HashMap<String, OceanCameraMotion>,
@@ -207,8 +210,7 @@ pub struct OceanSpace {
     camera_revision: u64,
     bookmarks: HashMap<String, OceanPoint>,
     runtime_bookmarks: HashSet<String>,
-    /// Output where a window entered the world. This is an input/focus hint,
-    /// not spatial ownership; every output can render the same window.
+    /// Output membership in independent mode; a focus hint in shared mode.
     entry_outputs: HashMap<WlSurface, String>,
     floating: HashMap<WlSurface, (Window, Rectangle<i32, Logical>)>,
     /// Optional client-sized rectangles for windows that remain in a reef
@@ -289,6 +291,7 @@ impl OceanSpace {
             .unwrap_or_default();
         bookmarks.entry("home".to_string()).or_insert(default_home);
         Self {
+            shared_canvas: config.shared_canvas,
             reefs,
             cameras: HashMap::new(),
             camera_motions: HashMap::new(),
@@ -312,7 +315,7 @@ impl OceanSpace {
     /// reef there so the first mapped window is visible instead of being
     /// inserted into a distant configured reef while the camera remains at
     /// the empty bookmark location.
-    pub fn ensure_default_reef(&mut self, viewport: Size<i32, Logical>) -> bool {
+    pub fn ensure_default_reef(&mut self, output: &str, viewport: Size<i32, Logical>) -> bool {
         let mut changed = false;
         if self.reefs.is_empty() {
             self.reefs.push(OceanReef::new(
@@ -325,7 +328,15 @@ impl OceanSpace {
             changed = true;
         }
         self.bookmarks.entry("1".to_string()).or_default();
-        for reef in &mut self.reefs {
+        let eligible: Vec<bool> = self
+            .reefs
+            .iter()
+            .map(|reef| self.reef_accepts_output(reef, output))
+            .collect();
+        for (reef, eligible) in self.reefs.iter_mut().zip(eligible) {
+            if !eligible {
+                continue;
+            }
             if reef.auto_width {
                 let width = reef.rect.size.w.max(viewport.w);
                 changed |= width != reef.rect.size.w;
@@ -391,13 +402,6 @@ impl OceanSpace {
             let origin = self.bookmarks.get("home").copied().unwrap_or_default();
             OceanCamera { origin, zoom: 1.0 }
         })
-    }
-
-    /// Configured reef rectangles, for the minimap's world extent -- an
-    /// empty reef is still a landmark worth framing even with nothing
-    /// inside it yet.
-    pub(crate) fn reefs(&self) -> &[OceanReef] {
-        &self.reefs
     }
 
     fn set_camera(
@@ -627,15 +631,18 @@ impl OceanSpace {
         let current = self.ensure_camera(output);
         let half_view = viewport.h as f64 / current.zoom.max(0.05) * 0.5;
         let mut anchors: Vec<f64> = self
-            .reefs
-            .iter()
-            .map(|reef| reef.rect.loc.y as f64)
+            .reef_rects_on_output(output)
+            .into_iter()
+            .map(|rect| rect.loc.y as f64)
             // A tiled window's Y position is only its local slot inside a
             // reef. Treating every tile row as a navigation stop makes
             // depth feel like vertically stacked workspaces. Floating
             // rectangles are explicit world placements, so sunk/manual
             // windows remain meaningful content-driven destinations.
-            .chain(self.floating.values().map(|(_, rect)| rect.loc.y as f64))
+            .chain(self.floating.iter().filter_map(|(surface, (_, rect))| {
+                self.visible_on_output(surface, output)
+                    .then_some(rect.loc.y as f64)
+            }))
             .collect();
         anchors.sort_by(f64::total_cmp);
         anchors.dedup_by(|a, b| (*a - *b).abs() < 1.0);
@@ -710,21 +717,85 @@ impl OceanSpace {
         window: Window,
         target: Option<&WlSurface>,
     ) {
-        self.ensure_default_reef(viewport);
+        self.ensure_default_reef(output, viewport);
         let camera = self.ensure_camera(output);
         let center = OceanPoint {
             x: camera.origin.x + viewport.w as f64 / camera.zoom.max(0.05) / 2.0,
             y: camera.origin.y + viewport.h as f64 / camera.zoom.max(0.05) / 2.0,
         };
+        let target = target.filter(|surface| self.visible_on_output(surface, output));
         let reef_index = target
             .and_then(|target| {
-                self.reefs
-                    .iter()
-                    .position(|reef| reef.layout.contains(target))
+                self.reefs.iter().position(|reef| {
+                    reef.layout.contains(target) && self.reef_accepts_output(reef, output)
+                })
             })
-            .or_else(|| nearest_reef(&self.reefs, center))
-            .unwrap_or(0);
+            .or_else(|| {
+                if self.shared_canvas {
+                    return nearest_reef(&self.reefs, center);
+                }
+                let nearest = nearest_reef(&self.reefs, center)?;
+                let eligible = self
+                    .reefs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, reef)| self.reef_accepts_output(reef, output))
+                    .min_by(|(_, a), (_, b)| {
+                        distance_to_rect(a.rect, center)
+                            .total_cmp(&distance_to_rect(b.rect, center))
+                    })
+                    .map(|(index, _)| index);
+                if eligible.is_some_and(|index| {
+                    distance_to_rect(self.reefs[index].rect, center)
+                        <= distance_to_rect(self.reefs[nearest].rect, center)
+                }) || !visible_through_camera(self.reefs[nearest].rect, camera, viewport)
+                {
+                    return eligible;
+                }
+                // Keep the nearest visible configured region available to
+                // each monitor without sharing its populated tiling tree.
+                let source = &self.reefs[nearest];
+                let private = OceanReef::new(
+                    format!("{}-{output}", source._name),
+                    source.rect,
+                    source.auto_width,
+                    source.auto_height,
+                    source.anchor_empty_layout_to_camera,
+                );
+                let index = self.reefs.len();
+                self.reefs.push(private);
+                Some(index)
+            })
+            .unwrap_or_else(|| {
+                let index = self.reefs.len();
+                self.reefs.push(OceanReef::new(
+                    format!("main-{output}"),
+                    Rectangle::new(
+                        (
+                            camera.origin.x.round() as i32,
+                            camera.origin.y.round() as i32,
+                        )
+                            .into(),
+                        viewport,
+                    ),
+                    true,
+                    true,
+                    true,
+                ));
+                index
+            });
         self.anchor_empty_reef_to_camera(reef_index, camera);
+        // Implicit, empty tiling regions start at this monitor's viewport.
+        // Other cameras may already have enlarged the unused default reef.
+        let reef = &mut self.reefs[reef_index];
+        if !self.shared_canvas && reef.layout.is_empty() && reef.anchor_empty_layout_to_camera {
+            if reef.auto_width {
+                reef.rect.size.w = viewport.w;
+            }
+            if reef.auto_height {
+                reef.rect.size.h = viewport.h;
+            }
+        }
         if let Some(surface) = window.toplevel().map(|toplevel| toplevel.wl_surface()) {
             self.entry_outputs
                 .insert(surface.clone(), output.to_string());
@@ -777,11 +848,14 @@ impl OceanSpace {
     }
 
     /// The `index`-th (1-based) window in app-opened order, if that slot
-    /// exists -- `app_slot(1)` is the first window still open, not
+    /// exists -- slot 1 is the first window still open on this view, not
     /// necessarily the first ever opened, since `remove` shifts later
     /// slots down when an earlier one closes.
-    pub fn app_slot(&self, index: usize) -> Option<&WlSurface> {
-        index.checked_sub(1).and_then(|i| self.app_order.get(i))
+    pub fn app_slot_on_output(&self, output: &str, index: usize) -> Option<&WlSurface> {
+        self.app_order
+            .iter()
+            .filter(|surface| self.visible_on_output(surface, output))
+            .nth(index.checked_sub(1)?)
     }
 
     pub fn has_open_apps(&self) -> bool {
@@ -823,7 +897,13 @@ impl OceanSpace {
         let Some(reef) = self.reefs.iter_mut().find(|reef| reef.layout.contains(old)) else {
             return false;
         };
-        reef.layout.replace_leaf(old, new_window)
+        let replaced = reef.layout.replace_leaf(old, new_window);
+        if replaced {
+            if let Some(surface) = new_window.toplevel().map(|t| t.wl_surface()) {
+                self.inherit_group_output(surface, old);
+            }
+        }
+        replaced
     }
 
     /// Gives an ungrouped tab a new leaf in the same reef as the surviving
@@ -837,8 +917,22 @@ impl OceanSpace {
         else {
             return false;
         };
+        let surface = window.toplevel().map(|t| t.wl_surface().clone());
         reef.layout.insert(window, Some(anchor));
+        if let Some(surface) = surface {
+            self.inherit_group_output(&surface, anchor);
+        }
         true
+    }
+
+    fn inherit_group_output(&mut self, surface: &WlSurface, anchor: &WlSurface) {
+        // A tab stays in its group's region when changing visibility policy.
+        // A parked tab may have entered shared mode from another monitor.
+        if !self.shared_canvas {
+            if let Some(owner) = self.entry_outputs.get(anchor).cloned() {
+                self.entry_outputs.insert(surface.clone(), owner);
+            }
+        }
     }
 
     pub fn window(&self, surface: &WlSurface) -> Option<Window> {
@@ -849,7 +943,88 @@ impl OceanSpace {
     }
 
     pub fn entry_output(&self, surface: &WlSurface) -> Option<&str> {
-        self.entry_outputs.get(surface).map(String::as_str)
+        self.screen_pins
+            .get(surface)
+            .map(|pin| pin.output.as_str())
+            .or_else(|| self.entry_outputs.get(surface).map(String::as_str))
+    }
+
+    pub fn set_shared_canvas(&mut self, shared: bool) {
+        if self.shared_canvas && !shared {
+            // A live switch can leave windows from several outputs in one
+            // shared tree. Split that tree by membership so later openings
+            // cannot either resize foreign tiles or overlap a new full reef.
+            let mut separated = Vec::new();
+            for reef in self.reefs.drain(..) {
+                let windows = reef.layout.windows();
+                let owners: std::collections::BTreeSet<String> = windows
+                    .iter()
+                    .filter_map(|window| {
+                        window
+                            .toplevel()
+                            .and_then(|t| self.entry_outputs.get(t.wl_surface()))
+                            .cloned()
+                    })
+                    .collect();
+                if owners.len() <= 1 {
+                    separated.push(reef);
+                    continue;
+                }
+                for owner in owners {
+                    let mut owned = reef.clone();
+                    owned._name = format!("{}-{owner}", reef._name);
+                    for window in &windows {
+                        if let Some(surface) = window.toplevel().map(|t| t.wl_surface()) {
+                            if self
+                                .entry_outputs
+                                .get(surface)
+                                .is_some_and(|output| *output != owner)
+                            {
+                                owned.layout.remove(surface);
+                            }
+                        }
+                    }
+                    separated.push(owned);
+                }
+            }
+            self.reefs = separated;
+        }
+        self.shared_canvas = shared;
+    }
+
+    pub fn reef_rects_on_output(&self, output: &str) -> Vec<Rectangle<i32, Logical>> {
+        self.reefs
+            .iter()
+            .filter(|reef| {
+                self.shared_canvas
+                    || reef.layout.is_empty()
+                    || reef.layout.windows().iter().any(|window| {
+                        window
+                            .toplevel()
+                            .is_some_and(|t| self.visible_on_output(t.wl_surface(), output))
+                    })
+            })
+            .map(|reef| reef.rect)
+            .collect()
+    }
+
+    pub fn visible_on_output(&self, surface: &WlSurface, output: &str) -> bool {
+        if let Some(pin) = self.screen_pins.get(surface) {
+            return pin.output == output;
+        }
+        self.shared_canvas
+            || self
+                .entry_output(surface)
+                .is_none_or(|owner| owner == output)
+    }
+
+    fn reef_accepts_output(&self, reef: &OceanReef, output: &str) -> bool {
+        self.shared_canvas
+            || reef.layout.windows().iter().all(|window| {
+                window
+                    .toplevel()
+                    .is_none_or(|t| self.visible_on_output(t.wl_surface(), output))
+            })
     }
 
     pub fn set_entry_output(&mut self, surface: &WlSurface, output: String) {
@@ -939,7 +1114,27 @@ impl OceanSpace {
         // carries the lint allow.
         #[allow(clippy::mutable_key_type)]
         let entry_outputs = std::mem::take(&mut self.entry_outputs);
-        let pinned_surfaces: Vec<WlSurface> = self.screen_pins.keys().cloned().collect();
+        #[allow(clippy::mutable_key_type)]
+        let pinned_surfaces = self
+            .screen_pins
+            .iter()
+            .map(|(surface, pin)| {
+                (
+                    surface.clone(),
+                    (
+                        pin.output.clone(),
+                        Rectangle::new(
+                            (
+                                pin.viewport_loc.x.round() as i32,
+                                pin.viewport_loc.y.round() as i32,
+                            )
+                                .into(),
+                            pin.size,
+                        ),
+                    ),
+                )
+            })
+            .collect();
         self.camera_motions.clear();
         self.cameras.clear();
         self.bookmarks.clear();
@@ -987,6 +1182,7 @@ impl OceanSpace {
     /// before walking its BSP tree.
     fn tiled_layouts_for_view(
         &self,
+        output: &str,
         camera: OceanCamera,
         viewport: Size<i32, Logical>,
         gap: i32,
@@ -994,12 +1190,18 @@ impl OceanSpace {
     ) -> Vec<(Window, Rectangle<i32, Logical>)> {
         let dragged = self.drag_override.as_ref().map(|(surface, _)| surface);
         let reefs = self.reefs.iter().filter(|reef| {
-            reef_may_contribute_to_view(
-                reef.rect,
-                camera,
-                viewport,
-                dragged.is_some_and(|surface| reef.layout.contains(surface)),
-            )
+            (self.shared_canvas
+                || reef.layout.windows().iter().any(|window| {
+                    window
+                        .toplevel()
+                        .is_some_and(|t| self.visible_on_output(t.wl_surface(), output))
+                }))
+                && reef_may_contribute_to_view(
+                    reef.rect,
+                    camera,
+                    viewport,
+                    dragged.is_some_and(|surface| reef.layout.contains(surface)),
+                )
         });
         self.tiled_layouts_from_reefs(reefs, gap, split_bias)
     }
@@ -1144,10 +1346,22 @@ impl OceanSpace {
     /// that layout is something anyone actually uses.
     fn growth_ceiling(&self, index: usize) -> (i32, i32) {
         let rect = self.reefs[index].rect;
+        let owner = self.reefs[index]
+            .layout
+            .windows()
+            .iter()
+            .find_map(|window| {
+                window
+                    .toplevel()
+                    .and_then(|t| self.entry_output(t.wl_surface()))
+            });
         let mut max_w = i32::MAX;
         let mut max_h = i32::MAX;
         for (other_index, other) in self.reefs.iter().enumerate() {
             if other_index == index {
+                continue;
+            }
+            if owner.is_some_and(|owner| !self.reef_accepts_output(other, owner)) {
                 continue;
             }
             let y_overlap = rect.loc.y < other.rect.loc.y + other.rect.size.h
@@ -1185,7 +1399,8 @@ impl OceanSpace {
             .into_iter()
             .filter_map(|(window, rect)| {
                 let target = window.toplevel()?.wl_surface().clone();
-                (target != *surface).then_some((target, rect))
+                (target != *surface && self.visible_on_output(&target, output))
+                    .then_some((target, rect))
             })
             .filter_map(|(target, rect)| {
                 let gap = rectangle_gap_distance(moving, rect);
@@ -1220,7 +1435,10 @@ impl OceanSpace {
             .into_iter()
             .filter_map(|(window, rect)| {
                 let target = window.toplevel()?.wl_surface().clone();
-                (target != *surface && rectangle_contains_point(rect, world)).then_some(target)
+                (target != *surface
+                    && self.visible_on_output(&target, output)
+                    && rectangle_contains_point(rect, world))
+                .then_some(target)
             })
             .next()
     }
@@ -1345,7 +1563,9 @@ impl OceanSpace {
             .into_iter()
             .filter_map(|(window, rect, _)| {
                 let surface = window.toplevel()?.wl_surface().clone();
-                if self.screen_pins.contains_key(&surface) {
+                if self.screen_pins.contains_key(&surface)
+                    || !self.visible_on_output(&surface, output)
+                {
                     return None;
                 }
                 let dy = rect.loc.y as f64 - visible_bottom;
@@ -1569,7 +1789,7 @@ impl OceanSpace {
         split_bias: SplitBias,
     ) -> Vec<PlacedWindow> {
         let camera = self.camera(output);
-        let tiled = self.tiled_layouts_for_view(camera, output_geo.size, gap, split_bias);
+        let tiled = self.tiled_layouts_for_view(output, camera, output_geo.size, gap, split_bias);
         let mut layouts = self.world_layouts_from_tiled(tiled);
         // Floating entries were collected first and are already frontmost.
         // Reverse only the tiled suffix so cascade/BSP tree order mirrors
@@ -1601,6 +1821,12 @@ impl OceanSpace {
         layouts
             .into_iter()
             .filter_map(|(window, rect, kind)| {
+                if window
+                    .toplevel()
+                    .is_some_and(|t| !self.visible_on_output(t.wl_surface(), output))
+                {
+                    return None;
+                }
                 let pin = window
                     .toplevel()
                     .and_then(|toplevel| self.screen_pins.get(toplevel.wl_surface()));
@@ -1757,14 +1983,317 @@ fn reef_may_contribute_to_view(
 }
 
 #[cfg(test)]
+#[path = "ocean_test_protocol.rs"]
+mod test_protocol;
+
+#[cfg(test)]
 mod tests {
+    use super::test_protocol::ProtocolFixture;
     use super::*;
     use crate::config::{OceanBookmarkConfig, OceanReefConfig};
 
     #[test]
+    fn independent_views_exclude_foreign_tiles_and_floats_and_shared_mode_can_reload() {
+        let mut protocol = ProtocolFixture::new();
+        let a = protocol.window();
+        let b = protocol.window();
+        let c = protocol.window();
+        let mut ocean = OceanSpace::default();
+        let viewport = (2048, 1152).into();
+        let geometry = Rectangle::new((1920, 0).into(), viewport);
+        ocean.insert("qhd", viewport, a, None);
+        ocean.insert("fhd", (1920, 1080).into(), b, None);
+        ocean.push_migrated_floating(
+            c.toplevel().unwrap().wl_surface().clone(),
+            c,
+            Rectangle::new((100, 100).into(), (500, 400).into()),
+            "fhd",
+        );
+        assert_eq!(
+            ocean.reefs.len(),
+            2,
+            "each monitor needs a separate BSP tree"
+        );
+        let camera = OceanCamera {
+            origin: OceanPoint {
+                x: -1000.0,
+                y: -500.0,
+            },
+            zoom: 0.25,
+        };
+        ocean.cameras.insert("qhd".to_string(), camera);
+        ocean.cameras.insert("fhd".to_string(), camera);
+        assert_eq!(
+            ocean.placements("qhd", geometry, 8, SplitBias::Auto).len(),
+            1
+        );
+        assert_eq!(
+            ocean.placements("fhd", geometry, 8, SplitBias::Auto).len(),
+            2
+        );
+        ocean.set_shared_canvas(true);
+        assert_eq!(
+            ocean.placements("qhd", geometry, 8, SplitBias::Auto).len(),
+            3
+        );
+        assert_eq!(
+            ocean.placements("fhd", geometry, 8, SplitBias::Auto).len(),
+            3
+        );
+        ocean.set_shared_canvas(false);
+        assert_eq!(
+            ocean.placements("qhd", geometry, 8, SplitBias::Auto).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn pinned_migration_keeps_output_and_viewport_rect_after_camera_travel() {
+        let mut protocol = ProtocolFixture::new();
+        let window = protocol.window();
+        let surface = window.toplevel().unwrap().wl_surface().clone();
+        let mut ocean = OceanSpace::default();
+        ocean.set_camera_origin("fhd", OceanPoint { x: 8000.0, y: 0.0 });
+        ocean.push_migrated_floating(
+            surface.clone(),
+            window,
+            Rectangle::new((8100, 50).into(), (600, 400).into()),
+            "fhd",
+        );
+        assert!(ocean.pin_to_screen(&surface, "fhd"));
+        ocean.set_camera_origin(
+            "fhd",
+            OceanPoint {
+                x: 14000.0,
+                y: 2000.0,
+            },
+        );
+        ocean.set_shared_canvas(true);
+        assert!(ocean
+            .placements(
+                "qhd",
+                Rectangle::new((1920, 0).into(), (2048, 1152).into()),
+                8,
+                SplitBias::Auto
+            )
+            .is_empty());
+        let (_, _, _, _, pins) = ocean.drain_for_classic();
+        assert_eq!(
+            pins[&surface],
+            (
+                "fhd".to_string(),
+                Rectangle::new((100, 50).into(), (600, 400).into())
+            )
+        );
+    }
+
+    #[test]
+    fn configured_start_region_is_available_on_both_independent_monitors() {
+        let mut protocol = ProtocolFixture::new();
+        let mut ocean = OceanSpace::from_config(&OceanConfig {
+            reefs: vec![
+                OceanReefConfig {
+                    name: "home".into(),
+                    x: 0,
+                    y: 0,
+                    width: Some(1000),
+                    height: Some(800),
+                },
+                OceanReefConfig {
+                    name: "code".into(),
+                    x: 4000,
+                    y: 0,
+                    width: Some(1000),
+                    height: Some(800),
+                },
+            ],
+            ..Default::default()
+        });
+        let a = protocol.window();
+        let b = protocol.window();
+        ocean.insert("left", (1000, 800).into(), a, None);
+        ocean.insert("right", (1000, 800).into(), b, None);
+        let geometry = Rectangle::new((0, 0).into(), (1000, 800).into());
+        assert_eq!(
+            ocean.placements("left", geometry, 8, SplitBias::Auto).len(),
+            1
+        );
+        assert_eq!(
+            ocean
+                .placements("right", geometry, 8, SplitBias::Auto)
+                .len(),
+            1
+        );
+        assert_eq!(ocean.reefs.len(), 3);
+        let c = protocol.window();
+        ocean.insert("right", (1000, 800).into(), c, None);
+        assert_eq!(
+            ocean.reefs.len(),
+            3,
+            "later openings reuse the private tree"
+        );
+        assert_eq!(
+            ocean
+                .placements("right", geometry, 8, SplitBias::Auto)
+                .len(),
+            2
+        );
+        assert_eq!(
+            ocean.placements("left", geometry, 8, SplitBias::Auto)[0]
+                .rect
+                .size,
+            (984, 784).into()
+        );
+    }
+
+    #[test]
+    fn shared_view_can_pin_a_foreign_window_then_reload_independent() {
+        let mut protocol = ProtocolFixture::new();
+        let window = protocol.window();
+        let surface = window.toplevel().unwrap().wl_surface().clone();
+        let mut ocean = OceanSpace::from_config(&OceanConfig {
+            shared_canvas: true,
+            ..Default::default()
+        });
+        ocean.push_migrated_floating(
+            surface.clone(),
+            window,
+            Rectangle::new((100, 100).into(), (600, 400).into()),
+            "right",
+        );
+        assert!(ocean.pin_to_screen(&surface, "left"));
+        assert_eq!(ocean.entry_output(&surface), Some("left"));
+        let geometry = Rectangle::new((0, 0).into(), (1000, 800).into());
+        for shared in [true, false] {
+            ocean.set_shared_canvas(shared);
+            assert_eq!(
+                ocean.placements("left", geometry, 8, SplitBias::Auto).len(),
+                1
+            );
+            assert!(ocean
+                .placements("right", geometry, 8, SplitBias::Auto)
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn app_slots_follow_monitor_membership_and_shared_policy() {
+        let mut protocol = ProtocolFixture::new();
+        let mut ocean = OceanSpace::default();
+        let mut surfaces = Vec::new();
+        for owner in ["fhd", "qhd", "fhd", "qhd"] {
+            let window = protocol.window();
+            let surface = window.toplevel().unwrap().wl_surface().clone();
+            ocean.insert(owner, (1000, 800).into(), window, None);
+            ocean.record_app_opened(surface.clone());
+            surfaces.push(surface);
+        }
+        assert_eq!(ocean.app_slot_on_output("qhd", 1), Some(&surfaces[1]));
+        assert_eq!(ocean.app_slot_on_output("fhd", 2), Some(&surfaces[2]));
+        assert!(ocean.app_slot_on_output("qhd", 3).is_none());
+        ocean.set_shared_canvas(true);
+        assert_eq!(ocean.app_slot_on_output("qhd", 1), Some(&surfaces[0]));
+    }
+
+    #[test]
+    fn switching_a_mixed_shared_tree_to_independent_keeps_future_openings_separate() {
+        let mut protocol = ProtocolFixture::new();
+        let mut ocean = OceanSpace::from_config(&OceanConfig {
+            shared_canvas: true,
+            ..Default::default()
+        });
+        let a = protocol.window();
+        let b = protocol.window();
+        ocean.insert("qhd", (1000, 800).into(), a, None);
+        ocean.insert("fhd", (1000, 800).into(), b, None);
+        assert_eq!(ocean.reefs.len(), 1);
+        ocean.set_shared_canvas(false);
+        assert_eq!(ocean.reefs.len(), 2);
+        let c = protocol.window();
+        ocean.insert("qhd", (1000, 800).into(), c, None);
+        assert_eq!(ocean.reefs.len(), 2);
+        let geometry = Rectangle::new((0, 0).into(), (1000, 800).into());
+        assert_eq!(
+            ocean.placements("qhd", geometry, 8, SplitBias::Auto).len(),
+            2
+        );
+        let fhd = ocean.placements("fhd", geometry, 8, SplitBias::Auto);
+        assert_eq!(fhd.len(), 1);
+        assert_eq!(
+            fhd[0].rect.size,
+            (984, 784).into(),
+            "foreign openings do not split this monitor's tile"
+        );
+    }
+
+    #[test]
+    fn independent_viewport_growth_and_depth_ignore_foreign_geometry() {
+        let mut protocol = ProtocolFixture::new();
+        let mut ocean = OceanSpace::default();
+        let small = protocol.window();
+        let surface = small.toplevel().unwrap().wl_surface().clone();
+        ocean.insert("small", (1000, 800).into(), small, None);
+        let large = protocol.window();
+        ocean.insert("large", (3000, 1800).into(), large, None);
+        ocean.ensure_default_reef("large", (3200, 2000).into());
+        assert_eq!(
+            ocean.world_rect(&surface, 8, SplitBias::Auto).unwrap().size,
+            (984, 784).into()
+        );
+        let small_index = ocean
+            .reefs
+            .iter()
+            .position(|reef| reef.layout.contains(&surface))
+            .unwrap();
+        let large_index = 1 - small_index;
+        ocean.reefs[large_index].rect.loc = (1000, 0).into();
+        assert_eq!(ocean.growth_ceiling(small_index).0, i32::MAX);
+        ocean.set_shared_canvas(true);
+        assert_eq!(ocean.growth_ceiling(small_index).0, 1000);
+        ocean.set_shared_canvas(false);
+        ocean.reefs[large_index].rect.loc.y = 2400;
+        assert!(!ocean.navigate_depth("small", (1000, 800).into(), true, (Duration::ZERO, 0.0)));
+        ocean.set_shared_canvas(true);
+        assert!(ocean.navigate_depth("small", (1000, 800).into(), true, (Duration::ZERO, 0.0)));
+        assert_eq!(ocean.camera("small").origin.y, 2400.0);
+    }
+
+    #[test]
+    fn shared_group_tabs_stay_in_their_region_after_switching_to_independent() {
+        let mut protocol = ProtocolFixture::new();
+        let mut ocean = OceanSpace::from_config(&OceanConfig {
+            shared_canvas: true,
+            ..Default::default()
+        });
+        let a = protocol.window();
+        let b = protocol.window();
+        let a_surface = a.toplevel().unwrap().wl_surface().clone();
+        let b_surface = b.toplevel().unwrap().wl_surface().clone();
+        ocean.insert("left", (1000, 800).into(), a.clone(), None);
+        ocean.insert("right", (1000, 800).into(), b.clone(), Some(&a_surface));
+        assert!(ocean.detach_tiled_for_group(&b_surface).is_some());
+        ocean.set_shared_canvas(false);
+        assert!(ocean.replace_tiled_group_leaf(&a_surface, &b));
+        assert_eq!(ocean.entry_output(&b_surface), Some("left"));
+        let geometry = Rectangle::new((0, 0).into(), (1000, 800).into());
+        assert!(ocean
+            .placements("right", geometry, 8, SplitBias::Auto)
+            .is_empty());
+        assert_eq!(
+            ocean.placements("left", geometry, 8, SplitBias::Auto).len(),
+            1
+        );
+        assert!(ocean.insert_tiled_next_to(&b_surface, a));
+        assert_eq!(
+            ocean.placements("left", geometry, 8, SplitBias::Auto).len(),
+            2
+        );
+    }
+
+    #[test]
     fn cameras_are_independent_views_of_one_world() {
         let mut ocean = OceanSpace::from_config(&OceanConfig::default());
-        ocean.ensure_default_reef(Size::from((1200, 800)));
+        ocean.ensure_default_reef("main", Size::from((1200, 800)));
         ocean.pan("left", 300.0, 40.0);
         ocean.pan("right", -75.0, 900.0);
 
@@ -1952,11 +2481,11 @@ mod tests {
             ..OceanConfig::default()
         });
 
-        assert!(ocean.ensure_default_reef(Size::from((1920, 1080))));
+        assert!(ocean.ensure_default_reef("main", Size::from((1920, 1080))));
         assert_eq!(ocean.reefs[0].rect.size, Size::from((1920, 1200)));
-        assert!(ocean.ensure_default_reef(Size::from((3440, 1440))));
+        assert!(ocean.ensure_default_reef("main", Size::from((3440, 1440))));
         assert_eq!(ocean.reefs[0].rect.size, Size::from((3440, 1200)));
-        assert!(!ocean.ensure_default_reef(Size::from((2560, 1080))));
+        assert!(!ocean.ensure_default_reef("main", Size::from((2560, 1080))));
     }
 
     #[test]
@@ -1977,7 +2506,7 @@ mod tests {
             ..OceanConfig::default()
         });
 
-        assert!(ocean.ensure_default_reef(Size::from((1000, 800))));
+        assert!(ocean.ensure_default_reef("main", Size::from((1000, 800))));
         assert_eq!(ocean.reefs.len(), 2);
         assert_eq!(ocean.reefs[1].rect.loc, Point::from((0, 0)));
         assert_eq!(ocean.ensure_camera("winit-0").origin, OceanPoint::default());
@@ -1985,14 +2514,14 @@ mod tests {
         ocean.pan("winit-0", 640.0, 320.0);
         let camera = ocean.camera("winit-0");
         assert!(ocean.anchor_empty_reef_to_camera(1, camera));
-        assert!(!ocean.ensure_default_reef(Size::from((1000, 800))));
+        assert!(!ocean.ensure_default_reef("main", Size::from((1000, 800))));
         assert_eq!(ocean.reefs.len(), 2);
     }
 
     #[test]
     fn empty_implicit_reef_follows_the_camera_for_its_first_window() {
         let mut ocean = OceanSpace::from_config(&OceanConfig::default());
-        ocean.ensure_default_reef(Size::from((1000, 800)));
+        ocean.ensure_default_reef("main", Size::from((1000, 800)));
         ocean.pan("main", 640.0, 320.0);
 
         let camera = ocean.camera("main");

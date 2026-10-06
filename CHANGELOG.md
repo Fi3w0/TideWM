@@ -2,6 +2,13 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.141 — Ocean can keep each monitor's windows independent
+
+- Added hot-reloadable `shared_canvas` in `ocean { }`, defaulting to `false`. Zoomed or panned views exclude other monitors' tiled and floating windows from drawing and effect capture. New windows use separate tiling trees per monitor; switching from shared to independent splits mixed trees by membership. `shared_canvas = true` retains deliberate travel through a shared world. Screen pins stay exclusive in either mode.
+- Ocean window commits and preferred fractional scale now resolve through monitor membership or camera-projected placements, rather than intersecting world coordinates with physical desktop coordinates. The old comparison could assign a DP-4 window to HDMI-A-2 because its world position happened to overlap that output's desktop rectangle.
+- Independent focus, numbered app navigation, smart tiling, depth navigation, compass and minimap follow monitor membership. Returning to Classic preserves the connected owner of tiles/floaters; a monitor with only floaters no longer loses them to another monitor's reef, and screen pins retain their output and viewport position after pan/zoom.
+- Regression coverage uses real in-process Wayland/xdg toplevels for overlapping zoomed views, configured start regions on both monitors, separate trees and live policy switching, app slots, independent region growth/depth, group tabs, and pin migration. All 621 tests, strict Clippy, fmt and the optimized all-feature build pass. Native .141 is maintainer-confirmed working with independent dual-monitor views and animated wallpapers; a repeat showcase recording completed successfully. Quantified performance measurements and a native shared-canvas retest remain pending.
+
 ## 0.90.140 — Covered video wallpapers can pause
 
 - Layer-shell frame callbacks now follow the output's actual render visibility in both backends. Wallpaper clients such as `mpvpaper -p` can pause behind fully occluding client-provided opaque regions; uncovering the surface resumes callbacks. Clients that advertise no opaque region keep their backdrop live even when they look opaque.

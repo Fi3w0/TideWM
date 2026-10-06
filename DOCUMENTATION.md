@@ -610,8 +610,13 @@ swim {
 
 Configures the workspace-free Ocean engine selected with
 `engine = ocean`. Windows have stable world rectangles on both X and
-Y. Each output stores an independent continuous camera into that same world;
-moving a camera never moves or resizes a window. Reefs are named local BSP
+Y. Each output stores an independent continuous camera. By default,
+`shared_canvas = false`: windows and tiling trees belong to their monitor, so
+zooming or panning cannot reveal another monitor's windows. Set
+`shared_canvas = true` to let cameras view windows from the same shared world,
+including deliberate travel into another monitor's region. Screen-pinned
+windows always remain exclusive to their pinned monitor. Moving a camera
+never moves or resizes a window. Reefs are named local BSP
 tiling zones, not pages, and bookmarks are named camera return points. The
 optional camera-anchored guide field moves and scales with the world, so empty
 travel remains legible instead of looking like windows sliding over a fixed
@@ -620,22 +625,31 @@ wallpaper.
 Rendering derives one placement snapshot from each output's current camera and
 shares it across every consumer in that render pass, including glass capture,
 tab strips, and final composition. Reefs outside that camera are rejected
-before their BSP trees are walked. Whole-world features such as the minimap
-still inspect every reef, and no placement snapshot persists across frames.
+before their BSP trees are walked. In independent mode, foreign windows are
+also excluded from rendering, effect capture, focus navigation, app slots,
+compass and minimap. No placement snapshot persists across frames.
 
 With no `reef` declaration TideWM creates `main` at `0x0`. Its dimensions come
 from the real logical output viewport—there is no 1080p resolution constant.
 An explicitly declared reef may omit either dimension to inherit and expand
 to the largest real viewport that uses Ocean, or set a positive dimension to
-make that world zone intentionally fixed/larger. Numbered `workspace:N`
+make that world zone intentionally fixed/larger. Once populated, independent
+reefs expand only for their own monitor; another monitor's reef cannot limit
+their growth. Implicit per-monitor regions start at that monitor's viewport.
+Numbered `workspace:N`
 actions become compatibility jumps to reef/bookmark `N`; they do not create
 workspaces. Reef and configured-bookmark declarations are startup-owned;
 runtime saved bookmarks last for the session. The remaining Ocean camera,
-zoom, guide, and depth toggles/tuning hot-reload.
+zoom, guide, depth and shared-canvas toggles/tuning hot-reload. Switching from
+shared to independent splits mixed tiling trees by monitor; enabling shared
+visibility again keeps those trees. Returning to Classic preserves connected
+monitor membership for independent tiles and floaters, and the viewport
+position of screen pins.
 
 ```wave
 engine = ocean
 ocean {
+    shared_canvas = false
     freeform_windows = true
     canvas_pan_button = left
     canvas_pan_requires_modifier = false
@@ -673,6 +687,7 @@ ocean {
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
+| `shared_canvas` | boolean | `false` | Independent monitor membership by default. `true` lets cameras reveal windows from other monitors. Reloads live; screen pins always remain exclusive. |
 | `freeform_windows` | boolean | `true` | In Ocean, beginning the configured move/resize gesture on a reef tile detaches it at the same world rectangle and continues as a free zoom-aware drag. `toggle-floating` can tile it into a reef again. `false` retains tile swap/split resize behavior. |
 | `smart_tiling` | boolean | `true` | Keeps modifier-left drags of tiled Ocean windows in the reef for tile-to-tile swaps, and reattaches a floating window released close to an existing tile. The dragged window lifts out and follows the pointer, and the tile it would swap into on release gets an active-border magnet highlight. |
 | `smart_tiling_snap_distance` | integer, `0`–`512` | `64` | Screen-pixel distance at which a floating Ocean window attaches to a nearby tiled window on release. `0` requires overlap. |
@@ -743,8 +758,9 @@ compass {
 
 Whole-world overview minimap for the Ocean engine (spatial roadmap S5's
 other half, alongside the compass). Hold the configured `key` to peek: a
-schematic map of every window in the shared world, plus every connected
-output's current camera viewport (the triggering output's own viewport
+schematic map of the triggering monitor's windows and camera in independent
+mode. With `ocean.shared_canvas = true`, it shows every window in the shared
+world, plus every connected output's current camera viewport (its own viewport
 drawn with the active accent color, every other output's viewport plainer),
 scaled to fit the screen. Click a window or region while still holding to
 travel that output's camera there and dismiss the peek; release without
@@ -1196,7 +1212,7 @@ once selected. `water_effects = false` bypasses the whole effect.
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `animation` | enum | `reactive` | `static` is the original fixed distortion (no time uniform, never ticks frames on its own). `reactive` energizes the distortion when the window moves, the backdrop behind it changes, or a ripple passes underneath, then settles back to still over `settle_ms`. `ambient` drifts constantly, ticking frames while glass is visible by design. `mode` is an alias. |
+| `animation` | enum | `reactive` | `static` is the original fixed distortion (no time uniform, never ticks frames on its own). `reactive` energizes the distortion when the window moves or a ripple passes underneath, then settles back to still over `settle_ms`. `ambient` drifts constantly, ticking frames while glass is visible by design. `mode` is an alias. |
 | `speed` | float | `1.0` | Phase drift multiplier, clamped to `0`–`8`. |
 | `amplitude` | float | `1.0` | Distortion strength multiplier on the shader's built-in UV offset, clamped to `0`–`4`. `strength` is an alias. |
 | `settle_ms` | integer | `1200` | Reactive-mode settle time after the last disturbance, clamped to `100`–`10000`. `settle` is an alias. |
@@ -1900,7 +1916,8 @@ In Ocean, `outputs` reports `active_workspace: null`, the current two-axis
 `camera_origin`, and `camera_zoom`; `workspaces` returns an empty list because bookmarks
 are navigation targets rather than real workspaces. Ocean window entries use
 `workspace: null` and `output: null` (the same world can be visible through
-multiple outputs), plus `entry_output` as a non-owning input/focus hint.
+multiple outputs in shared mode). `entry_output` identifies monitor membership
+in independent mode, and serves as an input/focus hint in shared mode.
 
 `diagnostics` is the compositor-side half of `tidectl doctor`/`report`: version, git commit, build profile and date, backend (`winit`/`udev`), uptime, spatial engine, `water_effects`, config path and current parse warnings, XWayland enablement, session-lock state, layer-surface count, and keybind/submap counts. It exists so a bug report can state exactly which build ran without guessing from the host.
 

@@ -25,6 +25,7 @@ use smithay::{
 
 use crate::config::{LayoutAlgorithm, MasterOrientation, SplitBias};
 
+#[derive(Clone)]
 enum Node {
     Leaf(Window),
     Split {
@@ -95,7 +96,7 @@ impl SplitResizeHandle {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct BspLayout {
     root: Option<Node>,
     /// Number of leaves in `root`. Keeping this beside the tree avoids

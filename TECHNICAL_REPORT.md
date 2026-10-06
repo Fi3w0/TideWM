@@ -6,7 +6,7 @@ A fast technical reference for TideWM: what it is, what's implemented, current h
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). A full tiling-WM feature set (BSP/master-stack/cascade layouts, workspaces, multi-monitor, layer-shell, IPC, XWayland) with a water/aqua render identity layered on top as a fully toggleable effect stack, plus a second spatial engine ("Ocean") as an alternative to numbered workspaces.
 
-Current development version: **0.90.140**, second major pre-release. 1.0 is intentionally reserved until the effect stack and Ocean get a broader real-hardware pass (see CHANGELOG).
+Current development version: **0.90.141**, second major pre-release. 1.0 is intentionally reserved until the effect stack and Ocean get a broader real-hardware pass (see CHANGELOG).
 
 ## Architecture
 
@@ -34,7 +34,7 @@ Current development version: **0.90.140**, second major pre-release. 1.0 is inte
 | Water/decoration render stack: impulse ripples, wave workspace transitions, tiled/floating water-glass and per-app liquid frost glass, analytical shadows, animated gradient borders, rounded clipping, configurable window animations, move/resize viscosity, connected-vessel BSP resizing, opt-in floating sway, automatic depth/buoyancy, ambient caustics | Done; tiled/liquid frost is release-GLES nested-verified in Classic/Ocean, standalone AMD remains, and the earlier stack is standalone-AMD-verified |
 | Custom shaders (`shaders { }`, `shader "<name>" { }`): opt-in user `.frag` effects over a window's backdrop, up to four chained stages with `save`/`get` and extra texture bindings, per-window and per-workspace assignment, bounded budgets | Done through Phase 7B; Mesa software-GLES tests and native NVIDIA daily-config two-program rendering/zero compile failures verified; broader combinations remain |
 | Classic Depth Deck (tiled-window park/swap recall) | Done, standalone-AMD-verified |
-| Ocean spatial engine: reefs, per-output cameras, sink/dredge/surface depth, bookmarks, freeform window detach, smart tiling, live Classic↔Ocean migration | Done, standalone-AMD-verified |
+| Ocean spatial engine: reefs, per-output cameras, sink/dredge/surface depth, bookmarks, freeform window detach, smart tiling, live Classic↔Ocean migration | Core standalone-AMD-verified; .141 independent monitor membership/default and optional shared canvas protocol-tested; independent dual-monitor views maintainer-confirmed on native NVIDIA with animated wallpapers and a completed showcase; quantified performance and native shared-mode checks pending |
 | Ocean compass (off-screen urgent/deep glow cues) and whole-world overview minimap | Done, nested-verified only |
 | Continuous swim navigation (trackpad swipe between workspaces) | Done, real-touchpad-verified |
 | Floating-window ocean physics (`float_physics { tier = light|full }`): disturbance-driven bob/drift, `full` adds mass/collisions/a traveling wave field | Done, nested-verified only |

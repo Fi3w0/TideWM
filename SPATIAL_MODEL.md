@@ -35,7 +35,13 @@ access.
 ## Ocean
 
 Ocean has no real numbered workspaces. It owns one continuous 2D world with
-independently panning and zooming per-output cameras:
+independently panning and zooming per-output cameras. By default, each monitor
+sees only its own windows and uses separate tiling trees, even when cameras
+overlap or zoom out. Setting `shared_canvas = true` inside `ocean { }` enables the original
+shared visibility: traveling a camera can reveal another monitor's windows.
+This setting reloads live; screen pins always stay on their pinned output.
+
+The continuous navigation model remains the same in both modes:
 
 - **X** is continuous lateral travel between working regions.
 - **Y** is physical window depth/position, not a row of disguised workspaces.
@@ -115,7 +121,8 @@ infrastructure. They do not share spatial ownership:
 - `ClassicSpace` owns `(output, workspace)`, layout leaves, deck membership,
   and restore slots.
 - `OceanSpace` now owns reef-local BSP trees, world rectangles, independent
-  per-output pan/zoom cameras, floating world rectangles, entry-output hints,
+  per-output pan/zoom cameras, floating world rectangles, output membership
+  (entry-output hints when shared),
   configured/runtime bookmarks, and physical depth travel/actions.
 
 Both produce the same model-neutral placed-window render input. S2 established

@@ -2802,9 +2802,16 @@ impl Smallvil {
                         target
                     }
                     crate::config::SpatialEngine::Ocean => {
-                        // Travel the primary output's camera to the window,
-                        // mirroring `jump_to_app_slot`'s travel-then-focus.
-                        if let Some(output) = self.primary_output() {
+                        // Travel the owner's camera in independent mode;
+                        // shared mode can summon it through the primary view.
+                        let output = if self.config.ocean.shared_canvas {
+                            self.primary_output()
+                        } else {
+                            self.ocean
+                                .entry_output(&windows[0])
+                                .and_then(|name| self.output_by_name(name))
+                        };
+                        if let Some(output) = output {
                             if let Some(viewport) =
                                 self.space.output_geometry(&output).map(|geo| geo.size)
                             {
@@ -3169,7 +3176,9 @@ impl Smallvil {
                 let Some(output_geo) = self.space.output_geometry(&output) else {
                     return;
                 };
-                let reef_resized = self.ocean.ensure_default_reef(output_geo.size);
+                let reef_resized = self
+                    .ocean
+                    .ensure_default_reef(&output.name(), output_geo.size);
                 let camera = self.ocean.camera(&output.name());
                 let step = self.config.ocean.camera_step as f64 / camera.zoom.max(0.05);
                 let (dx, dy) = match direction {

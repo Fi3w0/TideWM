@@ -4416,11 +4416,28 @@ impl Smallvil {
         stable_output_by_name(self.space.output_under(pos)).cloned()
     }
 
-    /// The output containing the largest share of a window's current geometry.
+    /// Ocean's independent membership, or the output containing the largest
+    /// share of the window's current presentation geometry.
     /// Output overlap storage inside Smithay is a HashMap, so taking its first
     /// entry made straddling-window ownership nondeterministic across runs.
     /// Ties use the stable output name. `None` if the window is not visible.
     pub(crate) fn output_for_window(&self, window: &Window) -> Option<Output> {
+        if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+            let surface = window.toplevel()?.wl_surface();
+            let owner = || {
+                self.ocean
+                    .entry_output(surface)
+                    .and_then(|name| self.output_by_name(name))
+            };
+            // Space contains Ocean world coordinates, not desktop output
+            // coordinates. Comparing those rectangles can change the
+            // preferred scale on every commit and corrupt output affinity.
+            return if self.config.ocean.shared_canvas {
+                self.rendered_output_for_surface(surface).or_else(owner)
+            } else {
+                owner().or_else(|| self.rendered_output_for_surface(surface))
+            };
+        }
         let rect = self.space.element_geometry(window)?;
         self.space
             .outputs()
@@ -5187,7 +5204,11 @@ impl Smallvil {
             return;
         };
         let animation = Duration::from_millis(self.config.ocean.camera_animation_ms);
-        match self.ocean.app_slot(index).cloned() {
+        match self
+            .ocean
+            .app_slot_on_output(&output.name(), index)
+            .cloned()
+        {
             Some(surface) => {
                 if let Some(rect) =
                     self.ocean
@@ -8454,6 +8475,9 @@ impl Smallvil {
             .into_iter()
             .filter_map(|(window, rect, _)| {
                 let surface = window.toplevel()?.wl_surface().clone();
+                if !self.ocean.visible_on_output(&surface, &output_name) {
+                    return None;
+                }
                 let kind = if self.urgent.contains(&surface) {
                     crate::compass::CueKind::Urgent
                 } else {
@@ -8526,16 +8550,21 @@ impl Smallvil {
             .into_iter()
             .filter_map(|(window, rect, _kind)| {
                 let surface = window.toplevel()?.wl_surface().clone();
+                if !self.ocean.visible_on_output(&surface, &output_name) {
+                    return None;
+                }
                 let urgent = self.urgent.contains(&surface);
                 Some((rect, crate::tab_strip::window_title(&surface), urgent))
             })
             .collect();
-        let reef_rects: Vec<Rectangle<i32, Logical>> =
-            self.ocean.reefs().iter().map(|reef| reef.rect).collect();
+        let reef_rects = self.ocean.reef_rects_on_output(&output_name);
         let viewports: Vec<(String, Rectangle<i32, Logical>)> = self
             .space
             .outputs()
             .filter_map(|candidate| {
+                if !self.config.ocean.shared_canvas && candidate.name() != output_name {
+                    return None;
+                }
                 let geo = self.space.output_geometry(candidate)?;
                 let camera = self.ocean.camera(&candidate.name());
                 let zoom = camera.zoom.max(0.05);
@@ -8981,6 +9010,8 @@ impl Smallvil {
     }
 
     fn retile_ocean(&mut self, skip_configure_for: Option<&WlSurface>) {
+        self.ocean
+            .set_shared_canvas(self.config.ocean.shared_canvas);
         let outputs: Vec<Output> = self.space.outputs().cloned().collect();
         let Some(seed_output) = outputs.first() else {
             return;
@@ -8988,12 +9019,14 @@ impl Smallvil {
         let Some(seed_geo) = self.space.output_geometry(seed_output) else {
             return;
         };
-        self.ocean.ensure_default_reef(seed_geo.size);
+        self.ocean
+            .ensure_default_reef(&seed_output.name(), seed_geo.size);
         self.ocean
             .clamp_screen_pins(&seed_output.name(), seed_geo.size);
         for output in outputs.iter().skip(1) {
             if let Some(geometry) = self.space.output_geometry(output) {
-                self.ocean.ensure_default_reef(geometry.size);
+                self.ocean
+                    .ensure_default_reef(&output.name(), geometry.size);
                 self.ocean.clamp_screen_pins(&output.name(), geometry.size);
             }
         }
@@ -9018,18 +9051,8 @@ impl Smallvil {
         }
 
         for (window, rect, _) in self.ocean.world_layouts_from_tiled(tiled) {
-            let output = window
-                .toplevel()
-                .and_then(|toplevel| {
-                    self.rendered_output_for_surface(toplevel.wl_surface())
-                        .or_else(|| {
-                            self.ocean
-                                .entry_output(toplevel.wl_surface())
-                                .and_then(|name| {
-                                    outputs.iter().find(|output| output.name() == name).cloned()
-                                })
-                        })
-                })
+            let output = self
+                .output_for_window(&window)
                 .unwrap_or_else(|| seed_output.clone());
             self.set_window_fractional_scale(&window, &output);
             // Space remains a protocol/input cache in Ocean. The shared
@@ -10821,11 +10844,10 @@ impl Smallvil {
     }
 
     /// Ocean -> Classic. Reefs sorted left-to-right become workspaces 1..N
-    /// on the output whose camera is nearest to each reef; the active
-    /// workspace is the one each output's camera is looking at. Floating
-    /// windows land on the workspace of the reef nearest their world rect,
-    /// clamped into the output's visible area; screen-pinned windows
-    /// re-enter the Classic `pinned` set.
+    /// on their owner in independent mode, or the nearest camera in shared
+    /// mode. The active workspace follows each camera. Floating windows
+    /// keep their connected output and select its nearest reef; screen pins
+    /// keep their viewport rectangle and re-enter the Classic `pinned` set.
     fn migrate_ocean_to_classic(&mut self) {
         let (reefs, floating, cameras, entry_outputs, pinned_surfaces) =
             self.ocean.drain_for_classic();
@@ -10887,7 +10909,17 @@ impl Smallvil {
         let mut reef_slots: Vec<(String, u32, Rectangle<i32, Logical>)> = Vec::new();
 
         for (_, rect, tree) in sorted_reefs {
-            let target_output = nearest_output(&rect);
+            let target_output = (!self.config.ocean.shared_canvas)
+                .then(|| {
+                    tree.windows().iter().find_map(|window| {
+                        entry_outputs
+                            .get(window.toplevel()?.wl_surface())
+                            .filter(|name| output_viewports.contains_key(*name))
+                            .cloned()
+                    })
+                })
+                .flatten()
+                .unwrap_or_else(|| nearest_output(&rect));
             let ws = ws_counters.entry(target_output.clone()).or_insert(1);
             self.layout
                 .insert_migrated_tree(target_output.clone(), *ws, tree);
@@ -10911,16 +10943,25 @@ impl Smallvil {
             self.layout.set_active_workspace(output_name, active);
         }
 
-        // Floating windows land on the workspace of the reef nearest their
-        // world rect, clamped into the output's visible area.
+        // Restrict nearest-reef selection to the floater's connected output.
+        // An output with only floaters must not lose them to another's reef.
         for (surface, window, world_rect) in floating {
-            let nearest_slot = reef_slots
-                .iter()
-                .min_by_key(|(_, _, rect)| squared_center_distance(world_rect, *rect));
+            let preferred_output = pinned_surfaces
+                .get(&surface)
+                .map(|(output, _)| output)
+                .or_else(|| entry_outputs.get(&surface))
+                .filter(|output| output_viewports.contains_key(*output));
+            let nearest_slot = ocean_classic_slot(
+                world_rect,
+                &reef_slots,
+                preferred_output.map(String::as_str),
+            );
             let (target_output, ws, reef_rect) = if let Some((output, ws, rect)) = nearest_slot {
                 (output.clone(), *ws, *rect)
             } else {
-                let output = nearest_output(&world_rect);
+                let output = preferred_output
+                    .cloned()
+                    .unwrap_or_else(|| nearest_output(&world_rect));
                 let Some(viewport) = output_viewports.get(&output).copied() else {
                     tracing::warn!(%output, "preserving floating world geometry without output geometry");
                     let output = entry_outputs.get(&surface).cloned().unwrap_or(output);
@@ -10962,7 +11003,19 @@ impl Smallvil {
                 );
                 continue;
             };
-            let local_rect = ocean_rect_to_classic(world_rect, reef_rect, output_geometry);
+            let local_rect = if let Some((_, pin_rect)) = pinned_surfaces.get(&surface) {
+                ocean_rect_to_classic(
+                    *pin_rect,
+                    Rectangle::new(Point::default(), output_geometry.size),
+                    output_geometry,
+                )
+            } else {
+                ocean_rect_to_classic(world_rect, reef_rect, output_geometry)
+            };
+            if let Some(toplevel) = window.toplevel() {
+                toplevel.with_pending_state(|state| state.size = Some(local_rect.size));
+                toplevel.send_pending_configure();
+            }
             self.floating_workspace.insert(
                 surface,
                 FloatingTag {
@@ -10977,7 +11030,7 @@ impl Smallvil {
         // Screen-pinned windows re-enter the Classic `pinned` set (their
         // floating entries were created just above; Classic's invariant is
         // that pinned windows stay floating, which holds).
-        for surface in pinned_surfaces {
+        for surface in pinned_surfaces.into_keys() {
             if self.floating_workspace.contains_key(&surface) {
                 self.pinned.insert(surface);
             }
@@ -13057,6 +13110,7 @@ impl Smallvil {
             .filter_map(|(window, rect, _)| {
                 let surface = window.toplevel().map(|t| t.wl_surface())?;
                 if surface == focused
+                    || !self.ocean.visible_on_output(surface, &output.name())
                     || self
                         .fullscreen
                         .get(surface)
@@ -13871,6 +13925,17 @@ fn ocean_island_origins(
     origins
 }
 
+fn ocean_classic_slot<'a>(
+    world_rect: Rectangle<i32, Logical>,
+    slots: &'a [(String, u32, Rectangle<i32, Logical>)],
+    owner: Option<&str>,
+) -> Option<&'a (String, u32, Rectangle<i32, Logical>)> {
+    slots
+        .iter()
+        .filter(|(output, _, _)| owner.is_none_or(|owner| owner == output))
+        .min_by_key(|(_, _, rect)| squared_center_distance(world_rect, *rect))
+}
+
 fn ocean_reef_x(base_x: i32, workspace: u32, width: i32, gap: i32) -> i32 {
     let stride = i64::from(width.saturating_add(gap).max(1));
     let offset = i64::from(workspace.saturating_sub(1)).saturating_mul(stride);
@@ -14316,6 +14381,28 @@ mod tests {
         let world = classic_rect_to_ocean(classic, output, reef);
         assert_eq!(world.loc, (8120, 80).into());
         assert_eq!(ocean_rect_to_classic(world, reef, output), classic);
+    }
+
+    #[test]
+    fn returning_float_keeps_its_monitor_even_when_only_the_other_monitor_has_tiles() {
+        let world = Rectangle::new((2100, 100).into(), (600, 400).into());
+        let qhd = (
+            "qhd".to_string(),
+            1,
+            Rectangle::new((0, 0).into(), (2048, 1152).into()),
+        );
+        let fhd = (
+            "fhd".to_string(),
+            3,
+            Rectangle::new((7000, 0).into(), (1920, 1080).into()),
+        );
+        let slots = vec![qhd.clone(), fhd];
+        assert_eq!(
+            ocean_classic_slot(world, &slots, Some("fhd")).unwrap().0,
+            "fhd"
+        );
+        assert!(ocean_classic_slot(world, std::slice::from_ref(&qhd), Some("fhd")).is_none());
+        assert_eq!(ocean_classic_slot(world, &[qhd], None).unwrap().0, "qhd");
     }
 
     #[test]

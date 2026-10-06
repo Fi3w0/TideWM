@@ -674,9 +674,9 @@ pub enum WorkspaceRef {
     Name(String),
 }
 
-/// Spatial ownership model selected once when TideWM starts. Classic keeps
-/// numbered per-output workspaces; Ocean owns one continuous world viewed by
-/// per-output cameras. A reload never swaps this underneath live windows.
+/// Spatial ownership model. Classic keeps numbered per-output workspaces;
+/// Ocean uses continuous world rectangles and per-output cameras, with optional
+/// shared visibility. Reloading the selection migrates live windows in place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SpatialEngine {
     #[default]
@@ -763,6 +763,10 @@ impl OceanPanButton {
 /// for a usable first launch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OceanConfig {
+    /// Opt in to rendering another output's windows through this camera.
+    /// Independent output membership is the default; world geometry stays
+    /// continuous in either mode.
+    pub shared_canvas: bool,
     pub camera_step: i32,
     /// Dragging a reef tile with the normal move/resize gesture detaches it
     /// into a freely placed world rectangle. Reefs remain available as local
@@ -809,6 +813,7 @@ pub struct OceanConfig {
 impl Default for OceanConfig {
     fn default() -> Self {
         Self {
+            shared_canvas: false,
             camera_step: 480,
             freeform_windows: true,
             smart_tiling: true,
@@ -7414,6 +7419,9 @@ fn apply_classic_depth_block(cfg: &mut ClassicDepthConfig, body: &[waves::Entry]
 fn apply_ocean_block(cfg: &mut OceanConfig, body: &[waves::Entry]) {
     for entry in body {
         match entry {
+            waves::Entry::Assign(key, value) if key == "shared_canvas" => {
+                set_bool(&mut cfg.shared_canvas, "ocean.shared_canvas", value)
+            }
             waves::Entry::Assign(key, value) if key == "freeform_windows" => {
                 set_bool(&mut cfg.freeform_windows, "ocean.freeform_windows", value)
             }
@@ -10830,9 +10838,11 @@ mod tests {
 
     #[test]
     fn ocean_selector_reefs_bookmarks_and_actions_parse_without_resolution_defaults() {
+        assert!(!OceanConfig::default().shared_canvas);
         let entries = wave_entries(
             "spatial_engine = ocean\n\
              ocean {\n\
+                 shared_canvas = true\n\
                  camera_step = 720\n\
                  depth_enabled = false\n\
                  zoom_enabled = true\n\
@@ -10872,6 +10882,7 @@ mod tests {
         let config = Config::from_raw(lower_entries(&entries)).0;
 
         assert_eq!(config.spatial_engine, SpatialEngine::Ocean);
+        assert!(config.ocean.shared_canvas);
         assert_eq!(config.ocean.camera_step, 720);
         assert!(!config.ocean.depth_enabled);
         assert!(config.ocean.zoom_enabled);
