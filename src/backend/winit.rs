@@ -1,4 +1,7 @@
-use std::time::Duration;
+use std::{
+    num::NonZeroU32,
+    time::{Duration, Instant},
+};
 
 use smithay::{
     backend::{
@@ -148,12 +151,12 @@ pub fn init_winit(
     // WinitEvent::Redraw/backend.window().request_redraw() (the pattern
     // smallvil used): nothing throttles how fast request_redraw() re-fires
     // on its own, and it was spinning the CPU at 100% even fully idle. A
-    // Timer physically can't fire faster than its re-arm duration, so this
-    // is safe by construction (same pattern DriftWM's winit backend uses,
-    // and the same one `backend/udev.rs` uses for its own render loop). One
+    // Absolute deadlines on a fixed epoch skip missed frames without
+    // catch-up bursts or adding rendering time to the frame period. One
     // shared Timer drives every simulated output, exactly like udev.rs
     // drives every CRTC from its one Timer -- see `WinitOutput::dirty`.
     let timer = Timer::immediate();
+    let frame_epoch = Instant::now();
     event_loop
         .handle()
         .insert_source(timer, move |_, _, state| {
@@ -545,16 +548,21 @@ pub fn init_winit(
             state.refresh_popup_grab();
             state.cleanup_capture();
 
-            // Re-arm at the host panel's reported frame period. The bounded
-            // timer preserves the no-spin property while following the
-            // monitor that owns the nested window.
+            // Use a rational frame grid shared with the screencast producer.
+            // Include all work above when skipping past missed deadlines.
             let refresh = outputs
                 .iter()
                 .filter_map(|entry| entry.output.current_mode())
-                .map(|mode| mode.refresh)
+                .filter_map(|mode| u32::try_from(mode.refresh).ok().and_then(NonZeroU32::new))
                 .max()
-                .unwrap_or(60_000);
-            TimeoutAction::ToDuration(Duration::from_micros(1_000_000_000 / refresh.max(1) as u64))
+                .unwrap_or(NonZeroU32::new(60_000).unwrap());
+            let now = Instant::now();
+            TimeoutAction::ToInstant(
+                now + crate::frame_clock::next_frame_delay(
+                    now.saturating_duration_since(frame_epoch),
+                    refresh,
+                ),
+            )
         })?;
 
     Ok(())

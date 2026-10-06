@@ -35,8 +35,10 @@ const STREAM_FRAMERATE: u32 = 30;
 /// Round upwards to nanoseconds so a boundary is never retriggered early.
 /// Missed frames are skipped in constant time, without a catch-up burst.
 fn next_frame_delay(elapsed: Duration) -> Duration {
-    let phase = (elapsed.as_nanos() * u128::from(STREAM_FRAMERATE)) % 1_000_000_000;
-    Duration::from_nanos((1_000_000_000 - phase).div_ceil(u128::from(STREAM_FRAMERATE)) as u64)
+    crate::frame_clock::next_frame_delay(
+        elapsed,
+        std::num::NonZeroU32::new(STREAM_FRAMERATE * 1_000).expect("stream rate is nonzero"),
+    )
 }
 
 #[derive(Clone, Copy)]

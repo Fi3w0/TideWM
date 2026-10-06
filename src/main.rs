@@ -7,6 +7,7 @@ mod accessibility;
 mod backend;
 mod capture;
 mod cursor;
+mod frame_clock;
 mod grabs;
 #[cfg(feature = "screencast")]
 mod screencast;
