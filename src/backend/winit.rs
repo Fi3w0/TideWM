@@ -68,7 +68,7 @@ struct WinitOutput {
     backend: WinitGraphicsBackend<GlesRenderer>,
     winit_evt: WinitEventLoop,
     damage_tracker: OutputDamageTracker,
-    /// Set whenever `Smallvil::take_needs_redraw()` observes dirty state
+    /// Set whenever `Smallvil::take_redraw_requests()` includes this output
     /// (see the shared `Timer` below) and cleared once this output actually
     /// renders. Per-output so N independent windows sharing one global
     /// dirty flag don't race each other -- without this, only whichever
@@ -250,8 +250,9 @@ pub fn init_winit(
                 return TimeoutAction::Drop;
             }
 
-            if state.take_needs_redraw() {
-                for entry in &mut outputs {
+            let redraw = state.take_redraw_requests();
+            for entry in &mut outputs {
+                if redraw.includes(&entry.output) {
                     entry.dirty = true;
                 }
             }

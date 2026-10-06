@@ -252,7 +252,7 @@ pub struct Smallvil {
     pub welcome_hint: Option<crate::welcome::WelcomeHint>,
     last_config_event: Instant,
     config_reload_timer_armed: bool,
-    needs_redraw: bool,
+    redraw_requests: crate::redraw::RedrawRequests,
     /// Optional backend wake-up used by native DRM to propagate damage as
     /// an event instead of waiting for a fixed polling interval. The winit
     /// backend keeps its host-refresh timer and leaves this unset.
@@ -3827,7 +3827,7 @@ impl Smallvil {
             last_pointer_motion: Instant::now(),
             last_activity: Instant::now(),
             cursor_idle_timer_armed: false,
-            needs_redraw: true,
+            redraw_requests: crate::redraw::RedrawRequests::global(),
             redraw_wakeup: None,
             active_submap: None,
             rescue_keybinds_active: false,
@@ -5935,12 +5935,25 @@ impl Smallvil {
     /// Backends should render only when this is true (or a toast is active)
     /// rather than redrawing every frame regardless of damage.
     pub fn request_redraw(&mut self) {
-        self.needs_redraw = true;
+        self.redraw_requests.request_all();
         if let Some(wakeup) = &self.redraw_wakeup {
             wakeup.ping();
         }
         #[cfg(feature = "accessibility")]
         self.schedule_accessibility_sync();
+    }
+
+    /// Scope backend work to a live output. Capture and animation wakeups
+    /// change pixels, not the accessibility tree. Coalescing is bounded by
+    /// the live output set rather than a hardware-specific output count.
+    pub(crate) fn request_output_redraw(&mut self, output: &Output) {
+        if !self.space.outputs().any(|mapped| mapped == output) {
+            return;
+        }
+        self.redraw_requests.request_output(output);
+        if let Some(wakeup) = &self.redraw_wakeup {
+            wakeup.ping();
+        }
     }
 
     /// Smallest live logical width used by every currently mapped output.
@@ -6221,10 +6234,8 @@ impl Smallvil {
     /// treating every live toast as implicitly dirty here would make a
     /// persistent error toast redraw forever at the timer's full rate.
     /// Clears the flag as a side effect, since the caller is about to render.
-    pub fn take_needs_redraw(&mut self) -> bool {
-        let needs_redraw = self.needs_redraw;
-        self.needs_redraw = false;
-        needs_redraw
+    pub(crate) fn take_redraw_requests(&mut self) -> crate::redraw::RedrawRequests {
+        self.redraw_requests.take()
     }
 
     /// Whether the welcome-hint card should actually be drawn this frame:

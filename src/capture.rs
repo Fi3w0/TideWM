@@ -268,8 +268,9 @@ impl Smallvil {
             capture.completion.fail(CaptureFailureReason::Unknown);
             return;
         }
+        let output = capture.output.clone();
         self.pending_captures.push(capture);
-        self.request_redraw();
+        self.request_output_redraw(&output);
     }
 
     #[cfg(feature = "screencast")]
@@ -393,7 +394,7 @@ impl Smallvil {
         if mine.len() > MAX_CAPTURE_RENDERS_PER_OUTPUT_FRAME {
             let deferred = mine.split_off(MAX_CAPTURE_RENDERS_PER_OUTPUT_FRAME);
             self.pending_captures.extend(deferred);
-            self.request_redraw();
+            self.request_output_redraw(output);
         }
 
         for capture in mine {

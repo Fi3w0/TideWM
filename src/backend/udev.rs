@@ -1100,7 +1100,7 @@ pub fn init_udev(
     Ok(())
 }
 
-/// Consume the compositor-wide damage bit and render every ready CRTC once.
+/// Consume coalesced damage requests and render each included ready CRTC once.
 /// A CRTC already waiting for VBlank keeps its own `dirty` bit and is picked
 /// up by the DRM event handler, so a slow output never blocks a faster one.
 fn render_requested_surfaces(
@@ -1108,8 +1108,9 @@ fn render_requested_surfaces(
     device: &Rc<RefCell<DeviceData>>,
 ) -> Vec<(crtc::Handle, Duration)> {
     let mut dev = device.borrow_mut();
-    if state.take_needs_redraw() {
-        for surface in dev.surfaces.values_mut() {
+    let redraw = state.take_redraw_requests();
+    for surface in dev.surfaces.values_mut() {
+        if redraw.includes(&surface.output) {
             surface.dirty = true;
         }
     }
