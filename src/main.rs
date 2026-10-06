@@ -733,7 +733,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if state.config.show_welcome_hint {
-        state.welcome_hint = Some(crate::welcome::WelcomeHint::build(&state.config.terminal));
+        state.welcome_hint = Some(crate::welcome::WelcomeHint::build(&state.config));
         state.request_redraw();
     }
 

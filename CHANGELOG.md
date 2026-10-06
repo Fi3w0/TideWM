@@ -2,6 +2,11 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.123 — Welcome card shows the real binds and config path
+
+- The empty-desktop welcome card now lists the binds actually configured to open the terminal (a `spawn:` bind whose program matches `terminal`), close a window and quit, then shows where the config file lives (home-relative) and that it reloads on save. Unbound actions show `(unbound)` instead of a guessed shortcut. The card is rebuilt on every config reload, so rebinding updates it live, and its height follows its content.
+- Fixes the dismissal line, which named the removed `show_welcome_hint` key instead of `welcome_hint`.
+
 ## 0.90.122 — Report decorated surfaces under their Wayland identity
 
 - The .121 live protocol probe showed that initializing primary-output state alone was insufficient: rounded/cascade elements deliberately namespace their render IDs, so the surface ID was absent from the actual frame report.

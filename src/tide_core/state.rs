@@ -13318,14 +13318,11 @@ impl Smallvil {
                         );
                     }
                 }
-                if new_config.show_welcome_hint {
-                    if self.welcome_hint.is_none() {
-                        self.welcome_hint =
-                            Some(crate::welcome::WelcomeHint::build(&new_config.terminal));
-                    }
-                } else {
-                    self.welcome_hint = None;
-                }
+                // Rebuilt on every reload: the card shows live binds and the
+                // config path, either of which the reload may have changed.
+                self.welcome_hint = new_config
+                    .show_welcome_hint
+                    .then(|| crate::welcome::WelcomeHint::build(&new_config));
                 let outputs_changed =
                     format!("{:?}", self.config.outputs) != format!("{:?}", new_config.outputs);
                 self.config = new_config;

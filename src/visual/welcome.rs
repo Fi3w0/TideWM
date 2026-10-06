@@ -1,6 +1,7 @@
 //! Static welcome card shown while `show_welcome_hint` is enabled and no real
-//! window is mapped. Its buffer is built once; render call sites decide current
-//! visibility from live config and Space state.
+//! window is mapped. Its buffer is rebuilt from the live config (binds, config
+//! path) on load/reload; render call sites decide current visibility from live
+//! config and Space state.
 
 use fontdue::Font;
 use smithay::{
@@ -10,11 +11,13 @@ use smithay::{
         Kind,
     },
     backend::renderer::gles::GlesRenderer,
+    input::keyboard::{xkb, Keysym},
     utils::{Physical, Size, Transform},
 };
 
-const CARD_W: i32 = 560;
-const CARD_H: i32 = 170;
+use crate::config::{Action, Config, Keybind};
+
+const CARD_W: i32 = 600;
 const CARD_RADIUS: f32 = 14.0;
 const CARD_BG: (u8, u8, u8, u8) = (22, 30, 34, 235);
 const CARD_BORDER: (u8, u8, u8) = (60, 170, 200); // same water-palette accent Toast/Overview use
@@ -22,6 +25,8 @@ const BORDER_PX: i32 = 2;
 const TITLE_SIZE: f32 = 20.0;
 const BODY_SIZE: f32 = 15.0;
 const TEXT_RGB: (u8, u8, u8) = (225, 225, 225);
+const KEY_RGB: (u8, u8, u8) = (120, 210, 230); // accent, so binds scan first
+const DIM_RGB: (u8, u8, u8) = (150, 160, 165);
 const PAD: i32 = 24;
 const LINE_GAP: i32 = 10;
 
@@ -32,8 +37,17 @@ pub struct WelcomeHint {
 }
 
 impl WelcomeHint {
-    pub fn build(terminal: &str) -> Self {
-        let (width, height) = (CARD_W, CARD_H);
+    pub fn build(config: &Config) -> Self {
+        let content = WelcomeContent::new(&config.terminal, &config.keybinds, &Config::path());
+        let rows = content.binds.len() as i32;
+        let key_col = PAD + content.key_column_width(crate::toast::font());
+        let height = PAD * 2
+            + TITLE_SIZE as i32
+            + LINE_GAP * 2
+            + rows * (BODY_SIZE as i32 + LINE_GAP)
+            + LINE_GAP
+            + 2 * (BODY_SIZE as i32 + LINE_GAP);
+        let width = CARD_W;
         let mut pixels = vec![0u8; (width * height * 4) as usize];
 
         for y in 0..height {
@@ -62,29 +76,49 @@ impl WelcomeHint {
             canvas,
             font,
             "Welcome to TideWM",
-            PAD,
-            y,
+            (PAD, y),
             TITLE_SIZE,
+            TEXT_RGB,
         );
-        y += TITLE_SIZE as i32 + LINE_GAP;
+        y += LINE_GAP * 2;
+        for (keys, label) in &content.binds {
+            y += BODY_SIZE as i32 + LINE_GAP;
+            let rgb = if keys.is_empty() { DIM_RGB } else { KEY_RGB };
+            let keys = if keys.is_empty() {
+                "(unbound)"
+            } else {
+                keys.as_str()
+            };
+            draw_line(&mut pixels, canvas, font, keys, (PAD, y), BODY_SIZE, rgb);
+            draw_line(
+                &mut pixels,
+                canvas,
+                font,
+                label,
+                (key_col, y),
+                BODY_SIZE,
+                TEXT_RGB,
+            );
+        }
+        y += LINE_GAP + BODY_SIZE as i32 + LINE_GAP;
         draw_line(
             &mut pixels,
             canvas,
             font,
-            &format!("Use your configured spawn bind for a terminal ({terminal})"),
-            PAD,
-            y,
+            &format!("Config: {} (reloads on save)", content.config_path),
+            (PAD, y),
             BODY_SIZE,
+            TEXT_RGB,
         );
         y += BODY_SIZE as i32 + LINE_GAP;
         draw_line(
             &mut pixels,
             canvas,
             font,
-            "Delete show_welcome_hint from config.wave to dismiss this",
-            PAD,
-            y,
+            "Set welcome_hint = false there to hide this card",
+            (PAD, y),
             BODY_SIZE,
+            DIM_RGB,
         );
 
         let buffer = MemoryRenderBuffer::from_slice(
@@ -155,9 +189,9 @@ fn draw_line(
     canvas: (i32, i32),
     font: &Font,
     text: &str,
-    x0: i32,
-    baseline_y: i32,
+    (x0, baseline_y): (i32, i32),
     font_size: f32,
+    rgb: (u8, u8, u8),
 ) {
     let (canvas_w, canvas_h) = canvas;
     let mut pen_x = x0;
@@ -180,7 +214,7 @@ fn draw_line(
                 if x < 0 || y < 0 || x >= canvas_w || y >= canvas_h {
                     continue;
                 }
-                blend_text_pixel(pixels, canvas_w, x, y, coverage);
+                blend_text_pixel(pixels, canvas_w, x, y, coverage, rgb);
             }
         }
         pen_x += metrics.advance_width.round() as i32;
@@ -211,12 +245,177 @@ fn put_pixel(pixels: &mut [u8], width: i32, x: i32, y: i32, (r, g, b, a): (u8, u
     pixels[i + 3] = a;
 }
 
-fn blend_text_pixel(pixels: &mut [u8], width: i32, x: i32, y: i32, coverage: u8) {
+fn blend_text_pixel(
+    pixels: &mut [u8],
+    width: i32,
+    x: i32,
+    y: i32,
+    coverage: u8,
+    rgb: (u8, u8, u8),
+) {
     let i = ((y * width + x) * 4) as usize;
     let t = coverage as f32 / 255.0;
-    let (tr, tg, tb) = TEXT_RGB;
+    let (tr, tg, tb) = rgb;
     pixels[i] = (pixels[i] as f32 + (tb as f32 - pixels[i] as f32) * t) as u8;
     pixels[i + 1] = (pixels[i + 1] as f32 + (tg as f32 - pixels[i + 1] as f32) * t) as u8;
     pixels[i + 2] = (pixels[i + 2] as f32 + (tr as f32 - pixels[i + 2] as f32) * t) as u8;
     pixels[i + 3] = pixels[i + 3].max(coverage);
+}
+
+/// Card text derived from the live config. Binds are looked up, never
+/// assumed, so a rebound or removed action shows what is actually pressed.
+struct WelcomeContent {
+    /// (key combo, description); an empty combo means nothing is bound.
+    binds: Vec<(String, String)>,
+    config_path: String,
+}
+
+impl WelcomeContent {
+    fn new(terminal: &str, keybinds: &[Keybind], path: &std::path::Path) -> Self {
+        let terminal = program_name(terminal);
+        let terminal_bind = keybinds.iter().find(|bind| {
+            matches!(&bind.action, Action::Spawn(cmd)
+                if terminal.is_some() && program_name(cmd) == terminal)
+        });
+        let find = |pred: fn(&Action) -> bool| keybinds.iter().find(|b| pred(&b.action));
+        let label = |bind: Option<&Keybind>| bind.map(format_keybind).unwrap_or_default();
+        let terminal_text = match terminal {
+            Some(name) => format!("open terminal ({name})"),
+            None => "open terminal".to_string(),
+        };
+        Self {
+            binds: vec![
+                (label(terminal_bind), terminal_text),
+                (
+                    label(find(|a| matches!(a, Action::CloseWindow))),
+                    "close window".into(),
+                ),
+                (
+                    label(find(|a| matches!(a, Action::Quit))),
+                    "exit TideWM".into(),
+                ),
+            ],
+            config_path: home_relative(path),
+        }
+    }
+
+    fn key_column_width(&self, font: &Font) -> i32 {
+        let widest = self
+            .binds
+            .iter()
+            .map(|(keys, _)| {
+                text_width(
+                    font,
+                    if keys.is_empty() { "(unbound)" } else { keys },
+                    BODY_SIZE,
+                )
+            })
+            .max()
+            .unwrap_or(0);
+        widest + PAD
+    }
+}
+
+/// Basename of a command's program, so `spawn:/usr/bin/kitty -1` matches
+/// `terminal = kitty`.
+fn program_name(cmd: &str) -> Option<&str> {
+    let program = cmd.split_whitespace().next()?;
+    program.rsplit('/').next().filter(|name| !name.is_empty())
+}
+
+fn format_keybind(bind: &Keybind) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for (held, name) in [
+        (bind.mods.logo, "Super"),
+        (bind.mods.ctrl, "Ctrl"),
+        (bind.mods.alt, "Alt"),
+        (bind.mods.shift, "Shift"),
+    ] {
+        if held {
+            parts.push(name.to_string());
+        }
+    }
+    parts.extend(bind.held_keysyms.iter().copied().map(key_name));
+    parts.push(key_name(bind.keysym));
+    parts.join("+")
+}
+
+fn key_name(keysym: Keysym) -> String {
+    let name = xkb::keysym_get_name(keysym);
+    if name.chars().count() == 1 {
+        name.to_uppercase()
+    } else {
+        name
+    }
+}
+
+fn home_relative(path: &std::path::Path) -> String {
+    if let Some(home) = std::env::var_os("HOME") {
+        if let Ok(rest) = path.strip_prefix(&home) {
+            return format!("~/{}", rest.display());
+        }
+    }
+    path.display().to_string()
+}
+
+fn text_width(font: &Font, text: &str, font_size: f32) -> i32 {
+    text.chars()
+        .map(|ch| font.metrics(ch, font_size).advance_width)
+        .sum::<f32>()
+        .ceil() as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bind(mods: crate::config::Mods, key: &str, action: Action) -> Keybind {
+        Keybind {
+            mods,
+            held_keysyms: Vec::new(),
+            keysym: xkb::keysym_from_name(key, xkb::KEYSYM_CASE_INSENSITIVE),
+            action,
+        }
+    }
+
+    #[test]
+    fn content_reports_live_binds_and_path() {
+        let logo = crate::config::Mods {
+            logo: true,
+            ..Default::default()
+        };
+        let logo_shift = crate::config::Mods {
+            shift: true,
+            ..logo
+        };
+        let keybinds = vec![
+            bind(logo, "Return", Action::Spawn("kitty".into())),
+            bind(logo, "t", Action::Spawn("/usr/bin/foot --server".into())),
+            bind(logo, "q", Action::CloseWindow),
+            bind(logo_shift, "e", Action::Quit),
+        ];
+        let content = WelcomeContent::new(
+            "foot",
+            &keybinds,
+            std::path::Path::new("/etc/tide/config.wave"),
+        );
+        assert_eq!(
+            content.binds[0],
+            ("Super+T".into(), "open terminal (foot)".into())
+        );
+        assert_eq!(content.binds[1].0, "Super+Q");
+        assert_eq!(content.binds[2].0, "Super+Shift+E");
+        assert_eq!(content.config_path, "/etc/tide/config.wave");
+    }
+
+    #[test]
+    fn missing_binds_are_reported_unbound() {
+        let keybinds = vec![bind(
+            Default::default(),
+            "F1",
+            Action::Spawn("kitty".into()),
+        )];
+        let content = WelcomeContent::new("alacritty", &keybinds, std::path::Path::new("/x"));
+        assert!(content.binds.iter().all(|(keys, _)| keys.is_empty()));
+    }
 }
