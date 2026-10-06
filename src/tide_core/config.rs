@@ -3573,6 +3573,9 @@ pub struct PopupConfig {
     pub radius: Option<f32>,
     /// Card shape. Defaults to `Pill`, the original card. See `ToastStyle`.
     pub style: ToastStyle,
+    /// How long a timed popup stays fully visible before its fade, in
+    /// milliseconds. Auto is 2400. Banner's countdown bar spans this.
+    pub duration_ms: Option<u64>,
 }
 
 /// Which built-in shape a ripple draws. Multiple shapes can stack
@@ -8345,6 +8348,13 @@ fn apply_popup_block(cfg: &mut PopupConfig, body: &[waves::Entry]) {
             "radius" => {
                 cfg.radius = parse_f32_clamped(value, 0.0, 64.0, "popup.radius");
             }
+            "duration_ms" | "duration" => match parse_duration_ms(value) {
+                Some(ms) if ms > 0 => cfg.duration_ms = Some((ms as u64).clamp(300, 60_000)),
+                _ => tracing::warn!(
+                    value,
+                    "Expected a positive integer for popup.duration_ms, ignoring"
+                ),
+            },
             "style" => {
                 cfg.style = match value.trim().to_ascii_lowercase().as_str() {
                     "pill" | "card" => ToastStyle::Pill,
@@ -13140,6 +13150,23 @@ shader tinted-blur {
         let entries = wave_entries("popup {\n style = nonsense\n }\n");
         let fallback = Config::from_raw(lower_entries(&entries)).0;
         assert_eq!(fallback.popup.style, ToastStyle::Pill);
+    }
+
+    #[test]
+    fn popup_duration_parses_and_clamps() {
+        let auto = Config::from_raw(RawConfig::default()).0;
+        assert_eq!(auto.popup.duration_ms, None);
+        let duration = |text: &str| {
+            let entries = wave_entries(&format!("popup {{\n duration_ms = {text}\n }}\n"));
+            Config::from_raw(lower_entries(&entries))
+                .0
+                .popup
+                .duration_ms
+        };
+        assert_eq!(duration("1500"), Some(1500));
+        assert_eq!(duration("10"), Some(300));
+        assert_eq!(duration("999999"), Some(60_000));
+        assert_eq!(duration("soon"), None);
     }
 
     #[test]

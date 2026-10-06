@@ -2,6 +2,12 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.130 — Configurable popup duration
+
+- New `popup { duration_ms }` (300–60000, default 2400): how long a timed popup stays fully visible before fading. The banner style's countdown bar spans the same time. Error popups still stay until the next reload.
+- Documented `popup { style = pill | banner }`, which existed but was missing from DOCUMENTATION.md, and that `radius = 0` gives square corners.
+- `popup { radius = 0 }` now draws a solid square card. The shared coverage function returned 0.5 inside any shape with a radius under half a pixel, so a square popup came out half transparent, and the border's inner edge was forced to a 1 px radius. Results for radii of 0.5 px and up are unchanged.
+
 ## 0.90.129 — Don't crash clients when a monitor disconnects
 
 - A monitor dropping off (here: a flaky HDMI link re-training after DPMS wake) made kitty segfault in `wl_proxy_get_user_data`. TideWM removed the `wl_output` global first and only sent `wl_surface.leave` on the next `Space::refresh`; glfw had already destroyed its proxy on `global_remove`, so the leave arrived naming a null object.

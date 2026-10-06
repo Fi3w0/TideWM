@@ -1076,13 +1076,21 @@ Themes TideWM's own popup chrome: the config warning panel and the toast. Everyt
 | --- | --- | --- | --- |
 | `border_width` | float, `0`–`8` | `border.width` (clamped `1`–`4`) | Popup border stroke thickness in logical pixels. `border-width` is an alias. |
 | `border_color` | RGBA color | accent gradient | Flat popup border color. When set, the gradient position is ignored and every sampled point uses this color. `border-color` is an alias. |
-| `radius` | float, `0`–`64` | average `[rounding]` radius | Popup corner radius in logical pixels. |
+| `radius` | float, `0`–`64` | average `[rounding]` radius | Popup corner radius in logical pixels. `0` gives square corners. |
+| `style` | `pill` or `banner` | `pill` | `pill` is the card with the TideWM mark. `banner` is a wide bar with an accent edge and a countdown bar along the bottom that fills while the popup is shown. `card` and `bar`/`strip` are aliases. |
+| `duration_ms` | integer, `300`–`60000` | `2400` | How long a timed popup stays fully visible before its 450 ms fade; the banner's countdown bar spans this time. `duration` is an alias. Error popups stay until the next reload regardless. |
 
 ```wave
 popup {
     border_width = 3
     border_color = FF0000
     radius = 20
+}
+
+popup {
+    style = banner       # square bar with a countdown
+    radius = 0
+    duration_ms = 1500
 }
 ```
 

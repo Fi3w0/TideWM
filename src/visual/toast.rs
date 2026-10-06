@@ -39,7 +39,6 @@ const ICON_WIDTH: i32 = 46;
 const TEXT_RIGHT_PAD: i32 = 22;
 const MIN_WIDTH: i32 = 270;
 
-const VISIBLE_FOR: Duration = Duration::from_millis(2400);
 const FADE_FOR: Duration = Duration::from_millis(450);
 
 // `ToastStyle::Banner`: a long, short bar instead of the pill's tall card,
@@ -115,7 +114,7 @@ impl Toast {
             message,
             kind,
             theme,
-            Some(VISIBLE_FOR),
+            Some(theme.popup_duration),
             narrowest_output_width,
         )
     }
@@ -443,7 +442,7 @@ fn rasterize_pill_for_output(
                     card_y + stroke,
                     card_w - stroke * 2,
                     CARD_HEIGHT - stroke * 2,
-                    (radius - stroke as f32).max(1.0),
+                    (radius - stroke as f32).max(0.0),
                 );
             if border > 0.0 {
                 let accent = theme.popup_accent(kind == ToastKind::Error, x as f32 / width as f32);
@@ -593,7 +592,7 @@ fn rasterize_banner_for_output(
                     card_y + stroke,
                     card_w - stroke * 2,
                     BANNER_HEIGHT - stroke * 2,
-                    (radius - stroke as f32).max(1.0),
+                    (radius - stroke as f32).max(0.0),
                 );
             if border > 0.0 {
                 blend_color_pixel(&mut pixels, width, x, y, accent, (border * 235.0) as u8);
@@ -736,11 +735,15 @@ pub(crate) fn rounded_rect_coverage_local(
     // of short-circuiting to "fully inside" the moment either axis alone
     // is flat, or a point far outside on one axis read as fully covered as
     // long as the other axis was in its flat middle.
-    let dx = ((fx - fw / 2.0).abs() - (fw / 2.0 - radius)).max(0.0);
-    let dy = ((fy - fh / 2.0).abs() - (fh / 2.0 - radius)).max(0.0);
+    let qx = (fx - fw / 2.0).abs() - (fw / 2.0 - radius);
+    let qy = (fy - fh / 2.0).abs() - (fh / 2.0 - radius);
+    let (dx, dy) = (qx.max(0.0), qy.max(0.0));
 
-    let dist = (dx * dx + dy * dy).sqrt();
-    (radius - dist + 0.5).clamp(0.0, 1.0)
+    // Signed distance to the rounded rectangle. The `min(max(qx, qy), 0)`
+    // term is what keeps the interior fully covered when `radius` < 0.5:
+    // without it a square card (`radius = 0`) rendered at half coverage.
+    let signed = (dx * dx + dy * dy).sqrt() + qx.max(qy).min(0.0) - radius;
+    (0.5 - signed).clamp(0.0, 1.0)
 }
 
 fn put_pixel(pixels: &mut [u8], width: i32, x: i32, y: i32, (r, g, b, a): (u8, u8, u8, u8)) {
@@ -831,6 +834,26 @@ mod tests {
     /// outside the pill on the y axis, but in the flat (non-corner) x
     /// region, must read as uncovered rather than the old short-circuit's
     /// "flat on one axis means fully inside".
+    #[test]
+    fn square_corners_cover_the_whole_interior() {
+        let (left, top, width, height) = (6, 6, 300, 46);
+        for (x, y) in [(6, 6), (305, 6), (6, 51), (305, 51), (150, 28)] {
+            assert_eq!(
+                rounded_rect_coverage_local(x, y, left, top, width, height, 0.0),
+                1.0,
+                "({x}, {y})"
+            );
+        }
+        assert_eq!(
+            rounded_rect_coverage_local(5, 6, left, top, width, height, 0.0),
+            0.0
+        );
+        assert_eq!(
+            rounded_rect_coverage_local(6, 52, left, top, width, height, 0.0),
+            0.0
+        );
+    }
+
     #[test]
     fn coverage_is_zero_far_outside_the_shape_even_in_the_flat_region() {
         let (left, top, width, height, radius) = (6, 6, 300, 70, 14.0);

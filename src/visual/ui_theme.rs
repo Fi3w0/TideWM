@@ -29,7 +29,12 @@ pub struct UiTheme {
     popup_border_color: Option<[u8; 3]>,
     /// `[popup] { style }`. Defaults to `Pill`.
     pub style: ToastStyle,
+    /// `[popup] { duration_ms }`: full-visibility time of a timed popup.
+    pub popup_duration: std::time::Duration,
 }
+
+/// Popup full-visibility time when `[popup] { duration_ms }` is unset.
+pub const DEFAULT_POPUP_DURATION: std::time::Duration = std::time::Duration::from_millis(2400);
 
 impl UiTheme {
     pub fn from_config(config: &Config) -> Self {
@@ -85,6 +90,10 @@ impl UiTheme {
             border_width,
             popup_border_color,
             style: config.popup.style,
+            popup_duration: config
+                .popup
+                .duration_ms
+                .map_or(DEFAULT_POPUP_DURATION, std::time::Duration::from_millis),
         }
     }
 
@@ -119,6 +128,7 @@ impl UiTheme {
             border_width: 2.0,
             popup_border_color: None,
             style: ToastStyle::Pill,
+            popup_duration: DEFAULT_POPUP_DURATION,
         }
     }
 
