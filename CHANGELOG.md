@@ -13,7 +13,7 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 - Saving `env { }` no longer needs a relogin. New `session_env` module: startup still writes the process environment (before any thread exists); reload-time changes are kept beside it and applied to every child TideWM spawns, because rewriting the process environment once helper threads exist would race their `getenv`. Removing a key restores its pre-TideWM value, or unsets it.
 - Standalone sessions push reload changes to `dbus-update-activation-environment --systemd` as explicit `KEY=VALUE` pairs and `systemctl --user unset-environment` for removals, on the same detached best-effort worker contract as startup.
 - Changing `XCURSOR_THEME`/`XCURSOR_SIZE` reloads TideWM's cursor theme on the spot (udev), so the compositor cursor and cursor-shape-protocol clients switch immediately; a theme without a default cursor falls back to the dot with a config warning.
-- Unit tests cover change detection, restoring baselines and removal.
+- Unit tests cover change detection, restoring baselines and removal. Maintainer-confirmed live on .129: changing `XCURSOR_THEME` in `env { }` switched the cursor on save, no relogin.
 
 ## 0.90.127 — Clear stale CRTC bindings when returning from a TTY
 
