@@ -2,6 +2,12 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.118 — Initialize natural floating geometry before mapping
+
+- A native NVIDIA GTK probe reproduced a 640×360 floating window opening at its rule minimum (500×280): mapping consumed Smithay's still-empty window bounding box before the generic commit handler refreshed it.
+- Initialize the unmapped window's geometry on its first buffer commit before evaluating placement. Existing mapped commits, null-buffer unmaps, explicit/remembered-size precedence, and synchronized-subsurface handling retain their paths.
+- Live validation is recorded in `report.md`; build/test success alone does not establish native behavior.
+
 ## [Unreleased]
 
 ### Added

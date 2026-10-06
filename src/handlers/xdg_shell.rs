@@ -670,6 +670,14 @@ pub fn handle_commit(state: &mut Smallvil, surface: &WlSurface) {
     let transition = lifecycle_transition(tracking, has_buffer);
     match transition {
         ToplevelTransition::Map => {
+            // Mapping rules consume the client's natural geometry before the
+            // generic post-lifecycle Window::on_commit call. Smithay clamps
+            // that geometry to its cached bbox, which is still empty on the
+            // first buffer unless we initialize it here. Keep the later
+            // commit path for existing windows and null-buffer unmaps intact.
+            if let Some(window) = state.unmapped_toplevels.get(surface) {
+                window.on_commit();
+            }
             state.note_toplevel_flutter(surface, true);
             state.map_toplevel(surface);
         }
