@@ -250,6 +250,7 @@ pub fn init_winit(
                 return TimeoutAction::Drop;
             }
 
+            super::scene::prepare_render_scene(&mut state.space);
             // Expiration must run even if no output rendered this tick.
             state.has_active_animation();
             let redraw = state.take_redraw_requests();
@@ -576,7 +577,6 @@ pub fn init_winit(
                 entry.dirty = state.output_has_active_animation(output, &placements);
             }
 
-            state.space.refresh();
             state.popups.cleanup();
             state.refresh_popup_grab();
             state.cleanup_capture();

@@ -1752,6 +1752,7 @@ fn render_surface(
     surface: &mut SurfaceData,
     renderer: &mut GlesRenderer,
 ) -> Option<Duration> {
+    super::scene::prepare_render_scene(&mut state.space);
     surface.dirty = false;
 
     let locked = !matches!(state.session_lock, SessionLock::Unlocked);
