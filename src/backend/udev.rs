@@ -838,11 +838,9 @@ pub fn init_udev(
                 SessionEvent::ActivateSession => {
                     let mut dev = device_for_session.borrow_mut();
                     tracing::info!("Session resumed (VT switch back)");
-                    if dev.libinput.resume().is_err() {
-                        tracing::warn!("Failed to resume libinput");
-                    }
-                    if let Err(e) = dev.drm.activate(false) {
-                        tracing::error!(%e, "Failed to reactivate DRM device");
+                    let DeviceData { drm, libinput, .. } = &mut *dev;
+                    if let Err(error) = super::session::resume_scanout(drm, libinput) {
+                        tracing::error!(%error, "Session remains paused after failed scanout recovery");
                         return;
                     }
                     for device in dev.render_only_devices.values_mut() {
