@@ -2,6 +2,10 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.136 — Banner keeps its line clear of the text on short boxes
+
+- With `height = 32` and `line_width = 8`, the banner's inset countdown line was drawn across the message. The gap under the line now scales with the box height, the line is capped at a sixth of the height, and the icon and text center in the space above it. A regression test checks the line's rows contain no text pixels.
+
 ## 0.90.135 — Underline + slide is the default popup; adjustable box size
 
 - The default popup is now `style = underline` with `animation = slide` (previously `pill` with a fade). Unknown style/animation values fall back to these defaults. `style = pill` and `animation = fade` restore the old look. Colors still follow the theme: the panel gradient from the border colors, the line and icon from the accent gradient (urgent colors for errors), and `border_color` still pins the line color.

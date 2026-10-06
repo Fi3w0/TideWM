@@ -679,11 +679,16 @@ fn rasterize_banner_for_output(
             .map_or(default, |w| w.round().clamp(1.0, 16.0) as i32)
     };
     let underline_h = line_width(UNDERLINE_HEIGHT).min(card_h / 2);
-    // Icon and text center in the card, above the line for `Underline`.
-    let content_h = if mode == BannerMode::Underline {
-        card_h - underline_h
-    } else {
-        card_h
+    // Banner's inset line scales with the card so a short box keeps room
+    // for text: the gap shrinks proportionally and the line is capped at a
+    // sixth of the height.
+    let banner_gap = (BANNER_PROGRESS_BOTTOM_GAP * card_h / BANNER_HEIGHT).max(2);
+    let banner_line_h = line_width(BANNER_PROGRESS_HEIGHT).min((card_h / 6).max(2));
+    // Icon and text center in the space above the countdown line.
+    let content_h = match mode {
+        BannerMode::Underline => card_h - underline_h,
+        BannerMode::Banner => card_h - banner_gap - banner_line_h,
+        BannerMode::Outline => card_h,
     };
     let icon_r = BANNER_ICON_RADIUS
         .min((content_h as f32 - 8.0) / 2.0)
@@ -838,11 +843,10 @@ fn rasterize_banner_for_output(
             h,
         }
     } else {
-        let h = line_width(BANNER_PROGRESS_HEIGHT)
-            .min(BANNER_PROGRESS_BOTTOM_GAP + BANNER_PROGRESS_HEIGHT * 2);
+        let h = banner_line_h;
         ProgressTrack {
             x: card_x + BANNER_PROGRESS_INSET_X,
-            y: card_y + card_h - BANNER_PROGRESS_BOTTOM_GAP - h,
+            y: card_y + card_h - banner_gap - h,
             w: (card_w - BANNER_PROGRESS_INSET_X * 2).max(0),
             h,
         }
@@ -1321,6 +1325,32 @@ mod tests {
         let narrow =
             rasterize_toast_for_output("ok", ToastKind::Info, theme, Some(400), 0.0).unwrap();
         assert_eq!(narrow.width, 400 - MARGIN * 2);
+    }
+
+    #[test]
+    fn banner_line_stays_below_the_text_on_short_boxes() {
+        let mut theme = banner_theme();
+        theme.popup_height = Some(32.0);
+        theme.popup_line_width = Some(8.0);
+        let raster =
+            rasterize_toast_for_output("Configuration reloaded", ToastKind::Info, theme, None, 0.0)
+                .unwrap();
+        let Some(Progress::Line(track)) = raster.progress else {
+            panic!("banner has a line track");
+        };
+        assert!(track.h <= 32 / 6, "line capped on a short box");
+        // No near-white text pixel may sit inside the line's rows (the
+        // accent line and border are never near-white on every channel).
+        for y in track.y..track.y + track.h {
+            for x in track.x..track.x + track.w {
+                let i = ((y * raster.width + x) * 4) as usize;
+                let px = &raster.pixels[i..i + 3];
+                assert!(
+                    !px.iter().all(|&c| c > 200),
+                    "text pixel at ({x}, {y}) overlaps the line"
+                );
+            }
+        }
     }
 
     #[test]
