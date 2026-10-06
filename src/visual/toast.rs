@@ -89,14 +89,13 @@ pub struct Toast {
     theme: crate::ui_theme::UiTheme,
     buffer: MemoryRenderBuffer,
     size: (i32, i32),
-    /// `ToastStyle::Banner`'s bottom progress-line geometry, if the active
-    /// style has one. Each visible frame repaints just this rectangle in
-    /// place via `MemoryRenderBuffer::render().draw` (which takes a damage
-    /// rect and re-uploads only that part of the texture) instead of
-    /// rebuilding the whole buffer -- see `render_element`. `None` for
-    /// `Pill`, and for a persistent toast: nothing to animate a countdown
-    /// against.
-    progress_track: Option<ProgressTrack>,
+    /// The active style's countdown, if it has one: Banner's bottom line or
+    /// Outline's traced border. Each visible frame repaints only what
+    /// changed in place via `MemoryRenderBuffer::render().draw` (damage-
+    /// scoped re-upload) instead of rebuilding the whole buffer -- see
+    /// `render_element`. `None` for `Pill`, and for a persistent toast:
+    /// nothing to animate a countdown against.
+    progress: Option<Progress>,
     layout_output_width: Option<i32>,
     shown_at: Instant,
     /// `None` means this toast never fades on its own -- see `persistent`.
@@ -147,7 +146,7 @@ impl Toast {
         // `progress_track`'s own doc comment for why it then tracks nothing
         // further to animate.
         let initial_fill = if visible_for.is_some() { 0.0 } else { 1.0 };
-        let (buffer, size, progress_track) =
+        let (buffer, size, progress) =
             build_buffer(&message, kind, theme, narrowest_output_width, initial_fill)?;
         Some(Self {
             message,
@@ -155,8 +154,8 @@ impl Toast {
             theme,
             buffer,
             size,
-            progress_track: if visible_for.is_some() {
-                progress_track
+            progress: if visible_for.is_some() {
+                progress
             } else {
                 None
             },
@@ -211,7 +210,7 @@ impl Toast {
     ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
         if self.layout_output_width != narrowest_output_width {
             let initial_fill = if self.visible_for.is_some() { 0.0 } else { 1.0 };
-            let (buffer, size, progress_track) = build_buffer(
+            let (buffer, size, progress) = build_buffer(
                 &self.message,
                 self.kind,
                 self.theme,
@@ -220,8 +219,8 @@ impl Toast {
             )?;
             self.buffer = buffer;
             self.size = size;
-            self.progress_track = if self.visible_for.is_some() {
-                progress_track
+            self.progress = if self.visible_for.is_some() {
+                progress
             } else {
                 None
             };
@@ -231,18 +230,28 @@ impl Toast {
         // (damage-scoped re-upload, not a whole-buffer rebuild) instead of
         // re-rasterizing text/background, so a Banner toast's bottom line
         // actually fills as it counts down.
-        if let (Some(track), Some(visible_for)) = (self.progress_track, self.visible_for) {
+        if let (Some(progress), Some(visible_for)) = (self.progress.as_mut(), self.visible_for) {
             let fraction = Animation::new(0.0, 1.0, self.shown_at, visible_for).value();
             let accent = self.theme.popup_accent(self.kind == ToastKind::Error, 0.5);
-            let filled = ((track.w as f32) * fraction).round().max(0.0) as i32;
             let width = self.size.0;
-            let _ = self.buffer.render().draw::<_, ()>(|mem| {
-                stamp_progress_fill(mem, width, track, accent, fraction);
-                Ok(vec![Rectangle::<i32, BufferSpace>::new(
-                    (track.x, track.y).into(),
-                    (filled, track.h).into(),
-                )])
-            });
+            match progress {
+                Progress::Line(track) => {
+                    let track = *track;
+                    let filled = ((track.w as f32) * fraction).round().max(0.0) as i32;
+                    let _ = self.buffer.render().draw::<_, ()>(|mem| {
+                        stamp_progress_fill(mem, width, track, accent, fraction);
+                        Ok(vec![Rectangle::<i32, BufferSpace>::new(
+                            (track.x, track.y).into(),
+                            (filled, track.h).into(),
+                        )])
+                    });
+                }
+                Progress::Outline(outline) => {
+                    let _ = self.buffer.render().draw::<_, ()>(|mem| {
+                        Ok(outline.advance(mem, width, fraction).into_iter().collect())
+                    });
+                }
+            }
         }
         let alpha = match self.visible_for {
             None => 1.0,
@@ -297,7 +306,59 @@ struct Rasterized {
     pixels: Vec<u8>,
     width: i32,
     height: i32,
-    progress_track: Option<ProgressTrack>,
+    progress: Option<Progress>,
+}
+
+/// A style's live countdown.
+enum Progress {
+    /// Banner: a bottom line filling left to right.
+    Line(ProgressTrack),
+    /// Outline: the border traced clockwise from the top-left corner.
+    Outline(OutlineTrack),
+}
+
+/// Outline's border pixels, precomputed once per raster and sorted by their
+/// clockwise position, so a frame paints only the newly reached run.
+struct OutlineTrack {
+    pixels: Vec<OutlinePixel>,
+    painted: usize,
+    accent: [u8; 3],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OutlinePixel {
+    x: i32,
+    y: i32,
+    /// Clockwise position around the card, `0.0..1.0`.
+    t: f32,
+    coverage: u8,
+}
+
+impl OutlineTrack {
+    /// Paints every pixel up to `fraction` not painted yet; returns the
+    /// damaged rectangle, if anything changed.
+    fn advance(
+        &mut self,
+        pixels: &mut [u8],
+        width: i32,
+        fraction: f32,
+    ) -> Option<Rectangle<i32, BufferSpace>> {
+        let end = self.pixels.partition_point(|p| p.t <= fraction);
+        if end <= self.painted {
+            return None;
+        }
+        let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        for p in &self.pixels[self.painted..end] {
+            blend_color_pixel(pixels, width, p.x, p.y, self.accent, p.coverage);
+            (x0, y0) = (x0.min(p.x), y0.min(p.y));
+            (x1, y1) = (x1.max(p.x), y1.max(p.y));
+        }
+        self.painted = end;
+        Some(Rectangle::new(
+            (x0, y0).into(),
+            (x1 - x0 + 1, y1 - y0 + 1).into(),
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -310,7 +371,7 @@ struct ProgressTrack {
 
 /// `(texture, its size, Banner's progress-line geometry if the style has
 /// one)`.
-type BuiltBuffer = (MemoryRenderBuffer, (i32, i32), Option<ProgressTrack>);
+type BuiltBuffer = (MemoryRenderBuffer, (i32, i32), Option<Progress>);
 
 /// Rasterizes and uploads a fresh texture for the toast's current style,
 /// message, and theme.
@@ -332,7 +393,7 @@ fn build_buffer(
         None,
     );
     let size = (rasterized.width, rasterized.height);
-    Some((buffer, size, rasterized.progress_track))
+    Some((buffer, size, rasterized.progress))
 }
 
 /// Composites the toast into a straight-alpha ARGB8888 buffer: a rounded-rect
@@ -363,10 +424,13 @@ fn rasterize_toast_for_output(
                 pixels,
                 width,
                 height,
-                progress_track: None,
+                progress: None,
             }),
         ToastStyle::Banner => {
-            rasterize_banner_for_output(message, kind, theme, narrowest_output_width, fill)
+            rasterize_banner_for_output(message, kind, theme, narrowest_output_width, fill, false)
+        }
+        ToastStyle::Outline => {
+            rasterize_banner_for_output(message, kind, theme, narrowest_output_width, fill, true)
         }
     }
 }
@@ -521,6 +585,9 @@ fn rasterize_banner_for_output(
     theme: crate::ui_theme::UiTheme,
     narrowest_output_width: Option<i32>,
     fill: f32,
+    // Outline style: same layout, but no static border, accent strip or
+    // bottom line; the border itself becomes the countdown.
+    outline: bool,
 ) -> Option<Rasterized> {
     let font = font();
     let font_size = kind.font_size();
@@ -554,6 +621,7 @@ fn rasterize_banner_for_output(
     let card_w = width - BANNER_INSET * 2;
     let radius = theme.radius.min(BANNER_HEIGHT / 2) as f32;
     let accent = theme.popup_accent(kind == ToastKind::Error, 0.5);
+    let mut ring = Vec::new();
 
     for y in 0..height {
         for x in 0..width {
@@ -594,7 +662,17 @@ fn rasterize_banner_for_output(
                     BANNER_HEIGHT - stroke * 2,
                     (radius - stroke as f32).max(0.0),
                 );
-            if border > 0.0 {
+            if border <= 0.0 {
+                continue;
+            }
+            if outline {
+                ring.push(OutlinePixel {
+                    x,
+                    y,
+                    t: perimeter_position(x, y, card_x, card_y, card_w, BANNER_HEIGHT),
+                    coverage: (border * 255.0) as u8,
+                });
+            } else {
                 blend_color_pixel(&mut pixels, width, x, y, accent, (border * 235.0) as u8);
             }
         }
@@ -607,7 +685,8 @@ fn rasterize_banner_for_output(
     // curves the top/bottom-left the same as the card itself, then only
     // the true `BANNER_ACCENT_WIDTH` columns are actually painted.
     let accent_bar_mask_w = BANNER_ACCENT_WIDTH + radius as i32;
-    for y in 0..height {
+    let accent_bar_rows = if outline { 0 } else { height };
+    for y in 0..accent_bar_rows {
         for x in 0..(card_x + BANNER_ACCENT_WIDTH).min(width) {
             let coverage = rounded_rect_coverage_local(
                 x,
@@ -652,12 +731,14 @@ fn rasterize_banner_for_output(
     // Faint resting groove, so the track reads even at 0% fill -- then
     // `stamp_progress_fill` overlays a brighter run of the same accent on
     // top as `fill` grows.
-    for y in track.y..track.y + track.h {
-        for x in track.x..track.x + track.w {
-            blend_color_pixel(&mut pixels, width, x, y, accent, 55);
+    if !outline {
+        for y in track.y..track.y + track.h {
+            for x in track.x..track.x + track.w {
+                blend_color_pixel(&mut pixels, width, x, y, accent, 55);
+            }
         }
+        stamp_progress_fill(&mut pixels, width, track, accent, fill);
     }
-    stamp_progress_fill(&mut pixels, width, track, accent, fill);
 
     let baseline = card_y + 28;
     let mut pen_x = card_x + text_start_offset;
@@ -685,12 +766,50 @@ fn rasterize_banner_for_output(
         pen_x += metrics.advance_width.round().max(1.0) as i32;
     }
 
+    let progress = if outline {
+        ring.sort_by(|a, b| a.t.total_cmp(&b.t));
+        let mut track = OutlineTrack {
+            pixels: ring,
+            painted: 0,
+            accent,
+        };
+        track.advance(&mut pixels, width, fill);
+        Progress::Outline(track)
+    } else {
+        Progress::Line(track)
+    };
+
     Some(Rasterized {
         pixels,
         width,
         height,
-        progress_track: Some(track),
+        progress: Some(progress),
     })
+}
+
+/// Clockwise position of a pixel around a card's edge, `0.0..1.0`, starting
+/// at the top-left corner: top edge, right edge, bottom edge, left edge.
+/// Each pixel is attributed to its nearest edge.
+fn perimeter_position(x: i32, y: i32, left: i32, top: i32, width: i32, height: i32) -> f32 {
+    let (w, h) = (width as f32, height as f32);
+    let lx = ((x - left) as f32 + 0.5).clamp(0.0, w);
+    let ly = ((y - top) as f32 + 0.5).clamp(0.0, h);
+    let perimeter = 2.0 * (w + h);
+    let to_top = ly;
+    let to_right = w - lx;
+    let to_bottom = h - ly;
+    let to_left = lx;
+    let nearest = to_top.min(to_right).min(to_bottom).min(to_left);
+    let along = if nearest == to_top {
+        lx
+    } else if nearest == to_right {
+        w + ly
+    } else if nearest == to_bottom {
+        w + h + (w - lx)
+    } else {
+        2.0 * w + h + (h - ly)
+    };
+    (along / perimeter).min(0.999_999)
 }
 
 /// Paints the filled portion of a `Banner` toast's bottom line, growing
@@ -959,13 +1078,65 @@ mod tests {
             raster.width > raster.height * 2,
             "banner should read long, not squarish"
         );
-        assert!(raster.progress_track.is_some());
+        assert!(matches!(raster.progress, Some(Progress::Line(_))));
         let visible = raster
             .pixels
             .chunks_exact(4)
             .filter(|pixel| pixel[3] > 0)
             .count();
         assert!(visible > 0);
+    }
+
+    #[test]
+    fn outline_traces_the_border_clockwise_as_time_passes() {
+        let mut theme = crate::ui_theme::UiTheme::for_test_with_style(ToastStyle::Outline);
+        theme.radius = 0;
+        let raster = |fill| {
+            rasterize_toast_for_output("Configuration reloaded", ToastKind::Info, theme, None, fill)
+                .unwrap()
+        };
+        let empty = raster(0.0);
+        let Some(Progress::Outline(track)) = &empty.progress else {
+            panic!("outline style has an outline track");
+        };
+        assert_eq!(track.painted, 0, "nothing traced at the start");
+        assert!(track.pixels.windows(2).all(|w| w[0].t <= w[1].t));
+        let first = track.pixels[0];
+        assert!(
+            first.x <= BANNER_INSET + 2 && first.y <= BANNER_INSET + 2,
+            "starts top-left"
+        );
+
+        let half = raster(0.5);
+        let full = raster(1.0);
+        let painted = |r: &Rasterized| match &r.progress {
+            Some(Progress::Outline(track)) => track.painted,
+            _ => unreachable!(),
+        };
+        assert!(painted(&half) > 0 && painted(&half) < track.pixels.len());
+        assert_eq!(
+            painted(&full),
+            track.pixels.len(),
+            "the ring closes at the end"
+        );
+
+        // No static border or accent strip: the top-right corner pixel is
+        // panel-colored until the outline reaches it.
+        let corner = ((BANNER_INSET * empty.width + empty.width - BANNER_INSET - 1) * 4) as usize;
+        assert_ne!(
+            empty.pixels[corner..corner + 3],
+            full.pixels[corner..corner + 3]
+        );
+    }
+
+    #[test]
+    fn perimeter_position_runs_clockwise_from_the_top_left() {
+        let at = |x, y| perimeter_position(x, y, 0, 0, 100, 50);
+        assert!(at(0, 0) < at(99, 0));
+        assert!(at(99, 0) < at(99, 49));
+        assert!(at(99, 49) < at(0, 49));
+        assert!(at(0, 49) < at(0, 1));
+        assert!(at(0, 1) < 1.0);
     }
 
     #[test]
@@ -980,7 +1151,9 @@ mod tests {
         let full =
             rasterize_toast_for_output("Configuration reloaded", ToastKind::Info, theme, None, 1.0)
                 .unwrap();
-        let track = empty.progress_track.unwrap();
+        let Some(Progress::Line(track)) = empty.progress else {
+            panic!("banner has a line track");
+        };
 
         let filled_pixels = |raster: &Rasterized| {
             (track.x..track.x + track.w)
@@ -1020,7 +1193,7 @@ mod tests {
             1.0,
         )
         .unwrap();
-        assert!(a.progress_track.is_none());
+        assert!(a.progress.is_none());
         assert_eq!(a.pixels, b.pixels);
     }
 }

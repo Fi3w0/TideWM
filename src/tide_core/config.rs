@@ -698,6 +698,9 @@ pub enum ToastStyle {
     #[default]
     Pill,
     Banner,
+    /// Square-friendly box with no static border: the accent outline
+    /// traces clockwise around it over the popup's visible time.
+    Outline,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -8359,6 +8362,7 @@ fn apply_popup_block(cfg: &mut PopupConfig, body: &[waves::Entry]) {
                 cfg.style = match value.trim().to_ascii_lowercase().as_str() {
                     "pill" | "card" => ToastStyle::Pill,
                     "banner" | "bar" | "strip" => ToastStyle::Banner,
+                    "outline" | "frame" | "border" => ToastStyle::Outline,
                     other => {
                         tracing::warn!(value = other, "Unknown popup.style, using pill");
                         ToastStyle::Pill
@@ -13146,6 +13150,10 @@ shader tinted-blur {
         let entries = wave_entries("popup {\n style = banner\n }\n");
         let banner = Config::from_raw(lower_entries(&entries)).0;
         assert_eq!(banner.popup.style, ToastStyle::Banner);
+
+        let entries = wave_entries("popup {\n style = outline\n }\n");
+        let outline = Config::from_raw(lower_entries(&entries)).0;
+        assert_eq!(outline.popup.style, ToastStyle::Outline);
 
         let entries = wave_entries("popup {\n style = nonsense\n }\n");
         let fallback = Config::from_raw(lower_entries(&entries)).0;

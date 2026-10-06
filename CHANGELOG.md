@@ -2,6 +2,11 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.131 — `outline` popup style: the border is the countdown
+
+- New `popup { style = outline }`: the banner layout with no static border, accent strip or bottom line. The accent outline traces clockwise from the top-left corner over `duration_ms` and closes when the popup is due to fade; error popups show it closed. Border pixels are precomputed once, sorted by clockwise position, and each frame paints only the newly reached run with a damage-scoped upload.
+- Reviewed against Hyprland's notification overlay, which uses borderless square rectangles with a colored left edge and a bottom progress line; the plain square box here follows it.
+
 ## 0.90.130 — Configurable popup duration
 
 - New `popup { duration_ms }` (300–60000, default 2400): how long a timed popup stays fully visible before fading. The banner style's countdown bar spans the same time. Error popups still stay until the next reload.
