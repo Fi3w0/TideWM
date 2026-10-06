@@ -7,12 +7,26 @@
 //!
 //! Everything here is best-effort: outside a git checkout (a tarball
 //! release), the commit env is simply absent and the binary reports
-//! "unknown". The build date honors `SOURCE_DATE_EPOCH` so reproducible
+//! "unknown", unless the packager sets `TIDEWM_GIT_COMMIT` explicitly. The build date honors `SOURCE_DATE_EPOCH` so reproducible
 //! builds stay reproducible when they want to be.
 
 use std::process::Command;
 
 fn main() {
+    // Packagers building from a tarball or a Nix store copy (no `.git`)
+    // can pass the commit they built through the environment instead. No
+    // `rerun-if-*` directive here: any such line would replace Cargo's
+    // default "rerun when a package file changes", which dirty detection
+    // relies on.
+    if let Some(commit) = std::env::var("TIDEWM_GIT_COMMIT")
+        .ok()
+        .filter(|hash| !hash.is_empty())
+    {
+        println!("cargo:rustc-env=TIDEWM_GIT_COMMIT={commit}");
+        println!("cargo:rustc-env=TIDEWM_BUILD_DATE={}", build_date());
+        return;
+    }
+
     let commit = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .output()

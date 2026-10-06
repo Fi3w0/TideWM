@@ -40,7 +40,15 @@ Underneath the water is a real tiling window manager: fast keyboard-driven layou
 
 ## Try it
 
-TideWM builds from source, there's no package yet. Rust stable plus a handful of Wayland/GPU dev libraries:
+**Fastest:** one command per distro installs TideWM as a real package (Gentoo overlay, Arch `PKGBUILD`, NixOS flake + module). See [packaging/README.md](packaging/README.md):
+
+```bash
+packaging/gentoo/install.sh     # Gentoo
+packaging/arch/install.sh       # Arch and derivatives
+nix run github:Fi3w0/TideWM    # Nix; NixOS module: programs.tidewm.enable
+```
+
+**From source** on anything else: Rust stable plus a handful of Wayland/GPU dev libraries, then `./install.sh`:
 
 ```bash
 # Arch

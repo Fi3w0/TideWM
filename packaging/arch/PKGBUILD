@@ -1,0 +1,74 @@
+# Maintainer: Fiw <alex.lazarevych@icloud.com>
+# Live package that follows the upstream default branch. Set TIDEWM_REPO to
+# build another clone (packaging/arch/install.sh --local does this).
+
+pkgname=tidewm-git
+pkgver=0
+pkgrel=1
+pkgdesc="Water-themed Wayland tiling compositor built on Smithay"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Fi3w0/TideWM"
+license=('GPL-3.0-or-later')
+depends=(
+  'gcc-libs'
+  'glibc'
+  'libdrm'
+  'libinput'
+  'libxkbcommon'
+  'mesa'
+  'pipewire'
+  'seatd'
+  'systemd-libs'
+  'wayland'
+)
+makedepends=('cargo' 'clang' 'git' 'pkgconf')
+optdepends=(
+  'xdg-desktop-portal: screen sharing (OBS, browsers)'
+  'xdg-desktop-portal-gtk: file chooser and other non-screencast portals'
+  'xwayland-satellite: X11 application support'
+  'kitty: default terminal (any terminal works, set terminal in config.wave)'
+)
+provides=('tidewm')
+conflicts=('tidewm')
+options=('!lto' '!debug')
+source=("tidewm::git+${TIDEWM_REPO:-https://github.com/Fi3w0/TideWM.git}")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd tidewm
+  local version
+  version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+  printf '%s.r%s.g%s' "$version" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+  cd tidewm
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd tidewm
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release --features screencast \
+    --bin TideWM --bin tidectl --bin wavefmt
+}
+
+check() {
+  cd tidewm
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --features screencast -- --test-threads=1
+}
+
+package() {
+  cd tidewm
+  install -Dm755 target/release/TideWM target/release/tidectl target/release/wavefmt -t "$pkgdir/usr/bin/"
+
+  install -Dm644 share/wayland-sessions/tidewm.desktop "$pkgdir/usr/share/wayland-sessions/tidewm.desktop"
+  install -Dm644 share/icons/TideWM-logo-faithful-4k.png "$pkgdir/usr/share/pixmaps/tidewm.png"
+  install -Dm644 share/xdg-desktop-portal/tidewm.portal "$pkgdir/usr/share/xdg-desktop-portal/portals/tidewm.portal"
+  install -Dm644 share/xdg-desktop-portal/tidewm-portals.conf "$pkgdir/usr/share/xdg-desktop-portal/tidewm-portals.conf"
+
+  install -Dm644 README.md CHANGELOG.md DOCUMENTATION.md WAVE.md -t "$pkgdir/usr/share/doc/$pkgname/"
+}

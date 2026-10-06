@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+	<maintainer type="person">
+		<name>Fiw</name>
+	</maintainer>
+	<use>
+		<flag name="screencast">Screen sharing through xdg-desktop-portal and PipeWire (OBS, browsers)</flag>
+		<flag name="accessibility">org.freedesktop.a11y.KeyboardMonitor for screen readers (Orca)</flag>
+	</use>
+	<upstream>
+		<remote-id type="github">Fi3w0/TideWM</remote-id>
+	</upstream>
+</pkgmetadata>

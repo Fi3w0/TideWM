@@ -2,6 +2,13 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.124 — Distro packages: Gentoo overlay, Arch PKGBUILD, NixOS flake
+
+- `packaging/gentoo/`: an overlay with the live `gui-wm/tidewm` ebuild (Rust 1.88 floor for mlua, `screencast`/`accessibility` USE flags, installs `wavefmt` too) and `install.sh`, which copies the overlay to `/var/db/repos/tidewm`, registers and unmasks it, and emerges it. `--local` builds the working checkout through `TIDEWM_SRC`; an existing hand-written Portage env file is never overwritten. Portage dependency resolution checked on Gentoo.
+- `packaging/arch/`: a `tidewm-git` PKGBUILD following Arch's Rust guidelines (locked fetch, frozen build, `check()` runs the suite) and `install.sh`, which builds it in a scratch directory with `makepkg -si`. `--local` builds the checkout's committed HEAD.
+- `flake.nix` + `packaging/nix/`: package (screencast on, accessibility optional, store-only source set, EGL/wayland linked for the nested backend), overlay, dev shell and a NixOS module (`programs.tidewm.enable`) that registers the session and the portal configuration. No `flake.lock` is committed yet: it's generated on first use, and the Nix build hasn't been run on a Nix system yet.
+- `build.rs` accepts `TIDEWM_GIT_COMMIT` from the environment so builds without `.git` (Nix, tarballs) still report their commit in `--version`.
+
 ## 0.90.123 — Welcome card shows the real binds and config path
 
 - The empty-desktop welcome card now lists the binds actually configured to open the terminal (a `spawn:` bind whose program matches `terminal`), close a window and quit, then shows where the config file lives (home-relative) and that it reloads on save. Unbound actions show `(unbound)` instead of a guessed shortcut. The card is rebuilt on every config reload, so rebinding updates it live, and its height follows its content.
