@@ -857,7 +857,7 @@ pub fn init_udev(
                     let mut retries = Vec::new();
                     for (&crtc, surface) in dev.surfaces.iter_mut() {
                         if let Err(e) = surface.compositor.reset_state() {
-                            tracing::warn!(%e, "Failed to reset DRM surface state");
+                            tracing::warn!(%e, output = %surface.output.name(), "Failed to reset DRM surface state");
                         }
                         surface.pending = false;
                         surface.dirty = true;
@@ -873,7 +873,14 @@ pub fn init_udev(
                         state
                             .wlr_output_power_management_state
                             .force_on(&surface.output);
-                        if let Some(delay) = render_surface(state, surface, renderer.as_mut()) {
+                        let retry = render_surface(state, surface, renderer.as_mut());
+                        tracing::info!(
+                            output = %surface.output.name(),
+                            queued = surface.pending,
+                            empty_frame_retry = retry.is_some(),
+                            "VT resume: first frame after reset"
+                        );
+                        if let Some(delay) = retry {
                             retries.push((crtc, delay));
                         }
                     }

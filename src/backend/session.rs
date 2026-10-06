@@ -56,9 +56,15 @@ impl ScanoutSession for (&mut DrmDevice, &mut Libinput) {
         // resume, so the real requirement is "this fd is master", not "this
         // process could take it".
         match self.0.acquire_master_lock() {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                tracing::info!("VT resume: acquired DRM master");
+                Ok(())
+            }
             Err(error) => match is_master(self.0.as_fd()) {
-                Ok(true) => Ok(()),
+                Ok(true) => {
+                    tracing::info!(%error, "VT resume: DRM master restored by the session manager");
+                    Ok(())
+                }
                 Ok(false) => Err(format!("DRM master not held after resume: {error}")),
                 Err(probe) => Err(format!(
                     "Failed to acquire DRM master ({error}) or query it ({probe})"
@@ -90,8 +96,9 @@ fn resume(session: &mut impl ScanoutSession) -> Result<(), String> {
         .acquire_master()
         .and_then(|()| session.activate())
         .and_then(|()| session.resume_input());
-    if result.is_err() {
-        session.pause();
+    match &result {
+        Ok(()) => tracing::info!("VT resume: scanout and input active"),
+        Err(_) => session.pause(),
     }
     result
 }

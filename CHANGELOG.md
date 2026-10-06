@@ -2,6 +2,10 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.126 — Log each VT resume step
+
+- 0.90.125 still froze after a TTY round trip on the maintainer's NVIDIA machine, and the hard reset that followed lost both the session log and the journal tail. The resume path now logs at info level how DRM master was regained (acquired or restored by the session manager), that scanout and input are active, and each output's first frame (queued, or waiting on the empty-frame retry). Reset failures name their output.
+
 ## 0.90.125 — Fix black/frozen screen after switching back from a TTY
 
 - Since 0.90.107, returning from another TTY left both outputs frozen or black on ordinary (non-root) logins. The resume path required this process to call DRM `SET_MASTER`, which the kernel refuses without `CAP_SYS_ADMIN` for an fd that logind/seatd opened. Those session managers restore master themselves before announcing the resume, so the check failed on every return and TideWM stayed paused.
