@@ -5121,8 +5121,8 @@ impl Smallvil {
     }
 
     /// Fits the focused Ocean floater to its live output minus configured
-    /// gaps, preserving its center. Sends size directly because Ocean retile
-    /// only repositions floating windows.
+    /// gaps and live floating limits, preserving its world-space center.
+    /// This action deliberately keeps its existing zoom-independent sizing.
     pub(crate) fn resize_to_monitor(&mut self) {
         if self.config.spatial_engine != crate::config::SpatialEngine::Ocean {
             return;
@@ -5130,6 +5130,9 @@ impl Smallvil {
         let Some(surface) = self.focused_window_surface() else {
             return;
         };
+        if self.fullscreen.contains_key(&surface) || self.maximized.contains_key(&surface) {
+            return;
+        }
         let Some(current) = self.ocean.floating_rect(&surface) else {
             return;
         };
@@ -5142,28 +5145,17 @@ impl Smallvil {
         let Some(output_geo) = self.space.output_geometry(&output) else {
             return;
         };
-        let size = crate::layout::inset(
-            Rectangle::new(Point::default(), output_geo.size),
+        let rect = monitor_resized_rect(
+            current,
+            output_geo.size,
             self.config.gaps,
-        )
-        .size;
-        let center: Point<i32, Logical> = Point::from((
-            current.loc.x + current.size.w / 2,
-            current.loc.y + current.size.h / 2,
-        ));
-        let rect = Rectangle::new(
-            Point::from((center.x - size.w / 2, center.y - size.h / 2)),
-            size,
+            self.floating_size_constraints_for(&surface),
         );
-        self.ocean.set_floating_rect(&surface, rect);
-        if let Some(toplevel) = self
-            .ocean
-            .window(&surface)
-            .and_then(|w| w.toplevel().cloned())
-        {
-            toplevel.with_pending_state(|state| state.size = Some(size));
-            toplevel.send_pending_configure();
-        }
+        self.apply_floating_placement(
+            &surface,
+            Some((rect.loc.x, rect.loc.y)),
+            Some((rect.size.w, rect.size.h)),
+        );
         self.retile();
         self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
             surface: surface.clone(),
@@ -13470,6 +13462,18 @@ impl Smallvil {
     }
 }
 
+fn monitor_resized_rect(
+    current: Rectangle<i32, Logical>,
+    output_size: Size<i32, Logical>,
+    gap: i32,
+    constraints: crate::window_size::FloatingSizeConstraints,
+) -> Rectangle<i32, Logical> {
+    use crate::window_size::{anchored_rect, SizeAnchor};
+    let size = constraints
+        .clamp(crate::layout::inset(Rectangle::new(Point::default(), output_size), gap).size);
+    anchored_rect(current, size, SizeAnchor::Center, SizeAnchor::Center)
+}
+
 fn keyboard_resized_size(
     current: Size<i32, Logical>,
     direction: Direction,
@@ -13811,6 +13815,41 @@ fn capture_wallpaper_size(logical: Size<i32, Logical>, scale: f64) -> Size<i32, 
 mod tests {
     use super::*;
     use smithay::output::{PhysicalProperties, Subpixel};
+
+    #[test]
+    fn monitor_resize_intersects_live_limits_and_keeps_the_world_center() {
+        let constraints = crate::window_size::FloatingSizeConstraints::from_hints(
+            (0, 700).into(),
+            (1200, 0).into(),
+            &crate::config::WindowRule {
+                max_width: Some(900),
+                ..Default::default()
+            },
+        );
+        let current = Rectangle::new((-2000, 4500).into(), (300, 200).into());
+        assert_eq!(
+            monitor_resized_rect(current, (1600, 600).into(), 10, constraints),
+            Rectangle::new((-2300, 4250).into(), (900, 700).into())
+        );
+    }
+
+    #[test]
+    fn monitor_resize_uses_live_logical_dimensions_and_safe_center_arithmetic() {
+        let constraints = crate::window_size::FloatingSizeConstraints::from_hints(
+            (0, 0).into(),
+            (0, 0).into(),
+            &crate::config::WindowRule::default(),
+        );
+        let current = Rectangle::new((i32::MAX - 10, i32::MIN + 10).into(), (200, 100).into());
+        let result = monitor_resized_rect(current, (601, 1001).into(), 8, constraints);
+        assert_eq!(result.size, (585, 985).into());
+        assert_eq!(result.loc.x, i32::MAX - 202);
+        assert_eq!(result.loc.y, i32::MIN);
+        assert_eq!(
+            monitor_resized_rect(current, (1, 1).into(), i32::MAX, constraints).size,
+            (1, 1).into()
+        );
+    }
 
     #[test]
     fn keyboard_resize_obeys_rules_client_limits_and_overflow_bounds() {

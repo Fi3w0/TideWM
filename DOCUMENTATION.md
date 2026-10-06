@@ -1824,6 +1824,7 @@ The same set of strings works after `bind ... { }` at the top level or inside a 
 - `ocean-pan-left` / `ocean-pan-right` / `ocean-pan-up` / `ocean-pan-down` — glide only the current output camera by `ocean.camera_step` screen pixels
 - `ocean-zoom-in` / `ocean-zoom-out` / `ocean-zoom-reset` — scale the continuous world around the output center
 - `ocean-center-focused` — center the camera on the focused window without moving that window in world space
+- `resize-to-monitor` — size the focused Ocean floater to its current logical output minus gaps, bounded by client hints and floating rules, while preserving its world-space center. Sizing is independent of camera zoom; fullscreen/maximized windows are unchanged.
 - `ocean-bookmark:<name>` — glide the current output camera to a configured or runtime bookmark
 - `ocean-save-bookmark:<name>` — store the current camera position for this session without rewriting config
 - `depth-down` / `depth-up` — travel to the next/previous meaningful world Y: a reef origin or explicitly floating/sunk window, never a local tile row
