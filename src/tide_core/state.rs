@@ -11,11 +11,12 @@ use smithay::{
     backend::{
         renderer::{
             element::{
+                default_primary_scanout_output_compare,
                 memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
                 solid::{SolidColorBuffer, SolidColorRenderElement},
                 surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
                 utils::RescaleRenderElement,
-                AsRenderElements, Kind, RenderElementStates,
+                AsRenderElements, Kind, RenderElementState, RenderElementStates,
             },
             gles::{GlesPixelProgram, GlesRenderer, GlesTexProgram, GlesTexture},
             ImportAll, ImportMem,
@@ -27,7 +28,8 @@ use smithay::{
         space::SpaceRenderElements,
         utils::{
             send_frames_surface_tree, surface_presentation_feedback_flags_from_states,
-            surface_primary_scanout_output, under_from_surface_tree, OutputPresentationFeedback,
+            surface_primary_scanout_output, under_from_surface_tree,
+            update_surface_primary_scanout_output, OutputPresentationFeedback,
         },
         PopupGrab, PopupManager, PopupUngrabStrategy, Space, Window, WindowSurfaceType,
     },
@@ -5885,21 +5887,63 @@ impl Smallvil {
         render_element_states: &RenderElementStates,
     ) -> OutputPresentationFeedback {
         let mut feedback = OutputPresentationFeedback::new(output);
+        let placements = self.render_placements(output).unwrap_or_default();
 
-        if let Some(placements) = self.render_placements(output) {
-            for placement in placements {
-                placement.window.take_presentation_feedback(
-                    &mut feedback,
-                    surface_primary_scanout_output,
-                    |surface, _| {
-                        surface_presentation_feedback_flags_from_states(
-                            surface,
-                            None,
-                            render_element_states,
+        // Smithay's feedback collector requires primary-scanout state. Update
+        // it from this frame, including windows absent from this output so an
+        // old output is cleared when a window moves away (Anvil's pattern).
+        // Include placement-only Ocean windows and visit each surface once.
+        // Resource identity/hash is stable even though liveness is mutable.
+        #[allow(clippy::mutable_key_type)]
+        let mut visited = HashSet::new();
+        for window in self
+            .space
+            .elements()
+            .chain(placements.iter().map(|placement| &placement.window))
+        {
+            let Some(surface) = window.toplevel().map(|toplevel| toplevel.wl_surface()) else {
+                continue;
+            };
+            if !visited.insert(surface.clone()) {
+                continue;
+            }
+            let overlaps = self.space.outputs_for_element(window);
+            window.with_surfaces(|surface, states| {
+                update_surface_primary_scanout_output(
+                    surface,
+                    output,
+                    states,
+                    None,
+                    render_element_states,
+                    |current, current_state, next, next_state| {
+                        // A previous frame's visibility must not pin feedback
+                        // to an output the window has already left. Ocean
+                        // placement owns its camera/output mapping directly.
+                        prefer_presentation_output(
+                            current,
+                            current_state,
+                            next,
+                            next_state,
+                            self.config.spatial_engine == crate::config::SpatialEngine::Classic
+                                && overlaps.contains(current),
                         )
                     },
                 );
-            }
+            });
+        }
+
+        for placement in placements {
+            placement.window.take_presentation_feedback(
+                &mut feedback,
+                surface_primary_scanout_output,
+                |surface, _| {
+                    surface_presentation_feedback_flags_from_states(
+                        surface,
+                        None,
+                        render_element_states,
+                    )
+                },
+            );
         }
 
         let map = layer_map_for_output(output);
@@ -5907,6 +5951,16 @@ impl Smallvil {
             if self.unmapped_layer_surfaces.contains(layer.wl_surface()) {
                 continue;
             }
+            layer.with_surfaces(|surface, states| {
+                update_surface_primary_scanout_output(
+                    surface,
+                    output,
+                    states,
+                    None,
+                    render_element_states,
+                    |_, _, next, _| next,
+                );
+            });
             layer.take_presentation_feedback(
                 &mut feedback,
                 surface_primary_scanout_output,
@@ -13552,6 +13606,20 @@ fn monitor_resized_rect(
     anchored_rect(current, size, SizeAnchor::Center, SizeAnchor::Center)
 }
 
+fn prefer_presentation_output<'a>(
+    current: &'a Output,
+    current_state: &'a RenderElementState,
+    next: &'a Output,
+    next_state: &'a RenderElementState,
+    current_can_show_window: bool,
+) -> &'a Output {
+    if current_can_show_window {
+        default_primary_scanout_output_compare(current, current_state, next, next_state)
+    } else {
+        next
+    }
+}
+
 fn keyboard_resized_size(
     current: Size<i32, Logical>,
     direction: Direction,
@@ -13893,6 +13961,84 @@ fn capture_wallpaper_size(logical: Size<i32, Logical>, scale: f64) -> Size<i32, 
 mod tests {
     use super::*;
     use smithay::output::{PhysicalProperties, Subpixel};
+
+    #[test]
+    fn presentation_moves_to_the_first_new_frame_even_with_a_slower_destination() {
+        use smithay::backend::renderer::element::{
+            Id, PrimaryScanoutOutput, RenderElementPresentationState,
+        };
+        let make_output = |name: &str, refresh| {
+            let output = Output::new(
+                name.into(),
+                PhysicalProperties {
+                    size: (0, 0).into(),
+                    subpixel: Subpixel::Unknown,
+                    make: "test".into(),
+                    model: "test".into(),
+                    serial_number: "test".into(),
+                },
+            );
+            output.change_current_state(
+                Some(smithay::output::Mode {
+                    size: (1000, 800).into(),
+                    refresh,
+                }),
+                None,
+                None,
+                None,
+            );
+            output
+        };
+        let left = make_output("left", 170_013);
+        let right = make_output("right", 71_347);
+        let id = Id::new();
+        let states = RenderElementStates {
+            states: HashMap::from([(
+                id.clone(),
+                RenderElementState {
+                    visible_area: 1000,
+                    presentation_state: RenderElementPresentationState::Rendering { reason: None },
+                    needs_capture: false,
+                },
+            )]),
+        };
+        let mut primary = PrimaryScanoutOutput::default();
+        assert!(primary.current_output().is_none());
+        primary.update_from_render_element_states(
+            id.clone(),
+            &left,
+            None,
+            &states,
+            default_primary_scanout_output_compare,
+        );
+        // Ordinary overlap keeps Smithay's existing refresh/area preference.
+        primary.update_from_render_element_states(
+            id.clone(),
+            &right,
+            None,
+            &states,
+            |a, sa, b, sb| prefer_presentation_output(a, sa, b, sb, true),
+        );
+        assert_eq!(primary.current_output(), Some(left));
+        // The source no longer intersects the window; its older render state
+        // cannot defer the first destination frame, even at a lower rate.
+        primary.update_from_render_element_states(
+            id.clone(),
+            &right,
+            None,
+            &states,
+            |a, sa, b, sb| prefer_presentation_output(a, sa, b, sb, false),
+        );
+        assert_eq!(primary.current_output(), Some(right.clone()));
+        primary.update_from_render_element_states(
+            id,
+            &right,
+            None,
+            &RenderElementStates::default(),
+            default_primary_scanout_output_compare,
+        );
+        assert!(primary.current_output().is_none());
+    }
 
     #[test]
     fn monitor_resize_intersects_live_limits_and_keeps_the_world_center() {

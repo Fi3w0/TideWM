@@ -2,6 +2,12 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.120 — Restore presentation feedback from actual render state
+
+- A native Wayland protocol probe on 0.90.119 submitted a visible frame and received frame callbacks but neither `presented` nor `discarded` presentation feedback. Smithay primary-scanout state had never been initialized.
+- Update that state from each output's render result before collecting feedback, covering mapped/placement-only windows, subsurfaces, popups, and layers. Include windows absent from the output to clear stale selection. Classic overlap retains Smithay's refresh/visible-area preference; an output already left cannot retain feedback using an older frame's area. Ocean follows its actual rendered placement.
+- A stateful Smithay regression covers first visibility, overlapping outputs, the first move to a slower destination, and occlusion. Native protocol delivery still needs the new running release.
+
 ## 0.90.119 — Accumulate keyboard resize while client commits lag
 
 - A real Classic client received just one resize step when twenty resize actions were batched before its next commit. Each action previously read the same committed bounding box.
