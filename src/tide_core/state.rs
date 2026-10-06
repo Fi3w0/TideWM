@@ -1610,6 +1610,7 @@ impl Smallvil {
     /// Smithay's authoritative xdg-toplevel title/app-id callbacks.
     pub(crate) fn refresh_window_opacity_and_glass_for(&mut self, surface: &WlSurface) {
         let rule = self.resolve_window_rules_for(surface);
+        self.enforce_floating_size_constraints_with_rule(surface, &rule);
         // Identity and urgency participate in rule matching, including the
         // per-app weight. Re-resolve on the next sync; the retained record
         // lets a changed weight settle smoothly rather than snapping.
@@ -1642,6 +1643,50 @@ impl Smallvil {
         if !self.backdrop_effect_for_surface(surface, self.fullscreen.contains_key(surface)) {
             self.backdrop_textures.remove(surface);
             self.glass_anim.remove(surface);
+        }
+    }
+
+    pub(crate) fn enforce_floating_size_constraints(&mut self, surface: &WlSurface) {
+        self.enforce_floating_size_constraints_with_rule(
+            surface,
+            &self.resolve_window_rules_for(surface),
+        );
+    }
+
+    fn enforce_floating_size_constraints_with_rule(
+        &mut self,
+        surface: &WlSurface,
+        rule: &crate::config::WindowRule,
+    ) {
+        if !self.is_floating(surface)
+            || self.fullscreen.contains_key(surface)
+            || self.maximized.contains_key(surface)
+            || crate::grabs::resize_grab::ongoing(surface)
+        {
+            return;
+        }
+        let Some(window) = self.mapped_toplevel_window(surface) else {
+            return;
+        };
+        let current = self
+            .ocean
+            .floating_rect(surface)
+            .map(|rect| rect.size)
+            .or_else(|| {
+                self.floating_workspace
+                    .get(surface)
+                    .map(|tag| tag.rect.size)
+            })
+            .unwrap_or_else(|| window.geometry().size);
+        let requested = window
+            .toplevel()
+            .and_then(|toplevel| toplevel.with_pending_state(|state| state.size))
+            .unwrap_or(current);
+        let constrained = self
+            .floating_size_constraints_with_rule(surface, rule)
+            .clamp(requested);
+        if constrained != requested {
+            self.apply_floating_placement(surface, None, Some((constrained.w, constrained.h)));
         }
     }
 
@@ -4974,6 +5019,7 @@ impl Smallvil {
                 self.set_window_fractional_scale(window, &output);
                 self.ocean.set_entry_output(&surface, output.name());
             }
+            self.enforce_floating_size_constraints(&surface);
             return;
         }
         if self.fullscreen.contains_key(&surface)
@@ -9137,6 +9183,9 @@ impl Smallvil {
                     self.window_buoyancy.remove(surface);
                 }
                 self.retile();
+                if was_tiled {
+                    self.enforce_floating_size_constraints(surface);
+                }
                 self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
                     surface: surface.clone(),
                 });
@@ -9156,7 +9205,8 @@ impl Smallvil {
             return;
         };
 
-        if self.layout.contains(surface) {
+        let was_tiled = self.layout.contains(surface);
+        if was_tiled {
             // `space` currently contains the fullscreen override geometry,
             // not the underlying tile geometry. If this is the first time a
             // tiled fullscreen window becomes floating, recover its normal
@@ -9262,6 +9312,9 @@ impl Smallvil {
 
         self.buoyancy_dirty = true;
         self.retile();
+        if was_tiled {
+            self.enforce_floating_size_constraints(surface);
+        }
         self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
             surface: surface.clone(),
         });
@@ -10819,7 +10872,12 @@ impl Smallvil {
                 self.floating_size_constraints_for(surface)
                     .clamp(size.map(Size::from).unwrap_or(current.size)),
             );
-            if rect == current {
+            let pending = window
+                .toplevel()
+                .and_then(|toplevel| toplevel.with_pending_state(|state| state.size));
+            if rect.loc == current.loc
+                && !crate::window_size::needs_size_configure(current.size, rect.size, pending)
+            {
                 return;
             }
             if let Some(toplevel) = window.toplevel() {
@@ -10848,7 +10906,12 @@ impl Smallvil {
             .floating_size_constraints_for(surface)
             .clamp(size.map(Size::from).unwrap_or(current.size));
         let rect = Rectangle::new(loc, size);
-        if rect == current {
+        let pending = window
+            .toplevel()
+            .and_then(|toplevel| toplevel.with_pending_state(|state| state.size));
+        if rect.loc == current.loc
+            && !crate::window_size::needs_size_configure(current.size, rect.size, pending)
+        {
             return;
         }
 

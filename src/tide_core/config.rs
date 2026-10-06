@@ -2932,7 +2932,9 @@ pub struct WindowRule {
     /// looser when the intersection is feasible. Conflicting bounds favor
     /// the minimum, matching the existing interactive client-hint policy.
     /// Applied to natural, explicit, and remembered floating placement,
-    /// pointer resize, and keyboard resize in both spatial engines.
+    /// pointer/keyboard resize, snapping, and live rule/client-hint changes.
+    /// Fullscreen/maximized geometry stays output-owned; normal restoration
+    /// and tiled-to-floating conversion apply the current bounds.
     pub min_width: Option<i32>,
     pub max_width: Option<i32>,
     pub min_height: Option<i32>,

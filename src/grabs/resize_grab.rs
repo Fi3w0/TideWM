@@ -396,6 +396,17 @@ pub fn cancel(surface: &WlSurface) {
     });
 }
 
+/// Defer live resizing policy until motion or the settled commit so the
+/// grab can preserve its original opposite-edge anchor.
+pub(crate) fn ongoing(surface: &WlSurface) -> bool {
+    compositor::with_states(surface, |states| {
+        states
+            .data_map
+            .get::<RefCell<ResizeSurfaceState>>()
+            .is_some_and(|state| !matches!(*state.borrow(), ResizeSurfaceState::Idle))
+    })
+}
+
 /// Should be called on `WlSurface::commit`
 pub fn handle_commit(space: &mut Space<Window>, surface: &WlSurface) -> Option<()> {
     let window = space

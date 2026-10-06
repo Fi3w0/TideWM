@@ -184,6 +184,9 @@ impl CompositorHandler for Smallvil {
             // after Window::on_commit. Persist the settled floating geometry
             // and cross-output ownership after that final adjustment.
             self.sync_visible_floating_window(&window);
+            if !self.window_is_visible(surface) {
+                self.enforce_floating_size_constraints(surface);
+            }
         }
     }
 

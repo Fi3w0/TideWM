@@ -8,6 +8,15 @@ use smithay::utils::{Logical, Rectangle, Size};
 
 use crate::config::WindowRule;
 
+/// Correct stale pending sizes while leaving a valid natural size alone.
+pub(crate) fn needs_size_configure(
+    current: Size<i32, Logical>,
+    requested: Size<i32, Logical>,
+    pending: Option<Size<i32, Logical>>,
+) -> bool {
+    requested != current || pending.is_some_and(|pending| pending != requested)
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum SizeAnchor {
     Start,
@@ -85,6 +94,19 @@ impl FloatingSizeConstraints {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_limits_cancel_a_stale_request_without_reconfiguring_natural_size() {
+        let current = (400, 300).into();
+        assert!(!needs_size_configure(current, current, None));
+        assert!(!needs_size_configure(current, current, Some(current)));
+        assert!(needs_size_configure(
+            current,
+            current,
+            Some((900, 700).into())
+        ));
+        assert!(needs_size_configure(current, (500, 300).into(), None));
+    }
 
     #[test]
     fn resize_constraints_preserve_the_opposite_edges() {

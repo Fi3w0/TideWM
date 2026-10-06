@@ -595,7 +595,10 @@ impl Smallvil {
             return;
         }
 
-        if let Some(entry) = entry {
+        if let Some(mut entry) = entry {
+            entry.restore_rect.size = self
+                .floating_size_constraints_for(wl_surface)
+                .clamp(entry.restore_rect.size);
             surface.with_pending_state(|state| {
                 state.size = Some(entry.restore_rect.size);
             });
@@ -1327,9 +1330,9 @@ impl Smallvil {
             return;
         };
 
-        // Placement and other map-only policy must not be replayed here.
-        // Opacity and glass are the two live resolved-rule caches; every
-        // other live visual rule is resolved at its point of use.
+        // Spawn-only placement must not replay here. Size bounds and
+        // visual caches follow live rule matches without replaying size or
+        // position placement effects.
         self.refresh_window_opacity_and_glass_for(surface);
         if change.invalidates_title_ui() {
             self.invalidate_window_title_ui(surface);
@@ -1784,7 +1787,13 @@ impl Smallvil {
         let restore_rect = entry
             .restore_rect
             .or_else(|| self.floating_workspace.get(wl_surface).map(|tag| tag.rect))
-            .or_else(|| self.ocean.floating_rect(wl_surface));
+            .or_else(|| self.ocean.floating_rect(wl_surface))
+            .map(|mut rect| {
+                rect.size = self
+                    .floating_size_constraints_for(wl_surface)
+                    .clamp(rect.size);
+                rect
+            });
         let maximized_rect = self.maximized.get(wl_surface).and_then(|maximized| {
             let output = self.output_by_name(&maximized.output)?;
             let area = self.output_tiling_area(&output)?;
