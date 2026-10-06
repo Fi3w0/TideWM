@@ -4,7 +4,7 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 
 ## 0.90.138 — Glass shows the wallpaper at the right size again
 
-- Regression in .137: glass/frost behind windows on the 1.25 output showed the wallpaper enlarged 1.25× from the top-left corner. The capture-only wallpaper element pre-multiplied its size by the output scale to compensate for the old scale-1.0 captures; with captures now at the real scale it was scaled twice. Captures now use the same logical-sized wallpaper element as the visible frame, and the compensation helper is gone. Found by the maintainer comparing the glass against an empty workspace.
+- Regression in .137: glass/frost behind windows on the 1.25 output showed the wallpaper enlarged 1.25× from the top-left corner. The capture-only wallpaper element pre-multiplied its size by the output scale to compensate for the old scale-1.0 captures; with captures now at the real scale it was scaled twice. Captures now use the same logical-sized wallpaper element as the visible frame, and the compensation helper is gone. Found by the maintainer comparing the glass against an empty workspace. Maintainer-confirmed fixed on .138, together with the .137 workspace-transition scale fix.
 
 ## 0.90.137 — Captures draw window contents at the output's real scale
 
