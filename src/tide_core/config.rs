@@ -2929,10 +2929,9 @@ pub struct WindowRule {
     /// Hard floating-size bounds in logical pixels (niri `min-width` /
     /// `max-width` / `min-height` / `max-height`), tighter than whatever
     /// the client's own xdg `min_size`/`max_size` hints already are, never
-    /// looser. Enforced at the one place TideWM currently sets a floating
-    /// window's size on a rule's behalf (`map_toplevel`'s
-    /// `apply_floating_placement` call). Interactive border-drag resize
-    /// does not clamp against these yet.
+    /// looser when the intersection is feasible. Conflicting bounds favor
+    /// the minimum, matching the existing interactive client-hint policy.
+    /// Applied to natural, explicit, and remembered floating placement.
     pub min_width: Option<i32>,
     pub max_width: Option<i32>,
     pub min_height: Option<i32>,

@@ -17,3 +17,4 @@ pub(crate) mod state;
 pub(crate) mod wave;
 pub(crate) mod wave_fmt;
 pub(crate) mod waves;
+pub(crate) mod window_size;

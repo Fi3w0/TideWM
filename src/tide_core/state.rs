@@ -1569,6 +1569,25 @@ impl Smallvil {
             })
     }
 
+    /// Safe during a pointer grab: rules and committed hints require no
+    /// pointer-handle query or backend/output assumption.
+    pub(crate) fn floating_size_constraints_for(
+        &self,
+        surface: &WlSurface,
+    ) -> crate::window_size::FloatingSizeConstraints {
+        let (min, max) = smithay::wayland::compositor::with_states(surface, |states| {
+            use smithay::wayland::shell::xdg::SurfaceCachedState;
+            let mut guard = states.cached_state.get::<SurfaceCachedState>();
+            let data = guard.current();
+            (data.min_size, data.max_size)
+        });
+        crate::window_size::FloatingSizeConstraints::from_hints(
+            min,
+            max,
+            &self.resolve_window_rules_for(surface),
+        )
+    }
+
     /// Re-derives `window_opacity`/`window_glass_modes`/
     /// `window_shader_assignments` for one window from
     /// its currently-resolved rule. Shared by the full post-reload battery
@@ -10779,8 +10798,12 @@ impl Smallvil {
             };
             let rect = Rectangle::new(
                 position.map(Point::from).unwrap_or(current.loc),
-                size.map(Size::from).unwrap_or(current.size),
+                self.floating_size_constraints_for(surface)
+                    .clamp(size.map(Size::from).unwrap_or(current.size)),
             );
+            if rect == current {
+                return;
+            }
             if let Some(toplevel) = window.toplevel() {
                 toplevel.with_pending_state(|state| state.size = Some(rect.size));
                 toplevel.send_pending_configure();
@@ -10803,8 +10826,13 @@ impl Smallvil {
             return;
         };
         let loc = position.map(Point::from).unwrap_or(current.loc);
-        let size = size.map(Size::from).unwrap_or(current.size);
+        let size = self
+            .floating_size_constraints_for(surface)
+            .clamp(size.map(Size::from).unwrap_or(current.size));
         let rect = Rectangle::new(loc, size);
+        if rect == current {
+            return;
+        }
 
         if let Some(toplevel) = window.toplevel() {
             toplevel.with_pending_state(|state| {
@@ -10818,6 +10846,7 @@ impl Smallvil {
         if let Some(tag) = self.floating_workspace.get_mut(surface) {
             tag.rect = rect;
         }
+        self.request_redraw();
     }
 
     /// Records real pointer motion and, if `cursor_hide_after_ms` is
