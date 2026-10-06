@@ -2,6 +2,11 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.132 — Popups can slide in like Hyprland's
+
+- New `popup { animation = slide }` (default `fade`): the popup slides in from the right screen edge over 400 ms (ease-out cubic), rests, then slides back out over 450 ms (ease-in cubic) instead of fading, following the motion of Hyprland's notification overlay. Expiry timing is unchanged, persistent error popups slide in and stay, and they keep requesting frames only while sliding. Each output clips the off-screen part, so a sliding popup never draws onto a neighboring monitor.
+- Maintainer-confirmed on .131: the `outline` style traces its border over 1.5 s.
+
 ## 0.90.131 — `outline` popup style: the border is the countdown
 
 - New `popup { style = outline }`: the banner layout with no static border, accent strip or bottom line. The accent outline traces clockwise from the top-left corner over `duration_ms` and closes when the popup is due to fade; error popups show it closed. Border pixels are precomputed once, sorted by clockwise position, and each frame paints only the newly reached run with a damage-scoped upload.

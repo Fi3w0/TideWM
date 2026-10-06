@@ -703,6 +703,17 @@ pub enum ToastStyle {
     Outline,
 }
 
+/// How a timed popup enters and leaves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PopupAnimation {
+    /// Appears in place, fades out.
+    #[default]
+    Fade,
+    /// Slides in from the right screen edge and back out (Hyprland's
+    /// notification motion).
+    Slide,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct OceanReefConfig {
     pub name: String,
@@ -3579,6 +3590,8 @@ pub struct PopupConfig {
     /// How long a timed popup stays fully visible before its fade, in
     /// milliseconds. Auto is 2400. Banner's countdown bar spans this.
     pub duration_ms: Option<u64>,
+    /// Enter/leave motion. Defaults to `Fade`.
+    pub animation: PopupAnimation,
 }
 
 /// Which built-in shape a ripple draws. Multiple shapes can stack
@@ -8350,6 +8363,16 @@ fn apply_popup_block(cfg: &mut PopupConfig, body: &[waves::Entry]) {
             }
             "radius" => {
                 cfg.radius = parse_f32_clamped(value, 0.0, 64.0, "popup.radius");
+            }
+            "animation" | "transition" => {
+                cfg.animation = match value.trim().to_ascii_lowercase().as_str() {
+                    "fade" => PopupAnimation::Fade,
+                    "slide" => PopupAnimation::Slide,
+                    other => {
+                        tracing::warn!(value = other, "Unknown popup.animation, using fade");
+                        PopupAnimation::Fade
+                    }
+                };
             }
             "duration_ms" | "duration" => match parse_duration_ms(value) {
                 Some(ms) if ms > 0 => cfg.duration_ms = Some((ms as u64).clamp(300, 60_000)),
@@ -13175,6 +13198,15 @@ shader tinted-blur {
         assert_eq!(duration("10"), Some(300));
         assert_eq!(duration("999999"), Some(60_000));
         assert_eq!(duration("soon"), None);
+    }
+
+    #[test]
+    fn popup_animation_defaults_to_fade_and_parses_slide() {
+        let auto = Config::from_raw(RawConfig::default()).0;
+        assert_eq!(auto.popup.animation, PopupAnimation::Fade);
+        let entries = wave_entries("popup {\n animation = slide\n }\n");
+        let slide = Config::from_raw(lower_entries(&entries)).0;
+        assert_eq!(slide.popup.animation, PopupAnimation::Slide);
     }
 
     #[test]

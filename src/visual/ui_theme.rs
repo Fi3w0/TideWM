@@ -31,6 +31,8 @@ pub struct UiTheme {
     pub style: ToastStyle,
     /// `[popup] { duration_ms }`: full-visibility time of a timed popup.
     pub popup_duration: std::time::Duration,
+    /// `[popup] { animation }`.
+    pub popup_animation: crate::config::PopupAnimation,
 }
 
 /// Popup full-visibility time when `[popup] { duration_ms }` is unset.
@@ -94,6 +96,7 @@ impl UiTheme {
                 .popup
                 .duration_ms
                 .map_or(DEFAULT_POPUP_DURATION, std::time::Duration::from_millis),
+            popup_animation: config.popup.animation,
         }
     }
 
@@ -129,6 +132,7 @@ impl UiTheme {
             popup_border_color: None,
             style: ToastStyle::Pill,
             popup_duration: DEFAULT_POPUP_DURATION,
+            popup_animation: crate::config::PopupAnimation::Fade,
         }
     }
 

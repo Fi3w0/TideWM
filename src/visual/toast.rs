@@ -40,6 +40,8 @@ const TEXT_RIGHT_PAD: i32 = 22;
 const MIN_WIDTH: i32 = 270;
 
 const FADE_FOR: Duration = Duration::from_millis(450);
+/// Slide-in time for `animation = slide`; slide-out reuses `FADE_FOR`.
+const SLIDE_IN_FOR: Duration = Duration::from_millis(400);
 
 // `ToastStyle::Banner`: a long, short bar instead of the pill's tall card,
 // with a solid accent bar down the left edge and a bottom progress line
@@ -188,7 +190,11 @@ impl Toast {
     /// toast settles, burning CPU/GPU on frames that look identical to the
     /// one already on screen.
     pub fn needs_continued_redraw(&self) -> bool {
-        self.visible_for.is_some()
+        self.visible_for.is_some() || (self.slides() && self.shown_at.elapsed() < SLIDE_IN_FOR)
+    }
+
+    fn slides(&self) -> bool {
+        self.theme.popup_animation == crate::config::PopupAnimation::Slide
     }
 
     pub fn expired(&self) -> bool {
@@ -253,8 +259,17 @@ impl Toast {
                 }
             }
         }
+        let slide = self
+            .slides()
+            .then(|| slide_fraction(self.shown_at.elapsed(), self.visible_for));
         let alpha = match self.visible_for {
             None => 1.0,
+            Some(_) if slide.is_some() => {
+                if self.expired() {
+                    return None;
+                }
+                1.0
+            }
             Some(visible_for) => {
                 // Anchored at `shown_at + visible_for`, not "now" -- holds
                 // at 1.0 (its own `from`) until that instant arrives, same
@@ -267,7 +282,12 @@ impl Toast {
             }
         };
 
-        let (x, y) = toast_location(logical_output_width, self.size.0, scale)?;
+        let (mut x, y) = toast_location(logical_output_width, self.size.0, scale)?;
+        if let Some(fraction) = slide {
+            // Pushed right by up to its own width plus the margin: fully
+            // past the output edge at 1.0.
+            x += f64::from(fraction) * f64::from(self.size.0 + MARGIN) * scale;
+        }
         let location: Point<f64, Physical> = (x, y).into();
 
         match MemoryRenderBufferRenderElement::from_buffer(
@@ -298,6 +318,20 @@ fn toast_location(logical_output_width: i32, toast_width: i32, scale: f64) -> Op
         return None;
     }
     Some((f64::from(logical_x) * scale, f64::from(MARGIN) * scale))
+}
+
+/// How far a sliding popup is pushed off the right edge, `0.0` (in place) to
+/// `1.0` (fully off screen): eases in over `SLIDE_IN_FOR`, holds, then eases
+/// out over `FADE_FOR` once `visible_for` has passed. A persistent popup
+/// (`None`) only slides in.
+fn slide_fraction(elapsed: Duration, visible_for: Option<Duration>) -> f32 {
+    let progress =
+        |t: Duration, over: Duration| (t.as_secs_f32() / over.as_secs_f32()).clamp(0.0, 1.0);
+    let entering = 1.0 - (1.0 - progress(elapsed, SLIDE_IN_FOR)).powi(3);
+    let leaving = visible_for
+        .and_then(|visible| elapsed.checked_sub(visible))
+        .map_or(0.0, |t| progress(t, FADE_FOR).powi(3));
+    (1.0 - entering).max(leaving)
 }
 
 /// A style's rasterized canvas, plus (`Banner` only) where its live
@@ -1126,6 +1160,30 @@ mod tests {
         assert_ne!(
             empty.pixels[corner..corner + 3],
             full.pixels[corner..corner + 3]
+        );
+    }
+
+    #[test]
+    fn slide_enters_holds_and_leaves() {
+        let ms = Duration::from_millis;
+        let visible = Some(ms(1500));
+        assert_eq!(slide_fraction(ms(0), visible), 1.0, "starts off screen");
+        assert!(
+            slide_fraction(ms(200), visible) < 0.2,
+            "mostly in after half the slide"
+        );
+        assert_eq!(slide_fraction(ms(800), visible), 0.0, "rests in place");
+        let leaving = slide_fraction(ms(1500) + FADE_FOR / 2, visible);
+        assert!(leaving > 0.0 && leaving < 1.0);
+        assert_eq!(
+            slide_fraction(ms(1500) + FADE_FOR, visible),
+            1.0,
+            "gone at expiry"
+        );
+        assert_eq!(
+            slide_fraction(ms(60_000), None),
+            0.0,
+            "persistent popups stay"
         );
     }
 
