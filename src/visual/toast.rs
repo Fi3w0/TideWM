@@ -667,14 +667,35 @@ fn rasterize_banner_for_output(
 ) -> Option<Rasterized> {
     let font = font();
     let font_size = kind.font_size();
-    let height = BANNER_HEIGHT + BANNER_INSET * 2;
-    let icon_diameter = (BANNER_ICON_RADIUS * 2.0).ceil() as i32;
+    let card_h = theme
+        .popup_height
+        .map_or(BANNER_HEIGHT, |h| h.round().clamp(24.0, 96.0) as i32);
+    let min_width = theme
+        .popup_min_width
+        .map_or(BANNER_MIN_WIDTH, |w| w.round().max(1.0) as i32);
+    let line_width = |default: i32| {
+        theme
+            .popup_line_width
+            .map_or(default, |w| w.round().clamp(1.0, 16.0) as i32)
+    };
+    let underline_h = line_width(UNDERLINE_HEIGHT).min(card_h / 2);
+    // Icon and text center in the card, above the line for `Underline`.
+    let content_h = if mode == BannerMode::Underline {
+        card_h - underline_h
+    } else {
+        card_h
+    };
+    let icon_r = BANNER_ICON_RADIUS
+        .min((content_h as f32 - 8.0) / 2.0)
+        .max(4.0);
+    let height = card_h + BANNER_INSET * 2;
+    let icon_diameter = (icon_r * 2.0).ceil() as i32;
     let text_start_offset =
         BANNER_ACCENT_WIDTH + BANNER_ICON_LEFT_GAP + icon_diameter + BANNER_TEXT_LEFT_GAP;
     let chrome_width = BANNER_INSET * 2 + text_start_offset + BANNER_TEXT_RIGHT_PAD;
     let available_width = narrowest_output_width
         .map(|width| width.saturating_sub(MARGIN * 2))
-        .unwrap_or(BANNER_MIN_WIDTH);
+        .unwrap_or(min_width);
     if available_width < chrome_width {
         return None;
     }
@@ -685,7 +706,7 @@ fn rasterize_banner_for_output(
     let width = line
         .advance
         .saturating_add(chrome_width)
-        .max(BANNER_MIN_WIDTH.min(width_limit))
+        .max(min_width.min(width_limit))
         .min(width_limit);
     let pixel_len = crate::text::checked_argb_len(width, height)?;
     let mut pixels = Vec::new();
@@ -695,7 +716,7 @@ fn rasterize_banner_for_output(
     let card_x = BANNER_INSET;
     let card_y = BANNER_INSET;
     let card_w = width - BANNER_INSET * 2;
-    let radius = theme.radius.min(BANNER_HEIGHT / 2) as f32;
+    let radius = theme.radius.min(card_h / 2) as f32;
     let accent = theme.popup_accent(kind == ToastKind::Error, 0.5);
     let mut ring = Vec::new();
 
@@ -707,18 +728,18 @@ fn rasterize_banner_for_output(
                 card_x - 3,
                 card_y + 3,
                 card_w + 6,
-                BANNER_HEIGHT,
+                card_h,
                 radius + 3.0,
             );
             if shadow > 0.0 {
                 put_pixel(&mut pixels, width, x, y, (0, 0, 0, (70.0 * shadow) as u8));
             }
             let coverage =
-                rounded_rect_coverage_local(x, y, card_x, card_y, card_w, BANNER_HEIGHT, radius);
+                rounded_rect_coverage_local(x, y, card_x, card_y, card_w, card_h, radius);
             if coverage <= 0.0 {
                 continue;
             }
-            let t = ((y - card_y) as f32 / BANNER_HEIGHT as f32).clamp(0.0, 1.0);
+            let t = ((y - card_y) as f32 / card_h as f32).clamp(0.0, 1.0);
             let bg = crate::ui_theme::mix(theme.panel_from, theme.panel_to, t);
             put_pixel(
                 &mut pixels,
@@ -735,7 +756,7 @@ fn rasterize_banner_for_output(
                     card_x + stroke,
                     card_y + stroke,
                     card_w - stroke * 2,
-                    BANNER_HEIGHT - stroke * 2,
+                    card_h - stroke * 2,
                     (radius - stroke as f32).max(0.0),
                 );
             if border <= 0.0 {
@@ -748,7 +769,7 @@ fn rasterize_banner_for_output(
                 ring.push(OutlinePixel {
                     x,
                     y,
-                    t: perimeter_position(x, y, card_x, card_y, card_w, BANNER_HEIGHT),
+                    t: perimeter_position(x, y, card_x, card_y, card_w, card_h),
                     coverage: (border * 255.0) as u8,
                 });
             } else {
@@ -777,7 +798,7 @@ fn rasterize_banner_for_output(
                 card_x,
                 card_y,
                 accent_bar_mask_w,
-                BANNER_HEIGHT,
+                card_h,
                 radius,
             );
             if coverage <= 0.0 {
@@ -791,33 +812,28 @@ fn rasterize_banner_for_output(
     // styles to one family instead of Banner reading as a plain bordered
     // box.
     let icon_accent = theme.accent(kind == ToastKind::Error, 0.35);
-    let icon_radius_i32 = BANNER_ICON_RADIUS.round() as i32;
+    let icon_radius_i32 = icon_r.round() as i32;
     let icon_center = (
         card_x + BANNER_ACCENT_WIDTH + BANNER_ICON_LEFT_GAP + icon_radius_i32,
-        card_y + BANNER_HEIGHT / 2,
+        card_y + content_h / 2,
     );
     draw_tide_mark(
         &mut pixels,
         width,
         icon_center,
-        BANNER_ICON_RADIUS,
+        icon_r,
         icon_accent,
         theme.text,
     );
 
-    let line_width = |default: i32| {
-        theme
-            .popup_line_width
-            .map_or(default, |w| w.round().clamp(1.0, 16.0) as i32)
-    };
     let track = if mode == BannerMode::Underline {
         // Flush with the card's bottom edge, inset only past rounded
         // corners so the line never pokes outside a rounded card.
-        let h = line_width(UNDERLINE_HEIGHT).min(BANNER_HEIGHT / 2);
+        let h = underline_h;
         let inset = radius.ceil() as i32;
         ProgressTrack {
             x: card_x + inset,
-            y: card_y + BANNER_HEIGHT - h,
+            y: card_y + card_h - h,
             w: (card_w - inset * 2).max(0),
             h,
         }
@@ -826,7 +842,7 @@ fn rasterize_banner_for_output(
             .min(BANNER_PROGRESS_BOTTOM_GAP + BANNER_PROGRESS_HEIGHT * 2);
         ProgressTrack {
             x: card_x + BANNER_PROGRESS_INSET_X,
-            y: card_y + BANNER_HEIGHT - BANNER_PROGRESS_BOTTOM_GAP - h,
+            y: card_y + card_h - BANNER_PROGRESS_BOTTOM_GAP - h,
             w: (card_w - BANNER_PROGRESS_INSET_X * 2).max(0),
             h,
         }
@@ -843,7 +859,9 @@ fn rasterize_banner_for_output(
         stamp_progress_fill(&mut pixels, width, track, accent, fill);
     }
 
-    let baseline = card_y + 28;
+    // Optical center: half the content height plus roughly half the cap
+    // height (28 for the default 46 px card and 15 px text).
+    let baseline = card_y + content_h / 2 + (font_size * 0.36).round() as i32;
     let mut pen_x = card_x + text_start_offset;
 
     for glyph in line.glyphs {
@@ -1291,6 +1309,21 @@ mod tests {
     }
 
     #[test]
+    fn banner_layouts_follow_configured_height_and_length() {
+        let mut theme = crate::ui_theme::UiTheme::for_test_with_style(ToastStyle::Underline);
+        theme.popup_height = Some(32.0);
+        theme.popup_min_width = Some(560.0);
+        let raster =
+            rasterize_toast_for_output("ok", ToastKind::Info, theme, Some(2048), 0.0).unwrap();
+        assert_eq!(raster.height, 32 + BANNER_INSET * 2);
+        assert_eq!(raster.width, 560);
+        // Never wider than the output allows.
+        let narrow =
+            rasterize_toast_for_output("ok", ToastKind::Info, theme, Some(400), 0.0).unwrap();
+        assert_eq!(narrow.width, 400 - MARGIN * 2);
+    }
+
+    #[test]
     fn perimeter_position_runs_clockwise_from_the_top_left() {
         let at = |x, y| perimeter_position(x, y, 0, 0, 100, 50);
         assert!(at(0, 0) < at(99, 0));
@@ -1336,7 +1369,7 @@ mod tests {
     }
 
     #[test]
-    fn pill_style_stays_the_default_and_ignores_fill() {
+    fn pill_style_ignores_fill() {
         assert_eq!(crate::ui_theme::UiTheme::for_test().style, ToastStyle::Pill);
         let a = rasterize_toast_for_output(
             "Configuration reloaded",

@@ -695,14 +695,14 @@ pub enum SpatialEngine {
 /// through `UiTheme::from_config`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToastStyle {
-    #[default]
     Pill,
     Banner,
     /// Square-friendly box with no static border: the accent outline
     /// traces clockwise around it over the popup's visible time.
     Outline,
     /// Borderless box whose countdown is a full-width line along its
-    /// bottom edge.
+    /// bottom edge. The default since 0.90.135.
+    #[default]
     Underline,
 }
 
@@ -710,10 +710,10 @@ pub enum ToastStyle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PopupAnimation {
     /// Appears in place, fades out.
-    #[default]
     Fade,
     /// Slides in from the right screen edge and back out (Hyprland's
-    /// notification motion).
+    /// notification motion). The default since 0.90.135.
+    #[default]
     Slide,
 }
 
@@ -3588,12 +3588,12 @@ pub struct PopupConfig {
     pub border_color: Option<[f32; 4]>,
     /// Pixels. Auto matches the average `[rounding]` radius.
     pub radius: Option<f32>,
-    /// Card shape. Defaults to `Pill`, the original card. See `ToastStyle`.
+    /// Card shape. Defaults to `Underline`. See `ToastStyle`.
     pub style: ToastStyle,
     /// How long a timed popup stays fully visible before its fade, in
     /// milliseconds. Auto is 2400. Banner's countdown bar spans this.
     pub duration_ms: Option<u64>,
-    /// Enter/leave motion. Defaults to `Fade`.
+    /// Enter/leave motion. Defaults to `Slide`.
     pub animation: PopupAnimation,
     /// Slide in and out time for `animation = slide`, milliseconds. Auto
     /// is 600, Hyprland's notification animation length.
@@ -3601,6 +3601,11 @@ pub struct PopupConfig {
     /// Countdown line thickness, pixels, for `banner` and `underline`.
     /// Auto is 3 for banner and 4 for underline.
     pub line_width: Option<f32>,
+    /// Card height for the banner-layout styles, pixels. Auto is 46.
+    pub height: Option<f32>,
+    /// Minimum card length for the banner-layout styles, pixels. Auto is
+    /// 320; never wider than the output allows.
+    pub min_width: Option<f32>,
 }
 
 /// Which built-in shape a ripple draws. Multiple shapes can stack
@@ -8378,10 +8383,16 @@ fn apply_popup_block(cfg: &mut PopupConfig, body: &[waves::Entry]) {
                     "fade" => PopupAnimation::Fade,
                     "slide" => PopupAnimation::Slide,
                     other => {
-                        tracing::warn!(value = other, "Unknown popup.animation, using fade");
-                        PopupAnimation::Fade
+                        tracing::warn!(value = other, "Unknown popup.animation, using the default");
+                        PopupAnimation::default()
                     }
                 };
+            }
+            "height" => {
+                cfg.height = parse_f32_clamped(value, 24.0, 96.0, "popup.height");
+            }
+            "min_width" | "min-width" | "width" => {
+                cfg.min_width = parse_f32_clamped(value, 120.0, 4096.0, "popup.min_width");
             }
             "line_width" | "line-width" | "bar_width" => {
                 cfg.line_width = parse_f32_clamped(value, 1.0, 16.0, "popup.line_width");
@@ -8407,8 +8418,8 @@ fn apply_popup_block(cfg: &mut PopupConfig, body: &[waves::Entry]) {
                     "outline" | "frame" | "border" => ToastStyle::Outline,
                     "underline" | "line" => ToastStyle::Underline,
                     other => {
-                        tracing::warn!(value = other, "Unknown popup.style, using pill");
-                        ToastStyle::Pill
+                        tracing::warn!(value = other, "Unknown popup.style, using the default");
+                        ToastStyle::default()
                     }
                 };
             }
@@ -13186,9 +13197,14 @@ shader tinted-blur {
     }
 
     #[test]
-    fn popup_style_defaults_to_pill_and_parses_banner() {
+    fn popup_style_defaults_to_underline_and_parses_every_style() {
         let auto = Config::from_raw(RawConfig::default()).0;
-        assert_eq!(auto.popup.style, ToastStyle::Pill);
+        assert_eq!(auto.popup.style, ToastStyle::Underline);
+        let entries = wave_entries("popup {\n style = pill\n }\n");
+        assert_eq!(
+            Config::from_raw(lower_entries(&entries)).0.popup.style,
+            ToastStyle::Pill
+        );
 
         let entries = wave_entries("popup {\n style = banner\n }\n");
         let banner = Config::from_raw(lower_entries(&entries)).0;
@@ -13203,9 +13219,14 @@ shader tinted-blur {
         assert_eq!(underline.popup.style, ToastStyle::Underline);
         assert_eq!(underline.popup.line_width, Some(6.0));
 
+        let entries = wave_entries("popup {\n height = 30\n min_width = 600\n }\n");
+        let sized = Config::from_raw(lower_entries(&entries)).0;
+        assert_eq!(sized.popup.height, Some(30.0));
+        assert_eq!(sized.popup.min_width, Some(600.0));
+
         let entries = wave_entries("popup {\n style = nonsense\n }\n");
         let fallback = Config::from_raw(lower_entries(&entries)).0;
-        assert_eq!(fallback.popup.style, ToastStyle::Pill);
+        assert_eq!(fallback.popup.style, ToastStyle::default());
     }
 
     #[test]
@@ -13226,9 +13247,12 @@ shader tinted-blur {
     }
 
     #[test]
-    fn popup_animation_defaults_to_fade_and_parses_slide() {
+    fn popup_animation_defaults_to_slide_and_parses_fade() {
         let auto = Config::from_raw(RawConfig::default()).0;
-        assert_eq!(auto.popup.animation, PopupAnimation::Fade);
+        assert_eq!(auto.popup.animation, PopupAnimation::Slide);
+        let entries = wave_entries("popup {\n animation = fade\n }\n");
+        let fade = Config::from_raw(lower_entries(&entries)).0;
+        assert_eq!(fade.popup.animation, PopupAnimation::Fade);
         let entries = wave_entries("popup {\n animation = slide\n }\n");
         let slide = Config::from_raw(lower_entries(&entries)).0;
         assert_eq!(slide.popup.animation, PopupAnimation::Slide);

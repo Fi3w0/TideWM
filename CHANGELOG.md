@@ -2,6 +2,11 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.135 — Underline + slide is the default popup; adjustable box size
+
+- The default popup is now `style = underline` with `animation = slide` (previously `pill` with a fade). Unknown style/animation values fall back to these defaults. `style = pill` and `animation = fade` restore the old look. Colors still follow the theme: the panel gradient from the border colors, the line and icon from the accent gradient (urgent colors for errors), and `border_color` still pins the line color.
+- New `popup { height }` (24–96, default 46) and `popup { min_width }` (default 320) size the banner, outline and underline boxes. Icon and text stay centered, above the line for `underline`, and the icon shrinks on short boxes.
+
 ## 0.90.134 — `underline` popup style and adjustable line width
 
 - New `popup { style = underline }`: the banner layout with no border or accent strip, and a full-width countdown line flush with the box's bottom edge over a faint track (inset only past rounded corners).

@@ -37,6 +37,9 @@ pub struct UiTheme {
     pub popup_slide: std::time::Duration,
     /// `[popup] { line_width }` pin; `None` lets each style pick its own.
     pub popup_line_width: Option<f32>,
+    /// `[popup] { height }` / `{ min_width }` pins for the banner layouts.
+    pub popup_height: Option<f32>,
+    pub popup_min_width: Option<f32>,
 }
 
 /// Popup slide time when `[popup] { slide_ms }` is unset (Hyprland's).
@@ -109,6 +112,8 @@ impl UiTheme {
                 .slide_ms
                 .map_or(DEFAULT_POPUP_SLIDE, std::time::Duration::from_millis),
             popup_line_width: config.popup.line_width,
+            popup_height: config.popup.height,
+            popup_min_width: config.popup.min_width,
         }
     }
 
@@ -147,6 +152,8 @@ impl UiTheme {
             popup_animation: crate::config::PopupAnimation::Fade,
             popup_slide: DEFAULT_POPUP_SLIDE,
             popup_line_width: None,
+            popup_height: None,
+            popup_min_width: None,
         }
     }
 
