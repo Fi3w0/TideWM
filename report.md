@@ -696,7 +696,7 @@ Fix direction: make redraw propagation event-driven or run a per-output schedule
 
 **Confidence: confirmed (live, 2026-10-06).** After a DPMS wake the maintainer's HDMI link re-trained, TideWM handled it as disconnect/reconnect, and kitty on that output segfaulted (`wl_proxy_get_user_data` from glfw-wayland's dispatch, core dump PID 8083). `handle_connector_change` called `remove_global` before unmapping; `Space::unmap_output` sends no events, so leaves went out on a later refresh, after clients had destroyed the proxy.
 
-**Fixed 2026-10-06, 0.90.129.** Unmap, `Space::refresh` (sends leaves), then `disable_global` with removal after 10 s (niri's order). Needs a live unplug/replug with a client on the output to confirm.
+**Fixed 2026-10-06, 0.90.129.** Unmap, `Space::refresh` (sends leaves), then `disable_global` with removal after 10 s (niri's order). **Maintainer-confirmed on .129:** a physical HDMI unplug/replug plus a spontaneous link drop 6 s later (two disconnect/reconnect cycles) with kitty on the output; the same kitty process survived both with no new core dump. Windows stay on the fallback output after the monitor returns (they are not moved back).
 
 ### M-38 — Primary GPU removal leaves a permanently black live session
 
