@@ -9,16 +9,16 @@ This is a static code review, not a claim that every issue below was reproduced 
 ## Implementation handoff
 
 - Updated: 2026-10-06
-- Implementation branch: `ai/codex/session-cadence-fixes`
+- Implementation branch: `ai/codex/floating-capture-improvements`
 - Worktree: `/home/fiw/Documents/Proyects/TideWM`
-- Latest behavioral head: `111fa43` (base for this batch: `e2385eb`)
-- Current TideWM version: `0.90.109`
+- Latest behavioral head: `fb8df5d` (base for this batch: `22737c5`)
+- Current TideWM version: `0.90.116`
 - Push status: this batch is local only; nothing was pushed.
 - Phase 3 continued from documentation/packaging head `b6805e2`, preserving all earlier remediation history.
 
 The finding text below is the original audit evidence. It is intentionally retained even when a finding is closed. Use this handoff ledger as the current status authority, then inspect the named commit and current code before changing a closed area. Do not repeat a fix merely because its original finding still says “confirmed.”
 
-### 2026-10-06 implementation batch
+### 2026-10-06 session/cadence batch
 
 Three focused fixes landed as SSH-signed local commits:
 
@@ -32,12 +32,32 @@ Baseline: 544 compositor, 14 tidectl, and 9 wavefmt tests passed before edits. T
 
 M-56 (`7421d3c`) and M-59/M-60 (`717e4fe`) were already implemented; their stale ledger statuses are corrected here without new behavior. Dependency pins and native dependencies are unchanged. Reference source reviewed: pinned Smithay DRM/winit, Linux DRM ownership, and niri at `ed22699d99462f61ab171472d3ea67e844ea580d` (session recovery and frame clock).
 
+### 2026-10-06 floating/capture continuation
+
+The maintainer requested a larger autonomous feature batch after the session/cadence fixes. Seven improvements extend existing compositor paths, with no new native or Rust dependencies and no changes to live config, services, or the active DRM seat:
+
+| Change | Commit / version | Verification still owed |
+| --- | --- | --- |
+| Natural, explicit, and remembered floating sizes share client/rule limits | `d222407` / 0.90.110 | Natural-size and persistent-size opening in both engines |
+| Pointer and keyboard resizing share live limits and safe edge anchoring | `cdfa4ce` / 0.90.111 | All pointer edges, rule reload during drag, keyboard parity |
+| Snap preview/commit use constrained destination-workspace policy | `2bc7c87` / 0.90.112 | Cross-output drag, live destination rules and limits |
+| Live limits cover existing/hidden floaters, conversion, and normal restoration | `e3997d3` / 0.90.113 | Reload/title/tag/client-hint changes; fullscreen/maximize return |
+| Capture wakeups target only their live output | `a501dce` / 0.90.114 | Mixed-output screenshot and PipeWire page-flip traces |
+| Ocean resize-to-monitor obeys limits and preserves its world center safely | `59926fd` / 0.90.115 | Live zoom-independent sizing and normal-state guard |
+| Animation continuation and caustics wakeups use output-local scenes/deadlines | `fb8df5d` / 0.90.116 | Mixed-output border/glass/ripple/camera/DPMS traces |
+
+Baseline for this continuation: 551 compositor, 14 tidectl, and 9 wavefmt tests (574 total). The expanded suite passes 569 compositor, 14 tidectl, and 9 wavefmt tests (592 total), a net increase of 18. All final gates pass: `cargo fmt --all -- --check`; `cargo test --locked --all-features --all-targets -- --test-threads=1`; `cargo clippy --locked --all-features --all-targets -- -D warnings`; and `cargo build --locked --release --all-features`. The optimized build finished in 1m 55s. Commands used one CPU (23), one Cargo job, niceness 19, and idle I/O; rustc's actual affinity/niceness were checked. Receipts: `/tmp/tidewm-floating-final-{fmt,tests,clippy,release,version}.log`. Release `--version` reports `0.90.116`, `fb8df5d-dirty`, built 2026-10-06: only the in-progress `report.md` documentation was uncommitted during that build; source matched `fb8df5d`. No compositor session was started. All seven implementation commits' SSH signatures verified locally against the existing key; this is not a claim of GitHub signing-key registration.
+
+References read locally before implementation: niri commit `ed22699d99462f61ab171472d3ea67e844ea580d`, especially floating sizing (`src/layout/floating.rs`, `src/window/mod.rs`, `src/utils/mod.rs`) and per-output unfinished-animation/redraw state (`src/niri.rs`, `src/backend/tty.rs`), plus the pinned Smithay `ff5fa7d` output, geometry, render-state, and presentation helpers. Zero client maxima remain unbounded; intersected impossible limits favor the minimum. Bounds are independent of output dimensions. Snap policy resolves the destination workspace before ownership transfer. Exact spawn size/position and persistence are not replayed by live rule refresh; removing a bound keeps current geometry. Ocean monitor sizing retains its explicitly documented independence from camera zoom.
+
+M-54's global capture wakeup is fixed. M-51 is partially addressed: each backend now continues animations only for its rendered placements and output-owned effects, while physics update functions can still request global scene damage and the shared toast legitimately animates everywhere. Global expiry cleanup is preserved even without rendering. M-53 remains open for achieved-cadence measurement, particularly nested host-cadence gating. M-58's original Space-membership argument is stale (`6d6ee92` already selects rendered placements), but the current presentation helper still reads Smithay primary-scanout state without an updater anywhere in this tree; pinned Smithay returns `None` in that case. This is a newly identified protocol correctness gap, so M-58 stays open rather than being labeled closed from placement inspection alone. No live verification or measured CPU/GPU improvement is claimed.
+
 ### Current totals
 
 - Critical: all 7 closed.
 - High: H-01 through H-44 closed. H-45 was re-audited as a stale false positive because the current udev path already processes connector `Changed` events and rescans/retries surface creation.
 - Medium explicitly re-audited and closed: M-01, M-02, M-04 through M-10, M-12 through M-23, M-25 through M-30, and M-32 through M-36.
-- Medium still open: M-24, M-51, M-53, M-54, M-55 (idle-maintenance measurement only), M-58, and M-72. M-24 remains mitigated rather than eliminated; M-51/M-53/M-54/M-58 remain measurement-led; M-72 still needs a maintainer scale-policy choice. M-37 and M-57 are fixed in this batch; M-56, M-59, and M-60 were already fixed and are now documented as closed. Phase 3 closed M-48, M-50, M-61 through M-63, M-65 through M-68, M-70, M-71, and M-73 in `7c48188`; M-64 and M-69 had already been closed on 2026-08-14. See each finding body for proof and validation debt.
+- Medium still open: M-24, M-51 (physics/global damage remains), M-53, M-55 (idle-maintenance measurement only), M-58, and M-72. M-24 remains mitigated rather than eliminated; M-51 is partially addressed and M-54 is fixed; M-53 remains measurement-led and M-58 requires presentation-state wiring; M-72 still needs a maintainer scale-policy choice. M-37 and M-57 were fixed in the preceding session/cadence batch; M-56, M-59, and M-60 were already fixed and are now documented as closed. Phase 3 closed M-48, M-50, M-61 through M-63, M-65 through M-68, M-70, M-71, and M-73 in `7c48188`; M-64 and M-69 had already been closed on 2026-08-14. See each finding body for proof and validation debt.
 - Phase 3 also closes the two executable config gaps in `7c48188`: layer blur's `ignore_alpha` now masks frost from a composed layer-surface alpha capture, and the udev renderer applies global/per-output adaptive-sync policy through Smithay's DRM `use_vrr`. Parser/commit tests and the all-feature build pass; a transparent full-output layer and real DRM VRR transitions remain explicitly unverified.
 - Performance re-audit (2026-08-13): P-01, P-02, P-03, P-06, P-07, P-08, and P-10 are fixed in `b6d829a`, `c211a17`, `193e63d`, `950d921`, `7e9a128`, and `c508041`. P-01 now shares one placement snapshot across an output render/capture pass and rejects off-camera reefs before BSP layout, without a persistent cache. P-04 was already single-search in the reconciled tree. P-05's remaining allocation is a bounded once-per-window history path, and P-09's picker rebuild happens only when selection state changes; neither justifies hot-path complexity without a profile. P-11 and P-14 are closed by the real-hardware results recorded below. P-12's scheduling fix is covered by nonstandard-cadence unit tests but still needs a real-DRM trace. P-13 remains a general low-end iGPU/client-buffer constraint, but TideWM's controlled side is now measurable, downscalable, wallpaper-optional, and reclaimed whenever the last output stops presenting a capture (`332cf1c`). A shared-per-output blur buffer remains a possible measured tradeoff, not an assumed win: it changes overlap/occlusion semantics and can allocate more than small tiled captures.
 - Lower-confidence re-audit (2026-08-13): every concrete U-01 through U-16 item has now been investigated. U-01 is fixed in `fc82fea`; U-04 in `1b14b48`; U-10 in `51c476e`; U-15 in `5fe5db4`; U-16 in `e6bf868`; U-02, U-03, U-05, and U-06 in `7edcc3b`; U-07 and U-08 in `7edc8c2`; U-11 in `9898128`; U-12 in `8efcdfe`; and the concrete hardware-facing U-14 ranges in `73d62ec`. U-09 and U-13 were already bounded in the reconciled tree. U-14 remains an ongoing parser-audit category for future fields, not permission to invent hardware defaults.
@@ -726,6 +746,8 @@ Fix direction: make redraw propagation event-driven or run a per-output schedule
 
 **Confidence: confirmed.** `has_active_animation()` is global across per-output transitions, caustics, windows, and overlays (`state.rs:4985-5039`). Both backends convert any active result into one global redraw flag (`winit.rs:520-528`, `udev.rs:825-838`) and then dirty every output (`winit.rs:214-217`, `udev.rs:773-777`). In a mixed-refresh multi-monitor setup, an animation on one monitor creates avoidable work/page flips on all static monitors.
 
+**Partially fixed 2026-10-06, 0.90.116.** Backend animation continuation now uses each output’s frame-owned placements and output-local transitions, ripples, camera motion, closing snapshots, border/glass eligibility, and caustics deadlines. Global expiry cleanup and shared toast behavior are retained. Physics/current/buoyancy updates still call global `request_redraw`, so the finding remains open for those paths and real mixed-output validation.
+
 ### M-52 — Lock/DPMS does not suspend invisible animation work
 
 **Confidence: confirmed.** The global animation predicate includes ambient/full physics, animated borders, and glass without considering lock or output power (`state.rs:5008-5038`, animated-border scan `:5395-5420`). Physics advances before lock-aware composition and requests redraw while bodies exist (`udev.rs:769-772`, `state.rs:1819-1850`). A lock screen or one remaining active CRTC can therefore keep repainting because of effects that are hidden or belong to a DPMS-off output.
@@ -739,6 +761,8 @@ Fix direction: make redraw propagation event-driven or run a per-output schedule
 ### M-54 — Screencasting one output repaints every output at about 30 FPS
 
 **Confidence: confirmed.** Each PipeWire cycle queues a capture, which calls global `request_redraw()` (`capture.rs:143-153`). Udev marks every CRTC dirty and renders visible frames before draining the targeted capture (`udev.rs:773-811`). On multi-4K setups, one output stream needlessly repaints the rest and compounds the full-frame readback/CPU copy at `capture.rs:721-775`.
+
+**Fixed 2026-10-06, `a501dce`, 0.90.114.** Both initial and deferred capture requests use `request_output_redraw` for their target. Both backends consume one coalesced request batch and dirty only included outputs; global scene requests still supersede scoped requests. Three actual Smithay Output tests cover coalescing, global precedence, and reconnect identity. Capture privacy, budgets, drain ordering, and negotiated stream rate are unchanged. A live mixed-output page-flip/capture trace remains pending.
 
 ### M-55 — Winit high-refresh timing drifts by render duration
 
@@ -761,6 +785,8 @@ Fix direction: make redraw propagation event-driven or run a per-output schedule
 ### M-58 — First frame after a cross-output move can misattribute presentation feedback
 
 **Confidence: likely.** `take_presentation_feedback` filters via `space.outputs_for_element` (`state.rs:4933-4947`), but both backends call `space.refresh()` only at the end of their tick (`winit.rs:530`, `udev.rs:840`). A move/placement commit can request and render a frame before the membership cache refreshes.
+
+**Re-audited 2026-10-06; still open.** The original Space-cache filter was already replaced by rendered placements in `6d6ee92`. However, `take_presentation_feedback` still passes `surface_primary_scanout_output`, and no `update_surface_primary_scanout_output` call exists in TideWM. Pinned Smithay documents and implements a `None` result until that state is updated; its collection helper skips feedback when the preferred output is `None`. Follow-up must wire render-state-based selection for windows/subsurfaces/popups and layer surfaces, then verify real feedback delivery and first-frame cross-output attribution. No new presentation behavior was added in this batch.
 
 ### M-59 — Screencast timing is not exactly its advertised 30 FPS
 
@@ -991,7 +1017,7 @@ The roadmap itself is reasonable, but audit evidence changes the order:
 
 **Verdict: the udev architecture is genuinely multi-output, and the enumerated correctness failures in this section now have code fixes; release confidence still requires the real-connector matrix.** Each CRTC has its own `SurfaceData`, damage tracker, pending/dirty state, KMS queue, VBlank completion, mode, scale, transform, and output object. The remaining or unverified multi-output work is:
 
-- Global redraw/capture scheduling can still repaint unrelated outputs (M-51, M-54); those findings remain measurement-led.
+- Physics-driven global scene updates can still repaint unrelated outputs (M-51); capture wakeups (M-54) and backend animation continuation are now output-scoped. Mixed-output measurement remains pending.
 - Phase 3's mixed-scale workspace swap, output-management, pointer/focus repair, lock resize, layer/control hotplug cleanup, Ocean rendered-output policy, and per-device absolute mapping have passed source/unit/build gates but still need the real hardware combinations recorded in their finding bodies.
 - Earlier closed Classic↔Ocean, mixed-refresh, secondary-output UI, rotated-capture, cursor-scale, hotplug rollback, zero-output, and L-shaped-layout findings retain their own live-validation caveats where noted; their original evidence is not a current open-finding list.
 
