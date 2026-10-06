@@ -2,6 +2,13 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.137 — Captures draw window contents at the output's real scale
+
+- On a fractionally scaled output (the maintainer's 2560×1440 at 1.25), every workspace switch showed window contents shrunk to 80% inside their full-size borders for the length of the transition, then snapping back. Offscreen captures used a damage tracker created at scale 1.0, and Smithay sizes client surface elements from the tracker's scale at draw time, so contents rendered at 1/1.25 while TideWM's own fixed-size elements (borders) stayed correct. Captures now render at the output's fractional scale. This covers the workspace-transition snapshot, per-window glass/frost and custom-shader backdrops, and layer-surface backdrops/alpha masks, which had the same mismatch.
+- Shown floating windows now take their fractional scale from the output they are actually displayed on during retile, instead of their ownership tag, which a pinned window can leave stale.
+- Confirmed live from a 45 s frame recording and a phone photo of the transition; integer-scale outputs were unaffected.
+- Also on .136: 5-minute soak with no leaks, suspend/resume recovery confirmed.
+
 ## 0.90.136 — Banner keeps its line clear of the text on short boxes
 
 - With `height = 32` and `line_width = 8`, the banner's inset countdown line was drawn across the message. The gap under the line now scales with the box height, the line is capped at a sixth of the height, and the icon and text center in the space above it. A regression test checks the line's rows contain no text pixels.

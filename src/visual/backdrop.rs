@@ -40,6 +40,8 @@ pub struct BackdropCapture {
     /// Native requested size, kept separately to detect size or scale changes.
     size: Size<i32, Physical>,
     scale: i32,
+    /// Output fractional scale the tracker renders surfaces at.
+    output_scale: f64,
     /// Outputs whose latest scene snapshot still contained this surface.
     /// Names avoid retaining disconnected Smithay `Output` objects.
     visible_outputs: HashSet<String>,
@@ -58,7 +60,15 @@ impl BackdropCapture {
 
     /// Allocates a downscaled texture and matching damage tracker. Empty sizes
     /// and renderer failures return `None` after logging.
-    pub fn new(renderer: &mut GlesRenderer, size: Size<i32, Physical>, scale: i32) -> Option<Self> {
+    /// `output_scale` is the output's fractional scale: client surface
+    /// elements size themselves from the tracker's scale at draw time, so a
+    /// capture at 1.0 on a 1.25 output drew window contents at 80%.
+    pub fn new(
+        renderer: &mut GlesRenderer,
+        size: Size<i32, Physical>,
+        scale: i32,
+        output_scale: f64,
+    ) -> Option<Self> {
         if size.w <= 0 || size.h <= 0 {
             return None;
         }
@@ -72,9 +82,14 @@ impl BackdropCapture {
             texture,
             id: Id::new(),
             version: 0,
-            tracker: OutputDamageTracker::new((texture_w, texture_h), 1.0, Transform::Normal),
+            tracker: OutputDamageTracker::new(
+                (texture_w, texture_h),
+                output_scale,
+                Transform::Normal,
+            ),
             size,
             scale,
+            output_scale,
             visible_outputs: HashSet::new(),
         })
     }
@@ -95,21 +110,24 @@ impl BackdropCapture {
         rect: Rectangle<i32, Physical>,
         behind: &[E],
         scale: i32,
+        output_scale: f64,
     ) -> Option<bool> {
         if rect.size.w <= 0 || rect.size.h <= 0 {
             return None;
         }
         let scale = scale.max(1);
-        if rect.size != self.size || scale != self.scale {
+        if rect.size != self.size || scale != self.scale || output_scale != self.output_scale {
             let (texture_w, texture_h) = scaled_size(rect.size, scale);
             let texture = renderer
                 .create_buffer(Fourcc::Argb8888, Size::from((texture_w, texture_h)))
                 .map_err(|err| tracing::warn!(%err, "Failed to resize backdrop capture texture"))
                 .ok()?;
             self.texture = texture;
-            self.tracker = OutputDamageTracker::new((texture_w, texture_h), 1.0, Transform::Normal);
+            self.tracker =
+                OutputDamageTracker::new((texture_w, texture_h), output_scale, Transform::Normal);
             self.size = rect.size;
             self.scale = scale;
+            self.output_scale = output_scale;
         }
 
         let offset = (-rect.loc.x, -rect.loc.y);
@@ -167,9 +185,10 @@ pub fn capture_once<E: RenderElement<GlesRenderer>>(
     renderer: &mut GlesRenderer,
     rect: Rectangle<i32, Physical>,
     behind: &[E],
+    output_scale: f64,
 ) -> Option<GlesTexture> {
-    let mut capture = BackdropCapture::new(renderer, rect.size, 1)?;
-    capture.capture(renderer, rect, behind, 1)?;
+    let mut capture = BackdropCapture::new(renderer, rect.size, 1, output_scale)?;
+    capture.capture(renderer, rect, behind, 1, output_scale)?;
     Some(capture.texture)
 }
 

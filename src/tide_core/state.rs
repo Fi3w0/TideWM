@@ -7206,6 +7206,7 @@ impl Smallvil {
                     renderer,
                     physical_rect.size,
                     capture_scale,
+                    output.current_scale().fractional_scale(),
                 ) else {
                     continue;
                 };
@@ -7215,7 +7216,13 @@ impl Smallvil {
             let Some(capture) = self.backdrop_textures.get_mut(&surface) else {
                 continue;
             };
-            match capture.capture(renderer, physical_rect, &behind, capture_scale) {
+            match capture.capture(
+                renderer,
+                physical_rect,
+                &behind,
+                capture_scale,
+                output.current_scale().fractional_scale(),
+            ) {
                 Some(true) => {
                     rendered += 1;
                     captured_first_backdrop |= first_capture;
@@ -7398,13 +7405,20 @@ impl Smallvil {
                     renderer,
                     physical_rect.size,
                     capture_scale,
+                    output.current_scale().fractional_scale(),
                 ) else {
                     continue;
                 };
                 self.layer_alpha_masks.insert(surface.clone(), capture);
             }
             if let Some(capture) = self.layer_alpha_masks.get_mut(surface) {
-                let _ = capture.capture(renderer, *physical_rect, &elements, capture_scale);
+                let _ = capture.capture(
+                    renderer,
+                    *physical_rect,
+                    &elements,
+                    capture_scale,
+                    output_scale,
+                );
             }
         }
 
@@ -7456,6 +7470,7 @@ impl Smallvil {
                     renderer,
                     physical_rect.size,
                     capture_scale,
+                    output.current_scale().fractional_scale(),
                 ) else {
                     continue;
                 };
@@ -7465,7 +7480,13 @@ impl Smallvil {
             let Some(capture) = self.backdrop_textures.get_mut(&surface) else {
                 continue;
             };
-            match capture.capture(renderer, physical_rect, &behind, capture_scale) {
+            match capture.capture(
+                renderer,
+                physical_rect,
+                &behind,
+                capture_scale,
+                output.current_scale().fractional_scale(),
+            ) {
                 Some(true) => {
                     rendered += 1;
                     captured_first_backdrop |= first_capture;
@@ -7989,7 +8010,12 @@ impl Smallvil {
                     .map(crate::backend::udev::OutputRenderElements::Wallpaper),
             )
             .collect();
-        crate::backdrop::capture_once(renderer, geometry, &elements)
+        crate::backdrop::capture_once(
+            renderer,
+            geometry,
+            &elements,
+            output.current_scale().fractional_scale(),
+        )
     }
 
     /// Captures the currently-visible desktop for a queued workspace
@@ -9146,7 +9172,17 @@ impl Smallvil {
                     .map(|(surface, tag)| (surface.clone(), tag.window.clone()))
                     .collect();
                 for (surface, window) in floating {
-                    self.set_window_fractional_scale(&window, output);
+                    // A shown window takes the scale of the output it is
+                    // actually displayed on. A pinned window's tag can
+                    // still name the output it was pinned on (see
+                    // `toggle_pin`), and using it made a pinned window on
+                    // another monitor flip to that monitor's scale on
+                    // every retile -- visible as content briefly drawn
+                    // too small during workspace switches.
+                    let scale_output = self
+                        .output_for_window(&window)
+                        .unwrap_or_else(|| output.clone());
+                    self.set_window_fractional_scale(&window, &scale_output);
 
                     if let Some(tag) = self.floating_workspace.get_mut(&surface) {
                         tag.rect = clamp_rect_visible(tag.rect, full);
