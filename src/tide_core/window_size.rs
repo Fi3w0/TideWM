@@ -11,6 +11,7 @@ use crate::config::WindowRule;
 #[derive(Clone, Copy)]
 pub(crate) enum SizeAnchor {
     Start,
+    Center,
     End,
 }
 
@@ -25,6 +26,7 @@ pub(crate) fn anchored_rect(
     let coordinate = |loc: i32, old: i32, new: i32, anchor| {
         let offset = match anchor {
             SizeAnchor::Start => 0,
+            SizeAnchor::Center => (i64::from(old) - i64::from(new)) / 2,
             SizeAnchor::End => i64::from(old) - i64::from(new),
         };
         (i64::from(loc) + offset).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32

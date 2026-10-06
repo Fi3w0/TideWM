@@ -7,6 +7,7 @@
 use smithay::utils::{Logical, Point, Rectangle};
 
 use crate::config::SnapConfig;
+use crate::window_size::{anchored_rect, FloatingSizeConstraints, SizeAnchor};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapPreset {
@@ -190,6 +191,30 @@ pub fn zone_enabled(zone: SnapZone, config: &SnapConfig) -> bool {
     }
 }
 
+/// The preview and final placement share the constrained size. Keep the
+/// selected output edges attached; center the axis without a selected edge.
+pub(crate) fn constrained_target_rect(
+    area: Rectangle<i32, Logical>,
+    zone: SnapZone,
+    gap: i32,
+    constraints: FloatingSizeConstraints,
+) -> Rectangle<i32, Logical> {
+    use SizeAnchor::{Center, End, Start};
+    let (horizontal, vertical) = match zone {
+        SnapZone::Left => (Start, Center),
+        SnapZone::Right => (End, Center),
+        SnapZone::Top => (Center, Start),
+        SnapZone::Bottom => (Center, End),
+        SnapZone::TopLeft => (Start, Start),
+        SnapZone::TopRight => (End, Start),
+        SnapZone::BottomLeft => (Start, End),
+        SnapZone::BottomRight => (End, End),
+        SnapZone::Fullscreen => (Center, Center),
+    };
+    let rect = target_rect(area, zone, gap);
+    anchored_rect(rect, constraints.clamp(rect.size), horizontal, vertical)
+}
+
 /// Converts a global logical preview origin into output-local physical
 /// coordinates. Keeping this pure makes fractional-scale behavior testable
 /// without constructing renderer state.
@@ -204,6 +229,64 @@ pub fn preview_physical_location(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn constrained_snap_preserves_selected_edges_and_centers_the_other_axis() {
+        let area = Rectangle::new((-101, 37).into(), (1001, 701).into());
+        let limits = FloatingSizeConstraints::from_hints(
+            (0, 0).into(),
+            (0, 0).into(),
+            &crate::config::WindowRule {
+                max_width: Some(200),
+                max_height: Some(100),
+                ..Default::default()
+            },
+        );
+        for zone in SnapZone::ALL {
+            let target = target_rect(area, zone, 8);
+            let constrained = constrained_target_rect(area, zone, 8, limits);
+            assert_eq!(constrained.size, (200, 100).into());
+            let x = match zone {
+                SnapZone::Left | SnapZone::TopLeft | SnapZone::BottomLeft => target.loc.x,
+                SnapZone::Right | SnapZone::TopRight | SnapZone::BottomRight => {
+                    target.loc.x + target.size.w - 200
+                }
+                _ => target.loc.x + (target.size.w - 200) / 2,
+            };
+            let y = match zone {
+                SnapZone::Top | SnapZone::TopLeft | SnapZone::TopRight => target.loc.y,
+                SnapZone::Bottom | SnapZone::BottomLeft | SnapZone::BottomRight => {
+                    target.loc.y + target.size.h - 100
+                }
+                _ => target.loc.y + (target.size.h - 100) / 2,
+            };
+            assert_eq!(constrained.loc, (x, y).into());
+        }
+    }
+
+    #[test]
+    fn unconstrained_snap_keeps_existing_geometry_and_client_minimum_can_exceed_zone() {
+        let area = Rectangle::new((37, -300).into(), (701, 501).into());
+        let limits = FloatingSizeConstraints::from_hints(
+            (0, 0).into(),
+            (0, 0).into(),
+            &crate::config::WindowRule::default(),
+        );
+        for zone in SnapZone::ALL {
+            assert_eq!(
+                constrained_target_rect(area, zone, 11, limits),
+                target_rect(area, zone, 11)
+            );
+        }
+        let minimum = FloatingSizeConstraints::from_hints(
+            (800, 600).into(),
+            (0, 0).into(),
+            &crate::config::WindowRule::default(),
+        );
+        let rect = constrained_target_rect(area, SnapZone::BottomRight, 0, minimum);
+        assert_eq!(rect.size, (800, 600).into());
+        assert_eq!(rect.loc, (-62, -399).into());
+    }
 
     fn config() -> SnapConfig {
         SnapConfig::default()

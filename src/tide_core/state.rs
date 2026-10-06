@@ -1529,6 +1529,16 @@ impl Smallvil {
         &self,
         surface: &WlSurface,
     ) -> crate::config::WindowRule {
+        self.resolve_window_rules_on_workspace(surface, self.workspace_of_surface(surface))
+    }
+
+    /// Prospective placement must evaluate live workspace matches at its
+    /// destination before previewing or mutating the window's ownership.
+    fn resolve_window_rules_on_workspace(
+        &self,
+        surface: &WlSurface,
+        on_workspace: Option<u32>,
+    ) -> crate::config::WindowRule {
         // How long after compositor launch a newly-mapped window still
         // counts as `at_startup` (niri) -- long enough to cover a
         // `spawn`-launched app's typical cold-start time, short enough to
@@ -1553,7 +1563,6 @@ impl Smallvil {
             .unwrap_or_else(|| (app_id.clone(), title.clone()));
         let at_startup = self.start_time.elapsed() < STARTUP_GRACE_PERIOD;
         let tags = self.window_tags.get(surface);
-        let on_workspace = self.workspace_of_surface(surface);
         self.config
             .resolve_window_rules(crate::config::WindowMatchFacts {
                 app_id: app_id.as_deref(),
@@ -1575,17 +1584,21 @@ impl Smallvil {
         &self,
         surface: &WlSurface,
     ) -> crate::window_size::FloatingSizeConstraints {
+        self.floating_size_constraints_with_rule(surface, &self.resolve_window_rules_for(surface))
+    }
+
+    fn floating_size_constraints_with_rule(
+        &self,
+        surface: &WlSurface,
+        rule: &crate::config::WindowRule,
+    ) -> crate::window_size::FloatingSizeConstraints {
         let (min, max) = smithay::wayland::compositor::with_states(surface, |states| {
             use smithay::wayland::shell::xdg::SurfaceCachedState;
             let mut guard = states.cached_state.get::<SurfaceCachedState>();
             let data = guard.current();
             (data.min_size, data.max_size)
         });
-        crate::window_size::FloatingSizeConstraints::from_hints(
-            min,
-            max,
-            &self.resolve_window_rules_for(surface),
-        )
+        crate::window_size::FloatingSizeConstraints::from_hints(min, max, rule)
     }
 
     /// Re-derives `window_opacity`/`window_glass_modes`/
@@ -2118,11 +2131,11 @@ impl Smallvil {
         }
         let output_name = output.name();
         let workspace = self.layout.active_workspace(&output_name);
+        let rule = self.resolve_window_rules_on_workspace(surface, Some(workspace));
         // A per-window decision keeps precedence over the destination
         // workspace. Otherwise, crossing an output must honor the active
         // workspace there rather than the workspace where the grab began.
-        if !self
-            .resolve_window_rules_for(surface)
+        if !rule
             .snap
             .or(self.config.resolve_workspace_rule(workspace).snap)
             .unwrap_or(true)
@@ -2139,7 +2152,12 @@ impl Smallvil {
             output: output_name,
             workspace,
             zone,
-            rect: crate::snap::target_rect(area, zone, gap),
+            rect: crate::snap::constrained_target_rect(
+                area,
+                zone,
+                gap,
+                self.floating_size_constraints_with_rule(surface, &rule),
+            ),
         })
     }
 

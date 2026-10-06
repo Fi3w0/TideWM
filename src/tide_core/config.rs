@@ -13750,4 +13750,32 @@ shader tinted-blur {
             .iter()
             .all(|warning| !warning.contains("top-secret")));
     }
+    #[test]
+    fn destination_workspace_rules_define_snap_limits_before_ownership_changes() {
+        let config = Config::from_raw(RawConfig {
+            window_rules: vec![WindowRule {
+                on_workspace: Some(3),
+                max_width: Some(240),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .0;
+        let area = smithay::utils::Rectangle::new((1500, 0).into(), (1000, 700).into());
+        for (workspace, width) in [(2, 500), (3, 240)] {
+            let rule = config.resolve_window_rules(WindowMatchFacts {
+                on_workspace: Some(workspace),
+                ..Default::default()
+            });
+            let bounds = crate::window_size::FloatingSizeConstraints::from_hints(
+                (0, 0).into(),
+                (0, 0).into(),
+                &rule,
+            );
+            let rect =
+                crate::snap::constrained_target_rect(area, crate::snap::SnapZone::Right, 0, bounds);
+            assert_eq!(rect.size.w, width);
+            assert_eq!(rect.loc.x + rect.size.w, 2500);
+        }
+    }
 }
