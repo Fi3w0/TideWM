@@ -2,6 +2,12 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.122 — Report decorated surfaces under their Wayland identity
+
+- The .121 live protocol probe showed that initializing primary-output state alone was insufficient: rounded/cascade elements deliberately namespace their render IDs, so the surface ID was absent from the actual frame report.
+- Carry the original surface ID alongside rounded and animated-rounded elements, then alias only their reported visibility for presentation. Rendering/damage retain the original wrapper IDs, draw behavior and storage; no persistent identity cache or framebuffer allocation is added. Niri's offscreen presentation-ID remapping informed this bridge.
+- Two regressions check real namespaced render reports, changing style between frames, skipped elements, and an already visible source. Final protocol checks are pending the .122 release.
+
 ## 0.90.121 — Wait for a complete captured image before publishing video
 
 - A strict PipeWire consumer reproduced one entirely zero-filled startup buffer on both native NVIDIA outputs, followed by 59 valid frames out of 60. The producer requested an asynchronous capture, then fabricated a full-sized zero image when no capture had arrived.

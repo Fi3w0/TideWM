@@ -6,7 +6,7 @@ A fast technical reference for TideWM: what it is, what's implemented, current h
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). A full tiling-WM feature set (BSP/master-stack/cascade layouts, workspaces, multi-monitor, layer-shell, IPC, XWayland) with a water/aqua render identity layered on top as a fully toggleable effect stack, plus a second spatial engine ("Ocean") as an alternative to numbered workspaces.
 
-Current development version: **0.90.121**, second major pre-release. 1.0 is intentionally reserved until the effect stack and Ocean get a broader real-hardware pass (see CHANGELOG).
+Current development version: **0.90.122**, second major pre-release. 1.0 is intentionally reserved until the effect stack and Ocean get a broader real-hardware pass (see CHANGELOG).
 
 ## Architecture
 
@@ -32,7 +32,7 @@ Current development version: **0.90.121**, second major pre-release. 1.0 is inte
 | IPC: request/response plus an event-stream subscribe mode | Done |
 | `tidectl` CLI, including `doctor`/`report` for bug triage | Done |
 | Water/decoration render stack: impulse ripples, wave workspace transitions, tiled/floating water-glass and per-app liquid frost glass, analytical shadows, animated gradient borders, rounded clipping, configurable window animations, move/resize viscosity, connected-vessel BSP resizing, opt-in floating sway, automatic depth/buoyancy, ambient caustics | Done; tiled/liquid frost is release-GLES nested-verified in Classic/Ocean, standalone AMD remains, and the earlier stack is standalone-AMD-verified |
-| Custom shaders (`shaders { }`, `shader "<name>" { }`): opt-in user `.frag` effects over a window's backdrop, up to four chained stages with `save`/`get` and extra texture bindings, per-window and per-workspace assignment, bounded budgets | Done through Phase 7B; compile/draw covered by Mesa software-GLES tests, not yet run in a nested or native session |
+| Custom shaders (`shaders { }`, `shader "<name>" { }`): opt-in user `.frag` effects over a window's backdrop, up to four chained stages with `save`/`get` and extra texture bindings, per-window and per-workspace assignment, bounded budgets | Done through Phase 7B; Mesa software-GLES tests and native NVIDIA daily-config two-program rendering/zero compile failures verified; broader combinations remain |
 | Classic Depth Deck (tiled-window park/swap recall) | Done, standalone-AMD-verified |
 | Ocean spatial engine: reefs, per-output cameras, sink/dredge/surface depth, bookmarks, freeform window detach, smart tiling, live Classic↔Ocean migration | Done, standalone-AMD-verified |
 | Ocean compass (off-screen urgent/deep glow cues) and whole-world overview minimap | Done, nested-verified only |
@@ -46,6 +46,7 @@ Current development version: **0.90.121**, second major pre-release. 1.0 is inte
 
 ## Hardware verification
 
+- **2026-10-06 continuation:** native NVIDIA release .119 fixes cross-monitor first-drag invisibility (maintainer-confirmed), natural floating size and accumulated keyboard resize. Wayland/XWayland GL, mixed-scale screenshots, native sizing/persistence and isolated Classic/Ocean behavior were exercised. The .120 presentation-state and .121 capture-readiness fixes follow reproduced native protocol failures; final loaded-release checks remain pending. See `report.md` for exact evidence, resource measurements and remaining hardware debt.
 - **AMD**: primary development and test hardware. The standalone `udev`/DRM backend, the full water/decoration render stack, swim's real-touchpad gesture path, and Ocean's core navigation (reefs, cameras, freeform drag) are all verified here.
 - **Latest standalone AMD health pass (2026-08-13)**: release 0.90.72 on Renoir completed full-output and cursor-overlay screencopy, reversible workspace transitions with ordered IPC events, invalid-action/batch/eval handling, and 100 one-shot plus 20 interrupted subscription connections without descriptor or PSS growth. Doctor remained all-pass with no TideWM panic/error or coredump. One-window PSS settled at 86.8 MiB after the reload/capture pass. The configured 24-fps caustics were the dominant continuous CPU/GPU cost; see `report.md` for the measured A/B and its whole-GPU caveat.
 - **Latest standalone NVIDIA pass (2026-09-25)**: 0.90.106 (`13b104e`, `fiw/testing-fixes`) on the RTX 3060 above: doctor all-pass; full-output and cursor-overlay `grim`; unknown actions, an invalid mixed batch, eval syntax errors and a runaway eval loop (execution budget) all failed cleanly; oversized, garbage and truncated IPC requests left the compositor running; 100 one-shot queries plus 20 interrupted subscribers left PSS and descriptors unchanged. Idle ~1% of one core, 131 MiB TideWM VRAM; nine frost windows ~0-1% CPU and 139 MiB. PSS plateaus near 180 MiB after warm-up, of which ~60-95 MiB is `/dev/nvidia*` mappings; open/close cycles returned to the same value with a flat heap, so this is not a leak.

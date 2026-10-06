@@ -9,10 +9,10 @@ This is a static code review, not a claim that every issue below was reproduced 
 ## Implementation handoff
 
 - Updated: 2026-10-06
-- Implementation branch: `ai/codex/floating-capture-improvements`
+- Implementation branch: `ai/codex/live-validation-cross-output`
 - Worktree: `/home/fiw/Documents/Proyects/TideWM`
-- Latest behavioral head: `fb8df5d` (base for this batch: `22737c5`)
-- Current TideWM version: `0.90.116`
+- Latest behavioral head: .122 render-ID bridge (preceding head `845cf25`; base `b8e69b2`)
+- Current TideWM version: `0.90.122`
 - Push status: this batch is local only; nothing was pushed.
 - Phase 3 continued from documentation/packaging head `b6805e2`, preserving all earlier remediation history.
 
@@ -51,6 +51,32 @@ Baseline for this continuation: 551 compositor, 14 tidectl, and 9 wavefmt tests 
 References read locally before implementation: niri commit `ed22699d99462f61ab171472d3ea67e844ea580d`, especially floating sizing (`src/layout/floating.rs`, `src/window/mod.rs`, `src/utils/mod.rs`) and per-output unfinished-animation/redraw state (`src/niri.rs`, `src/backend/tty.rs`), plus the pinned Smithay `ff5fa7d` output, geometry, render-state, and presentation helpers. Zero client maxima remain unbounded; intersected impossible limits favor the minimum. Bounds are independent of output dimensions. Snap policy resolves the destination workspace before ownership transfer. Exact spawn size/position and persistence are not replayed by live rule refresh; removing a bound keeps current geometry. Ocean monitor sizing retains its explicitly documented independence from camera zoom.
 
 M-54's global capture wakeup is fixed. M-51 is partially addressed: each backend now continues animations only for its rendered placements and output-owned effects, while physics update functions can still request global scene damage and the shared toast legitimately animates everywhere. Global expiry cleanup is preserved even without rendering. M-53 remains open for achieved-cadence measurement, particularly nested host-cadence gating. M-58's original Space-membership argument is stale (`6d6ee92` already selects rendered placements), but the current presentation helper still reads Smithay primary-scanout state without an updater anywhere in this tree; pinned Smithay returns `None` in that case. This is a newly identified protocol correctness gap, so M-58 stays open rather than being labeled closed from placement inspection alone. No live verification or measured CPU/GPU improvement is claimed.
+
+### 2026-10-06 live NVIDIA validation and fixes
+
+The maintainer authorized native testing and reported first-drag cross-monitor invisibility, then clarified that each new drag waits about two seconds before the destination begins drawing. Builds initially used one CPU/job with nice 19/idle I/O; the maintainer subsequently explicitly allowed all available cores/threads while idle, and remaining gates use nice 10 without affinity/job restrictions. Tests remain serial.
+
+| Fix | Signed commit / version | Evidence |
+| --- | --- | --- |
+| Refresh Smithay output membership before consuming each render scene | `10a31e9` / .117 | Two real-Smithay-Space regressions cover first movement both ways and committed size/lifetime changes with mixed scale/rotation. **Maintainer confirmed the disappearance fixed in the native .119 session.** |
+| Initialize first-buffer window geometry before spawn placement | `c12c01b` / .118 | Native .116 GTK 640×360 opened at 500×280; native .119 preserves 640×360. The first `Window::on_commit` now precedes mapping geometry reads, following niri; existing/null-buffer paths remain intact. |
+| Accumulate Classic keyboard resize against the latest requested size | `6fe6920` / .119 | Twenty actions previously produced one 24-pixel step. Native .119 reaches both limits, and five shrinking actions produce 700→580; Ocean and Classic nested checks pass. |
+| Initialize presentation primary-output state from actual render results | `c06f4cb` / .120 | Native .119 protocol probe received ordinary frame callbacks but no presentation result in two seconds. Render-state wiring covers windows/subsurfaces/popups/layers. Stateful Smithay test covers a stale faster source and first slower-destination frame. New-release protocol confirmation pending. |
+| Keep screencast chunks empty until a complete image exists | `845cf25` / .121 | Native .116 DP-4/HDMI-A-2 and .119 DP-4 each delivered 60 buffers with one initial all-zero image. New row-copy checks reject missing/incomplete images without fabricating black; padded rows and legitimate black images are tested. Release .121 nested NVIDIA compositor delivers 60/60 nonempty buffers in 1.964 s; native new-release confirmation pending. |
+
+**Hardware/session actually exercised:** standalone release `udev`, Classic; NVIDIA RTX 3060 LHR, driver 595.104.02, kernel 7.2.8-1-fiw-nyx-v1.1. DP-4 is 1920×1080 at 180003 mHz, scale 1.0, global (0,72); HDMI-A-2 is 2560×1440 at 143995 mHz, scale 1.25, global (1920,0). These are observations, never production constants. The existing GPU policy explicitly selects NVIDIA and excludes AMD, so this pass **does not verify AMD/NVIDIA PRIME offload or cross-device scanout**. VRR is configured off; no live VRR transition is claimed.
+
+**Functional coverage:** native NVIDIA GTK Wayland and XWayland clients report the RTX 3060 GL renderer. Wayland traces show actual EGL DMA-BUF client buffers; PipeWire capture is independently **SHM/MemFd**, not DMA-BUF transport. Native .116 passes client min/max/intersection/impossible-bound changes, live tighten/remove rules, corner snapping and fullscreen/maximize normal restoration. Native .119 passes natural opening, batched upper/lower limits, five-step accumulation, corner snap, and remembered 580×500 reopening. A private-D-Bus release .119 nested session exercises both engines: 14 sizing/monitor/zoom/restore/migration checks and 12 title/tag/workspace/pin/scratchpad/conversion/pseudo-tile checks pass after correcting focus in the last three controls. Nested compositor GLES uses NVIDIA, while its GTK client falls back to llvmpipe/SHM; this is not an Ocean-native/DRM claim. Its private bus and nested export guard leave the real user's activation environment on .119/wayland-1. Test clients closed and the original user configuration restored byte-for-byte.
+
+**Capture and IPC:** native .116 `grim` screenshots have physical sizes 1920×1080 and 2560×1440. Both monitor streams negotiate 30/1 and deliver 60 buffers across about 1.966 s (59 frame intervals); both contain the initial-zero failure described above, so the strict all-nonempty consumer correctly exits with failure. Native .119 rejects unknown actions, invalid atomic batches, eval syntax errors and runaway eval within its budget. After clients settle, 100 queries plus 20 interrupted subscriptions leave descriptors exactly 96→96, outputs unchanged, and the compositor responsive. An earlier 102→105 sample overlapped a GTK client starting and is not used as leak evidence.
+
+**Resource evidence so far:** release .119, one kitty window, water/decorations/two custom-shader programs enabled, no animation driver active, no compiler/test clients running: 15.002 s sample is 2.358% of one logical CPU, PSS 101.97 MiB, eight threads, and approximately 38.52 MiB of TideWM-owned texture payload. This is a quiet-session observation with an updating terminal, not a controlled before/after benchmark. NVIDIA `pmon` reports per-process framebuffer memory, but per-process utilization is unavailable (`-`); global GPU busy/power readings cannot be attributed to TideWM. No resource improvement or long-run leak claim is made.
+
+**Presentation follow-up:** release .121 still produced no feedback with rounded content despite the .120 updater. Actual frame reports use namespaced rounded IDs; .122 carries and aliases that identity only for protocol reporting, retaining render/damage IDs and framebuffer behavior. Two frame-report tests cover the bridge; live release confirmation is pending.
+
+**Gates:** .117–.119 pass fmt, all-feature/all-target tests (594 total), strict Clippy and release builds. .120 adds one presentation regression; .121 adds two capture-copy regressions: 574 compositor + 14 tidectl + 9 wavefmt = **597 tests**, all passing, with strict Clippy passing. The .121 release build passes (1m 41s, clean `845cf25`). .122 adds two render-report regressions, giving **599 tests** (576 + 14 + 9), and strict Clippy passes. Final .122 release/protocol/hardware receipts remain in progress. No dependencies/pins changed; no push. Local receipts: `.hermes/worklogs/live-validation.md` and `/tmp/tidewm-live-validation/`.
+
+**Remaining hardware matrix:** forced DRM/libinput failure rollback, physical VT return, output unplug/replug, suspend/resume, live VRR/DPMS transitions, window-versus-monitor capture page-flip attribution, cross-output presentation protocol attribution, isolated animation/caustics achieved cadence, actual hybrid offload and extended soak still require their stated tests. Existing tests/history are preserved; absence of a fresh test is not relabeled a new pass.
 
 ### Current totals
 

@@ -487,13 +487,20 @@ pub fn init_winit(
                         );
                         elements.extend(ripple_layers.below_all);
 
-                        entry.damage_tracker.render_output(
+                        let result = entry.damage_tracker.render_output(
                             renderer,
                             &mut framebuffer,
                             0,
                             &elements,
                             [0.05, 0.05, 0.05, 1.0],
-                        )
+                        );
+                        result.map(|mut result| {
+                            super::presentation::report_surface_identities(
+                                &elements,
+                                &mut result.states,
+                            );
+                            result
+                        })
                     }
                 };
                 let render_result = match render_result {

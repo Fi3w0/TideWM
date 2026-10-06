@@ -6876,6 +6876,7 @@ impl Smallvil {
         }
         let mut main = Vec::with_capacity(raw_main.len());
         for element in raw_main {
+            let surface_id = smithay::backend::renderer::element::Element::id(&element).clone();
             if let (true, Some(program)) = (clip || cascade.is_some(), rounded_program.clone()) {
                 let rounded = crate::decoration::RoundedSurfaceElement::new(
                     element,
@@ -6890,16 +6891,21 @@ impl Smallvil {
                 if resize_active {
                     main.push(
                         crate::backend::udev::OutputRenderElements::AnimatedRoundedSurface(
-                            RescaleRenderElement::from_element(
-                                rounded,
-                                physical_anchor,
-                                resize_scale,
+                            crate::backend::presentation::SurfaceRenderIdentity::new(
+                                RescaleRenderElement::from_element(
+                                    rounded,
+                                    physical_anchor,
+                                    resize_scale,
+                                ),
+                                surface_id,
                             ),
                         ),
                     );
                 } else {
                     main.push(crate::backend::udev::OutputRenderElements::RoundedSurface(
-                        rounded,
+                        crate::backend::presentation::SurfaceRenderIdentity::new(
+                            rounded, surface_id,
+                        ),
                     ));
                 }
             } else if resize_active {
