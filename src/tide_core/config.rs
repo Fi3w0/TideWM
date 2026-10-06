@@ -2931,7 +2931,8 @@ pub struct WindowRule {
     /// the client's own xdg `min_size`/`max_size` hints already are, never
     /// looser when the intersection is feasible. Conflicting bounds favor
     /// the minimum, matching the existing interactive client-hint policy.
-    /// Applied to natural, explicit, and remembered floating placement.
+    /// Applied to natural, explicit, and remembered floating placement,
+    /// pointer resize, and keyboard resize in both spatial engines.
     pub min_width: Option<i32>,
     pub max_width: Option<i32>,
     pub min_height: Option<i32>,

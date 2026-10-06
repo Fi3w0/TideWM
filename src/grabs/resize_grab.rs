@@ -1,4 +1,7 @@
-use crate::Smallvil;
+use crate::{
+    window_size::{anchored_rect, SizeAnchor},
+    Smallvil,
+};
 use smithay::{
     desktop::{Space, Window},
     input::pointer::{
@@ -12,7 +15,7 @@ use smithay::{
         wayland_server::protocol::wl_surface::WlSurface,
     },
     utils::{IsAlive, Logical, Point, Rectangle, Size},
-    wayland::{compositor, shell::xdg::SurfaceCachedState},
+    wayland::compositor,
 };
 use std::cell::RefCell;
 
@@ -127,26 +130,12 @@ impl PointerGrab<Smallvil> for ResizeSurfaceGrab {
             new_window_height = (self.initial_rect.size.h as f64 + delta.y) as i32;
         }
 
-        let (min_size, max_size) =
-            compositor::with_states(self.window.toplevel().unwrap().wl_surface(), |states| {
-                let mut guard = states.cached_state.get::<SurfaceCachedState>();
-                let data = guard.current();
-                (data.min_size, data.max_size)
-            });
-
-        self.last_window_size = Size::from((
-            constrain_dimension(new_window_width, min_size.w, max_size.w),
-            constrain_dimension(new_window_height, min_size.h, max_size.h),
-        ));
+        self.last_window_size = data
+            .floating_size_constraints_for(surface)
+            .clamp_dimensions(new_window_width, new_window_height);
 
         let xdg = self.window.toplevel().unwrap();
-        let mut target_location = self.initial_rect.loc;
-        if self.edges.intersects(ResizeEdge::LEFT) {
-            target_location.x += self.initial_rect.size.w - self.last_window_size.w;
-        }
-        if self.edges.intersects(ResizeEdge::TOP) {
-            target_location.y += self.initial_rect.size.h - self.last_window_size.h;
-        }
+        let target_location = resize_rect(self.initial_rect, self.last_window_size, self.edges).loc;
         data.retarget_window_viscosity(
             xdg.wl_surface(),
             Rectangle::new(target_location, self.last_window_size),
@@ -322,14 +311,27 @@ impl PointerGrab<Smallvil> for ResizeSurfaceGrab {
     }
 }
 
-/// Applies XDG size hints in max-then-min order. A zero maximum is
-/// unbounded; if a broken client advertises max < min, the minimum wins
-/// instead of TideWM producing a size below the client's minimum.
-fn constrain_dimension(mut value: i32, min_size: i32, max_size: i32) -> i32 {
-    if max_size > 0 {
-        value = value.min(max_size);
-    }
-    value.max(min_size.max(1))
+/// Both motion and committed client geometry keep the opposite edge fixed.
+/// This uses the shared wide-coordinate arithmetic for extreme client sizes.
+fn resize_rect(
+    rect: Rectangle<i32, Logical>,
+    size: Size<i32, Logical>,
+    edges: ResizeEdge,
+) -> Rectangle<i32, Logical> {
+    anchored_rect(
+        rect,
+        size,
+        if edges.contains(ResizeEdge::LEFT) {
+            SizeAnchor::End
+        } else {
+            SizeAnchor::Start
+        },
+        if edges.contains(ResizeEdge::TOP) {
+            SizeAnchor::End
+        } else {
+            SizeAnchor::Start
+        },
+    )
 }
 
 /// State of the resize operation.
@@ -411,13 +413,10 @@ pub fn handle_commit(space: &mut Space<Window>, surface: &WlSurface) -> Option<(
                 // If the window is being resized by top or left, its location must be adjusted
                 // accordingly.
                 edges.intersects(ResizeEdge::TOP_LEFT).then(|| {
-                    let new_x = edges
-                        .intersects(ResizeEdge::LEFT)
-                        .then_some(initial_rect.loc.x + (initial_rect.size.w - geometry.size.w));
+                    let resized = resize_rect(initial_rect, geometry.size, edges);
+                    let new_x = edges.intersects(ResizeEdge::LEFT).then_some(resized.loc.x);
 
-                    let new_y = edges
-                        .intersects(ResizeEdge::TOP)
-                        .then_some(initial_rect.loc.y + (initial_rect.size.h - geometry.size.h));
+                    let new_y = edges.intersects(ResizeEdge::TOP).then_some(resized.loc.y);
 
                     (new_x, new_y).into()
                 })
@@ -442,13 +441,38 @@ pub fn handle_commit(space: &mut Space<Window>, surface: &WlSurface) -> Option<(
 
 #[cfg(test)]
 mod tests {
-    use super::constrain_dimension;
+    use super::*;
 
     #[test]
-    fn size_constraints_honor_normal_unbounded_and_inverted_hints() {
-        assert_eq!(constrain_dimension(50, 100, 300), 100);
-        assert_eq!(constrain_dimension(500, 100, 300), 300);
-        assert_eq!(constrain_dimension(500, 100, 0), 500);
-        assert_eq!(constrain_dimension(250, 300, 200), 300);
+    fn all_resize_edges_keep_the_correct_original_edges() {
+        let rect = Rectangle::new((100, 200).into(), (500, 300).into());
+        for edges in [
+            ResizeEdge::LEFT,
+            ResizeEdge::RIGHT,
+            ResizeEdge::TOP,
+            ResizeEdge::BOTTOM,
+            ResizeEdge::TOP_LEFT,
+            ResizeEdge::TOP_RIGHT,
+            ResizeEdge::BOTTOM_LEFT,
+            ResizeEdge::BOTTOM_RIGHT,
+        ] {
+            let resized = resize_rect(rect, (200, 400).into(), edges);
+            assert_eq!(
+                resized.loc.x,
+                if edges.contains(ResizeEdge::LEFT) {
+                    400
+                } else {
+                    100
+                }
+            );
+            assert_eq!(
+                resized.loc.y,
+                if edges.contains(ResizeEdge::TOP) {
+                    100
+                } else {
+                    200
+                }
+            );
+        }
     }
 }

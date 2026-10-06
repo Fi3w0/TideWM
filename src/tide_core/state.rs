@@ -12204,10 +12204,18 @@ impl Smallvil {
         let Some(window) = self.mapped_toplevel_window(&surface) else {
             return;
         };
+        if self.fullscreen.contains_key(&surface) || self.maximized.contains_key(&surface) {
+            return;
+        }
 
         if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
             if let Some(mut rect) = self.ocean.floating_rect(&surface) {
-                rect.size = keyboard_resized_size(&window, rect.size, direction, STEP);
+                rect.size = keyboard_resized_size(
+                    rect.size,
+                    direction,
+                    STEP,
+                    self.floating_size_constraints_for(&surface),
+                );
                 self.ocean.set_floating_rect(&surface, rect);
                 if let Some(toplevel) = window.toplevel() {
                     toplevel.with_pending_state(|state| state.size = Some(rect.size));
@@ -12242,12 +12250,21 @@ impl Smallvil {
             // origin.
             let location = self.space.element_location(&window).unwrap_or_default();
             let mut geometry = window.geometry();
-            geometry.size = keyboard_resized_size(&window, geometry.size, direction, STEP);
+            geometry.size = keyboard_resized_size(
+                geometry.size,
+                direction,
+                STEP,
+                self.floating_size_constraints_for(&surface),
+            );
             if let Some(toplevel) = window.toplevel() {
                 toplevel.with_pending_state(|state| state.size = Some(geometry.size));
                 toplevel.send_pending_configure();
             }
             self.space.map_element(window, location, true);
+            if let Some(tag) = self.floating_workspace.get_mut(&surface) {
+                tag.rect.loc = location;
+                tag.rect.size = geometry.size;
+            }
             self.request_redraw();
             return;
         }
@@ -13362,36 +13379,20 @@ impl Smallvil {
 }
 
 fn keyboard_resized_size(
-    window: &Window,
     current: Size<i32, Logical>,
     direction: Direction,
     step: i32,
+    constraints: crate::window_size::FloatingSizeConstraints,
 ) -> Size<i32, Logical> {
-    let (min_size, max_size) = window
-        .toplevel()
-        .map(|toplevel| {
-            smithay::wayland::compositor::with_states(toplevel.wl_surface(), |states| {
-                use smithay::wayland::shell::xdg::SurfaceCachedState;
-                let mut guard = states.cached_state.get::<SurfaceCachedState>();
-                let data = guard.current();
-                (data.min_size, data.max_size)
-            })
-        })
-        .unwrap_or_default();
-    let min_w = min_size.w.max(1);
-    let min_h = min_size.h.max(1);
-    let max_w = if max_size.w > 0 { max_size.w } else { i32::MAX };
-    let max_h = if max_size.h > 0 { max_size.h } else { i32::MAX };
-    let mut size = current;
+    let mut width = current.w;
+    let mut height = current.h;
     match direction {
-        Direction::Right => size.w = size.w.saturating_add(step),
-        Direction::Down => size.h = size.h.saturating_add(step),
-        Direction::Left => size.w = size.w.saturating_sub(step),
-        Direction::Up => size.h = size.h.saturating_sub(step),
+        Direction::Right => width = width.saturating_add(step),
+        Direction::Down => height = height.saturating_add(step),
+        Direction::Left => width = width.saturating_sub(step),
+        Direction::Up => height = height.saturating_sub(step),
     }
-    size.w = size.w.clamp(min_w, max_w.max(min_w));
-    size.h = size.h.clamp(min_h, max_h.max(min_h));
-    size
+    constraints.clamp_dimensions(width, height)
 }
 
 /// The `keyboard_move_floating` step vector for `direction`: `step` logical
@@ -13718,6 +13719,35 @@ fn capture_wallpaper_size(logical: Size<i32, Logical>, scale: f64) -> Size<i32, 
 mod tests {
     use super::*;
     use smithay::output::{PhysicalProperties, Subpixel};
+
+    #[test]
+    fn keyboard_resize_obeys_rules_client_limits_and_overflow_bounds() {
+        let constraints = crate::window_size::FloatingSizeConstraints::from_hints(
+            (200, 100).into(),
+            (900, 700).into(),
+            &crate::config::WindowRule {
+                max_width: Some(500),
+                min_height: Some(250),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            keyboard_resized_size((490, 300).into(), Direction::Right, 24, constraints),
+            (500, 300).into()
+        );
+        assert_eq!(
+            keyboard_resized_size((300, 260).into(), Direction::Up, 24, constraints),
+            (300, 250).into()
+        );
+        assert_eq!(
+            keyboard_resized_size((220, 300).into(), Direction::Left, i32::MAX, constraints),
+            (200, 300).into()
+        );
+        assert_eq!(
+            keyboard_resized_size((i32::MAX, 300).into(), Direction::Right, 24, constraints),
+            (500, 300).into()
+        );
+    }
 
     #[test]
     fn capture_wallpaper_matches_the_scaled_output_in_physical_pixels() {
