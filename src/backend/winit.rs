@@ -24,19 +24,42 @@ use smithay::reexports::winit::{dpi::LogicalSize, window::Window as WinitWindow}
 
 use crate::{state::SessionLock, Smallvil};
 
-/// The host monitor's real refresh rate in millihertz, clamped to a sane
-/// range, falling back to 60Hz when the host doesn't report one (a
-/// Wayland host often can't say until the window has actually mapped
-/// onto a monitor). Drives both the advertised output mode and the
-/// render-loop timer cadence, so a 144Hz host panel actually gets tested
-/// at 144Hz nested instead of a hardcoded 60.
-fn host_refresh_millihertz(backend: &WinitGraphicsBackend<GlesRenderer>) -> i32 {
-    backend
-        .window()
-        .current_monitor()
-        .and_then(|monitor| monitor.refresh_rate_millihertz())
-        .map(|millihertz| (millihertz as i32).clamp(30_000, 360_000))
-        .unwrap_or(60_000)
+/// Unknown monitor data must not overwrite a previously known rate. The
+/// initial fallback is used only until the host identifies the monitor.
+fn host_refresh_millihertz(backend: &WinitGraphicsBackend<GlesRenderer>) -> Option<i32> {
+    valid_refresh(
+        backend
+            .window()
+            .current_monitor()
+            .and_then(|monitor| monitor.refresh_rate_millihertz()),
+    )
+}
+
+fn valid_refresh(reported: Option<u32>) -> Option<i32> {
+    reported
+        .and_then(|rate| i32::try_from(rate).ok())
+        .filter(|rate| *rate > 0)
+}
+
+fn replace_nested_mode(output: &Output, mode: Mode, scale: Option<smithay::output::Scale>) {
+    let previous = output.current_mode();
+    output.set_preferred(mode);
+    output.change_current_state(Some(mode), None, scale, None);
+    if let Some(previous) = previous.filter(|previous| *previous != mode) {
+        output.delete_mode(previous);
+    }
+}
+
+fn update_host_refresh(output: &Output, reported: Option<i32>) -> bool {
+    let (Some(mut mode), Some(refresh)) = (output.current_mode(), reported) else {
+        return false;
+    };
+    if mode.refresh == refresh {
+        return false;
+    }
+    mode.refresh = refresh;
+    replace_nested_mode(output, mode, None);
+    true
 }
 
 /// One simulated output: a winit window standing in for a monitor.
@@ -89,7 +112,7 @@ pub fn init_winit(
 
         let mode = Mode {
             size: backend.window_size(),
-            refresh: host_refresh_millihertz(&backend),
+            refresh: host_refresh_millihertz(&backend).unwrap_or(60_000),
         };
         let scale_factor = backend.scale_factor();
 
@@ -171,18 +194,17 @@ pub fn init_winit(
                 let backend = &entry.backend;
                 entry.winit_evt.dispatch_new_events(|event| match event {
                     WinitEvent::Resized { size, scale_factor } => {
-                        // Re-read refresh too: a resize is also how the
-                        // window landing on a different host monitor
-                        // (different Hz, different scale) manifests.
-                        output.change_current_state(
-                            Some(Mode {
+                        replace_nested_mode(
+                            output,
+                            Mode {
                                 size,
-                                refresh: host_refresh_millihertz(backend),
-                            }),
-                            None,
+                                refresh: host_refresh_millihertz(backend)
+                                    .or_else(|| output.current_mode().map(|mode| mode.refresh))
+                                    .unwrap_or(60_000),
+                            },
                             Some(smithay::output::Scale::Fractional(scale_factor)),
-                            None,
                         );
+                        entry.dirty = true;
                         // The layer map's cached non_exclusive_zone only
                         // recomputes on arrange(), which otherwise happens
                         // solely on layer-surface events -- without this,
@@ -206,6 +228,17 @@ pub fn init_winit(
                     WinitEvent::CloseRequested => closing = true,
                     _ => (),
                 });
+                // Smithay exposes no move event. Query after pumping host
+                // events so same-size/same-scale monitor moves still update
+                // mode metadata, presentation feedback and timer cadence.
+                if update_host_refresh(output, host_refresh_millihertz(backend)) {
+                    entry.dirty = true;
+                    #[cfg(feature = "screencast")]
+                    if let Some(screencast) = &state.screencast {
+                        screencast.refresh_outputs(state.space.outputs());
+                    }
+                    state.wlr_output_management_state.refresh(&state.space);
+                }
             }
 
             if closing {
@@ -566,4 +599,62 @@ pub fn init_winit(
         })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn output() -> Output {
+        let output = Output::new(
+            "test".into(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "test".into(),
+                model: "test".into(),
+                serial_number: "test".into(),
+            },
+        );
+        replace_nested_mode(
+            &output,
+            Mode {
+                size: (1280, 800).into(),
+                refresh: 60_000,
+            },
+            Some(smithay::output::Scale::Fractional(1.25)),
+        );
+        output
+    }
+
+    #[test]
+    fn same_size_same_scale_monitor_move_updates_current_and_preferred_rate() {
+        let output = output();
+        let size = output.current_mode().unwrap().size;
+        for refresh in [144_000, 59_940, 500_000, 60_000] {
+            assert!(update_host_refresh(&output, valid_refresh(Some(refresh))));
+            let mode = output.current_mode().unwrap();
+            assert_eq!(mode.refresh, refresh as i32);
+            assert_eq!(mode.size, size);
+            assert_eq!(output.current_scale().fractional_scale(), 1.25);
+            assert_eq!(output.preferred_mode(), Some(mode));
+            assert_eq!(output.modes(), [mode]);
+            assert!(!update_host_refresh(&output, valid_refresh(Some(refresh))));
+        }
+    }
+
+    #[test]
+    fn missing_or_invalid_monitor_data_retains_last_known_refresh() {
+        let output = output();
+        assert!(update_host_refresh(&output, valid_refresh(Some(75_437))));
+        let mode = output.current_mode().unwrap();
+        for reported in [None, Some(0), Some(u32::MAX)] {
+            assert!(!update_host_refresh(&output, valid_refresh(reported)));
+            assert_eq!(output.current_mode(), Some(mode));
+            assert_eq!(output.preferred_mode(), Some(mode));
+            assert_eq!(output.modes(), [mode]);
+        }
+        assert_eq!(valid_refresh(Some(24_000)), Some(24_000));
+        assert_eq!(valid_refresh(Some(500_000)), Some(500_000));
+    }
 }

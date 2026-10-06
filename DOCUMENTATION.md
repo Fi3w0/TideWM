@@ -19,6 +19,8 @@ Full reference for configuring and controlling TideWM: every config key, every a
 | `-v, --version` | Print the version and exit. |
 | `-h, --help` | Print usage and exit. |
 
+When launched inside an existing desktop session, the nested output follows the host window's monitor refresh and scale. Moving it between monitors updates refresh even when size and scale stay the same. If the host temporarily reports no refresh, TideWM retains the last known rate; before any monitor report it uses a 60 Hz fallback. Reported valid rates are not restricted to a fixed hardware range. Frame deadlines skip missed periods instead of adding rendering time to each period; the host compositor still controls actual presentation.
+
 ## Config file
 
 `$XDG_CONFIG_HOME/tidewm/config.wave`, or `~/.config/tidewm/config.wave` if `XDG_CONFIG_HOME` isn't set (or the path given to `--config`, see above). Written out with working defaults on first run. Almost every change hot-reloads on save — no restart needed — and a bad edit is shown in a persistent compositor-owned panel that reserves space above tiled windows (with file/line detail) while the previous config keeps running. Fixing the file clears the panel; the existing short reload/debug toast remains separate. `engine` is hot-reloadable too: a change migrates every live window between the Classic and Ocean models in place instead of requiring a restart (workspace stacks become reefs laid out on the lateral line, and back; see the Ocean section below for the mapping). Startup-owned exceptions are `xwayland { enabled }` and Ocean reef/bookmark declarations; changing one shows a restart-required warning. Ocean's `camera_step` remains hot-reloadable. Keyboard layout and already-connected touchpads also apply immediately.
