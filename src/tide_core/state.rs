@@ -12405,8 +12405,15 @@ impl Smallvil {
             // origin.
             let location = self.space.element_location(&window).unwrap_or_default();
             let mut geometry = window.geometry();
+            // Accumulate key repeats/batched actions against the latest
+            // requested size, as niri's floating actions use expected_size.
+            // The committed bbox can lag several configures behind input.
+            let requested = window
+                .toplevel()
+                .and_then(|toplevel| toplevel.with_pending_state(|state| state.size))
+                .unwrap_or(geometry.size);
             geometry.size = keyboard_resized_size(
-                geometry.size,
+                requested,
                 direction,
                 STEP,
                 self.floating_size_constraints_for(&surface),

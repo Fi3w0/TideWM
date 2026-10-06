@@ -2,6 +2,12 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.119 — Accumulate keyboard resize while client commits lag
+
+- A real Classic client received just one resize step when twenty resize actions were batched before its next commit. Each action previously read the same committed bounding box.
+- Base each floating keyboard resize on the latest requested xdg size, falling back to committed geometry when absent. This follows niri's expected-size pattern and preserves live bounds and the current global position. Ocean already accumulates in its durable floating rectangle.
+- Native and nested validation receipts are recorded in `report.md`.
+
 ## 0.90.118 — Initialize natural floating geometry before mapping
 
 - A native NVIDIA GTK probe reproduced a 640×360 floating window opening at its rule minimum (500×280): mapping consumed Smithay's still-empty window bounding box before the generic commit handler refreshed it.
