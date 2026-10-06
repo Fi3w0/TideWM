@@ -3592,6 +3592,9 @@ pub struct PopupConfig {
     pub duration_ms: Option<u64>,
     /// Enter/leave motion. Defaults to `Fade`.
     pub animation: PopupAnimation,
+    /// Slide in and out time for `animation = slide`, milliseconds. Auto
+    /// is 600, Hyprland's notification animation length.
+    pub slide_ms: Option<u64>,
 }
 
 /// Which built-in shape a ripple draws. Multiple shapes can stack
@@ -8374,6 +8377,13 @@ fn apply_popup_block(cfg: &mut PopupConfig, body: &[waves::Entry]) {
                     }
                 };
             }
+            "slide_ms" | "slide_duration" => match parse_duration_ms(value) {
+                Some(ms) if ms > 0 => cfg.slide_ms = Some((ms as u64).clamp(50, 3_000)),
+                _ => tracing::warn!(
+                    value,
+                    "Expected a positive integer for popup.slide_ms, ignoring"
+                ),
+            },
             "duration_ms" | "duration" => match parse_duration_ms(value) {
                 Some(ms) if ms > 0 => cfg.duration_ms = Some((ms as u64).clamp(300, 60_000)),
                 _ => tracing::warn!(
@@ -13207,6 +13217,12 @@ shader tinted-blur {
         let entries = wave_entries("popup {\n animation = slide\n }\n");
         let slide = Config::from_raw(lower_entries(&entries)).0;
         assert_eq!(slide.popup.animation, PopupAnimation::Slide);
+        assert_eq!(slide.popup.slide_ms, None);
+        let entries = wave_entries("popup {\n slide_ms = 900\n }\n");
+        assert_eq!(
+            Config::from_raw(lower_entries(&entries)).0.popup.slide_ms,
+            Some(900)
+        );
     }
 
     #[test]

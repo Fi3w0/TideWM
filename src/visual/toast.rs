@@ -40,8 +40,6 @@ const TEXT_RIGHT_PAD: i32 = 22;
 const MIN_WIDTH: i32 = 270;
 
 const FADE_FOR: Duration = Duration::from_millis(450);
-/// Slide-in time for `animation = slide`; slide-out reuses `FADE_FOR`.
-const SLIDE_IN_FOR: Duration = Duration::from_millis(400);
 
 // `ToastStyle::Banner`: a long, short bar instead of the pill's tall card,
 // with a solid accent bar down the left edge and a bottom progress line
@@ -190,16 +188,26 @@ impl Toast {
     /// toast settles, burning CPU/GPU on frames that look identical to the
     /// one already on screen.
     pub fn needs_continued_redraw(&self) -> bool {
-        self.visible_for.is_some() || (self.slides() && self.shown_at.elapsed() < SLIDE_IN_FOR)
+        self.visible_for.is_some()
+            || (self.slides() && self.shown_at.elapsed() < self.theme.popup_slide)
     }
 
     fn slides(&self) -> bool {
         self.theme.popup_animation == crate::config::PopupAnimation::Slide
     }
 
+    /// How long the popup takes to leave once its visible time is up.
+    fn exit_for(&self) -> Duration {
+        if self.slides() {
+            self.theme.popup_slide
+        } else {
+            FADE_FOR
+        }
+    }
+
     pub fn expired(&self) -> bool {
         self.visible_for.is_some_and(|visible_for| {
-            self.shown_at.elapsed() >= visible_for.saturating_add(FADE_FOR)
+            self.shown_at.elapsed() >= visible_for.saturating_add(self.exit_for())
         })
     }
 
@@ -259,9 +267,13 @@ impl Toast {
                 }
             }
         }
-        let slide = self
-            .slides()
-            .then(|| slide_fraction(self.shown_at.elapsed(), self.visible_for));
+        let slide = self.slides().then(|| {
+            slide_fraction(
+                self.shown_at.elapsed(),
+                self.visible_for,
+                self.theme.popup_slide,
+            )
+        });
         let alpha = match self.visible_for {
             None => 1.0,
             Some(_) if slide.is_some() => {
@@ -321,16 +333,16 @@ fn toast_location(logical_output_width: i32, toast_width: i32, scale: f64) -> Op
 }
 
 /// How far a sliding popup is pushed off the right edge, `0.0` (in place) to
-/// `1.0` (fully off screen): eases in over `SLIDE_IN_FOR`, holds, then eases
-/// out over `FADE_FOR` once `visible_for` has passed. A persistent popup
-/// (`None`) only slides in.
-fn slide_fraction(elapsed: Duration, visible_for: Option<Duration>) -> f32 {
+/// `1.0` (fully off screen): eases in over `slide`, holds, then eases out
+/// over `slide` once `visible_for` has passed. A persistent popup (`None`)
+/// only slides in.
+fn slide_fraction(elapsed: Duration, visible_for: Option<Duration>, slide: Duration) -> f32 {
     let progress =
         |t: Duration, over: Duration| (t.as_secs_f32() / over.as_secs_f32()).clamp(0.0, 1.0);
-    let entering = 1.0 - (1.0 - progress(elapsed, SLIDE_IN_FOR)).powi(3);
+    let entering = 1.0 - (1.0 - progress(elapsed, slide)).powi(3);
     let leaving = visible_for
         .and_then(|visible| elapsed.checked_sub(visible))
-        .map_or(0.0, |t| progress(t, FADE_FOR).powi(3));
+        .map_or(0.0, |t| progress(t, slide).powi(3));
     (1.0 - entering).max(leaving)
 }
 
@@ -1166,22 +1178,20 @@ mod tests {
     #[test]
     fn slide_enters_holds_and_leaves() {
         let ms = Duration::from_millis;
-        let visible = Some(ms(1500));
-        assert_eq!(slide_fraction(ms(0), visible), 1.0, "starts off screen");
+        let (visible, slide) = (Some(ms(1500)), ms(600));
+        let at = |t| slide_fraction(t, visible, slide);
+        assert_eq!(at(ms(0)), 1.0, "starts off screen");
         assert!(
-            slide_fraction(ms(200), visible) < 0.2,
-            "mostly in after half the slide"
+            at(ms(150)) > 0.3,
+            "still clearly moving a quarter of the way in"
         );
-        assert_eq!(slide_fraction(ms(800), visible), 0.0, "rests in place");
-        let leaving = slide_fraction(ms(1500) + FADE_FOR / 2, visible);
+        assert!(at(ms(300)) < 0.2, "mostly in by half the slide");
+        assert_eq!(at(ms(800)), 0.0, "rests in place");
+        let leaving = at(ms(1800));
         assert!(leaving > 0.0 && leaving < 1.0);
+        assert_eq!(at(ms(2100)), 1.0, "gone at expiry");
         assert_eq!(
-            slide_fraction(ms(1500) + FADE_FOR, visible),
-            1.0,
-            "gone at expiry"
-        );
-        assert_eq!(
-            slide_fraction(ms(60_000), None),
+            slide_fraction(ms(60_000), None, slide),
             0.0,
             "persistent popups stay"
         );

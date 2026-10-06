@@ -2,6 +2,10 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.133 — Slower, configurable popup slide
+
+- The .132 slide was confirmed working by frame capture, but at 400 ms with a cubic ease-out most of the travel happened in the first 100 ms, so it read as a pop-in. The slide now takes 600 ms in and 600 ms out by default (Hyprland's notification animation length), and `popup { slide_ms }` (50–3000) sets it.
+
 ## 0.90.132 — Popups can slide in like Hyprland's
 
 - New `popup { animation = slide }` (default `fade`): the popup slides in from the right screen edge over 400 ms (ease-out cubic), rests, then slides back out over 450 ms (ease-in cubic) instead of fading, following the motion of Hyprland's notification overlay. Expiry timing is unchanged, persistent error popups slide in and stay, and they keep requesting frames only while sliding. Each output clips the off-screen part, so a sliding popup never draws onto a neighboring monitor.
