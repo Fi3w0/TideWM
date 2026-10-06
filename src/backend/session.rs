@@ -74,8 +74,15 @@ impl ScanoutSession for (&mut DrmDevice, &mut Libinput) {
     }
 
     fn activate(&mut self) -> Result<(), String> {
+        // Whoever held the VT meanwhile (fbcon, another compositor) may have
+        // rebound connectors to different CRTCs. TideWM commits per CRTC, so
+        // a swapped pair can never be undone one commit at a time: each test
+        // leaves the other CRTC active without its connector (EINVAL, seen
+        // live on NVIDIA). `true` makes Smithay disable every connector and
+        // plane in one device-wide commit first, at the cost of a full
+        // modeset on return.
         self.0
-            .activate(false)
+            .activate(true)
             .map_err(|error| format!("Failed to activate DRM device: {error}"))
     }
 

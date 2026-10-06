@@ -2,6 +2,11 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.127 — Clear stale CRTC bindings when returning from a TTY
+
+- The 0.90.126 log showed the real freeze: after a round trip through another VT (with Plasma running there), the kernel had DP-4 on the CRTC TideWM used for HDMI-A-2 and vice versa. TideWM commits per CRTC, so every test commit left the other CRTC active without its connector and NVIDIA rejected it with EINVAL, thousands of times, while input kept working. Master recovery (0.90.125) and scanout activation both succeeded.
+- Resume now activates the scanout device with Smithay's device-wide reset, disabling every connector and plane in one commit before the per-output frames re-enable them, as Smithay's own reset documents for this conflict. Returning costs a full modeset (a brief black flash).
+
 ## 0.90.126 — Log each VT resume step
 
 - 0.90.125 still froze after a TTY round trip on the maintainer's NVIDIA machine, and the hard reset that followed lost both the session log and the journal tail. The resume path now logs at info level how DRM master was regained (acquired or restored by the session manager), that scanout and input are active, and each output's first frame (queued, or waiting on the empty-frame retry). Reset failures name their output.
