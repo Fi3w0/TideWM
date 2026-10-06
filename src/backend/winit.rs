@@ -579,7 +579,11 @@ pub fn init_winit(
                     state.send_dnd_icon_frames(output, state.start_time.elapsed());
                 } else {
                     state.send_window_frames(output, state.start_time.elapsed());
-                    state.send_layer_frames(output, state.start_time.elapsed());
+                    state.send_layer_frames(
+                        output,
+                        state.start_time.elapsed(),
+                        &render_result.states,
+                    );
                 }
                 entry.dirty = state.output_has_active_animation(output, &placements);
             }

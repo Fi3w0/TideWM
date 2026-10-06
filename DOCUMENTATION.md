@@ -78,7 +78,21 @@ The line-based grammar is gone; Wave is the only grammar. Old configs were migra
 
 ## Wallpaper behavior
 
-TideWM always provides the bundled `assets/tide-aqua-4k.png` artwork, so a fresh session never needs a separate daemon. The source is decoded once at its native 3840×2160 resolution and scales to each output with centered `cover` cropping rather than distortion; it is never pre-downsampled, and it is hidden while the session is locked. This costs about 31.6 MiB of steady-state pixel backing in exchange for retaining full 4K detail. It is intentionally only a fallback: standard Wayland layer-shell background clients render above it, so tools such as `swaybg`, `swww`/`awww`, or another compatible wallpaper daemon can provide images, animations, transitions, and per-output management without a TideWM-specific API. Start one with `spawn = [swaybg ...]` if desired.
+TideWM provides the bundled `assets/tide-aqua-4k.png` artwork by default, so a fresh session needs no separate daemon. The source is decoded once at its native 3840×2160 resolution and scales to each output with centered `cover` cropping. Standard Wayland layer-shell background clients render above it. Set `builtin_wallpaper = false` when using an external wallpaper daemon to skip the bundled image's decode and texture.
+
+Video wallpapers work through a layer-shell player such as `mpvpaper`. For example:
+
+```wave
+builtin_wallpaper = false
+spawn = ["mpvpaper -p -o 'loop-file=inf no-audio terminal=no' HDMI-A-1 /path/to/video.mp4"]
+```
+
+Use separate commands for different videos on each output. Add the hardware-decoding option supported by your player/GPU and verify the decoder actually selected; the NVIDIA test here required `hwdec=nvdec-copy`, because `nvdec` fell back to software. Animated backgrounds cause blur and custom shaders to update, so measure their cost with your actual windows.
+
+Layer callbacks follow actual render visibility. `mpvpaper -p` can pause while its surface is fully occluded, and resumes when exposed. Visible backdrop effects keep layer clients updating because glass and shaders may still sample them. Occlusion requires client-provided opaque regions: a visually opaque client that advertises no opaque region can keep the wallpaper playing. Transparent fullscreen windows also keep it playing.
+
+For water glass that moves continuously, select `glass { animation = ambient }` in a multi-line block. The default `reactive` mode settles after movement or ripple disturbances; backdrop recaptures do not restart it.
+
 
 ## Config reference
 

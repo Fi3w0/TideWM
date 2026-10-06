@@ -391,7 +391,7 @@ pub enum GlassAnimation {
     /// on its own.
     Static,
     /// The distortion is energized by disturbances -- the window moving,
-    /// the backdrop behind it changing, a ripple passing underneath -- and
+    /// a ripple passing underneath -- and
     /// settles back to still over `settle_ms`. An idle desktop with glass
     /// windows visible still ticks zero frames.
     Reactive,

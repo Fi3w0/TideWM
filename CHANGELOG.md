@@ -2,6 +2,12 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.140 — Covered video wallpapers can pause
+
+- Layer-shell frame callbacks now follow the output's actual render visibility in both backends. Wallpaper clients such as `mpvpaper -p` can pause behind fully occluding client-provided opaque regions; uncovering the surface resumes callbacks. Clients that advertise no opaque region keep their backdrop live even when they look opaque.
+- Visible custom shaders, frost, water glass, and layer blur keep callbacks flowing to backdrop layers they may sample, so an animated wallpaper behind glass stays live. Protocol-unmapped layers remain excluded. Visibility is evaluated per frame and output without a new persistent cache.
+- Verified with nine optimized nested playback checks: pause/resume with an opaque GTK surface, live playback through transparent fullscreen Kitty and frost/water/custom shaders, and pause/resume again after removing effects. Native .139 reproduced uninterrupted playback under visually opaque Kitty; its Wayland trace advertises no opaque region. The callback fix is active in native .141; automated native opaque-occlusion pause/resume verification remains pending.
+
 ## 0.90.139 — New tiled windows no longer flash on the neighboring monitor
 
 - Opening several windows quickly could flash one of them for a frame or two at the top of the other monitor. A Classic window's render rectangle is its Space location plus its last committed size, and each output renders every window overlapping it; a new window tiled near an output edge still carried its larger first buffer until it committed the tile size, so it overlapped the neighbor output and was drawn there. Classic tiled windows now render only on the output whose layout owns them; floating windows can still span outputs.

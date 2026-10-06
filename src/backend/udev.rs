@@ -2188,7 +2188,7 @@ fn render_surface(
             // dropped, which discards the callbacks -- the correct answer
             // for content that never reached the display.
             let feedback = state.take_presentation_feedback(output, &render_result.states);
-            match surface.compositor.queue_frame(Some(feedback)) {
+            let retry = match surface.compositor.queue_frame(Some(feedback)) {
                 Ok(()) => {
                     surface.pending = true;
                     // A previously armed timer may still fire, but it will
@@ -2206,7 +2206,11 @@ fn render_surface(
                     surface.dirty = true;
                     None
                 }
+            };
+            if !locked {
+                state.send_layer_frames(output, state.start_time.elapsed(), &render_result.states);
             }
+            retry
         }
         Err(e) => {
             tracing::warn!(%e, "Failed to render DRM frame");
@@ -2223,7 +2227,6 @@ fn render_surface(
         state.send_dnd_icon_frames(output, state.start_time.elapsed());
     } else {
         state.send_window_frames(output, state.start_time.elapsed());
-        state.send_layer_frames(output, state.start_time.elapsed());
     }
 
     // Keep this CRTC's animation chain local to its own VBlank cadence. A

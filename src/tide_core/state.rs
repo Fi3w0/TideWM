@@ -16,7 +16,7 @@ use smithay::{
                 solid::{SolidColorBuffer, SolidColorRenderElement},
                 surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
                 utils::RescaleRenderElement,
-                AsRenderElements, Kind, RenderElementState, RenderElementStates,
+                AsRenderElements, Id, Kind, RenderElementState, RenderElementStates,
             },
             gles::{GlesPixelProgram, GlesRenderer, GlesTexProgram, GlesTexture},
             ImportAll, ImportMem,
@@ -5489,12 +5489,19 @@ impl Smallvil {
         }
     }
 
-    /// Sends the frame-done callback to every mapped layer surface on
-    /// `output`, the layer-shell equivalent of the per-window
-    /// `window.send_frame(...)` loop each backend already runs. Without
-    /// this, clients that throttle redraws on frame callbacks (most
-    /// wlr-layer-shell clients do) never get their next one.
-    pub fn send_layer_frames(&self, output: &Output, time: Duration) {
+    /// Hidden layers stop receiving callbacks so wallpaper clients can pause.
+    /// A visible backdrop effect still samples lower layers even when its
+    /// opaque capture hides them in the final frame; keep those clients live.
+    pub fn send_layer_frames(
+        &self,
+        output: &Output,
+        time: Duration,
+        render_states: &RenderElementStates,
+    ) {
+        let backdrop_visible = self
+            .backdrop_textures
+            .values()
+            .any(|capture| render_states.element_was_presented(capture.id.clone()));
         for layer in layer_map_for_output(output).layers() {
             // A role remains registered in LayerMap across null-buffer
             // unmap so it can be arranged for a later fresh configure, but
@@ -5502,6 +5509,13 @@ impl Smallvil {
             // unmapped. Filtering also prevents a bufferless client from
             // driving a commit/callback redraw loop.
             if self.unmapped_layer_surfaces.contains(layer.wl_surface()) {
+                continue;
+            }
+            let mut visible = backdrop_visible;
+            layer.with_surfaces(|surface, _| {
+                visible |= render_states.element_was_presented(Id::from_wayland_resource(surface));
+            });
+            if !visible {
                 continue;
             }
             layer.send_frame(output, time, Some(Duration::ZERO), |_, _| {
