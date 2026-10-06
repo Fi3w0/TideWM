@@ -692,6 +692,12 @@ Fix direction: make redraw propagation event-driven or run a per-output schedule
 
 **Second VT-return failure found and fixed 2026-10-06, 0.90.127.** With master recovery working (.125, confirmed by the .126 resume log), both outputs still failed every atomic test after returning from a VT where Plasma ran: the kernel state had the two connectors swapped between TideWM's CRTCs, and per-CRTC commits cannot resolve a swap. Resume now uses `activate(true)` (Smithay's device-wide connector/plane disable). **Maintainer-confirmed on .127 (2026-10-06, NVIDIA RTX 3060, plasmalogin/logind):** a text-VT round trip restores both outputs; the debug log shows master restored by the session manager, scanout/input active, and both first frames queued with zero atomic-test failures. Not yet repeated with another graphical session (Plasma) holding the other VT, the case that produced the swapped CRTCs.
 
+### M-74 — Output disconnect sent `wl_surface.leave` after retracting the `wl_output` global
+
+**Confidence: confirmed (live, 2026-10-06).** After a DPMS wake the maintainer's HDMI link re-trained, TideWM handled it as disconnect/reconnect, and kitty on that output segfaulted (`wl_proxy_get_user_data` from glfw-wayland's dispatch, core dump PID 8083). `handle_connector_change` called `remove_global` before unmapping; `Space::unmap_output` sends no events, so leaves went out on a later refresh, after clients had destroyed the proxy.
+
+**Fixed 2026-10-06, 0.90.129.** Unmap, `Space::refresh` (sends leaves), then `disable_global` with removal after 10 s (niri's order). Needs a live unplug/replug with a client on the output to confirm.
+
 ### M-38 — Primary GPU removal leaves a permanently black live session
 
 **Confidence: confirmed.** `backend/udev.rs:745-755` only logs removal of the driven GPU. With the single-GPU design, the compositor remains alive but can no longer render; terminating the session is more recoverable.

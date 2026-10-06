@@ -2,6 +2,12 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.129 — Don't crash clients when a monitor disconnects
+
+- A monitor dropping off (here: a flaky HDMI link re-training after DPMS wake) made kitty segfault in `wl_proxy_get_user_data`. TideWM removed the `wl_output` global first and only sent `wl_surface.leave` on the next `Space::refresh`; glfw had already destroyed its proxy on `global_remove`, so the leave arrived naming a null object.
+- Disconnect now unmaps the output and refreshes the space immediately (sending every leave), then disables the global and removes it 10 s later so clients that raced a bind still find it, the same order niri uses.
+- Also on .128: DPMS off/on via `toggle-dpms` keeps both outputs rendering (native presentation and 60/60-frame capture probes after wake).
+
 ## 0.90.128 — `env { }` and the cursor theme reload live
 
 - Saving `env { }` no longer needs a relogin. New `session_env` module: startup still writes the process environment (before any thread exists); reload-time changes are kept beside it and applied to every child TideWM spawns, because rewriting the process environment once helper threads exist would race their `getenv`. Removing a key restores its pre-TideWM value, or unsets it.

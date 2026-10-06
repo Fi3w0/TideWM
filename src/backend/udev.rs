@@ -1563,13 +1563,6 @@ fn handle_connector_change(
             } => {
                 if let Some(surface) = dev.surfaces.remove(&crtc) {
                     tracing::info!(?crtc, "Output disconnected");
-                    // Retract the wl_output global explicitly -- letting
-                    // `surface` (and its `GlobalId`) just drop does not do
-                    // this; a client that already bound it would otherwise
-                    // keep seeing a global for an output that no longer
-                    // exists, and a later replug would advertise a second
-                    // global on top of the still-live stale one.
-                    display_handle.remove_global::<Smallvil>(surface.global);
                     // Every window owned by this output migrates to a
                     // still-connected fallback (same workspace numbers) so
                     // neither tiled nor floating content becomes permanently
@@ -1590,6 +1583,10 @@ fn handle_connector_change(
                     }
                     state.remove_layer_output(&surface.output);
                     state.space.unmap_output(&surface.output);
+                    // `unmap_output` only forgets the output; the
+                    // wl_surface.leave events go out on the next refresh.
+                    // Send them now, before the global is retracted below.
+                    state.space.refresh();
                     state.refresh_input_device_outputs();
                     let space = &state.space;
                     if let Some(theme) = state.cursor_theme.as_mut() {
@@ -1619,10 +1616,43 @@ fn handle_connector_change(
                         fallback.as_deref(),
                         smithay::utils::SERIAL_COUNTER.next_serial(),
                     );
+                    retract_output_global(display_handle, state, surface.global);
                 }
             }
             _ => {}
         }
+    }
+}
+
+/// How long a disconnected output's disabled `wl_output` global stays
+/// bindable, so clients that raced a bind still find it (niri uses the same).
+const OUTPUT_GLOBAL_REMOVE_DELAY: Duration = Duration::from_secs(10);
+
+/// Retracts a disconnected output's `wl_output` global. Must run after every
+/// surface has left the output: a client that sees `global_remove` destroys
+/// its proxy, and a later `wl_surface.leave` naming it reaches the client as
+/// a null object (kitty/glfw segfaults on that). Disabling stops new binds
+/// and tells clients now; removal follows after a delay. Without this an
+/// already-bound client keeps a stale global and a replug advertises a
+/// second one on top.
+fn retract_output_global(
+    display_handle: &smithay::reexports::wayland_server::DisplayHandle,
+    state: &mut Smallvil,
+    global: smithay::reexports::wayland_server::backend::GlobalId,
+) {
+    display_handle.disable_global::<Smallvil>(global.clone());
+    let remover = display_handle.clone();
+    let delayed = global.clone();
+    let scheduled = state.loop_handle.insert_source(
+        Timer::from_duration(OUTPUT_GLOBAL_REMOVE_DELAY),
+        move |_, _, _| {
+            remover.remove_global::<Smallvil>(delayed.clone());
+            TimeoutAction::Drop
+        },
+    );
+    if let Err(err) = scheduled {
+        tracing::warn!(%err, "Failed to schedule wl_output global removal; removing now");
+        display_handle.remove_global::<Smallvil>(global);
     }
 }
 
