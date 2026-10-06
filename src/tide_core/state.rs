@@ -2824,6 +2824,17 @@ impl Smallvil {
                 } else {
                     crate::placement::PlacementKind::Tiled
                 };
+                // A tiled window belongs to exactly one output's layout.
+                // Its Space geometry is location + last committed size, so
+                // until it commits the tile size a large first buffer near
+                // an edge overlaps the neighbor output and would flash there.
+                if kind == crate::placement::PlacementKind::Tiled
+                    && surface
+                        .and_then(|surface| self.layout.output_of(surface))
+                        .is_some_and(|owner| owner != output_name)
+                {
+                    return None;
+                }
                 let stack = if surface.is_some_and(|surface| self.fullscreen.contains_key(surface))
                 {
                     crate::placement::PlacementStack::Fullscreen
@@ -8712,8 +8723,14 @@ impl Smallvil {
         let Some(window) = self.mapped_toplevel_window(surface) else {
             return;
         };
-        let Some(output) = self
-            .rendered_output_for_surface(surface)
+        // A Classic tiled window belongs to its layout's output even while
+        // its committed size still overlaps a neighbor.
+        let layout_owner = (self.config.spatial_engine == crate::config::SpatialEngine::Classic)
+            .then(|| self.layout.output_of(surface))
+            .flatten()
+            .and_then(|name| self.output_by_name(name));
+        let Some(output) = layout_owner
+            .or_else(|| self.rendered_output_for_surface(surface))
             .or_else(|| self.output_for_window(&window))
         else {
             return;

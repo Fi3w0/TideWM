@@ -2,6 +2,11 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.139 — New tiled windows no longer flash on the neighboring monitor
+
+- Opening several windows quickly could flash one of them for a frame or two at the top of the other monitor. A Classic window's render rectangle is its Space location plus its last committed size, and each output renders every window overlapping it; a new window tiled near an output edge still carried its larger first buffer until it committed the tile size, so it overlapped the neighbor output and was drawn there. Classic tiled windows now render only on the output whose layout owns them; floating windows can still span outputs.
+- The window-open ripple used the same overlap test and could spawn on the neighbor output (captured at HDMI-A-2's corner shared with DP-4); Classic tiled windows now ripple on their layout output.
+
 ## 0.90.138 — Glass shows the wallpaper at the right size again
 
 - Regression in .137: glass/frost behind windows on the 1.25 output showed the wallpaper enlarged 1.25× from the top-left corner. The capture-only wallpaper element pre-multiplied its size by the output scale to compensate for the old scale-1.0 captures; with captures now at the real scale it was scaled twice. Captures now use the same logical-sized wallpaper element as the visible frame, and the compensation helper is gone. Found by the maintainer comparing the glass against an empty workspace. Maintainer-confirmed fixed on .138, together with the .137 workspace-transition scale fix.
