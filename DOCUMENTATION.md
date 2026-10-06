@@ -1341,6 +1341,8 @@ Porting a Hyprland `screen_shader` usually means deleting its `precision` line a
 
 `KEY = VALUE` pairs, applied to TideWM's own process before the backend starts (so e.g. `XCURSOR_THEME` here actually changes the cursor theme TideWM itself loads, not just what child processes see) and exported on standalone sessions to the systemd/D-Bus activation environment alongside `WAYLAND_DISPLAY`. That external export is an ordered, best-effort background task: direct children receive TideWM's process environment immediately, while a missing or wedged session helper may delay session-activated services seeing the update without delaying the compositor, input, or startup commands. Invalid Unix environment names/values are ignored with a config warning; values are never repeated in that diagnostic because they may contain secrets.
 
+Changes apply on save, with no relogin. Programs started afterwards (keybinds, `spawn`, autostart helpers) get the new values, and standalone sessions push them to systemd/D-Bus as `KEY=VALUE` (removed keys are unset there). Removing a key restores the value it had before TideWM set it. Changing `XCURSOR_THEME` or `XCURSOR_SIZE` reloads TideWM's cursor immediately, which also covers apps that use the cursor-shape protocol (most current GTK/Qt apps, Firefox, kitty). Programs that are already running keep the environment they started with; that is how process environments work everywhere, so restart a program to give it new values.
+
 ```
 env {
     XCURSOR_THEME = Adwaita

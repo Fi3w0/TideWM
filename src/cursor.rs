@@ -181,9 +181,8 @@ impl PreparedCache {
 
 impl Theme {
     pub fn load() -> Option<Theme> {
-        let name = std::env::var("XCURSOR_THEME").unwrap_or_else(|_| "default".into());
-        let size = std::env::var("XCURSOR_SIZE")
-            .ok()
+        let name = crate::session_env::get("XCURSOR_THEME").unwrap_or_else(|| "default".into());
+        let size = crate::session_env::get("XCURSOR_SIZE")
             .and_then(|s| s.parse().ok())
             .unwrap_or(24);
 

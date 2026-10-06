@@ -11,6 +11,7 @@ mod frame_clock;
 mod grabs;
 #[cfg(feature = "screencast")]
 mod screencast;
+mod session_env;
 mod tide_core;
 mod visual;
 mod xwayland;
@@ -65,6 +66,8 @@ pub(crate) fn track_child(child: Child) {
 /// would inherit blocked SIGINT/SIGTERM/SIGHUP and ignore normal shutdown.
 pub(crate) fn child_command(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
+    // `env { }` changes made by a config reload after startup.
+    session_env::apply_to(&mut command);
     // Safety: after fork and before exec this hook calls only libc signal-mask
     // functions over stack-owned plain data. It captures nothing and performs
     // no work beyond replacing the signal mask or returning that libc error.
@@ -213,16 +216,48 @@ fn split_command(cmd: &str) -> Option<Vec<String>> {
 /// not just processes TideWM spawns later. Called separately from, and
 /// before, `export_session_environment` below, which needs the real
 /// `WAYLAND_DISPLAY` the backend sets up and so can only run afterward.
+/// Reload-time changes go through `session_env::update` instead.
 fn apply_user_env(env: &std::collections::HashMap<String, String>) {
-    for (key, value) in env {
-        if let Err(reason) = crate::config::validate_env_entry(key, value) {
-            // Config lowering already filters these and emits a user-facing
-            // warning. Keep this guard at the mutation boundary as defense
-            // in depth for programmatically constructed Config values.
-            tracing::error!(key = ?key, reason, "Skipping invalid environment entry");
-            continue;
-        }
-        std::env::set_var(key, value);
+    session_env::apply_startup(env);
+}
+
+/// Publishes a reload's `env { }` changes to the systemd user manager and
+/// the D-Bus activation environment, with explicit values (the process
+/// environment is deliberately not rewritten after startup). Same
+/// best-effort, never-blocking contract as the startup export.
+pub(crate) fn export_env_change(change: session_env::EnvChange) {
+    if change.is_empty() {
+        return;
+    }
+    let spawned = thread::Builder::new()
+        .name("tidewm-session-environment".to_string())
+        .spawn(move || {
+            let runner = ProcessSessionEnvironmentRunner;
+            let mut tasks: Vec<(&str, Vec<String>)> = Vec::new();
+            if !change.set.is_empty() {
+                let mut args = vec!["--systemd".to_string()];
+                args.extend(change.set.iter().map(|(k, v)| format!("{k}={v}")));
+                tasks.push(("dbus-update-activation-environment", args));
+            }
+            if !change.unset.is_empty() {
+                let mut args = vec!["--user".to_string(), "unset-environment".to_string()];
+                args.extend(change.unset.iter().cloned());
+                tasks.push(("systemctl", args));
+            }
+            for (program, args) in tasks {
+                match runner.status(program, &args) {
+                    Ok(status) if status.success() => {}
+                    Ok(status) => {
+                        tracing::debug!(program, ?status, "Environment update exited non-zero")
+                    }
+                    Err(err) => {
+                        tracing::debug!(%err, program, "Environment update command not available")
+                    }
+                }
+            }
+        });
+    if let Err(err) = spawned {
+        tracing::debug!(%err, "Failed to start environment update worker");
     }
 }
 

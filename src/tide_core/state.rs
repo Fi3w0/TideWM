@@ -13325,6 +13325,25 @@ impl Smallvil {
                     .then(|| crate::welcome::WelcomeHint::build(&new_config));
                 let outputs_changed =
                     format!("{:?}", self.config.outputs) != format!("{:?}", new_config.outputs);
+                // `env { }` is live: children spawned from now on get the new
+                // values, the session manager is told, and TideWM's own
+                // cursor follows XCURSOR_THEME/XCURSOR_SIZE immediately.
+                let env_change = crate::session_env::update(&new_config.env);
+                if self.backend_name == "udev"
+                    && (env_change.touches("XCURSOR_THEME") || env_change.touches("XCURSOR_SIZE"))
+                {
+                    self.cursor_theme = crate::cursor::Theme::load();
+                    if self.cursor_theme.is_none() {
+                        warnings.push(
+                            "Cursor theme from XCURSOR_THEME has no default cursor; using the fallback dot"
+                                .to_string(),
+                        );
+                    }
+                    self.request_redraw();
+                }
+                if self.backend_name == "udev" {
+                    crate::export_env_change(env_change);
+                }
                 self.config = new_config;
                 self.sync_config_watch_paths();
                 if outputs_changed {
