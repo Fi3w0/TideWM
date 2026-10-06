@@ -2,6 +2,10 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.138 — Glass shows the wallpaper at the right size again
+
+- Regression in .137: glass/frost behind windows on the 1.25 output showed the wallpaper enlarged 1.25× from the top-left corner. The capture-only wallpaper element pre-multiplied its size by the output scale to compensate for the old scale-1.0 captures; with captures now at the real scale it was scaled twice. Captures now use the same logical-sized wallpaper element as the visible frame, and the compensation helper is gone. Found by the maintainer comparing the glass against an empty workspace.
+
 ## 0.90.137 — Captures draw window contents at the output's real scale
 
 - On a fractionally scaled output (the maintainer's 2560×1440 at 1.25), every workspace switch showed window contents shrunk to 80% inside their full-size borders for the length of the transition, then snapping back. Offscreen captures used a damage tracker created at scale 1.0, and Smithay sizes client surface elements from the tracker's scale at draw time, so contents rendered at 1/1.25 while TideWM's own fixed-size elements (borders) stayed correct. Captures now render at the output's fractional scale. This covers the workspace-transition snapshot, per-window glass/frost and custom-shader backdrops, and layer-surface backdrops/alpha masks, which had the same mismatch.

@@ -6430,22 +6430,15 @@ impl Smallvil {
 
     /// The wallpaper for an offscreen capture (glass/layer backdrops, custom
     /// shader sources, workspace-transition snapshots). Captures render at
-    /// scale 1.0 in output-local physical pixels, but `wallpaper_element` is
-    /// sized in logical pixels for the scaled output frame, so under a
-    /// fractional scale it came out `1/scale` too small inside every capture
-    /// (glass showed a shrunken, top-left-anchored wallpaper at 1.25x).
+    /// the output's own fractional scale (see `backdrop::BackdropCapture`),
+    /// so this is the same logical-sized element the visible frame draws.
     pub(crate) fn wallpaper_capture_element(
         &mut self,
         output: &Output,
         renderer: &mut GlesRenderer,
     ) -> Option<smithay::backend::renderer::element::texture::TextureRenderElement<GlesTexture>>
     {
-        if !self.config.builtin_wallpaper {
-            return None;
-        }
-        let logical_size = self.space.output_geometry(output)?.size;
-        let size = capture_wallpaper_size(logical_size, output.current_scale().fractional_scale());
-        self.builtin_wallpaper.render_element(renderer, size)
+        self.wallpaper_element(output, renderer)
     }
 
     /// The output-local physical rectangle produced by the shared placement
@@ -14004,17 +13997,6 @@ fn tide_workspace_value(engine: crate::config::SpatialEngine, first_workspace: O
     }
 }
 
-/// Physical size of an output's wallpaper for scale-1.0 offscreen captures,
-/// rounded the same way the scaled on-screen frame rounds it. Returned as a
-/// `Logical` size because the wallpaper element takes one; at the capture's
-/// 1.0 scale logical and physical coincide.
-fn capture_wallpaper_size(logical: Size<i32, Logical>, scale: f64) -> Size<i32, Logical> {
-    let physical = logical
-        .to_f64()
-        .to_physical_precise_round::<f64, i32>(scale);
-    Size::from((physical.w, physical.h))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -14159,24 +14141,6 @@ mod tests {
         assert_eq!(
             keyboard_resized_size((i32::MAX, 300).into(), Direction::Right, 24, constraints),
             (500, 300).into()
-        );
-    }
-
-    #[test]
-    fn capture_wallpaper_matches_the_scaled_output_in_physical_pixels() {
-        // 1440p at 1.25x: the frame draws 2560x1440, so must every capture.
-        assert_eq!(
-            capture_wallpaper_size(Size::from((2048, 1152)), 1.25),
-            Size::from((2560, 1440))
-        );
-        assert_eq!(
-            capture_wallpaper_size(Size::from((1920, 1080)), 1.0),
-            Size::from((1920, 1080))
-        );
-        // Rounds like to_physical_precise_round on the visible path.
-        assert_eq!(
-            capture_wallpaper_size(Size::from((1707, 960)), 1.5),
-            Size::from((2561, 1440))
         );
     }
 
