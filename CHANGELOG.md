@@ -2,6 +2,12 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.134 — `underline` popup style and adjustable line width
+
+- New `popup { style = underline }`: the banner layout with no border or accent strip, and a full-width countdown line flush with the box's bottom edge over a faint track (inset only past rounded corners).
+- New `popup { line_width }` (1–16 px) sets the countdown line thickness for `banner` (default 3) and `underline` (default 4).
+- Maintainer-confirmed on .133: the 600 ms slide in/out reads correctly.
+
 ## 0.90.133 — Slower, configurable popup slide
 
 - The .132 slide was confirmed working by frame capture, but at 400 ms with a cubic ease-out most of the travel happened in the first 100 ms, so it read as a pop-in. The slide now takes 600 ms in and 600 ms out by default (Hyprland's notification animation length), and `popup { slide_ms }` (50–3000) sets it.

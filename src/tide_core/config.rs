@@ -701,6 +701,9 @@ pub enum ToastStyle {
     /// Square-friendly box with no static border: the accent outline
     /// traces clockwise around it over the popup's visible time.
     Outline,
+    /// Borderless box whose countdown is a full-width line along its
+    /// bottom edge.
+    Underline,
 }
 
 /// How a timed popup enters and leaves.
@@ -3595,6 +3598,9 @@ pub struct PopupConfig {
     /// Slide in and out time for `animation = slide`, milliseconds. Auto
     /// is 600, Hyprland's notification animation length.
     pub slide_ms: Option<u64>,
+    /// Countdown line thickness, pixels, for `banner` and `underline`.
+    /// Auto is 3 for banner and 4 for underline.
+    pub line_width: Option<f32>,
 }
 
 /// Which built-in shape a ripple draws. Multiple shapes can stack
@@ -8377,6 +8383,9 @@ fn apply_popup_block(cfg: &mut PopupConfig, body: &[waves::Entry]) {
                     }
                 };
             }
+            "line_width" | "line-width" | "bar_width" => {
+                cfg.line_width = parse_f32_clamped(value, 1.0, 16.0, "popup.line_width");
+            }
             "slide_ms" | "slide_duration" => match parse_duration_ms(value) {
                 Some(ms) if ms > 0 => cfg.slide_ms = Some((ms as u64).clamp(50, 3_000)),
                 _ => tracing::warn!(
@@ -8396,6 +8405,7 @@ fn apply_popup_block(cfg: &mut PopupConfig, body: &[waves::Entry]) {
                     "pill" | "card" => ToastStyle::Pill,
                     "banner" | "bar" | "strip" => ToastStyle::Banner,
                     "outline" | "frame" | "border" => ToastStyle::Outline,
+                    "underline" | "line" => ToastStyle::Underline,
                     other => {
                         tracing::warn!(value = other, "Unknown popup.style, using pill");
                         ToastStyle::Pill
@@ -13187,6 +13197,11 @@ shader tinted-blur {
         let entries = wave_entries("popup {\n style = outline\n }\n");
         let outline = Config::from_raw(lower_entries(&entries)).0;
         assert_eq!(outline.popup.style, ToastStyle::Outline);
+
+        let entries = wave_entries("popup {\n style = underline\n line_width = 6\n }\n");
+        let underline = Config::from_raw(lower_entries(&entries)).0;
+        assert_eq!(underline.popup.style, ToastStyle::Underline);
+        assert_eq!(underline.popup.line_width, Some(6.0));
 
         let entries = wave_entries("popup {\n style = nonsense\n }\n");
         let fallback = Config::from_raw(lower_entries(&entries)).0;

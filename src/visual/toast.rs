@@ -472,12 +472,30 @@ fn rasterize_toast_for_output(
                 height,
                 progress: None,
             }),
-        ToastStyle::Banner => {
-            rasterize_banner_for_output(message, kind, theme, narrowest_output_width, fill, false)
-        }
-        ToastStyle::Outline => {
-            rasterize_banner_for_output(message, kind, theme, narrowest_output_width, fill, true)
-        }
+        ToastStyle::Banner => rasterize_banner_for_output(
+            message,
+            kind,
+            theme,
+            narrowest_output_width,
+            fill,
+            BannerMode::Banner,
+        ),
+        ToastStyle::Outline => rasterize_banner_for_output(
+            message,
+            kind,
+            theme,
+            narrowest_output_width,
+            fill,
+            BannerMode::Outline,
+        ),
+        ToastStyle::Underline => rasterize_banner_for_output(
+            message,
+            kind,
+            theme,
+            narrowest_output_width,
+            fill,
+            BannerMode::Underline,
+        ),
     }
 }
 
@@ -625,15 +643,27 @@ fn rasterize_pill_for_output(
 /// slides a second rect in over the first to fake its colored left edge,
 /// draws from a fixed per-severity palette instead of the live theme, and
 /// has no configurable corners at all.
+/// The banner-layout styles: shared size, icon and text, different chrome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BannerMode {
+    /// Border, left accent strip, inset bottom countdown line.
+    Banner,
+    /// No static chrome; the border itself is the countdown.
+    Outline,
+    /// No border or strip; a full-width countdown line on the bottom edge.
+    Underline,
+}
+
+/// Default `Underline` line thickness when `[popup] { line_width }` is unset.
+const UNDERLINE_HEIGHT: i32 = 4;
+
 fn rasterize_banner_for_output(
     message: &str,
     kind: ToastKind,
     theme: crate::ui_theme::UiTheme,
     narrowest_output_width: Option<i32>,
     fill: f32,
-    // Outline style: same layout, but no static border, accent strip or
-    // bottom line; the border itself becomes the countdown.
-    outline: bool,
+    mode: BannerMode,
 ) -> Option<Rasterized> {
     let font = font();
     let font_size = kind.font_size();
@@ -711,7 +741,10 @@ fn rasterize_banner_for_output(
             if border <= 0.0 {
                 continue;
             }
-            if outline {
+            if mode == BannerMode::Underline {
+                continue;
+            }
+            if mode == BannerMode::Outline {
                 ring.push(OutlinePixel {
                     x,
                     y,
@@ -731,7 +764,11 @@ fn rasterize_banner_for_output(
     // curves the top/bottom-left the same as the card itself, then only
     // the true `BANNER_ACCENT_WIDTH` columns are actually painted.
     let accent_bar_mask_w = BANNER_ACCENT_WIDTH + radius as i32;
-    let accent_bar_rows = if outline { 0 } else { height };
+    let accent_bar_rows = if mode == BannerMode::Banner {
+        height
+    } else {
+        0
+    };
     for y in 0..accent_bar_rows {
         for x in 0..(card_x + BANNER_ACCENT_WIDTH).min(width) {
             let coverage = rounded_rect_coverage_local(
@@ -768,16 +805,36 @@ fn rasterize_banner_for_output(
         theme.text,
     );
 
-    let track = ProgressTrack {
-        x: card_x + BANNER_PROGRESS_INSET_X,
-        y: card_y + BANNER_HEIGHT - BANNER_PROGRESS_BOTTOM_GAP - BANNER_PROGRESS_HEIGHT,
-        w: (card_w - BANNER_PROGRESS_INSET_X * 2).max(0),
-        h: BANNER_PROGRESS_HEIGHT,
+    let line_width = |default: i32| {
+        theme
+            .popup_line_width
+            .map_or(default, |w| w.round().clamp(1.0, 16.0) as i32)
+    };
+    let track = if mode == BannerMode::Underline {
+        // Flush with the card's bottom edge, inset only past rounded
+        // corners so the line never pokes outside a rounded card.
+        let h = line_width(UNDERLINE_HEIGHT).min(BANNER_HEIGHT / 2);
+        let inset = radius.ceil() as i32;
+        ProgressTrack {
+            x: card_x + inset,
+            y: card_y + BANNER_HEIGHT - h,
+            w: (card_w - inset * 2).max(0),
+            h,
+        }
+    } else {
+        let h = line_width(BANNER_PROGRESS_HEIGHT)
+            .min(BANNER_PROGRESS_BOTTOM_GAP + BANNER_PROGRESS_HEIGHT * 2);
+        ProgressTrack {
+            x: card_x + BANNER_PROGRESS_INSET_X,
+            y: card_y + BANNER_HEIGHT - BANNER_PROGRESS_BOTTOM_GAP - h,
+            w: (card_w - BANNER_PROGRESS_INSET_X * 2).max(0),
+            h,
+        }
     };
     // Faint resting groove, so the track reads even at 0% fill -- then
     // `stamp_progress_fill` overlays a brighter run of the same accent on
     // top as `fill` grows.
-    if !outline {
+    if mode != BannerMode::Outline {
         for y in track.y..track.y + track.h {
             for x in track.x..track.x + track.w {
                 blend_color_pixel(&mut pixels, width, x, y, accent, 55);
@@ -812,7 +869,7 @@ fn rasterize_banner_for_output(
         pen_x += metrics.advance_width.round().max(1.0) as i32;
     }
 
-    let progress = if outline {
+    let progress = if mode == BannerMode::Outline {
         ring.sort_by(|a, b| a.t.total_cmp(&b.t));
         let mut track = OutlineTrack {
             pixels: ring,
@@ -1194,6 +1251,42 @@ mod tests {
             slide_fraction(ms(60_000), None, slide),
             0.0,
             "persistent popups stay"
+        );
+    }
+
+    #[test]
+    fn underline_is_a_full_width_bottom_line_with_configurable_width() {
+        let mut theme = crate::ui_theme::UiTheme::for_test_with_style(ToastStyle::Underline);
+        theme.radius = 0;
+        let raster = |theme, fill| {
+            rasterize_toast_for_output("Configuration reloaded", ToastKind::Info, theme, None, fill)
+                .unwrap()
+        };
+        let Some(Progress::Line(track)) = raster(theme, 0.0).progress else {
+            panic!("underline has a line track");
+        };
+        assert_eq!(track.h, UNDERLINE_HEIGHT);
+        assert_eq!(track.x, BANNER_INSET, "starts at the card edge");
+        assert_eq!(
+            track.y + track.h,
+            BANNER_INSET + BANNER_HEIGHT,
+            "flush with the bottom"
+        );
+
+        theme.popup_line_width = Some(8.0);
+        let Some(Progress::Line(thick)) = raster(theme, 0.0).progress else {
+            panic!("underline has a line track");
+        };
+        assert_eq!(thick.h, 8);
+        assert_eq!(thick.y + thick.h, track.y + track.h);
+
+        // No border: the top-right card pixel matches the panel, not the accent.
+        let full = raster(theme, 1.0);
+        let corner = ((BANNER_INSET * full.width + full.width - BANNER_INSET - 1) * 4) as usize;
+        let accent = theme.popup_accent(false, 0.5);
+        assert_ne!(
+            full.pixels[corner..corner + 3],
+            [accent[2], accent[1], accent[0]]
         );
     }
 

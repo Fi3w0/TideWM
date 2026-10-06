@@ -35,6 +35,8 @@ pub struct UiTheme {
     pub popup_animation: crate::config::PopupAnimation,
     /// `[popup] { slide_ms }`: slide in and out time.
     pub popup_slide: std::time::Duration,
+    /// `[popup] { line_width }` pin; `None` lets each style pick its own.
+    pub popup_line_width: Option<f32>,
 }
 
 /// Popup slide time when `[popup] { slide_ms }` is unset (Hyprland's).
@@ -106,6 +108,7 @@ impl UiTheme {
                 .popup
                 .slide_ms
                 .map_or(DEFAULT_POPUP_SLIDE, std::time::Duration::from_millis),
+            popup_line_width: config.popup.line_width,
         }
     }
 
@@ -143,6 +146,7 @@ impl UiTheme {
             popup_duration: DEFAULT_POPUP_DURATION,
             popup_animation: crate::config::PopupAnimation::Fade,
             popup_slide: DEFAULT_POPUP_SLIDE,
+            popup_line_width: None,
         }
     }
 
