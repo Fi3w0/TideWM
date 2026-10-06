@@ -566,4 +566,30 @@ mod tests {
         caustics.render_failures.record_failure(Instant::now());
         assert!(caustics.next_frame_in(fps).unwrap() > Duration::ZERO);
     }
+
+    #[test]
+    fn output_deadlines_and_failure_backoff_are_independent() {
+        let now = Instant::now();
+        let sample = Some(CausticsSample {
+            time: 0.0,
+            intensity: 0.4,
+            color: [0.2, 0.5, 0.8],
+            scale: 1.3,
+        });
+        let mut due = Caustics {
+            last_sample: sample,
+            last_advance: now - Duration::from_secs(2),
+            ..Caustics::default()
+        };
+        let waiting = Caustics {
+            last_sample: sample,
+            last_advance: now,
+            ..Caustics::default()
+        };
+        assert_eq!(due.next_frame_in(1), Some(Duration::ZERO));
+        assert!(waiting.next_frame_in(1).unwrap() > Duration::ZERO);
+        due.render_failures.record_failure(Instant::now());
+        assert!(due.next_frame_in(1).unwrap() > Duration::ZERO);
+        assert_eq!(waiting.render_failures.failures, 0);
+    }
 }

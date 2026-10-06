@@ -432,6 +432,12 @@ impl OceanSpace {
         self.camera_motions.values().any(OceanCameraMotion::active)
     }
 
+    pub(crate) fn has_active_camera_motion_on(&self, output: &str) -> bool {
+        self.camera_motions
+            .get(output)
+            .is_some_and(OceanCameraMotion::active)
+    }
+
     /// Drops completed interpolation records. `cameras` already stores each
     /// motion's target, so removing a finished record preserves the sampled
     /// camera while keeping the auxiliary map bounded to active work.
@@ -1769,6 +1775,33 @@ mod tests {
         assert_eq!(
             ocean.camera("right").origin,
             OceanPoint { x: -75.0, y: 900.0 }
+        );
+    }
+
+    #[test]
+    fn camera_animation_continues_only_its_output_and_expires_without_rendering() {
+        let mut ocean = OceanSpace::from_config(&OceanConfig::default());
+        ocean.set_camera(
+            "moving",
+            OceanCamera {
+                origin: OceanPoint { x: 300.0, y: 40.0 },
+                zoom: 1.0,
+            },
+            Duration::from_secs(1),
+            0.0,
+            None,
+        );
+        assert!(ocean.has_active_camera_motion());
+        assert!(ocean.has_active_camera_motion_on("moving"));
+        assert!(!ocean.has_active_camera_motion_on("idle"));
+        ocean.camera_motions.get_mut("moving").unwrap().started =
+            Instant::now() - Duration::from_secs(2);
+        assert!(!ocean.has_active_camera_motion_on("moving"));
+        ocean.prune_completed_camera_motions();
+        assert!(ocean.camera_motions.is_empty());
+        assert_eq!(
+            ocean.camera("moving").origin,
+            OceanPoint { x: 300.0, y: 40.0 }
         );
     }
 

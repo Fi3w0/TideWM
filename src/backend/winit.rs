@@ -173,11 +173,11 @@ pub fn init_winit(
     // A bounded host-cadence calloop Timer drives the loop, not
     // WinitEvent::Redraw/backend.window().request_redraw() (the pattern
     // smallvil used): nothing throttles how fast request_redraw() re-fires
-    // on its own, and it was spinning the CPU at 100% even fully idle. A
+    // on its own, and it was spinning the CPU at 100% even fully idle.
     // Absolute deadlines on a fixed epoch skip missed frames without
     // catch-up bursts or adding rendering time to the frame period. One
-    // shared Timer drives every simulated output, exactly like udev.rs
-    // drives every CRTC from its one Timer -- see `WinitOutput::dirty`.
+    // shared Timer pumps every simulated output; udev uses redraw wakeups
+    // and independent VBlank chains. Both preserve per-output dirty state.
     let timer = Timer::immediate();
     let frame_epoch = Instant::now();
     event_loop
@@ -250,6 +250,8 @@ pub fn init_winit(
                 return TimeoutAction::Drop;
             }
 
+            // Expiration must run even if no output rendered this tick.
+            state.has_active_animation();
             let redraw = state.take_redraw_requests();
             for entry in &mut outputs {
                 if redraw.includes(&entry.output) {
@@ -258,6 +260,12 @@ pub fn init_winit(
             }
 
             for entry in &mut outputs {
+                if state
+                    .caustics_redraw_delay_for_output(&entry.output)
+                    .is_some_and(|delay| delay.is_zero())
+                {
+                    entry.dirty = true;
+                }
                 if !entry.dirty {
                     continue;
                 }
@@ -565,16 +573,7 @@ pub fn init_winit(
                     state.send_window_frames(output, state.start_time.elapsed());
                     state.send_layer_frames(output, state.start_time.elapsed());
                 }
-            }
-
-            // An active animation (a toast still fading, today) needs
-            // another frame even though nothing else marked itself dirty
-            // in the meantime. Goes through the normal request_redraw() ->
-            // take_needs_redraw() path (checked at the top of *next*
-            // tick), which re-dirties every output, not just whichever
-            // one(s) just rendered.
-            if state.has_active_animation() {
-                state.request_redraw();
+                entry.dirty = state.output_has_active_animation(output, &placements);
             }
 
             state.space.refresh();

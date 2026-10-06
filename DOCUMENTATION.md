@@ -1019,7 +1019,7 @@ rounding {
 
 ### `border { }`
 
-Draws a fixed-cost rounded border immediately above its window. Equal start/end colors produce a solid border; different colors produce a linear gradient. Active, inactive, and urgent states have independent gradients and opacity. Rotation/pulse animation is opt-in because an animated border intentionally keeps the output redrawing.
+Draws a fixed-cost rounded border immediately above its window. Equal start/end colors produce a solid border; different colors produce a linear gradient. Active, inactive, and urgent states have independent gradients and opacity. Rotation/pulse animation is opt-in because an animated border intentionally keeps its visible output redrawing. Animation continuation is scoped to each output's scene; physics updates can still request global redraws.
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |

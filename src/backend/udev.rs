@@ -1071,9 +1071,21 @@ pub fn init_udev(
             state.update_float_physics_full();
             state.update_currents();
             state.update_buoyancy();
-            let caustics_delay = state.caustics_redraw_delay();
-            if caustics_delay.is_some_and(|delay| delay.is_zero()) {
-                state.request_redraw();
+            let mut caustics_delay = None;
+            for surface in device_for_timer
+                .borrow()
+                .surfaces
+                .values()
+                .filter(|surface| !surface.powered_off)
+            {
+                if let Some(delay) = state.caustics_redraw_delay_for_output(&surface.output) {
+                    caustics_delay = Some(
+                        caustics_delay.map_or(delay, |previous: Duration| previous.min(delay)),
+                    );
+                    if delay.is_zero() {
+                        state.request_output_redraw(&surface.output);
+                    }
+                }
             }
             let active = state.has_active_animation();
 
@@ -2180,7 +2192,8 @@ fn render_surface(
     // frame uses the mode-derived retry timer. Going through the global
     // redraw eventfd here would immediately retry an EmptyFrame and turn an
     // otherwise damage-free animation gate into a busy loop.
-    if state.has_active_animation() {
+    state.has_active_animation();
+    if state.output_has_active_animation(output, &placements) {
         surface.dirty = true;
     }
 

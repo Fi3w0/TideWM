@@ -6074,6 +6074,67 @@ impl Smallvil {
             || self.caustics_active()
     }
 
+    /// Continue only the animations present in this output's actual scene.
+    /// The backend passes its frame-owned placements, including previews;
+    /// durable workspace ownership and Space overlap are not camera visibility.
+    /// Completion cleanup remains global in `has_active_animation`.
+    pub(crate) fn output_has_active_animation(
+        &self,
+        output: &Output,
+        placements: &[crate::placement::PlacedWindow],
+    ) -> bool {
+        if !matches!(self.session_lock, SessionLock::Unlocked) {
+            return false;
+        }
+        let name = output.name();
+        self.toast
+            .as_ref()
+            .is_some_and(|toast| toast.needs_continued_redraw())
+            || self.ripples.iter().any(|ripple| ripple.output == name)
+            || self.workspace_transitions.contains_key(&name)
+            || self.workspace_glides.contains_key(&name)
+            || self.depth_transitions.contains_key(&name)
+            || self.swim_cameras.contains_key(&name)
+            || self.ocean.has_active_camera_motion_on(&name)
+            || (self.config.spatial_engine == crate::config::SpatialEngine::Ocean
+                && self.config.ocean.canvas_marker
+                && self.ocean_canvases.get(&name).is_some_and(|canvas| {
+                    canvas.marker_active(Duration::from_millis(
+                        self.config.ocean.canvas_marker_fade_ms,
+                    ))
+                }))
+            || self
+                .closing_window_animations
+                .iter()
+                .any(|closing| closing.snapshot.output == name)
+            || placements
+                .iter()
+                .filter_map(|placed| placed.surface())
+                .any(|surface| {
+                    self.window_open_animations.contains_key(surface)
+                        || self.cascade_window_animations.contains_key(surface)
+                        || self.window_move_animations.contains_key(surface)
+                        || self.window_viscosity.contains_key(surface)
+                        || self.window_sway.contains_key(surface)
+                        || self.window_float_physics.contains_key(surface)
+                        || self.window_float_ambient.contains_key(surface)
+                        || self.window_float_bodies.contains_key(surface)
+                        || self
+                            .window_currents
+                            .get(surface)
+                            .is_some_and(crate::currents::CurrentDrift::needs_frame)
+                        || self
+                            .window_buoyancy
+                            .get(surface)
+                            .is_some_and(crate::buoyancy::BuoyancyState::needs_frame)
+                        || self.surface_has_animated_border(surface)
+                        || self.surface_has_glass_animation(surface)
+                })
+            || self
+                .caustics_redraw_delay_for_output(output)
+                .is_some_and(|delay| delay.is_zero())
+    }
+
     /// Whether any water-glass window's refraction is currently animating
     /// and needs the frame pump kept alive: always in `ambient` mode, only
     /// during the post-disturbance settle tail in `reactive` mode, never
@@ -6082,26 +6143,29 @@ impl Smallvil {
     /// water) so a window hot-reloaded to frost or plain glass can't keep
     /// the compositor ticking through its leftover entry.
     fn glass_animation_active(&self) -> bool {
-        if !self.config.water_effects || self.glass_anim.is_empty() {
+        self.glass_anim
+            .keys()
+            .any(|surface| self.surface_has_glass_animation(surface))
+    }
+
+    fn surface_has_glass_animation(&self, surface: &WlSurface) -> bool {
+        if !self.config.water_effects
+            || !self.backdrop_textures.contains_key(surface)
+            || matches!(
+                self.window_glass_modes.get(surface),
+                Some(crate::config::GlassMode::Frost) | Some(crate::config::GlassMode::Plain)
+            )
+        {
             return false;
         }
-        let takes_water_branch = |surface: &WlSurface| {
-            self.backdrop_textures.contains_key(surface)
-                && !matches!(
-                    self.window_glass_modes.get(surface),
-                    Some(crate::config::GlassMode::Frost) | Some(crate::config::GlassMode::Plain)
-                )
+        let Some(anim) = self.glass_anim.get(surface) else {
+            return false;
         };
         match self.config.water_glass.animation {
             crate::config::GlassAnimation::Static => false,
-            crate::config::GlassAnimation::Ambient => {
-                self.glass_anim.keys().any(takes_water_branch)
-            }
+            crate::config::GlassAnimation::Ambient => true,
             crate::config::GlassAnimation::Reactive => {
-                let settle_ms = self.config.water_glass.settle_ms;
-                self.glass_anim.iter().any(|(surface, anim)| {
-                    anim.envelope(settle_ms) > 0.0 && takes_water_branch(surface)
-                })
+                anim.envelope(self.config.water_glass.settle_ms) > 0.0
             }
         }
     }
@@ -6638,30 +6702,33 @@ impl Smallvil {
 
     fn animated_borders_possible(&self) -> bool {
         self.space.elements().any(|window| {
-            let Some(surface) = window.toplevel().map(|toplevel| toplevel.wl_surface()) else {
-                return false;
-            };
-            let border = self.border_config_for_surface(surface);
-            let focused = matches!(
-                &self.keyboard_focus,
-                KeyboardFocusTarget::Window(focused) if focused == surface
-            );
-            let urgent = self.urgent.contains(surface);
-            let state_animated = if urgent {
-                border.animate_urgent
-            } else if focused {
-                border.animate_focused
-            } else {
-                border.animate_inactive
-            };
-            border.enabled
-                && border.width > 0.0
-                && border.animate
-                && state_animated
-                && (focused || urgent || border.inactive_enabled)
-                && (!border.floating_only || self.floating_workspace.contains_key(surface))
-                && (!self.fullscreen.contains_key(surface) || border.fullscreen)
+            window
+                .toplevel()
+                .is_some_and(|toplevel| self.surface_has_animated_border(toplevel.wl_surface()))
         })
+    }
+
+    fn surface_has_animated_border(&self, surface: &WlSurface) -> bool {
+        let border = self.border_config_for_surface(surface);
+        let focused = matches!(
+            &self.keyboard_focus,
+            KeyboardFocusTarget::Window(focused) if focused == surface
+        );
+        let urgent = self.urgent.contains(surface);
+        let state_animated = if urgent {
+            border.animate_urgent
+        } else if focused {
+            border.animate_focused
+        } else {
+            border.animate_inactive
+        };
+        border.enabled
+            && border.width > 0.0
+            && border.animate
+            && state_animated
+            && (focused || urgent || border.inactive_enabled)
+            && (!border.floating_only || self.is_floating(surface))
+            && (!self.fullscreen.contains_key(surface) || border.fullscreen)
     }
 
     /// Popups remain unclipped above compositor decoration; only the
@@ -8212,6 +8279,13 @@ impl Smallvil {
     }
 
     pub(crate) fn caustics_redraw_delay(&self) -> Option<Duration> {
+        self.space
+            .outputs()
+            .filter_map(|output| self.caustics_redraw_delay_for_output(output))
+            .min()
+    }
+
+    pub(crate) fn caustics_redraw_delay_for_output(&self, output: &Output) -> Option<Duration> {
         let cfg = &self.config.caustics;
         if !matches!(self.session_lock, SessionLock::Unlocked)
             || !self.config.water_effects
@@ -8228,16 +8302,13 @@ impl Smallvil {
         }
         let period = Duration::from_secs_f64(1.0 / f64::from(fps));
         let program_retry = self.caustics_program.retry_in(period);
-        self.space
-            .outputs()
-            .map(|output| {
-                self.caustics
-                    .get(&output.name())
-                    .and_then(|caustics| caustics.next_frame_in(fps))
-                    .unwrap_or(period)
-                    .max(program_retry)
-            })
-            .min()
+        Some(
+            self.caustics
+                .get(&output.name())
+                .and_then(|caustics| caustics.next_frame_in(fps))
+                .unwrap_or(period)
+                .max(program_retry),
+        )
     }
 
     fn caustics_active(&self) -> bool {
