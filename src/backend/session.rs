@@ -1,7 +1,32 @@
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+
 use smithay::{
     backend::drm::DrmDevice,
     reexports::{drm::Device as DrmRawDevice, input::Libinput},
 };
+
+/// `DRM_IOCTL_AUTH_MAGIC`: `_IOW('d', 0x11, struct drm_auth)`.
+const DRM_IOCTL_AUTH_MAGIC: u32 = (1 << 30) | (4 << 16) | ((b'd' as u32) << 8) | 0x11;
+
+/// Whether `fd` is the device's current DRM master, the same probe as
+/// libdrm's `drmIsMaster`: AUTH_MAGIC is a master-only ioctl, so a non-master
+/// caller gets EACCES, while a master is refused the invalid magic 0 with
+/// EINVAL. Works without CAP_SYS_ADMIN.
+fn is_master(fd: BorrowedFd<'_>) -> std::io::Result<bool> {
+    let mut magic: u32 = 0;
+    // SAFETY: AUTH_MAGIC reads one u32 (struct drm_auth) from the pointer,
+    // which stays valid for the duration of the call.
+    let ret = unsafe { libc::ioctl(fd.as_raw_fd(), DRM_IOCTL_AUTH_MAGIC as _, &mut magic) };
+    if ret == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::EINVAL) => Ok(true),
+        Some(libc::EACCES) => Ok(false),
+        _ => Err(error),
+    }
+}
 
 /// The selected scanout device owns KMS and therefore requires DRM master.
 /// Render/import-only devices do not go through this ownership check.
@@ -24,9 +49,22 @@ impl ScanoutSession for (&mut DrmDevice, &mut Libinput) {
         // Check it explicitly before that call can mark scanout active.
         // Once acquired, this fd retains master across activate's repeated
         // ioctl. Remove the guard after adopting Smithay's 85f83ab6 fix.
-        self.0
-            .acquire_master_lock()
-            .map_err(|error| format!("Failed to acquire DRM master: {error}"))
+        //
+        // SET_MASTER needs CAP_SYS_ADMIN for an fd that logind or seatd
+        // opened, so an ordinary login always gets EACCES here. Those
+        // session managers restore master themselves before announcing the
+        // resume, so the real requirement is "this fd is master", not "this
+        // process could take it".
+        match self.0.acquire_master_lock() {
+            Ok(()) => Ok(()),
+            Err(error) => match is_master(self.0.as_fd()) {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(format!("DRM master not held after resume: {error}")),
+                Err(probe) => Err(format!(
+                    "Failed to acquire DRM master ({error}) or query it ({probe})"
+                )),
+            },
+        }
     }
 
     fn activate(&mut self) -> Result<(), String> {

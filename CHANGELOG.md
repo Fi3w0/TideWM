@@ -2,6 +2,11 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.125 — Fix black/frozen screen after switching back from a TTY
+
+- Since 0.90.107, returning from another TTY left both outputs frozen or black on ordinary (non-root) logins. The resume path required this process to call DRM `SET_MASTER`, which the kernel refuses without `CAP_SYS_ADMIN` for an fd that logind/seatd opened. Those session managers restore master themselves before announcing the resume, so the check failed on every return and TideWM stayed paused.
+- Recovery now accepts master that the session manager restored, verified with the same master-only ioctl probe libdrm's `drmIsMaster` uses, and still stays paused if the fd really isn't master. Root sessions keep the explicit acquisition. Reproduced live on NVIDIA through plasmalogin/logind; the probe was checked against the held scanout card (not master) and an idle card (master). The live VT round trip on this build is pending.
+
 ## 0.90.124 — Distro packages: Gentoo overlay, Arch PKGBUILD, NixOS flake
 
 - `packaging/gentoo/`: an overlay with the live `gui-wm/tidewm` ebuild (Rust 1.88 floor for mlua, `screencast`/`accessibility` USE flags, installs `wavefmt` too) and `install.sh`, which copies the overlay to `/var/db/repos/tidewm`, registers and unmasks it, and emerges it. `--local` builds the working checkout through `TIDEWM_SRC`; an existing hand-written Portage env file is never overwritten. Portage dependency resolution checked on Gentoo.
