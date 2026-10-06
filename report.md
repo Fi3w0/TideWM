@@ -8,31 +8,45 @@ This is a static code review, not a claim that every issue below was reproduced 
 
 ## Implementation handoff
 
-- Updated: 2026-09-01
-- Implementation branch: `master`
-- Worktree: `/home/fiw/Proyects/TideWM`
-- Latest behavioral head: `7c48188`
-- Current TideWM version: `0.90.105`
-- Push status: local only; nothing from this phase has been pushed.
+- Updated: 2026-10-06
+- Implementation branch: `ai/codex/session-cadence-fixes`
+- Worktree: `/home/fiw/Documents/Proyects/TideWM`
+- Latest behavioral head: `111fa43` (base for this batch: `e2385eb`)
+- Current TideWM version: `0.90.109`
+- Push status: this batch is local only; nothing was pushed.
 - Phase 3 continued from documentation/packaging head `b6805e2`, preserving all earlier remediation history.
 
 The finding text below is the original audit evidence. It is intentionally retained even when a finding is closed. Use this handoff ledger as the current status authority, then inspect the named commit and current code before changing a closed area. Do not repeat a fix merely because its original finding still says “confirmed.”
+
+### 2026-10-06 implementation batch
+
+Three focused fixes landed as SSH-signed local commits:
+
+| Change | Commit / version | Verification still owed |
+| --- | --- | --- |
+| Checked scanout ownership and input rollback (M-37) | `1e7bce0` / 0.90.107 | Normal VT return and forced DRM/libinput failures on hardware |
+| Shared rational absolute nested deadlines (M-55 drift) | `c11c384` / 0.90.108 | Host presentation trace and idle-maintenance profile |
+| Monitor refresh updates without resize (M-57) | `111fa43` / 0.90.109 | Live same-size/same-scale move between mixed-refresh host monitors |
+
+Baseline: 544 compositor, 14 tidectl, and 9 wavefmt tests passed before edits. The implementation suite passes 551 compositor, 14 tidectl, and 9 wavefmt tests (574 total), including seven new checks. Final 0.90.109 gates all pass: `cargo fmt --all -- --check`; `cargo test --locked --all-features --all-targets -- --test-threads=1` (574 tests); `cargo clippy --locked --all-features --all-targets -- -D warnings`; `cargo build --locked --release --all-features` (2m 51s under the build limits). The release binary reports `TideWM 0.90.109`, code commit `111fa43`, release build, built 2026-10-06 via `--version`. Compilation is constrained to one allowed CPU, one Cargo job, niceness 19, and idle I/O priority. No compositor session, output setting, service, or game was changed for testing.
+
+M-56 (`7421d3c`) and M-59/M-60 (`717e4fe`) were already implemented; their stale ledger statuses are corrected here without new behavior. Dependency pins and native dependencies are unchanged. Reference source reviewed: pinned Smithay DRM/winit, Linux DRM ownership, and niri at `ed22699d99462f61ab171472d3ea67e844ea580d` (session recovery and frame clock).
 
 ### Current totals
 
 - Critical: all 7 closed.
 - High: H-01 through H-44 closed. H-45 was re-audited as a stale false positive because the current udev path already processes connector `Changed` events and rescans/retries surface creation.
 - Medium explicitly re-audited and closed: M-01, M-02, M-04 through M-10, M-12 through M-23, M-25 through M-30, and M-32 through M-36.
-- Medium still open: M-24, M-37, M-51, M-53 through M-60, and M-72. M-24 remains mitigated rather than eliminated; M-37 remains blocked on the Smithay pin decision; M-51/M-53..M-60 remain deliberately measurement-led; M-72 still needs a maintainer scale-policy choice. Phase 3 closed M-48, M-50, M-61 through M-63, M-65 through M-68, M-70, M-71, and M-73 in `7c48188`; M-64 and M-69 had already been closed on 2026-08-14. See each finding body for proof and validation debt.
+- Medium still open: M-24, M-51, M-53, M-54, M-55 (idle-maintenance measurement only), M-58, and M-72. M-24 remains mitigated rather than eliminated; M-51/M-53/M-54/M-58 remain measurement-led; M-72 still needs a maintainer scale-policy choice. M-37 and M-57 are fixed in this batch; M-56, M-59, and M-60 were already fixed and are now documented as closed. Phase 3 closed M-48, M-50, M-61 through M-63, M-65 through M-68, M-70, M-71, and M-73 in `7c48188`; M-64 and M-69 had already been closed on 2026-08-14. See each finding body for proof and validation debt.
 - Phase 3 also closes the two executable config gaps in `7c48188`: layer blur's `ignore_alpha` now masks frost from a composed layer-surface alpha capture, and the udev renderer applies global/per-output adaptive-sync policy through Smithay's DRM `use_vrr`. Parser/commit tests and the all-feature build pass; a transparent full-output layer and real DRM VRR transitions remain explicitly unverified.
 - Performance re-audit (2026-08-13): P-01, P-02, P-03, P-06, P-07, P-08, and P-10 are fixed in `b6d829a`, `c211a17`, `193e63d`, `950d921`, `7e9a128`, and `c508041`. P-01 now shares one placement snapshot across an output render/capture pass and rejects off-camera reefs before BSP layout, without a persistent cache. P-04 was already single-search in the reconciled tree. P-05's remaining allocation is a bounded once-per-window history path, and P-09's picker rebuild happens only when selection state changes; neither justifies hot-path complexity without a profile. P-11 and P-14 are closed by the real-hardware results recorded below. P-12's scheduling fix is covered by nonstandard-cadence unit tests but still needs a real-DRM trace. P-13 remains a general low-end iGPU/client-buffer constraint, but TideWM's controlled side is now measurable, downscalable, wallpaper-optional, and reclaimed whenever the last output stops presenting a capture (`332cf1c`). A shared-per-output blur buffer remains a possible measured tradeoff, not an assumed win: it changes overlap/occlusion semantics and can allocate more than small tiled captures.
 - Lower-confidence re-audit (2026-08-13): every concrete U-01 through U-16 item has now been investigated. U-01 is fixed in `fc82fea`; U-04 in `1b14b48`; U-10 in `51c476e`; U-15 in `5fe5db4`; U-16 in `e6bf868`; U-02, U-03, U-05, and U-06 in `7edcc3b`; U-07 and U-08 in `7edc8c2`; U-11 in `9898128`; U-12 in `8efcdfe`; and the concrete hardware-facing U-14 ranges in `73d62ec`. U-09 and U-13 were already bounded in the reconciled tree. U-14 remains an ongoing parser-audit category for future fields, not permission to invent hardware defaults.
 - Formatter findings F-01 through F-04: closed.
 - The highest-confidence stale source comments were cleaned up in 0.90.84. Version 0.90.88 compresses nine high-priority module histories into current ownership and safety contracts, and 0.90.93 completes the audit's remaining enumerated cleanup across visual, backend, capture, protocol, cursor, Xwayland, and core-state paths. The non-water motion-pack decision landed in 0.90.86, while the real-hardware matrix below remains.
 
-### Open finding re-audit notes
+### Finding re-audit notes
 
-- **M-37:** the pinned Smithay `ff5fa7d` implementation logs DRM-master reacquisition failure inside `DrmDevice::activate(false)`, marks the device active anyway, and returns success, so TideWM's existing error branch is unreachable. Upstream `85f83ab6` propagates that failure, but pinning it directly also crosses Smithay's broad Dispatch2 protocol-delegation refactor and currently produces 101 TideWM compile errors. Do not land only the Tide-side libinput rollback: first either backport the upstream five-line DRM fix on a maintained compatibility pin/fork or plan the full delegation migration, then suspend libinput again on input/DRM activation failure before any surface reset/render work. **Re-confirmed 2026-08-13:** the pinned `ff5fa7d` `DrmDevice::activate` (`src/backend/drm/device/mod.rs:430`) still logs the `acquire_master_lock` failure, proceeds regardless, and returns `Ok(())`, so TideWM's error branch remains unreachable and the finding stays blocked on the pin decision.
+- **M-37: closed, `1e7bce0`, 0.90.107.** Explicit DRM-master acquisition on the selected scanout fd makes the pinned Smithay ownership error observable before activation; input resumes only after successful scanout activation and rolls back with DRM on failure. The previous pin/fork blocker is superseded by this checked public-API compatibility guard. Render/import-only devices keep their existing path. Live VT/failure validation remains pending; see the finding body.
 - **M-38:** confirmed against TideWM's explicit single-GPU backend. Removal of the driven DRM device currently logs and leaves a permanently black live session; the bounded recovery is to stop `state.loop_signal` only for the matching device and let normal teardown return control to the login/session manager. Dynamic GPU replacement requires a separate per-GPU backend architecture.
 - **M-39:** confirmed. A lock requested with zero outputs confirms immediately, but removing the final output while already `Locking` does not re-run the confirmation predicate. Re-evaluate lock confirmation after disconnect removes that output's lock surface/buffer; the remaining-output predicate is intentionally vacuously true at zero, matching current niri behavior.
 - **M-24:** mitigated but not closed, `eb9107b` (2026-08-13) -- see the finding body. The timed-out worker `JoinHandle` is now joined and logged by a reaper thread instead of silently dropped, so the leak is observable and bounded to one extra idle thread per timeout, but a genuinely wedged PipeWire call still runs forever underneath (Rust has no portable thread cancellation). Closing this for real means either giving `run()` an internal cooperative-cancellation check it polls during its own blocking PipeWire calls (invasive -- PipeWire's own APIs are the blocking part, not TideWM's code), or restructuring PipeWire off a dedicated thread entirely onto the compositor's event loop the way niri does (`MainLoopRc` as a calloop `Generic` FD source, `niri/src/screencasting/pw_utils.rs`) -- a materially bigger change than this finding's severity warrants on its own. Left open for a future session to decide which.
@@ -736,6 +750,8 @@ Fix direction: make redraw propagation event-driven or run a per-output schedule
 
 **Confidence: confirmed.** `winit.rs:227-228` creates a full-size damage rectangle and `:453` submits it regardless of the damage tracker's result. `render_result.damage` is used only for presentation feedback. Small changes therefore ask the host to repaint the entire nested window at high refresh.
 
+**Re-audited closed 2026-10-06; already fixed in `7421d3c` (`Submit nested output damage precisely`).** Current winit submits `render_result.damage` directly, skips swaps when there is no damage, and retries failed submissions. No duplicate implementation was added in this batch. The all-feature suite passes; no new live host damage trace was collected.
+
 ### M-57 — Nested refresh can remain stale after moving between host monitors
 
 **Confidence: confirmed against the pinned Smithay event surface.** Refresh is sampled at startup and only re-read on `WinitEvent::Resized` (`winit.rs:87-90`, `:166-179`). The pinned Smithay winit backend exposes no moved event. Moving the nested window between 60 and 144 Hz monitors without a resize/scale change can preserve the old advertised refresh/timer indefinitely.
@@ -750,9 +766,13 @@ Fix direction: make redraw propagation event-driven or run a per-output schedule
 
 **Confidence: confirmed, low impact.** PipeWire advertises exact 30/1 (`pipewire_thread.rs:434-460`) but triggers with integer `Duration::from_millis(1000/30)` (`:491-532`), i.e. 33 ms or 30.303 fps before overhead. Resetting the next deadline from `Instant::now()` also accumulates processing delay. Screencast is intentionally fixed at 30 fps and does not negotiate source refresh.
 
+**Re-audited closed 2026-10-06; already fixed in `717e4fe` (`Preserve rational capture cadence and fractional DRM refresh`).** The offered rate and producer clock share `STREAM_FRAMERATE`, and deadlines follow a rational epoch grid with overdue frames skipped. This batch only shares that existing arithmetic with winit; the original two PipeWire cadence tests still pass. Source-refresh negotiation and end-to-end frame delivery measurements are separate work.
+
 ### M-60 — Fractional DRM refresh metadata is approximate
 
 **Confidence: confirmed, low impact.** Mode selection uses integer `DrmMode::vrefresh()` (`udev.rs:883-897`) and exports `vrefresh()*1000` (`:983-985`). Rates such as 59.94/119.88 lose precision in advertised/presentation metadata and empty-frame estimates, although real KMS VBlank pacing remains hardware-controlled.
+
+**Re-audited closed 2026-10-06; already fixed in `717e4fe`.** Mode ranking, advertised refresh, and derived retry/presentation timing use Smithay `Mode::from(DrmMode)` millihertz computed from the clock/totals/scan flags. The integer `vrefresh()` still appears only in a diagnostic log. Existing live-output-period tests cover fractional rates; no new DRM trace was collected.
 
 ### M-61 — Absolute pointer/touch devices are hard-bound to the first output
 
@@ -979,14 +999,14 @@ Nested winit cannot verify multi-monitor behavior: it intentionally exposes one 
 
 ### 120 Hz and higher
 
-**Verdict: no for the standalone udev backend as written.** It can modeset a 120/144/240 Hz mode and KMS VBlank pacing remains per CRTC, but the global 16 ms dirty-transfer poll caps the production of new animated/client frames near 62.5 fps (H-34). The screen may scan at 120 Hz while TideWM supplies new content roughly every other VBlank.
+**Current implementation status (2026-10-06): H-34 is closed.** Native redraw propagation is event-driven and each CRTC follows its own VBlank/estimated-retrace chain; the original fixed 16 ms dirty-transfer cap is gone. The scheduling code and tests do not establish achieved 120/144/240 Hz presentation cadence on every driver: P-12 still requires a native trace.
 
-Winit targets the host's reported 30–360 Hz rate and most animations are wall-clock based, so animation duration does not speed up or slow down with frame count. Its relative timer rearm and full-window submission still make the advertised refresh an upper bound rather than proof of achieved cadence (M-55 through M-57). Full float physics uses a fixed 120 Hz accumulator with up to eight catch-up substeps, which is numerically preferable, but it is driven only from the backend poll and currently has the idle-loop bug in H-07.
+Winit follows valid host-reported millihertz without a hardware-range clamp, updates rates independently of resize, and schedules absolute rational deadlines (2026-10-06). Damage submission was already fixed in `7421d3c`. Most animations are wall-clock based, so their duration does not scale with frame count. Full float physics retains a fixed 120 Hz numerical integration step with bounded catch-up; H-07 is closed. Advertised refresh still does not prove achieved cadence, and high-refresh idle maintenance remains measurement debt under M-55.
 
 Other refresh-related limits:
 
-- PipeWire screencast is intentionally fixed near 30 fps, not source refresh (M-59).
-- Adaptive-sync/VRR config is only queried/logged; `use_vrr` is not called (`backend/udev.rs:958-969`). This is an acknowledged feature gap, not a newly introduced regression.
+- PipeWire screencast negotiates exactly 30/1 and uses a rational producer clock (M-59 closed); source-refresh negotiation is separate.
+- Adaptive-sync/VRR config is applied through Smithay `use_vrr` (Phase 3); real per-driver transitions remain verification debt.
 - Udev presentation feedback completes on VBlank, but uses handler-time and sequence 0 because the pinned DRM event provides no timestamp/sequence. Winit completes at submit time and marks VSync even though the host owns real presentation.
 - Most visual animations sample `Instant`, which is good: once scheduling is fixed, they should remain time-correct at 60/120/144/240 Hz.
 

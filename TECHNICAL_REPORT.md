@@ -6,7 +6,7 @@ A fast technical reference for TideWM: what it is, what's implemented, current h
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). A full tiling-WM feature set (BSP/master-stack/cascade layouts, workspaces, multi-monitor, layer-shell, IPC, XWayland) with a water/aqua render identity layered on top as a fully toggleable effect stack, plus a second spatial engine ("Ocean") as an alternative to numbered workspaces.
 
-Current release: **0.90.104**, second major pre-release. 1.0 is intentionally reserved until the effect stack and Ocean get a broader real-hardware pass (see CHANGELOG).
+Current development version: **0.90.109**, second major pre-release. 1.0 is intentionally reserved until the effect stack and Ocean get a broader real-hardware pass (see CHANGELOG).
 
 ## Architecture
 
@@ -41,6 +41,7 @@ Current release: **0.90.104**, second major pre-release. 1.0 is intentionally re
 | Ocean currents: bounded render-only downstream drift for visible unfocused floating windows, with focus/drag pause | Done, release-GLES nested-verified on AMD |
 | Weighted buoyancy: per-app render-only mass/sink for Classic and Ocean floaters, with Ocean flow attenuation | Done, release-GLES nested-verified on AMD under Ocean; Classic shares the validated render path |
 | Nvidia support | Standalone DRM backend verified on a real RTX 3060 (proprietary 595.99.02, two outputs at mixed scale, 2026-09-25); nested verified earlier |
+| VT scanout recovery and nested refresh scheduling | Checked DRM-master/input recovery and rational absolute nested deadlines implemented; unit coverage includes partial failures, fractional rates, and same-size/same-scale monitor changes. Live VT failure injection and mixed-refresh host moves remain pending |
 | AUR package | Not yet |
 
 ## Hardware verification
@@ -130,7 +131,7 @@ sudo cp share/xdg-desktop-portal/tidewm-portals.conf /usr/share/xdg-desktop-port
 
 ## Roadmap
 
-- **Audit follow-through**: real-DRM cadence verification for P-12, a maintained Smithay-pin decision for DRM-master reacquisition failure, and fresh review of the medium-confidence items still open in `report.md`.
+- **Audit follow-through**: real-DRM cadence verification for P-12, VT recovery/failure checks for the new checked ownership path, mixed-refresh nested host moves, idle-maintenance measurement for M-55, and fresh review of the remaining medium findings in `report.md`. M-37 now has a checked public-API workaround on the existing Smithay pin; upgrading the pin remains separate compatibility work.
 - **Lower TideWM-owned VRAM**: active capture cost is measurable through `tidectl perf`, adjustable with `backdrop_capture_scale`, and reclaimed after the last output stops presenting a glass surface; `builtin_wallpaper = false` also avoids the fallback texture. Measure representative large glass windows before considering a shared per-output blur framebuffer, whose different overlap/occlusion semantics need an explicit design decision. Client surface buffers remain outside compositor control.
 - **Non-water motion presets**: smooth window move/resize and workspace motion that works with `water_effects = false`, exposed as Wave-selectable presets and tunable fields. Exact feel and defaults require maintainer approval before implementation.
 - **Feel-tuning** across viscosity, sway, depth timings, cascade's drag feel, floating-window ocean physics, and the transition/ripple presets. All ship with working defaults; the actual feel still gets refined against real use.
