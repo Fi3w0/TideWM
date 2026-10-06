@@ -2,6 +2,12 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.121 — Wait for a complete captured image before publishing video
+
+- A strict PipeWire consumer reproduced one entirely zero-filled startup buffer on both native NVIDIA outputs, followed by 59 valid frames out of 60. The producer requested an asynchronous capture, then fabricated a full-sized zero image when no capture had arrived.
+- Keep the chunk empty until a complete matching capture is available. Validate dimensions, destination capacity and every source row before copying; preserve allocator row padding and accept legitimate black frames. Truncated images no longer publish partially initialized video.
+- Two regression tests cover missing/mismatched/truncated captures, short destinations, padded rows and real black images. SHM/MemFd is the currently offered capture format; the existing DMA-BUF callback path is not an advertised or hardware-verified transport.
+
 ## 0.90.120 — Restore presentation feedback from actual render state
 
 - A native Wayland protocol probe on 0.90.119 submitted a visible frame and received frame callbacks but neither `presented` nor `discarded` presentation feedback. Smithay primary-scanout state had never been initialized.

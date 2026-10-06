@@ -1,6 +1,7 @@
 //! PipeWire producer for monitor and per-window screencasts.
 //!
-//! Negotiates DMA-BUF first with mapped MemFd as the portable fallback.
+//! Offers mapped MemFd BGRA video. The process callback also handles DMA-BUF
+//! allocations if a future format-negotiation path supplies them.
 //! PipeWire-owned DMA-BUF fds are duplicated and sent to the compositor for
 //! direct GL rendering with an explicit completion fence; SHM continues to
 //! copy the newest owned BGRA readback. No GL, Wayland, or `Smallvil` value
@@ -25,7 +26,48 @@ use pipewire as pw;
 use pw::{properties::properties, spa};
 use spa::pod::Pod;
 
-use super::{FrameTarget, ScreencastEvent, ScreencastSource};
+use super::{FrameTarget, ScreencastEvent, ScreencastFrame, ScreencastSource};
+
+/// Publish only a complete captured frame. A requested capture is asynchronous;
+/// until it arrives, a zero-sized chunk tells the consumer no image is ready.
+/// Validate every row before writing so malformed/truncated frames cannot
+/// publish partly initialized video, while valid black images remain valid.
+fn copy_shm_frame(
+    frame: Option<&ScreencastFrame>,
+    width: u32,
+    height: u32,
+    destination: &mut [u8],
+) -> usize {
+    let Some(frame) = frame else {
+        return 0;
+    };
+    if width == 0 || height == 0 || frame.width != width || frame.height != height {
+        return 0;
+    }
+    let Some(row_bytes) = (width as usize).checked_mul(4) else {
+        return 0;
+    };
+    let stride = frame.stride as usize;
+    let Some(total_bytes) = row_bytes.checked_mul(height as usize) else {
+        return 0;
+    };
+    let Some(source_bytes) = (height as usize - 1)
+        .checked_mul(stride)
+        .and_then(|offset| offset.checked_add(row_bytes))
+    else {
+        return 0;
+    };
+    if stride < row_bytes || source_bytes > frame.pixels.len() || total_bytes > destination.len() {
+        return 0;
+    }
+    for row in 0..height as usize {
+        let source = row * stride;
+        let target = row * row_bytes;
+        destination[target..target + row_bytes]
+            .copy_from_slice(&frame.pixels[source..source + row_bytes]);
+    }
+    total_bytes
+}
 
 // One source of truth for the fixed format offered below and its producer
 // clock. This is the stream's negotiated rate, not an output refresh rate.
@@ -319,7 +361,6 @@ fn run_connection(
             // render or SHM copy below publishes a non-zero size.
             *data.chunk_mut().size_mut() = 0;
             let expected_stride = width as usize * 4;
-            let expected_len = expected_stride.saturating_mul(height as usize);
 
             if data.type_() == spa::buffer::DataType::DmaBuf && data.fd() >= 0 {
                 // Honor allocator-provided row padding; use packed stride only
@@ -385,32 +426,7 @@ fn run_connection(
                 // dimensions.
                 target_for_process.close();
             }
-            let written = if let Some(frame) = frame.as_ref().filter(|frame| {
-                frame.width == width
-                    && frame.height == height
-                    && frame.stride as usize >= expected_stride
-            }) {
-                let dst_len = destination.len().min(expected_len);
-                let rows = height as usize;
-                let mut written = 0;
-                for row in 0..rows {
-                    let src_start = row * frame.stride as usize;
-                    let dst_start = row * expected_stride;
-                    if src_start + expected_stride > frame.pixels.len()
-                        || dst_start + expected_stride > dst_len
-                    {
-                        break;
-                    }
-                    destination[dst_start..dst_start + expected_stride]
-                        .copy_from_slice(&frame.pixels[src_start..src_start + expected_stride]);
-                    written += expected_stride;
-                }
-                written
-            } else {
-                let len = destination.len().min(expected_len);
-                destination[..len].fill(0);
-                len
-            };
+            let written = copy_shm_frame(frame.as_deref(), width, height, destination);
             let chunk = data.chunk_mut();
             *chunk.offset_mut() = 0;
             *chunk.stride_mut() = expected_stride as i32;
@@ -522,6 +538,67 @@ fn run_connection(
 #[cfg(test)]
 mod cadence_tests {
     use super::*;
+
+    #[test]
+    fn missing_or_incomplete_capture_never_publishes_video_or_changes_pixels() {
+        let mut destination = [0xa5; 16];
+        assert_eq!(copy_shm_frame(None, 2, 2, &mut destination), 0);
+        for (width, height, stride, len) in [
+            (3, 2, 12, 24),
+            (2, 3, 8, 24),
+            (2, 2, 7, 16),
+            (2, 2, 8, 15),
+            (u32::MAX, u32::MAX, u32::MAX, 0),
+        ] {
+            let frame = ScreencastFrame {
+                pixels: vec![1; len],
+                width,
+                height,
+                stride,
+            };
+            assert_eq!(copy_shm_frame(Some(&frame), 2, 2, &mut destination), 0);
+            assert_eq!(destination, [0xa5; 16]);
+        }
+        let frame = ScreencastFrame {
+            pixels: vec![1; 16],
+            width: 2,
+            height: 2,
+            stride: 8,
+        };
+        assert_eq!(
+            copy_shm_frame(Some(&frame), 2, 2, &mut destination[..15]),
+            0
+        );
+        assert_eq!(destination, [0xa5; 16]);
+        assert_eq!(copy_shm_frame(Some(&frame), 0, 2, &mut destination), 0);
+    }
+
+    #[test]
+    fn complete_capture_copies_padded_rows_and_accepts_real_black_images() {
+        let frame = ScreencastFrame {
+            pixels: vec![
+                1, 2, 3, 4, 5, 6, 7, 8, 99, 99, 99, 99, 9, 10, 11, 12, 13, 14, 15, 16,
+            ],
+            width: 2,
+            height: 2,
+            stride: 12,
+        };
+        let mut destination = [0xa5; 20];
+        assert_eq!(copy_shm_frame(Some(&frame), 2, 2, &mut destination), 16);
+        assert_eq!(
+            destination[..16],
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        );
+        assert_eq!(destination[16..], [0xa5; 4]);
+        let black = ScreencastFrame {
+            pixels: vec![0; 16],
+            width: 2,
+            height: 2,
+            stride: 8,
+        };
+        assert_eq!(copy_shm_frame(Some(&black), 2, 2, &mut destination), 16);
+        assert_eq!(destination[..16], [0; 16]);
+    }
 
     #[test]
     fn rational_frame_grid_does_not_accumulate_rounding_or_work_time() {
