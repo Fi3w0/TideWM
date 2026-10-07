@@ -25,7 +25,7 @@ Current development version: **0.90.142**, second major pre-release. 1.0 is inte
 | Multi-monitor, hotplug, independent tiling tree per output, mixed-DPI | Done |
 | Hybrid/multi-GPU client render offload | Implemented with Smithay `GpuManager`, DMA-BUF feedback, and primary-node early import; real AMD+Nvidia laptop verification pending. Outputs remain confined to one selected GPU. |
 | Window groups (tabbed), floating, fullscreen, maximize, pseudo-tiling | Done |
-| Layer-shell (bars, launchers, lock screens) | Done; content-only layer commits preserve tiled drag positions and stacking (.142), with protocol regression coverage for mixed-scale outputs, exclusive-zone changes and unmap/remap; loaded-native fix verification pending |
+| Layer-shell (bars, launchers, lock screens) | Done; content-only layer commits preserve tiled drag positions and stacking (.142), with protocol regression coverage for mixed-scale outputs, exclusive-zone changes and unmap/remap; maintainer-confirmed fixed on native NVIDIA with video wallpapers |
 | XWayland | Done, via xwayland-satellite |
 | Screenshots, clipboard, session lock | Done |
 | PipeWire screencasting | Done (`--features screencast`), verified end to end via real OBS and Discord on standalone hardware |

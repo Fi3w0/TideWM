@@ -6,7 +6,7 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 
 - Every layer-shell root commit used to retile all outputs, even when only its pixels changed. A video wallpaper could repeatedly pull a dragged tile back to its layout slot and reorder it behind another tile; the next pointer motion moved it back again. The maintainer reproduced this on the native dual-monitor session and confirmed that pausing the wallpapers removed the stutter; disabling drag viscosity or Kitty blur did not.
 - Layers still arrange and configure normally, but tiles now update only when the usable output area changes or a layer maps/unmaps. Panel reservation changes continue to resize tiles, and tiled drop-to-swap behavior is unchanged. No new dependencies, hardware-specific settings or persistent state were added.
-- A real Wayland protocol regression exercises repeated wallpaper commits on another output while preserving a moved tile's position and stacking, mixed output scales, reservation changes without a layer-size change, and null-buffer unmap/remap. The regression fails with the original unconditional retile. All 622 tests, strict Clippy and formatting pass. Loaded-native fix verification remains pending.
+- A real Wayland protocol regression exercises repeated wallpaper commits on another output while preserving a moved tile's position and stacking, mixed output scales, reservation changes without a layer-size change, and null-buffer unmap/remap. The regression fails with the original unconditional retile. All 622 tests, strict Clippy and formatting pass. Maintainer-confirmed fixed on native .142 with video wallpapers running.
 
 ## 0.90.141 — Ocean can keep each monitor's windows independent
 
