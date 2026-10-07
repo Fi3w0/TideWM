@@ -2,6 +2,12 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.142 — Video wallpaper frames no longer reset tiled drags
+
+- Every layer-shell root commit used to retile all outputs, even when only its pixels changed. A video wallpaper could repeatedly pull a dragged tile back to its layout slot and reorder it behind another tile; the next pointer motion moved it back again. The maintainer reproduced this on the native dual-monitor session and confirmed that pausing the wallpapers removed the stutter; disabling drag viscosity or Kitty blur did not.
+- Layers still arrange and configure normally, but tiles now update only when the usable output area changes or a layer maps/unmaps. Panel reservation changes continue to resize tiles, and tiled drop-to-swap behavior is unchanged. No new dependencies, hardware-specific settings or persistent state were added.
+- A real Wayland protocol regression exercises repeated wallpaper commits on another output while preserving a moved tile's position and stacking, mixed output scales, reservation changes without a layer-size change, and null-buffer unmap/remap. The regression fails with the original unconditional retile. All 622 tests, strict Clippy and formatting pass. Loaded-native fix verification remains pending.
+
 ## 0.90.141 — Ocean can keep each monitor's windows independent
 
 - Added hot-reloadable `shared_canvas` in `ocean { }`, defaulting to `false`. Zoomed or panned views exclude other monitors' tiled and floating windows from drawing and effect capture. New windows use separate tiling trees per monitor; switching from shared to independent splits mixed trees by membership. `shared_canvas = true` retains deliberate travel through a shared world. Screen pins stay exclusive in either mode.

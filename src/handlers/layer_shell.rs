@@ -53,7 +53,9 @@ pub fn handle_commit(state: &mut Smallvil, surface: &WlSurface) -> bool {
     // client already set via set_size on its first commit, same ordering
     // niri uses and the same "configure only after the surface's own first
     // commit" rule xdg_shell::handle_commit already follows for toplevels.
+    let previous_zone = map.non_exclusive_zone();
     map.arrange();
+    let usable_area_changed = map.non_exclusive_zone() != previous_zone;
     let layer = map
         .layer_for_surface(&root, WindowSurfaceType::TOPLEVEL)
         .unwrap()
@@ -100,7 +102,14 @@ pub fn handle_commit(state: &mut Smallvil, surface: &WlSurface) -> bool {
         }
     }
 
-    state.retile();
+    // A content-only commit (for example the next video-wallpaper frame)
+    // does not change the tiling area. Retiling here would overwrite an
+    // active tiled drag's position and stacking order on every frame.
+    // Keep arranging/configuring layers above, and update tiles only for a
+    // changed usable area or a map/unmap lifecycle transition.
+    if usable_area_changed || transition != LayerTransition::None {
+        state.retile();
+    }
     match transition {
         LayerTransition::Map
             if layer.cached_state().keyboard_interactivity != KeyboardInteractivity::None =>
@@ -216,6 +225,10 @@ impl WlrLayerShellHandler for Smallvil {
 }
 
 delegate_layer_shell!(Smallvil);
+
+#[cfg(test)]
+#[path = "layer_shell_test.rs"]
+mod commit_tests;
 
 impl Smallvil {
     /// The topmost mapped layer surface across all outputs that wants
