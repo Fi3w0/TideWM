@@ -137,12 +137,12 @@ impl CompositorHandler for Smallvil {
             // consumed by TideWM's existing effects/render elements.
             gpu.prepare_surface(surface);
         }
-        self.request_redraw();
+        let mut root = surface.clone();
+        while let Some(parent) = get_parent(&root) {
+            root = parent;
+        }
+        self.request_surface_commit_redraw(&root);
         let committed_window = if !is_sync_subsurface(surface) {
-            let mut root = surface.clone();
-            while let Some(parent) = get_parent(&root) {
-                root = parent;
-            }
             self.mapped_toplevel_window(&root)
         } else {
             None
@@ -162,10 +162,6 @@ impl CompositorHandler for Smallvil {
         if let Some(window) = committed_window.or_else(|| {
             if is_sync_subsurface(surface) {
                 return None;
-            }
-            let mut root = surface.clone();
-            while let Some(parent) = get_parent(&root) {
-                root = parent;
             }
             self.mapped_toplevel_window(&root)
         }) {
@@ -188,6 +184,7 @@ impl CompositorHandler for Smallvil {
                 self.enforce_floating_size_constraints(surface);
             }
         }
+        self.request_surface_commit_redraw(&root);
     }
 
     fn destroyed(&mut self, surface: &WlSurface) {

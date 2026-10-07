@@ -244,6 +244,7 @@ fn wallpaper_frames_preserve_drag_and_exclusive_zone_changes_retile() {
         .state
         .space
         .map_element(dragged.clone(), location, false);
+    fixture.state.take_redraw_requests();
     for _ in 0..8 {
         fixture.request(14, 2, &[0, 0, 1, 1], &[]); // damage next frame
         fixture.request(14, 6, &[], &[]);
@@ -257,6 +258,12 @@ fn wallpaper_frames_preserve_drag_and_exclusive_zone_changes_retile() {
             fixture.state.space.elements().last(),
             Some(dragged),
             "a wallpaper frame changed drag stacking"
+        );
+        let redraw = fixture.state.take_redraw_requests();
+        assert!(redraw.includes(&outputs[0]));
+        assert!(
+            !redraw.includes(&outputs[1]),
+            "a wallpaper frame dirtied the other output"
         );
     }
 

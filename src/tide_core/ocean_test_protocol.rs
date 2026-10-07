@@ -1,4 +1,4 @@
-//! Real xdg toplevels for Ocean placement tests, without a GPU or desktop socket.
+//! Real xdg toplevels for placement/redraw tests, without a GPU or desktop socket.
 use smithay::{
     desktop::Window,
     reexports::wayland_server::{
@@ -49,7 +49,7 @@ impl XdgShellHandler for State {
 smithay::delegate_compositor!(State);
 smithay::delegate_xdg_shell!(State);
 
-pub(super) struct ProtocolFixture {
+pub(crate) struct ProtocolFixture {
     display: Display<State>,
     state: State,
     peer: UnixStream,
@@ -77,7 +77,7 @@ impl ProtocolFixture {
         self.display.dispatch_clients(&mut self.state).unwrap();
         self.display.flush_clients().unwrap();
     }
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let display = Display::new().unwrap();
         let mut handle = display.handle();
         let state = State {
@@ -138,7 +138,7 @@ impl ProtocolFixture {
         fixture.dispatch();
         fixture
     }
-    pub(super) fn window(&mut self) -> Window {
+    pub(crate) fn window(&mut self) -> Window {
         let surface = self.next_id;
         let xdg_surface = surface + 1;
         let toplevel = surface + 2;

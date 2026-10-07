@@ -8,15 +8,23 @@ This is a static code review, not a claim that every issue below was reproduced 
 
 ## Implementation handoff
 
-- Updated: 2026-10-06
+- Updated: 2026-10-07
 - Implementation branch: `ai/codex/live-validation-cross-output`
 - Worktree: `/home/fiw/Documents/Proyects/TideWM`
-- Latest behavioral head: `311c01e` (base `b8e69b2`)
-- Current TideWM version: `0.90.122`
-- Push status: this batch is local only; nothing was pushed.
+- Latest native-confirmed behavioral head: `3dba1b7` / .142; .143 redraw refinement is recorded below.
+- Current TideWM version: `0.90.143` (native desktop remains on confirmed .142)
+- Push status: .141/licensing history was published through `02cb381`; today's .142/.143 batch is local only.
 - Phase 3 continued from documentation/packaging head `b6805e2`, preserving all earlier remediation history.
 
 The finding text below is the original audit evidence. It is intentionally retained even when a finding is closed. Use this handoff ledger as the current status authority, then inspect the named commit and current code before changing a closed area. Do not repeat a fix merely because its original finding still says “confirmed.”
+
+### 2026-10-07 native validation and redraw continuation
+
+The maintainer confirmed .142's tiled-drag correction after relogging: content-only layer commits no longer overwrite the drag location or stacking order. The real-protocol regression fails with the old unconditional retile. 622 tests, strict Clippy, fmt and the optimized all-feature .142 build pass.
+
+Fresh .142 evidence: private virtual-output GLES identity captures preserve wallpaper/client pixels at scale 1, 1.25, 1.5 and 2, stop static shader updates and release backdrop textures; native opaque GTK fullscreen on QHD pauses mpvpaper (unchanged time-pos) and removing it resumes playback without changing the other player's pause state. Both native monitor capture streams deliver 60/60 nonempty frames at their actual resolutions and negotiated 30 Hz. This is capture cadence, not achieved display refresh. Separate native first-feedback checks return presentation timestamps and mode-matching refresh intervals on both monitors; they do not measure continuous cadence. Temporary client/rule cleanup is complete; personal autostart uses the supported spawn list.
+
+The .143 refinement removes global dirty requests from routine known-window/layer content commits and the three remaining sustained physics paths (full bodies, Ocean currents and buoyancy), resolving affected surfaces through current engine placements. Pre/post commit walks retain old/new damage extents; lifecycle and unknown-role fallbacks remain global. It preserves shared views/floating overlap/previews, independent ownership/screen pins and global/capture precedence, and avoids cosmetic redraw while locked. Native mixed-output page-flip/performance measurement remains owed under M-51; no gain is inferred from compilation or a different active workload. M-24, M-53, M-55, M-58's remaining trace cases and M-72's scale policy remain open/pending as described below. Ignored evidence and helpers remain under .hermes/worklogs/validation-2026-10-07/.
 
 ### 2026-10-06 session/cadence batch
 
@@ -797,6 +805,8 @@ Fix direction: make redraw propagation event-driven or run a per-output schedule
 **Confidence: confirmed.** `has_active_animation()` is global across per-output transitions, caustics, windows, and overlays (`state.rs:4985-5039`). Both backends convert any active result into one global redraw flag (`winit.rs:520-528`, `udev.rs:825-838`) and then dirty every output (`winit.rs:214-217`, `udev.rs:773-777`). In a mixed-refresh multi-monitor setup, an animation on one monitor creates avoidable work/page flips on all static monitors.
 
 **Partially fixed 2026-10-06, 0.90.116.** Backend animation continuation now uses each output’s frame-owned placements and output-local transitions, ripples, camera motion, closing snapshots, border/glass eligibility, and caustics deadlines. Global expiry cleanup and shared toast behavior are retained. Physics/current/buoyancy updates still call global `request_redraw`, so the finding remains open for those paths and real mixed-output validation.
+
+**Implementation refinement 2026-10-07, 0.90.143.** Routine known-window/layer content commits and full bodies, currents and buoyancy now pass affected surface identities through the current placement scenes into the existing output-identity redraw queue. This covers independent/shared Ocean cameras, pins, Classic overlap/previews, hidden windows and pending capture/global work without a new persistent ownership cache or changes to the integration clock. The previous sustained global physics calls are removed. Real-protocol scene regressions cover those policies. M-51 remains open only for native mixed-output page-flip/performance validation; the tests do not establish a CPU/GPU reduction on the maintainer's animated desktop.
 
 ### M-52 — Lock/DPMS does not suspend invisible animation work
 

@@ -1,6 +1,6 @@
 [package]
 name = "tidewm"
-version = "0.90.142"
+version = "0.90.143"
 edition = "2021"
 license = "GPL-3.0-or-later"
 # Verified floor: wayland-protocols 0.32.13 requires 1.86 (1.85 fails to

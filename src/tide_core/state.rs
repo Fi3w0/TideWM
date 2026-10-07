@@ -2066,6 +2066,7 @@ impl Smallvil {
     /// Advances the full floating-physics simulation from either backend's
     /// live frame clock. A fixed-timestep accumulator with capped catch-up
     /// keeps integration stable across variable output cadence.
+    #[allow(clippy::mutable_key_type)] // WlSurface identity is stable across body updates.
     pub(crate) fn update_float_physics_full(&mut self) {
         const FIXED_DT: f64 = 1.0 / 120.0;
         const MAX_SUBSTEPS: u32 = 8;
@@ -2097,9 +2098,11 @@ impl Smallvil {
             steps += 1;
             self.step_float_physics_full(&contexts, FIXED_DT);
         }
-        if matches!(self.session_lock, SessionLock::Unlocked) {
-            self.request_redraw();
-        }
+        let changed = contexts
+            .iter()
+            .map(|context| context.surface.clone())
+            .collect();
+        self.request_surface_redraws(&changed);
 
         // Passive at-rest bodies stay present while another body moves so
         // the collision pass can hit them. Once all motion ends, remove the
@@ -2329,20 +2332,20 @@ impl Smallvil {
             .retain(|surface, _| seen.contains(surface));
         let focused = self.focused_window_surface();
         let now = Instant::now();
-        let mut needs_redraw = false;
+        let mut changed = HashSet::new();
         for (surface, phase) in visible {
             let paused =
                 focused.as_ref() == Some(&surface) || self.floating_dragging.contains(&surface);
             let drift = self
                 .window_currents
-                .entry(surface)
+                .entry(surface.clone())
                 .or_insert_with(|| crate::currents::CurrentDrift::new(now, phase, paused));
             drift.tick(now, paused);
-            needs_redraw |= drift.needs_frame();
+            if drift.needs_frame() {
+                changed.insert(surface);
+            }
         }
-        if needs_redraw {
-            self.request_redraw();
-        }
+        self.request_surface_redraws(&changed);
     }
 
     fn buoyancy_enabled(&self) -> bool {
@@ -2424,7 +2427,7 @@ impl Smallvil {
         let focused = self.focused_window_surface();
         let now = Instant::now();
         let settle = self.config.buoyancy.settle_ms as f64 / 1000.0;
-        let mut needs_redraw = false;
+        let mut changed = HashSet::new();
         for (surface, state) in &mut self.window_buoyancy {
             let paused =
                 focused.as_ref() == Some(surface) || self.floating_dragging.contains(surface);
@@ -2434,11 +2437,11 @@ impl Smallvil {
                 state.configured_weight()
             };
             state.tick(now, target, settle);
-            needs_redraw |= state.needs_frame();
+            if state.needs_frame() {
+                changed.insert(surface.clone());
+            }
         }
-        if needs_redraw {
-            self.request_redraw();
-        }
+        self.request_surface_redraws(&changed);
     }
 
     /// One fixed `dt` physics substep across every F1 `full` body: wave/
@@ -6045,6 +6048,65 @@ impl Smallvil {
         self.redraw_requests.request_output(output);
         if let Some(wakeup) = &self.redraw_wakeup {
             wakeup.ping();
+        }
+    }
+
+    /// Damage a committed surface's current scene. The compositor calls this
+    /// before and after role/geometry handling so both old and new extents
+    /// are cleared. Lifecycle/layout/focus changes may still request global
+    /// damage through their existing paths; unknown roles retain that fallback.
+    #[allow(clippy::mutable_key_type)] // Stable Wayland protocol identity.
+    pub(crate) fn request_surface_commit_redraw(&mut self, root: &WlSurface) {
+        #[cfg(feature = "accessibility")]
+        self.schedule_accessibility_sync();
+        if self.mapped_toplevel_window(root).is_some() {
+            self.request_surface_redraws(&HashSet::from([root.clone()]));
+            return;
+        }
+        let output = self
+            .space
+            .outputs()
+            .find(|output| {
+                layer_map_for_output(output)
+                    .layer_for_surface(root, WindowSurfaceType::TOPLEVEL)
+                    .is_some()
+            })
+            .cloned();
+        if let Some(output) = output {
+            self.request_output_redraw(&output);
+        } else {
+            self.request_redraw();
+        }
+    }
+
+    /// Queue cosmetic physics changes on every output that renders an
+    /// affected window. Placement filtering preserves independent/shared Ocean
+    /// views, screen pins, and Classic floating overlap without an owner cache.
+    #[allow(clippy::mutable_key_type)] // Bounded set of stable Wayland protocol identities.
+    fn request_surface_redraws(&mut self, surfaces: &HashSet<WlSurface>) {
+        if surfaces.is_empty()
+            || self.redraw_requests.is_global()
+            || !matches!(self.session_lock, SessionLock::Unlocked)
+        {
+            return;
+        }
+        // Mapping may have happened since the last backend frame; Classic's
+        // per-output Space cache must reflect those live windows before use.
+        self.space.refresh();
+        let outputs: Vec<Output> = self.space.outputs().cloned().collect();
+        let mut requested = false;
+        for output in outputs {
+            let Some(placements) = self.render_placements(&output) else {
+                continue;
+            };
+            requested |=
+                self.redraw_requests
+                    .request_surface_changes(&output, &placements, surfaces);
+        }
+        if requested {
+            if let Some(wakeup) = &self.redraw_wakeup {
+                wakeup.ping();
+            }
         }
     }
 

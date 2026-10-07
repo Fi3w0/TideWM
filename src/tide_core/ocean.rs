@@ -1984,7 +1984,7 @@ fn reef_may_contribute_to_view(
 
 #[cfg(test)]
 #[path = "ocean_test_protocol.rs"]
-mod test_protocol;
+pub(crate) mod test_protocol;
 
 #[cfg(test)]
 mod tests {

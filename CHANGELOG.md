@@ -2,6 +2,13 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.143 — Window updates redraw the monitors that show them
+
+- Routine mapped-window and wallpaper content commits now redraw their current outputs rather than every monitor. Window geometry is sampled before and after commit handling to retain damage on both old and new extents. Mapping, layout, focus and unknown-role changes retain their existing global fallback.
+- Full floating physics, Ocean currents and buoyancy transitions now request redraws only on outputs whose current render scene contains an affected window. Shared Ocean views, Classic floating overlap and swim previews can still redraw multiple outputs; independent views, screen pins and offscreen windows respect the existing placement policy.
+- Reuses the shared placement records and output-identity damage queue. Already-pending global damage avoids an extra scene walk, and locked sessions do not queue cosmetic window redraws. No new persistent ownership cache, dependencies, hardware limits or animation-timing settings were added.
+- Real Wayland/xdg placement regressions cover independent/shared Ocean policy, camera travel, screen pins, overlapping floating/preview scenes, hidden windows, old/new extent union, coalescing and capture/global-damage precedence. The real layer-shell regression also rejects a wallpaper frame dirtying the unrelated monitor and fails with the original global commit damage. All 627 locked all-feature/all-target tests, strict Clippy and formatting pass. Native mixed-output page-flip/performance measurement remains pending; this change does not claim a measured CPU/GPU gain.
+
 ## 0.90.142 — Video wallpaper frames no longer reset tiled drags
 
 - Every layer-shell root commit used to retile all outputs, even when only its pixels changed. A video wallpaper could repeatedly pull a dragged tile back to its layout slot and reorder it behind another tile; the next pointer motion moved it back again. The maintainer reproduced this on the native dual-monitor session and confirmed that pausing the wallpapers removed the stutter; disabling drag viscosity or Kitty blur did not.
@@ -19,7 +26,7 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 
 - Layer-shell frame callbacks now follow the output's actual render visibility in both backends. Wallpaper clients such as `mpvpaper -p` can pause behind fully occluding client-provided opaque regions; uncovering the surface resumes callbacks. Clients that advertise no opaque region keep their backdrop live even when they look opaque.
 - Visible custom shaders, frost, water glass, and layer blur keep callbacks flowing to backdrop layers they may sample, so an animated wallpaper behind glass stays live. Protocol-unmapped layers remain excluded. Visibility is evaluated per frame and output without a new persistent cache.
-- Verified with nine optimized nested playback checks: pause/resume with an opaque GTK surface, live playback through transparent fullscreen Kitty and frost/water/custom shaders, and pause/resume again after removing effects. Native .139 reproduced uninterrupted playback under visually opaque Kitty; its Wayland trace advertises no opaque region. The callback fix is active in native .141; automated native opaque-occlusion pause/resume verification remains pending.
+- Verified with nine optimized nested playback checks: pause/resume with an opaque GTK surface, live playback through transparent fullscreen Kitty and frost/water/custom shaders, and pause/resume again after removing effects. Native .139 reproduced uninterrupted playback under visually opaque Kitty; its Wayland trace advertises no opaque region. The callback fix is active in native .141; native opaque GTK fullscreen coverage on QHD is now verified to pause playback with stable time-pos and resume after uncovering (.142). The other output's pause state stayed unchanged.
 
 ## 0.90.139 — New tiled windows no longer flash on the neighboring monitor
 

@@ -6,7 +6,7 @@ A fast technical reference for TideWM: what it is, what's implemented, current h
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). A full tiling-WM feature set (BSP/master-stack/cascade layouts, workspaces, multi-monitor, layer-shell, IPC, XWayland) with a water/aqua render identity layered on top as a fully toggleable effect stack, plus a second spatial engine ("Ocean") as an alternative to numbered workspaces.
 
-Current development version: **0.90.142**, second major pre-release. 1.0 is intentionally reserved until the effect stack and Ocean get a broader real-hardware pass (see CHANGELOG).
+Current development version: **0.90.143**, second major pre-release. 1.0 is intentionally reserved until the effect stack and Ocean get a broader real-hardware pass (see CHANGELOG).
 
 ## Architecture
 
@@ -133,6 +133,7 @@ sudo cp share/xdg-desktop-portal/tidewm-portals.conf /usr/share/xdg-desktop-port
 
 ## Roadmap
 
+- **Rendering validation (2026-10-07)**: optimized .142 GLES captures match wallpaper and a patterned client through an identity effect at scales 1, 1.25, 1.5 and 2; static effects stop updating and captured textures release. These isolated winit checks use private KWin virtual outputs and explicit output-management scale settings. Native .142 verifies opaque-wallpaper pause/uncover resume and both full-resolution PipeWire monitor streams (60/60 nonempty frames each at negotiated 30 Hz); capture cadence is not display presentation cadence. A separate native first-feedback check receives presentation timestamps on both monitors with refresh intervals matching their configured 144/180 Hz modes; continuous cadence and cross-output traces remain pending. .143 scopes routine window/layer commits and full physics/current/buoyancy damage to affected window placements, retaining old/new commit extents, with protocol/scene regressions; native page-flip/performance verification remains pending.
 - **Audit follow-through**: real-DRM cadence verification for P-12, VT recovery/failure checks for the new checked ownership path, mixed-refresh nested host moves, idle-maintenance measurement for M-55, and fresh review of the remaining medium findings in `report.md`. M-37 now has a checked public-API workaround on the existing Smithay pin; upgrading the pin remains separate compatibility work.
 - **Lower TideWM-owned VRAM**: active capture cost is measurable through `tidectl perf`, adjustable with `backdrop_capture_scale`, and reclaimed after the last output stops presenting a glass surface; `builtin_wallpaper = false` also avoids the fallback texture. Measure representative large glass windows before considering a shared per-output blur framebuffer, whose different overlap/occlusion semantics need an explicit design decision. Client surface buffers remain outside compositor control.
 - **Non-water motion presets**: smooth window move/resize and workspace motion that works with `water_effects = false`, exposed as Wave-selectable presets and tunable fields. Exact feel and defaults require maintainer approval before implementation.
