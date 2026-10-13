@@ -1071,6 +1071,7 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
                 "refresh_hz": if refresh_mhz > 0 { refresh_mhz as f64 / 1000.0 } else { 0.0 },
                 "scale": output.current_scale().fractional_scale(),
                 "transform": format!("{:?}", output.current_transform()),
+                "native_render": state.native_render_stats.get(output),
             })
         })
         .collect();

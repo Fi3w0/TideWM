@@ -176,6 +176,7 @@ pub struct Smallvil {
     /// surfaced through the IPC `diagnostics` request so `tidectl report`
     /// can say which code path a bug ran on without guessing from env.
     pub(crate) backend_name: &'static str,
+    pub(crate) native_render_stats: HashMap<Output, crate::backend::perf::OutputRenderStats>,
     /// The session Lua state config evaluates into: config globals and
     /// section tables persist here after a load, which is what makes
     /// `tidectl eval` and `on "event"` handlers work.
@@ -3799,6 +3800,7 @@ impl Smallvil {
             xwayland_satellite_pid: None,
             xwayland_display: None,
             backend_name: "unknown",
+            native_render_stats: HashMap::new(),
             config_lua,
             tide,
             handler_depth: 0,
@@ -5762,6 +5764,7 @@ impl Smallvil {
     /// Destroy callbacks cannot find these surfaces after the output leaves
     /// `Space`, so disconnect must perform the cleanup first.
     pub(crate) fn remove_layer_output(&mut self, output: &Output) {
+        self.native_render_stats.remove(output);
         let layers: Vec<desktop::LayerSurface> =
             layer_map_for_output(output).layers().cloned().collect();
         if layers.is_empty() {
@@ -7338,7 +7341,13 @@ impl Smallvil {
             skipped,
             "Window backdrop captures"
         );
-        self.run_custom_shader_chains(renderer, &chained);
+        if self.backend_name == "udev" {
+            self.native_render_stats
+                .entry(output.clone())
+                .or_default()
+                .record_backdrops(rendered, skipped);
+        }
+        self.run_custom_shader_chains(renderer, output, &chained);
         // The frame that triggered the first capture could otherwise be the
         // last dirty frame on a static desktop. Schedule exactly one more so
         // the newly available texture is actually consumed; later capture
@@ -7350,9 +7359,15 @@ impl Smallvil {
 
     /// Renders the offscreen stages of every chained effect on this output
     /// from its fresh capture, still before the visible bind.
-    fn run_custom_shader_chains(&mut self, renderer: &mut GlesRenderer, surfaces: &[WlSurface]) {
+    fn run_custom_shader_chains(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+        surfaces: &[WlSurface],
+    ) {
         let mut failures = Vec::new();
         let mut deferred = false;
+        let mut updates = 0_u64;
         let work: Vec<(WlSurface, String)> = surfaces
             .iter()
             .filter_map(|surface| {
@@ -7371,6 +7386,7 @@ impl Smallvil {
                 .custom_shader_instances
                 .entry(surface.clone())
                 .or_insert_with(crate::shader_effect::ShaderInstance::new);
+            let before = instance.updates();
             let outcome = crate::shader_effect::run_chain(
                 renderer,
                 &mut self.custom_shader_programs,
@@ -7381,8 +7397,15 @@ impl Smallvil {
                 (&capture.id, capture.version),
                 &mut self.custom_shader_compile_budget,
             );
+            updates = updates.saturating_add(instance.updates().saturating_sub(before));
             failures.extend(outcome.failures);
             deferred |= outcome.deferred;
+        }
+        if self.backend_name == "udev" {
+            self.native_render_stats
+                .entry(output.clone())
+                .or_default()
+                .record_shader_updates(updates);
         }
         if deferred {
             self.request_redraw();
@@ -7602,7 +7625,13 @@ impl Smallvil {
             skipped,
             "Layer backdrop captures"
         );
-        self.run_custom_shader_chains(renderer, &chained);
+        if self.backend_name == "udev" {
+            self.native_render_stats
+                .entry(output.clone())
+                .or_default()
+                .record_backdrops(rendered, skipped);
+        }
+        self.run_custom_shader_chains(renderer, output, &chained);
         if captured_first_backdrop {
             self.request_redraw();
         }

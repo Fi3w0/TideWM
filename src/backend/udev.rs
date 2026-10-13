@@ -11,7 +11,13 @@
 //! Surface creation currently requires explicit modifier negotiation; a
 //! failed `DrmCompositor` construction leaves that connector unpublished.
 
-use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    path::PathBuf,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use smithay::reexports::wayland_server::Resource;
 use smithay::{
@@ -1789,6 +1795,8 @@ fn render_surface(
     surface: &mut SurfaceData,
     renderer: &mut GlesRenderer,
 ) -> Option<Duration> {
+    let frame_start = Instant::now();
+    let mut sample = super::perf::RenderSample::default();
     super::scene::prepare_render_scene(&mut state.space);
     surface.dirty = false;
 
@@ -1836,10 +1844,12 @@ fn render_surface(
     // current window position in this visible frame; capturing afterward
     // made interactive moves visibly trail and flicker. Same-sized captures
     // reuse their existing window texture.
+    let backdrop_start = Instant::now();
     if !locked {
         state.capture_window_backdrops(renderer, output, &placements);
         state.capture_layer_backdrops(renderer, output, &placements);
     }
+    sample.backdrops = backdrop_start.elapsed();
     let size = output.current_mode().map(|m| m.size).unwrap_or_default();
     let output_scale = output.current_scale();
     let scale = output_scale.fractional_scale();
@@ -2149,15 +2159,31 @@ fn render_surface(
     elements.extend(lock_elements.into_iter().map(OutputRenderElements::Lock));
     elements.extend(ripple_layers.below_all);
 
+    let render_start = Instant::now();
+    sample.scene = render_start
+        .duration_since(frame_start)
+        .saturating_sub(sample.backdrops);
     let render_result = surface.compositor.render_frame::<_, OutputRenderElements>(
         renderer,
         &elements,
         [0.05, 0.05, 0.05, 1.0],
         FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY,
     );
+    sample.render = render_start.elapsed();
 
     let empty_frame_retry = match render_result {
         Ok(mut render_result) => {
+            sample.primary_scanout = !matches!(
+                render_result.primary_element,
+                PrimaryPlaneElement::Swapchain(_)
+            );
+            sample.cursor_plane = render_result.cursor_element.is_some();
+            sample.needs_sync = render_result.needs_sync();
+            sample.empty = render_result.is_empty;
+            if let PrimaryPlaneElement::Swapchain(ref element) = render_result.primary_element {
+                sample.fence_present = element.sync.contains_fence();
+                sample.fence_exportable = element.sync.is_exportable();
+            }
             super::presentation::report_surface_identities(&elements, &mut render_result.states);
             // KMS can consume the renderer's fence directly on the normal
             // path. If Smithay says it cannot, wait for the swapchain image
@@ -2176,8 +2202,12 @@ fn render_surface(
                     // 0.15.1 `TileMoveGrab` deadlock caused. One attempt,
                     // then present whatever the swapchain already has
                     // rather than never presenting again.
+                    let wait_start = Instant::now();
                     if let Err(e) = element.sync.wait() {
                         tracing::error!(%e, "GPU fence wait failed (non-retryable); presenting without waiting");
+                    }
+                    if sample.fence_present {
+                        sample.fence_wait = Some(wait_start.elapsed());
                     }
                 }
             }
@@ -2188,8 +2218,10 @@ fn render_surface(
             // dropped, which discards the callbacks -- the correct answer
             // for content that never reached the display.
             let feedback = state.take_presentation_feedback(output, &render_result.states);
+            let queue_start = Instant::now();
             let retry = match surface.compositor.queue_frame(Some(feedback)) {
                 Ok(()) => {
+                    sample.submitted = true;
                     surface.pending = true;
                     // A previously armed timer may still fire, but it will
                     // observe this flag and become a no-op.
@@ -2200,19 +2232,25 @@ fn render_surface(
                     state.mark_output_locked_frame(output);
                     None
                 }
-                Err(FrameError::EmptyFrame) => Some(output_refresh_period(output)),
+                Err(FrameError::EmptyFrame) => {
+                    sample.empty = true;
+                    Some(output_refresh_period(output))
+                }
                 Err(e) => {
+                    sample.failed = true;
                     tracing::warn!(%e, "Failed to queue DRM frame");
                     surface.dirty = true;
                     None
                 }
             };
+            sample.queue = Some(queue_start.elapsed());
             if !locked {
                 state.send_layer_frames(output, state.start_time.elapsed(), &render_result.states);
             }
             retry
         }
         Err(e) => {
+            sample.failed = true;
             tracing::warn!(%e, "Failed to render DRM frame");
             surface.dirty = true;
             None
@@ -2239,6 +2277,12 @@ fn render_surface(
         surface.dirty = true;
     }
 
+    sample.total = frame_start.elapsed();
+    state
+        .native_render_stats
+        .entry(output.clone())
+        .or_default()
+        .record(sample);
     empty_frame_retry
 }
 

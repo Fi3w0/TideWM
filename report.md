@@ -18,6 +18,10 @@ This is a static code review, not a claim that every issue below was reproduced 
 
 The finding text below is the original audit evidence. It is intentionally retained even when a finding is closed. Use this handoff ledger as the current status authority, then inspect the named commit and current code before changing a closed area. Do not repeat a fix merely because its original finding still says “confirmed.”
 
+### 2026-10-13 native gaming diagnostics
+
+Maintainer authorized per-output diagnostics, cursor-plane support, render/scanout DMA-BUF feedback, explicit synchronization and tiled monitor drag. .144 adds bounded cumulative native render/scanout/cursor/fence/backdrop/shader counters with CPU-side stage timings to `tidectl perf --json`; counters are removed with outputs. A required sync branch without a real fence is distinguished from an actual wait, following DriftWM's diagnostic distinction. No render policy change or measured speedup is claimed. Native session remains .143; installation/relog and overhead validation remain pending. Existing M-51 and cadence trace debt is not marked closed by these counters.
+
 ### 2026-10-07 native validation and redraw continuation
 
 The maintainer confirmed .142's tiled-drag correction after relogging: content-only layer commits no longer overwrite the drag location or stacking order. The real-protocol regression fails with the old unconditional retile. 622 tests, strict Clippy, fmt and the optimized all-feature .142 build pass.

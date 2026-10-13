@@ -2,6 +2,12 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.144 — Native render diagnostics per monitor
+
+- `tidectl perf --json` now includes cumulative per-output native render counters: submitted/empty/failed frames, primary scanout and cursor-plane use, required synchronization, actual/exportable fences, backdrop renders/skips and custom shader chain updates.
+- CPU-side scene, backdrop, render, queue and real fence-wait durations report sample counts, total nanoseconds and maximum nanoseconds. Differences between snapshots describe a measurement window; these are not GPU execution timestamps.
+- Aggregates are bounded by live outputs and removed on disconnect. No frame scheduling, appearance, dependency or hardware policy changed. Native timing/overhead verification remains pending installation and user-controlled relog.
+
 ## 0.90.143 — Window updates redraw the monitors that show them
 
 - Routine mapped-window and wallpaper content commits now redraw their current outputs rather than every monitor. Window geometry is sampled before and after commit handling to retain damage on both old and new extents. Mapping, layout, focus and unknown-role changes retain their existing global fallback.
