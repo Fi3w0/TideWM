@@ -11,22 +11,28 @@ This is a static code review, not a claim that every issue below was reproduced 
 - Updated: 2026-10-13
 - Implementation branch: `native-performance`
 - Worktree: `/home/fiw/Documents/Proyects/TideWM`
-- Latest native-confirmed behavioral head: `3dba1b7` / .142; .143 redraw refinement is recorded below.
-- Current TideWM version: `0.90.148` (native desktop remains on .143)
-- Push status: published through `655b5c5` (.143 validation); .144–.148 are local signed commits.
+- Latest maintainer-tested native behavioral head: `91273d2` / .148; Classic tiled monitor drag is explicitly confirmed.
+- Current TideWM version: `0.90.148` (installed clean native release `91273d2`)
+- Publication: maintainer authorized merging .144–.148 to `master` and pushing to GitHub on 2026-10-13. Commits retain the maintainer identity and SSH signatures.
 - Phase 3 continued from documentation/packaging head `b6805e2`, preserving all earlier remediation history.
 
 The finding text below is the original audit evidence. It is intentionally retained even when a finding is closed. Use this handoff ledger as the current status authority, then inspect the named commit and current code before changing a closed area. Do not repeat a fix merely because its original finding still says “confirmed.”
+
+### 2026-10-13 native confirmation and publication
+
+All 630 locked all-feature/all-target tests, strict Clippy, formatting and the clean optimized release passed. Native GBM/kernel-timeline regressions passed on both available render nodes, covering delayed acquire, final buffer-reference release, repeated attachment/damage progression and destruction while acquire is pending. The maintainer installed the checksummed .148 build, relogged, confirmed cross-monitor tiled dragging works and approved publication after testing it. IPC verifies clean release `91273d2` on the native DRM backend, without config warnings; cursor-plane use was observed on DP-4 and the syncobj global is advertised.
+
+The first .148 animated-wallpaper Sober log reports 3368.1 benchmark Average FPS and 5069.43 sampled peak; the later user-focused log reports 3030.7 and 6261.31. The recorded KWin animated baseline was 2872.1/5226.57. An intervening 3056.8/6109.93 log has Kitty focus in all overlapping resource samples and is retained separately. Sober config hashes match the earlier runs. Resource/FPS windows overlap partly and the later focused log has no paired resource capture; these results do not establish the effect of an individual feature or a consistent speedup. Native Ocean drag, fractional cursor-plane validation, continuous KMS traces, VT/DPMS/hotplug and a post-change Lost Coast run remain pending. Raw evidence stays outside the repository in the native benchmark directory.
 
 ### 2026-10-13 native performance implementation
 
 .145 transfers tiled drops to the destination active layout in Classic/Ocean, preserving groups/parked tabs, pins and fractional scale. .146 marks cursor elements and enables KMS cursor planes with Smithay fallback and a generic hot-reloadable software override. .147 caches per-output DMA-BUF feedback and selects render/scanout preferences from actual frame states after decorated identity reporting; plane formats are intersected with renderer import formats and configured offload formats remain available.
 
-.148 implements capability-gated explicit sync with pending acquire blockers, shared watcher admission limits and surface/client cleanup. The real kernel timeline regression caught two pinned-library edge cases: unused blocked transactions need release ownership on cancellation, and reattaching the same wl_buffer needs a new explicit lifetime. TideWM holds only unadopted transaction points, hands applied points to Smithay, and retires reused wrappers through the public buffer handler’s removal path while preserving damage progression. Native GBM/timeline checks run in-process without a renderer, nested desktop or modeset. Native KMS/driver/game/VT/DPMS/hotplug checks and FPS comparison remain pending; no speedup is claimed.
+.148 implements capability-gated explicit sync with pending acquire blockers, shared watcher admission limits and surface/client cleanup. The real kernel timeline regression caught two pinned-library edge cases: unused blocked transactions need release ownership on cancellation, and reattaching the same wl_buffer needs a new explicit lifetime. TideWM holds only unadopted transaction points, hands applied points to Smithay, and retires reused wrappers through the public buffer handler’s removal path while preserving damage progression. Native GBM/timeline checks run in-process without a renderer, nested desktop or modeset. Native Classic drag and fullscreen Sober checks are recorded above. Extended KMS/driver/VT/DPMS/hotplug checks remain pending; no repeatable speedup or individual-feature attribution is claimed.
 
 ### 2026-10-13 native gaming diagnostics
 
-Maintainer authorized per-output diagnostics, cursor-plane support, render/scanout DMA-BUF feedback, explicit synchronization and tiled monitor drag. .144 adds bounded cumulative native render/scanout/cursor/fence/backdrop/shader counters with CPU-side stage timings to `tidectl perf --json`; counters are removed with outputs. A required sync branch without a real fence is distinguished from an actual wait, following DriftWM's diagnostic distinction. No render policy change or measured speedup is claimed. Native session remains .143; installation/relog and overhead validation remain pending. Existing M-51 and cadence trace debt is not marked closed by these counters.
+Maintainer authorized per-output diagnostics, cursor-plane support, render/scanout DMA-BUF feedback, explicit synchronization and tiled monitor drag. .144 adds bounded cumulative native render/scanout/cursor/fence/backdrop/shader counters with CPU-side stage timings to `tidectl perf --json`; counters are removed with outputs. A required sync branch without a real fence is distinguished from an actual wait, following DriftWM's diagnostic distinction. No render policy change or measured speedup is claimed. The maintainer installed and relogged into .148; quantified diagnostic overhead isolation remains pending. Existing M-51 and cadence trace debt is not marked closed by these counters.
 
 ### 2026-10-07 native validation and redraw continuation
 

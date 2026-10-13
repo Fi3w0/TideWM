@@ -6,7 +6,7 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 
 - Advertise `linux-drm-syncobj-v1` only when the selected DRM device supports syncobj eventfd. Pending acquire points block surface transactions before renderer import; clients without explicit points retain implicit DMA-BUF readiness.
 - Smithay owns release points with its renderer/KMS buffer references. Failed explicit fence creation or watcher registration rejects the client instead of applying an unsafe commit. Implicit and explicit watchers share admission limits and surface/client cleanup.
-- Unused transaction release points survive cancellation/destruction; reattaching the same buffer adopts its new explicit points while preserving damage progression. Native GBM/kernel-timeline regressions check these cases, deferred commits and release after the final held buffer reference. Driver/game/KMS/VT/DPMS validation remains pending.
+- Unused transaction release points survive cancellation/destruction; reattaching the same buffer adopts its new explicit points while preserving damage progression. Native GBM/kernel-timeline regressions check these cases, deferred commits and release after the final held buffer reference. All 630 tests, strict Clippy, formatting and the clean optimized release pass. Installed .148 is maintainer-tested on native NVIDIA with animated wallpapers and fullscreen Sober; extended driver/KMS/VT/DPMS validation remains pending.
 
 ## 0.90.147 — Surface DMA-BUF render and scanout feedback
 
@@ -22,7 +22,7 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 
 - Completed tiled drags insert into the destination monitor’s active layout in Classic and Ocean. The existing same-monitor drop behavior is retained.
 - Live previews cross output boundaries without moving layout membership until release; cancellation restores the source layout. Ocean previews use the destination camera. Group ownership, parked tabs, preferred fractional scale and output pins move with the active tile.
-- Real in-process Wayland regressions cover preview ownership, cancellation state and transfer without replaying app-open metadata. Native drag validation remains pending.
+- Real in-process Wayland regressions cover preview ownership, cancellation state and transfer without replaying app-open metadata. Classic native cross-monitor drag is maintainer-confirmed on .148; native Ocean and extended cancellation/group checks remain pending.
 
 ## 0.90.144 — Native render diagnostics per monitor
 
