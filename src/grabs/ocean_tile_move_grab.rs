@@ -81,13 +81,20 @@ impl OceanTileMoveGrab {
             return;
         };
         let pointer_view = self.last_location - output_geo.loc.to_f64();
-        match data.ocean.tiled_target_at_view(
+        let target = data.ocean.tiled_target_at_view(
             &self.surface,
             &output,
             pointer_view,
             data.config.gaps,
             data.config.bsp_split_bias,
-        ) {
+        );
+        if output != self.output {
+            if let Some(destination) = data.output_by_name(&output) {
+                data.move_tiled_window_to_output(&self.surface, &destination, target.as_ref());
+            }
+            return;
+        }
+        match target {
             Some(target) => {
                 data.ocean.swap_tiled(&self.surface, &target);
             }
@@ -204,8 +211,10 @@ impl PointerGrab<Smallvil> for OceanTileMoveGrab {
                     data.config.bsp_split_bias,
                 )
             });
-        data.ocean
-            .set_tile_drag(self.surface.clone(), world_rect, hint);
+        if let Some((output, _)) = self.output_at(data, self.last_location) {
+            data.ocean
+                .set_tile_drag(self.surface.clone(), world_rect, hint, output);
+        }
         data.space
             .map_element(self.window.clone(), world_rect.loc, false);
         data.request_redraw();

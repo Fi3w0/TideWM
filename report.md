@@ -1,5 +1,7 @@
 # TideWM repository audit
 
+.145 implements completed cross-monitor tiled drag in Classic and Ocean, with transient previews and group/scale ownership updates. In-process protocol validation does not replace the pending native mixed-scale drag check.
+
 Audit date: 2026-08-08  
 Audited commit: `aca94940b132` (`master`, matching `origin/master` when the audit began)  
 Scope: the complete Rust source tree, build/package entry points, the Wave configuration/runtime, IPC/CLI, inline documentation, and the current roadmap in `TECHNICAL_REPORT.md`/`AGENT.md`.

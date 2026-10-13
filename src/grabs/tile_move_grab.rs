@@ -1,6 +1,7 @@
 //! Pointer grab for tiled-window drag-to-swap. The window follows the cursor
 //! visually while its layout membership remains unchanged. A completed drop
-//! over another immutable layout slot swaps the windows; cancellation or an
+//! over another slot on the same output swaps the windows; a different
+//! monitor inserts the tile into its active workspace. Cancellation or an
 //! invalid target retiles the original tree. Pointer position is retained
 //! from motion events and never re-queried from inside a pointer callback.
 
@@ -66,10 +67,8 @@ impl TileMoveGrab {
     /// real, unchanged slot, `self.window`'s included, since nothing
     /// about tree membership moved during the drag.
     ///
-    /// Scoped to this window's own (output, workspace) -- dropping on a
-    /// different output or workspace than it started on doesn't relocate
-    /// it there, just snaps it back; that's a deliberate first-pass scope
-    /// limit (see `AGENT.md`), not an oversight.
+    /// Cross-output drops use the destination's active layout, while swaps
+    /// on the original output remain scoped to the original workspace.
     ///
     /// Runs from `unset()` only after a real initiating-button release or
     /// a successful gesture end marks the shared completion token. Forced
@@ -80,6 +79,25 @@ impl TileMoveGrab {
             || data.fullscreen.contains_key(&self.surface)
         {
             return;
+        }
+        if let Some(output) = data.output_for_point(self.last_location) {
+            if output.name() != self.output {
+                let workspace = data.layout.active_workspace(&output.name());
+                let target = data.output_tiling_area(&output).and_then(|area| {
+                    data.layout
+                        .layout(
+                            &output.name(),
+                            workspace,
+                            area,
+                            data.gaps_for(&output.name(), workspace),
+                        )
+                        .into_iter()
+                        .find(|(_, rect)| rect.contains(self.last_location.to_i32_round()))
+                        .and_then(|(window, _)| window.toplevel().map(|t| t.wl_surface().clone()))
+                });
+                data.move_tiled_window_to_output(&self.surface, &output, target.as_ref());
+                return;
+            }
         }
         if let Some(area) = data
             .output_by_name(&self.output)
@@ -128,6 +146,7 @@ impl PointerGrab<Smallvil> for TileMoveGrab {
             return;
         }
 
+        data.classic_tile_drag = Some(self.surface.clone());
         let delta = event.location - self.start_data.location;
         let new_location = self.initial_location.to_f64() + delta;
         let new_location = new_location.to_i32_round();
@@ -257,6 +276,7 @@ impl PointerGrab<Smallvil> for TileMoveGrab {
         if self.completion.take_complete() {
             self.commit(data);
         }
+        data.classic_tile_drag = None;
         // Motion moved only the visual Space element. Always snap it back
         // to authoritative tiling, including on cancellation.
         data.retile_viscous();

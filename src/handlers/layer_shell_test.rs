@@ -2,7 +2,10 @@
 use crate::{state::ClientState, Smallvil};
 use smithay::{
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
-    reexports::{calloop::EventLoop, wayland_server::Display},
+    reexports::{
+        calloop::EventLoop,
+        wayland_server::{Display, Resource},
+    },
     utils::Point,
     wayland::compositor::CompositorClientState,
 };
@@ -326,4 +329,54 @@ fn wallpaper_frames_preserve_drag_and_exclusive_zone_changes_retile() {
         fixture.state.space.element_location(dragged),
         Some(location)
     );
+    // A live drag may overlap another monitor without changing layout
+    // ownership. Clearing the preview restores ordinary ownership filtering.
+    let surface = dragged.toplevel().unwrap().wl_surface().clone();
+    fixture.state.unmapped_toplevels.remove(&surface);
+    let id = surface.id().protocol_id();
+    let serial = dragged.toplevel().unwrap().send_configure();
+    fixture.request(id + 1, 4, &[serial.into()], &[]);
+    fixture.request(id, 1, &[16, 0, 0], &[]);
+    fixture.request(id, 6, &[], &[]);
+    fixture.dispatch();
+    let destination = &outputs[0];
+    let destination_geo = fixture.state.space.output_geometry(destination).unwrap();
+    fixture
+        .state
+        .space
+        .map_element(dragged.clone(), destination_geo.loc, false);
+    fixture.state.space.refresh();
+    fixture.state.classic_tile_drag = Some(surface.clone());
+    assert!(fixture
+        .state
+        .render_placements(destination)
+        .unwrap()
+        .iter()
+        .any(|p| p.surface() == Some(&surface)));
+    fixture.state.classic_tile_drag = None;
+    assert!(!fixture
+        .state
+        .render_placements(destination)
+        .unwrap()
+        .iter()
+        .any(|p| p.surface() == Some(&surface)));
+    fixture.state.retile();
+    assert!(fixture
+        .state
+        .move_tiled_window_to_output(&surface, destination, None));
+    fixture.state.retile();
+    assert_eq!(
+        fixture.state.layout.output_of(&surface),
+        Some(destination.name().as_str())
+    );
+    assert_eq!(
+        fixture.state.layout.workspace_of(&surface),
+        Some(fixture.state.layout.active_workspace(&destination.name()))
+    );
+    assert!(!fixture
+        .state
+        .render_placements(&outputs[1])
+        .unwrap()
+        .iter()
+        .any(|p| p.surface() == Some(&surface)));
 }

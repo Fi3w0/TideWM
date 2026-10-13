@@ -108,7 +108,10 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
                             data.config.bsp_split_bias,
                         )
                     });
-                data.ocean.set_tile_drag(surface.clone(), rect, hint);
+                if let Some(output) = data.ocean.entry_output(surface).map(str::to_string) {
+                    data.ocean
+                        .set_tile_drag(surface.clone(), rect, hint, output);
+                }
             }
         }
         if let Some(previous_location) = previous_location {

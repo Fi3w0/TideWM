@@ -229,7 +229,7 @@ pub struct OceanSpace {
     /// the window at its frozen slot; `Space` reflects the drag position
     /// too, but only rendering fed from `Space` reads it, and Ocean's does
     /// not. Both fields are `None` outside an active drag.
-    drag_override: Option<(WlSurface, Rectangle<i32, Logical>)>,
+    drag_override: Option<(WlSurface, Rectangle<i32, Logical>, String)>,
     drag_hint: Option<WlSurface>,
     /// Insertion-order record of every window Ocean has ever mapped, for
     /// numbered app-slot switching (`Action::SwitchWorkspace`'s Ocean
@@ -828,7 +828,7 @@ impl OceanSpace {
         if self
             .drag_override
             .as_ref()
-            .is_some_and(|(dragged, _)| dragged == surface)
+            .is_some_and(|(dragged, _, _)| dragged == surface)
         {
             self.drag_override = None;
         }
@@ -886,6 +886,21 @@ impl OceanSpace {
             .find(|reef| reef.layout.contains(surface))?;
         let window = reef.layout.window(surface)?;
         reef.layout.remove(surface);
+        Some(window)
+    }
+
+    /// Transfers a tile without replaying its app-open lifecycle or dropping
+    /// remembered attached size. Insertion uses the destination camera/reef
+    /// policy already shared by initial placement and floating attachment.
+    pub(crate) fn move_tiled_to_output(
+        &mut self,
+        surface: &WlSurface,
+        output: &str,
+        viewport: Size<i32, Logical>,
+        target: Option<&WlSurface>,
+    ) -> Option<Window> {
+        let window = self.detach_tiled_for_group(surface)?;
+        self.insert(output, viewport, window.clone(), target);
         Some(window)
     }
 
@@ -1028,7 +1043,7 @@ impl OceanSpace {
     }
 
     pub fn set_entry_output(&mut self, surface: &WlSurface, output: String) {
-        if self.contains(surface) {
+        if self.contains(surface) || self.entry_outputs.contains_key(surface) {
             self.entry_outputs.insert(surface.clone(), output);
         }
     }
@@ -1188,7 +1203,7 @@ impl OceanSpace {
         gap: i32,
         split_bias: SplitBias,
     ) -> Vec<(Window, Rectangle<i32, Logical>)> {
-        let dragged = self.drag_override.as_ref().map(|(surface, _)| surface);
+        let dragged = self.drag_override.as_ref().map(|(surface, _, _)| surface);
         let reefs = self.reefs.iter().filter(|reef| {
             (self.shared_canvas
                 || reef.layout.windows().iter().any(|window| {
@@ -1478,8 +1493,9 @@ impl OceanSpace {
         surface: WlSurface,
         rect: Rectangle<i32, Logical>,
         hint: Option<WlSurface>,
+        output: String,
     ) {
-        self.drag_override = Some((surface, rect));
+        self.drag_override = Some((surface, rect, output));
         self.drag_hint = hint;
     }
 
@@ -1808,23 +1824,28 @@ impl OceanSpace {
         // dragged rectangle instead of its frozen reef slot, lifted to the
         // front like a floating window -- the tree itself stays untouched
         // until the gesture ends, see `set_tile_drag`'s doc comment.
-        if let Some((surface, rect)) = &self.drag_override {
-            if let Some(pos) = layouts.iter().position(|(window, _, _)| {
-                window
-                    .toplevel()
-                    .is_some_and(|toplevel| toplevel.wl_surface() == surface)
-            }) {
-                let (window, _, _) = layouts.remove(pos);
-                layouts.insert(0, (window, *rect, PlacementKind::Floating));
+        if let Some((surface, rect, drag_output)) = &self.drag_override {
+            layouts.retain(|(window, _, _)| {
+                window.toplevel().is_none_or(|t| t.wl_surface() != surface)
+            });
+            if drag_output == output {
+                if let Some(window) = self.window(surface) {
+                    layouts.insert(0, (window, *rect, PlacementKind::Floating));
+                }
             }
         }
         layouts
             .into_iter()
             .filter_map(|(window, rect, kind)| {
-                if window
-                    .toplevel()
-                    .is_some_and(|t| !self.visible_on_output(t.wl_surface(), output))
-                {
+                if window.toplevel().is_some_and(|t| {
+                    !self.visible_on_output(t.wl_surface(), output)
+                        && !self
+                            .drag_override
+                            .as_ref()
+                            .is_some_and(|(surface, _, owner)| {
+                                surface == t.wl_surface() && owner == output
+                            })
+                }) {
                     return None;
                 }
                 let pin = window
@@ -1991,6 +2012,47 @@ mod tests {
     use super::test_protocol::ProtocolFixture;
     use super::*;
     use crate::config::{OceanBookmarkConfig, OceanReefConfig};
+
+    #[test]
+    fn tiled_monitor_drag_previews_without_changing_owner_and_preserves_app_metadata() {
+        let mut protocol = ProtocolFixture::new();
+        let window = protocol.window();
+        let surface = window.toplevel().unwrap().wl_surface().clone();
+        let mut ocean = OceanSpace::default();
+        let viewport = (1280, 720).into();
+        ocean.insert("left", viewport, window, None);
+        let order = ocean.app_order.clone();
+        let geometry = Rectangle::new((1280, 0).into(), viewport);
+        let rect = Rectangle::new((50, 50).into(), (400, 300).into());
+        ocean.set_tile_drag(surface.clone(), rect, None, "right".into());
+        assert_eq!(ocean.entry_outputs.get(&surface).unwrap(), "left");
+        let preview = ocean.placements("right", geometry, 8, SplitBias::Auto);
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0].rect.loc, geometry.loc + rect.loc);
+        assert!(ocean
+            .placements("left", geometry, 8, SplitBias::Auto)
+            .is_empty());
+        ocean.clear_tile_drag();
+        assert!(ocean
+            .placements("right", geometry, 8, SplitBias::Auto)
+            .is_empty());
+        assert_eq!(ocean.entry_outputs.get(&surface).unwrap(), "left");
+        assert!(ocean
+            .move_tiled_to_output(&surface, "right", viewport, None)
+            .is_some());
+        assert_eq!(ocean.entry_outputs.get(&surface).unwrap(), "right");
+        assert_eq!(ocean.app_order, order);
+        assert!(ocean.is_tiled(&surface));
+        assert!(ocean
+            .placements("left", geometry, 8, SplitBias::Auto)
+            .is_empty());
+        assert_eq!(
+            ocean
+                .placements("right", geometry, 8, SplitBias::Auto)
+                .len(),
+            1
+        );
+    }
 
     #[test]
     fn independent_views_exclude_foreign_tiles_and_floats_and_shared_mode_can_reload() {

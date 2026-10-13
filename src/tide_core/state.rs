@@ -176,6 +176,7 @@ pub struct Smallvil {
     /// surfaced through the IPC `diagnostics` request so `tidectl report`
     /// can say which code path a bug ran on without guessing from env.
     pub(crate) backend_name: &'static str,
+    pub(crate) classic_tile_drag: Option<WlSurface>,
     pub(crate) native_render_stats: HashMap<Output, crate::backend::perf::OutputRenderStats>,
     /// The session Lua state config evaluates into: config globals and
     /// section tables persist here after a load, which is what makes
@@ -2833,6 +2834,7 @@ impl Smallvil {
                 // until it commits the tile size a large first buffer near
                 // an edge overlaps the neighbor output and would flash there.
                 if kind == crate::placement::PlacementKind::Tiled
+                    && surface != self.classic_tile_drag.as_ref()
                     && surface
                         .and_then(|surface| self.layout.output_of(surface))
                         .is_some_and(|owner| owner != output_name)
@@ -3800,6 +3802,7 @@ impl Smallvil {
             xwayland_satellite_pid: None,
             xwayland_display: None,
             backend_name: "unknown",
+            classic_tile_drag: None,
             native_render_stats: HashMap::new(),
             config_lua,
             tide,
@@ -10569,6 +10572,80 @@ impl Smallvil {
             self.move_window_to_output(surface, &to_output);
         }
         self.retile();
+    }
+
+    /// Completes a cross-monitor tile drop onto the destination's visible
+    /// tree. Group tabs travel together; pointer callbacks supply the target
+    /// and never need to lock/query the pointer again during release.
+    pub(crate) fn move_tiled_window_to_output(
+        &mut self,
+        surface: &WlSurface,
+        to: &Output,
+        target: Option<&WlSurface>,
+    ) -> bool {
+        if !self.window_is_visible(surface)
+            || self.fullscreen.contains_key(surface)
+            || self.maximized.contains_key(surface)
+        {
+            return false;
+        }
+        let Some(geometry) = self.space.output_geometry(to) else {
+            return false;
+        };
+        let name = to.name();
+        let workspace = self.layout.active_workspace(&name);
+        let window = match self.config.spatial_engine {
+            crate::config::SpatialEngine::Classic => {
+                let Some(window) = self.layout.window_of(surface) else {
+                    return false;
+                };
+                let target = target.filter(|target| {
+                    self.layout.output_of(target) == Some(name.as_str())
+                        && self.layout.workspace_of(target) == Some(workspace)
+                });
+                self.layout.remove(surface);
+                self.layout.insert(&name, workspace, window.clone(), target);
+                window
+            }
+            crate::config::SpatialEngine::Ocean => {
+                let Some(window) =
+                    self.ocean
+                        .move_tiled_to_output(surface, &name, geometry.size, target)
+                else {
+                    return false;
+                };
+                window
+            }
+        };
+        let members = if let Some(index) = self.group_of(surface) {
+            let group = &mut self.groups[index];
+            group.output = name.clone();
+            group.workspace = workspace;
+            group.strip = None;
+            group
+                .members
+                .iter()
+                .map(|member| (member.surface.clone(), member.parked_window.clone()))
+                .collect::<Vec<_>>()
+        } else {
+            vec![(surface.clone(), None)]
+        };
+        self.set_window_fractional_scale(&window, to);
+        for (member, parked) in members {
+            if let Some(pin) = self.output_pins.get_mut(&member) {
+                *pin = name.clone();
+            }
+            if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+                self.ocean.set_entry_output(&member, name.clone());
+            }
+            if let Some(parked) = parked {
+                self.set_window_fractional_scale(&parked, to);
+            }
+            self.refresh_window_opacity_and_glass_for(&member);
+            self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged { surface: member });
+        }
+        self.refresh_ext_workspaces();
+        true
     }
 
     /// Moves exactly `surface` to `to`, wherever it currently lives --

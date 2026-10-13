@@ -2,6 +2,12 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.145 — Drag tiled windows between monitors
+
+- Completed tiled drags insert into the destination monitor’s active layout in Classic and Ocean. The existing same-monitor drop behavior is retained.
+- Live previews cross output boundaries without moving layout membership until release; cancellation restores the source layout. Ocean previews use the destination camera. Group ownership, parked tabs, preferred fractional scale and output pins move with the active tile.
+- Real in-process Wayland regressions cover preview ownership, cancellation state and transfer without replaying app-open metadata. Native drag validation remains pending.
+
 ## 0.90.144 — Native render diagnostics per monitor
 
 - `tidectl perf --json` now includes cumulative per-output native render counters: submitted/empty/failed frames, primary scanout and cursor-plane use, required synchronization, actual/exportable fences, backdrop renders/skips and custom shader chain updates.
