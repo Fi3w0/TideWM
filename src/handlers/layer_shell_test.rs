@@ -54,6 +54,7 @@ impl Fixture {
         loop {
             match self.peer.read(&mut buffer) {
                 Ok(n) if n > 0 => bytes.extend_from_slice(&buffer[..n]),
+                Ok(0) if !bytes.is_empty() => break,
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 other => panic!("unexpected Wayland read: {other:?}"),
             }
@@ -379,4 +380,295 @@ fn wallpaper_frames_preserve_drag_and_exclusive_zone_changes_retile() {
         .unwrap()
         .iter()
         .any(|p| p.surface() == Some(&surface)));
+    let other = windows[1].toplevel().unwrap().wl_surface().clone();
+    assert!(fixture
+        .state
+        .move_tiled_window_to_output(&other, destination, None));
+    fixture.state.retile();
+    fixture.state.group_with(&surface, &other);
+    let index = fixture.state.group_of(&surface).unwrap();
+    assert_eq!(fixture.state.groups[index].members.len(), 2);
+    fixture
+        .state
+        .layout
+        .set_active_workspace(&outputs[1].name(), 2);
+    fixture
+        .state
+        .output_pins
+        .insert(other.clone(), destination.name());
+    assert!(fixture
+        .state
+        .move_tiled_window_to_output(&surface, &outputs[1], None));
+    fixture.state.retile();
+    let index = fixture.state.group_of(&surface).unwrap();
+    assert_eq!(fixture.state.groups[index].output, outputs[1].name());
+    assert_eq!(fixture.state.groups[index].workspace, 2);
+    assert_eq!(
+        fixture.state.output_pins.get(&other),
+        Some(&outputs[1].name())
+    );
+    assert!(
+        !fixture.state.layout.contains(&other),
+        "parked tabs must stay outside the tree"
+    );
+    fixture.state.ungroup(&other);
+    assert_eq!(
+        fixture.state.layout.output_of(&other),
+        Some(outputs[1].name().as_str())
+    );
+    assert_eq!(fixture.state.layout.workspace_of(&other), Some(2));
+    if let Some(node) = std::env::var_os("TIDEWM_SYNC_TEST_NODE") {
+        native_syncobj_commit_lifecycle(&mut fixture, &surface, &node);
+    }
+}
+
+fn native_syncobj_commit_lifecycle(
+    fixture: &mut Fixture,
+    surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    node: &std::ffi::OsStr,
+) {
+    use smithay::{
+        backend::{
+            allocator::{
+                dmabuf::AsDmabuf,
+                gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
+                Allocator, Fourcc, Modifier,
+            },
+            drm::DrmDeviceFd,
+            renderer::utils::RendererSurfaceStateUserData,
+        },
+        reexports::{drm::control::Device, wayland_server::protocol::wl_buffer::WlBuffer},
+        utils::DeviceFd,
+        wayland::{
+            compositor::{with_states, BufferAssignment, SurfaceAttributes},
+            drm_syncobj::{supports_syncobj_eventfd, DrmSyncobjState},
+        },
+    };
+    use std::os::fd::{AsRawFd, OwnedFd};
+    let fd: OwnedFd = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(node)
+        .unwrap()
+        .into();
+    let device = DrmDeviceFd::new(DeviceFd::from(fd));
+    assert!(
+        supports_syncobj_eventfd(&device),
+        "requested test device lacks syncobj eventfd"
+    );
+    let syncobj = device.create_syncobj(false).unwrap();
+    let timeline_fd = device.syncobj_to_fd(syncobj, false).unwrap();
+    fixture.state.drm_syncobj_state = Some(DrmSyncobjState::new::<Smallvil>(
+        &fixture.state.display_handle,
+        device.clone(),
+    ));
+    let name = fixture
+        .dispatch()
+        .into_iter()
+        .find_map(|(object, opcode, body)| {
+            if object != 2 || opcode != 0 {
+                return None;
+            }
+            let len = u32::from_ne_bytes(body[4..8].try_into().unwrap()) as usize;
+            (std::str::from_utf8(&body[8..8 + len - 1]).unwrap()
+                == "wp_linux_drm_syncobj_manager_v1")
+                .then(|| u32::from_ne_bytes(body[..4].try_into().unwrap()))
+        })
+        .unwrap();
+    let mut tail = string("wp_linux_drm_syncobj_manager_v1");
+    tail.extend_from_slice(&1_u32.to_ne_bytes());
+    tail.extend_from_slice(&17_u32.to_ne_bytes());
+    fixture.request(2, 0, &[name], &tail);
+    fixture.request(17, 1, &[18, surface.id().protocol_id()], &[]);
+    // Import the real kernel timeline through SCM_RIGHTS, as a client does.
+    let mut wire = 17_u32.to_ne_bytes().to_vec();
+    wire.extend_from_slice(&((12_u32 << 16) | 2).to_ne_bytes());
+    wire.extend_from_slice(&19_u32.to_ne_bytes());
+    unsafe {
+        let space = libc::CMSG_SPACE(std::mem::size_of::<i32>() as u32) as usize;
+        let mut control = vec![0_usize; space.div_ceil(std::mem::size_of::<usize>())];
+        let mut iov = libc::iovec {
+            iov_base: wire.as_mut_ptr().cast(),
+            iov_len: wire.len(),
+        };
+        let mut msg: libc::msghdr = std::mem::zeroed();
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = control.as_mut_ptr().cast();
+        msg.msg_controllen = space;
+        let header = libc::CMSG_FIRSTHDR(&msg);
+        (*header).cmsg_level = libc::SOL_SOCKET;
+        (*header).cmsg_type = libc::SCM_RIGHTS;
+        (*header).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<i32>() as u32) as usize;
+        libc::CMSG_DATA(header)
+            .cast::<i32>()
+            .write_unaligned(timeline_fd.as_raw_fd());
+        assert_eq!(
+            libc::sendmsg(fixture.peer.as_raw_fd(), &msg, libc::MSG_NOSIGNAL),
+            wire.len() as isize
+        );
+    }
+    fixture.dispatch();
+    let gbm = GbmDevice::new(device.clone()).unwrap();
+    let mut allocator = GbmAllocator::new(gbm, GbmBufferFlags::RENDERING);
+    let allocation = allocator
+        .create_buffer(64, 64, Fourcc::Xrgb8888, &[Modifier::Invalid])
+        .unwrap();
+    let dmabuf = allocation.export().unwrap();
+    let client = surface.client().unwrap();
+    let buffer: WlBuffer = client
+        .create_resource::<WlBuffer, _, Smallvil>(&fixture.state.display_handle, 1, dmabuf)
+        .unwrap();
+    let set_points = |fixture: &mut Fixture, acquire, release| {
+        fixture.request(18, 1, &[19, 0, acquire], &[]);
+        fixture.request(18, 2, &[19, 0, release], &[]);
+        fixture.dispatch();
+    };
+    let serial = fixture
+        .state
+        .layout
+        .window_of(surface)
+        .unwrap()
+        .toplevel()
+        .unwrap()
+        .send_configure();
+    fixture.request(surface.id().protocol_id() + 1, 4, &[serial.into()], &[]);
+    fixture.dispatch();
+    set_points(fixture, 1, 2);
+    with_states(surface, |states| {
+        states
+            .cached_state
+            .get::<SurfaceAttributes>()
+            .pending()
+            .buffer = Some(BufferAssignment::NewBuffer(buffer.clone()))
+    });
+    fixture.request(surface.id().protocol_id(), 6, &[], &[]);
+    fixture.dispatch();
+    assert_eq!(
+        fixture.state.dmabuf_blocker_source_count, 1,
+        "unsignalled acquire must defer commit"
+    );
+    assert!(with_states(surface, |states| states
+        .data_map
+        .get::<RendererSurfaceStateUserData>()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .buffer()
+        .unwrap()
+        != buffer));
+    device.syncobj_timeline_signal(&[syncobj], &[1]).unwrap();
+    fixture
+        .event_loop
+        .dispatch(Some(Duration::from_millis(20)), &mut fixture.state)
+        .unwrap();
+    fixture.dispatch();
+    assert_eq!(fixture.state.dmabuf_blocker_source_count, 0);
+    let in_flight = with_states(surface, |states| {
+        states
+            .data_map
+            .get::<RendererSurfaceStateUserData>()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .buffer()
+            .unwrap()
+            .clone()
+    });
+    assert_eq!(in_flight, buffer);
+    let old_damage = with_states(surface, |states| {
+        states
+            .data_map
+            .get::<RendererSurfaceStateUserData>()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .damage()
+            .current_commit()
+    });
+    // Reattaching the same wl_buffer still describes a new explicit lifetime.
+    set_points(fixture, 3, 4);
+    with_states(surface, |states| {
+        states
+            .cached_state
+            .get::<SurfaceAttributes>()
+            .pending()
+            .buffer = Some(BufferAssignment::NewBuffer(buffer.clone()))
+    });
+    fixture.request(surface.id().protocol_id(), 6, &[], &[]);
+    fixture.dispatch();
+    assert_eq!(fixture.state.dmabuf_blocker_source_count, 1);
+    device.syncobj_timeline_signal(&[syncobj], &[3]).unwrap();
+    fixture
+        .event_loop
+        .dispatch(Some(Duration::from_millis(20)), &mut fixture.state)
+        .unwrap();
+    fixture.dispatch();
+    let reattached = with_states(surface, |states| {
+        let renderer = states
+            .data_map
+            .get::<RendererSurfaceStateUserData>()
+            .unwrap()
+            .lock()
+            .unwrap();
+        assert_ne!(
+            renderer.damage().current_commit(),
+            old_damage,
+            "reattachment must retain damage progression"
+        );
+        renderer.buffer().unwrap().clone()
+    });
+
+    fixture.request(surface.id().protocol_id(), 1, &[0, 0, 0], &[]);
+    fixture.request(surface.id().protocol_id(), 6, &[], &[]);
+    fixture.dispatch();
+    let mut signalled = [0];
+    device
+        .syncobj_timeline_query(&[syncobj], &mut signalled, false)
+        .unwrap();
+    assert_eq!(
+        signalled[0], 3,
+        "release must wait while a renderer/KMS buffer reference remains"
+    );
+    drop(reattached);
+    drop(in_flight);
+    device
+        .syncobj_timeline_query(&[syncobj], &mut signalled, false)
+        .unwrap();
+    assert_eq!(signalled[0], 4);
+    let toplevel = fixture
+        .state
+        .unmapped_toplevels
+        .get(surface)
+        .unwrap()
+        .toplevel()
+        .unwrap();
+    let serial = toplevel.send_configure();
+    fixture.request(surface.id().protocol_id() + 1, 4, &[serial.into()], &[]);
+    fixture.dispatch();
+    set_points(fixture, 5, 6);
+    with_states(surface, |states| {
+        states
+            .cached_state
+            .get::<SurfaceAttributes>()
+            .pending()
+            .buffer = Some(BufferAssignment::NewBuffer(buffer))
+    });
+    fixture.request(surface.id().protocol_id(), 6, &[], &[]);
+    fixture.dispatch();
+    assert_eq!(fixture.state.dmabuf_blocker_source_count, 1);
+    fixture.request(surface.id().protocol_id(), 0, &[], &[]);
+    fixture.dispatch();
+    assert_eq!(
+        fixture.state.dmabuf_blocker_source_count, 0,
+        "destroyed surfaces must remove their fence watchers"
+    );
+    device
+        .syncobj_timeline_query(&[syncobj], &mut signalled, false)
+        .unwrap();
+    assert_eq!(
+        signalled[0], 6,
+        "a destroyed unused pending buffer must release its point"
+    );
+    device.destroy_syncobj(syncobj).unwrap();
 }

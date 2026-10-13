@@ -1,5 +1,6 @@
 mod capture;
 mod compositor;
+mod explicit_sync;
 pub(crate) mod ext_workspace;
 mod layer_shell;
 mod screencopy;
@@ -821,3 +822,10 @@ impl PointerConstraintsHandler for Smallvil {
 
 delegate_pointer_constraints!(Smallvil);
 delegate_relative_pointer!(Smallvil);
+
+impl smithay::wayland::drm_syncobj::DrmSyncobjHandler for Smallvil {
+    fn drm_syncobj_state(&mut self) -> Option<&mut smithay::wayland::drm_syncobj::DrmSyncobjState> {
+        self.drm_syncobj_state.as_mut()
+    }
+}
+smithay::delegate_drm_syncobj!(Smallvil);

@@ -1,11 +1,5 @@
 # TideWM repository audit
 
-.147 adds cached per-output DMA-BUF render/scanout feedback, selected from current frame states after decorated identity reporting. Primary-plane preferences are intersected with renderer import formats, retaining the configured offload devices. Native modifier/allocation/scanout validation remains pending.
-
-.146 enables runtime-tested KMS cursor-plane assignment with automatic software fallback and the hot-reloadable `hardware_cursor` override. Native NVIDIA and mixed-scale checks remain pending; no FPS gain is claimed.
-
-.145 implements completed cross-monitor tiled drag in Classic and Ocean, with transient previews and group/scale ownership updates. In-process protocol validation does not replace the pending native mixed-scale drag check.
-
 Audit date: 2026-08-08  
 Audited commit: `aca94940b132` (`master`, matching `origin/master` when the audit began)  
 Scope: the complete Rust source tree, build/package entry points, the Wave configuration/runtime, IPC/CLI, inline documentation, and the current roadmap in `TECHNICAL_REPORT.md`/`AGENT.md`.
@@ -14,15 +8,21 @@ This is a static code review, not a claim that every issue below was reproduced 
 
 ## Implementation handoff
 
-- Updated: 2026-10-07
-- Implementation branch: `ai/codex/live-validation-cross-output`
+- Updated: 2026-10-13
+- Implementation branch: `native-performance`
 - Worktree: `/home/fiw/Documents/Proyects/TideWM`
 - Latest native-confirmed behavioral head: `3dba1b7` / .142; .143 redraw refinement is recorded below.
-- Current TideWM version: `0.90.143` (native desktop remains on confirmed .142)
-- Push status: .141/licensing history was published through `02cb381`; today's .142/.143 batch is local only.
+- Current TideWM version: `0.90.148` (native desktop remains on .143)
+- Push status: published through `655b5c5` (.143 validation); .144–.148 are local signed commits.
 - Phase 3 continued from documentation/packaging head `b6805e2`, preserving all earlier remediation history.
 
 The finding text below is the original audit evidence. It is intentionally retained even when a finding is closed. Use this handoff ledger as the current status authority, then inspect the named commit and current code before changing a closed area. Do not repeat a fix merely because its original finding still says “confirmed.”
+
+### 2026-10-13 native performance implementation
+
+.145 transfers tiled drops to the destination active layout in Classic/Ocean, preserving groups/parked tabs, pins and fractional scale. .146 marks cursor elements and enables KMS cursor planes with Smithay fallback and a generic hot-reloadable software override. .147 caches per-output DMA-BUF feedback and selects render/scanout preferences from actual frame states after decorated identity reporting; plane formats are intersected with renderer import formats and configured offload formats remain available.
+
+.148 implements capability-gated explicit sync with pending acquire blockers, shared watcher admission limits and surface/client cleanup. The real kernel timeline regression caught two pinned-library edge cases: unused blocked transactions need release ownership on cancellation, and reattaching the same wl_buffer needs a new explicit lifetime. TideWM holds only unadopted transaction points, hands applied points to Smithay, and retires reused wrappers through the public buffer handler’s removal path while preserving damage progression. Native GBM/timeline checks run in-process without a renderer, nested desktop or modeset. Native KMS/driver/game/VT/DPMS/hotplug checks and FPS comparison remain pending; no speedup is claimed.
 
 ### 2026-10-13 native gaming diagnostics
 

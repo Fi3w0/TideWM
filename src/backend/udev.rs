@@ -527,12 +527,15 @@ pub fn init_udev(
         }
     }
 
-    // Do not advertise linux-drm-syncobj-v1 yet. Smithay's protocol state
-    // validates acquire/release points but does not wait for acquire points
-    // automatically; advertising it without a DrmSyncPointBlocker would let
-    // client buffers reach rendering or scanout before they are ready. Niri
-    // and DriftWM likewise leave this protocol disabled. Re-enable it only
-    // together with the pre-commit acquire blocker and hardware tests.
+    // The protocol is usable only when acquire timeline points can wake
+    // the event loop. The shared pre-commit hook installs their blockers;
+    // Smithay retains release points with renderer/KMS buffer references.
+    let syncobj_device = drm.device_fd().clone();
+    if smithay::wayland::drm_syncobj::supports_syncobj_eventfd(&syncobj_device) {
+        state.drm_syncobj_state = Some(smithay::wayland::drm_syncobj::DrmSyncobjState::new::<
+            Smallvil,
+        >(&display_handle, syncobj_device));
+    }
 
     // Libinput, fed by the same seat as the DRM session.
     let libinput_session = LibinputSessionInterface::from(session.clone());

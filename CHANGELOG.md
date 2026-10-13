@@ -2,6 +2,12 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.148 — Native explicit buffer synchronization
+
+- Advertise `linux-drm-syncobj-v1` only when the selected DRM device supports syncobj eventfd. Pending acquire points block surface transactions before renderer import; clients without explicit points retain implicit DMA-BUF readiness.
+- Smithay owns release points with its renderer/KMS buffer references. Failed explicit fence creation or watcher registration rejects the client instead of applying an unsafe commit. Implicit and explicit watchers share admission limits and surface/client cleanup.
+- Unused transaction release points survive cancellation/destruction; reattaching the same buffer adopts its new explicit points while preserving damage progression. Native GBM/kernel-timeline regressions check these cases, deferred commits and release after the final held buffer reference. Driver/game/KMS/VT/DPMS validation remains pending.
+
 ## 0.90.147 — Surface DMA-BUF render and scanout feedback
 
 - Native surfaces receive output-specific feedback selected from the actual frame’s render state, including decorated windows. Scanout preferences contain only primary-plane formats that the selected renderer can import; rejection retains a render fallback.

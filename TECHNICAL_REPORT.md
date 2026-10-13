@@ -1,18 +1,12 @@
 # TideWM — Technical Report
 
-.147 adds cached per-output DMA-BUF render/scanout feedback, selected from current frame states after decorated identity reporting. Primary-plane preferences are intersected with renderer import formats, retaining the configured offload devices. Native modifier/allocation/scanout validation remains pending.
-
-.146 enables runtime-tested KMS cursor-plane assignment with automatic software fallback and the hot-reloadable `hardware_cursor` override. Native NVIDIA and mixed-scale checks remain pending; no FPS gain is claimed.
-
-.145 implements completed cross-monitor tiled drag in Classic and Ocean, with transient previews and group/scale ownership updates. In-process protocol validation does not replace the pending native mixed-scale drag check.
-
 A fast technical reference for TideWM: what it is, what's implemented, current hardware-verification status, and how to build it. For the pitch, see [README.md](README.md). For the full config/action/IPC reference, see [DOCUMENTATION.md](DOCUMENTATION.md). For the Classic/Ocean spatial-engine design, see [SPATIAL_MODEL.md](SPATIAL_MODEL.md). For release-by-release detail, see [CHANGELOG.md](CHANGELOG.md).
 
 ## What it is
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). A full tiling-WM feature set (BSP/master-stack/cascade layouts, workspaces, multi-monitor, layer-shell, IPC, XWayland) with a water/aqua render identity layered on top as a fully toggleable effect stack, plus a second spatial engine ("Ocean") as an alternative to numbered workspaces.
 
-Current development version: **0.90.143**, second major pre-release. 1.0 is intentionally reserved until the effect stack and Ocean get a broader real-hardware pass (see CHANGELOG).
+Current development version: **0.90.148**, second major pre-release. 1.0 is intentionally reserved until the effect stack and Ocean get a broader real-hardware pass (see CHANGELOG).
 
 ## Architecture
 
@@ -49,6 +43,14 @@ Current development version: **0.90.143**, second major pre-release. 1.0 is inte
 | Nvidia support | Standalone DRM backend verified on a real RTX 3060 (proprietary 595.99.02, two outputs at mixed scale, 2026-09-25); nested verified earlier |
 | VT scanout recovery and nested refresh scheduling | Checked DRM-master/input recovery and rational absolute nested deadlines implemented; unit coverage includes partial failures, fractional rates, and same-size/same-scale monitor changes. Live VT failure injection and mixed-refresh host moves remain pending |
 | AUR package | Not yet |
+
+## Native performance and buffer synchronization
+
+Native outputs expose cumulative CPU-side render timings and scanout/cursor/fence/backdrop counters through `tidectl perf --json`. Cursor-plane assignment uses Smithay’s software fallback; `hardware_cursor = false` forces composition. Surface DMA-BUF feedback follows actual frame states and offers primary-plane formats only when the selected renderer can also import them, while retaining configured offload formats.
+
+`linux-drm-syncobj-v1` is advertised only with runtime syncobj-eventfd support. Acquire points defer transactions before import; applied release points follow Smithay buffer references. Unused transaction releases survive cancellation/destruction, and reattaching a buffer adopts its new points without losing damage progression. Real kernel timeline/DMA-BUF regressions exercise these lifetimes on both available render nodes without a nested desktop or modesetting. Native game, cursor-plane, KMS/VT/DPMS/hotplug and post-change FPS checks remain pending.
+
+Tiled drags transfer to the destination’s active layout in Classic and Ocean. Transient previews do not alter membership; completed transfers preserve groups, parked tabs, scale and pins. Protocol regressions cover ownership, cancellation state, empty destinations and grouped transfer across mixed scales; native drag validation remains pending.
 
 ## Hardware verification
 

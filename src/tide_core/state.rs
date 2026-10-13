@@ -525,9 +525,10 @@ pub struct Smallvil {
 
     // Smithay State
     pub compositor_state: CompositorState,
-    /// Implicit-fence watchers keyed by their Wayland client. Signalled
+    pub(crate) drm_syncobj_state: Option<smithay::wayland::drm_syncobj::DrmSyncobjState>,
+    /// Implicit and explicit fence watchers keyed by their Wayland client. Signalled
     /// sources remove themselves; disconnect cleanup removes the rest.
-    pub(crate) dmabuf_blocker_sources: HashMap<ClientId, Vec<RegistrationToken>>,
+    pub(crate) dmabuf_blocker_sources: HashMap<ClientId, Vec<(RegistrationToken, WlSurface)>>,
     pub(crate) dmabuf_blocker_source_count: usize,
     pub xdg_shell_state: XdgShellState,
     /// `zxdg_decoration_manager_v1`: lets GTK/Qt clients ask whether to draw
@@ -3930,6 +3931,7 @@ impl Smallvil {
             socket_name,
 
             compositor_state,
+            drm_syncobj_state: None,
             dmabuf_blocker_sources: HashMap::new(),
             dmabuf_blocker_source_count: 0,
             xdg_shell_state,
@@ -5674,7 +5676,7 @@ impl Smallvil {
             self.dmabuf_blocker_source_count = self
                 .dmabuf_blocker_source_count
                 .saturating_sub(sources.len());
-            for token in sources {
+            for (token, _) in sources {
                 self.loop_handle.remove(token);
             }
         }
@@ -5695,12 +5697,13 @@ impl Smallvil {
     pub(crate) fn track_dmabuf_blocker_source(
         &mut self,
         client_id: ClientId,
+        surface: WlSurface,
         token: RegistrationToken,
     ) {
         self.dmabuf_blocker_sources
             .entry(client_id)
             .or_default()
-            .push(token);
+            .push((token, surface));
         self.dmabuf_blocker_source_count = self.dmabuf_blocker_source_count.saturating_add(1);
     }
 
@@ -5713,12 +5716,37 @@ impl Smallvil {
             return;
         };
         let previous_len = sources.len();
-        sources.retain(|candidate| *candidate != token);
+        sources.retain(|(candidate, _)| *candidate != token);
         self.dmabuf_blocker_source_count = self
             .dmabuf_blocker_source_count
             .saturating_sub(previous_len - sources.len());
         if sources.is_empty() {
             self.dmabuf_blocker_sources.remove(client_id);
+        }
+    }
+
+    pub(crate) fn remove_surface_buffer_blockers(&mut self, surface: &WlSurface) {
+        // A resource's client lookup can already fail during destruction.
+        // The bounded watcher records retain the owning client identity.
+        let tokens: Vec<_> = self
+            .dmabuf_blocker_sources
+            .iter()
+            .flat_map(|(client, sources)| {
+                sources
+                    .iter()
+                    .filter(|(_, owner)| owner == surface)
+                    .map(|(token, _)| (client.clone(), *token))
+            })
+            .collect();
+        for (client, token) in tokens {
+            self.loop_handle.remove(token);
+            self.untrack_dmabuf_blocker_source(&client, token);
+            if let Ok(data) = self.display_handle.backend_handle().get_client_data(client) {
+                if let Some(client_state) = data.downcast_ref::<ClientState>() {
+                    let dh = self.display_handle.clone();
+                    client_state.compositor_state.blocker_cleared(self, &dh);
+                }
+            }
         }
     }
 

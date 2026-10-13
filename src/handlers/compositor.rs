@@ -5,7 +5,7 @@ use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_shm,
     reexports::{
-        calloop::Interest,
+        calloop::{EventSource, Interest},
         wayland_server::{
             backend::protocol::ProtocolError,
             protocol::{wl_buffer, wl_surface::WlSurface},
@@ -33,6 +33,61 @@ fn dmabuf_blocker_admitted(per_client: usize, total: usize) -> bool {
     per_client < MAX_PENDING_DMABUF_BLOCKERS_PER_CLIENT && total < MAX_PENDING_DMABUF_BLOCKERS_TOTAL
 }
 
+fn reject_buffer_commit(state: &Smallvil, surface: &WlSurface, message: &str) {
+    if let Some(client) = surface.client() {
+        client.kill(
+            &state.display_handle,
+            ProtocolError {
+                code: 0,
+                object_id: surface.id().protocol_id(),
+                object_interface: "wl_surface".into(),
+                message: message.into(),
+            },
+        );
+    }
+}
+
+fn register_buffer_readiness<S, B>(state: &mut Smallvil, surface: &WlSurface, blocker: B, source: S)
+where
+    S: EventSource<Event = (), Ret = Result<(), std::io::Error>> + 'static,
+    B: smithay::wayland::compositor::Blocker + Send + 'static,
+{
+    let Some(client) = surface.client() else {
+        return;
+    };
+    let client_id = client.id();
+    let per_client = state
+        .dmabuf_blocker_sources
+        .get(&client_id)
+        .map_or(0, Vec::len);
+    if !dmabuf_blocker_admitted(per_client, state.dmabuf_blocker_source_count) {
+        reject_buffer_commit(state, surface, "too many pending buffer readiness fences");
+        return;
+    }
+    let token_slot = Rc::new(Cell::new(None));
+    let callback_token = token_slot.clone();
+    let callback_client_id = client_id.clone();
+    match state
+        .loop_handle
+        .insert_source(source, move |_, _, state: &mut Smallvil| {
+            if let Some(token) = callback_token.get() {
+                state.untrack_dmabuf_blocker_source(&callback_client_id, token);
+            }
+            if let Some(client_state) = client.get_data::<ClientState>() {
+                let dh = state.display_handle.clone();
+                client_state.compositor_state.blocker_cleared(state, &dh);
+            }
+            Ok(())
+        }) {
+        Ok(token) => {
+            token_slot.set(Some(token));
+            state.track_dmabuf_blocker_source(client_id, surface.clone(), token);
+            add_blocker(surface, blocker);
+        }
+        Err(_) => reject_buffer_commit(state, surface, "failed to register buffer readiness fence"),
+    }
+}
+
 impl CompositorHandler for Smallvil {
     fn compositor_state(&mut self) -> &mut CompositorState {
         &mut self.compositor_state
@@ -48,8 +103,14 @@ impl CompositorHandler for Smallvil {
         // regular `commit` callback is too late because the transaction has
         // already been applied by then.
         add_pre_commit_hook::<Smallvil, _>(surface, |state, _dh, surface| {
-            let maybe_dmabuf = with_states(surface, |surface_data| {
-                surface_data
+            let (maybe_dmabuf, acquire_point) = with_states(surface, |surface_data| {
+                let acquire = surface_data
+                    .cached_state
+                    .get::<smithay::wayland::drm_syncobj::DrmSyncobjCachedState>()
+                    .pending()
+                    .acquire_point
+                    .clone();
+                let dmabuf = surface_data
                     .cached_state
                     .get::<SurfaceAttributes>()
                     .pending()
@@ -58,69 +119,43 @@ impl CompositorHandler for Smallvil {
                     .and_then(|assignment| match assignment {
                         BufferAssignment::NewBuffer(buffer) => get_dmabuf(buffer).cloned().ok(),
                         _ => None,
-                    })
+                    });
+                (dmabuf, acquire)
             });
             let Some(dmabuf) = maybe_dmabuf else {
                 return;
             };
-            let Ok((blocker, source)) = dmabuf.generate_blocker(Interest::READ) else {
-                // `AlreadyReady` means no blocker is necessary.
-                return;
-            };
-            let Some(client) = surface.client() else {
-                return;
-            };
-            let client_id = client.id();
-            let per_client = state
-                .dmabuf_blocker_sources
-                .get(&client_id)
-                .map_or(0, Vec::len);
-            let total = state.dmabuf_blocker_source_count;
-            if !dmabuf_blocker_admitted(per_client, total) {
-                tracing::warn!(
-                    per_client,
-                    total,
-                    "Disconnecting client after excessive pending DMA-BUF fences"
-                );
-                client.kill(
-                    &state.display_handle,
-                    ProtocolError {
-                        code: 0,
-                        object_id: surface.id().protocol_id(),
-                        object_interface: "wl_surface".to_string(),
-                        message: "too many pending DMA-BUF readiness fences".to_string(),
-                    },
-                );
+            if let Some(acquire_point) = acquire_point {
+                if !super::explicit_sync::track_pending_release(
+                    surface,
+                    MAX_PENDING_DMABUF_BLOCKERS_PER_CLIENT,
+                ) {
+                    reject_buffer_commit(
+                        state,
+                        surface,
+                        "too many pending explicit buffer releases",
+                    );
+                    return;
+                }
+                // Explicit timelines replace implicit DMA-BUF readiness.
+                // A failed eventfd/source must never apply an unsafe commit.
+                match acquire_point.generate_blocker() {
+                    Ok((blocker, source)) => {
+                        register_buffer_readiness(state, surface, blocker, source)
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "Failed to create explicit acquire fence blocker");
+                        reject_buffer_commit(
+                            state,
+                            surface,
+                            "failed to create explicit acquire fence blocker",
+                        );
+                    }
+                }
                 return;
             }
-
-            let token_slot = Rc::new(Cell::new(None));
-            let callback_token = token_slot.clone();
-            let callback_client_id = client_id.clone();
-
-            match state
-                .loop_handle
-                .insert_source(source, move |_, _, state: &mut Smallvil| {
-                    if let Some(token) = callback_token.get() {
-                        state.untrack_dmabuf_blocker_source(&callback_client_id, token);
-                    }
-                    if let Some(client_state) = client.get_data::<ClientState>() {
-                        let dh = state.display_handle.clone();
-                        client_state.compositor_state.blocker_cleared(state, &dh);
-                    }
-                    Ok(())
-                }) {
-                Ok(token) => {
-                    token_slot.set(Some(token));
-                    state.track_dmabuf_blocker_source(client_id, token);
-                    add_blocker(surface, blocker);
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        %err,
-                        "Failed to register DMA-BUF readiness source; commit will not be blocked"
-                    );
-                }
+            if let Ok((blocker, source)) = dmabuf.generate_blocker(Interest::READ) {
+                register_buffer_readiness(state, surface, blocker, source);
             }
         });
     }
@@ -129,7 +164,11 @@ impl CompositorHandler for Smallvil {
         // Smithay requires this to be the first commit-processing step: its
         // persistent renderer state is the source of truth for whether a
         // surface currently has a usable buffer.
-        on_commit_buffer_handler::<Self>(surface);
+        if self.drm_syncobj_state.is_some() {
+            super::explicit_sync::commit_buffers::<Self>(surface);
+        } else {
+            on_commit_buffer_handler::<Self>(surface);
+        }
         if let Some(gpu) = &self.udev_gpu {
             // `early_import` alone leaves a `MultiTexture` in Smithay's
             // multi-renderer cache. The udev bridge also exposes the copied
@@ -188,6 +227,11 @@ impl CompositorHandler for Smallvil {
     }
 
     fn destroyed(&mut self, surface: &WlSurface) {
+        super::explicit_sync::release_cancelled(surface);
+        self.remove_surface_buffer_blockers(surface);
+        if self.classic_tile_drag.as_ref() == Some(surface) {
+            self.classic_tile_drag = None;
+        }
         if let Some(client) = surface.client() {
             if let Some(client_state) = client.get_data::<ClientState>() {
                 let dh = self.display_handle.clone();
