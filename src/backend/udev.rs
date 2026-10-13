@@ -1927,7 +1927,7 @@ fn render_surface(
                     local.to_i32_round(),
                     scale,
                     1.0,
-                    Kind::Unspecified,
+                    Kind::Cursor,
                 );
             (elements, None)
         }
@@ -2167,7 +2167,12 @@ fn render_surface(
         renderer,
         &elements,
         [0.05, 0.05, 0.05, 1.0],
-        FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY,
+        FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY
+            | if state.config.hardware_cursor {
+                FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT
+            } else {
+                FrameFlags::empty()
+            },
     );
     sample.render = render_start.elapsed();
 

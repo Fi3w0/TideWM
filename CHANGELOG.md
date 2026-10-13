@@ -2,6 +2,11 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.146 — Native hardware cursors
+
+- Named, fallback and client cursor elements can use a KMS cursor plane. Smithay keeps the software path when plane size, format, transform or assignment is unsuitable. Drag-and-drop icons remain ordinary composited content.
+- `hardware_cursor = false` disables cursor-plane attempts for driver troubleshooting; the default is enabled. Cursor hiding, pointer lock and session lock use the existing visibility policy. Native mixed-scale/driver validation remains pending.
+
 ## 0.90.145 — Drag tiled windows between monitors
 
 - Completed tiled drags insert into the destination monitor’s active layout in Classic and Ocean. The existing same-monitor drop behavior is retained.

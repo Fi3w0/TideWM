@@ -71,7 +71,7 @@ pub fn fallback_glyph_element(
         None,
         None,
         None,
-        Kind::Unspecified,
+        Kind::Cursor,
     )
     .ok()
 }
@@ -272,7 +272,7 @@ impl Theme {
             None,
             None,
             None,
-            Kind::Unspecified,
+            Kind::Cursor,
         )
         .ok()
     }

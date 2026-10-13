@@ -1998,3 +1998,5 @@ Full flag/command list: `tidectl --help`.
 Everything else on the original protocol/rice compatibility list is implemented. Screencasting's remaining loose ends are multi-output capture and DMA-BUF export (see the entries above) — the DBus/portal plumbing, PipeWire MemFd frame delivery, and a real portal-mediated client on the standalone udev/DRM backend are all confirmed working end to end.
 
 Tiled window drags can cross monitor boundaries in Classic and Ocean: release on another monitor to insert into its active layout. Cancelling the drag restores the original layout. Same-monitor drops retain the existing swap/attachment behavior.
+
+`hardware_cursor = true` (default) permits the native DRM backend to use a KMS cursor plane when supported. Set it to `false` to force software cursor composition, including for drivers that accept cursor planes but display them poorly. Cursor appearance and hide settings are unchanged.

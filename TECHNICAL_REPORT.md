@@ -1,5 +1,7 @@
 # TideWM — Technical Report
 
+.146 enables runtime-tested KMS cursor-plane assignment with automatic software fallback and the hot-reloadable `hardware_cursor` override. Native NVIDIA and mixed-scale checks remain pending; no FPS gain is claimed.
+
 .145 implements completed cross-monitor tiled drag in Classic and Ocean, with transient previews and group/scale ownership updates. In-process protocol validation does not replace the pending native mixed-scale drag check.
 
 A fast technical reference for TideWM: what it is, what's implemented, current hardware-verification status, and how to build it. For the pitch, see [README.md](README.md). For the full config/action/IPC reference, see [DOCUMENTATION.md](DOCUMENTATION.md). For the Classic/Ocean spatial-engine design, see [SPATIAL_MODEL.md](SPATIAL_MODEL.md). For release-by-release detail, see [CHANGELOG.md](CHANGELOG.md).

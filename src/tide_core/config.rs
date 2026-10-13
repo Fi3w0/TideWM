@@ -1211,6 +1211,8 @@ pub struct Config {
     /// the correct default behavior, this is an opt-in override for anyone
     /// who wants the pointer to never disappear.
     pub cursor_always_visible: bool,
+    /// Permit KMS cursor planes, with automatic software fallback.
+    pub hardware_cursor: bool,
     /// Hides the udev backend's software cursor after this many
     /// milliseconds of no real pointer motion (niri's
     /// `cursor.hide-after-inactive-ms`). `0` (default) disables it --
@@ -1688,6 +1690,7 @@ impl Config {
             ripple: raw.ripple,
             ripple_presets: raw.ripple_presets,
             cursor_always_visible: raw.cursor_always_visible,
+            hardware_cursor: raw.hardware_cursor,
             cursor_hide_after_ms: raw.cursor_hide_after_ms,
             workspace_auto_back_and_forth: raw.workspace_auto_back_and_forth,
             workspace_count: raw.workspace_count,
@@ -2157,6 +2160,7 @@ struct RawConfig {
     ripple: RippleConfig,
     ripple_presets: HashMap<String, RippleConfig>,
     cursor_always_visible: bool,
+    hardware_cursor: bool,
     cursor_hide_after_ms: i32,
     workspace_auto_back_and_forth: bool,
     workspace_count: Option<u32>,
@@ -2327,6 +2331,7 @@ impl Default for RawConfig {
             ripple: RippleConfig::default(),
             ripple_presets: HashMap::new(),
             cursor_always_visible: false,
+            hardware_cursor: true,
             cursor_hide_after_ms: 0,
             workspace_auto_back_and_forth: false,
             workspace_count: None,
@@ -5362,6 +5367,7 @@ fn is_known_top_level_key(key: &str) -> bool {
             | "viscosity"
             | "backdrop_capture_scale"
             | "cursor_always_visible"
+            | "hardware_cursor"
             | "cursor_hide_after"
             | "auto_back_and_forth"
             | "workspace_count"
@@ -5393,6 +5399,7 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
             None => tracing::warn!(value, "Expected finite viscosity from 0.0 to 4.0, ignoring"),
         },
         "backdrop_capture_scale" => set_i32(&mut raw.backdrop_capture_scale, key, value),
+        "hardware_cursor" => set_bool(&mut raw.hardware_cursor, key, value),
         "cursor_always_visible" => set_bool(&mut raw.cursor_always_visible, key, value),
         "cursor_hide_after" => {
             // `0` is documented as "never hide", so zero must parse.
@@ -10780,6 +10787,7 @@ mod tests {
             ripple: RippleConfig::system_default(),
             ripple_presets: HashMap::new(),
             cursor_always_visible: false,
+            hardware_cursor: true,
             cursor_hide_after_ms: 0,
             workspace_auto_back_and_forth: false,
             workspace_count: None,
