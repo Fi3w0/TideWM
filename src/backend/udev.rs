@@ -23,6 +23,7 @@ use smithay::reexports::wayland_server::Resource;
 use smithay::{
     backend::{
         allocator::{
+            format::FormatSet,
             gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
             Format,
         },
@@ -65,11 +66,18 @@ use smithay::{
         },
         input::Libinput,
         rustix::fs::OFlags,
-        wayland_protocols::wp::presentation_time::server::wp_presentation_feedback,
+        wayland_protocols::wp::{
+            linux_dmabuf::zv1::server::zwp_linux_dmabuf_feedback_v1::TrancheFlags,
+            presentation_time::server::wp_presentation_feedback,
+        },
         wayland_server::{backend::GlobalId, protocol::wl_surface::WlSurface},
     },
     utils::DeviceFd,
-    wayland::{compositor::with_states, dmabuf::DmabufFeedbackBuilder, presentation::Refresh},
+    wayland::{
+        compositor::with_states,
+        dmabuf::{DmabufFeedback, DmabufFeedbackBuilder},
+        presentation::Refresh,
+    },
 };
 use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
 
@@ -167,7 +175,13 @@ smithay::backend::renderer::element::render_elements! {
     Dim = SolidColorRenderElement,
 }
 
+pub(crate) struct NativeDmabufFeedback {
+    render: DmabufFeedback,
+    formats: Vec<(DrmNode, FormatSet)>,
+}
+
 struct SurfaceData {
+    dmabuf_feedback: Option<(DmabufFeedback, DmabufFeedback)>,
     compositor: GbmDrmCompositor,
     output: Output,
     /// The `wl_output` global id, retracted when this surface disconnects.
@@ -484,11 +498,13 @@ pub fn init_udev(
     // our own scanout swapchain).
     {
         let primary_formats = gpu_manager.single_renderer(&render_node)?.dmabuf_formats();
+        let mut feedback_formats = vec![(render_node, primary_formats.clone())];
         let mut builder = DmabufFeedbackBuilder::new(render_node.dev_id(), primary_formats);
         for gpu in &opened {
             let formats = gpu_manager
                 .single_renderer(&gpu.render_node)?
                 .dmabuf_formats();
+            feedback_formats.push((gpu.render_node, formats.clone()));
             builder = builder.add_preference_tranche(gpu.render_node.dev_id(), None, formats);
         }
         match builder.build() {
@@ -500,6 +516,10 @@ pub fn init_udev(
                         &default_feedback,
                     );
                 state.dmabuf_global = Some(global);
+                state.native_dmabuf_feedback = Some(NativeDmabufFeedback {
+                    render: default_feedback,
+                    formats: feedback_formats,
+                });
             }
             Err(e) => {
                 tracing::warn!(%e, "Failed to build dmabuf feedback; GPU clients will fall back to shm");
@@ -1238,22 +1258,25 @@ fn refresh_dmabuf_feedback<'a>(
     let Ok(primary_renderer) = manager.single_renderer(&gpu.primary_render_node) else {
         return;
     };
-    let mut builder = DmabufFeedbackBuilder::new(
-        gpu.primary_render_node.dev_id(),
-        primary_renderer.dmabuf_formats(),
-    );
+    let primary_formats = primary_renderer.dmabuf_formats();
+    let mut formats = vec![(gpu.primary_render_node, primary_formats.clone())];
+    let mut builder = DmabufFeedbackBuilder::new(gpu.primary_render_node.dev_id(), primary_formats);
     for device in devices {
         let Ok(renderer) = manager.single_renderer(&device.render_node) else {
             continue;
         };
-        builder = builder.add_preference_tranche(
-            device.render_node.dev_id(),
-            None,
-            renderer.dmabuf_formats(),
-        );
+        let device_formats = renderer.dmabuf_formats();
+        formats.push((device.render_node, device_formats.clone()));
+        builder = builder.add_preference_tranche(device.render_node.dev_id(), None, device_formats);
     }
     match builder.build() {
-        Ok(feedback) => state.dmabuf_state.set_default_feedback(&global, &feedback),
+        Ok(feedback) => {
+            state.dmabuf_state.set_default_feedback(&global, &feedback);
+            state.native_dmabuf_feedback = Some(NativeDmabufFeedback {
+                render: feedback,
+                formats,
+            });
+        }
         Err(error) => tracing::warn!(%error, "Failed to refresh multi-GPU DMA-BUF feedback"),
     }
 }
@@ -1506,6 +1529,7 @@ fn create_surface(
     state.refresh_ext_workspaces();
 
     Some(SurfaceData {
+        dmabuf_feedback: None,
         compositor,
         output,
         global,
@@ -2223,6 +2247,49 @@ fn render_surface(
             // dropped, which discards the callbacks -- the correct answer
             // for content that never reached the display.
             let feedback = state.take_presentation_feedback(output, &render_result.states);
+            if let Some(default) = &state.native_dmabuf_feedback {
+                if surface
+                    .dmabuf_feedback
+                    .as_ref()
+                    .is_none_or(|(render, _)| render != &default.render)
+                {
+                    // Limit the primary-plane tranche to formats we can also
+                    // import, so a rejected plane still has a render fallback.
+                    let (primary, formats) = &default.formats[0];
+                    let plane_formats = &surface.compositor.surface().plane_info().formats;
+                    let scanout_formats: Vec<_> =
+                        plane_formats.intersection(formats).copied().collect();
+                    let mut builder = DmabufFeedbackBuilder::new(primary.dev_id(), formats.clone());
+                    if let Ok(device) = surface.compositor.surface().device_fd().dev_id() {
+                        builder = builder.add_preference_tranche(
+                            device,
+                            Some(TrancheFlags::Scanout),
+                            scanout_formats,
+                        );
+                    }
+                    for (node, formats) in default.formats.iter().skip(1) {
+                        builder =
+                            builder.add_preference_tranche(node.dev_id(), None, formats.clone());
+                    }
+                    match builder.build() {
+                        Ok(scanout) => {
+                            surface.dmabuf_feedback = Some((default.render.clone(), scanout))
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "Failed to build output DMA-BUF feedback")
+                        }
+                    }
+                }
+                if let Some((render, scanout)) = &surface.dmabuf_feedback {
+                    state.send_native_dmabuf_feedback(
+                        output,
+                        &render_result.states,
+                        render,
+                        scanout,
+                    );
+                }
+            }
+
             let queue_start = Instant::now();
             let retry = match surface.compositor.queue_frame(Some(feedback)) {
                 Ok(()) => {

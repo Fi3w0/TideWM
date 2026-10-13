@@ -2,6 +2,11 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.147 — Surface DMA-BUF render and scanout feedback
+
+- Native surfaces receive output-specific feedback selected from the actual frame’s render state, including decorated windows. Scanout preferences contain only primary-plane formats that the selected renderer can import; rejection retains a render fallback.
+- Output feedback is cached and refreshed after GPU format/offload changes; existing GPU selection and offload preference formats remain available. Windows, popups, layers, cursor/DND trees and lock surfaces use their output visibility policy. Native allocation/scanout validation remains pending.
+
 ## 0.90.146 — Native hardware cursors
 
 - Named, fallback and client cursor elements can use a KMS cursor plane. Smithay keeps the software path when plane size, format, transform or assignment is unsuitable. Drag-and-drop icons remain ordinary composited content.

@@ -861,6 +861,7 @@ pub struct Smallvil {
     /// global means no client ever binds it, so `DmabufHandler` methods
     /// never fire.
     pub dmabuf_state: DmabufState,
+    pub(crate) native_dmabuf_feedback: Option<crate::backend::udev::NativeDmabufFeedback>,
     pub dmabuf_global: Option<DmabufGlobal>,
     /// Shared multi-GPU manager and selected primary render node. The udev
     /// render loop and DMA-BUF handler borrow it only on the single calloop
@@ -3998,6 +3999,7 @@ impl Smallvil {
             keyboard_focus: KeyboardFocusTarget::None,
 
             dmabuf_state: DmabufState::new(),
+            native_dmabuf_feedback: None,
             dmabuf_global: None,
             udev_gpu: None,
             session: None,
@@ -6030,6 +6032,81 @@ impl Smallvil {
         }
 
         feedback
+    }
+
+    pub(crate) fn send_native_dmabuf_feedback(
+        &self,
+        output: &Output,
+        states: &RenderElementStates,
+        render: &smithay::wayland::dmabuf::DmabufFeedback,
+        scanout: &smithay::wayland::dmabuf::DmabufFeedback,
+    ) {
+        use smithay::{
+            backend::renderer::element::utils::select_dmabuf_feedback,
+            desktop::utils::send_dmabuf_feedback_surface_tree,
+        };
+        let select = |surface: &WlSurface, _: &smithay::wayland::compositor::SurfaceData| {
+            select_dmabuf_feedback(surface, states, render, scanout)
+        };
+        // Presentation collection has just refreshed window/layer primary
+        // output state from the actual frame, including decorated IDs.
+        if matches!(self.session_lock, SessionLock::Unlocked) {
+            for placement in self.render_placements(output).unwrap_or_default() {
+                placement.window.send_dmabuf_feedback(
+                    output,
+                    surface_primary_scanout_output,
+                    select,
+                );
+            }
+            for layer in layer_map_for_output(output).layers() {
+                if !self.unmapped_layer_surfaces.contains(layer.wl_surface()) {
+                    layer.send_dmabuf_feedback(output, surface_primary_scanout_output, select);
+                }
+            }
+        } else if let Some(lock) = self.lock_surfaces.get(output) {
+            send_dmabuf_feedback_surface_tree(
+                lock.wl_surface(),
+                output,
+                |_, _| Some(output.clone()),
+                select,
+            );
+        }
+        let cursor = match &self.cursor_status {
+            CursorImageStatus::Surface(surface)
+                if matches!(self.session_lock, SessionLock::Unlocked) =>
+            {
+                Some(surface)
+            }
+            _ => None,
+        };
+        for surface in cursor.into_iter().chain(
+            self.dnd_icon
+                .as_ref()
+                .filter(|_| matches!(self.session_lock, SessionLock::Unlocked)),
+        ) {
+            smithay::wayland::compositor::with_surface_tree_downward(
+                surface,
+                (),
+                |_, _, _| smithay::wayland::compositor::TraversalAction::DoChildren(()),
+                |surface, data, _| {
+                    update_surface_primary_scanout_output(
+                        surface,
+                        output,
+                        data,
+                        None,
+                        states,
+                        default_primary_scanout_output_compare,
+                    );
+                },
+                |_, _, _| true,
+            );
+            send_dmabuf_feedback_surface_tree(
+                surface,
+                output,
+                surface_primary_scanout_output,
+                select,
+            );
+        }
     }
 
     /// Marks that something changed and a frame needs to be composited.

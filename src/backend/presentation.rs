@@ -130,6 +130,50 @@ mod tests {
     use smithay::backend::renderer::element::{RenderElementPresentationState, RenderElementState};
 
     #[test]
+    fn decorated_scanout_feedback_follows_the_current_frame_identity() {
+        use smithay::{
+            backend::{
+                allocator::{Format, Fourcc, Modifier},
+                renderer::element::utils::select_dmabuf_feedback,
+            },
+            wayland::dmabuf::DmabufFeedbackBuilder,
+        };
+        let format = Format {
+            code: Fourcc::Xrgb8888,
+            modifier: Modifier::Linear,
+        };
+        let render = DmabufFeedbackBuilder::new(1, [format]).build().unwrap();
+        let scanout = DmabufFeedbackBuilder::new(2, [format]).build().unwrap();
+        let surface = Id::new();
+        let decorated = surface.clone().namespaced(12);
+        let mut states = RenderElementStates {
+            states: [(
+                decorated.clone(),
+                RenderElementState {
+                    visible_area: 512,
+                    presentation_state: RenderElementPresentationState::ZeroCopy,
+                    needs_capture: false,
+                },
+            )]
+            .into(),
+        };
+        assert_eq!(
+            select_dmabuf_feedback(surface.clone(), &states, &render, &scanout),
+            &render
+        );
+        alias_surface_state(&mut states, &decorated, &surface);
+        assert_eq!(
+            select_dmabuf_feedback(surface.clone(), &states, &render, &scanout),
+            &scanout
+        );
+        let next_frame = RenderElementStates::default();
+        assert_eq!(
+            select_dmabuf_feedback(surface, &next_frame, &render, &scanout),
+            &render
+        );
+    }
+
+    #[test]
     fn decorated_report_preserves_damage_identity_and_tracks_new_style_each_frame() {
         let surface = Id::new();
         let rounded = surface.clone().namespaced(12);

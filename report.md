@@ -1,5 +1,7 @@
 # TideWM repository audit
 
+.147 adds cached per-output DMA-BUF render/scanout feedback, selected from current frame states after decorated identity reporting. Primary-plane preferences are intersected with renderer import formats, retaining the configured offload devices. Native modifier/allocation/scanout validation remains pending.
+
 .146 enables runtime-tested KMS cursor-plane assignment with automatic software fallback and the hot-reloadable `hardware_cursor` override. Native NVIDIA and mixed-scale checks remain pending; no FPS gain is claimed.
 
 .145 implements completed cross-monitor tiled drag in Classic and Ocean, with transient previews and group/scale ownership updates. In-process protocol validation does not replace the pending native mixed-scale drag check.
