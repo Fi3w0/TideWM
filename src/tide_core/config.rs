@@ -933,6 +933,11 @@ pub enum Action {
     /// behavior (`OceanSpace::animate_to_bookmark`), since app-slots are
     /// inherently numbered.
     SwitchWorkspace(WorkspaceRef),
+    /// `workspace-on:<output>:<N>`: the same switch, on the named output
+    /// instead of `primary_output`. For bars and other external tools,
+    /// where the click lands on one monitor while the focused window may
+    /// sit on another.
+    SwitchWorkspaceOn(String, WorkspaceRef),
     MoveToWorkspace(WorkspaceRef),
     /// Swaps the current output's active workspace content with the named
     /// output's. No default keybind -- output names are machine-specific
@@ -9357,6 +9362,18 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
     if let Some(n) = action.strip_prefix("workspace:") {
         return Some(Action::SwitchWorkspace(parse_workspace_ref(n)));
     }
+    // Connector names never contain ':', so the last ':' splits output
+    // from workspace.
+    if let Some(rest) = action.strip_prefix("workspace-on:") {
+        let (output, n) = rest.rsplit_once(':')?;
+        if output.is_empty() || n.is_empty() {
+            return None;
+        }
+        return Some(Action::SwitchWorkspaceOn(
+            output.to_string(),
+            parse_workspace_ref(n),
+        ));
+    }
     if let Some(n) = action.strip_prefix("move-to-workspace:") {
         return Some(Action::MoveToWorkspace(parse_workspace_ref(n)));
     }
@@ -9892,6 +9909,21 @@ mod tests {
             Some(Action::SwitchWorkspace(WorkspaceRef::Number(2)))
         ));
         assert!(parsed.tablet_mode_off.is_none());
+    }
+
+    #[test]
+    fn workspace_on_parses_output_and_ref() {
+        assert!(matches!(
+            parse_action("workspace-on:DP-4:3"),
+            Some(Action::SwitchWorkspaceOn(ref o, WorkspaceRef::Number(3))) if o == "DP-4"
+        ));
+        assert!(matches!(
+            parse_action("workspace-on:HDMI-A-2:web"),
+            Some(Action::SwitchWorkspaceOn(ref o, WorkspaceRef::Name(ref n))) if o == "HDMI-A-2" && n == "web"
+        ));
+        assert!(parse_action("workspace-on:DP-4").is_none());
+        assert!(parse_action("workspace-on::3").is_none());
+        assert!(parse_action("workspace-on:DP-4:").is_none());
     }
 
     #[test]

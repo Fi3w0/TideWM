@@ -1862,6 +1862,7 @@ The same set of strings works after `bind ... { }` at the top level or inside a 
 
 **Workspaces**
 - `workspace:<N>` — Classic switches to workspace `N`; Ocean jumps to numeric bookmark/reef `N` without creating a workspace
+- `workspace-on:<output-name>:<N>` — the same switch on the named output instead of the focused one; meant for bars, where a click on one monitor's workspace strip must not switch the monitor that holds the focused window (`tidectl workspace-on DP-4 3`)
 - `move-to-workspace:<N>` — move the focused window to workspace `N`
 - `swap-workspaces:<output-name>` — swap this output's and the named output's active-workspace content
 - `workspace:<name>` / `move-to-workspace:<name>` — same two actions, addressed by a `workspace_name` alias instead of a number (see below) — a workspace's real identity is always its number, this is just another way to spell it

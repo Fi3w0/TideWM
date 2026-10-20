@@ -659,6 +659,11 @@ fn build_request(args: &[String]) -> Result<Value, String> {
         "workspace" if !rest.is_empty() => {
             Ok(action_request(&format!("workspace:{}", rest.join(" "))))
         }
+        "workspace-on" if rest.len() >= 2 => Ok(action_request(&format!(
+            "workspace-on:{}:{}",
+            rest[0],
+            rest[1..].join(" ")
+        ))),
         "move-to-workspace" if !rest.is_empty() => Ok(action_request(&format!(
             "move-to-workspace:{}",
             rest.join(" ")
@@ -951,6 +956,7 @@ ACTIONS:
 
     A few space-separated shorthands, equivalent to the colon syntax above:
         tidectl workspace <N>              same as "workspace:N"
+        tidectl workspace-on <output> <N>  same as "workspace-on:<output>:N"
         tidectl move-to-workspace <N>      same as "move-to-workspace:N"
         tidectl swap-workspaces <output>   same as "swap-workspaces:<output>"
         tidectl spawn <cmd...>             same as "spawn:<cmd...>"

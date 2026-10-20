@@ -3036,6 +3036,23 @@ impl Smallvil {
                     self.move_to_workspace(&surface, workspace);
                 }
             }
+            Action::SwitchWorkspaceOn(name, workspace) => {
+                let Some(output) = self.output_by_name(&name) else {
+                    tracing::warn!(output = %name, "workspace-on: no such output");
+                    return;
+                };
+                if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+                    // Same app-slot meaning `workspace:N` has under Ocean.
+                    if let crate::config::WorkspaceRef::Number(number) = workspace {
+                        self.jump_to_app_slot(&output, number as usize);
+                    }
+                    return;
+                }
+                let Some(workspace) = self.resolve_workspace_ref(&workspace) else {
+                    return;
+                };
+                self.switch_workspace(&output, workspace);
+            }
             Action::SwapWorkspacesWithOutput(name) => {
                 let Some(this_output) = self.primary_output() else {
                     return;

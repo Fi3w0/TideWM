@@ -2,6 +2,10 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.149 — Output-addressed workspace switching
+
+- New `workspace-on:<output>:<N>` action (and `tidectl workspace-on <output> <N>`) switches the named output's workspace instead of the focused window's output. Bars and other external tools need it: a click on one monitor's workspace strip must not switch the monitor that holds the focused window. Ocean maps a numbered ref to that output's app slot, like `workspace:N`. Unknown outputs warn and do nothing; a malformed action is rejected at parse time.
+
 ## 0.90.148 — Native explicit buffer synchronization
 
 - Advertise `linux-drm-syncobj-v1` only when the selected DRM device supports syncobj eventfd. Pending acquire points block surface transactions before renderer import; clients without explicit points retain implicit DMA-BUF readiness.
