@@ -488,6 +488,9 @@ impl Smallvil {
         Self::send_forced_configure(&surface);
 
         self.retile();
+        if self.focused_window_surface().as_ref() == Some(surface.wl_surface()) {
+            self.reveal_scroll_window(surface.wl_surface());
+        }
     }
 
     fn do_maximize_request(&mut self, surface: ToplevelSurface) {
@@ -1785,6 +1788,7 @@ impl Smallvil {
     pub(crate) fn do_unfullscreen(&mut self, surface: &ToplevelSurface) {
         let wl_surface = surface.wl_surface();
         let entry = self.fullscreen.remove(wl_surface);
+        self.layout.scroll.fullscreen_extents.remove(wl_surface);
 
         surface.with_pending_state(|state| {
             state.states.unset(xdg_toplevel::State::Fullscreen);

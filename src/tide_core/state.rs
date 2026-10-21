@@ -2674,8 +2674,8 @@ impl Smallvil {
             .and_then(|sample| sample.size)
             .unwrap_or_else(|| old_rect.size.to_f64());
         let from_offset = Point::from((
-            (old_rect.loc.x - new_rect.loc.x) as f64 + current_offset.x,
-            (old_rect.loc.y - new_rect.loc.y) as f64 + current_offset.y,
+            (f64::from(old_rect.loc.x) - f64::from(new_rect.loc.x)) + current_offset.x,
+            (f64::from(old_rect.loc.y) - f64::from(new_rect.loc.y)) + current_offset.y,
         ));
         let size_changed = animations.movement.animate_size
             && ((current_size.w - new_rect.size.w as f64).abs() >= 0.01
@@ -2693,7 +2693,18 @@ impl Smallvil {
                 new_rect.size.to_f64(),
             ),
         );
-        self.request_redraw();
+        let scroll_output = (self.config.spatial_engine == crate::config::SpatialEngine::Scroll)
+            .then(|| {
+                self.layout
+                    .output_of(surface)
+                    .and_then(|name| self.output_by_name(name))
+            })
+            .flatten();
+        if let Some(output) = scroll_output {
+            self.request_output_redraw(&output);
+        } else {
+            self.request_redraw();
+        }
     }
 
     /// Transfers the last drawable surface snapshot into a short close
@@ -9317,6 +9328,26 @@ impl Smallvil {
         self.layout.scroll.config = (self.config.spatial_engine
             == crate::config::SpatialEngine::Scroll)
             .then_some(self.config.scroll);
+        self.layout.scroll.fullscreen_extents =
+            if self.config.spatial_engine == crate::config::SpatialEngine::Scroll {
+                self.fullscreen
+                    .iter()
+                    .filter_map(|(surface, entry)| {
+                        if !self.layout.contains(surface) {
+                            return None;
+                        }
+                        let output = self.output_by_name(&entry.output)?;
+                        let geometry = self.space.output_geometry(&output)?;
+                        let extent = match self.config.scroll.orientation {
+                            crate::scroll::Orientation::Horizontal => geometry.size.w,
+                            crate::scroll::Orientation::Vertical => geometry.size.h,
+                        };
+                        Some((surface.clone(), f64::from(extent)))
+                    })
+                    .collect()
+            } else {
+                HashMap::new()
+            };
         self.buoyancy_dirty = true;
         if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
             self.retile_ocean(skip_configure_for);
@@ -9352,7 +9383,36 @@ impl Smallvil {
                         (self.fullscreen.get(&surface), full_output_geo)
                     {
                         if entry.output == output.name() {
-                            rect = full;
+                            if self.config.spatial_engine == crate::config::SpatialEngine::Scroll {
+                                let gap = gaps
+                                    .max(0)
+                                    .min(area.size.w.min(area.size.h).saturating_sub(1) / 2);
+                                let translation = match self.config.scroll.orientation {
+                                    crate::scroll::Orientation::Horizontal => (
+                                        i64::from(rect.loc.x)
+                                            - i64::from(area.loc.x)
+                                            - i64::from(gap),
+                                        0,
+                                    ),
+                                    crate::scroll::Orientation::Vertical => (
+                                        0,
+                                        i64::from(rect.loc.y)
+                                            - i64::from(area.loc.y)
+                                            - i64::from(gap),
+                                    ),
+                                };
+                                let x = (i64::from(full.loc.x) + translation.0).clamp(
+                                    i64::from(i32::MIN),
+                                    i64::from(i32::MAX - full.size.w.max(1)),
+                                ) as i32;
+                                let y = (i64::from(full.loc.y) + translation.1).clamp(
+                                    i64::from(i32::MIN),
+                                    i64::from(i32::MAX - full.size.h.max(1)),
+                                ) as i32;
+                                rect = Rectangle::new((x, y).into(), full.size);
+                            } else {
+                                rect = full;
+                            }
                         }
                     } else if self.pseudo_tiled.contains(&surface) {
                         rect = crate::layout::scale_centered(rect, self.config.pseudo_tile_scale);

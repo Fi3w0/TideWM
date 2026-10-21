@@ -44,6 +44,8 @@ impl Default for ScrollConfig {
 #[derive(Default)]
 pub struct ScrollState {
     pub config: Option<ScrollConfig>,
+    /// Per-retile snapshot of full-output extents; FullscreenEntry remains authoritative.
+    pub fullscreen_extents: HashMap<WlSurface, f64>,
     offsets: HashMap<(String, u32), f64>,
     proportions: HashMap<WlSurface, f64>,
 }
@@ -84,6 +86,7 @@ impl ScrollState {
     }
     pub fn forget(&mut self, surface: &WlSurface) {
         self.proportions.remove(surface);
+        self.fullscreen_extents.remove(surface);
     }
     pub fn prune(&mut self, populated: &[(String, u32)]) {
         self.offsets.retain(|(output, workspace), _| {

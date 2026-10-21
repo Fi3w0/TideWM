@@ -2,6 +2,12 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.159 — Fullscreen follows its scrolling column
+
+- A tiled fullscreen window reserves the owning output's full extent in Scroll and moves with its column. Focusing a neighboring column no longer leaves the fullscreen app covering it. Entering/exiting fullscreen reveals the focused tile, with per-retile fullscreen geometry derived from the existing authoritative entries and live output size.
+- Scroll movement-animation damage follows the owning output, and movement deltas use floating-point subtraction before conversion to avoid overflowing distant logical positions.
+- The actual nested-client regression reproduced the fullscreen overlap on .158 and passes after the correction, along with fullscreen restoration and shared frost captures. No native session or installation changed.
+
 ## 0.90.158 — Experimental Scroll spatial engine
 
 - `engine = scroll` adds independent scrolling on each output. `scroll.workspaces = separate` gives each workspace a strip; `sections` lays out tiled workspace sections consecutively on that output. Horizontal/vertical orientation, proportional tile sizing, optional focused-tile centering, keyboard resize and viewport actions are configurable. Existing groups and workspace ownership are reused rather than duplicated.

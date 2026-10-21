@@ -92,8 +92,8 @@ by this compositor change.
   ambiguity, lock refusal and all six directed engine transitions.
 - Private virtual-host nested GLES checks use actual GTK clients and captures:
   stable tile sizes during scrolling, horizontal/vertical navigation, sections,
-  hidden workspace activation, PID lookup, group-tab migration and fullscreen
-  restoration. The native desktop is not involved.
+  hidden workspace activation, PID lookup, group-tab migration, scrolling away from a fullscreen column, fullscreen
+  restoration and shared frost captures. The native desktop is not involved.
 - Physical dual-output drag/scale/hotplug, actual touchpad gesture feel and the
   complete feature matrix remain native validation work. Nested winit exposes
   only one output, so it cannot establish those results. No CPU/GPU or memory

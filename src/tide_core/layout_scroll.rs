@@ -55,7 +55,10 @@ impl Layouts {
                         .toplevel()
                         .map(|t| self.scroll.proportion(t.wl_surface()))
                         .unwrap_or(cfg.tile_proportion);
-                    let extent = (viewport * proportion).round().max(1.0);
+                    let extent = window
+                        .toplevel()
+                        .and_then(|t| self.scroll.fullscreen_extents.get(t.wl_surface()).copied())
+                        .unwrap_or_else(|| (viewport * proportion).round().max(1.0));
                     result.push((number, Some(window), start, extent));
                     start += extent + f64::from(gap.max(0));
                 }
@@ -234,6 +237,27 @@ mod tests {
         layouts.insert("left", 3, protocol.window(), None);
         assert_eq!(layouts.scroll.offset("left", 3), 0.0);
         assert!(layouts.scroll.offset("left", 1) > 0.0);
+    }
+
+    #[test]
+    fn fullscreen_columns_reserve_output_extent_without_covering_the_next_tile() {
+        let mut protocol = ProtocolFixture::new();
+        let mut layouts = Layouts::default();
+        layouts.scroll.config = Some(ScrollConfig::default());
+        let fullscreen = protocol.window();
+        let neighbor = protocol.window();
+        layouts.insert("screen", 1, fullscreen.clone(), None);
+        layouts.insert("screen", 1, neighbor.clone(), None);
+        let area = Rectangle::new((0, 0).into(), (1301, 701).into());
+        let surface = fullscreen.toplevel().unwrap().wl_surface().clone();
+        layouts.scroll.fullscreen_extents.insert(surface, 1301.0);
+        let before = layouts.layout("screen", 1, area, 7);
+        assert_eq!(before[0].1.size.w, 1301);
+        assert!(layouts.scroll_reveal(neighbor.toplevel().unwrap().wl_surface(), area, 7));
+        let after = layouts.layout("screen", 1, area, 7);
+        assert!(after[0].1.loc.x < 0);
+        assert!(after[1].1.loc.x >= area.loc.x);
+        assert!(after[1].1.loc.x + after[1].1.size.w <= area.size.w);
     }
 
     #[test]

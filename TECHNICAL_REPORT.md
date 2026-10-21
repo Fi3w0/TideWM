@@ -6,12 +6,12 @@ A fast technical reference for TideWM: what it is, what's implemented, current h
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). A full tiling-WM feature set (BSP/master-stack/cascade layouts, workspaces, multi-monitor, layer-shell, IPC, XWayland) with a water/aqua render identity layered on top as a fully toggleable effect stack, plus a second spatial engine ("Ocean") as an alternative to numbered workspaces.
 
-Current development version: **0.90.158**, second major pre-release. 1.0 is intentionally reserved until the effect stack and Ocean get a broader real-hardware pass (see CHANGELOG).
+Current development version: **0.90.159**, second major pre-release. 1.0 is intentionally reserved until the effect stack and Ocean get a broader real-hardware pass (see CHANGELOG).
 
 ## Architecture
 
 - **Two backends**: `winit` (nested inside an existing session, the primary dev/test loop) and `udev`/DRM (standalone TTY session, the real daily-driver path).
-- **Three spatial engines**, chosen with `spatial_engine = classic|ocean` and switchable live on a config hot reload, migrating every window in place with no restart.
+- **Three spatial engines**, chosen with `engine = classic|ocean|scroll` and switchable live on a config hot reload, migrating every window in place with no restart.
 - **XWayland** via a spawned [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite) process rather than an embedded X11 window manager, so X11 clients arrive as ordinary `xdg_shell` surfaces.
 - **Render pipeline**: one shared backdrop-capture pipeline feeds water-glass/frost glass, then shadow, then rounding/borders, then window-open/close/move animation. Each output render or desktop capture shares one frame-owned placement snapshot across those consumers; the same element walk feeds both backends, screenshots, screencasts, and workspace-transition captures, so effects don't need parallel implementations per output path.
 - **RAM target**: effect-scaled with a 2GB absolute ceiling. Real measurements come in far below that: ~50MB PSS for a plain tiling setup (effects off), ~60-70MB PSS idle and ~63MB with nine glass windows with the full water stack on (real AMD, 0.90.59) -- roughly half of same-machine Hyprland.

@@ -10,7 +10,7 @@ This is a static code review, not a claim that every issue below was reproduced 
 
 Local `scroll-engine` development adds .157 shared exact-window/app activation
 and notification-source lookup, followed by .158 experimental per-output Scroll
-geometry and live three-engine switching. SCROLL.md is the scope/validation guide;
+geometry and live three-engine switching, and .159 fullscreen column correction. SCROLL.md is the scope/validation guide;
 the original audit ledger below remains historical and no unrelated finding is
 closed by this work. Source and protocol-state checks do not establish native
 dual-monitor, hardware-gesture or hotplug behavior. Nothing is installed or pushed.
