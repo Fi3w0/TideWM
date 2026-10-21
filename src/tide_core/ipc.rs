@@ -58,6 +58,11 @@ enum Request {
     Windows,
     FocusedWindow,
     ActiveSubmap,
+    /// XKB layout group and layout names, for bars showing or switching
+    /// the input language. Same shape as niri's `keyboard-layouts`:
+    /// `current_idx` is a zero-based index into `names`; `codes` is
+    /// TideWM's own addition, the configured `xkb_layout` split on commas.
+    KeyboardLayouts,
     /// Compositor-side facts for `tidectl doctor`/`report`: version, build
     /// profile, commit, backend, uptime, engine, config path and warnings,
     /// and counts that a bug report wants without guessing from the host.
@@ -113,16 +118,19 @@ pub(crate) enum EventKind {
     Depth,
     /// `config-reloaded`.
     Config,
+    /// `layout-changed`.
+    Layout,
 }
 
 impl EventKind {
-    const ALL: [EventKind; 6] = [
+    const ALL: [EventKind; 7] = [
         EventKind::Window,
         EventKind::Workspace,
         EventKind::Focus,
         EventKind::Urgent,
         EventKind::Depth,
         EventKind::Config,
+        EventKind::Layout,
     ];
 
     /// Lowercase kebab string used in the ack and in the `events` array of
@@ -137,6 +145,7 @@ impl EventKind {
             EventKind::Urgent => "urgent",
             EventKind::Depth => "depth",
             EventKind::Config => "config",
+            EventKind::Layout => "layout",
         }
     }
 }
@@ -195,6 +204,14 @@ pub(crate) enum IpcEvent {
         tier: u8,
     },
     ConfigReloaded,
+    /// The active XKB layout group or the layout list changed. Carries the
+    /// snapshot directly because it is read under the keyboard lock, where
+    /// `to_json_line`'s shared `&Smallvil` cannot call `with_xkb_state`.
+    LayoutChanged {
+        group: u32,
+        names: Vec<String>,
+        codes: Vec<String>,
+    },
 }
 
 impl IpcEvent {
@@ -211,6 +228,7 @@ impl IpcEvent {
             IpcEvent::UrgentChanged { .. } => EventKind::Urgent,
             IpcEvent::DepthChanged { .. } => EventKind::Depth,
             IpcEvent::ConfigReloaded => EventKind::Config,
+            IpcEvent::LayoutChanged { .. } => EventKind::Layout,
         }
     }
 
@@ -228,6 +246,7 @@ impl IpcEvent {
             IpcEvent::UrgentChanged { .. } => "urgent-changed",
             IpcEvent::DepthChanged { .. } => "depth-changed",
             IpcEvent::ConfigReloaded => "config-reloaded",
+            IpcEvent::LayoutChanged { .. } => "layout-changed",
         }
     }
 
@@ -278,6 +297,15 @@ impl IpcEvent {
                 }
                 snap
             }
+            IpcEvent::LayoutChanged {
+                group,
+                names,
+                codes,
+            } => json!({
+                "current_idx": group,
+                "names": names,
+                "codes": codes,
+            }),
             IpcEvent::ConfigReloaded => serde_json::Value::Null,
         };
         let mut line = serde_json::to_vec(&json!({ "event": self.event_name(), "data": data }))
@@ -799,6 +827,14 @@ fn handle_request(state: &mut Smallvil, request: Request) -> serde_json::Value {
         Request::Windows => json!({ "ok": true, "data": windows_json(state) }),
         Request::FocusedWindow => json!({ "ok": true, "data": focused_window_json(state) }),
         Request::ActiveSubmap => json!({ "ok": true, "data": state.active_submap }),
+        Request::KeyboardLayouts => match state.keyboard_layouts() {
+            Some((group, names)) => json!({ "ok": true, "data": {
+                "current_idx": group,
+                "names": names,
+                "codes": state.keyboard_layout_codes(),
+            } }),
+            None => json!({ "ok": false, "error": "no keyboard on the seat" }),
+        },
         Request::Diagnostics => json!({ "ok": true, "data": diagnostics_json(state) }),
         Request::Perf => json!({ "ok": true, "data": perf_snapshot_json(state) }),
         // Subscribe is intercepted upstream in `register_connection` before
@@ -1478,6 +1514,15 @@ mod tests {
                 IpcEvent::ConfigReloaded,
                 EventKind::Config,
                 "config-reloaded",
+            ),
+            (
+                IpcEvent::LayoutChanged {
+                    group: 1,
+                    names: vec!["English (US)".into(), "Russian".into()],
+                    codes: vec!["us".into(), "ru".into()],
+                },
+                EventKind::Layout,
+                "layout-changed",
             ),
         ];
         for (event, kind, name) in cases {

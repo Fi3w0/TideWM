@@ -275,6 +275,11 @@ pub struct Smallvil {
     /// burning frames at full rate forever. Pointer motion alone is not
     /// enough -- keys and touch must reset it too.
     pub(crate) last_activity: Instant,
+    /// Last XKB layout group + layout names announced over IPC, so
+    /// `layout-changed` fires only on an actual change (the `grp:` xkb
+    /// option changes the group inside `keyboard.input`, where no action
+    /// runs). `None` until the first check.
+    pub(crate) keyboard_layout_state: Option<(u32, Vec<String>)>,
     /// Whether a `cursor_hide_after_ms` wake-up timer is currently pending.
     /// `note_pointer_motion` only arms a new timer when this is `false`,
     /// rather than spawning a fresh calloop source on every single motion
@@ -3849,6 +3854,7 @@ impl Smallvil {
             config_reload_timer_armed: false,
             last_pointer_motion: Instant::now(),
             last_activity: Instant::now(),
+            keyboard_layout_state: None,
             cursor_idle_timer_armed: false,
             redraw_requests: crate::redraw::RedrawRequests::global(),
             redraw_wakeup: None,
@@ -11367,6 +11373,53 @@ impl Smallvil {
         }
     }
 
+    /// Current XKB layout group and every layout name in the keymap, for
+    /// `tidectl keyboard-layouts` (also niri's `keyboard-layouts` shape:
+    /// `current_idx` is zero-based).
+    pub fn keyboard_layouts(&mut self) -> Option<(u32, Vec<String>)> {
+        let keyboard = self.seat.get_keyboard()?;
+        Some(keyboard.with_xkb_state(self, |context| {
+            let xkb = context.xkb().lock().unwrap();
+            (
+                xkb.active_layout().0,
+                xkb.layouts()
+                    .map(|layout| xkb.layout_name(layout).to_string())
+                    .collect(),
+            )
+        }))
+    }
+
+    /// The configured `xkb_layout` codes (`us,ru,es` -> `[us, ru, es]`),
+    /// positionally matching `keyboard_layouts()`'s names.
+    pub fn keyboard_layout_codes(&self) -> Vec<String> {
+        self.config
+            .input
+            .xkb_layout
+            .split(',')
+            .map(|code| code.trim().to_string())
+            .filter(|code| !code.is_empty())
+            .collect()
+    }
+
+    /// Broadcasts `layout-changed` when the active group (or the layout
+    /// list) differs from the last announced one. Called after keyboard
+    /// input and after `switch-layout`, so both a `grp:` xkb key and an
+    /// IPC/bind action reach subscribers without polling.
+    pub fn notify_keyboard_layout_changed(&mut self) {
+        let Some((group, names)) = self.keyboard_layouts() else {
+            return;
+        };
+        if self.keyboard_layout_state.as_ref() == Some(&(group, names.clone())) {
+            return;
+        }
+        self.keyboard_layout_state = Some((group, names.clone()));
+        self.emit_ipc_event(crate::ipc::IpcEvent::LayoutChanged {
+            group,
+            names,
+            codes: self.keyboard_layout_codes(),
+        });
+    }
+
     /// Applies a `[[rule]]`-specified exact position/size to a floating
     /// window, either of which may be unset (keep whatever `toggle_floating`
     /// already placed it at for that axis). No-op if `surface` isn't
@@ -13732,6 +13785,9 @@ impl Smallvil {
                     crate::export_env_change(env_change);
                 }
                 self.config = new_config;
+                // A changed `xkb_layout` gives a new layout list, not just a
+                // new group; subscribers need to hear about it.
+                self.notify_keyboard_layout_changed();
                 self.sync_config_watch_paths();
                 if outputs_changed {
                     warnings.extend(self.apply_output_blocks_live());

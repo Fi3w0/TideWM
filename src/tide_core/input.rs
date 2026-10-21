@@ -17,7 +17,7 @@ use smithay::{
     },
     desktop::layer_map_for_output,
     input::{
-        keyboard::{keysyms, FilterResult, Keysym, ModifiersState},
+        keyboard::{keysyms, FilterResult, Keysym, Layout, ModifiersState},
         pointer::{
             AxisFrame, ButtonEvent, Focus, GestureHoldBeginEvent, GestureHoldEndEvent,
             GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
@@ -50,7 +50,7 @@ use std::{
 };
 
 use crate::{
-    config::{Action, Direction, InputDeviceConfig, Keybind, Mods, TouchpadConfig},
+    config::{Action, Direction, InputDeviceConfig, Keybind, LayoutSwitch, Mods, TouchpadConfig},
     grabs::{
         resize_grab::ResizeEdge, CascadeResizeGrab, GrabCompletion, MoveSurfaceGrab, OceanPanGrab,
         OceanTileMoveGrab, ResizeSurfaceGrab, TileMoveGrab, TileResizeGrab, TileWindowResizeGrab,
@@ -1150,6 +1150,10 @@ impl Smallvil {
                         }
                     },
                 );
+                // A `grp:` xkb option (Alt+Super+Space here) changes the
+                // group inside `keyboard.input` with no action involved;
+                // announce it once the keyboard lock is released.
+                self.notify_keyboard_layout_changed();
             }
             InputEvent::PointerMotion { event, .. } => {
                 self.note_pointer_motion();
@@ -2934,6 +2938,53 @@ impl Smallvil {
             }
             Action::ToggleDpms => {
                 self.toggle_dpms();
+            }
+            Action::SwitchLayout(target) => {
+                let Some(keyboard) = self.seat.get_keyboard() else {
+                    return;
+                };
+                let codes = self.keyboard_layout_codes();
+                keyboard.with_xkb_state(self, |mut context| match &target {
+                    LayoutSwitch::Next => context.cycle_next_layout(),
+                    LayoutSwitch::Previous => context.cycle_prev_layout(),
+                    LayoutSwitch::Index(index) => {
+                        let count = context.xkb().lock().unwrap().layouts().count();
+                        if (*index as usize) < count {
+                            context.set_layout(Layout(*index));
+                        } else {
+                            tracing::warn!(
+                                index,
+                                count,
+                                "switch-layout: index is out of range, ignoring"
+                            );
+                        }
+                    }
+                    LayoutSwitch::Name(name) => {
+                        let needle = name.to_ascii_lowercase();
+                        let found = {
+                            let xkb = context.xkb().lock().unwrap();
+                            xkb.layouts()
+                                .find(|layout| {
+                                    xkb.layout_name(*layout).to_ascii_lowercase() == needle
+                                })
+                                .map(|layout| layout.0)
+                        }
+                        .or_else(|| {
+                            codes
+                                .iter()
+                                .position(|code| *code == *name || *code == needle)
+                                .map(|index| index as u32)
+                        });
+                        match found {
+                            Some(index) => context.set_layout(Layout(index)),
+                            None => tracing::warn!(
+                                %name,
+                                "switch-layout: no layout with that code or name, ignoring"
+                            ),
+                        }
+                    }
+                });
+                self.notify_keyboard_layout_changed();
             }
             Action::ToggleScratchpad(name) => {
                 if let Some(output) = self.primary_output() {

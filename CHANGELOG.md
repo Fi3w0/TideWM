@@ -2,6 +2,14 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.150 — Keyboard layouts over IPC
+
+- New `keyboard-layouts` query returns `{"current_idx": N, "names": [...], "codes": [...]}`: the zero-based active layout, every layout name in the keymap, and the configured `xkb_layout` codes positionally. The `current_idx`/`names` pair is exactly niri's `keyboard-layouts` shape, so a client written for one parses the other unchanged; `codes` is TideWM's addition for short `US`/`RU` labels.
+- New `switch-layout:next` / `switch-layout:prev` / `switch-layout:<index>` / `switch-layout:<code|name>` action (bare `switch-layout` is `next`). Codes and names match case-insensitively; an unknown index or name logs a warning and does nothing. Implemented with Smithay's own `cycle_next_layout`, `cycle_prev_layout` and `set_layout`, which refresh the cached modifier state so clients see the new group on the next key event.
+- New `layout` subscription channel with `layout-changed`, carrying the same object as the query. It fires for the action and for a `grp:` xkb option that changes the group (checked once per key event, after the keyboard lock is released), so bars and status widgets get event-driven updates instead of polling. A config reload that changes `xkb_layout` also emits it.
+- `tidectl keyboard-layouts` (alias `layout`) prints `N/count code (name)`; `--json` returns the raw request/response as usual.
+- Reference: niri's `SwitchLayout` action and `KeyboardLayouts`/`KeyboardLayoutSwitched` IPC events. `DOCUMENTATION.md` lists the action, query and channel.
+
 ## 0.90.149 — Output-addressed workspace switching
 
 - New `workspace-on:<output>:<N>` action (and `tidectl workspace-on <output> <N>`) switches the named output's workspace instead of the focused window's output. Bars and other external tools need it: a click on one monitor's workspace strip must not switch the monitor that holds the focused window. Ocean maps a numbered ref to that output's app slot, like `workspace:N`. Unknown outputs warn and do nothing; a malformed action is rejected at parse time.

@@ -840,6 +840,17 @@ impl Default for OceanConfig {
     }
 }
 
+/// Target of `switch-layout`: `next`, `prev`, a zero-based index, or a
+/// layout code/name (matched case-insensitively against the keymap's own
+/// layout names and the configured `xkb_layout` codes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LayoutSwitch {
+    Next,
+    Previous,
+    Index(u32),
+    Name(String),
+}
+
 #[derive(Debug, Clone)]
 pub enum Action {
     Spawn(String),
@@ -899,6 +910,12 @@ pub enum Action {
     /// Toggles every output's power together (all on, or all off). See
     /// `Smallvil::toggle_dpms`.
     ToggleDpms,
+    /// Switches the XKB layout group: next/previous with wraparound, or an
+    /// explicit index/code/name. The action a bar's layout widget needs;
+    /// niri's `switch-layout` is the same shape, and the same keymap
+    /// toggle a `grp:` xkb option performs can be driven from here instead
+    /// of a key. See `Smallvil::run_action`.
+    SwitchLayout(LayoutSwitch),
     CycleFocus,
     FocusDirection(Direction),
     SwapDirection(Direction),
@@ -9474,6 +9491,7 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "lower-window" => Some(Action::LowerWindow),
         "focus-urgent" => Some(Action::FocusUrgent),
         "toggle-dpms" => Some(Action::ToggleDpms),
+        "switch-layout" => Some(Action::SwitchLayout(LayoutSwitch::Next)),
         "cycle-focus" => Some(Action::CycleFocus),
         "focus-left" => Some(Action::FocusDirection(Direction::Left)),
         "focus-right" => Some(Action::FocusDirection(Direction::Right)),
@@ -9499,6 +9517,20 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "cycle-tab-next" => Some(Action::CycleTabForward),
         "cycle-tab-prev" => Some(Action::CycleTabBackward),
         "quit" => Some(Action::Quit),
+        other if other.starts_with("switch-layout:") => {
+            let target = &other["switch-layout:".len()..];
+            if target.is_empty() {
+                None
+            } else if target == "next" {
+                Some(Action::SwitchLayout(LayoutSwitch::Next))
+            } else if target == "prev" || target == "previous" {
+                Some(Action::SwitchLayout(LayoutSwitch::Previous))
+            } else if let Ok(index) = target.parse::<u32>() {
+                Some(Action::SwitchLayout(LayoutSwitch::Index(index)))
+            } else {
+                Some(Action::SwitchLayout(LayoutSwitch::Name(target.to_string())))
+            }
+        }
         other => {
             tracing::warn!(action = %other, "Unknown keybind action, skipping");
             None
@@ -9924,6 +9956,39 @@ mod tests {
         assert!(parse_action("workspace-on:DP-4").is_none());
         assert!(parse_action("workspace-on::3").is_none());
         assert!(parse_action("workspace-on:DP-4:").is_none());
+    }
+
+    #[test]
+    fn switch_layout_parses_next_prev_index_and_names() {
+        assert!(matches!(
+            parse_action("switch-layout"),
+            Some(Action::SwitchLayout(LayoutSwitch::Next))
+        ));
+        assert!(matches!(
+            parse_action("switch-layout:next"),
+            Some(Action::SwitchLayout(LayoutSwitch::Next))
+        ));
+        assert!(matches!(
+            parse_action("switch-layout:prev"),
+            Some(Action::SwitchLayout(LayoutSwitch::Previous))
+        ));
+        assert!(matches!(
+            parse_action("switch-layout:previous"),
+            Some(Action::SwitchLayout(LayoutSwitch::Previous))
+        ));
+        assert!(matches!(
+            parse_action("switch-layout:2"),
+            Some(Action::SwitchLayout(LayoutSwitch::Index(2)))
+        ));
+        assert!(matches!(
+            parse_action("switch-layout:us"),
+            Some(Action::SwitchLayout(LayoutSwitch::Name(ref code))) if code == "us"
+        ));
+        assert!(matches!(
+            parse_action("switch-layout:Russian"),
+            Some(Action::SwitchLayout(LayoutSwitch::Name(ref name))) if name == "Russian"
+        ));
+        assert!(parse_action("switch-layout:").is_none());
     }
 
     #[test]

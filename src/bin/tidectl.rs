@@ -650,6 +650,7 @@ fn build_request(args: &[String]) -> Result<Value, String> {
         "windows" => Ok(json!({ "request": "windows" })),
         "focused-window" | "focused" => Ok(json!({ "request": "focused-window" })),
         "active-submap" => Ok(json!({ "request": "active-submap" })),
+        "keyboard-layouts" | "layout" => Ok(json!({ "request": "keyboard-layouts" })),
         "eval" if !rest.is_empty() => Ok(json!({
             "request": "eval",
             "expression": rest.join(" ")
@@ -795,9 +796,34 @@ fn print_response(command: &str, data: &Value) {
             Some(name) => println!("{name}"),
             None => println!("(none, base keybinds active)"),
         },
+        "keyboard-layouts" | "layout" => print_keyboard_layouts(data),
         "eval" => println!("{}", serde_json::to_string_pretty(data).unwrap_or_default()),
         _ => println!("ok"),
     }
+}
+
+fn print_keyboard_layouts(data: &Value) {
+    let current = data.get("current_idx").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let names = data.get("names").and_then(Value::as_array);
+    let codes = data.get("codes").and_then(Value::as_array);
+    let count = names.map(|n| n.len()).unwrap_or(0);
+    let pick = |list: Option<&Vec<Value>>| {
+        list.and_then(|values| values.get(current))
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_string()
+    };
+    let code = match codes {
+        Some(_) => pick(codes),
+        None => pick(names),
+    };
+    println!(
+        "{}/{} {} ({})",
+        current + 1,
+        count.max(1),
+        code,
+        pick(names)
+    );
 }
 
 fn print_outputs(data: &Value) {
@@ -921,6 +947,7 @@ QUERIES:
     windows             list currently mapped windows
     focused-window       (alias: focused) the currently focused window, if any
     active-submap        the currently active `submap <name> {{ }}` block, if any
+    keyboard-layouts     current XKB layout (`--json`: current_idx, names, codes)
 
 STREAMING:
     subscribe [event...]   long-lived: print one JSON line per event
