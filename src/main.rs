@@ -573,9 +573,11 @@ where
         return PortalRecovery::Idle;
     }
 
-    // A backend left in `failed` keeps returning its old failure to the
-    // activation request instead of being started again; clearing the state
-    // is what lets the restart below resolve it fresh.
+    // Housekeeping: backends that died with the previous compositor are left
+    // `failed`; clearing that keeps the unit list honest. It cannot cancel a
+    // D-Bus activation still pending from the old frontend -- that is what
+    // actually stalled a quick TideWM->TideWM relog, and the clean-shutdown
+    // stop (`stop_session_portals`) is what prevents it.
     reset_failed_portal_backends(runner);
 
     // `--no-block` is load-bearing, not an optimization: this runs before the
@@ -626,6 +628,76 @@ where
         Ok(status) if status.success() => {}
         Ok(status) => tracing::debug!(?status, "Portal backend reset exited non-zero"),
         Err(err) => tracing::debug!(%err, "Portal backend reset unavailable"),
+    }
+}
+
+/// How long a clean shutdown waits for the portal units to stop. Stopping
+/// takes milliseconds; the bound only keeps a wedged user bus from holding up
+/// logout.
+const PORTAL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Stops this session's portal frontend, then its backends, when TideWM
+/// exits cleanly.
+///
+/// Without this the frontend outlives the compositor. Its backends (e.g.
+/// xdg-desktop-portal-gtk) are Wayland clients of TideWM and die with it; the
+/// frontend at once asks D-Bus to activate them again, the new backend exits
+/// with `cannot open display:`, and dbus-daemon keeps that activation pending
+/// for its whole service_start_timeout (120 s) because systemd never reports
+/// the failure back. Every activation of the same backend joins that pending
+/// one, so a relog inside those two minutes gets a frontend whose Settings,
+/// AppChooser and Print proxies each time out after 25 s and are never
+/// retried (measured: a shell 40 s late, `Settings.ReadAll` failing). Stopping
+/// the frontend first leaves nothing to re-activate a backend into a dead
+/// display. `stop` is a no-op for units that are not running, and without a
+/// systemd --user manager there is nothing to stop.
+fn stop_session_portals<R>(runner: &R)
+where
+    R: SessionEnvironmentRunner,
+{
+    for unit in [
+        "xdg-desktop-portal.service",
+        "*xdg-desktop-portal-*.service",
+    ] {
+        let args: Vec<String> = ["--user", "stop", unit]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        match runner.status("systemctl", &args) {
+            Ok(status) if status.success() => {}
+            Ok(status) => tracing::debug!(?status, unit, "Portal stop on shutdown exited non-zero"),
+            Err(err) => tracing::debug!(%err, unit, "Portal stop on shutdown unavailable"),
+        }
+    }
+}
+
+/// Runs `stop_session_portals` on a worker and waits at most `timeout`.
+/// Returns whether it finished; on timeout TideWM exits anyway and the worker
+/// ends with the process.
+fn stop_session_portals_bounded<R>(runner: R, timeout: Duration) -> bool
+where
+    R: SessionEnvironmentRunner,
+{
+    let (done, finished) = mpsc::channel();
+    let spawned = thread::Builder::new()
+        .name("tidewm-portal-shutdown".to_string())
+        .spawn(move || {
+            stop_session_portals(&runner);
+            let _ = done.send(());
+        });
+    if let Err(err) = spawned {
+        tracing::debug!(%err, "Failed to start portal shutdown worker");
+        return false;
+    }
+    match finished.recv_timeout(timeout) {
+        Ok(()) => true,
+        Err(_) => {
+            tracing::warn!(
+                ?timeout,
+                "Portal units did not stop in time; exiting anyway"
+            );
+            false
+        }
     }
 }
 
@@ -935,10 +1007,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // which is what produced the input lag, the client-side key-repeat storm
     // (the release was queued but unflushed, so kitty kept repeating), and
     // the near-frozen redraw rate on an all-tiled udev-backend desktop.
-    event_loop.run(None, &mut state, move |state| {
+    let result = event_loop.run(None, &mut state, move |state| {
         let _ = state.display_handle.flush_clients();
-    })?;
+    });
 
+    // Still holding the display: stop the portal frontend before its backends
+    // lose their compositor (see `stop_session_portals`). A nested session
+    // shares the host's portals and must leave them alone.
+    if !nested {
+        stop_session_portals_bounded(ProcessSessionEnvironmentRunner, PORTAL_SHUTDOWN_TIMEOUT);
+    }
+
+    result?;
     Ok(())
 }
 
@@ -1355,6 +1435,58 @@ mod session_environment_tests {
         assert!(waiting.try_recv().is_ok());
         assert!(runner.calls().iter().any(|call| matches!(call,
             Call::Status(_, args) if args.iter().any(|arg| arg == "--no-block"))));
+    }
+
+    #[test]
+    fn shutdown_stops_the_frontend_before_its_backends() {
+        let runner = RecordingRunner::new(b"XDG_CURRENT_DESKTOP=tidewm\0");
+        stop_session_portals(&runner);
+
+        let stops: Vec<Vec<String>> = runner
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                Call::Status(program, args) if program == "systemctl" => Some(args),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            stops,
+            [
+                ["--user", "stop", "xdg-desktop-portal.service"],
+                ["--user", "stop", "*xdg-desktop-portal-*.service"],
+            ]
+        );
+    }
+
+    #[test]
+    fn shutdown_without_systemctl_still_finishes() {
+        let mut runner = RecordingRunner::new(b"");
+        runner.status_error = true; // no systemd --user: systemctl not found
+        assert!(stop_session_portals_bounded(runner, Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn a_wedged_bus_cannot_hold_up_shutdown() {
+        struct Wedged;
+        impl SessionEnvironmentRunner for Wedged {
+            fn status(&self, _: &str, _: &[String]) -> std::io::Result<ExitStatus> {
+                thread::sleep(Duration::from_secs(60));
+                Ok(ExitStatus::from_raw(0))
+            }
+            fn output(&self, _: &str, _: &[String]) -> std::io::Result<Output> {
+                unreachable!()
+            }
+            fn read(&self, _: &Path) -> std::io::Result<Vec<u8>> {
+                unreachable!()
+            }
+        }
+        let started = std::time::Instant::now();
+        assert!(!stop_session_portals_bounded(
+            Wedged,
+            Duration::from_millis(50)
+        ));
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 }
 

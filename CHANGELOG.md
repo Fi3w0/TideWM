@@ -2,6 +2,13 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.155 — Portals stop with the session, so a quick relog no longer stalls
+
+- On a clean exit (SIGTERM from the display manager, `quit`), standalone TideWM now stops `xdg-desktop-portal.service` and then `*xdg-desktop-portal-*.service` while it still holds the display. Measured on a real TideWM->TideWM relog with .154: the old frontend outlived the compositor, re-activated its GTK backend one second later, the backend exited with `cannot open display:`, and dbus-daemon kept that activation pending for its whole `service_start_timeout` (120 s) because the failure never reached it. Every later activation of that backend joined the pending one, so the new login's frontend had its Settings, AppChooser and Print proxies time out after 25 s each and never retried them -- the shell stalled ~40 s and `Settings.ReadAll` kept failing until the frontend was restarted by hand. .154's stale-frontend restart and `reset-failed` ran correctly but cannot cancel a pending D-Bus activation.
+- Bounded at 3 s on a worker, warn-logged on expiry, so a wedged user bus cannot hold up logout. Without systemd --user (OpenRC, runit, s6, or none) `systemctl` is absent or has no manager and the step is a debug-logged no-op; there dbus-daemon starts backends itself and sees a failing one immediately, so the stall cannot form. A nested session leaves the host's portals alone.
+- The .154 recovery remains as the fallback for an unclean exit (crash, SIGKILL); its comment no longer claims a `failed` backend replays its failure to new activations.
+- Tests: frontend stopped before its backends, no systemctl still finishing, and a wedged bus not delaying shutdown.
+
 ## 0.90.154 — Portal readiness stays ordered, bounded and init-agnostic
 
 - The bounded wait stays at 2 s, and now logs at `warn` when it expires: a miss means startup spawns ran ahead of the published environment and a portal backend may have failed to start, which belongs in a session log rather than at debug.
