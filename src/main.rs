@@ -36,8 +36,9 @@ use std::{
     os::unix::process::CommandExt,
     path::Path,
     process::{Child, Command, ExitStatus, Output},
-    sync::Mutex,
+    sync::{mpsc, Mutex},
     thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use smithay::reexports::{
@@ -269,6 +270,12 @@ const FOREIGN_COMPOSITOR_ENV: &[&str] = &[
     "WAYFIRE_SOCKET",
 ];
 
+/// How long startup autostarts wait for the session environment to reach the
+/// systemd user manager and the D-Bus activation environment. Typical is a
+/// few milliseconds; the bound exists so that a wedged user bus still cannot
+/// delay the session.
+const SESSION_ENV_READY_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Makes TideWM's identity authoritative for this process and everything it
 /// spawns.  This matters especially for the nested backend: the process that
 /// launches us belongs to the host desktop, so blindly retaining its session
@@ -363,7 +370,7 @@ fn validated_session_environment_keys(env: &HashMap<String, String>) -> Vec<Stri
 
 fn start_session_environment_worker(
     env: &HashMap<String, String>,
-) -> std::io::Result<JoinHandle<()>> {
+) -> std::io::Result<(JoinHandle<()>, mpsc::Receiver<()>)> {
     start_session_environment_worker_with_runner(
         validated_session_environment_keys(env),
         ProcessSessionEnvironmentRunner,
@@ -373,13 +380,20 @@ fn start_session_environment_worker(
 fn start_session_environment_worker_with_runner<R>(
     env_keys: Vec<String>,
     runner: R,
-) -> std::io::Result<JoinHandle<()>>
+) -> std::io::Result<(JoinHandle<()>, mpsc::Receiver<()>)>
 where
     R: SessionEnvironmentRunner,
 {
-    thread::Builder::new()
+    let (ready, exported) = mpsc::channel();
+    let worker = thread::Builder::new()
         .name("tidewm-session-environment".to_string())
-        .spawn(move || run_session_environment_tasks(&env_keys, &runner))
+        .spawn(move || {
+            run_session_environment_tasks(&env_keys, &runner);
+            // The receiver is bounded by its own timeout; a dropped receiver
+            // (nested session, or an already-finished wait) is not an error.
+            let _ = ready.send(());
+        })?;
+    Ok((worker, exported))
 }
 
 fn run_session_environment_tasks<R>(env_keys: &[String], runner: &R)
@@ -487,22 +501,59 @@ where
     .into_iter()
     .map(str::to_string)
     .collect();
-    let has_fresh_env = runner
+    let frontend_pid = runner
         .output("systemctl", &show_args)
         .ok()
         .and_then(|output| String::from_utf8(output.stdout).ok())
         .and_then(|pid| pid.trim().parse::<u32>().ok())
-        .filter(|&pid| pid != 0)
+        .filter(|&pid| pid != 0);
+
+    let fresh_identity = frontend_pid
         .and_then(|pid| runner.read(Path::new(&format!("/proc/{pid}/environ"))).ok())
         .map(|environ| {
             environ
                 .split(|&byte| byte == 0)
                 .any(|entry| entry == b"XDG_CURRENT_DESKTOP=tidewm")
         });
+    // Only meaningful with a running frontend; skipping it also keeps the
+    // "nothing to check" path free of extra reads.
+    let (frontend_start, own_start) = match frontend_pid {
+        Some(pid) => (
+            runner
+                .read(Path::new(&format!("/proc/{pid}/stat")))
+                .ok()
+                .and_then(|stat| proc_starttime(&stat)),
+            runner
+                .read(Path::new("/proc/self/stat"))
+                .ok()
+                .and_then(|stat| proc_starttime(&stat)),
+        ),
+        None => (None, None),
+    };
 
-    // `None` covers both "not running yet" and "couldn't check" -- its next
-    // activation already gets the freshly exported environment either way,
-    // so only an already-running, confirmed-stale instance needs a kick.
+    // Identity alone cannot see a relog from TideWM into TideWM: that
+    // frontend is tagged correctly, but the backend units it manages died
+    // with the previous compositor and stay `failed`, so every later
+    // `Settings.ReadAll` blocks until its timeout (a real login stalled Qt
+    // for ~40s that way). A frontend that started before this compositor is
+    // from a previous login either way.
+    if !portal_frontend_stale(fresh_identity, frontend_start, own_start) {
+        return;
+    }
+
+    // A backend left in `failed` keeps returning its old failure to the
+    // activation request instead of being started again; clearing the state
+    // is what lets the restart below resolve it fresh.
+    let reset_args: Vec<String> = ["--user", "reset-failed", "*xdg-desktop-portal*.service"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    match runner.status("systemctl", &reset_args) {
+        Ok(status) if status.success() => {}
+        Ok(status) => tracing::debug!(?status, "Portal backend reset exited non-zero"),
+        Err(err) => tracing::debug!(%err, "Portal backend reset unavailable"),
+    }
+
     // `--no-block` is load-bearing, not an optimization: this runs before the
     // event loop starts, and the restarted frontend's backend (e.g.
     // xdg-desktop-portal-gtk) is itself a Wayland client of *this*
@@ -510,24 +561,59 @@ where
     // waits for a compositor whose only thread is sitting in that wait --
     // a circular hang that froze the whole session (mouse, keyboard, VT
     // switch) on a real SDDM login. The restart's outcome only matters for
-    // screencast requests minutes later, so enqueueing the job is enough.
-    if has_fresh_env == Some(false) {
-        let restart_args: Vec<String> = [
-            "--user",
-            "--no-block",
-            "restart",
-            "xdg-desktop-portal.service",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect();
-        match runner.status("systemctl", &restart_args) {
-            Ok(status) if status.success() => tracing::info!(
-                "Restarting xdg-desktop-portal.service: it was still carrying another desktop's identity"
-            ),
-            Ok(status) => tracing::debug!(?status, "Stale portal frontend restart exited non-zero"),
-            Err(err) => tracing::debug!(%err, "Stale portal frontend restart unavailable"),
-        }
+    // requests minutes later, so enqueueing the job is enough.
+    let restart_args: Vec<String> = [
+        "--user",
+        "--no-block",
+        "restart",
+        "xdg-desktop-portal.service",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    match runner.status("systemctl", &restart_args) {
+        Ok(status) if status.success() => tracing::info!(
+            "Restarting xdg-desktop-portal.service: it or its backends belong to an earlier login"
+        ),
+        Ok(status) => tracing::debug!(?status, "Stale portal frontend restart exited non-zero"),
+        Err(err) => tracing::debug!(%err, "Stale portal frontend restart unavailable"),
+    }
+}
+
+/// Start time of a process in clock ticks since boot (`/proc/<pid>/stat`
+/// field 22). `comm` may contain spaces and parentheses, so parse from the
+/// last `)`.
+fn proc_starttime(stat: &[u8]) -> Option<u64> {
+    let text = std::str::from_utf8(stat).ok()?;
+    text.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
+}
+
+/// Whether an already-running portal frontend has to be restarted before this
+/// session uses it.
+///
+/// A mismatched identity is the loud case (another desktop's frontend routes
+/// every request to that desktop's backend). Start time catches the quiet
+/// one, where the identity is already `tidewm` because the previous login was
+/// TideWM too, but the frontend and its dead backends predate this
+/// compositor. Unknown values never trigger a restart: a frontend that is not
+/// running yet is activated with the freshly exported environment anyway.
+fn portal_frontend_stale(
+    fresh_identity: Option<bool>,
+    frontend_start: Option<u64>,
+    own_start: Option<u64>,
+) -> bool {
+    match fresh_identity {
+        Some(false) => true,
+        Some(true) => match (frontend_start, own_start) {
+            (Some(frontend), Some(own)) => frontend < own,
+            _ => false,
+        },
+        None => false,
     }
 }
 
@@ -670,16 +756,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // exact ordering in one worker, but never make compositor readiness,
     // autostarts, or shutdown wait for them. Dropping this handle detaches
     // the worker; it is intentionally never joined.
-    let _session_environment_worker = if !nested {
+    let (_session_environment_worker, session_env_exported) = if !nested {
         match start_session_environment_worker(&state.config.env) {
-            Ok(worker) => Some(worker),
+            Ok((worker, exported)) => (Some(worker), Some(exported)),
             Err(err) => {
                 tracing::debug!(%err, "Failed to start session environment export worker");
-                None
+                (None, None)
             }
         }
     } else {
-        None
+        (None, None)
     };
 
     // Bound so it stays alive for the process lifetime; the config watcher
@@ -750,6 +836,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             None
         }
     };
+
+    // Anything spawned below can reach the portal stack: the shell asks Qt's
+    // xdgdesktopportal theme plugin for settings right at startup, and that
+    // D-Bus-activates a portal backend. Those backends are Wayland clients,
+    // so activating one before WAYLAND_DISPLAY reached the systemd user
+    // manager and the D-Bus activation environment makes it exit with
+    // "cannot open display:", and the failed unit is then left behind for the
+    // rest of the login -- a real login showed Qt blocking on
+    // `Settings.ReadAll` for ~40s because of exactly that. Wait for the
+    // export, bounded: a wedged user bus must still not delay the session.
+    if let Some(exported) = session_env_exported {
+        if exported.recv_timeout(SESSION_ENV_READY_TIMEOUT).is_err() {
+            tracing::debug!(
+                "Session environment export still running after {SESSION_ENV_READY_TIMEOUT:?}; spawning startup commands anyway"
+            );
+        }
+    }
 
     for cmd in &state.config.spawn_at_startup {
         if let Err(err) = spawn(cmd) {
@@ -903,7 +1006,7 @@ mod session_environment_tests {
         run_session_environment_tasks(&["CUSTOM_SESSION_KEY".to_string()], &runner);
 
         let calls = runner.calls();
-        assert_eq!(calls.len(), 7);
+        assert_eq!(calls.len(), 10);
 
         let expected_export_vars = [
             "WAYLAND_DISPLAY",
@@ -958,8 +1061,20 @@ mod session_environment_tests {
         );
         assert!(matches!(&calls[4], Call::Output(program, _) if program == "systemctl"));
         assert_eq!(calls[5], Call::Read(PathBuf::from("/proc/4242/environ")));
+        assert_eq!(calls[6], Call::Read(PathBuf::from("/proc/4242/stat")));
+        assert_eq!(calls[7], Call::Read(PathBuf::from("/proc/self/stat")));
         assert_eq!(
-            calls[6],
+            calls[8],
+            Call::Status(
+                "systemctl".to_string(),
+                ["--user", "reset-failed", "*xdg-desktop-portal*.service"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            )
+        );
+        assert_eq!(
+            calls[9],
             Call::Status(
                 "systemctl".to_string(),
                 [
@@ -976,7 +1091,7 @@ mod session_environment_tests {
 
         let fresh_runner = RecordingRunner::new(b"XDG_CURRENT_DESKTOP=tidewm\0");
         run_session_environment_tasks(&[], &fresh_runner);
-        assert_eq!(fresh_runner.calls().len(), 6);
+        assert_eq!(fresh_runner.calls().len(), 8);
         assert!(!fresh_runner.calls().iter().any(|call| {
             matches!(call, Call::Status(program, args) if program == "systemctl" && args.iter().any(|arg| arg == "restart"))
         }));
@@ -990,7 +1105,7 @@ mod session_environment_tests {
         run_session_environment_tasks(&[], &runner);
 
         let calls = runner.calls();
-        assert_eq!(calls.len(), 6);
+        assert_eq!(calls.len(), 8);
         assert!(
             matches!(&calls[0], Call::Status(program, _) if program == "dbus-update-activation-environment")
         );
@@ -1001,6 +1116,8 @@ mod session_environment_tests {
         assert!(matches!(&calls[3], Call::Status(program, _) if program == "systemctl"));
         assert!(matches!(&calls[4], Call::Output(program, _) if program == "systemctl"));
         assert!(matches!(&calls[5], Call::Read(_)));
+        assert!(matches!(&calls[6], Call::Read(_)));
+        assert!(matches!(&calls[7], Call::Read(_)));
     }
 
     #[test]
@@ -1046,7 +1163,8 @@ mod session_environment_tests {
             worker_name: worker_name.clone(),
         };
 
-        let worker = start_session_environment_worker_with_runner(Vec::new(), runner).unwrap();
+        let (worker, _exported) =
+            start_session_environment_worker_with_runner(Vec::new(), runner).unwrap();
         entered.wait();
         assert_eq!(
             worker_name.lock().unwrap().as_deref(),
@@ -1068,6 +1186,28 @@ mod session_environment_tests {
             validated_session_environment_keys(&env),
             vec!["VALID_KEY".to_string()]
         );
+    }
+
+    #[test]
+    fn portal_frontend_restart_needs_a_real_signal() {
+        // Started after this compositor: this login's own frontend.
+        assert!(!portal_frontend_stale(Some(true), Some(200), Some(100)));
+        // Another desktop's frontend routes every request to its backend.
+        assert!(portal_frontend_stale(Some(false), Some(200), Some(100)));
+        // Same desktop, but from a previous login: its backends died with
+        // the previous compositor and are stuck failed.
+        assert!(portal_frontend_stale(Some(true), Some(50), Some(100)));
+        // Not running, or timing unreadable: activation already has the
+        // freshly exported environment, so no restart.
+        assert!(!portal_frontend_stale(None, None, Some(100)));
+        assert!(!portal_frontend_stale(Some(true), None, Some(100)));
+        assert!(!portal_frontend_stale(Some(true), Some(50), None));
+    }
+
+    #[test]
+    fn start_time_parses_around_a_comm_with_spaces() {
+        let stat = b"1234 (fire fox (x)) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 4242 20";
+        assert_eq!(proc_starttime(stat), Some(4242));
     }
 }
 

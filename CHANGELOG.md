@@ -2,6 +2,12 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.153 — Session environment reaches portals before they start
+
+- Startup autostarts now wait for the session-environment export -- bounded at 2 s, debug-logged when it expires -- instead of racing it. That export is what puts `WAYLAND_DISPLAY` and the `XDG_*` identity into the systemd user manager and the D-Bus activation environment. A shell that starts first can D-Bus-activate a portal backend right away (Qt's `xdgdesktopportal` theme plugin asks for settings at startup), and a backend activated without `WAYLAND_DISPLAY` exits with `cannot open display:` and remains `failed` for the rest of the login. Measured on a real relog: two `Settings.ReadAll` calls blocked ~25 s each, so the shell appeared ~40 s late. A wedged user bus still cannot delay the session; the wait is bounded.
+- `restart_stale_portal_frontend` now also recognises a relog from TideWM into TideWM. It previously restarted only a frontend carrying another desktop's `XDG_CURRENT_DESKTOP`, but a same-desktop relog leaves an identically tagged frontend from the previous login whose backends died with the previous compositor. It now compares the frontend's `/proc/<pid>/stat` start time with this compositor's, and clears the failed state of `*xdg-desktop-portal*.service` before the (still `--no-block`) restart, so a backend that failed once is not left returning its old error to every later activation. A frontend started after this compositor, or one that is not running, is left untouched -- no portal is restarted on a clean login.
+- Tests: `portal_frontend_restart_needs_a_real_signal` and `start_time_parses_around_a_comm_with_spaces`, plus the existing task-order tests updated to the new call sequence.
+
 ## 0.90.152 — Decoration requests are never answered with a configure
 
 - .151 tried to suppress the repeated `zxdg_toplevel_decoration_v1.configure` by comparing against the toplevel state. That state does not reliably keep `decoration_mode` across the configures other code paths send (a configure whose state leaves the field unset changes what the next comparison sees), so the client still received one configure per `set_mode` and the loop survived: measured again on .151, ~77k read syscalls/s and 41.8% of one core with Firefox open, dropping to 10.8% with every Firefox process stopped.
