@@ -434,23 +434,12 @@ fn decoration_configure_needed(advertised: Option<zxdg_toplevel_decoration_v1::M
 
 impl XdgDecorationHandler for Smallvil {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
-        // Advertisement path: this object is new, so the client has to learn
-        // the mode -- either from a configure of its own (object created
-        // after the initial one) or from the initial configure still to come.
-        toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(zxdg_toplevel_decoration_v1::Mode::ServerSide);
-        });
-        if toplevel.is_initial_configure_sent() {
-            toplevel.send_pending_configure();
-        }
-    }
-
-    fn request_mode(&mut self, toplevel: ToplevelSurface, mode: zxdg_toplevel_decoration_v1::Mode) {
-        // Ignore what the client asked for, but only answer when that changes
-        // what it was already told (`decoration_configure_needed`). The state
-        // assignment is unconditional: a later configure for any other reason
-        // (a resize, new bounds) still carries server-side.
-        let _ = mode;
+        // Advertisement path, and the only place that ever configures for
+        // decoration: this object is new, so the client has to learn the
+        // mode -- either from a configure of its own (object created after
+        // the initial one) or from the initial configure still to come.
+        // `request_mode` deliberately never answers a request with a
+        // configure; see there.
         let mut needed = false;
         toplevel.with_pending_state(|state| {
             needed = decoration_configure_needed(state.decoration_mode);
@@ -461,10 +450,25 @@ impl XdgDecorationHandler for Smallvil {
         }
     }
 
+    fn request_mode(&mut self, toplevel: ToplevelSurface, mode: zxdg_toplevel_decoration_v1::Mode) {
+        // Record server-side and stay silent. A configure here is what makes
+        // GTK clients loop: they answer every configure they receive with a
+        // fresh set_mode(client_side), so answering each request is a
+        // feedback loop (~60k 12-byte round trips/s, ~30% of a core, measured
+        // in the field). The protocol lets the compositor ignore the request,
+        // and a client only switches mode when a configure confirms it, so
+        // silence leaves it on the mode it was already told -- which
+        // `new_decoration` advertised as server-side.
+        let _ = mode;
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(zxdg_toplevel_decoration_v1::Mode::ServerSide);
+        });
+    }
+
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
-        // The client is dropping its decoration object; the state still has
-        // to say server-side for the next configure, but there is nothing to
-        // announce to a client that is tearing the object down.
+        // The client is dropping its decoration object; keep the state
+        // server-side for whatever configure comes next, but there is nothing
+        // to announce to a client that is tearing the object down.
         toplevel.with_pending_state(|state| {
             state.decoration_mode = Some(zxdg_toplevel_decoration_v1::Mode::ServerSide);
         });

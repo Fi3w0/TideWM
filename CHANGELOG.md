@@ -2,6 +2,12 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.152 — Decoration requests are never answered with a configure
+
+- .151 tried to suppress the repeated `zxdg_toplevel_decoration_v1.configure` by comparing against the toplevel state. That state does not reliably keep `decoration_mode` across the configures other code paths send (a configure whose state leaves the field unset changes what the next comparison sees), so the client still received one configure per `set_mode` and the loop survived: measured again on .151, ~77k read syscalls/s and 41.8% of one core with Firefox open, dropping to 10.8% with every Firefox process stopped.
+- `request_mode` and `unset_mode` now only record server-side in the pending state and never send a configure. `new_decoration` -- and the initial configure it rides along with -- is the only place that configures for decoration. The protocol allows a compositor to ignore a mode request, and a client only switches when a configure confirms it, so silence leaves it on the advertised server-side.
+- `handlers::decoration_tests` still pin the "advertise only when the state does not already say server-side" rule, now used by `new_decoration`.
+
 ## 0.90.151 — Decoration negotiation answers once
 
 - `xdg-decoration` no longer answers every `set_mode` with a configure. TideWM still only ever advertises server-side (it draws no decorations), but it now says so once -- in the initial configure, or from `new_decoration` for an object created afterwards -- and stays silent when a request asks for the mode the state already carries, which the protocol allows. Clients that re-request on each configure they receive (GTK, and so Firefox) turned the old unconditional re-advertise into a 1:1 loop: strace showed the 12-byte `set_mode(client_side)` / `configure(server_side)` pair at ~60k round trips per second on the maintainer's two-output NVIDIA desktop, and pausing Firefox dropped the compositor from 42.7% to 11.5% of one core while its render path was only ~8%. A client only switches mode when a configure confirms it, so staying silent keeps it on the advertised server-side instead of returning to client-side drawing.
