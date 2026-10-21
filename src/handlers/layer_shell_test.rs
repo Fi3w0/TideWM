@@ -417,6 +417,7 @@ fn wallpaper_frames_preserve_drag_and_exclusive_zone_changes_retile() {
         Some(outputs[1].name().as_str())
     );
     assert_eq!(fixture.state.layout.workspace_of(&other), Some(2));
+    crate::ipc::navigation_regression(&mut fixture.state, &windows, &outputs[1]);
     if let Some(node) = std::env::var_os("TIDEWM_SYNC_TEST_NODE") {
         native_syncobj_commit_lifecycle(&mut fixture, &surface, &node);
     }

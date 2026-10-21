@@ -1016,6 +1016,8 @@ pub enum Action {
     /// you. No-op when the app has no mapped window; the caller (a bar's
     /// pin) is expected to spawn it when it has none.
     FocusApp(String),
+    /// Reveals and activates one exact live window, including hidden owners.
+    FocusWindow(u64),
     /// Sends a graceful close request to every mapped window of the given
     /// app_id -- the dock's "quit app". Apps that confirm-and-close on
     /// their own handle it; anything stuck must be killed by the caller.
@@ -9437,6 +9439,13 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
     if let Some(name) = action.strip_prefix("ocean-save-bookmark:") {
         return (!name.trim().is_empty())
             .then(|| Action::OceanSaveBookmark(name.trim().to_string()));
+    }
+    if let Some(id) = action.strip_prefix("focus-window:") {
+        return id
+            .parse::<u64>()
+            .ok()
+            .filter(|id| *id > 0)
+            .map(Action::FocusWindow);
     }
     if let Some(name) = action.strip_prefix("focus-app:") {
         return (!name.trim().is_empty()).then(|| Action::FocusApp(name.trim().to_string()));

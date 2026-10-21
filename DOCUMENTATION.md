@@ -2005,3 +2005,37 @@ Native DRM sessions advertise `linux-drm-syncobj-v1` when the selected device su
 | `org.freedesktop.impl.portal.ScreenCast` (DBus, the real `xdg-desktop-portal` backend interface) | Discord/OBS-style screen sharing | Behind the `screencast` Cargo feature, self-contained (no `xdg-desktop-portal-gnome` needed), with a compositor-owned source picker over monitor/window/virtual-source selection, reusing the same PipeWire path as the row above. Virtual sources still mirror the selected desktop dimensions rather than creating a headless DRM connector. This is the exact entry point real OBS and Discord went through in the standalone verification above. |
 
 Everything else on the original protocol/rice compatibility list is implemented. Screencasting's remaining loose ends are multi-output capture and DMA-BUF export (see the entries above) — the DBus/portal plumbing, PipeWire MemFd frame delivery, and a real portal-mediated client on the standalone udev/DRM backend are all confirmed working end to end.
+
+## Window activation and notification sources
+
+`tidectl focus-window <ID>` activates the exact `window_id` returned by `windows`.
+`tidectl focus-app <app_id>` selects the most recently focused matching live
+window, including hidden workspaces. Both navigate to the existing owner;
+neither transfers a window to a different monitor. The equivalent bind actions
+are `focus-window:<ID>` and `focus-app:<app_id>`. IDs last only for the current
+mapping lifetime; a closed/remapped window must be resolved again.
+
+For notification producers, `tidectl --json resolve-window --pid <PID>` walks
+from that process to its ancestors and returns the nearest uniquely matching
+live window. Optional `--app-id <ID>` and `--window-id <ID>` selectors narrow the
+match; selectors can also be used without a PID. PID resolution is best-effort
+for terminal applications: shared terminal servers, multiplexers and XWayland
+satellites may own several windows. Ambiguity fails with candidate IDs; callers
+must supply an exact target rather than focus an arbitrary session. Resolve
+while the source process is alive and preserve the returned ID with the
+notification. Resolution itself never focuses anything.
+
+Wire requests:
+
+```json
+{"request":"resolve-window","pid":12345}
+{"request":"focus-window","window_id":42}
+{"request":"focus-app","app_id":"org.example.App"}
+```
+
+The notification server remains an external shell component. It should invoke
+the application-provided action, or its associated exact-window activation
+callback, on a user click. Notification arrival alone must not focus a window.
+Resolution is a target lookup, not authentication of a notification sender.
+Session locks and exclusive layers block activation; standard XDG activation
+continues requiring fresh user input for focus.

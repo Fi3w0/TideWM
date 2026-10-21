@@ -6,7 +6,7 @@ A fast technical reference for TideWM: what it is, what's implemented, current h
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). A full tiling-WM feature set (BSP/master-stack/cascade layouts, workspaces, multi-monitor, layer-shell, IPC, XWayland) with a water/aqua render identity layered on top as a fully toggleable effect stack, plus a second spatial engine ("Ocean") as an alternative to numbered workspaces.
 
-Current development version: **0.90.156**, second major pre-release. 1.0 is intentionally reserved until the effect stack and Ocean get a broader real-hardware pass (see CHANGELOG).
+Current development version: **0.90.157**, second major pre-release. 1.0 is intentionally reserved until the effect stack and Ocean get a broader real-hardware pass (see CHANGELOG).
 
 ## Architecture
 
@@ -159,3 +159,12 @@ Native `tidectl perf --json` exposes per-output scanout/cursor-plane decisions, 
 - [SPATIAL_MODEL.md](SPATIAL_MODEL.md) — Classic vs. Ocean engine design
 - [CHANGELOG.md](CHANGELOG.md) — release-by-release history
 - [CONTRIBUTING.md](CONTRIBUTING.md) / [SECURITY.md](SECURITY.md)
+
+## Shared activation IPC
+
+Exact-window activation and MRU app activation share hidden-workspace/group
+reveal and Ocean camera navigation. Notification producers can resolve their
+source window through bounded PID ancestry or explicit selectors; ambiguous
+terminal-server matches fail. No notification daemon is embedded. Protocol-state
+regressions cover hidden Classic activation, stale IDs and lock refusal; native
+notification-click and Ocean camera visuals remain to be verified.

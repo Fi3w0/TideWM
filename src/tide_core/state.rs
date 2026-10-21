@@ -12172,6 +12172,38 @@ impl Smallvil {
         self.cycling_focus = false;
     }
 
+    pub(crate) fn activation_blocked(&self) -> bool {
+        self.exclusive_layer().is_some() || !matches!(self.session_lock, SessionLock::Unlocked)
+    }
+
+    /// Looks up protocol-mapped windows without depending on current visibility.
+    pub(crate) fn window_surface_by_id(&self, id: u64) -> Option<WlSurface> {
+        self.foreign_toplevel_numeric_ids
+            .iter()
+            .find(|(surface, candidate)| {
+                **candidate == id && self.mapped_toplevel_window(surface).is_some()
+            })
+            .map(|(surface, _)| surface.clone())
+    }
+
+    pub(crate) fn app_activation_target(&self, app_id: &str) -> Option<WlSurface> {
+        let matches = |surface: &WlSurface| {
+            self.mapped_toplevel_window(surface).is_some()
+                && self.toplevel_identity(surface).0.as_deref() == Some(app_id)
+        };
+        self.focus_history
+            .iter()
+            .find(|surface| matches(surface))
+            .cloned()
+            .or_else(|| {
+                self.foreign_toplevel_numeric_ids
+                    .iter()
+                    .filter(|(surface, _)| matches(surface))
+                    .min_by_key(|(_, id)| **id)
+                    .map(|(surface, _)| surface.clone())
+            })
+    }
+
     /// Grants an xdg-activation request for `surface`: focus its window,
     /// switching to its workspace first if that workspace is hidden,
     /// promoting it to its group's active tab if it's a parked member, and
@@ -12180,11 +12212,17 @@ impl Smallvil {
     /// focus-moving action uses, so a background client can't activate its
     /// way past one.
     pub(crate) fn activate_toplevel(&mut self, surface: &WlSurface) {
-        if self.exclusive_layer().is_some() {
+        if self.exclusive_layer().is_some() || !matches!(self.session_lock, SessionLock::Unlocked) {
             return;
         }
         if self.mapped_toplevel_window(surface).is_none() {
             return;
+        }
+
+        if let Some(entry) = self.classic_depth.remove(surface) {
+            self.layout
+                .insert(&entry.output, entry.workspace, entry.window, None);
+            self.retile();
         }
 
         // Where does the window live? A parked group member isn't in any
@@ -12226,6 +12264,37 @@ impl Smallvil {
             }
         }
 
+        if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+            let target = self
+                .group_of(surface)
+                .and_then(|idx| self.groups[idx].members.get(self.groups[idx].active))
+                .map(|member| member.surface.clone())
+                .unwrap_or_else(|| surface.clone());
+            let output = self
+                .ocean
+                .entry_output(&target)
+                .and_then(|name| self.output_by_name(name))
+                .or_else(|| self.primary_output());
+            if let Some(output) = output {
+                if let (Some(viewport), Some(rect)) = (
+                    self.space.output_geometry(&output).map(|geo| geo.size),
+                    self.ocean
+                        .world_rect(&target, self.config.gaps, self.config.bsp_split_bias),
+                ) {
+                    if !self.ocean.is_screen_pinned(&target) {
+                        self.ocean.center_on_rect(
+                            &output.name(),
+                            viewport,
+                            rect,
+                            Duration::from_millis(self.config.ocean.camera_animation_ms),
+                            self.config.ocean.camera_sway,
+                        );
+                    }
+                }
+            }
+            self.retile_with_viscosity(false, None);
+        }
+
         // Raise only a floating window: raising a tiled one would lift the
         // whole tiled layer above any overlapping floating window, breaking
         // the z-order invariant -- tiled windows never overlap each other,
@@ -12237,6 +12306,7 @@ impl Smallvil {
         }
 
         self.focus_window(Some(surface.clone()), SERIAL_COUNTER.next_serial());
+        self.request_redraw();
     }
 
     /// Invalidates every compositor-owned texture whose pixels include this

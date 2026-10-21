@@ -11,6 +11,7 @@ pub(crate) mod wlr_gamma_control;
 pub(crate) mod wlr_output_management;
 pub(crate) mod wlr_output_power_management;
 mod xdg_shell;
+pub(crate) use xdg_shell::ancestor_pids;
 
 use crate::Smallvil;
 

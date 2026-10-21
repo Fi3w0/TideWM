@@ -645,6 +645,52 @@ fn read_bounded_to_end<R: Read>(reader: R, cap: usize) -> std::io::Result<Vec<u8
 fn build_request(args: &[String]) -> Result<Value, String> {
     let rest = &args[1..];
     match args[0].as_str() {
+        "focus-window" if rest.len() == 1 => {
+            let id = rest[0]
+                .parse::<u64>()
+                .ok()
+                .filter(|id| *id > 0)
+                .ok_or("focus-window requires a positive window ID")?;
+            Ok(json!({ "request": "focus-window", "window_id": id }))
+        }
+        "focus-app" if rest.len() == 1 && !rest[0].is_empty() => {
+            Ok(json!({ "request": "focus-app", "app_id": rest[0] }))
+        }
+        "resolve-window" => {
+            if rest.is_empty() || rest.len() % 2 != 0 {
+                return Err(
+                    "resolve-window requires --pid PID, --app-id ID, or --window-id ID".into(),
+                );
+            }
+            let mut request = json!({ "request": "resolve-window" });
+            for pair in rest.chunks_exact(2) {
+                let (key, value) = match pair[0].as_str() {
+                    "--pid" => (
+                        "pid",
+                        json!(pair[1]
+                            .parse::<i32>()
+                            .ok()
+                            .filter(|pid| *pid > 0)
+                            .ok_or("invalid PID")?),
+                    ),
+                    "--window-id" => (
+                        "window_id",
+                        json!(pair[1]
+                            .parse::<u64>()
+                            .ok()
+                            .filter(|id| *id > 0)
+                            .ok_or("invalid window ID")?),
+                    ),
+                    "--app-id" if !pair[1].is_empty() => ("app_id", json!(pair[1])),
+                    _ => return Err(format!("invalid resolve-window selector: {}", pair[0])),
+                };
+                if request.get(key).is_some() {
+                    return Err(format!("duplicate selector: {}", pair[0]));
+                }
+                request[key] = value;
+            }
+            Ok(request)
+        }
         "outputs" => Ok(json!({ "request": "outputs" })),
         "workspaces" => Ok(json!({ "request": "workspaces" })),
         "windows" => Ok(json!({ "request": "windows" })),
@@ -947,6 +993,8 @@ QUERIES:
     windows             list currently mapped windows
     focused-window       (alias: focused) the currently focused window, if any
     active-submap        the currently active `submap <name> {{ }}` block, if any
+    resolve-window --pid <PID> | --app-id <ID> | --window-id <ID>
+                        resolve a notification source; ambiguous matches fail
     keyboard-layouts     current XKB layout (`--json`: current_idx, names, codes)
 
 STREAMING:
@@ -982,6 +1030,8 @@ ACTIONS:
         toggle-overview
 
     A few space-separated shorthands, equivalent to the colon syntax above:
+        tidectl focus-window <ID>          reveal and activate an exact window
+        tidectl focus-app <app_id>         reveal the most recently used matching app
         tidectl workspace <N>              same as "workspace:N"
         tidectl workspace-on <output> <N>  same as "workspace-on:<output>:N"
         tidectl move-to-workspace <N>      same as "move-to-workspace:N"
@@ -1004,6 +1054,32 @@ tidewm-*.sock under $XDG_RUNTIME_DIR."#
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn navigation_commands_validate_selectors_and_preserve_identity() {
+        let request =
+            |args: &[&str]| build_request(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            request(&["focus-window", "42"]).unwrap(),
+            json!({"request":"focus-window", "window_id":42})
+        );
+        assert!(request(&["focus-window", "0"]).is_err());
+        assert_eq!(
+            request(&["focus-app", "org.example.App"]).unwrap()["app_id"],
+            "org.example.App"
+        );
+        assert_eq!(
+            request(&["resolve-window", "--pid", "123", "--app-id", "kitty"]).unwrap()["pid"],
+            123
+        );
+        for args in [
+            &["resolve-window"][..],
+            &["resolve-window", "--pid", "-1"],
+            &["resolve-window", "--pid", "1", "--pid", "2"],
+        ] {
+            assert!(request(args).is_err());
+        }
+    }
 
     fn spawn_action(args: &[&str]) -> String {
         let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();

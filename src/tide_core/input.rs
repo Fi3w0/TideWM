@@ -2752,99 +2752,14 @@ impl Smallvil {
                 }
             }
             Action::FocusApp(app_id) => {
-                if app_id.is_empty() {
-                    return;
+                if let Some(surface) = self.app_activation_target(&app_id) {
+                    self.activate_toplevel(&surface);
                 }
-                type WlSurface =
-                    smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-                let windows: Vec<WlSurface> = self
-                    .space
-                    .elements()
-                    .filter_map(|window| {
-                        let toplevel = window.toplevel()?;
-                        let surface = toplevel.wl_surface().clone();
-                        let (id, _) = self.toplevel_identity(&surface);
-                        (id.as_deref() == Some(app_id.as_str())).then_some(surface)
-                    })
-                    .collect();
-                if windows.is_empty() {
-                    return;
+            }
+            Action::FocusWindow(id) => {
+                if let Some(surface) = self.window_surface_by_id(id) {
+                    self.activate_toplevel(&surface);
                 }
-                let candidate = match self.config.spatial_engine {
-                    crate::config::SpatialEngine::Classic => {
-                        // Prefer a window already on the active workspace of
-                        // its output, else the first mapped. Switch to its
-                        // workspace first so the focus actually lands.
-                        let mut first: Option<WlSurface> = None;
-                        let mut target: Option<WlSurface> = None;
-                        for surface in windows {
-                            if first.is_none() {
-                                first = Some(surface.clone());
-                            }
-                            let (Some(output_name), Some(workspace)) = (
-                                self.layout.output_of(&surface),
-                                self.layout.workspace_of(&surface),
-                            ) else {
-                                continue;
-                            };
-                            if workspace == self.layout.active_workspace(output_name) {
-                                target = Some(surface);
-                                break;
-                            }
-                        }
-                        let target = target.or(first).expect("windows is non-empty");
-                        if let (Some(output_name), Some(workspace)) = (
-                            self.layout.output_of(&target),
-                            self.layout.workspace_of(&target),
-                        ) {
-                            if let Some(output) = self.output_by_name(output_name) {
-                                if workspace != self.layout.active_workspace(output_name) {
-                                    self.switch_workspace(&output, workspace);
-                                }
-                            }
-                        }
-                        target
-                    }
-                    crate::config::SpatialEngine::Ocean => {
-                        // Travel the owner's camera in independent mode;
-                        // shared mode can summon it through the primary view.
-                        let output = if self.config.ocean.shared_canvas {
-                            self.primary_output()
-                        } else {
-                            self.ocean
-                                .entry_output(&windows[0])
-                                .and_then(|name| self.output_by_name(name))
-                        };
-                        if let Some(output) = output {
-                            if let Some(viewport) =
-                                self.space.output_geometry(&output).map(|geo| geo.size)
-                            {
-                                for surface in &windows {
-                                    if let Some(rect) = self.ocean.world_rect(
-                                        surface,
-                                        self.config.gaps,
-                                        self.config.bsp_split_bias,
-                                    ) {
-                                        self.ocean.center_on_rect(
-                                            &output.name(),
-                                            viewport,
-                                            rect,
-                                            Duration::from_millis(
-                                                self.config.ocean.camera_animation_ms,
-                                            ),
-                                            self.config.ocean.camera_sway,
-                                        );
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        windows[0].clone()
-                    }
-                };
-                self.focus_window(Some(candidate.clone()), SERIAL_COUNTER.next_serial());
-                self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged { surface: candidate });
-                self.request_redraw();
             }
             Action::CloseApp(app_id) => {
                 if app_id.is_empty() {

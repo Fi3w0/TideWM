@@ -1984,7 +1984,7 @@ impl Smallvil {
 /// `pid`'s ancestor process chain (nearest first) from `/proc`, stopping
 /// at init. Capped well past any realistic terminal -> shell -> app
 /// nesting depth, in case of a PPid cycle in a racing/dying process tree.
-fn ancestor_pids(pid: i32) -> Vec<i32> {
+pub(crate) fn ancestor_pids(pid: i32) -> Vec<i32> {
     let mut ancestors = Vec::new();
     let mut current = pid;
     for _ in 0..16 {

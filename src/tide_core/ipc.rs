@@ -57,6 +57,18 @@ enum Request {
     Workspaces,
     Windows,
     FocusedWindow,
+    FocusWindow {
+        window_id: u64,
+    },
+    FocusApp {
+        app_id: String,
+    },
+    /// Resolves a notification producer without retaining notification state.
+    ResolveWindow {
+        window_id: Option<u64>,
+        app_id: Option<String>,
+        pid: Option<i32>,
+    },
     ActiveSubmap,
     /// XKB layout group and layout names, for bars showing or switching
     /// the input language. Same shape as niri's `keyboard-layouts`:
@@ -826,6 +838,18 @@ fn handle_request(state: &mut Smallvil, request: Request) -> serde_json::Value {
         Request::Workspaces => json!({ "ok": true, "data": workspaces_json(state) }),
         Request::Windows => json!({ "ok": true, "data": windows_json(state) }),
         Request::FocusedWindow => json!({ "ok": true, "data": focused_window_json(state) }),
+        Request::FocusWindow { window_id } => {
+            activate_window_response(state, state.window_surface_by_id(window_id))
+        }
+        Request::FocusApp { app_id } => {
+            activate_window_response(state, state.app_activation_target(&app_id))
+        }
+        Request::ResolveWindow {
+            window_id,
+            app_id,
+            pid,
+        } => resolve_window_response(state, window_id, app_id.as_deref(), pid),
+
         Request::ActiveSubmap => json!({ "ok": true, "data": state.active_submap }),
         Request::KeyboardLayouts => match state.keyboard_layouts() {
             Some((group, names)) => json!({ "ok": true, "data": {
@@ -909,6 +933,69 @@ fn run_ipc_action(state: &mut Smallvil, action: config::Action) -> Result<(), St
         state.run_action(action);
         Ok(())
     }
+}
+
+fn activate_window_response(
+    state: &mut Smallvil,
+    surface: Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>,
+) -> serde_json::Value {
+    if state.activation_blocked() {
+        return json!({ "ok": false, "error": "activation blocked by session lock or exclusive layer" });
+    }
+    let Some(surface) = surface else {
+        return json!({ "ok": false, "error": "no matching live window" });
+    };
+    state.activate_toplevel(&surface);
+    json!({ "ok": true, "data": { "window_id": state.foreign_toplevel_numeric_ids.get(&surface) } })
+}
+
+fn resolve_window_response(
+    state: &Smallvil,
+    window_id: Option<u64>,
+    app_id: Option<&str>,
+    pid: Option<i32>,
+) -> serde_json::Value {
+    if window_id.is_none() && app_id.is_none() && pid.is_none() {
+        return json!({ "ok": false, "error": "provide window_id, app_id, or pid" });
+    }
+    if pid.is_some_and(|pid| pid <= 0) || app_id.is_some_and(str::is_empty) {
+        return json!({ "ok": false, "error": "pid and app_id must be nonempty valid selectors" });
+    }
+    let mut candidates: Vec<_> = state
+        .foreign_toplevel_numeric_ids
+        .iter()
+        .filter(|(surface, id)| {
+            window_id.is_none_or(|wanted| wanted == **id)
+                && state.mapped_toplevel_window(surface).is_some()
+                && app_id.is_none_or(|wanted| {
+                    state.toplevel_identity(surface).0.as_deref() == Some(wanted)
+                })
+        })
+        .collect();
+    if let Some(pid) = pid {
+        // Prefer the nearest process in the producer's ancestry. A shared
+        // terminal server may still own several windows: report ambiguity.
+        let chain = std::iter::once(pid).chain(crate::handlers::ancestor_pids(pid));
+        let nearest = chain
+            .filter_map(|pid| {
+                let found: Vec<_> = candidates
+                    .iter()
+                    .copied()
+                    .filter(|(surface, _)| state.client_pid(surface) == Some(pid))
+                    .collect();
+                (!found.is_empty()).then_some(found)
+            })
+            .next();
+        candidates = nearest.unwrap_or_default();
+    }
+    candidates.sort_by_key(|(_, id)| **id);
+    if candidates.len() != 1 {
+        return json!({ "ok": false, "error": if candidates.is_empty() { "no matching live window" } else { "ambiguous source; provide an exact window_id" },
+            "candidates": candidates.iter().map(|(_, id)| **id).collect::<Vec<_>>() });
+    }
+    let (surface, id) = candidates[0];
+    let (app_id, title) = state.toplevel_identity(surface);
+    json!({ "ok": true, "data": { "window_id": id, "app_id": app_id, "title": title } })
 }
 
 fn outputs_json(state: &Smallvil) -> serde_json::Value {
@@ -1331,6 +1418,53 @@ fn window_json(
         }
     }
     Some(entry)
+}
+
+#[cfg(test)]
+pub(crate) fn navigation_regression(
+    state: &mut Smallvil,
+    windows: &[smithay::desktop::Window],
+    output: &smithay::output::Output,
+) {
+    let surface = windows[0].toplevel().unwrap().wl_surface().clone();
+    state
+        .foreign_toplevel_numeric_ids
+        .insert(surface.clone(), 9_001);
+    state.layout.remove(&surface);
+    state
+        .layout
+        .insert(&output.name(), 7, windows[0].clone(), None);
+    state.space.unmap_elem(&windows[0]);
+    let response = handle_request(state, Request::FocusWindow { window_id: 9_001 });
+    assert_eq!(response["ok"], true, "{response}");
+    assert_eq!(state.layout.active_workspace(&output.name()), 7);
+    assert_eq!(state.focused_window_surface(), Some(surface.clone()));
+    let response = handle_request(
+        state,
+        Request::ResolveWindow {
+            window_id: Some(9_001),
+            app_id: None,
+            pid: None,
+        },
+    );
+    assert_eq!(response["data"]["window_id"], 9_001);
+    assert_eq!(
+        handle_request(
+            state,
+            Request::FocusWindow {
+                window_id: u64::MAX
+            }
+        )["ok"],
+        false
+    );
+    let previous = state.focused_window_surface();
+    state.session_lock = crate::state::SessionLock::Locked;
+    assert_eq!(
+        handle_request(state, Request::FocusWindow { window_id: 9_001 })["ok"],
+        false
+    );
+    assert_eq!(state.focused_window_surface(), previous);
+    state.session_lock = crate::state::SessionLock::Unlocked;
 }
 
 #[cfg(test)]
