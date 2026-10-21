@@ -6,6 +6,15 @@ Scope: the complete Rust source tree, build/package entry points, the Wave confi
 
 This is a static code review, not a claim that every issue below was reproduced on hardware. Each item has a confidence label. No source file was changed, and nothing was committed. This report is the only intended working-tree change.
 
+## Scroll continuation — 2026-10-22
+
+Local `scroll-engine` development adds .157 shared exact-window/app activation
+and notification-source lookup, followed by .158 experimental per-output Scroll
+geometry and live three-engine switching. SCROLL.md is the scope/validation guide;
+the original audit ledger below remains historical and no unrelated finding is
+closed by this work. Source and protocol-state checks do not establish native
+dual-monitor, hardware-gesture or hotplug behavior. Nothing is installed or pushed.
+
 ## Implementation handoff
 
 - Updated: 2026-10-13

@@ -917,6 +917,15 @@ fn handle_request(state: &mut Smallvil, request: Request) -> serde_json::Value {
 /// registered by the connection callback can reach the client before the
 /// loop stops. Other actions remain synchronous, preserving batch order.
 fn run_ipc_action(state: &mut Smallvil, action: config::Action) -> Result<(), String> {
+    if let config::Action::SetEngine(target) = action {
+        return state
+            .migrate_spatial_engine(target)
+            .then_some(())
+            .ok_or_else(|| {
+                "engine switch requires a live output, unlocked session and no active grab"
+                    .to_string()
+            });
+    }
     if matches!(action, config::Action::Quit) {
         state
             .loop_handle
@@ -1019,6 +1028,14 @@ fn outputs_json(state: &Smallvil) -> serde_json::Value {
                     json!(state.layout.active_workspace(&output.name()))
                 },
             });
+            if state.config.spatial_engine == crate::config::SpatialEngine::Scroll {
+                let workspace = state.layout.active_workspace(&output.name());
+                entry["scroll"] = json!({
+                    "offset": state.layout.scroll.offset(&output.name(), state.layout.scroll_key(workspace)),
+                    "orientation": match state.config.scroll.orientation { crate::scroll::Orientation::Horizontal => "horizontal", crate::scroll::Orientation::Vertical => "vertical" },
+                    "workspaces": match state.config.scroll.workspaces { crate::scroll::WorkspaceMode::Separate => "separate", crate::scroll::WorkspaceMode::Sections => "sections" },
+                });
+            }
             if ocean_engine {
                 let camera = state.ocean.camera(&output.name()).origin;
                 entry["camera_origin"] = json!([camera.x, camera.y]);
@@ -1153,6 +1170,7 @@ fn diagnostics_json(state: &Smallvil) -> serde_json::Value {
         "uptime_secs": state.start_time.elapsed().as_secs(),
         "spatial_engine": match state.config.spatial_engine {
             crate::config::SpatialEngine::Classic => "classic",
+            crate::config::SpatialEngine::Scroll => "scroll",
             crate::config::SpatialEngine::Ocean => "ocean",
         },
         "water_effects": state.config.water_effects,
@@ -1271,6 +1289,7 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
         "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
         "spatial_engine": match state.config.spatial_engine {
             crate::config::SpatialEngine::Classic => "classic",
+            crate::config::SpatialEngine::Scroll => "scroll",
             crate::config::SpatialEngine::Ocean => "ocean",
         },
         "pss_bytes": pss_kib * 1024,
@@ -1465,6 +1484,82 @@ pub(crate) fn navigation_regression(
     );
     assert_eq!(state.focused_window_surface(), previous);
     state.session_lock = crate::state::SessionLock::Unlocked;
+    let other = windows[1].toplevel().unwrap().wl_surface().clone();
+    state
+        .foreign_toplevel_numeric_ids
+        .insert(other.clone(), 9_002);
+    for candidate in [&surface, &other] {
+        smithay::wayland::compositor::with_states(candidate, |states| {
+            states
+                .data_map
+                .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .app_id = Some("navigation.test".to_owned());
+        });
+    }
+    state.activate_toplevel(&other);
+    assert_eq!(state.app_activation_target("navigation.test"), Some(other));
+    let ambiguous = handle_request(
+        state,
+        Request::ResolveWindow {
+            window_id: None,
+            app_id: Some("navigation.test".into()),
+            pid: None,
+        },
+    );
+    assert_eq!(ambiguous["ok"], false);
+    assert_eq!(ambiguous["candidates"].as_array().unwrap().len(), 2);
+    let response = handle_request(
+        state,
+        Request::ResolveWindow {
+            window_id: Some(9_001),
+            app_id: None,
+            pid: Some(std::process::id() as i32),
+        },
+    );
+    assert_eq!(response["data"]["window_id"], 9_001);
+    state.activate_toplevel(&surface);
+    // Exercise every directed engine transition with the same live handles.
+    for target in [
+        crate::config::SpatialEngine::Scroll,
+        crate::config::SpatialEngine::Classic,
+        crate::config::SpatialEngine::Ocean,
+        crate::config::SpatialEngine::Scroll,
+        crate::config::SpatialEngine::Ocean,
+        crate::config::SpatialEngine::Classic,
+    ] {
+        assert!(state.migrate_spatial_engine(target));
+        assert!(state.mapped_toplevel_window(&surface).is_some());
+        assert_eq!(
+            handle_request(state, Request::FocusWindow { window_id: 9_001 })["ok"],
+            true
+        );
+        assert_eq!(state.focused_window_surface(), Some(surface.clone()));
+        for live_output in state.space.outputs() {
+            if let Some(placements) = state.render_placements(live_output) {
+                for placement in placements {
+                    if target == crate::config::SpatialEngine::Scroll
+                        && placement.surface() == Some(&surface)
+                    {
+                        assert_eq!(
+                            state.layout.output_of(&surface),
+                            Some(live_output.name().as_str())
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let path = crate::config::Config::path();
+    let mut source = std::fs::read_to_string(&path).unwrap();
+    source
+        .push_str("\nreload_toast = false\nrule {\n app_id = navigation.test\n opacity = 0.7\n}\n");
+    std::fs::write(path, source).unwrap();
+    state.take_redraw_requests();
+    state.reload_config();
+    assert!(state.take_redraw_requests().is_global(), "a static appearance reload must schedule a frame without relying on a toast or animated wallpaper");
 }
 
 #[cfg(test)]

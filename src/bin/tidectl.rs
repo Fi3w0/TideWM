@@ -703,6 +703,7 @@ fn build_request(args: &[String]) -> Result<Value, String> {
         })),
         "batch" if !rest.is_empty() => Ok(json!({ "request": "batch", "actions": rest })),
         "action" if !rest.is_empty() => Ok(action_request(&rest.join(" "))),
+        "engine" if rest.len() == 1 => Ok(action_request(&format!("engine:{}", rest[0]))),
         "workspace" if !rest.is_empty() => {
             Ok(action_request(&format!("workspace:{}", rest.join(" "))))
         }
@@ -1030,6 +1031,7 @@ ACTIONS:
         toggle-overview
 
     A few space-separated shorthands, equivalent to the colon syntax above:
+        tidectl engine classic|ocean|scroll  switch the live spatial engine
         tidectl focus-window <ID>          reveal and activate an exact window
         tidectl focus-app <app_id>         reveal the most recently used matching app
         tidectl workspace <N>              same as "workspace:N"

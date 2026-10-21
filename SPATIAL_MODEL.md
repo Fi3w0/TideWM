@@ -1,6 +1,6 @@
 # TideWM spatial model
 
-TideWM is one compositor with two selectable spatial engines. The engine
+TideWM is one compositor with three selectable spatial engines. The engine
 changes window ownership and navigation, but it is not a startup-only choice
 anymore: a hot reload that flips `spatial_engine` migrates every live window
 between the models in place (see "Migration" below). Water, glass, animations,
@@ -83,6 +83,26 @@ world Y. The bioluminescent compass makes distant or urgent windows discoverable
 soft glow at the viewport edge points toward each off-screen urgent window
 (in any direction) and each deep window (below the viewport). Travel stays
 explicit.
+
+## Scroll
+
+Scroll shares the durable per-output/workspace window registry with Classic and
+supplies a different geometry policy: ordered tiles and a viewport offset.
+Classic's BSP trees retain membership, insertion order and group slots, so a
+Classic/Scroll round trip does not rebuild them. Scroll offsets and requested
+tile proportions are lightweight metadata; no alternate client objects or
+render textures are kept for an inactive engine.
+
+Each output scrolls independently. Workspaces select separate strips by default;
+`scroll { workspaces = sections }` presents tiled workspace sections in one
+continuous strip per output. Scratchpads remain separate. Floating windows keep
+their existing workspace overlay/pin behavior. See SCROLL.md for configuration,
+current limits and verification status.
+
+`tidectl engine classic|ocean|scroll` selects an engine for the running session.
+Config reload can also select it. Locks and ongoing grabs block migration.
+Scroll/Classic to Ocean and back use the existing reef conversion; Ocean camera
+history and bookmarks still have no workspace counterpart.
 
 ## Migration
 

@@ -2418,6 +2418,25 @@ impl Smallvil {
                 let compositor_swipe = (action_match || workspace_fallback)
                     && matches!(self.session_lock, SessionLock::Unlocked)
                     && self.exclusive_layer().is_none();
+                if compositor_swipe
+                    && workspace_fallback
+                    && !action_match
+                    && self.config.spatial_engine == crate::config::SpatialEngine::Scroll
+                {
+                    if let Some(output) = self.primary_output() {
+                        let workspace = self.layout.active_workspace(&output.name());
+                        let initial_offset = self
+                            .layout
+                            .scroll
+                            .offset(&output.name(), self.layout.scroll_key(workspace));
+                        self.compositor_gesture = Some(CompositorGesture::Scroll {
+                            output: output.name(),
+                            workspace,
+                            initial_offset,
+                        });
+                        return;
+                    }
+                }
                 if compositor_swipe {
                     // Decided once, at Begin: a config change mid-drag must
                     // not switch which model an already-running gesture
@@ -2510,6 +2529,15 @@ impl Smallvil {
                     pointer.frame(self);
                     return;
                 }
+                if let Some(CompositorGesture::Scroll {
+                    output, workspace, ..
+                }) = &self.compositor_gesture
+                {
+                    let output = output.clone();
+                    let workspace = *workspace;
+                    self.update_scroll_gesture(&output, workspace, delta.x, delta.y);
+                    return;
+                }
                 let swim = if let Some(CompositorGesture::Swipe {
                     swim,
                     delta_x,
@@ -2568,6 +2596,25 @@ impl Smallvil {
                         SERIAL_COUNTER.next_serial(),
                         Event::time_msec(&event),
                     );
+                    return;
+                }
+                if matches!(
+                    self.compositor_gesture,
+                    Some(CompositorGesture::Scroll { .. })
+                ) {
+                    if let Some(CompositorGesture::Scroll {
+                        output,
+                        workspace,
+                        initial_offset,
+                    }) = self.compositor_gesture.take()
+                    {
+                        self.finish_scroll_gesture(
+                            &output,
+                            workspace,
+                            initial_offset,
+                            GestureEndEvent::cancelled(&event),
+                        );
+                    }
                     return;
                 }
                 if let Some(CompositorGesture::Swipe {
@@ -2756,6 +2803,12 @@ impl Smallvil {
                     self.activate_toplevel(&surface);
                 }
             }
+            Action::SetEngine(engine) => {
+                if !self.activation_blocked() {
+                    self.migrate_spatial_engine(engine);
+                }
+            }
+            Action::ScrollView(direction) => self.scroll_view(direction),
             Action::FocusWindow(id) => {
                 if let Some(surface) = self.window_surface_by_id(id) {
                     self.activate_toplevel(&surface);

@@ -25,6 +25,9 @@ use smithay::{
 
 use crate::config::{LayoutAlgorithm, MasterOrientation, SplitBias};
 
+#[path = "layout_scroll.rs"]
+mod scroll_policy;
+
 #[derive(Clone)]
 enum Node {
     Leaf(Window),
@@ -339,6 +342,8 @@ impl Drop for BspLayout {
 /// take `workspace` explicitly.
 #[derive(Default)]
 pub struct Layouts {
+    pub(crate) scroll: crate::scroll::ScrollState,
+    pub(crate) scroll_section_requests: HashMap<String, u32>,
     trees: HashMap<(String, u32), BspLayout>,
     /// Direct surface -> tree ownership. Geometry remains authoritative in
     /// `trees`; this index prevents common membership/output/workspace
@@ -445,6 +450,10 @@ impl Layouts {
     /// -- callers (see `Smallvil::switch_workspace`) are responsible for
     /// actually hiding/showing the right windows around this call.
     pub fn set_active_workspace(&mut self, output: &str, workspace: u32) {
+        if self.scroll.config.is_some() && self.scroll_key(workspace) == 0 {
+            self.scroll_section_requests
+                .insert(output.to_owned(), workspace);
+        }
         self.active.insert(output.to_string(), workspace);
     }
 
@@ -545,6 +554,7 @@ impl Layouts {
             .is_some_and(|layout| layout.remove(surface));
         debug_assert!(removed, "layout owner index must point at the owning tree");
         self.owners.remove(surface);
+        self.scroll.forget(surface);
         if !removed {
             return;
         }
@@ -562,6 +572,7 @@ impl Layouts {
             self.master_ratio.remove(&key);
             self.cascade_state.remove(&key);
         }
+        self.scroll.prune(&self.populated_workspaces());
         self.bump_topology_revision();
     }
 
@@ -682,6 +693,9 @@ impl Layouts {
             .get_mut(&key)
             .is_some_and(|layout| layout.replace_leaf(old, new_window));
         if replaced {
+            if let Some(toplevel) = new_window.toplevel() {
+                self.scroll.replace_slot(old, toplevel.wl_surface().clone());
+            }
             self.owners.remove(old);
             if let Some(surface) = new_window
                 .toplevel()
@@ -709,6 +723,9 @@ impl Layouts {
         area: Rectangle<i32, Logical>,
         gap: i32,
     ) -> Vec<(Window, Rectangle<i32, Logical>)> {
+        if self.scroll.config.is_some() {
+            return self.scroll_layout(output, workspace, area, gap);
+        }
         let Some(tree) = self.trees.get(&(output.to_string(), workspace)) else {
             return Vec::new();
         };
@@ -772,7 +789,9 @@ impl Layouts {
             self.cascade_state.remove(&key);
             return;
         }
-        if self.algorithm(output, workspace) != LayoutAlgorithm::Cascade {
+        if self.scroll.config.is_some()
+            || self.algorithm(output, workspace) != LayoutAlgorithm::Cascade
+        {
             return;
         }
         let state =
@@ -835,7 +854,9 @@ impl Layouts {
         gap: i32,
         point: Point<f64, Logical>,
     ) -> Option<CascadeHit> {
-        if self.algorithm(output, workspace) != LayoutAlgorithm::Cascade {
+        if self.scroll.config.is_some()
+            || self.algorithm(output, workspace) != LayoutAlgorithm::Cascade
+        {
             return None;
         }
         let state = self.cascade_state.get(&(output.to_string(), workspace))?;
@@ -902,7 +923,9 @@ impl Layouts {
         area: Rectangle<i32, Logical>,
         surface: &WlSurface,
     ) -> Vec<CascadeHit> {
-        if self.algorithm(output, workspace) != LayoutAlgorithm::Cascade {
+        if self.scroll.config.is_some()
+            || self.algorithm(output, workspace) != LayoutAlgorithm::Cascade
+        {
             return Vec::new();
         }
         let key = (output.to_string(), workspace);
@@ -1015,7 +1038,8 @@ impl Layouts {
         gap: i32,
         point: Point<f64, Logical>,
     ) -> Option<SplitHit> {
-        if self.algorithm(output, workspace) != LayoutAlgorithm::Bsp {
+        if self.scroll.config.is_some() || self.algorithm(output, workspace) != LayoutAlgorithm::Bsp
+        {
             return None;
         }
         let mut hit = self
@@ -1038,7 +1062,8 @@ impl Layouts {
         area: Rectangle<i32, Logical>,
         surface: &WlSurface,
     ) -> Vec<SplitHit> {
-        if self.algorithm(output, workspace) != LayoutAlgorithm::Bsp {
+        if self.scroll.config.is_some() || self.algorithm(output, workspace) != LayoutAlgorithm::Bsp
+        {
             return Vec::new();
         }
         let Some(tree) = self.trees.get(&(output.to_string(), workspace)) else {

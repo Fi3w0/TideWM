@@ -682,6 +682,13 @@ pub enum SpatialEngine {
     #[default]
     Classic,
     Ocean,
+    Scroll,
+}
+
+impl SpatialEngine {
+    pub fn uses_workspaces(self) -> bool {
+        self != Self::Ocean
+    }
 }
 
 /// Which shape TideWM's first-party toast/popup chrome draws. `Pill` is the
@@ -1010,7 +1017,7 @@ pub enum Action {
     /// bookmarks remain the startup baseline; this does not rewrite config.
     OceanSaveBookmark(String),
     /// Focuses the most recently used mapped window of the given app_id
-    /// (the one on the current workspace when there is one), switching
+    /// including hidden workspace windows, switching
     /// workspace / traveling the camera there first if needed -- the dock
     /// and taskbar's "smart open": running app, click icon, it comes to
     /// you. No-op when the app has no mapped window; the caller (a bar's
@@ -1018,6 +1025,8 @@ pub enum Action {
     FocusApp(String),
     /// Reveals and activates one exact live window, including hidden owners.
     FocusWindow(u64),
+    SetEngine(SpatialEngine),
+    ScrollView(Direction),
     /// Sends a graceful close request to every mapped window of the given
     /// app_id -- the dock's "quit app". Apps that confirm-and-close on
     /// their own handle it; anything stuck must be killed by the caller.
@@ -1108,6 +1117,7 @@ pub struct Config {
     /// until the next TideWM launch so live windows never change owners.
     pub spatial_engine: SpatialEngine,
     pub ocean: OceanConfig,
+    pub scroll: crate::scroll::ScrollConfig,
     /// Physically-held modifier required for compositor mouse move/resize.
     /// This is separate from keybinds because `$mod` is only a Waves
     /// variable, not global compositor state; the shipped config points
@@ -1649,6 +1659,7 @@ impl Config {
         let spatial_engine = match raw.spatial_engine.trim().to_ascii_lowercase().as_str() {
             "classic" | "workspace" | "workspaces" => SpatialEngine::Classic,
             "ocean" | "canvas" => SpatialEngine::Ocean,
+            "scroll" => SpatialEngine::Scroll,
             other => {
                 warnings.push(format!("Invalid spatial_engine \"{other}\"; using classic"));
                 SpatialEngine::Classic
@@ -1681,6 +1692,7 @@ impl Config {
             terminal: raw.terminal,
             spatial_engine,
             ocean: raw.ocean,
+            scroll: raw.scroll,
             pointer_modifier,
             show_welcome_hint: raw.show_welcome_hint,
             show_config_reload_toast: raw.show_config_reload_toast,
@@ -2137,6 +2149,7 @@ struct RawConfig {
     terminal: String,
     spatial_engine: String,
     ocean: OceanConfig,
+    scroll: crate::scroll::ScrollConfig,
     /// `super`, `alt`, `ctrl`, `shift`, or a `+`-joined combination.
     /// Resolved after Waves variable substitution in `Config::from_raw`.
     pointer_modifier: String,
@@ -2315,6 +2328,7 @@ impl Default for RawConfig {
             terminal: "kitty".to_string(),
             spatial_engine: "classic".to_string(),
             ocean: OceanConfig::default(),
+            scroll: crate::scroll::ScrollConfig::default(),
             pointer_modifier: "super".to_string(),
             backdrop_capture_scale: 1,
             // Deliberately false, not true: a real config.wave always ships
@@ -5482,6 +5496,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "compass" => apply_compass_block(&mut raw.compass, body),
         "minimap" => apply_minimap_block(&mut raw.minimap, body),
         "ocean" => apply_ocean_block(&mut raw.ocean, body),
+        "scroll" => apply_scroll_block(&mut raw.scroll, body),
         "animations" => apply_animations_block(&mut raw.animations, body),
         "cascade" => apply_cascade_liquid_block(&mut raw.cascade, body),
         "depth" => apply_depth_block(&mut raw.depth, body),
@@ -7443,6 +7458,39 @@ fn apply_classic_depth_block(cfg: &mut ClassicDepthConfig, body: &[waves::Entry]
                 ),
             },
             other => tracing::warn!(key = %other, "Unknown key in `classic_depth` block, ignoring"),
+        }
+    }
+}
+
+fn apply_scroll_block(cfg: &mut crate::scroll::ScrollConfig, body: &[waves::Entry]) {
+    use crate::scroll::{Orientation, WorkspaceMode};
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            continue;
+        };
+        match key.as_str() {
+            "workspaces" => match value.as_str() {
+                "separate" => cfg.workspaces = WorkspaceMode::Separate,
+                "sections" => cfg.workspaces = WorkspaceMode::Sections,
+                _ => tracing::warn!(value, "Expected scroll.workspaces separate or sections"),
+            },
+            "orientation" => match value.as_str() {
+                "horizontal" => cfg.orientation = Orientation::Horizontal,
+                "vertical" => cfg.orientation = Orientation::Vertical,
+                _ => tracing::warn!(value, "Expected scroll.orientation horizontal or vertical"),
+            },
+            "tile_proportion" => match value.parse::<f64>() {
+                Ok(value) if value.is_finite() && (0.1..=1.0).contains(&value) => {
+                    cfg.tile_proportion = value
+                }
+                _ => tracing::warn!(value, "Expected scroll.tile_proportion from 0.1 to 1.0"),
+            },
+            "gesture_distance" => match value.parse::<f64>() {
+                Ok(value) if value.is_finite() && value > 0.0 => cfg.gesture_distance = value,
+                _ => tracing::warn!(value, "Expected a positive finite scroll.gesture_distance"),
+            },
+            "center_focused" => set_bool(&mut cfg.center_focused, "scroll.center_focused", value),
+            _ => tracing::warn!(key, "Unknown scroll setting"),
         }
     }
 }
@@ -9440,6 +9488,23 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         return (!name.trim().is_empty())
             .then(|| Action::OceanSaveBookmark(name.trim().to_string()));
     }
+    if let Some(engine) = action.strip_prefix("engine:") {
+        return match engine {
+            "classic" => Some(Action::SetEngine(SpatialEngine::Classic)),
+            "ocean" => Some(Action::SetEngine(SpatialEngine::Ocean)),
+            "scroll" => Some(Action::SetEngine(SpatialEngine::Scroll)),
+            _ => None,
+        };
+    }
+    if let Some(direction) = action.strip_prefix("scroll-") {
+        return match direction {
+            "left" => Some(Action::ScrollView(Direction::Left)),
+            "right" => Some(Action::ScrollView(Direction::Right)),
+            "up" => Some(Action::ScrollView(Direction::Up)),
+            "down" => Some(Action::ScrollView(Direction::Down)),
+            _ => None,
+        };
+    }
     if let Some(id) = action.strip_prefix("focus-window:") {
         return id
             .parse::<u64>()
@@ -9918,6 +9983,59 @@ mode nav {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scroll_config_and_engine_actions_are_explicit_and_finite() {
+        let mut raw = RawConfig {
+            spatial_engine: "scroll".into(),
+            ..Default::default()
+        };
+        apply_scroll_block(
+            &mut raw.scroll,
+            &[
+                waves::Entry::Assign("workspaces".into(), "sections".into()),
+                waves::Entry::Assign("orientation".into(), "vertical".into()),
+                waves::Entry::Assign("tile_proportion".into(), "0.6".into()),
+                waves::Entry::Assign("gesture_distance".into(), "900".into()),
+            ],
+        );
+        apply_scroll_block(
+            &mut raw.scroll,
+            &[
+                waves::Entry::Assign("tile_proportion".into(), "NaN".into()),
+                waves::Entry::Assign("gesture_distance".into(), "0".into()),
+            ],
+        );
+        let (config, _) = Config::from_raw(raw);
+        assert_eq!(config.spatial_engine, SpatialEngine::Scroll);
+        assert_eq!(
+            config.scroll.workspaces,
+            crate::scroll::WorkspaceMode::Sections
+        );
+        assert_eq!(
+            config.scroll.orientation,
+            crate::scroll::Orientation::Vertical
+        );
+        assert_eq!(config.scroll.tile_proportion, 0.6);
+        assert_eq!(config.scroll.gesture_distance, 900.0);
+        let entries = wave_entries("engine = scroll\nscroll {\n workspaces = sections\n orientation = vertical\n tile_proportion = 0.6\n}\n");
+        let (parsed, warnings) = Config::from_raw(lower_entries(&entries));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(parsed.spatial_engine, SpatialEngine::Scroll);
+        assert_eq!(
+            parsed.scroll.workspaces,
+            crate::scroll::WorkspaceMode::Sections
+        );
+        assert!(matches!(
+            parse_action("engine:scroll"),
+            Some(Action::SetEngine(SpatialEngine::Scroll))
+        ));
+        assert!(parse_action("engine:invalid").is_none());
+        assert!(matches!(
+            parse_action("scroll-left"),
+            Some(Action::ScrollView(Direction::Left))
+        ));
+    }
 
     /// Shorthand for the common `resolve_window_rules` test call: only
     /// `app_id` set, everything else defaulted. Keeps call sites short
@@ -10857,6 +10975,7 @@ mod tests {
             terminal: String::new(),
             spatial_engine: SpatialEngine::Classic,
             ocean: OceanConfig::default(),
+            scroll: crate::scroll::ScrollConfig::default(),
             pointer_modifier: Mods {
                 logo: true,
                 ..Default::default()

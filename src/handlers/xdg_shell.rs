@@ -451,7 +451,9 @@ impl Smallvil {
             });
 
         let active_pin = match self.config.spatial_engine {
-            crate::config::SpatialEngine::Classic => self.pinned.remove(&wl_surface),
+            crate::config::SpatialEngine::Classic | crate::config::SpatialEngine::Scroll => {
+                self.pinned.remove(&wl_surface)
+            }
             crate::config::SpatialEngine::Ocean => {
                 self.pinned.remove(&wl_surface);
                 self.ocean.unpin_from_screen(&wl_surface)
@@ -1865,7 +1867,8 @@ impl Smallvil {
             }
             if entry.was_pinned {
                 match self.config.spatial_engine {
-                    crate::config::SpatialEngine::Classic => {
+                    crate::config::SpatialEngine::Classic
+                    | crate::config::SpatialEngine::Scroll => {
                         self.pinned.insert(wl_surface.clone());
                     }
                     crate::config::SpatialEngine::Ocean => {
@@ -1876,6 +1879,9 @@ impl Smallvil {
         }
 
         self.retile();
+        if self.focused_window_surface().as_ref() == Some(wl_surface) {
+            self.reveal_scroll_window(wl_surface);
+        }
         self.refresh_wlr_toplevel_state(wl_surface);
     }
 

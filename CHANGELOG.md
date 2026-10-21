@@ -2,6 +2,14 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.158 — Experimental Scroll spatial engine
+
+- `engine = scroll` adds independent scrolling on each output. `scroll.workspaces = separate` gives each workspace a strip; `sections` lays out tiled workspace sections consecutively on that output. Horizontal/vertical orientation, proportional tile sizing, optional focused-tile centering, keyboard resize and viewport actions are configurable. Existing groups and workspace ownership are reused rather than duplicated.
+- `tidectl engine classic|ocean|scroll` changes the live engine without relogging. Classic/Scroll preserve the existing workspace trees; Ocean uses the established reef migration. Locks, exclusive layers and active grabs block switching. The runtime choice lasts until a config reload selects another engine.
+- Directional focus reveals the next tile. Configured workspace-swipe gestures follow the scrolling viewport when no explicit swipe action overrides them; cancellation restores the starting view. Viewport changes retile/redraw their own output. Outputs IPC includes scroll offset and policy.
+- Static appearance reloads now request a frame even with reload toasts and animations disabled. The nested glass check exposed that appearance-only changes could otherwise wait indefinitely for unrelated client damage.
+- Initial scope and remaining interaction work are explicit in SCROLL.md: this is not full niri column/stack/drag parity, and native dual-output/touchpad/hotplug validation remains.
+
 ## 0.90.157 — Window activation and notification-source resolution
 
 - `tidectl focus-window <ID>` and `focus-app <app_id>` reveal live windows through shared activation, including hidden Classic workspaces and inactive group tabs. App selection uses focus history; Ocean activation travels the owning monitor's camera. Parked Depth Deck windows are recalled before activation. Lock/exclusive-layer restrictions remain.

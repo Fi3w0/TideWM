@@ -1240,6 +1240,11 @@ pub(crate) enum SessionLock {
 /// wp-pointer-gestures. A stream is claimed at Begin and remains owned until
 /// End so clients never receive a partial gesture.
 pub(crate) enum CompositorGesture {
+    Scroll {
+        output: String,
+        workspace: u32,
+        initial_offset: f64,
+    },
     Swipe {
         workspace_fallback: bool,
         /// Whether this gesture is being driven live by the swim camera
@@ -1531,7 +1536,9 @@ impl Smallvil {
     /// and the swim toggle both on. Off falls back to the ordinary discrete
     /// workspace switch, and the camera offset collapses to zero.
     pub(crate) fn swim_enabled(&self) -> bool {
-        self.config.water_effects && self.config.swim.enabled
+        self.config.spatial_engine == crate::config::SpatialEngine::Classic
+            && self.config.water_effects
+            && self.config.swim.enabled
     }
 
     /// Gathers every fact `WindowRule::matches`/`matches_initial` need for
@@ -2048,7 +2055,7 @@ impl Smallvil {
         const MIN_MASS: f64 = 1.0;
         let mass = (anchor.2 * anchor.3).max(MIN_MASS);
         let output_bounds = match self.config.spatial_engine {
-            crate::config::SpatialEngine::Classic => {
+            crate::config::SpatialEngine::Classic | crate::config::SpatialEngine::Scroll => {
                 self.mapped_toplevel_window(surface).and_then(|window| {
                     let output = self.output_for_window(&window)?;
                     let geo = self.space.output_geometry(&output)?;
@@ -2152,7 +2159,7 @@ impl Smallvil {
     }
 
     fn snap_eligible_surface(&self, surface: &WlSurface) -> bool {
-        if self.config.spatial_engine != crate::config::SpatialEngine::Classic
+        if !self.config.spatial_engine.uses_workspaces()
             || !self.config.snap.enabled
             || !matches!(self.session_lock, SessionLock::Unlocked)
             || self.layout.contains(surface)
@@ -2606,9 +2613,7 @@ impl Smallvil {
     }
 
     fn cascade_liquid_applies(&self, surface: &WlSurface) -> bool {
-        if !self.config.water_effects
-            || self.config.spatial_engine != crate::config::SpatialEngine::Classic
-        {
+        if !self.config.water_effects || !self.config.spatial_engine.uses_workspaces() {
             return false;
         }
         let (Some(output), Some(workspace)) = (
@@ -2974,7 +2979,9 @@ impl Smallvil {
         output: &Output,
     ) -> Option<Vec<crate::placement::PlacedWindow>> {
         match self.config.spatial_engine {
-            crate::config::SpatialEngine::Classic => self.classic_render_placements(output),
+            crate::config::SpatialEngine::Classic | crate::config::SpatialEngine::Scroll => {
+                self.classic_render_placements(output)
+            }
             crate::config::SpatialEngine::Ocean => {
                 let output_geo = self.space.output_geometry(output)?;
                 let mut placements = self.ocean.placements(
@@ -4451,6 +4458,15 @@ impl Smallvil {
     /// entry made straddling-window ownership nondeterministic across runs.
     /// Ties use the stable output name. `None` if the window is not visible.
     pub(crate) fn output_for_window(&self, window: &Window) -> Option<Output> {
+        if self.config.spatial_engine == crate::config::SpatialEngine::Scroll {
+            if let Some(output) = window
+                .toplevel()
+                .and_then(|t| self.layout.output_of(t.wl_surface()))
+                .and_then(|name| self.output_by_name(name))
+            {
+                return Some(output);
+            }
+        }
         if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
             let surface = window.toplevel()?.wl_surface();
             let owner = || {
@@ -4488,7 +4504,7 @@ impl Smallvil {
     /// must resolve through camera placements because world coordinates and
     /// physical output coordinates intentionally do not share an origin.
     pub(crate) fn rendered_output_for_surface(&self, surface: &WlSurface) -> Option<Output> {
-        if self.config.spatial_engine == crate::config::SpatialEngine::Classic {
+        if self.config.spatial_engine.uses_workspaces() {
             let window = self.mapped_toplevel_window(surface)?;
             return self.output_for_window(&window);
         }
@@ -4652,6 +4668,9 @@ impl Smallvil {
         serial: smithay::utils::Serial,
         animate_handoff: bool,
     ) {
+        if let Some(surface) = surface.as_ref() {
+            self.reveal_scroll_window(surface);
+        }
         let previous_focus = self.window_focus.clone();
         self.on_demand_layer_focus = None;
         self.window_focus = surface.filter(|surface| self.window_is_visible(surface));
@@ -5449,6 +5468,10 @@ impl Smallvil {
     /// choosing a fallback. If an Exclusive layer currently owns the seat,
     /// this still repairs the window that should be restored underneath it.
     pub(crate) fn forget_window_focus(&mut self, surface: &WlSurface) {
+        self.layout.scroll.forget(surface);
+        self.layout
+            .scroll
+            .prune(&self.layout.populated_workspaces());
         self.release_popup_grab_for_root(surface);
         if self.window_focus.as_ref() == Some(surface) {
             self.window_focus = None;
@@ -5815,6 +5838,7 @@ impl Smallvil {
     /// `Space`, so disconnect must perform the cleanup first.
     pub(crate) fn remove_layer_output(&mut self, output: &Output) {
         self.native_render_stats.remove(output);
+        self.layout.scroll_section_requests.remove(&output.name());
         let layers: Vec<desktop::LayerSurface> =
             layer_map_for_output(output).layers().cloned().collect();
         if layers.is_empty() {
@@ -6026,7 +6050,7 @@ impl Smallvil {
                             current_state,
                             next,
                             next_state,
-                            self.config.spatial_engine == crate::config::SpatialEngine::Classic
+                            self.config.spatial_engine.uses_workspaces()
                                 && overlaps.contains(current),
                         )
                     },
@@ -8984,7 +9008,7 @@ impl Smallvil {
         };
         // A Classic tiled window belongs to its layout's output even while
         // its committed size still overlaps a neighbor.
-        let layout_owner = (self.config.spatial_engine == crate::config::SpatialEngine::Classic)
+        let layout_owner = (self.config.spatial_engine.uses_workspaces())
             .then(|| self.layout.output_of(surface))
             .flatten()
             .and_then(|name| self.output_by_name(name));
@@ -9281,12 +9305,29 @@ impl Smallvil {
     }
 
     fn retile_with_viscosity(&mut self, interactive: bool, skip_configure_for: Option<&WlSurface>) {
+        self.retile_filtered(interactive, skip_configure_for, None);
+    }
+
+    fn retile_filtered(
+        &mut self,
+        interactive: bool,
+        skip_configure_for: Option<&WlSurface>,
+        scoped_output: Option<&str>,
+    ) {
+        self.layout.scroll.config = (self.config.spatial_engine
+            == crate::config::SpatialEngine::Scroll)
+            .then_some(self.config.scroll);
         self.buoyancy_dirty = true;
         if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
             self.retile_ocean(skip_configure_for);
             return;
         }
-        let outputs: Vec<Output> = self.space.outputs().cloned().collect();
+        let outputs: Vec<Output> = self
+            .space
+            .outputs()
+            .filter(|output| scoped_output.is_none_or(|name| output.name() == name))
+            .cloned()
+            .collect();
         for output in &outputs {
             let Some(area) = self.output_tiling_area(output) else {
                 continue;
@@ -9295,6 +9336,8 @@ impl Smallvil {
             let workspace = self.layout.active_workspace(&output.name());
 
             let gaps = self.gaps_for(&output.name(), workspace);
+            self.layout
+                .prepare_scroll(&output.name(), workspace, area, gaps);
             let window_count = self.layout.window_count(&output.name(), workspace);
             let target_aspect = area.size.w as f32 / (area.size.h as f32).max(1.0);
             self.layout.refresh_cascade_state(
@@ -9345,7 +9388,12 @@ impl Smallvil {
                             let viscous = (interactive
                                 || self.window_viscosity.contains_key(&surface))
                                 && self.retarget_window_viscosity(&surface, rect);
-                            if !viscous {
+                            if matches!(
+                                self.compositor_gesture,
+                                Some(CompositorGesture::Scroll { .. })
+                            ) {
+                                self.window_move_animations.remove(&surface);
+                            } else if !viscous {
                                 self.start_window_move_animation(&surface, old_rect, rect);
                             }
                         }
@@ -9854,6 +9902,18 @@ impl Smallvil {
         }
         let output_name = output.name();
         let current = self.layout.active_workspace(&output_name);
+        if self.config.spatial_engine == crate::config::SpatialEngine::Scroll {
+            let target = if current == workspace && self.config.workspace_auto_back_and_forth {
+                self.workspace_previous
+                    .get(&output_name)
+                    .copied()
+                    .unwrap_or(workspace)
+            } else {
+                workspace
+            };
+            self.switch_workspace_immediate(output, target);
+            return;
+        }
         // A second request before the first one's outgoing capture ran can
         // cancel it by selecting the still-visible workspace. Treating
         // this as auto-back-and-forth would instead jump somewhere the
@@ -10717,7 +10777,7 @@ impl Smallvil {
         let name = to.name();
         let workspace = self.layout.active_workspace(&name);
         let window = match self.config.spatial_engine {
-            crate::config::SpatialEngine::Classic => {
+            crate::config::SpatialEngine::Classic | crate::config::SpatialEngine::Scroll => {
                 let Some(window) = self.layout.window_of(surface) else {
                     return false;
                 };
@@ -10936,9 +10996,23 @@ impl Smallvil {
     /// Translates live ownership between Classic workspaces and Ocean reefs.
     /// Shared window/protocol tags survive; pins change representation. State
     /// with no counterpart is dropped after restoring any parked windows.
-    fn migrate_spatial_engine(&mut self, target: crate::config::SpatialEngine) -> bool {
+    pub(crate) fn migrate_spatial_engine(&mut self, target: crate::config::SpatialEngine) -> bool {
         if target == self.config.spatial_engine {
             return true;
+        }
+        if self.activation_blocked()
+            || self.classic_tile_drag.is_some()
+            || self.compositor_gesture.is_some()
+            || self
+                .seat
+                .get_pointer()
+                .is_some_and(|pointer| pointer.is_grabbed())
+        {
+            tracing::warn!(
+                ?target,
+                "cannot change spatial engine during lock or an active grab"
+            );
+            return false;
         }
         if self
             .space
@@ -10974,15 +11048,20 @@ impl Smallvil {
             self.space.unmap_elem(&window);
         }
         self.space.refresh();
-        match target {
-            crate::config::SpatialEngine::Classic => self.migrate_ocean_to_classic(),
-            crate::config::SpatialEngine::Ocean => self.migrate_classic_to_ocean(),
+        match (self.config.spatial_engine, target) {
+            (crate::config::SpatialEngine::Ocean, _) => self.migrate_ocean_to_classic(),
+            (_, crate::config::SpatialEngine::Ocean) => self.migrate_classic_to_ocean(),
+            _ => {} // Classic and Scroll share durable workspace membership.
         }
         self.config.spatial_engine = target;
+        self.pending_workspace_transitions.clear();
+        self.workspace_transitions.clear();
+        self.workspace_glides.clear();
+        self.swim_cameras.clear();
         // Rebuild Space as the new engine's render/input cache.
         self.retile_with_viscosity(false, None);
         // Classic retile maps trees only; restore visible migrated floaters.
-        if target == crate::config::SpatialEngine::Classic {
+        if target.uses_workspaces() {
             let floating: Vec<(WlSurface, Rectangle<i32, Logical>, Window)> = self
                 .floating_workspace
                 .iter()
@@ -11005,6 +11084,12 @@ impl Smallvil {
         for surface in &migrated_surfaces {
             self.refresh_window_opacity_and_glass_for(surface);
         }
+        if let Some(focus) = self.window_focus.clone() {
+            self.reveal_scroll_window(&focus);
+        }
+        self.sync_tide();
+        self.refresh_ext_workspaces();
+        self.emit_ipc_event(crate::ipc::IpcEvent::ConfigReloaded);
         self.request_redraw();
         true
     }
@@ -11615,28 +11700,34 @@ impl Smallvil {
     /// leaving two disagreeing sources of truth.
     pub(crate) fn window_is_pinned(&self, surface: &WlSurface) -> bool {
         match self.config.spatial_engine {
-            crate::config::SpatialEngine::Classic => self.pinned.contains(surface),
+            crate::config::SpatialEngine::Classic | crate::config::SpatialEngine::Scroll => {
+                self.pinned.contains(surface)
+            }
             crate::config::SpatialEngine::Ocean => self.ocean.is_screen_pinned(surface),
         }
     }
 
     fn spatial_is_tiled(&self, surface: &WlSurface) -> bool {
         match self.config.spatial_engine {
-            crate::config::SpatialEngine::Classic => self.layout.contains(surface),
+            crate::config::SpatialEngine::Classic | crate::config::SpatialEngine::Scroll => {
+                self.layout.contains(surface)
+            }
             crate::config::SpatialEngine::Ocean => self.ocean.is_tiled(surface),
         }
     }
 
     fn spatial_tiled_window(&self, surface: &WlSurface) -> Option<Window> {
         match self.config.spatial_engine {
-            crate::config::SpatialEngine::Classic => self.layout.window_of(surface),
+            crate::config::SpatialEngine::Classic | crate::config::SpatialEngine::Scroll => {
+                self.layout.window_of(surface)
+            }
             crate::config::SpatialEngine::Ocean => self.ocean.window(surface),
         }
     }
 
     fn spatial_tiles_share_owner(&self, first: &WlSurface, second: &WlSurface) -> bool {
         match self.config.spatial_engine {
-            crate::config::SpatialEngine::Classic => {
+            crate::config::SpatialEngine::Classic | crate::config::SpatialEngine::Scroll => {
                 self.layout.output_of(first) == self.layout.output_of(second)
                     && self.layout.workspace_of(first) == self.layout.workspace_of(second)
             }
@@ -11646,7 +11737,7 @@ impl Smallvil {
 
     fn detach_tiled_group_member(&mut self, surface: &WlSurface) -> Option<Window> {
         match self.config.spatial_engine {
-            crate::config::SpatialEngine::Classic => {
+            crate::config::SpatialEngine::Classic | crate::config::SpatialEngine::Scroll => {
                 let window = self.layout.window_of(surface)?;
                 self.layout.remove(surface);
                 Some(window)
@@ -11657,7 +11748,7 @@ impl Smallvil {
 
     fn replace_tiled_group_leaf(&mut self, old: &WlSurface, new_window: &Window) -> bool {
         match self.config.spatial_engine {
-            crate::config::SpatialEngine::Classic => {
+            crate::config::SpatialEngine::Classic | crate::config::SpatialEngine::Scroll => {
                 if !self.layout.contains(old) {
                     return false;
                 }
@@ -11753,7 +11844,7 @@ impl Smallvil {
         }
         let new_group_owner = if existing_group.is_none() {
             let owner = match self.config.spatial_engine {
-                crate::config::SpatialEngine::Classic => {
+                crate::config::SpatialEngine::Classic | crate::config::SpatialEngine::Scroll => {
                     self.layout.output_of(&anchor).map(|output| {
                         let workspace = self
                             .layout
@@ -11894,7 +11985,7 @@ impl Smallvil {
             return;
         };
         match self.config.spatial_engine {
-            crate::config::SpatialEngine::Classic => {
+            crate::config::SpatialEngine::Classic | crate::config::SpatialEngine::Scroll => {
                 self.layout.insert(&output, workspace, window, None);
             }
             crate::config::SpatialEngine::Ocean => {
@@ -12172,6 +12263,133 @@ impl Smallvil {
         self.cycling_focus = false;
     }
 
+    pub(crate) fn reveal_scroll_window(&mut self, surface: &WlSurface) {
+        if self.config.spatial_engine != crate::config::SpatialEngine::Scroll {
+            return;
+        }
+        let Some(owner) = self.layout.output_of(surface).map(str::to_owned) else {
+            return;
+        };
+        let Some(output) = self.output_by_name(&owner) else {
+            return;
+        };
+        let Some(area) = self.output_tiling_area(&output) else {
+            return;
+        };
+        let workspace = self.layout.active_workspace(&owner);
+        let gap = self.gaps_for(&owner, workspace);
+        if self.layout.scroll_reveal(surface, area, gap) {
+            self.retile_filtered(false, None, Some(&output.name()));
+        }
+    }
+
+    pub(crate) fn scroll_view(&mut self, direction: Direction) {
+        if self.config.spatial_engine != crate::config::SpatialEngine::Scroll
+            || self.activation_blocked()
+        {
+            return;
+        }
+        let delta = match (self.config.scroll.orientation, direction) {
+            (crate::scroll::Orientation::Horizontal, Direction::Left)
+            | (crate::scroll::Orientation::Vertical, Direction::Up) => -0.5,
+            (crate::scroll::Orientation::Horizontal, Direction::Right)
+            | (crate::scroll::Orientation::Vertical, Direction::Down) => 0.5,
+            _ => return,
+        };
+        let Some(output) = self.primary_output() else {
+            return;
+        };
+        let Some(area) = self.output_tiling_area(&output) else {
+            return;
+        };
+        let workspace = self.layout.active_workspace(&output.name());
+        let gap = self.gaps_for(&output.name(), workspace);
+        self.layout
+            .scroll_pan(&output.name(), workspace, area, gap, delta);
+        self.retile_filtered(false, None, Some(&output.name()));
+        self.request_output_redraw(&output);
+    }
+
+    pub(crate) fn update_scroll_gesture(
+        &mut self,
+        output_name: &str,
+        workspace: u32,
+        delta_x: f64,
+        delta_y: f64,
+    ) {
+        if self.config.spatial_engine != crate::config::SpatialEngine::Scroll
+            || self.activation_blocked()
+        {
+            return;
+        }
+        let Some(output) = self.output_by_name(output_name) else {
+            return;
+        };
+        if self.layout.active_workspace(output_name) != workspace {
+            return;
+        }
+        let Some(area) = self.output_tiling_area(&output) else {
+            return;
+        };
+        let gap = self.gaps_for(output_name, workspace);
+        let delta = match self.config.scroll.orientation {
+            crate::scroll::Orientation::Horizontal => delta_x,
+            crate::scroll::Orientation::Vertical => delta_y,
+        } / self.config.scroll.gesture_distance;
+        self.layout
+            .scroll_pan(output_name, workspace, area, gap, delta);
+        self.retile_filtered(false, None, Some(&output.name()));
+        self.request_output_redraw(&output);
+    }
+
+    pub(crate) fn finish_scroll_gesture(
+        &mut self,
+        output_name: &str,
+        workspace: u32,
+        initial_offset: f64,
+        cancelled: bool,
+    ) {
+        if self.config.spatial_engine != crate::config::SpatialEngine::Scroll {
+            return;
+        }
+        let Some(output) = self.output_by_name(output_name) else {
+            return;
+        };
+        if self.layout.active_workspace(output_name) != workspace {
+            return;
+        }
+        if cancelled || self.activation_blocked() {
+            self.layout.scroll.set_offset(
+                output_name,
+                self.layout.scroll_key(workspace),
+                initial_offset,
+            );
+            self.retile_filtered(false, None, Some(&output.name()));
+            self.request_output_redraw(&output);
+            return;
+        }
+        let Some(area) = self.output_tiling_area(&output) else {
+            return;
+        };
+        let gap = self.gaps_for(output_name, workspace);
+        let target = self
+            .layout
+            .layout(output_name, workspace, area, gap)
+            .into_iter()
+            .filter_map(|(window, rect)| {
+                let intersection = rect.intersection(area)?;
+                let visible = i64::from(intersection.size.w) * i64::from(intersection.size.h);
+                Some((window, visible))
+            })
+            .max_by_key(|(_, visible)| *visible)
+            .map(|(window, _)| window);
+        if let Some(window) = target {
+            if let Some(toplevel) = window.toplevel() {
+                self.activate_toplevel(toplevel.wl_surface());
+            }
+        }
+    }
+
     pub(crate) fn activation_blocked(&self) -> bool {
         self.exclusive_layer().is_some() || !matches!(self.session_lock, SessionLock::Unlocked)
     }
@@ -12227,7 +12445,7 @@ impl Smallvil {
 
         // Where does the window live? A parked group member isn't in any
         // tree under its own surface -- the group owns its slot.
-        let ownership = (self.config.spatial_engine == crate::config::SpatialEngine::Classic)
+        let ownership = (self.config.spatial_engine.uses_workspaces())
             .then(|| {
                 self.group_of(surface)
                     .map(|idx| (self.groups[idx].output.clone(), self.groups[idx].workspace))
@@ -12348,9 +12566,7 @@ impl Smallvil {
 
         let mut elements = Vec::new();
         for group in &mut self.groups {
-            if self.config.spatial_engine == crate::config::SpatialEngine::Classic
-                && group.output != output_name
-            {
+            if self.config.spatial_engine.uses_workspaces() && group.output != output_name {
                 continue;
             }
             let active_surface = &group.members[group.active].surface;
@@ -12537,7 +12753,7 @@ impl Smallvil {
         // resolving the pre-swap output/workspace. Classic-only: under
         // Ocean no tree moved, and the fields are migration cache, not
         // ownership.
-        if self.config.spatial_engine == crate::config::SpatialEngine::Classic {
+        if self.config.spatial_engine.uses_workspaces() {
             for group in &mut self.groups {
                 if let Some((output, workspace)) = swapped_group_owner(
                     &group.output,
@@ -12832,6 +13048,46 @@ impl Smallvil {
             return;
         }
 
+        if self.config.spatial_engine == crate::config::SpatialEngine::Scroll
+            && self.layout.contains(&focused)
+        {
+            let Some(owner) = self.layout.output_of(&focused).map(str::to_owned) else {
+                return;
+            };
+            let Some(output) = self.output_by_name(&owner) else {
+                return;
+            };
+            let Some(area) = self.output_tiling_area(&output) else {
+                return;
+            };
+            let workspace = self.layout.active_workspace(&owner);
+            let layout =
+                self.layout
+                    .layout(&owner, workspace, area, self.gaps_for(&owner, workspace));
+            let Some(index) = layout
+                .iter()
+                .position(|(w, _)| w.toplevel().is_some_and(|t| t.wl_surface() == &focused))
+            else {
+                return;
+            };
+            let delta = match (self.config.scroll.orientation, direction) {
+                (crate::scroll::Orientation::Horizontal, Direction::Left)
+                | (crate::scroll::Orientation::Vertical, Direction::Up) => -1,
+                (crate::scroll::Orientation::Horizontal, Direction::Right)
+                | (crate::scroll::Orientation::Vertical, Direction::Down) => 1,
+                _ => return,
+            };
+            if let Some((next, _)) = index
+                .checked_add_signed(delta)
+                .and_then(|index| layout.get(index))
+            {
+                if let Some(toplevel) = next.toplevel() {
+                    self.activate_toplevel(toplevel.wl_surface());
+                }
+            }
+            return;
+        }
+
         let Some(current) = self
             .space
             .elements()
@@ -12940,6 +13196,42 @@ impl Smallvil {
             return;
         };
         if self.fullscreen.contains_key(&surface) || self.maximized.contains_key(&surface) {
+            return;
+        }
+
+        if self.config.spatial_engine == crate::config::SpatialEngine::Scroll
+            && self.layout.contains(&surface)
+        {
+            let Some(owner) = self.layout.output_of(&surface).map(str::to_owned) else {
+                return;
+            };
+            let Some(output) = self.output_by_name(&owner) else {
+                return;
+            };
+            let Some(area) = self.output_tiling_area(&output) else {
+                return;
+            };
+            let extent = match (self.config.scroll.orientation, direction) {
+                (crate::scroll::Orientation::Horizontal, Direction::Left | Direction::Right) => {
+                    area.size.w
+                }
+                (crate::scroll::Orientation::Vertical, Direction::Up | Direction::Down) => {
+                    area.size.h
+                }
+                _ => return,
+            }
+            .max(1);
+            let delta = if matches!(direction, Direction::Right | Direction::Down) {
+                STEP
+            } else {
+                -STEP
+            };
+            let proportion =
+                self.layout.scroll.proportion(&surface) + f64::from(delta) / f64::from(extent);
+            self.layout.scroll.resize(surface.clone(), proportion);
+            self.retile();
+            self.reveal_scroll_window(&surface);
+            self.request_redraw();
             return;
         }
 
@@ -14081,6 +14373,7 @@ impl Smallvil {
                         "Migrated live windows to the {} engine",
                         match self.config.spatial_engine {
                             crate::config::SpatialEngine::Classic => "classic",
+                            crate::config::SpatialEngine::Scroll => "scroll",
                             crate::config::SpatialEngine::Ocean => "ocean",
                         }
                     );
@@ -14107,7 +14400,10 @@ impl Smallvil {
                         ));
                 }
                 self.retile();
-                if had_error_overlay || !warnings.is_empty() {
+                if let Some(focus) = self.window_focus.clone() {
+                    self.reveal_scroll_window(&focus);
+                }
+                if !diff.is_empty() || had_error_overlay || !warnings.is_empty() {
                     self.request_redraw();
                 }
             }
@@ -14498,7 +14794,10 @@ fn stable_output_by_name<'a>(outputs: impl Iterator<Item = &'a Output>) -> Optio
 
 fn tide_workspace_value(engine: crate::config::SpatialEngine, first_workspace: Option<u32>) -> i64 {
     match (engine, first_workspace) {
-        (crate::config::SpatialEngine::Classic, Some(workspace)) => i64::from(workspace),
+        (
+            crate::config::SpatialEngine::Classic | crate::config::SpatialEngine::Scroll,
+            Some(workspace),
+        ) => i64::from(workspace),
         _ => 0,
     }
 }

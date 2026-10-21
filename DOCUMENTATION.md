@@ -2039,3 +2039,33 @@ callback, on a user click. Notification arrival alone must not focus a window.
 Resolution is a target lookup, not authentication of a notification sender.
 Session locks and exclusive layers block activation; standard XDG activation
 continues requiring fresh user input for focus.
+
+## Scroll spatial engine
+
+See [SCROLL.md](SCROLL.md) for the experimental third engine and its current
+interaction limits. `engine = scroll` selects it at startup/reload;
+`tidectl engine scroll` (bind action `engine:scroll`) selects it live. `classic`
+and `ocean` are also accepted. This runtime selection does not rewrite config.
+
+```wave
+scroll {
+    workspaces = separate
+    orientation = horizontal
+    tile_proportion = 0.5
+    center_focused = false
+    gesture_distance = 1200
+}
+```
+
+`workspaces`: `separate` or `sections`; `orientation`: `horizontal` or `vertical`.
+`tile_proportion` is the viewport fraction from 0.1 through 1.0. Positive finite
+`gesture_distance` controls touchpad travel per viewport; it is a sensitivity
+setting, not an assumed monitor width. The existing configured workspace-swipe
+finger count drives scrolling, unless explicit swipe actions take priority.
+`scroll-left/right/up/down` moves half a viewport along the selected axis.
+Existing `focus-*` actions reveal neighboring tiles, and `resize-*` changes tile
+extent along that axis. No additional bindings are inserted automatically.
+
+Each entry from `outputs` includes a `scroll` object in Scroll mode with
+`offset`, `orientation` and `workspaces`. Workspace numbers/names retain their
+existing IPC meaning; sections are a presentation of their tiled members.

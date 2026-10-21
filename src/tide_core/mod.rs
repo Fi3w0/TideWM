@@ -13,6 +13,7 @@ pub(crate) mod ocean;
 pub(crate) mod output_layout;
 pub(crate) mod placement;
 pub(crate) mod redraw;
+pub(crate) mod scroll;
 pub(crate) mod snap;
 pub(crate) mod state;
 pub(crate) mod wave;
