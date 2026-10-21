@@ -387,21 +387,34 @@ where
     let (ready, exported) = mpsc::channel();
     let worker = thread::Builder::new()
         .name("tidewm-session-environment".to_string())
-        .spawn(move || {
-            run_session_environment_tasks(&env_keys, &runner);
-            // The receiver is bounded by its own timeout; a dropped receiver
-            // (nested session, or an already-finished wait) is not an error.
-            let _ = ready.send(());
-        })?;
+        .spawn(move || run_session_environment_tasks(&env_keys, &runner, ready))?;
     Ok((worker, exported))
 }
 
-fn run_session_environment_tasks<R>(env_keys: &[String], runner: &R)
+fn run_session_environment_tasks<R>(env_keys: &[String], runner: &R, exported: mpsc::Sender<()>)
 where
     R: SessionEnvironmentRunner,
 {
     export_session_environment(env_keys, runner);
-    restart_stale_portal_frontend(runner);
+    let recovery = restart_stale_portal_frontend(runner);
+
+    // Readiness is signalled only after portal recovery: a client that reads
+    // portal settings as soon as it is spawned must never be handed a
+    // frontend that is being restarted underneath it. `--no-block` means this
+    // does not wait for the unit to become healthy, only that the recovery is
+    // queued.
+    //
+    // A failed send means the compositor stopped waiting (see
+    // SESSION_ENV_READY_TIMEOUT and its `warn`), so spawns may already have
+    // activated a backend against a half-published environment. Only a
+    // manager that exposes unit state can be repaired; when the stale-frontend
+    // pass above already repaired it, there is nothing left to do.
+    if exported.send(()).is_err() && recovery == PortalRecovery::Idle {
+        tracing::info!(
+            "Session environment export finished after startup stopped waiting; clearing failed portal backends once"
+        );
+        reset_failed_portal_backends(runner);
+    }
 }
 
 fn export_session_environment<R>(env_keys: &[String], runner: &R)
@@ -486,7 +499,24 @@ where
 /// see -- it just looked like screencasting was broken. Restarting only
 /// the frontend is enough: backends are re-resolved fresh, from the
 /// now-correct activation environment, the next time it starts.
-fn restart_stale_portal_frontend<R>(runner: &R)
+/// Outcome of the portal recovery pass, in terms the caller can act on.
+///
+/// Only systemd --user exposes unit state to clear (`failed`) and a frontend
+/// to restart. Every other init, and a session with no per-user service
+/// manager at all, activates portals purely through D-Bus, where the
+/// activation environment is the only thing that matters and there is nothing
+/// to inspect or repair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortalRecovery {
+    /// No per-user service manager to talk to.
+    NoSessionManager,
+    /// Manager reachable, nothing needed repairing.
+    Idle,
+    /// Manager reachable, failed state cleared and/or a restart queued.
+    Repaired,
+}
+
+fn restart_stale_portal_frontend<R>(runner: &R) -> PortalRecovery
 where
     R: SessionEnvironmentRunner,
 {
@@ -508,51 +538,45 @@ where
         .and_then(|pid| pid.trim().parse::<u32>().ok())
         .filter(|&pid| pid != 0);
 
-    let fresh_identity = frontend_pid
-        .and_then(|pid| runner.read(Path::new(&format!("/proc/{pid}/environ"))).ok())
+    // No unit to ask about: either systemd --user is not this session's
+    // manager, or no frontend is running yet. Portals are D-Bus-activated
+    // either way, so the exported activation environment is all they need and
+    // there is no unit state to reset or restart.
+    let Some(frontend_pid) = frontend_pid else {
+        return PortalRecovery::NoSessionManager;
+    };
+
+    let fresh_identity = runner
+        .read(Path::new(&format!("/proc/{frontend_pid}/environ")))
+        .ok()
         .map(|environ| {
             environ
                 .split(|&byte| byte == 0)
                 .any(|entry| entry == b"XDG_CURRENT_DESKTOP=tidewm")
         });
-    // Only meaningful with a running frontend; skipping it also keeps the
-    // "nothing to check" path free of extra reads.
-    let (frontend_start, own_start) = match frontend_pid {
-        Some(pid) => (
-            runner
-                .read(Path::new(&format!("/proc/{pid}/stat")))
-                .ok()
-                .and_then(|stat| proc_starttime(&stat)),
-            runner
-                .read(Path::new("/proc/self/stat"))
-                .ok()
-                .and_then(|stat| proc_starttime(&stat)),
-        ),
-        None => (None, None),
-    };
+    let frontend_start = runner
+        .read(Path::new(&format!("/proc/{frontend_pid}/stat")))
+        .ok()
+        .and_then(|stat| proc_starttime(&stat));
+    let own_start = runner
+        .read(Path::new("/proc/self/stat"))
+        .ok()
+        .and_then(|stat| proc_starttime(&stat));
 
     // Identity alone cannot see a relog from TideWM into TideWM: that
     // frontend is tagged correctly, but the backend units it manages died
-    // with the previous compositor and stay `failed`, so every later
-    // `Settings.ReadAll` blocks until its timeout (a real login stalled Qt
-    // for ~40s that way). A frontend that started before this compositor is
+    // with the previous compositor and stay `failed`, so a client reading
+    // portal settings then blocks until its own call times out (a real login
+    // lost ~40s that way). A frontend that started before this compositor is
     // from a previous login either way.
     if !portal_frontend_stale(fresh_identity, frontend_start, own_start) {
-        return;
+        return PortalRecovery::Idle;
     }
 
     // A backend left in `failed` keeps returning its old failure to the
     // activation request instead of being started again; clearing the state
     // is what lets the restart below resolve it fresh.
-    let reset_args: Vec<String> = ["--user", "reset-failed", "*xdg-desktop-portal*.service"]
-        .into_iter()
-        .map(str::to_string)
-        .collect();
-    match runner.status("systemctl", &reset_args) {
-        Ok(status) if status.success() => {}
-        Ok(status) => tracing::debug!(?status, "Portal backend reset exited non-zero"),
-        Err(err) => tracing::debug!(%err, "Portal backend reset unavailable"),
-    }
+    reset_failed_portal_backends(runner);
 
     // `--no-block` is load-bearing, not an optimization: this runs before the
     // event loop starts, and the restarted frontend's backend (e.g.
@@ -577,6 +601,31 @@ where
         ),
         Ok(status) => tracing::debug!(?status, "Stale portal frontend restart exited non-zero"),
         Err(err) => tracing::debug!(%err, "Stale portal frontend restart unavailable"),
+    }
+    PortalRecovery::Repaired
+}
+
+/// Clears the failed state of portal backends so the next activation starts
+/// them instead of replaying the failure they were left with.
+///
+/// This is the one repair that is inherently systemd-specific: `failed` is a
+/// unit state, and only a manager that has units can be asked to forget it.
+/// Inits without a per-user service manager simply have nothing to reset --
+/// their portals are D-Bus-activated -- which is why this is only reached when
+/// a manager answered the frontend query. Targeted on purpose: it touches
+/// units already in `failed`, and `reset-failed` starts nothing.
+fn reset_failed_portal_backends<R>(runner: &R)
+where
+    R: SessionEnvironmentRunner,
+{
+    let reset_args: Vec<String> = ["--user", "reset-failed", "*xdg-desktop-portal*.service"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    match runner.status("systemctl", &reset_args) {
+        Ok(status) if status.success() => {}
+        Ok(status) => tracing::debug!(?status, "Portal backend reset exited non-zero"),
+        Err(err) => tracing::debug!(%err, "Portal backend reset unavailable"),
     }
 }
 
@@ -837,19 +886,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Anything spawned below can reach the portal stack: the shell asks Qt's
-    // xdgdesktopportal theme plugin for settings right at startup, and that
-    // D-Bus-activates a portal backend. Those backends are Wayland clients,
-    // so activating one before WAYLAND_DISPLAY reached the systemd user
-    // manager and the D-Bus activation environment makes it exit with
-    // "cannot open display:", and the failed unit is then left behind for the
-    // rest of the login -- a real login showed Qt blocking on
-    // `Settings.ReadAll` for ~40s because of exactly that. Wait for the
+    // Anything spawned below can reach the portal stack: a toolkit client may
+    // read portal settings as soon as it starts, which D-Bus-activates a
+    // portal backend. Those backends are Wayland clients, so activating one
+    // before WAYLAND_DISPLAY reached the systemd user manager and the D-Bus
+    // activation environment makes it exit with "cannot open display:", and
+    // the failed unit is then left behind for the rest of the login -- a real
+    // login lost ~40s that way, to two blocked settings reads. Wait for the
     // export, bounded: a wedged user bus must still not delay the session.
     if let Some(exported) = session_env_exported {
         if exported.recv_timeout(SESSION_ENV_READY_TIMEOUT).is_err() {
-            tracing::debug!(
-                "Session environment export still running after {SESSION_ENV_READY_TIMEOUT:?}; spawning startup commands anyway"
+            tracing::warn!(
+                "Session environment export still running after {SESSION_ENV_READY_TIMEOUT:?}; spawning startup commands anyway -- portal backends may have failed to start"
             );
         }
     }
@@ -918,6 +966,16 @@ mod session_environment_tests {
         calls: Arc<Mutex<Vec<Call>>>,
         portal_environment: Vec<u8>,
         status_error: bool,
+        /// `starttime` reported for `/proc/<frontend>/stat` and
+        /// `/proc/self/stat`. Default: the frontend started after us.
+        frontend_start: u64,
+        own_start: u64,
+        /// Fail only the portal restart, modelling `--no-block` returning
+        /// while the unit is still not healthy.
+        restart_error: bool,
+        /// `MainPID` reported for the frontend. Zero models a session with no
+        /// systemd --user (OpenRC, runit, s6, ...).
+        frontend_pid: u32,
     }
 
     impl RecordingRunner {
@@ -926,6 +984,10 @@ mod session_environment_tests {
                 calls: Arc::new(Mutex::new(Vec::new())),
                 portal_environment: portal_environment.to_vec(),
                 status_error: false,
+                frontend_start: 300,
+                own_start: 200,
+                restart_error: false,
+                frontend_pid: 4242,
             }
         }
 
@@ -940,6 +1002,9 @@ mod session_environment_tests {
                 .lock()
                 .unwrap()
                 .push(Call::Status(program.to_string(), args.to_vec()));
+            if self.restart_error && args.iter().any(|arg| arg == "restart") {
+                return Ok(ExitStatus::from_raw(1));
+            }
             if self.status_error {
                 Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
@@ -957,7 +1022,7 @@ mod session_environment_tests {
                 .push(Call::Output(program.to_string(), args.to_vec()));
             Ok(Output {
                 status: ExitStatus::from_raw(0),
-                stdout: b"4242\n".to_vec(),
+                stdout: format!("{}\n", self.frontend_pid).into_bytes(),
                 stderr: Vec::new(),
             })
         }
@@ -967,6 +1032,19 @@ mod session_environment_tests {
                 .lock()
                 .unwrap()
                 .push(Call::Read(path.to_path_buf()));
+            if path.ends_with("stat") {
+                // `/proc/<pid>/stat` field 22 (starttime), so a frontend from
+                // a previous login is expressible.
+                let start = if path == Path::new("/proc/self/stat") {
+                    self.own_start
+                } else {
+                    self.frontend_start
+                };
+                return Ok(format!(
+                    "4242 (proc) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 {start} 20"
+                )
+                .into_bytes());
+            }
             Ok(self.portal_environment.clone())
         }
     }
@@ -1003,7 +1081,8 @@ mod session_environment_tests {
     #[test]
     fn session_environment_tasks_keep_order_and_restart_only_stale_portal() {
         let runner = RecordingRunner::new(b"XDG_CURRENT_DESKTOP=Hyprland\0");
-        run_session_environment_tasks(&["CUSTOM_SESSION_KEY".to_string()], &runner);
+        let (exported, _waiting) = mpsc::channel();
+        run_session_environment_tasks(&["CUSTOM_SESSION_KEY".to_string()], &runner, exported);
 
         let calls = runner.calls();
         assert_eq!(calls.len(), 10);
@@ -1090,7 +1169,8 @@ mod session_environment_tests {
         );
 
         let fresh_runner = RecordingRunner::new(b"XDG_CURRENT_DESKTOP=tidewm\0");
-        run_session_environment_tasks(&[], &fresh_runner);
+        let (exported, _waiting) = mpsc::channel();
+        run_session_environment_tasks(&[], &fresh_runner, exported);
         assert_eq!(fresh_runner.calls().len(), 8);
         assert!(!fresh_runner.calls().iter().any(|call| {
             matches!(call, Call::Status(program, args) if program == "systemctl" && args.iter().any(|arg| arg == "restart"))
@@ -1102,7 +1182,8 @@ mod session_environment_tests {
         let mut runner = RecordingRunner::new(b"XDG_CURRENT_DESKTOP=tidewm\0");
         runner.status_error = true;
 
-        run_session_environment_tasks(&[], &runner);
+        let (exported, _waiting) = mpsc::channel();
+        run_session_environment_tasks(&[], &runner, exported);
 
         let calls = runner.calls();
         assert_eq!(calls.len(), 8);
@@ -1208,6 +1289,72 @@ mod session_environment_tests {
     fn start_time_parses_around_a_comm_with_spaces() {
         let stat = b"1234 (fire fox (x)) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 4242 20";
         assert_eq!(proc_starttime(stat), Some(4242));
+    }
+
+    #[test]
+    fn no_session_manager_means_no_unit_recovery() {
+        // systemd --user absent (OpenRC, runit, s6, ...): systemctl reports no
+        // MainPID, so there is no unit state to inspect or reset -- not even
+        // for a late export. Portals there are D-Bus-activated, and the
+        // exported activation environment is the whole fix.
+        let mut runner = RecordingRunner::new(b"XDG_CURRENT_DESKTOP=tidewm\0");
+        runner.frontend_pid = 0;
+        let (exported, waiting) = mpsc::channel();
+        drop(waiting);
+        run_session_environment_tasks(&[], &runner, exported);
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 5); // four env exports + the MainPID query
+        assert!(!calls.iter().any(|call| matches!(call,
+            Call::Status(_, args) if args.iter().any(|arg| arg == "reset-failed" || arg == "restart"))));
+    }
+
+    #[test]
+    fn stale_same_desktop_frontend_is_repaired_before_readiness() {
+        let mut runner = RecordingRunner::new(b"XDG_CURRENT_DESKTOP=tidewm\0");
+        runner.frontend_start = 100; // started before this compositor (200)
+        let (exported, waiting) = mpsc::channel();
+        run_session_environment_tasks(&[], &runner, exported);
+
+        assert!(
+            waiting.try_recv().is_ok(),
+            "readiness is signalled even when recovery was needed"
+        );
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 10);
+        assert!(matches!(&calls[8], Call::Status(program, args)
+            if program == "systemctl" && args.iter().any(|arg| arg == "reset-failed")));
+        assert!(matches!(&calls[9], Call::Status(program, args)
+            if program == "systemctl" && args.iter().any(|arg| arg == "restart")));
+    }
+
+    #[test]
+    fn late_export_clears_failed_portal_backends_once() {
+        let runner = RecordingRunner::new(b"XDG_CURRENT_DESKTOP=tidewm\0");
+        let (exported, waiting) = mpsc::channel();
+        drop(waiting); // startup stopped waiting for the export
+        run_session_environment_tasks(&[], &runner, exported);
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 9);
+        assert!(matches!(&calls[8], Call::Status(program, args)
+            if program == "systemctl" && args.iter().any(|arg| arg == "reset-failed")));
+        // A healthy frontend is not restarted just because the export was late.
+        assert!(!calls.iter().any(|call| matches!(call,
+            Call::Status(_, args) if args.iter().any(|arg| arg == "restart"))));
+    }
+
+    #[test]
+    fn delayed_portal_restart_does_not_gate_readiness() {
+        let mut runner = RecordingRunner::new(b"XDG_CURRENT_DESKTOP=tidewm\0");
+        runner.frontend_start = 100;
+        runner.restart_error = true; // queued with --no-block, not healthy yet
+        let (exported, waiting) = mpsc::channel();
+        run_session_environment_tasks(&[], &runner, exported);
+
+        assert!(waiting.try_recv().is_ok());
+        assert!(runner.calls().iter().any(|call| matches!(call,
+            Call::Status(_, args) if args.iter().any(|arg| arg == "--no-block"))));
     }
 }
 

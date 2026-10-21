@@ -2,6 +2,14 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.154 — Portal readiness stays ordered, bounded and init-agnostic
+
+- The bounded wait stays at 2 s, and now logs at `warn` when it expires: a miss means startup spawns ran ahead of the published environment and a portal backend may have failed to start, which belongs in a session log rather than at debug.
+- If the export does finish after startup stopped waiting, the worker performs one targeted repair: it clears the failed state of `*xdg-desktop-portal*.service`, so a backend that died against the half-published environment can be activated again. Nothing is restarted merely because the export was late.
+- Readiness is still signalled only after portal recovery has been queued, so a client that reads portal settings immediately after being spawned is never handed a frontend that is being restarted underneath it. `--no-block` is unchanged: recovery is queued, readiness does not wait for a unit to become healthy.
+- The recovery pass now reports whether a per-user service manager was reachable at all. Without one (systemd --user absent: OpenRC, runit, s6, ...) there is no unit state to clear and nothing to restart; portals are D-Bus-activated, so the exported activation environment is the whole fix, and no systemd-only command runs.
+- Tests: a stale same-desktop frontend, a late export (one backend reset, no restart), a failing/delayed restart not gating readiness, and a session with no service manager doing no unit recovery at all.
+
 ## 0.90.153 — Session environment reaches portals before they start
 
 - Startup autostarts now wait for the session-environment export -- bounded at 2 s, debug-logged when it expires -- instead of racing it. That export is what puts `WAYLAND_DISPLAY` and the `XDG_*` identity into the systemd user manager and the D-Bus activation environment. A shell that starts first can D-Bus-activate a portal backend right away (Qt's `xdgdesktopportal` theme plugin asks for settings at startup), and a backend activated without `WAYLAND_DISPLAY` exits with `cannot open display:` and remains `failed` for the rest of the login. Measured on a real relog: two `Settings.ReadAll` calls blocked ~25 s each, so the shell appeared ~40 s late. A wedged user bus still cannot delay the session; the wait is bounded.
