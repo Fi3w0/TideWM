@@ -2,6 +2,13 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.160 — Scroll pointer routing and centered edge columns
+
+- Scroll refreshes pointer enter/leave after layout changes, during movement animations and before wheel/button delivery. A stationary mouse receives input on the visible app without requiring a mouse nudge, while keyboard navigation retains its selected destination. Pointer grabs and lock/exclusive layers retain ownership.
+- Scroll pointer hit tests follow the animated, output-owned placement, including fullscreen columns, instead of the final unanimated Space position.
+- `scroll.center_focused = true` now centers the first, last and sole column as well as interior columns. Finite negative offsets represent the leading margin; pan/reload/section bounds share the same policy. Width, centering and gaps remain configurable; SCROLL.md includes nearly full-width neighbor-peek examples.
+- Real buffered Wayland-client checks cover stationary-pointer navigation, wheel delivery and animation completion without stealing keyboard focus; geometry checks cover centered edge columns on both orientations and returning to edge alignment.
+
 ## 0.90.159 — Fullscreen follows its scrolling column
 
 - A tiled fullscreen window reserves the owning output's full extent in Scroll and moves with its column. Focusing a neighboring column no longer leaves the fullscreen app covering it. Entering/exiting fullscreen reveals the focused tile, with per-retile fullscreen geometry derived from the existing authoritative entries and live output size.

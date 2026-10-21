@@ -59,7 +59,7 @@ impl ScrollState {
     pub fn set_offset(&mut self, output: &str, workspace: u32, value: f64) {
         if value.is_finite() {
             let key = (output.to_owned(), workspace);
-            if value <= 0.0 {
+            if value == 0.0 {
                 self.offsets.remove(&key);
             } else {
                 self.offsets.insert(key, value);
@@ -111,7 +111,7 @@ pub fn reveal(offset: f64, start: f64, extent: f64, viewport: f64, center: bool)
         return start.max(0.0);
     }
     if center {
-        return (start - (viewport - extent) / 2.0).max(0.0);
+        return start - (viewport - extent) / 2.0;
     }
     if start < offset {
         start.max(0.0)

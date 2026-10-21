@@ -1422,6 +1422,7 @@ impl Smallvil {
                 }
             }
             InputEvent::PointerButton { event, .. } => {
+                self.refresh_scroll_pointer_focus();
                 let pointer = self.seat.get_pointer().unwrap();
 
                 let serial = SERIAL_COUNTER.next_serial();
@@ -2235,6 +2236,9 @@ impl Smallvil {
                 }
             }
             InputEvent::PointerAxis { event, .. } => {
+                // Navigation can move a new client under a stationary mouse.
+                // Resolve it before applying its rules or delivering the wheel.
+                self.refresh_scroll_pointer_focus();
                 let source = event.source();
 
                 let horizontal_amount = event.amount(Axis::Horizontal).unwrap_or_else(|| {

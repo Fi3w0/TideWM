@@ -403,6 +403,8 @@ pub struct Smallvil {
     /// bounded snapshot records below so unmapping never retains a client.
     pub(crate) cascade_window_animations:
         HashMap<WlSurface, crate::cascade_transition::CascadeTransition>,
+    /// Coalesces strip hit-test refreshes outside pointer-grab callbacks.
+    scroll_pointer_refresh_pending: bool,
     pub(crate) window_move_animations:
         HashMap<WlSurface, crate::window_animation::WindowVisualAnimation>,
     /// Short-lived render-only followers for interactive move/resize.
@@ -2843,9 +2845,12 @@ impl Smallvil {
             .unwrap_or(0.0);
         let output_width = output_geo.size.w as f64;
         let active_view_offset = Point::from((-(camera_offset as f64) * output_width, 0.0));
+        let scrolling = self.config.spatial_engine == crate::config::SpatialEngine::Scroll;
         let mut result: Vec<crate::placement::PlacedWindow> = self
             .space
             .elements_for_output(output)
+            .filter(|_| !scrolling)
+            .chain(self.space.elements().filter(|_| scrolling))
             .rev()
             .filter_map(|window| {
                 let location = self.space.element_location(window)?;
@@ -2875,15 +2880,20 @@ impl Smallvil {
                 } else {
                     crate::placement::PlacementStack::Normal
                 };
-                Some(
-                    crate::placement::PlacedWindow::authoritative(
-                        window.clone(),
-                        Rectangle::new(location, window.geometry().size),
-                    )
-                    .with_view_offset(active_view_offset)
-                    .with_kind(kind)
-                    .with_stack(stack),
+                let placement = crate::placement::PlacedWindow::authoritative(
+                    window.clone(),
+                    Rectangle::new(location, window.geometry().size),
                 )
+                .with_view_offset(active_view_offset)
+                .with_kind(kind)
+                .with_stack(stack);
+                // Space's cached output membership is refreshed later in the
+                // backend loop and tracks final geometry, not moving columns.
+                // Scroll resolves its current visible rectangle directly.
+                if scrolling && !self.placement_input_rect(&placement).overlaps(output_geo) {
+                    return None;
+                }
+                Some(placement)
             })
             .collect();
 
@@ -3925,6 +3935,7 @@ impl Smallvil {
             ripple_program: None,
             window_open_animations: HashMap::new(),
             cascade_window_animations: HashMap::new(),
+            scroll_pointer_refresh_pending: false,
             window_move_animations: HashMap::new(),
             window_viscosity: HashMap::new(),
             window_sway: HashMap::new(),
@@ -4247,13 +4258,10 @@ impl Smallvil {
                 )
             })
             .or_else(|| {
-                if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+                if self.config.spatial_engine != crate::config::SpatialEngine::Classic {
                     self.render_placements(&output).and_then(|placements| {
                         placements.into_iter().find_map(|placement| {
-                            let rect = crate::placement::translated_rect(
-                                placement.rect,
-                                placement.view_offset,
-                            );
+                            let rect = self.placement_input_rect(&placement);
                             let view_local = pos - rect.loc.to_f64();
                             if view_local.x < 0.0
                                 || view_local.y < 0.0
@@ -4313,6 +4321,27 @@ impl Smallvil {
             })
     }
 
+    /// Scroll input follows the same animated rectangle as the rendered strip.
+    /// Other engines retain their existing camera/input policy.
+    fn placement_input_rect(
+        &self,
+        placement: &crate::placement::PlacedWindow,
+    ) -> Rectangle<i32, Logical> {
+        if self.config.spatial_engine == crate::config::SpatialEngine::Scroll {
+            let visual = self.placement_visual_sample(placement);
+            Rectangle::new(
+                placement.rect.loc
+                    + Point::from((
+                        visual.offset.x.round() as i32,
+                        visual.offset.y.round() as i32,
+                    )),
+                visual.rounded_size_or(placement.rect.size),
+            )
+        } else {
+            crate::placement::translated_rect(placement.rect, placement.view_offset)
+        }
+    }
+
     /// Topmost ordinary window and its current presentation location. Ocean
     /// resolves this through the same camera placement used by rendering;
     /// Classic keeps Smithay Space as the direct source.
@@ -4330,7 +4359,7 @@ impl Smallvil {
         self.render_placements(&output)?
             .into_iter()
             .find_map(|placement| {
-                let rect = crate::placement::translated_rect(placement.rect, placement.view_offset);
+                let rect = self.placement_input_rect(&placement);
                 let local = pos - rect.loc.to_f64();
                 (local.x >= 0.0
                     && local.y >= 0.0
@@ -4345,16 +4374,13 @@ impl Smallvil {
         output: &Output,
         pos: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
-        if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+        if self.config.spatial_engine != crate::config::SpatialEngine::Classic {
             return self.render_placements(output).and_then(|placements| {
                 placements
                     .into_iter()
                     .filter(crate::placement::PlacedWindow::is_fullscreen)
                     .find_map(|placement| {
-                        let rect = crate::placement::translated_rect(
-                            placement.rect,
-                            placement.view_offset,
-                        );
+                        let rect = self.placement_input_rect(&placement);
                         let view_local = pos - rect.loc.to_f64();
                         if view_local.x < 0.0
                             || view_local.y < 0.0
@@ -5033,6 +5059,36 @@ impl Smallvil {
             },
         );
         pointer.frame(self);
+    }
+
+    fn queue_scroll_pointer_refresh(&mut self) {
+        if self.config.spatial_engine != crate::config::SpatialEngine::Scroll
+            || self.scroll_pointer_refresh_pending
+        {
+            return;
+        }
+        self.scroll_pointer_refresh_pending = true;
+        // Retiling may run inside a pointer grab while its handle is locked.
+        // Enter/leave must run after that callback releases the handle.
+        self.loop_handle.insert_idle(|state| {
+            state.scroll_pointer_refresh_pending = false;
+            state.refresh_scroll_pointer_focus();
+        });
+    }
+
+    /// Moving a strip changes the pointer target even with a stationary mouse.
+    /// Keep keyboard focus selected by navigation; only refresh pointer routing.
+    pub(crate) fn refresh_scroll_pointer_focus(&mut self) {
+        if self.config.spatial_engine != crate::config::SpatialEngine::Scroll
+            || self.activation_blocked()
+            || self
+                .seat
+                .get_pointer()
+                .is_none_or(|pointer| pointer.is_grabbed())
+        {
+            return;
+        }
+        self.refresh_pointer_focus();
     }
 
     /// The retained visible window underneath any layer focus. Used only for
@@ -6325,8 +6381,13 @@ impl Smallvil {
             .retain(|_, animation| !animation.finished());
         self.cascade_window_animations
             .retain(|_, animation| !animation.finished());
+        let scroll_was_moving = self.config.spatial_engine == crate::config::SpatialEngine::Scroll
+            && !self.window_move_animations.is_empty();
         self.window_move_animations
             .retain(|_, animation| !animation.finished());
+        if scroll_was_moving {
+            self.queue_scroll_pointer_refresh();
+        }
         self.window_viscosity.retain(|_, motion| !motion.finished());
         self.window_sway.retain(|_, sway| !sway.finished());
         self.window_float_physics
@@ -9625,6 +9686,7 @@ impl Smallvil {
             self.space.raise_element(&window, false);
         }
 
+        self.queue_scroll_pointer_refresh();
         #[cfg(debug_assertions)]
         self.assert_state_invariants();
         self.request_redraw();

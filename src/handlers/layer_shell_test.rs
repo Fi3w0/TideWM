@@ -673,3 +673,210 @@ fn native_syncobj_commit_lifecycle(
     );
     device.destroy_syncobj(syncobj).unwrap();
 }
+
+#[test]
+fn scroll_navigation_refreshes_stationary_pointer_without_stealing_keyboard_focus() {
+    use smithay::{
+        input::pointer::{AxisFrame, MotionEvent},
+        utils::SERIAL_COUNTER,
+    };
+    const CHILD: &str = "TIDEWM_SCROLL_POINTER_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "tidewm-pointer-test-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("config/tidewm")).unwrap();
+        std::fs::create_dir(root.join("runtime")).unwrap();
+        std::fs::set_permissions(root.join("runtime"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::write(root.join("config/tidewm/config.wave"), "engine = scroll\nwelcome_hint = false\nwater_effects = false\ngaps = 0\nscroll {\n tile_proportion = 1.0\n}\nanimations {\n enabled = false\n}\n").unwrap();
+        let name = concat!(
+            module_path!(),
+            "::scroll_navigation_refreshes_stationary_pointer_without_stealing_keyboard_focus"
+        );
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name.split_once("::").unwrap().1, "--nocapture"])
+            .env(CHILD, "1")
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_RUNTIME_DIR", root.join("runtime"))
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(String::from_utf8_lossy(&result.stdout).contains("running 1 test"));
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    }
+    let mut event_loop = EventLoop::try_new().unwrap();
+    let state = Smallvil::new(&mut event_loop, Display::new().unwrap());
+    let (server, peer) = UnixStream::pair().unwrap();
+    state
+        .display_handle
+        .clone()
+        .insert_client(
+            server,
+            Arc::new(ClientState {
+                compositor_state: CompositorClientState::default(),
+                security_context: None,
+                disconnect_sender: None,
+            }),
+        )
+        .unwrap();
+    peer.set_nonblocking(true).unwrap();
+    let mut fixture = Fixture {
+        event_loop,
+        state,
+        peer,
+    };
+    let output = Output::new(
+        "pointer-output".into(),
+        PhysicalProperties {
+            size: (0, 0).into(),
+            subpixel: Subpixel::Unknown,
+            make: "test".into(),
+            model: "test".into(),
+            serial_number: "test".into(),
+        },
+    );
+    output.change_current_state(
+        Some(Mode {
+            size: (1000, 600).into(),
+            refresh: 60_000,
+        }),
+        None,
+        Some(Scale::Integer(1)),
+        None,
+    );
+    fixture.state.space.map_output(&output, (0, 0));
+    fixture.request(1, 1, &[2], &[]);
+    let globals: Vec<_> = fixture
+        .dispatch()
+        .into_iter()
+        .filter_map(|(object, opcode, body)| {
+            if object != 2 || opcode != 0 {
+                return None;
+            }
+            let name = u32::from_ne_bytes(body[..4].try_into().unwrap());
+            let length = u32::from_ne_bytes(body[4..8].try_into().unwrap()) as usize;
+            Some((
+                String::from_utf8(body[8..8 + length - 1].to_vec()).unwrap(),
+                name,
+            ))
+        })
+        .collect();
+    for (interface, id, version) in [
+        ("wl_compositor", 3_u32, 4_u32),
+        ("xdg_wm_base", 4, 1),
+        ("wp_single_pixel_buffer_manager_v1", 5, 1),
+        ("wp_viewporter", 6, 1),
+        ("wl_seat", 7, 5),
+    ] {
+        let name = globals
+            .iter()
+            .find(|(candidate, _)| candidate == interface)
+            .unwrap()
+            .1;
+        let mut tail = string(interface);
+        tail.extend_from_slice(&version.to_ne_bytes());
+        tail.extend_from_slice(&id.to_ne_bytes());
+        fixture.request(2, 0, &[name], &tail);
+    }
+    fixture.request(7, 0, &[8], &[]); // get_pointer
+    fixture.dispatch();
+    for surface in [9_u32, 14] {
+        fixture.request(3, 0, &[surface], &[]);
+        fixture.request(4, 2, &[surface + 1, surface], &[]);
+        fixture.request(surface + 1, 1, &[surface + 2], &[]);
+        fixture.request(6, 1, &[surface + 3, surface], &[]);
+        fixture.request(surface + 3, 2, &[1000, 600], &[]);
+        fixture.request(surface, 6, &[], &[]);
+        let serial = fixture
+            .dispatch()
+            .into_iter()
+            .find_map(|(object, opcode, body)| {
+                (object == surface + 1 && opcode == 0)
+                    .then(|| u32::from_ne_bytes(body[..4].try_into().unwrap()))
+            })
+            .unwrap();
+        fixture.request(surface + 1, 4, &[serial], &[]);
+        fixture.request(5, 1, &[surface + 4, u32::MAX, 0, 0, u32::MAX], &[]);
+        fixture.request(surface, 1, &[surface + 4, 0, 0], &[]);
+        fixture.request(surface, 6, &[], &[]);
+        fixture.dispatch();
+    }
+    let mut windows: Vec<_> = fixture.state.space.elements().cloned().collect();
+    windows.sort_by_key(|window| window.toplevel().unwrap().wl_surface().id().protocol_id());
+    assert_eq!(windows.len(), 2);
+    let surfaces: Vec<_> = windows
+        .iter()
+        .map(|window| window.toplevel().unwrap().wl_surface().clone())
+        .collect();
+    let pointer = fixture.state.seat.get_pointer().unwrap();
+    fixture.state.activate_toplevel(&surfaces[0]);
+    fixture.dispatch();
+    let pos = (500.0, 300.0).into();
+    let under = fixture.state.surface_under(pos);
+    pointer.motion(
+        &mut fixture.state,
+        under,
+        &MotionEvent {
+            location: pos,
+            serial: SERIAL_COUNTER.next_serial(),
+            time: 1,
+        },
+    );
+    pointer.frame(&mut fixture.state);
+    fixture.dispatch();
+    assert_eq!(pointer.current_focus(), Some(surfaces[0].clone()));
+    fixture.state.activate_toplevel(&surfaces[1]);
+    fixture.dispatch();
+    // No real motion between focusing the other column and sending the wheel.
+    assert_eq!(pointer.current_location(), pos);
+    assert_eq!(pointer.current_focus(), Some(surfaces[1].clone()));
+    assert_eq!(
+        fixture.state.focused_window_surface(),
+        Some(surfaces[1].clone())
+    );
+    pointer.axis(
+        &mut fixture.state,
+        AxisFrame::new(2).value(smithay::backend::input::Axis::Vertical, 15.0),
+    );
+    pointer.frame(&mut fixture.state);
+    let events = fixture.dispatch();
+    assert!(
+        events
+            .iter()
+            .any(|(object, opcode, _)| (*object, *opcode) == (8, 4)),
+        "the stationary pointer received no wheel event"
+    );
+    // Animated navigation keeps pointer input on the app visibly underneath,
+    // while keyboard focus stays on the selected destination.
+    fixture.state.config.animations.enabled = true;
+    fixture.state.config.animations.movement.enabled = true;
+    fixture.state.config.animations.movement.duration_ms = 50;
+    fixture.state.config.animations.slowdown = 1.0;
+    fixture.state.activate_toplevel(&surfaces[0]);
+    fixture.dispatch();
+    assert_eq!(
+        fixture.state.focused_window_surface(),
+        Some(surfaces[0].clone())
+    );
+    assert_eq!(pointer.current_focus(), Some(surfaces[1].clone()));
+    std::thread::sleep(Duration::from_millis(400));
+    fixture.state.has_active_animation();
+    fixture.dispatch();
+    assert_eq!(pointer.current_focus(), Some(surfaces[0].clone()));
+    assert_eq!(
+        fixture.state.focused_window_surface(),
+        Some(surfaces[0].clone())
+    );
+}

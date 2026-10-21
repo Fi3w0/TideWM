@@ -2058,7 +2058,11 @@ scroll {
 ```
 
 `workspaces`: `separate` or `sections`; `orientation`: `horizontal` or `vertical`.
-`tile_proportion` is the viewport fraction from 0.1 through 1.0. Positive finite
+`tile_proportion` is the viewport fraction from 0.1 through 1.0; `0.94` gives a
+nearly full-width app with a narrow neighbor peek, while `1.0` fills the usable
+viewport. `center_focused = true` centers the focused tile even at either end
+of the strip or when it is the only tile; `false` moves only enough to reveal it.
+Spacing follows `gaps`. Positive finite
 `gesture_distance` controls touchpad travel per viewport; it is a sensitivity
 setting, not an assumed monitor width. The existing configured workspace-swipe
 finger count drives scrolling, unless explicit swipe actions take priority.
@@ -2067,5 +2071,6 @@ Existing `focus-*` actions reveal neighboring tiles, and `resize-*` changes tile
 extent along that axis. No additional bindings are inserted automatically.
 
 Each entry from `outputs` includes a `scroll` object in Scroll mode with
-`offset`, `orientation` and `workspaces`. Workspace numbers/names retain their
+`offset`, `orientation` and `workspaces`. A centered leading margin can produce
+a negative offset. Workspace numbers/names retain their
 existing IPC meaning; sections are a presentation of their tiled members.

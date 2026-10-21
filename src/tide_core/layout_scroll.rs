@@ -81,6 +81,35 @@ impl Layouts {
         )
     }
 
+    /// Centering permits empty margins at either end of the strip, so the
+    /// first, last and sole tile can align like every interior tile.
+    fn scroll_bounds(&self, slots: &[ScrollSlot], viewport: f64) -> (f64, f64) {
+        let centered = self.scroll.config.is_some_and(|cfg| cfg.center_focused);
+        let minimum = slots
+            .first()
+            .map(|(_, _, start, extent)| {
+                if centered {
+                    start - ((viewport - extent) / 2.0).max(0.0)
+                } else {
+                    0.0
+                }
+            })
+            .unwrap_or(0.0);
+        let maximum = slots
+            .last()
+            .map(|(_, _, start, extent)| {
+                let trailing = if centered {
+                    ((viewport - extent) / 2.0).max(0.0)
+                } else {
+                    0.0
+                };
+                start + extent - viewport + trailing
+            })
+            .unwrap_or(0.0)
+            .max(minimum);
+        (minimum, maximum)
+    }
+
     pub(crate) fn prepare_scroll(
         &mut self,
         output: &str,
@@ -93,18 +122,21 @@ impl Layouts {
         }
         let slots = self.scroll_slots(output, workspace, area, gap);
         let viewport = self.scroll_viewport(area, gap);
-        let maximum = slots
-            .last()
-            .map(|(_, _, start, extent)| start + extent - viewport)
-            .unwrap_or(0.0)
-            .max(0.0);
+        let (minimum, maximum) = self.scroll_bounds(&slots, viewport);
         let key = self.scroll_key(workspace);
-        let mut offset = self.scroll.offset(output, key).min(maximum);
+        let mut offset = self.scroll.offset(output, key).clamp(minimum, maximum);
         if self.scroll_section_requests.remove(output).is_some() && key == 0 {
-            if let Some((_, _, start, _)) =
+            if let Some((_, _, start, extent)) =
                 slots.iter().find(|(number, _, _, _)| *number == workspace)
             {
-                offset = start.min(maximum);
+                offset = scroll::reveal(
+                    0.0,
+                    *start,
+                    *extent,
+                    viewport,
+                    self.scroll.config.unwrap_or_default().center_focused,
+                )
+                .clamp(minimum, maximum);
             }
         }
         self.scroll.set_offset(output, key, offset);
@@ -165,13 +197,9 @@ impl Layouts {
         let key = self.scroll_key(workspace);
         let previous = self.scroll.offset(&output, key);
         let viewport = self.scroll_viewport(area, gap);
-        let maximum = slots
-            .last()
-            .map(|(_, _, start, extent)| start + extent - viewport)
-            .unwrap_or(0.0)
-            .max(0.0);
-        let offset =
-            scroll::reveal(previous, *start, *extent, viewport, cfg.center_focused).min(maximum);
+        let (minimum, maximum) = self.scroll_bounds(&slots, viewport);
+        let offset = scroll::reveal(previous, *start, *extent, viewport, cfg.center_focused)
+            .clamp(minimum, maximum);
         self.scroll.set_offset(&output, key, offset);
         (previous - offset).abs() > f64::EPSILON
     }
@@ -186,13 +214,9 @@ impl Layouts {
     ) {
         let slots = self.scroll_slots(output, workspace, area, gap);
         let viewport = self.scroll_viewport(area, gap);
-        let maximum = slots
-            .last()
-            .map(|(_, _, start, extent)| start + extent - viewport)
-            .unwrap_or(0.0)
-            .max(0.0);
+        let (minimum, maximum) = self.scroll_bounds(&slots, viewport);
         let key = self.scroll_key(workspace);
-        let offset = (self.scroll.offset(output, key) + delta * viewport).clamp(0.0, maximum);
+        let offset = (self.scroll.offset(output, key) + delta * viewport).clamp(minimum, maximum);
         self.scroll.set_offset(output, key, offset);
     }
 }
@@ -237,6 +261,50 @@ mod tests {
         layouts.insert("left", 3, protocol.window(), None);
         assert_eq!(layouts.scroll.offset("left", 3), 0.0);
         assert!(layouts.scroll.offset("left", 1) > 0.0);
+    }
+
+    #[test]
+    fn centered_edges_single_tiles_and_pan_use_symmetric_margins() {
+        let mut protocol = ProtocolFixture::new();
+        for orientation in [Orientation::Horizontal, Orientation::Vertical] {
+            let mut layouts = Layouts::default();
+            layouts.scroll.config = Some(ScrollConfig {
+                center_focused: true,
+                tile_proportion: 0.94,
+                orientation,
+                ..Default::default()
+            });
+            let first = protocol.window();
+            layouts.insert("screen", 1, first.clone(), None);
+            let area = Rectangle::new((-100, 25).into(), (1200, 800).into());
+            let centered = |rect: Rectangle<i32, Logical>| {
+                let error = match orientation {
+                    Orientation::Horizontal => {
+                        2 * rect.loc.x + rect.size.w - (2 * area.loc.x + area.size.w)
+                    }
+                    Orientation::Vertical => {
+                        2 * rect.loc.y + rect.size.h - (2 * area.loc.y + area.size.h)
+                    }
+                };
+                assert!(error.abs() <= 1, "not centered: {rect:?}");
+            };
+            layouts.prepare_scroll("screen", 1, area, 8);
+            centered(layouts.layout("screen", 1, area, 8)[0].1);
+            assert!(layouts.scroll.offset("screen", 1) < 0.0);
+            let last = protocol.window();
+            layouts.insert("screen", 1, last.clone(), None);
+            layouts.scroll_reveal(last.toplevel().unwrap().wl_surface(), area, 8);
+            layouts.prepare_scroll("screen", 1, area, 8);
+            centered(layouts.layout("screen", 1, area, 8)[1].1);
+            layouts.scroll_pan("screen", 1, area, 8, -100.0);
+            centered(layouts.layout("screen", 1, area, 8)[0].1);
+            layouts.scroll_pan("screen", 1, area, 8, 100.0);
+            centered(layouts.layout("screen", 1, area, 8)[1].1);
+            layouts.scroll.config.as_mut().unwrap().center_focused = false;
+            layouts.scroll_reveal(first.toplevel().unwrap().wl_surface(), area, 8);
+            layouts.prepare_scroll("screen", 1, area, 8);
+            assert_eq!(layouts.scroll.offset("screen", 1), 0.0);
+        }
     }
 
     #[test]

@@ -42,8 +42,9 @@ overlay behavior rather than being translated into the tiled strip.
 The primary axis can be horizontal or vertical. Both axes at once belong to
 Ocean's 2D model and are not implemented by Scroll. The default tile proportion
 is half the usable viewport; opening more tiles does not reduce existing widths.
-`center_focused` optionally centers a focused tile; otherwise only enough of the
-view moves to reveal it. The extent can be changed with existing keyboard resize
+`center_focused` optionally centers every focused tile, including the first,
+last and sole column, using empty margins at the strip ends. Otherwise only
+enough of the view moves to reveal it. The extent can be changed with existing keyboard resize
 actions along the strip axis. Viewport movement uses existing window-motion
 animation settings; direct gesture updates follow the finger.
 
@@ -52,6 +53,34 @@ Existing directional focus actions navigate tiled strip neighbors. The
 The configured workspace-swipe finger count controls direct scrolling when no
 explicit swipe action takes priority. Cancelling restores its starting offset.
 Gesture distance is configurable sensitivity, independent of output resolution.
+
+## Width, neighbor peeks and alignment
+
+These settings reload live and use the current output's usable logical size:
+
+```wave
+scroll {
+    tile_proportion = 0.94
+    center_focused = true
+}
+gaps = 8
+```
+
+`tile_proportion` accepts 0.1–1.0: `1.0` fills the viewport, `0.94` leaves a
+narrow neighbor peek, `0.85` exposes more context, and `0.5` fits about two apps.
+This is a default width; existing per-window keyboard resizes retain their own
+proportions. `center_focused = true` balances the available space around the
+selected app; `false` moves only as far as necessary to reveal it. Outer and
+inter-column spacing follow `gaps`; there is no fixed monitor-pixel peek size.
+The same settings apply to heights with `orientation = vertical`.
+
+Directional focus navigates apps; directional swap reorders them. Existing
+`resize-left/right` actions adjust width for horizontal strips; `resize-up/down`
+adjust height for vertical strips. Bind these actions to the keys you prefer.
+Movement timing/easing follows `animations.movement`; pointer-focus refresh
+keeps wheel input on the visible client after navigation, without warping the
+mouse or replacing keyboard-selected focus. Physical mouse motion still follows
+`input.focus_follows_mouse`, including its pointer-grab and exclusive-layer rules.
 
 ## Engine and feature boundaries
 
