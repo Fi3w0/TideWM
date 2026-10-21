@@ -8,6 +8,7 @@ All notable changes to TideWM are documented here. Format loosely follows [Keep 
 - Bounded at 3 s on a worker, warn-logged on expiry, so a wedged user bus cannot hold up logout. Without systemd --user (OpenRC, runit, s6, or none) `systemctl` is absent or has no manager and the step is a debug-logged no-op; there dbus-daemon starts backends itself and sees a failing one immediately, so the stall cannot form. A nested session leaves the host's portals alone.
 - The .154 recovery remains as the fallback for an unclean exit (crash, SIGKILL); its comment no longer claims a `failed` backend replays its failure to new activations.
 - Tests: frontend stopped before its backends, no systemctl still finishing, and a wedged bus not delaying shutdown.
+- Verified live on NVIDIA/systemd: a `tidectl quit` relog 5 s apart stopped the frontend, then the GTK and KDE backends, within 10 ms at exit; no backend was re-activated into the dead display, the next login's frontend and GTK backend came up in ~55 ms, and `Settings.ReadAll` answered in 4 ms. The relog just before it, still exiting through .154, reproduced the stall.
 
 ## 0.90.154 — Portal readiness stays ordered, bounded and init-agnostic
 
