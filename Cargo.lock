@@ -2614,7 +2614,7 @@ dependencies = [
 
 [[package]]
 name = "tidewm"
-version = "0.90.155"
+version = "0.90.156"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -2638,6 +2638,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wayland-protocols-wlr",
+ "wayland-scanner",
  "xcursor",
  "zbus",
 ]

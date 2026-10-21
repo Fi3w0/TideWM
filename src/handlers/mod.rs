@@ -2,6 +2,7 @@ mod capture;
 mod compositor;
 mod explicit_sync;
 pub(crate) mod ext_workspace;
+mod hyprland_toplevel_export;
 mod layer_shell;
 mod screencopy;
 mod tearing_control;

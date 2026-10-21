@@ -6,7 +6,7 @@ A fast technical reference for TideWM: what it is, what's implemented, current h
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). A full tiling-WM feature set (BSP/master-stack/cascade layouts, workspaces, multi-monitor, layer-shell, IPC, XWayland) with a water/aqua render identity layered on top as a fully toggleable effect stack, plus a second spatial engine ("Ocean") as an alternative to numbered workspaces.
 
-Current development version: **0.90.148**, second major pre-release. 1.0 is intentionally reserved until the effect stack and Ocean get a broader real-hardware pass (see CHANGELOG).
+Current development version: **0.90.156**, second major pre-release. 1.0 is intentionally reserved until the effect stack and Ocean get a broader real-hardware pass (see CHANGELOG).
 
 ## Architecture
 
@@ -27,7 +27,7 @@ Current development version: **0.90.148**, second major pre-release. 1.0 is inte
 | Window groups (tabbed), floating, fullscreen, maximize, pseudo-tiling | Done |
 | Layer-shell (bars, launchers, lock screens) | Done; content-only layer commits preserve tiled drag positions and stacking (.142), with protocol regression coverage for mixed-scale outputs, exclusive-zone changes and unmap/remap; maintainer-confirmed fixed on native NVIDIA with video wallpapers |
 | XWayland | Done, via xwayland-satellite |
-| Screenshots, clipboard, session lock | Done |
+| Screenshots, clipboard, session lock | Done; per-window capture through ext-image-copy-capture and hyprland-toplevel-export-v1 |
 | PipeWire screencasting | Done (`--features screencast`), verified end to end via real OBS and Discord on standalone hardware |
 | IPC: request/response plus an event-stream subscribe mode | Done |
 | `tidectl` CLI, including `doctor`/`report` for bug triage | Done |

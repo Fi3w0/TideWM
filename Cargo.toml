@@ -1,6 +1,6 @@
 [package]
 name = "tidewm"
-version = "0.90.155"
+version = "0.90.156"
 edition = "2021"
 license = "GPL-3.0-or-later"
 # Verified floor: wayland-protocols 0.32.13 requires 1.86 (1.85 fails to
@@ -31,6 +31,9 @@ png = "0.18"
 regex = "1"
 xcursor = "0.3"
 wayland-protocols-wlr = "0.3.12"
+# Generates protocols/*.xml that no dependency ships (src/protocols.rs);
+# already in the tree through wayland-protocols, same version.
+wayland-scanner = "0.31.10"
 # Screencasting only (org.gnome.Mutter.ScreenCast over DBus + PipeWire
 # monitor/window streaming, see AGENT.md's "Screencasting" section) --
 # optional and default-off to keep these native/runtime dependencies out of

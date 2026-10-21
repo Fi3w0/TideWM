@@ -84,16 +84,9 @@ impl ImageCopyCaptureHandler for Smallvil {
             .user_data()
             .get::<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>(
         ) {
-            let window = self.mapped_toplevel_window(surface)?;
-            let output = self.capture_output_for_screencast(surface)?;
-            let scale = output.current_scale().fractional_scale();
-            let geometry = window.bbox_with_popups();
+            let (_, size) = self.window_capture_target(surface)?;
             return Some(BufferConstraints {
-                size: (
-                    (geometry.size.w as f64 * scale).round().max(1.0) as i32,
-                    (geometry.size.h as f64 * scale).round().max(1.0) as i32,
-                )
-                    .into(),
+                size,
                 shm: vec![wl_shm::Format::Argb8888, wl_shm::Format::Xrgb8888],
                 dma: None,
             });
@@ -174,5 +167,24 @@ impl Smallvil {
         surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
     ) -> Option<Output> {
         self.rendered_output_for_surface(surface)
+    }
+
+    /// The output a window capture renders through and the buffer size it
+    /// produces: the window with its popups, at that output's scale. The
+    /// same numbers `render_one_capture` uses, so every per-window protocol
+    /// advertises exactly the buffer it will fill.
+    pub(crate) fn window_capture_target(
+        &self,
+        surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    ) -> Option<(Output, smithay::utils::Size<i32, smithay::utils::Buffer>)> {
+        let window = self.mapped_toplevel_window(surface)?;
+        let output = self.capture_output_for_screencast(surface)?;
+        let scale = output.current_scale().fractional_scale();
+        let geometry = window.bbox_with_popups();
+        let size = (
+            (geometry.size.w as f64 * scale).round().max(1.0) as i32,
+            (geometry.size.h as f64 * scale).round().max(1.0) as i32,
+        );
+        Some((output, size.into()))
     }
 }

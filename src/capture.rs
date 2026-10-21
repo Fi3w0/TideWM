@@ -157,6 +157,14 @@ pub enum CaptureCompletion {
         buffer: WlBuffer,
         report_damage: bool,
     },
+    /// hyprland-toplevel-export-v1: one window into an SHM buffer that
+    /// arrives with `copy`; `report_damage` unless the client set
+    /// `ignore_damage`.
+    HyprlandToplevel {
+        frame: crate::protocols::hyprland_toplevel_export::server::hyprland_toplevel_export_frame_v1::HyprlandToplevelExportFrameV1,
+        buffer: WlBuffer,
+        report_damage: bool,
+    },
     /// wlr-screencopy targeting a client-owned DMA-BUF. The compositor
     /// renders straight into this buffer and never maps/copies it through
     /// CPU memory.
@@ -184,6 +192,7 @@ impl CaptureCompletion {
         match self {
             Self::Ext(frame) => frame.fail(reason),
             Self::Wlr { frame, .. } => frame.failed(),
+            Self::HyprlandToplevel { frame, .. } => frame.failed(),
             Self::WlrDmabuf { frame, .. } => frame.failed(),
             #[cfg(feature = "screencast")]
             Self::PipewireDmabuf { done, .. } => {
@@ -202,6 +211,7 @@ impl CaptureCompletion {
         match self {
             Self::Ext(frame) => frame.fail(CaptureFailureReason::Unknown),
             Self::Wlr { frame, .. } => frame.failed(),
+            Self::HyprlandToplevel { frame, .. } => frame.failed(),
             Self::WlrDmabuf { frame, .. } => frame.failed(),
             #[cfg(feature = "screencast")]
             Self::PipewireDmabuf { done, .. } => {
@@ -1041,6 +1051,7 @@ impl Smallvil {
         let buffer = match &completion {
             CaptureCompletion::Ext(frame) => frame.buffer(),
             CaptureCompletion::Wlr { buffer, .. } => buffer.clone(),
+            CaptureCompletion::HyprlandToplevel { buffer, .. } => buffer.clone(),
             CaptureCompletion::WlrDmabuf { .. } => unreachable!(),
             #[cfg(feature = "screencast")]
             CaptureCompletion::PipewireDmabuf { .. } => unreachable!(),
@@ -1133,6 +1144,28 @@ impl Smallvil {
                     ..
                 },
             ) => {
+                if report_damage {
+                    frame.damage(0, 0, rect.size.w as u32, rect.size.h as u32);
+                }
+                let secs = elapsed.as_secs();
+                frame.ready(
+                    (secs >> 32) as u32,
+                    (secs & 0xFFFFFFFF) as u32,
+                    elapsed.subsec_nanos(),
+                );
+            }
+            (
+                Ok(true),
+                CaptureCompletion::HyprlandToplevel {
+                    frame,
+                    report_damage,
+                    ..
+                },
+            ) => {
+                // Readback is already top-down (see above), so no y_invert.
+                frame.flags(
+                    crate::protocols::hyprland_toplevel_export::server::hyprland_toplevel_export_frame_v1::Flags::empty(),
+                );
                 if report_damage {
                     frame.damage(0, 0, rect.size.w as u32, rect.size.h as u32);
                 }

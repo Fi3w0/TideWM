@@ -8,6 +8,7 @@ for one component does not replace another component's terms.
 | TideWM source code, shaders, scripts, documentation, configuration examples and other project assets unless separately identified below | GNU GPL version 3 or later (`GPL-3.0-or-later`) | [LICENSE](LICENSE) |
 | Bundled Wave implementation and `wavefmt` | GNU GPL version 3 or later (`GPL-3.0-or-later`) | [LICENSE](LICENSE); these are part of TideWM |
 | `share/icons/TideWM-logo-faithful-4k.png` and `share/icons/tidewm.png` | Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (`CC-BY-NC-SA-4.0`) | [Logo notice](share/icons/LICENSE), [full legal text](LICENSES/CC-BY-NC-SA-4.0.txt) |
+| `protocols/hyprland-toplevel-export-v1.xml` (protocol definition from hyprwm/hyprland-protocols) | BSD 3-Clause (`BSD-3-Clause`) | [Copyright notice and license](protocols/LICENSE-hyprland-protocols) |
 | `assets/fonts/AdwaitaSans-Regular.ttf` | SIL Open Font License 1.1 (`OFL-1.1`) | [Font copyright notices and license](assets/fonts/OFL-LICENSE.txt) |
 
 Third-party dependencies retain their own copyright notices and licenses.

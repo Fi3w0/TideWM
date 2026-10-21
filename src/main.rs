@@ -1,6 +1,7 @@
 #![allow(irrefutable_let_patterns)]
 
 mod handlers;
+mod protocols;
 
 #[cfg(feature = "accessibility")]
 mod accessibility;

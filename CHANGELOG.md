@@ -2,6 +2,13 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.156 — Per-window capture for Hyprland-protocol clients
+
+- `hyprland-toplevel-export-v1` (version 2), generated from the protocol XML vendored under `protocols/` (BSD-3-Clause, see LICENSING.md) with `wayland-scanner`, already in the dependency tree at the same version. `capture_toplevel_with_wlr_toplevel_handle` captures the window behind a `zwlr_foreign_toplevel_handle_v1` -- what Quickshell's `ScreencopyView` uses for live window previews (task switchers, overviews), which until now could only capture whole outputs on TideWM. The version-1 request names a Hyprland window address; nothing in TideWM is addressed that way, so it fails its frame cleanly.
+- Frames offer ARGB8888 SHM at the window's size with popups at its output's scale -- the same numbers the ext toplevel source now shares through one helper -- and go through the existing capture queue: per-client/per-output limits, layer capture exclusions, and refusal while the session is locked. `ignore_damage` is honoured (full damage otherwise); readback is top-down, so `flags` is empty.
+- Tests: buffer validation, and a real client connection (isolated config) that sees the global at version 2 and gets `failed`, not a protocol error, for a window address.
+- TECHNICAL_REPORT.md's version line was still at 0.90.148.
+
 ## 0.90.155 — Portals stop with the session, so a quick relog no longer stalls
 
 - On a clean exit (SIGTERM from the display manager, `quit`), standalone TideWM now stops `xdg-desktop-portal.service` and then `*xdg-desktop-portal-*.service` while it still holds the display. Measured on a real TideWM->TideWM relog with .154: the old frontend outlived the compositor, re-activated its GTK backend one second later, the backend exited with `cannot open display:`, and dbus-daemon kept that activation pending for its whole `service_start_timeout` (120 s) because the failure never reached it. Every later activation of that backend joined the pending one, so the new login's frontend had its Settings, AppChooser and Print proxies time out after 25 s each and never retried them -- the shell stalled ~40 s and `Settings.ReadAll` kept failing until the frontend was restarted by hand. .154's stale-frontend restart and `reset-failed` ran correctly but cannot cancel a pending D-Bus activation.

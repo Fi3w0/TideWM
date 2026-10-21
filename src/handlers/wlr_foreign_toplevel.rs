@@ -323,6 +323,22 @@ impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for Smallvil {
 /// Per-handle requests. The handle's data is the shared `WlrForeignToplevelHandle`,
 /// which we map back to its `WlSurface` via `state.wlr_foreign_toplevels` so
 /// the underlying window can be operated on.
+impl Smallvil {
+    /// The mapped surface a client's `zwlr_foreign_toplevel_handle_v1`
+    /// stands for, or `None` once that toplevel has closed. Other protocols
+    /// that address windows by this handle (hyprland-toplevel-export) share
+    /// the lookup the handle's own requests use.
+    pub(crate) fn surface_for_wlr_toplevel(
+        &self,
+        handle: &ZwlrForeignToplevelHandleV1,
+    ) -> Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface> {
+        let data = handle.data::<WlrForeignToplevelHandle>()?;
+        self.wlr_foreign_toplevels
+            .iter()
+            .find_map(|(surface, h)| Arc::ptr_eq(&h.inner, &data.inner).then(|| surface.clone()))
+    }
+}
+
 impl Dispatch<ZwlrForeignToplevelHandleV1, WlrForeignToplevelHandle> for Smallvil {
     fn request(
         state: &mut Self,
