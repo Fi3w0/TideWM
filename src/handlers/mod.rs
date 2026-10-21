@@ -403,15 +403,40 @@ delegate_xdg_toplevel_icon!(Smallvil);
 //
 // `request_mode`/`unset_mode` deliberately do not honor a client's ask for
 // client-side: the protocol explicitly allows the compositor to disagree
-// (the client is "requesting", not "telling"). The configure that follows
-// re-advertises server-side, and well-behaved clients stop drawing CSD.
-// This is the same enforcement shape sway uses; anvil honors client
-// requests because anvil actually implements SSD drawing, which TideWM
-// does not.
+// (the client is "requesting", not "telling"). This is the same enforcement
+// shape sway uses; anvil honors client requests because anvil actually
+// implements SSD drawing, which TideWM does not.
 //
+// The mode is advertised once -- in the initial configure, or by
+// `new_decoration` for an object created after it -- and a request for the
+// mode already carried by the state is not answered with another configure.
+// That silence is what ends the negotiation: a client only switches mode when
+// a configure confirms it, so it stays on its last advertised server-side,
+// while answering every request is a feedback loop with clients that
+// re-request on each configure they receive (GTK/Firefox:
+// set_mode(client_side) -> configure(server_side) -> set_mode(client_side)).
+// Measured in the field at ~60k 12-byte round trips per second, ~30% of a
+// core with two outputs and a Firefox window open.
+//
+
+/// Whether a decoration request needs another configure, given the mode the
+/// toplevel's state already carries.
+///
+/// TideWM never draws decorations, so the only mode it can advertise is
+/// server-side; the open question is whether advertising it again would say
+/// anything new. It would not, once `advertised` already is server-side --
+/// and repeating it is a loop with clients that answer each configure with a
+/// fresh `set_mode` (see the module comment). Silence is protocol-legal: the
+/// compositor may simply not answer a request it disagrees with.
+fn decoration_configure_needed(advertised: Option<zxdg_toplevel_decoration_v1::Mode>) -> bool {
+    advertised != Some(zxdg_toplevel_decoration_v1::Mode::ServerSide)
+}
 
 impl XdgDecorationHandler for Smallvil {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        // Advertisement path: this object is new, so the client has to learn
+        // the mode -- either from a configure of its own (object created
+        // after the initial one) or from the initial configure still to come.
         toplevel.with_pending_state(|state| {
             state.decoration_mode = Some(zxdg_toplevel_decoration_v1::Mode::ServerSide);
         });
@@ -421,27 +446,49 @@ impl XdgDecorationHandler for Smallvil {
     }
 
     fn request_mode(&mut self, toplevel: ToplevelSurface, mode: zxdg_toplevel_decoration_v1::Mode) {
-        // Ignore what the client asked for; reaffirm server-side.
+        // Ignore what the client asked for, but only answer when that changes
+        // what it was already told (`decoration_configure_needed`). The state
+        // assignment is unconditional: a later configure for any other reason
+        // (a resize, new bounds) still carries server-side.
         let _ = mode;
+        let mut needed = false;
         toplevel.with_pending_state(|state| {
+            needed = decoration_configure_needed(state.decoration_mode);
             state.decoration_mode = Some(zxdg_toplevel_decoration_v1::Mode::ServerSide);
         });
-        if toplevel.is_initial_configure_sent() {
+        if needed && toplevel.is_initial_configure_sent() {
             toplevel.send_pending_configure();
         }
     }
 
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        // The client is dropping its decoration object; the state still has
+        // to say server-side for the next configure, but there is nothing to
+        // announce to a client that is tearing the object down.
         toplevel.with_pending_state(|state| {
             state.decoration_mode = Some(zxdg_toplevel_decoration_v1::Mode::ServerSide);
         });
-        if toplevel.is_initial_configure_sent() {
-            toplevel.send_pending_configure();
-        }
     }
 }
 
 delegate_xdg_decoration!(Smallvil);
+
+#[cfg(test)]
+mod decoration_tests {
+    use super::decoration_configure_needed;
+    use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
+
+    #[test]
+    fn a_request_already_answered_by_the_state_is_not_configured_again() {
+        assert!(!decoration_configure_needed(Some(Mode::ServerSide)));
+    }
+
+    #[test]
+    fn the_first_request_and_a_stale_client_side_state_are_answered() {
+        assert!(decoration_configure_needed(None));
+        assert!(decoration_configure_needed(Some(Mode::ClientSide)));
+    }
+}
 
 impl KdeDecorationHandler for Smallvil {
     fn kde_decoration_state(&self) -> &KdeDecorationState {
@@ -455,8 +502,12 @@ impl KdeDecorationHandler for Smallvil {
         mode: WEnum<Mode>,
     ) {
         // Same enforcement: re-advertise server regardless of what was
-        // requested. (Still need to read `mode` so the WEnum is consumed
-        // even on the no-op path.)
+        // requested. Unlike xdg-decoration above, this answer cannot form the
+        // set_mode/configure loop: `mode` is the reply to a request, not a
+        // configure a client reacts to, and the manager is created with
+        // server-side as its default, so a client that never asks still gets
+        // it. (Still need to read `mode` so the WEnum is consumed even on the
+        // no-op path.)
         let _ = mode;
         decoration.mode(Mode::Server);
     }

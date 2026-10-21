@@ -2,6 +2,13 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.151 — Decoration negotiation answers once
+
+- `xdg-decoration` no longer answers every `set_mode` with a configure. TideWM still only ever advertises server-side (it draws no decorations), but it now says so once -- in the initial configure, or from `new_decoration` for an object created afterwards -- and stays silent when a request asks for the mode the state already carries, which the protocol allows. Clients that re-request on each configure they receive (GTK, and so Firefox) turned the old unconditional re-advertise into a 1:1 loop: strace showed the 12-byte `set_mode(client_side)` / `configure(server_side)` pair at ~60k round trips per second on the maintainer's two-output NVIDIA desktop, and pausing Firefox dropped the compositor from 42.7% to 11.5% of one core while its render path was only ~8%. A client only switches mode when a configure confirms it, so staying silent keeps it on the advertised server-side instead of returning to client-side drawing.
+- `unset_mode` no longer sends a configure either; the state keeps server-side for whatever configure comes next, but a client destroying its decoration object has nothing left to be told.
+- `org_kde_kwin_server_decoration` still answers every request: its `mode` event is the reply to a request rather than a configure a client reacts to, so the same loop cannot form, and the manager is already created with server-side as its default.
+- `handlers::decoration_tests` pins the rule: a request already satisfied by the state is not configured again, while a first request or a stale client-side state still is. All 608 tests, strict Clippy and `cargo fmt --check` pass.
+
 ## 0.90.150 — Keyboard layouts over IPC
 
 - New `keyboard-layouts` query returns `{"current_idx": N, "names": [...], "codes": [...]}`: the zero-based active layout, every layout name in the keymap, and the configured `xkb_layout` codes positionally. The `current_idx`/`names` pair is exactly niri's `keyboard-layouts` shape, so a client written for one parses the other unchanged; `codes` is TideWM's addition for short `US`/`RU` labels.

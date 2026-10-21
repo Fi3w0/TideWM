@@ -1973,7 +1973,7 @@ Native DRM sessions advertise `linux-drm-syncobj-v1` when the selected device su
 | --- | --- | --- |
 | `xdg-shell` | Core window protocol | Done |
 | `wlr-layer-shell-unstable-v1` | Bars, launchers, lock screens | Done — verified live with `rofi`, `hyprlock` |
-| `xdg-decoration` + `org_kde_kwin_server_decoration` | Server-side decoration negotiation | Done — both resolve to server-side |
+| `xdg-decoration` + `org_kde_kwin_server_decoration` | Server-side decoration negotiation | Done — both resolve to server-side, advertised once per request at most |
 | `xdg-activation-v1` | Focus-stealing prevention / requested activation | Done |
 | `wp-fractional-scale-v1` | Non-integer output scaling | Done |
 | `wp-viewporter` | Surface scaling/cropping (needed by `xwayland-satellite`) | Done |
