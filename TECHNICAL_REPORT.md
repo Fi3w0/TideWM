@@ -67,7 +67,7 @@ scroll {
 - **`always_center_single`:** a workspace with just one column keeps it centered.
 - **`preset_widths`:** the widths `switch-preset-width` steps through.
 - **`orientation`:** horizontal or vertical strips. For a free 2D layout, use Ocean.
-- **`workspaces`:** `separate` gives each workspace its own strip and scroll position. `sections` lays a monitor's workspaces end to end in one strip, and switching workspace jumps to its section. In both modes, scratchpads stay separate and floating windows float above the strip.
+- **`workspaces`:** `separate` gives each workspace its own strip and scroll position. `sections` lays a monitor's workspaces end to end in one strip, and switching workspace jumps to its section. In both modes, scratchpads stay separate, and floating windows float above the strip or stay on it (see `float_anchor`).
 - **`gesture_distance`:** how far a touchpad swipe travels per screen. The swipe uses your workspace-swipe finger count.
 - **`float_anchor`:** `screen` keeps floating windows where they are on the monitor while the strip scrolls. `strip` leaves each one at its spot on the strip, so it scrolls away with the columns and comes back when you return. Pinned windows and scratchpads always stay on screen. `toggle-float-anchor` flips it until the next reload.
 - **Spacing** comes from the global `gaps`.
@@ -100,13 +100,18 @@ A column holds one app or several stacked ones. The table is for horizontal stri
 | `consume-into-column` | Pull the next column's first app into this column |
 | `expel-from-column` | Move the app out into its own column, right after |
 | `switch-preset-width` | Step the column through `preset_widths` |
+| `switch-preset-width-back` | The same, the other way |
+| `set-column-width:<v>` | `50%`, `800` (pixels), or `+10%`/`-10%`/`+100` from the current width |
 | `maximize-column` | Full width, and back to the old width |
 | `expand-column` | Fill the space the other fully visible columns leave |
 | `center-column` | Center the column once, even at the ends of the strip |
 | `focus-column-first/last` | Jump to the first or last column |
+| `focus-column-right-or-first` / `focus-column-left-or-last` | Next or previous column, wrapping at the ends |
+| `focus-window-top/bottom` | Jump to the first or last app in the column |
 | `move-column-first/last` | Move the column to the start or end |
 | `toggle-column-tabbed` | Turn the column into tabs (one app shown, a tab bar on top), and back |
 | `scroll-left/right/up/down` | Slide the strip half a screen |
+| `toggle-float-anchor` | Floating windows follow the screen or stay on the strip, until the next reload |
 | Mod + right-drag | Drag sideways to resize the column, up/down to resize the app in a shared column |
 | Mod + left-drag | Drop near a tile's left or right edge for a new column there, near its top or bottom to join that column, or in the middle to swap. A highlight shows where it lands |
 | Touchpad swipe | Slide the strip with your fingers |

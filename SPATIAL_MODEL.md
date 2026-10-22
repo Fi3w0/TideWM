@@ -41,7 +41,7 @@ Ocean has no numbered workspaces. It's one continuous 2D world, and each monitor
 
 Each monitor gets a strip of apps you slide along, niri-style. Under the hood Scroll shares Classic's per-monitor, per-workspace window registry. It adds only a scroll position and per-app sizes, so switching between Classic and Scroll keeps your trees, insertion order and groups exactly as they were.
 
-By default each workspace has its own strip. With `scroll { workspaces = sections }`, a monitor's workspaces are laid end to end in one strip. Scratchpads stay separate and floating windows float above the strip.
+By default each workspace has its own strip. With `scroll { workspaces = sections }`, a monitor's workspaces are laid end to end in one strip. Scratchpads stay separate. Floating windows float above the strip, or with `scroll { float_anchor = strip }` keep their place on it.
 
 Configuration and keys: [TECHNICAL_REPORT.md](TECHNICAL_REPORT.md#scroll-engine).
 
