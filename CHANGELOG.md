@@ -2,6 +2,11 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.175 · 2026-10-22 — Less idle work
+
+- Moving the mouse with focus-follows-mouse does less hit-testing per motion.
+- Wave event handlers, float physics and currents skip their per-event or per-frame work when there is nothing for them to do.
+
 ## 0.90.174 · 2026-10-22 — Column top and bottom
 
 - `focus-window-top` and `focus-window-bottom` jump to the first or last window of a stacked Scroll column.

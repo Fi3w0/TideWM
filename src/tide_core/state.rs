@@ -2144,6 +2144,10 @@ impl Smallvil {
             .as_secs_f64();
         self.float_physics_last_tick = now;
 
+        if self.floating_workspace.is_empty() && self.window_float_bodies.is_empty() {
+            self.float_physics_accum = 0.0;
+            return;
+        }
         self.sync_float_physics_bodies();
         if self.window_float_bodies.is_empty() {
             self.float_physics_accum = 0.0;
@@ -2422,7 +2426,7 @@ impl Smallvil {
     /// redraw work proportional to what can actually be seen.
     #[allow(clippy::mutable_key_type)] // WlSurface-keyed bounded visibility set
     pub(crate) fn update_currents(&mut self) {
-        if !self.currents_enabled() {
+        if !self.currents_enabled() || self.floating_workspace.is_empty() {
             self.window_currents.clear();
             return;
         }
@@ -3640,7 +3644,8 @@ impl Smallvil {
                 now.scroll.clone_from(&before.scroll);
             }
         }
-        let Some(before) = self.ipc_seen.replace(now.clone()) else {
+        let Some(before) = self.ipc_seen.take() else {
+            self.ipc_seen = Some(now);
             return;
         };
         use crate::ipc::IpcEvent;
@@ -3685,6 +3690,7 @@ impl Smallvil {
                 });
             }
         }
+        self.ipc_seen = Some(now);
     }
 
     fn ipc_seen_state(&self) -> IpcSeenState {
@@ -13791,7 +13797,9 @@ impl Smallvil {
 
     /// Focuses the window under `pos` without raising it. Layer surfaces and
     /// exclusive-interactivity states are excluded.
-    pub fn focus_follows_mouse(&mut self, pos: Point<f64, Logical>) {
+    /// `under` is the surface the same motion event already hit-tested, so
+    /// the layer check does not walk every placement a second time.
+    pub fn focus_follows_mouse(&mut self, pos: Point<f64, Logical>, under: Option<&WlSurface>) {
         if !self.config.input.focus_follows_mouse {
             return;
         }
@@ -13805,7 +13813,14 @@ impl Smallvil {
         if self.exclusive_layer().is_some() {
             return;
         }
-        if self.layer_under_pointer(pos).is_some() {
+        let over_layer = under.is_some_and(|surface| {
+            self.output_for_point(pos).is_some_and(|output| {
+                layer_map_for_output(&output)
+                    .layer_for_surface(surface, WindowSurfaceType::ALL)
+                    .is_some_and(|layer| !self.unmapped_layer_surfaces.contains(layer.wl_surface()))
+            })
+        });
+        if over_layer {
             return;
         }
         let surface = self
@@ -14777,6 +14792,17 @@ impl Smallvil {
     /// nesting cap: a handler whose queued action emits another event
     /// cannot recurse unboundedly.
     pub(crate) fn run_lua_handlers(&mut self, event: &crate::ipc::IpcEvent) {
+        // Most configs have no handler for most events; skip the `tide`
+        // table sync entirely unless one exists.
+        let registered = self
+            .config_lua
+            .globals()
+            .get::<mlua::Table>("_handlers")
+            .and_then(|handlers| handlers.get::<mlua::Value>(event.event_name()))
+            .is_ok_and(|value| matches!(value, mlua::Value::Table(_)));
+        if !registered {
+            return;
+        }
         if self.handler_depth >= 16 {
             tracing::warn!("Wave event handler nesting cap reached, skipping");
             return;

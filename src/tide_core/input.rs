@@ -1336,7 +1336,7 @@ impl Smallvil {
                     },
                 );
                 pointer.frame(self);
-                self.focus_follows_mouse(new_loc);
+                self.focus_follows_mouse(new_loc, new_under.as_ref().map(|(s, _)| s));
 
                 // After moving, activate any constraint the pointer is now
                 // sitting inside. The protocol requires the compositor to
@@ -1400,6 +1400,7 @@ impl Smallvil {
                 let pointer = self.seat.get_pointer().unwrap();
 
                 let under = self.surface_under(pos);
+                let hovered = under.as_ref().map(|(surface, _)| surface.clone());
 
                 pointer.motion(
                     self,
@@ -1411,7 +1412,7 @@ impl Smallvil {
                     },
                 );
                 pointer.frame(self);
-                self.focus_follows_mouse(pos);
+                self.focus_follows_mouse(pos, hovered.as_ref());
 
                 // Only the udev backend composites its own cursor (see
                 // cursor.rs); under winit the host draws the real one, so

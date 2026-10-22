@@ -2,6 +2,14 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.175 — Per-event and per-tick work trimmed (external audit of .168)
+
+- `run_lua_handlers` checks `_handlers[event]` before `sync_tide()`, so configs without a handler for an event no longer rebuild the `tide` table on every focus/workspace/window/scroll event.
+- `focus_follows_mouse(pos, under)` takes the surface the motion event already hit-tested and checks layer membership directly, removing one full `surface_under` (and its placement builds) per pointer motion. `window_under` still runs once; caching `render_placements` per layout revision remains open on TODO.md.
+- `update_float_physics_full` returns before `sync_float_physics_bodies` with no floating windows and no bodies; `update_currents` returns with no floating windows instead of building placements every tick.
+- `emit_state_change_events` moves the snapshot into `ipc_seen` instead of cloning it each dispatch. A dirty revision that skips the fingerprint entirely remains open on TODO.md.
+- 668 tests, strict Clippy, fmt, release build pass. No behavior change intended; not measured natively.
+
 ## 0.90.174 — focus-window-top/bottom
 
 - `ColumnAction::FocusRowEnd { last }` (niri's `focus-window-top` / `focus-window-bottom`) activates the first/last window of the focused column; already there is a no-op.
