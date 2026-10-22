@@ -2,6 +2,12 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.161 — Scroll keeps its strip still for pointer focus
+
+- Pointer-driven focus no longer moves a Scroll viewport. `focus_follows_mouse` hover, a press, a touch contact and a tablet tip focus the window already under the pointer and leave the strip where it is, so moving the pointer onto the other monitor does not scroll that monitor and clicking a neighbor's peek does not slide it out from under the click.
+- Keyboard navigation, `focus-window`/`focus-app`, notification activation, map/close focus repairs, resize and depth recall still reveal the target column, centered when `scroll.center_focused = true`. `false` keeps the old minimal-scroll behavior and only moves when the column is not already visible.
+- The real-window Scroll regression now asserts the viewport offset is unchanged by pointer focus and still changes for navigation focus.
+
 ## 0.90.160 — Scroll pointer routing and centered edge columns
 
 - Scroll refreshes pointer enter/leave after layout changes, during movement animations and before wheel/button delivery. A stationary mouse receives input on the visible app without requiring a mouse nudge, while keyboard navigation retains its selected destination. Pointer grabs and lock/exclusive layers retain ownership.

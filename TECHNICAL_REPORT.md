@@ -177,7 +177,8 @@ sizes, shared groups, keyboard resize and configured touchpad viewport gestures.
 The existing renderer/effects/capture pipeline consumes the same placements.
 Centered focus includes edge/sole columns; configurable widths can expose neighbor
 peeks. Pointer routing follows animated Scroll placement and refreshes without
-physical mouse motion, preserving keyboard-selected focus and active grabs.
+physical mouse motion, preserving keyboard-selected focus and active grabs, and
+pointer-driven focus never scrolls the strip while keyboard/IPC activation does.
 Classic/Scroll preserve membership trees; Ocean migration remains the existing
 conversion. See SCROLL.md for limits and validation. Native dual-output, physical
 touchpad and hotplug checks are still pending; no performance improvement is

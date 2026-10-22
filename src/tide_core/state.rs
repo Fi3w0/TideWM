@@ -1238,6 +1238,18 @@ pub(crate) enum SessionLock {
     Locked,
 }
 
+/// What caused a focus change. Only navigation origins may move a Scroll
+/// viewport; pointer origins must leave the strip exactly where it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FocusOrigin {
+    /// Keyboard actions, IPC (`focus-window`/`focus-app`), xdg-activation,
+    /// notification clicks, map/close/workspace repairs, depth recall.
+    Navigation,
+    /// Pointer hover, press, touch contact or tablet tip. The pointer is
+    /// already on the app, so the viewport must not move under it.
+    Pointer,
+}
+
 /// Gesture streams captured by compositor bindings instead of forwarded via
 /// wp-pointer-gestures. A stream is claimed at Begin and remains owned until
 /// End so clients never receive a partial gesture.
@@ -4683,7 +4695,22 @@ impl Smallvil {
         surface: Option<WlSurface>,
         serial: smithay::utils::Serial,
     ) {
-        self.focus_window_with_ripple(surface, serial, true);
+        self.focus_window_with_ripple(surface, serial, true, FocusOrigin::Navigation);
+    }
+
+    /// Focus caused by the pointer itself: hover (`focus_follows_mouse`), a
+    /// press, a touch contact or a tablet tip. Scroll keeps its viewport
+    /// still for these -- moving the strip out from under the pointer (or
+    /// recentering it because `center_focused` is on) is not a navigation
+    /// request, and a monitor change must not scroll the monitor just
+    /// because the cursor crossed a neighbor's peek. Keyboard navigation,
+    /// IPC activation and notifications still reveal through `focus_window`.
+    pub(crate) fn focus_window_from_pointer(
+        &mut self,
+        surface: Option<WlSurface>,
+        serial: smithay::utils::Serial,
+    ) {
+        self.focus_window_with_ripple(surface, serial, true, FocusOrigin::Pointer);
     }
 
     /// Gives a freshly mapped window focus without also treating that
@@ -4696,7 +4723,7 @@ impl Smallvil {
         serial: smithay::utils::Serial,
         animate_handoff: bool,
     ) {
-        self.focus_window_with_ripple(surface, serial, animate_handoff);
+        self.focus_window_with_ripple(surface, serial, animate_handoff, FocusOrigin::Navigation);
     }
 
     fn focus_window_with_ripple(
@@ -4704,9 +4731,12 @@ impl Smallvil {
         surface: Option<WlSurface>,
         serial: smithay::utils::Serial,
         animate_handoff: bool,
+        origin: FocusOrigin,
     ) {
-        if let Some(surface) = surface.as_ref() {
-            self.reveal_scroll_window(surface);
+        if origin == FocusOrigin::Navigation {
+            if let Some(surface) = surface.as_ref() {
+                self.reveal_scroll_window(surface);
+            }
         }
         let previous_focus = self.window_focus.clone();
         self.on_demand_layer_focus = None;
@@ -13056,7 +13086,7 @@ impl Smallvil {
             .and_then(|(window, _)| window.toplevel().map(|t| t.wl_surface().clone()));
         let Some(surface) = surface else {
             if self.config.input.unfocus_on_empty && self.focused_window_surface().is_some() {
-                self.focus_window(None, SERIAL_COUNTER.next_serial());
+                self.focus_window_from_pointer(None, SERIAL_COUNTER.next_serial());
             }
             return;
         };
@@ -13064,7 +13094,7 @@ impl Smallvil {
         if current.as_ref() == Some(&surface) {
             return;
         }
-        self.focus_window(Some(surface), SERIAL_COUNTER.next_serial());
+        self.focus_window_from_pointer(Some(surface), SERIAL_COUNTER.next_serial());
     }
 
     /// Cycles keyboard focus to the next mapped window (tiled or floating)

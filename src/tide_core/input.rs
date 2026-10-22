@@ -544,7 +544,7 @@ impl Smallvil {
             return None;
         }
 
-        self.focus_window(Some(wl_surface.clone()), serial);
+        self.focus_window_from_pointer(Some(wl_surface.clone()), serial);
         let start_data = PointerGrabStartData {
             focus: Some((wl_surface.clone(), loc.to_f64())),
             button: BTN_LEFT,
@@ -1510,9 +1510,9 @@ impl Smallvil {
                             if !self.layout.contains(&surface) {
                                 self.space.raise_element(&window, false);
                             }
-                            self.focus_window(Some(surface), serial);
+                            self.focus_window_from_pointer(Some(surface), serial);
                         } else {
-                            self.focus_window(None, serial);
+                            self.focus_window_from_pointer(None, serial);
                         }
                     }
                 }
@@ -1603,7 +1603,7 @@ impl Smallvil {
                                     return;
                                 };
                                 let view_scale = self.ocean.camera(&output).zoom;
-                                self.focus_window(Some(wl_surface.clone()), serial);
+                                self.focus_window_from_pointer(Some(wl_surface.clone()), serial);
                                 let start_data = PointerGrabStartData {
                                     focus: Some((wl_surface.clone(), loc.to_f64())),
                                     button,
@@ -1635,7 +1635,7 @@ impl Smallvil {
                                 };
                                 self.ocean.raise_floating(&wl_surface);
                                 self.space.raise_element(&window, false);
-                                self.focus_window(Some(wl_surface.clone()), serial);
+                                self.focus_window_from_pointer(Some(wl_surface.clone()), serial);
                                 let start_data = PointerGrabStartData {
                                     focus: Some((wl_surface.clone(), loc.to_f64())),
                                     button,
@@ -1681,7 +1681,7 @@ impl Smallvil {
                             {
                                 self.ocean.raise_floating(&wl_surface);
                                 self.space.raise_element(&window, false);
-                                self.focus_window(Some(wl_surface.clone()), serial);
+                                self.focus_window_from_pointer(Some(wl_surface.clone()), serial);
 
                                 let start_data = PointerGrabStartData {
                                     focus: Some((wl_surface.clone(), loc.to_f64())),
@@ -1729,7 +1729,10 @@ impl Smallvil {
                                 let output = self.layout.output_of(&wl_surface).map(str::to_string);
                                 let workspace = self.layout.workspace_of(&wl_surface);
                                 if let (Some(output), Some(workspace)) = (output, workspace) {
-                                    self.focus_window(Some(wl_surface.clone()), serial);
+                                    self.focus_window_from_pointer(
+                                        Some(wl_surface.clone()),
+                                        serial,
+                                    );
 
                                     let start_data = PointerGrabStartData {
                                         focus: Some((wl_surface.clone(), loc.to_f64())),
@@ -1761,7 +1764,10 @@ impl Smallvil {
                                         .flat_map(|hit| self.connected_resize_handles(&hit))
                                         .collect();
                                     if !handles.is_empty() {
-                                        self.focus_window(Some(wl_surface.clone()), serial);
+                                        self.focus_window_from_pointer(
+                                            Some(wl_surface.clone()),
+                                            serial,
+                                        );
 
                                         let start_data = PointerGrabStartData {
                                             focus: Some((wl_surface, loc.to_f64())),
@@ -1783,7 +1789,10 @@ impl Smallvil {
                                         &wl_surface,
                                     );
                                     if !cascade_hits.is_empty() {
-                                        self.focus_window(Some(wl_surface.clone()), serial);
+                                        self.focus_window_from_pointer(
+                                            Some(wl_surface.clone()),
+                                            serial,
+                                        );
 
                                         let start_data = PointerGrabStartData {
                                             focus: Some((wl_surface, loc.to_f64())),
@@ -1865,7 +1874,10 @@ impl Smallvil {
                                 ) {
                                     self.ocean.raise_floating(&wl_surface);
                                     self.space.raise_element(&window, false);
-                                    self.focus_window(Some(wl_surface.clone()), serial);
+                                    self.focus_window_from_pointer(
+                                        Some(wl_surface.clone()),
+                                        serial,
+                                    );
 
                                     let start_data = PointerGrabStartData {
                                         focus: Some((wl_surface.clone(), loc.to_f64())),
@@ -1954,9 +1966,9 @@ impl Smallvil {
                             self.ocean.raise_floating(&wl_surface);
                             self.space.raise_element(&window, false);
                         }
-                        self.focus_window(Some(wl_surface), serial);
+                        self.focus_window_from_pointer(Some(wl_surface), serial);
                     } else {
-                        self.focus_window(None, serial);
+                        self.focus_window_from_pointer(None, serial);
                     }
                 };
 
@@ -2009,9 +2021,9 @@ impl Smallvil {
                             if !self.layout.contains(&surface) {
                                 self.space.raise_element(&window, false);
                             }
-                            self.focus_window(Some(surface), serial);
+                            self.focus_window_from_pointer(Some(surface), serial);
                         } else if under.is_none() {
-                            self.focus_window(None, serial);
+                            self.focus_window_from_pointer(None, serial);
                         }
                     }
                 }
@@ -2194,7 +2206,7 @@ impl Smallvil {
                                     if !self.layout.contains(&surface) {
                                         self.space.raise_element(&window, false);
                                     }
-                                    self.focus_window(Some(surface), serial);
+                                    self.focus_window_from_pointer(Some(surface), serial);
                                 }
                             }
                         }

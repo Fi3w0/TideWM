@@ -2070,6 +2070,16 @@ finger count drives scrolling, unless explicit swipe actions take priority.
 Existing `focus-*` actions reveal neighboring tiles, and `resize-*` changes tile
 extent along that axis. No additional bindings are inserted automatically.
 
+Pointer focus never scrolls. `focus_follows_mouse`, a press, a touch contact and
+a tablet tip focus what is under the pointer and leave the viewport exactly
+where it is, so moving the pointer onto another monitor does not scroll that
+monitor's strip and clicking a neighbor's peek does not slide it away. Keyboard
+navigation, `focus-window`/`focus-app`, notification activation, map/close focus
+repairs and depth recall still reveal the target column, centered when
+`center_focused = true`. With `center_focused = false` the viewport moves only
+when the focused column is not already visible; with `true` every revealed
+column is centered.
+
 Each entry from `outputs` includes a `scroll` object in Scroll mode with
 `offset`, `orientation` and `workspaces`. A centered leading margin can produce
 a negative offset. Workspace numbers/names retain their

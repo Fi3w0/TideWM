@@ -82,6 +82,15 @@ keeps wheel input on the visible client after navigation, without warping the
 mouse or replacing keyboard-selected focus. Physical mouse motion still follows
 `input.focus_follows_mouse`, including its pointer-grab and exclusive-layer rules.
 
+Pointer focus itself never scrolls. Hover (`focus_follows_mouse`), a press, a
+touch contact and a tablet tip focus what is already under the pointer and leave
+the viewport alone -- crossing onto another monitor must not scroll the strip
+the cursor just entered, and clicking a neighbor's peek must not slide it out
+from under the click. Keyboard focus actions, `tidectl focus-window`/`focus-app`,
+notification activation, map/close focus repairs and depth recall still reveal
+the focused column. `center_focused = true` centers that reveal; `false` moves
+only when the column is not already visible.
+
 ## Engine and feature boundaries
 
 Classic and Scroll share the existing workspace registry and membership trees;

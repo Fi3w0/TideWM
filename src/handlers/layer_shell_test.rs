@@ -879,4 +879,31 @@ fn scroll_navigation_refreshes_stationary_pointer_without_stealing_keyboard_focu
         fixture.state.focused_window_surface(),
         Some(surfaces[0].clone())
     );
+
+    // Scroll reveals only for navigation. Pointer-driven focus (hover, press,
+    // touch, tablet) must leave the viewport alone: crossing to another
+    // monitor focuses the window under the cursor, and recentering it there
+    // would drag the strip out from under the pointer that just arrived.
+    let strip_offset = |state: &Smallvil| state.layout.scroll.offset("pointer-output", 1);
+    assert_eq!(strip_offset(&fixture.state), 0.0);
+    fixture
+        .state
+        .focus_window_from_pointer(Some(surfaces[1].clone()), SERIAL_COUNTER.next_serial());
+    assert_eq!(
+        fixture.state.focused_window_surface(),
+        Some(surfaces[1].clone())
+    );
+    assert_eq!(
+        strip_offset(&fixture.state),
+        0.0,
+        "pointer focus moved the Scroll viewport"
+    );
+    fixture
+        .state
+        .focus_window(Some(surfaces[1].clone()), SERIAL_COUNTER.next_serial());
+    assert_eq!(
+        strip_offset(&fixture.state),
+        1000.0,
+        "navigation focus did not reveal the off-screen column"
+    );
 }
