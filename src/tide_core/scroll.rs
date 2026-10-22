@@ -83,6 +83,9 @@ pub struct ScrollConfig {
     pub gesture_distance: f64,
     /// Whether floating windows follow the camera or stay on the strip.
     pub float_anchor: FloatAnchor,
+    /// With `float_anchor = strip`, move a floater the strip can no longer
+    /// scroll to (its columns closed) back onto the screen.
+    pub float_rescue: bool,
 }
 
 /// A column width or window height change: `50%`, `+10%`, `-10%`,
@@ -167,6 +170,7 @@ impl Default for ScrollConfig {
                 .expect("default presets are valid"),
             gesture_distance: 1200.0,
             float_anchor: FloatAnchor::Screen,
+            float_rescue: true,
         }
     }
 }

@@ -2,6 +2,11 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.177 — float_rescue
+
+- Hot-reloadable `scroll.float_rescue` (default `true`). After `anchor_scroll_floaters`, `rescue_scroll_floaters` maps each visible strip floater (not fullscreen/maximized) into strip coordinates and compares it with `Layouts::scroll_reach` (the `[minimum, maximum + viewport]` range the strip can show, from the existing `scroll_bounds`). A floater wholly outside that range is translated onto the output along the strip axis, nearest edge first. Reachable off-screen floaters are left alone. Reported natively: a floater whose columns closed was unreachable by scrolling or Alt+Tab.
+- Nested runs: three columns plus a floater; closing two columns strands it at x 1930 on a 1280 px output with `false`, and brings it to x 880 (right edge) with `true`. The float-anchor regression still leaves a reachable off-screen floater at x 1530. 668 tests, strict Clippy, fmt pass.
+
 ## 0.90.176 — Strip floaters keep their output on commit
 
 - `sync_visible_floating_window(window, dropped)` runs on every floating commit (`handlers/compositor.rs`) and re-derived the owner from the largest output overlap. A strip-anchored floater scrolled toward a neighbor's coordinates (where it is not drawn) was retagged to that neighbor on its next commit, so it appeared there. Plain commits now keep a strip floater's tag output; only the end of an interactive move (`move_grab.rs`, `dropped = true`) may hand it to another output. Reported natively by the maintainer on .175.

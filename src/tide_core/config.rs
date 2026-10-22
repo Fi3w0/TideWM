@@ -7525,6 +7525,7 @@ fn apply_scroll_block(cfg: &mut crate::scroll::ScrollConfig, body: &[waves::Entr
                 "strip" => cfg.float_anchor = crate::scroll::FloatAnchor::Strip,
                 _ => tracing::warn!(value, "Expected scroll.float_anchor screen or strip"),
             },
+            "float_rescue" => set_bool(&mut cfg.float_rescue, "scroll.float_rescue", value),
             "always_center_single" => set_bool(
                 &mut cfg.always_center_single,
                 "scroll.always_center_single",

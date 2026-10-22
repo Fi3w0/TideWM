@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.177 · 2026-10-22 — No more lost floating windows
+
+- With `float_anchor = strip`, closing the apps around a floating window could leave it off-screen where the strip can no longer scroll. It now comes back onto the screen. `scroll { float_rescue = false }` keeps the old behavior.
+
 ## 0.90.176 · 2026-10-22 — Floating windows stay on their monitor
 
 - With `float_anchor = strip`, a floating window could jump to the other monitor after the strip scrolled it toward that side. It now stays on its own monitor until you drag it to another one.

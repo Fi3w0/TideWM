@@ -9754,6 +9754,7 @@ impl Smallvil {
             self.layout
                 .prepare_scroll(&output.name(), workspace, area, gaps);
             self.anchor_scroll_floaters(&output.name(), workspace);
+            self.rescue_scroll_floaters(&output.name(), workspace, area, gaps);
             let window_count = self.layout.window_count(&output.name(), workspace);
             let target_aspect = area.size.w as f32 / (area.size.h as f32).max(1.0);
             self.layout.refresh_cascade_state(
@@ -12968,6 +12969,77 @@ impl Smallvil {
             if let (Some(old), Some(new)) = (old, new) {
                 self.start_window_move_animation(&surface, old, new);
             }
+        }
+    }
+
+    /// `scroll.float_rescue`: a visible strip floater lying wholly outside
+    /// the part of the strip scrolling can still show (the columns around
+    /// it closed) is moved onto the screen, nearest edge first, so it never
+    /// becomes unreachable.
+    fn rescue_scroll_floaters(
+        &mut self,
+        output: &str,
+        workspace: u32,
+        area: Rectangle<i32, Logical>,
+        gap: i32,
+    ) {
+        if !self.config.scroll.float_rescue
+            || self.config.scroll.float_anchor != crate::scroll::FloatAnchor::Strip
+            || self.layout.scroll.config.is_none()
+        {
+            return;
+        }
+        let key = self.layout.scroll_key(workspace);
+        let (offset, first, last) = self.layout.scroll_reach(output, workspace, area, gap);
+        let horizontal = self.config.scroll.orientation == crate::scroll::Orientation::Horizontal;
+        let (origin, extent) = if horizontal {
+            (area.loc.x, area.size.w)
+        } else {
+            (area.loc.y, area.size.h)
+        };
+        let lead = f64::from(origin) + f64::from(gap.max(0));
+        let surfaces: Vec<WlSurface> = self
+            .floating_workspace
+            .iter()
+            .filter(|(surface, tag)| {
+                tag.output == output
+                    && self.layout.scroll_key(tag.workspace) == key
+                    && self.scroll_strip_floater(surface)
+                    && !self.fullscreen.contains_key(*surface)
+                    && !self.maximized.contains_key(*surface)
+                    && self.window_is_visible(surface)
+            })
+            .map(|(surface, _)| surface.clone())
+            .collect();
+        for surface in surfaces {
+            let Some(window) = self
+                .floating_workspace
+                .get(&surface)
+                .map(|t| t.window.clone())
+            else {
+                continue;
+            };
+            let Some(rect) = self.space.element_geometry(&window) else {
+                continue;
+            };
+            let (start, size) = if horizontal {
+                (rect.loc.x, rect.size.w)
+            } else {
+                (rect.loc.y, rect.size.h)
+            };
+            let strip_start = f64::from(start) - lead + offset;
+            if strip_start + f64::from(size) > first && strip_start < last {
+                continue;
+            }
+            let low = origin;
+            let high = (origin + extent - size).max(origin);
+            let target = start.clamp(low, high);
+            let delta: Point<i32, Logical> = if horizontal {
+                (target - start, 0).into()
+            } else {
+                (0, target - start).into()
+            };
+            self.translate_floating_window(&surface, delta);
         }
     }
 

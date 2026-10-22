@@ -2064,6 +2064,7 @@ scroll {
     preset_widths = [0.333, 0.5, 0.667]
     gesture_distance = 1200
     float_anchor = screen
+    float_rescue = true
 }
 ```
 
@@ -2077,6 +2078,7 @@ scroll {
 | `preset_widths` | list of 1–16 widths, `0.1`–`1.0` | `[0.333, 0.5, 0.667]` | Widths `switch-preset-width` steps through, narrowest first after the widest. |
 | `gesture_distance` | positive float | `1200` | Touchpad travel per viewport. A sensitivity, not a monitor width. |
 | `float_anchor` | `screen` \| `strip` | `screen` | `screen` keeps floating windows fixed on the monitor while the strip scrolls under them. `strip` keeps each floating window at its place on the strip, so it scrolls away with the columns and comes back when you scroll back; it may sit off-screen along the strip and is drawn only on its own monitor. Pinned windows and scratchpads always stay on screen. `toggle-float-anchor` flips it until the next reload. |
+| `float_rescue` | bool | `true` | With `float_anchor = strip`: when the columns around a floating window close and the strip can no longer scroll to it, move it onto the screen at the nearest edge. `false` leaves it where it was, off-screen. |
 
 Spacing follows `gaps`. A column holds one window or several stacked ones. Along the strip, `focus-*` moves between columns (landing on the window last focused there), `swap-*` moves the whole column and `resize-*` changes the column width; across the strip, they move focus, reorder and resize inside the column. `consume-or-expel-left/right`, `consume-into-column` and `expel-from-column` edit columns (see [Action strings](#action-strings)). New windows open as a column after the focused column. Modifier+right-drag on a Scroll tile resizes its column along the strip and, in a shared column, the window across it. A modifier+left-drag drop lands by zone of the tile under the pointer: the outer quarters along the strip insert a new column before/after it, the outer quarters across it insert into its column above/below it, and the middle swaps. While dragging, a bar (or the whole tile, for a swap) previews the landing spot in the `snap` preview color and opacity. `scroll-left/right/up/down` slides half a viewport. No binds are added automatically. Pointer focus (hover, click, touch, tablet) never moves the strip; keyboard focus, `focus-window`/`focus-app` and notification activation reveal the target.
 

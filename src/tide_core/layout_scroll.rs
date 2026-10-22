@@ -489,6 +489,23 @@ impl Layouts {
         (minimum, maximum)
     }
 
+    /// The part of the strip scrolling can ever show, in strip
+    /// coordinates (`offset` 0 at the first column's leading edge), with
+    /// the current offset: `(offset, first, last)`.
+    pub(crate) fn scroll_reach(
+        &self,
+        output: &str,
+        workspace: u32,
+        area: Rectangle<i32, Logical>,
+        gap: i32,
+    ) -> (f64, f64, f64) {
+        let slots = self.scroll_slots(output, workspace, area, gap);
+        let viewport = self.scroll_viewport(area, gap);
+        let key = self.scroll_key(workspace);
+        let (minimum, maximum) = self.scroll_bounds(&slots, viewport, (output, key));
+        (self.scroll.offset(output, key), minimum, maximum + viewport)
+    }
+
     pub(crate) fn prepare_scroll(
         &mut self,
         output: &str,
