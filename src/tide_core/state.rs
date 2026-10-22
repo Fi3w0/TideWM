@@ -2990,11 +2990,13 @@ impl Smallvil {
                     return None;
                 }
                 // A strip-anchored floater scrolled off its own output must
-                // not appear on the neighbor, exactly like a tile.
+                // not appear on the neighbor, exactly like a tile -- unless
+                // it is being dragged there.
                 if kind == crate::placement::PlacementKind::Floating
                     && scrolling
                     && surface.is_some_and(|surface| {
-                        self.scroll_strip_floater(surface)
+                        !self.floating_dragging.contains(surface)
+                            && self.scroll_strip_floater(surface)
                             && self
                                 .floating_workspace
                                 .get(surface)

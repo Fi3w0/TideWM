@@ -2,6 +2,11 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.179 — Draw dragged strip floaters on the target output
+
+- `classic_render_placements` exempts surfaces in `floating_dragging` (set unconditionally by `MoveSurfaceGrab` motion, cleared on unset) from the strip-floater owner filter added in .169, so a floater dragged across outputs is drawn on both while the grab lasts. The drop retags it as in .176.
+- 668 tests, strict Clippy, fmt pass. Not exercised nested (single virtual output); native two-monitor check owed.
+
 ## 0.90.178 — Reveal strip floaters on navigation focus
 
 - `reveal_scroll_window` hands strip floaters to `reveal_strip_floater`, which pans the strip by the floater's overflow past the output's tiling area (leading edge first when it is larger than the screen), clamped to `scroll_reach`, clears explicit-center margins and retiles that output; `anchor_scroll_floaters` then moves the floater with the strip. Only `FocusOrigin::Navigation` reaches it, so pointer focus still never moves the strip. Hidden workspaces, fullscreen and maximized floaters are skipped.

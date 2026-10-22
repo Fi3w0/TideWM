@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.179 · 2026-10-22 — Dragging floaters between monitors
+
+- With `float_anchor = strip`, a floating window you drag onto the other monitor stays visible there during the drag instead of vanishing until you let go.
+
 ## 0.90.178 · 2026-10-22 — Alt+Tab finds floating windows
 
 - With `float_anchor = strip`, switching to a floating window that is off-screen (Alt+Tab, keyboard focus, notifications) scrolls the strip to it.
