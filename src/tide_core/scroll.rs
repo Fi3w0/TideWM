@@ -81,6 +81,18 @@ pub struct ScrollConfig {
     /// Widths `switch-preset-width` cycles through.
     pub preset_widths: PresetWidths,
     pub gesture_distance: f64,
+    /// Whether floating windows follow the camera or stay on the strip.
+    pub float_anchor: FloatAnchor,
+}
+
+/// What a floating window is fixed to while the strip scrolls.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FloatAnchor {
+    /// Floating windows stay put on screen; the strip slides under them.
+    #[default]
+    Screen,
+    /// Floating windows keep their place on the strip and scroll with it.
+    Strip,
 }
 impl Default for ScrollConfig {
     fn default() -> Self {
@@ -93,6 +105,7 @@ impl Default for ScrollConfig {
             preset_widths: PresetWidths::new(&[1.0 / 3.0, 0.5, 2.0 / 3.0])
                 .expect("default presets are valid"),
             gesture_distance: 1200.0,
+            float_anchor: FloatAnchor::Screen,
         }
     }
 }
@@ -122,8 +135,23 @@ pub struct ScrollState {
     restore_widths: HashMap<WlSurface, f64>,
     /// Strips an explicit `center-column` left with end margins.
     margins: HashSet<(String, u32)>,
+    /// Offset, in whole pixels, floating windows were last placed against.
+    float_offsets: HashMap<(String, u32), i32>,
 }
 impl ScrollState {
+    /// Records `offset` as the one floating windows now sit against and
+    /// returns how far they must move, or `None` the first time a strip is
+    /// seen. Whole pixels so repeated small pans cannot drift.
+    pub fn float_shift(&mut self, output: &str, workspace: u32, offset: f64) -> Option<i32> {
+        let offset = offset
+            .round()
+            .clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32;
+        let previous = self
+            .float_offsets
+            .insert((output.to_string(), workspace), offset)?;
+        Some(previous.saturating_sub(offset)).filter(|shift| *shift != 0)
+    }
+
     pub fn offset(&self, output: &str, workspace: u32) -> f64 {
         self.offsets
             .get(&(output.to_owned(), workspace))
@@ -438,6 +466,17 @@ pub fn column_tile_rect(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn float_shift_tracks_whole_pixels() {
+        let mut state = ScrollState::default();
+        assert_eq!(state.float_shift("out", 1, 0.0), None);
+        assert_eq!(state.float_shift("out", 1, 0.4), None);
+        assert_eq!(state.float_shift("out", 1, 300.6), Some(-301));
+        assert_eq!(state.float_shift("out", 1, 100.0), Some(201));
+        assert_eq!(state.float_shift("out", 2, 500.0), None);
+    }
+
     use super::*;
     #[test]
     fn reveal_preserves_visible_windows_and_handles_oversized_content() {

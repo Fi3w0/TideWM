@@ -929,6 +929,9 @@ pub enum Action {
     /// independent of the drag/map/wave kick sources, until toggled off
     /// again. Floating windows only -- see `Smallvil::toggle_float_ambient`.
     ToggleFloatAmbient,
+    /// Flips `scroll.float_anchor` between `screen` and `strip` until the
+    /// next config reload.
+    ToggleFloatAnchor,
     /// Raises/lowers the focused *floating* window within the floating
     /// stack (a no-op on a tiled one -- tiled windows never overlap, so
     /// z-order has no meaning there, same reasoning `TogglePseudoTile`'s
@@ -7509,6 +7512,11 @@ fn apply_scroll_block(cfg: &mut crate::scroll::ScrollConfig, body: &[waves::Entr
                     "Expected scroll.center_focused never, always or on-overflow"
                 ),
             },
+            "float_anchor" => match value.as_str() {
+                "screen" => cfg.float_anchor = crate::scroll::FloatAnchor::Screen,
+                "strip" => cfg.float_anchor = crate::scroll::FloatAnchor::Strip,
+                _ => tracing::warn!(value, "Expected scroll.float_anchor screen or strip"),
+            },
             "always_center_single" => set_bool(
                 &mut cfg.always_center_single,
                 "scroll.always_center_single",
@@ -9587,6 +9595,7 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "move-to-scratchpad" => Some(Action::MoveToScratchpad(None)),
         "toggle-pseudo-tile" => Some(Action::TogglePseudoTile),
         "toggle-float-ambient" => Some(Action::ToggleFloatAmbient),
+        "toggle-float-anchor" => Some(Action::ToggleFloatAnchor),
         "raise-window" => Some(Action::RaiseWindow),
         "lower-window" => Some(Action::LowerWindow),
         "focus-urgent" => Some(Action::FocusUrgent),

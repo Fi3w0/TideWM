@@ -2985,6 +2985,20 @@ impl Smallvil {
                 {
                     return None;
                 }
+                // A strip-anchored floater scrolled off its own output must
+                // not appear on the neighbor, exactly like a tile.
+                if kind == crate::placement::PlacementKind::Floating
+                    && scrolling
+                    && surface.is_some_and(|surface| {
+                        self.scroll_strip_floater(surface)
+                            && self
+                                .floating_workspace
+                                .get(surface)
+                                .is_some_and(|tag| tag.output != output_name)
+                    })
+                {
+                    return None;
+                }
                 let stack = if surface.is_some_and(|surface| self.fullscreen.contains_key(surface))
                 {
                     crate::placement::PlacementStack::Fullscreen
@@ -5668,40 +5682,47 @@ impl Smallvil {
             .map(|(surface, _)| surface.clone())
             .collect();
         for surface in surfaces {
-            let output_override =
-                self.fullscreen.contains_key(&surface) || self.maximized.contains_key(&surface);
-            if output_override {
-                // The live Space rect is the fullscreen/maximized override,
-                // not windowed geometry. Retile will derive that override
-                // again from the output's new live geometry; only translate
-                // the durable windowed restore records here.
-                if let Some(tag) = self.floating_workspace.get_mut(&surface) {
-                    tag.rect.loc = saturating_translate(tag.rect.loc, delta);
-                }
-            } else if self.window_is_visible(&surface) {
-                let window = self
-                    .floating_workspace
-                    .get(&surface)
-                    .unwrap()
-                    .window
-                    .clone();
-                let Some(mut rect) = self.space.element_geometry(&window) else {
-                    continue;
-                };
-                rect.loc = saturating_translate(rect.loc, delta);
-                self.space.map_element(window, rect.loc, false);
-                self.floating_workspace.get_mut(&surface).unwrap().rect = rect;
-            } else if let Some(tag) = self.floating_workspace.get_mut(&surface) {
+            self.translate_floating_window(&surface, delta);
+        }
+    }
+
+    /// Moves one floating window by `delta`, live position if visible,
+    /// remembered one if hidden; see `translate_floating_windows_on_output`.
+    fn translate_floating_window(&mut self, surface: &WlSurface, delta: Point<i32, Logical>) {
+        let surface = surface.clone();
+        let output_override =
+            self.fullscreen.contains_key(&surface) || self.maximized.contains_key(&surface);
+        if output_override {
+            // The live Space rect is the fullscreen/maximized override,
+            // not windowed geometry. Retile will derive that override
+            // again from the output's new live geometry; only translate
+            // the durable windowed restore records here.
+            if let Some(tag) = self.floating_workspace.get_mut(&surface) {
                 tag.rect.loc = saturating_translate(tag.rect.loc, delta);
             }
-            if let Some(entry) = self.fullscreen.get_mut(&surface) {
-                if let Some(rect) = &mut entry.restore_rect {
-                    rect.loc = saturating_translate(rect.loc, delta);
-                }
+        } else if self.window_is_visible(&surface) {
+            let window = self
+                .floating_workspace
+                .get(&surface)
+                .unwrap()
+                .window
+                .clone();
+            let Some(mut rect) = self.space.element_geometry(&window) else {
+                return;
+            };
+            rect.loc = saturating_translate(rect.loc, delta);
+            self.space.map_element(window, rect.loc, false);
+            self.floating_workspace.get_mut(&surface).unwrap().rect = rect;
+        } else if let Some(tag) = self.floating_workspace.get_mut(&surface) {
+            tag.rect.loc = saturating_translate(tag.rect.loc, delta);
+        }
+        if let Some(entry) = self.fullscreen.get_mut(&surface) {
+            if let Some(rect) = &mut entry.restore_rect {
+                rect.loc = saturating_translate(rect.loc, delta);
             }
-            if let Some(entry) = self.maximized.get_mut(&surface) {
-                entry.restore_rect.loc = saturating_translate(entry.restore_rect.loc, delta);
-            }
+        }
+        if let Some(entry) = self.maximized.get_mut(&surface) {
+            entry.restore_rect.loc = saturating_translate(entry.restore_rect.loc, delta);
         }
     }
 
@@ -9716,6 +9737,7 @@ impl Smallvil {
             let gaps = self.gaps_for(&output.name(), workspace);
             self.layout
                 .prepare_scroll(&output.name(), workspace, area, gaps);
+            self.anchor_scroll_floaters(&output.name(), workspace);
             let window_count = self.layout.window_count(&output.name(), workspace);
             let target_aspect = area.size.w as f32 / (area.size.h as f32).max(1.0);
             self.layout.refresh_cascade_state(
@@ -9901,9 +9923,10 @@ impl Smallvil {
                         .output_for_window(&window)
                         .unwrap_or_else(|| output.clone());
                     self.set_window_fractional_scale(&window, &scale_output);
+                    let bounds = self.floating_bounds(&surface, full);
 
                     if let Some(tag) = self.floating_workspace.get_mut(&surface) {
-                        tag.rect = clamp_rect_visible(tag.rect, full);
+                        tag.rect = clamp_rect_visible(tag.rect, bounds);
                     }
                     if let Some(entry) = self.fullscreen.get_mut(&surface) {
                         if let Some(rect) = &mut entry.restore_rect {
@@ -9923,7 +9946,7 @@ impl Smallvil {
                             .element_geometry(&window)
                             .or_else(|| self.floating_workspace.get(&surface).map(|tag| tag.rect));
                         if let Some(current) = current {
-                            let clamped = clamp_rect_visible(current, full);
+                            let clamped = clamp_rect_visible(current, bounds);
                             if let Some(tag) = self.floating_workspace.get_mut(&surface) {
                                 tag.rect = clamped;
                             }
@@ -12883,6 +12906,97 @@ impl Smallvil {
             }
         }
         self.scroll_columns_changed(focused);
+    }
+
+    /// Moves floating windows by however far the strip scrolled since the
+    /// last retile when `scroll.float_anchor = strip`, so they stay on the
+    /// strip instead of following the camera. Pinned windows and
+    /// scratchpads keep their screen position.
+    fn anchor_scroll_floaters(&mut self, output: &str, workspace: u32) {
+        if self.layout.scroll.config.is_none() {
+            return;
+        }
+        let key = self.layout.scroll_key(workspace);
+        let offset = self.layout.scroll.offset(output, key);
+        let Some(shift) = self.layout.scroll.float_shift(output, key, offset) else {
+            return;
+        };
+        if self.config.scroll.float_anchor != crate::scroll::FloatAnchor::Strip {
+            return;
+        }
+        let delta: Point<i32, Logical> = match self.config.scroll.orientation {
+            crate::scroll::Orientation::Horizontal => (shift, 0).into(),
+            crate::scroll::Orientation::Vertical => (0, shift).into(),
+        };
+        let surfaces: Vec<WlSurface> = self
+            .floating_workspace
+            .iter()
+            .filter(|(surface, tag)| {
+                tag.output == output
+                    && self.layout.scroll_key(tag.workspace) == key
+                    && self.scroll_strip_floater(surface)
+            })
+            .map(|(surface, _)| surface.clone())
+            .collect();
+        for surface in surfaces {
+            let old = self
+                .floating_workspace
+                .get(&surface)
+                .filter(|_| self.window_is_visible(&surface))
+                .and_then(|tag| self.space.element_geometry(&tag.window));
+            self.translate_floating_window(&surface, delta);
+            let new = self
+                .floating_workspace
+                .get(&surface)
+                .and_then(|tag| self.space.element_geometry(&tag.window));
+            if let (Some(old), Some(new)) = (old, new) {
+                self.start_window_move_animation(&surface, old, new);
+            }
+        }
+    }
+
+    /// A floating window that `scroll.float_anchor = strip` keeps on the
+    /// strip: it may sit off-screen and belongs only to its own output.
+    pub(crate) fn scroll_strip_floater(&self, surface: &WlSurface) -> bool {
+        self.config.spatial_engine == crate::config::SpatialEngine::Scroll
+            && self.config.scroll.float_anchor == crate::scroll::FloatAnchor::Strip
+            && !self.pinned.contains(surface)
+            && self
+                .floating_workspace
+                .get(surface)
+                .is_some_and(|tag| !is_scratchpad_workspace(tag.workspace))
+    }
+
+    /// The bounds a floating window is kept inside: the output, unbounded
+    /// along the strip for a strip-anchored Scroll floater.
+    fn floating_bounds(
+        &self,
+        surface: &WlSurface,
+        full: Rectangle<i32, Logical>,
+    ) -> Rectangle<i32, Logical> {
+        if !self.scroll_strip_floater(surface) {
+            return full;
+        }
+        const HALF: i32 = i32::MAX / 4;
+        match self.config.scroll.orientation {
+            crate::scroll::Orientation::Horizontal => {
+                Rectangle::new((-HALF, full.loc.y).into(), (2 * HALF, full.size.h).into())
+            }
+            crate::scroll::Orientation::Vertical => {
+                Rectangle::new((full.loc.x, -HALF).into(), (full.size.w, 2 * HALF).into())
+            }
+        }
+    }
+
+    /// Runtime counterpart of `scroll.float_anchor`; a reload restores the
+    /// configured value.
+    pub(crate) fn toggle_float_anchor(&mut self) {
+        use crate::scroll::FloatAnchor;
+        self.config.scroll.float_anchor = match self.config.scroll.float_anchor {
+            FloatAnchor::Screen => FloatAnchor::Strip,
+            FloatAnchor::Strip => FloatAnchor::Screen,
+        };
+        tracing::info!(anchor = ?self.config.scroll.float_anchor, "scroll.float_anchor toggled");
     }
 
     /// Retiles after a column edit and keeps the edited window in view.

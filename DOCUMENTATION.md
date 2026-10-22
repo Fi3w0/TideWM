@@ -1845,6 +1845,7 @@ The same set of strings works after `bind ... { }` at the top level or inside a 
 - `center-column` — Scroll only: center the focused column once, even the first or last one (the strip may show empty space past its end until the next focus change)
 - `focus-column-first` / `focus-column-last` — Scroll only: focus the first or last column, on its most recently focused window
 - `move-column-first` / `move-column-last` — Scroll only: move the focused column to the start or end of the strip
+- `toggle-float-anchor` — Scroll only: switch `scroll.float_anchor` between `screen` and `strip` for the running session; a config reload restores the configured value
 - `toggle-column-tabbed` — Scroll only: turn the focused column into one tab group (tabs in column order, the focused window stays visible), or a tab group back into a stacked column in tab order
 - `resize-left` / `resize-right` / `resize-up` / `resize-down` — shrink/grow the focused floating window by 24 logical pixels, or resize its nearest BSP split and connected parallel ancestors
 - `move-left` / `move-right` / `move-up` / `move-down` — step the focused floating window 24 logical pixels, no-op on a tiled one
@@ -2058,6 +2059,7 @@ scroll {
     always_center_single = false
     preset_widths = [0.333, 0.5, 0.667]
     gesture_distance = 1200
+    float_anchor = screen
 }
 ```
 
@@ -2070,6 +2072,7 @@ scroll {
 | `always_center_single` | bool | `false` | Keep a workspace's only column centered whatever `center_focused` says. |
 | `preset_widths` | list of 1–16 widths, `0.1`–`1.0` | `[0.333, 0.5, 0.667]` | Widths `switch-preset-width` steps through, narrowest first after the widest. |
 | `gesture_distance` | positive float | `1200` | Touchpad travel per viewport. A sensitivity, not a monitor width. |
+| `float_anchor` | `screen` \| `strip` | `screen` | `screen` keeps floating windows fixed on the monitor while the strip scrolls under them. `strip` keeps each floating window at its place on the strip, so it scrolls away with the columns and comes back when you scroll back; it may sit off-screen along the strip and is drawn only on its own monitor. Pinned windows and scratchpads always stay on screen. `toggle-float-anchor` flips it until the next reload. |
 
 Spacing follows `gaps`. A column holds one window or several stacked ones. Along the strip, `focus-*` moves between columns (landing on the window last focused there), `swap-*` moves the whole column and `resize-*` changes the column width; across the strip, they move focus, reorder and resize inside the column. `consume-or-expel-left/right`, `consume-into-column` and `expel-from-column` edit columns (see [Action strings](#action-strings)). New windows open as a column after the focused column. Modifier+right-drag on a Scroll tile resizes its column along the strip and, in a shared column, the window across it. A modifier+left-drag drop lands by zone of the tile under the pointer: the outer quarters along the strip insert a new column before/after it, the outer quarters across it insert into its column above/below it, and the middle swaps. While dragging, a bar (or the whole tile, for a swap) previews the landing spot in the `snap` preview color and opacity. `scroll-left/right/up/down` slides half a viewport. No binds are added automatically. Pointer focus (hover, click, touch, tablet) never moves the strip; keyboard focus, `focus-window`/`focus-app` and notification activation reveal the target.
 

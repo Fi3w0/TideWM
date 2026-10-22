@@ -48,6 +48,7 @@ scroll {
     always_center_single = false
     preset_widths        = [0.333, 0.5, 0.667]
     gesture_distance     = 1200
+    float_anchor         = screen                 # or strip
 }
 ```
 
@@ -68,6 +69,7 @@ scroll {
 - **`orientation`:** horizontal or vertical strips. For a free 2D layout, use Ocean.
 - **`workspaces`:** `separate` gives each workspace its own strip and scroll position. `sections` lays a monitor's workspaces end to end in one strip, and switching workspace jumps to its section. In both modes, scratchpads stay separate and floating windows float above the strip.
 - **`gesture_distance`:** how far a touchpad swipe travels per screen. The swipe uses your workspace-swipe finger count.
+- **`float_anchor`:** `screen` keeps floating windows where they are on the monitor while the strip scrolls. `strip` leaves each one at its spot on the strip, so it scrolls away with the columns and comes back when you return. Pinned windows and scratchpads always stay on screen. `toggle-float-anchor` flips it until the next reload.
 - **Spacing** comes from the global `gaps`.
 
 A nearly full-width setup with neighbor peeks:

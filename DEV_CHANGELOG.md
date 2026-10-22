@@ -2,6 +2,15 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.169 — Strip-anchored Scroll floaters
+
+- Hot-reloadable `scroll.float_anchor = screen | strip` (default `screen`, unchanged behavior) and the `toggle-float-anchor` action, which flips it until the next reload.
+- `ScrollState::float_shift` records, per strip, the whole-pixel offset floaters were last placed against; `retile_filtered` calls `anchor_scroll_floaters` right after `prepare_scroll` and, in `strip` mode, translates every floater whose workspace maps to that strip key (all of a monitor's workspaces with `sections`) by the difference. Whole pixels keep repeated small pans from drifting. Visible floaters get the normal movement animation so they glide with the tiles; hidden ones move their remembered rect. Pinned windows and scratchpads are excluded.
+- `translate_floating_window` is factored out of `translate_floating_windows_on_output` so both share the visible/hidden/fullscreen/maximized handling.
+- The retile clamp that keeps floaters 32 px on screen is unbounded along the strip for strip-anchored floaters (`floating_bounds`) and still applies across it; switching back to `screen` clamps them on screen again.
+- `classic_render_placements` drops a strip-anchored floater on any output other than its own, like tiles, which also keeps pointer hit-testing off the neighbor monitor.
+- Nested run (virtual KWin host, three tiled GTK clients plus one floating by rule): the strip moved 650 px and the floater moved exactly 650 px with it and back; after `toggle-float-anchor` it stayed at the same x through four scrolls. 667 tests (1 new), strict Clippy, fmt pass. Not verified natively or on multiple monitors.
+
 ## 0.90.168 — Scroll workspace animation and quieter scroll events
 
 - Scroll with `workspaces = separate` now switches workspaces through the normal captured transition, so `animations.workspace` (and the water transition) play like in Classic. The immediate switch remains only for `sections`, where the shared strip slides to the section instead. The .158 engine had routed every Scroll switch through `switch_workspace_immediate`.

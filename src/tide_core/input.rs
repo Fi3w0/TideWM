@@ -2907,6 +2907,7 @@ impl Smallvil {
                     self.toggle_float_ambient(&surface);
                 }
             }
+            Action::ToggleFloatAnchor => self.toggle_float_anchor(),
             Action::RaiseWindow => {
                 let focused = self.focused_window_surface();
                 if let Some(surface) = focused {
