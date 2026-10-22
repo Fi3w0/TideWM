@@ -2,6 +2,12 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.168 — Scroll workspace animation and quieter scroll events
+
+- Scroll with `workspaces = separate` now switches workspaces through the normal captured transition, so `animations.workspace` (and the water transition) play like in Classic. The immediate switch remains only for `sections`, where the shared strip slides to the section instead. The .158 engine had routed every Scroll switch through `switch_workspace_immediate`.
+- `scroll-changed` is held while a pointer grab or compositor gesture is active and emitted once with the final state afterwards. A native session showed hundreds of events per minute during Mod+right-drag resizing, one per pointer motion.
+- A nested run with a 1 s fade caught the outgoing window half-faded 350 ms into a Scroll workspace switch.
+
 ## 0.90.167 — Tabbed Scroll columns and drag-to-insert
 
 - `toggle-column-tabbed` turns a Scroll column into one tab group, anchored on the head so tabs follow column order and the focused window stays the visible tab; toggled again, the group's members become a stacked column in tab order in the group's place. It reuses the existing group machinery (tab strip, `cycle-tab-*`, parking).

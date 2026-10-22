@@ -2,6 +2,11 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.168 · 2026-10-22 — Scroll fixes
+
+- Switching workspaces in Scroll plays your workspace animation again.
+- `scroll-changed` events wait until a drag or swipe ends instead of firing on every mouse movement.
+
 ## 0.90.167 · 2026-10-22 — Tabbed columns and drag-to-insert
 
 - `toggle-column-tabbed` turns a Scroll column into tabs and back.

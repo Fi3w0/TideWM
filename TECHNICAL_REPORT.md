@@ -6,7 +6,7 @@ The quick technical picture: what TideWM is built from, what works, what's been 
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). Underneath is a complete tiling window manager: BSP, master/stack and cascade layouts, workspaces, multi-monitor, layer shell, IPC and XWayland. On top sits the water look (ripples, waves, glass, shadows, physics), and every piece of it is a config toggle.
 
-Current version: **0.90.167**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
+Current version: **0.90.168**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
 
 ## Architecture
 

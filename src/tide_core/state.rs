@@ -3613,7 +3613,19 @@ impl Smallvil {
             self.ipc_seen = None;
             return;
         }
-        let now = self.ipc_seen_state();
+        let mut now = self.ipc_seen_state();
+        // A drag or swipe moves the strip on every motion event; report
+        // Scroll once, with the final state, when the interaction ends.
+        let interacting = self.compositor_gesture.is_some()
+            || self
+                .seat
+                .get_pointer()
+                .is_some_and(|pointer| pointer.is_grabbed());
+        if interacting {
+            if let Some(before) = &self.ipc_seen {
+                now.scroll.clone_from(&before.scroll);
+            }
+        }
         let Some(before) = self.ipc_seen.replace(now.clone()) else {
             return;
         };
@@ -10298,7 +10310,12 @@ impl Smallvil {
         }
         let output_name = output.name();
         let current = self.layout.active_workspace(&output_name);
-        if self.config.spatial_engine == crate::config::SpatialEngine::Scroll {
+        // Scroll sections slide the shared strip to the section instead of
+        // capturing a transition. Separate strips switch like Classic, with
+        // the configured workspace animation.
+        if self.config.spatial_engine == crate::config::SpatialEngine::Scroll
+            && self.config.scroll.workspaces == crate::scroll::WorkspaceMode::Sections
+        {
             let target = if current == workspace && self.config.workspace_auto_back_and_forth {
                 self.workspace_previous
                     .get(&output_name)
