@@ -64,8 +64,6 @@ on "workspace-changed" {
 
 **Live queries.** `tidectl eval <expression>` evaluates on the running session's Lua — config variables, section tables, and the live `tide` table are all answerable (`tidectl eval "theme.primary"`, `tidectl eval "tide.workspace"`).
 
-**Coming from the old line-based format?** `$mod = SUPER` is now `@mod = SUPER`, `bind X = Y` is `bind X { Y }`, `$wave(...)` is `wave(...)`, and `spawn_at_startup` lines become one `spawn = [...]` list. Old spellings no longer parse.
-
 **Multi-file:** `include "path.wave"` as its own statement, repeatable (one per line), in any file (the main one, or one it includes). Each path resolves relative to the file that lists it; `~/` expands to your home directory. Rules:
 
 - `input { }`, `input { touchpad { } }`, `env { }`, `gpu { }`, `switch_events { }`, and a given `mode <name> { }` merge field-by-field across files — the same key set from two files combines rather than one replacing the other.
@@ -74,7 +72,7 @@ on "workspace-changed" {
 - **The including file's own keys always win over anything it includes.** If `config.wave` includes `overrides.wave`, and both set `gaps`, `config.wave`'s own value wins — put an override directly in the file doing the including, not in a file you list last.
 - A broken include (missing, unreadable, unparseable, or a cycle) is skipped with a warning; it doesn't fail the whole config.
 - The config directory is watched recursively (`*.wave` files only, dotfiles/dotdirs skipped) — editing any included file hot-reloads exactly like editing the main file.
-- An unrecognized *top-level key* (`key = value`) warns and is ignored. An unrecognized *block keyword* is different: if its body only sets keys that aren't valid at the top level, it's indistinguishable from a Lua computation block like `theme { }` and is silently dropped with **no warning at all** — this is what happens if you write a stale `connected_vessels { }`, `water_glass { }`, or `submap <name> { }` (the canonical spellings are `vessels { }`, `glass { }`, and `mode <name> { }`; see their sections below).
+- An unrecognized *top-level key* (`key = value`) warns and is ignored. An unrecognized *block keyword* is different: if its body only sets keys that aren't valid at the top level, it's indistinguishable from a Lua computation block like `theme { }` and is silently dropped with **no warning at all**. A misspelled block name therefore does nothing, silently.
 
 ## Wallpaper behavior
 
@@ -100,9 +98,8 @@ For water glass that moves continuously, select `glass { animation = ambient }` 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `terminal` | string | `"kitty"` | Spawned by the shipped `$mod+Return` bind (`@mod = SUPER` in the generated file). The terminal fallback is `wave(kitty, alacritty, foot, xterm)` — see the Wave format section above. |
-| `pointer_modifier` (aliases `drag_modifier`, `mouse_modifier`) | modifier | `SUPER` | Held with left-drag to move and right-drag to resize windows, and for pointer-anchored zoom/pan. Independent of `@mod`: the generated config sets `drag_modifier = mod` so it follows `@mod`, but a config without the key keeps `SUPER` even when `@mod = ALT`. |
-| `engine` (aliases `spatial_engine`, `wm_mode`) | `classic` \| `ocean` | `classic` | Selects one of TideWM's two WM ownership models. Classic keeps numbered workspaces. Ocean has no workspaces: outputs are cameras into one continuous 2D world. Hot-reloadable: a change migrates every live window in place. Classic→Ocean turns each output's populated workspace trees into reefs on the lateral line at `X = (N-1) * (output width + 128)` with the camera at the previously-active workspace; depth-deck windows are recalled to their tiles, floating windows translate to world coordinates around their workspace's reef, and pinned windows become Ocean screen pins. Ocean→Classic turns reefs sorted left-to-right into workspaces `1..N` on the output whose camera is nearest, selects the active workspace from each camera, clamps floating windows into the visible area, and restores pins. Tab groups and fullscreen/maximized entries carry across both directions; Ocean bookmarks and camera history are dropped (no Classic counterpart). |
-| `drag_modifier` | modifier or `+`-joined modifiers | `super` | Modifier physically held for compositor mouse actions: left-drag moves floating windows or drags tiles (cross-monitor drops insert into the destination active layout in Classic/Ocean; cancellation restores the source); right-drag resizes floating or tiled windows. Accepts `super`/`logo`/`mod4`, `alt`/`mod1`, `ctrl`/`control`, and `shift`. The shipped config sets it to `mod`. |
+| `engine` | `classic` \| `ocean` \| `scroll` | `classic` | Selects one of TideWM's three spatial engines (see [SPATIAL_MODEL.md](SPATIAL_MODEL.md)). Classic keeps numbered workspaces. Ocean has no workspaces: outputs are cameras into one continuous 2D world. Scroll gives each output a scrolling strip. Hot-reloadable: a change migrates every live window in place. Classic→Ocean turns each output's populated workspace trees into reefs on the lateral line at `X = (N-1) * (output width + 128)` with the camera at the previously-active workspace; depth-deck windows are recalled to their tiles, floating windows translate to world coordinates around their workspace's reef, and pinned windows become Ocean screen pins. Ocean→Classic turns reefs sorted left-to-right into workspaces `1..N` on the output whose camera is nearest, selects the active workspace from each camera, clamps floating windows into the visible area, and restores pins. Tab groups and fullscreen/maximized entries carry across both directions; Ocean bookmarks and camera history are dropped (no Classic counterpart). |
+| `drag_modifier` | modifier or `+`-joined modifiers | `super` | Modifier physically held for compositor mouse actions: left-drag moves floating windows or drags tiles (cross-monitor drops insert into the destination active layout in Classic/Ocean; cancellation restores the source); right-drag resizes floating or tiled windows; also anchors Ocean's pointer zoom and pan. Accepts `super`/`logo`/`mod4`, `alt`/`mod1`, `ctrl`/`control`, and `shift`, joined with `+`. Independent of `@mod`: the shipped config sets `drag_modifier = mod` so it follows `@mod`, but a config without the key keeps Super. |
 | `welcome_hint` | bool | `true` | Shows a persistent empty-desktop card listing your live terminal/close/quit binds and the config file path. Disappears when a real window maps; delete this key (or set it `false`) to stop it returning. |
 | `reload_toast` | bool | `true` | Shows the short compositor card after a successful hot reload. `false` hides that confirmation only; parse errors and configuration warnings remain visible so a bad config cannot silently lock itself in. |
 | `water_effects` | bool | `true` | Master toggle for TideWM's water/aqua render identity. Disables water-glass, frost, glass backdrop capture (custom shaders keep theirs under `shaders { enabled }`), impulse ripples, wave workspace transitions, Cascade pour/drain, automatic depth/buoyancy, interactive viscosity, connected-vessel resize, and floating sway when `false`. |
@@ -693,7 +690,7 @@ ocean {
 | `smart_tiling_snap_distance` | integer, `0`–`512` | `64` | Screen-pixel distance at which a floating Ocean window attaches to a nearby tiled window on release. `0` requires overlap. |
 | `smart_tiling_preserve_size` | boolean | `true` | Keeps the floating window's current size after smart reattachment. The window remains a member of the reef tiling tree while its custom size is rendered around its tile slot. |
 | `canvas_pan_button` | `left` \| `middle` \| `right` \| `none` | `left` | Button that directly drags genuinely empty Ocean canvas. `none` disables mouse camera grabbing and reserves no button. Layer surfaces and windows keep their clicks. |
-| `canvas_pan_requires_modifier` | boolean | `false` | When true, empty-canvas dragging also requires the currently configured `pointer_modifier`; false gives direct Drift-style canvas movement. |
+| `canvas_pan_requires_modifier` | boolean | `false` | When true, empty-canvas dragging also requires the currently configured `drag_modifier`; false gives direct Drift-style canvas movement. |
 | `camera_step` | integer, `32`–`8192` | `480` | Logical pixels moved by an `ocean-pan-*` keyboard action. Hot-reloadable. |
 | `camera_animation_ms` | integer, `0`–`5000` | `260` | Smooth pan/zoom/bookmark travel duration. `0` makes camera actions immediate. |
 | `camera_sway` | float, `0`–`256` | `18` | Small perpendicular arc, in screen pixels, during keyboard camera travel. `0` keeps a straight path. |
@@ -703,7 +700,7 @@ ocean {
 | `canvas_marker` | boolean | `true` | Show a small point at the viewport center only after the Ocean camera moves. Independent from the grid. |
 | `canvas_marker_fade_ms` | integer, `0`–`30000` | `4200` | Inactivity fade duration for the center point. `0` disables it. |
 | `zoom_enabled` | boolean | `true` | Enables all Ocean zoom actions and the modifier-wheel gesture. When disabled the live camera is held at `1.0`. |
-| `modifier_zoom` | boolean | `true` | With zoom enabled, physically holding `pointer_modifier` while scrolling zooms around the pointer. |
+| `modifier_zoom` | boolean | `true` | With zoom enabled, physically holding `drag_modifier` while scrolling zooms around the pointer. |
 | `min_zoom` / `max_zoom` | float, `0.05`–`8` | `0.25` / `2.0` | Camera scale limits. |
 | `zoom_step` | float, `1.01`–`3` | `1.2` | Multiplicative keyboard/wheel zoom step. |
 | `depth_enabled` | boolean | `true` | Enables Ocean sink/dredge/surface and Depth Up/Down. Does not affect the 2D camera or zoom. |
@@ -965,7 +962,7 @@ Configures Phase R2 compositor-drawn drop shadows. TideWM combines niri’s CSS-
 
 Shadows are ordinary decoration and therefore independent of `water_effects`. The default `draw_behind_window = false` is especially important for transparent/frosted apps: TideWM cuts the actual window body out of the shadow, so the shadow cannot become a dark or colored filter over the client. Set it to `true` only when a client’s unknown rounded CSD shape would otherwise leave artifacts.
 
-Every key also works inside `rule { shadow { } }`; omitted fields inherit the global block and multiple matching shadow sub-blocks merge field by field. Colors accept `RRGGBB`, `RRGGBBAA`, quoted `"#RRGGBBAA"`, and legacy `0xAARRGGBB`.
+Every key also works inside `rule { shadow { } }`; omitted fields inherit the global block and multiple matching shadow sub-blocks merge field by field. Colors accept `RRGGBB`, `RRGGBBAA` and `#RRGGBBAA`.
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -1144,7 +1141,7 @@ Configures the Phase R1 impulse ripple shared by window-map, focus-change, and u
 | `focus_on_map` | bool | `false` | When `true`, automatic focus during map also emits `focus_preset`, deliberately stacking it over the map effect. `stack_focus_on_map` is an alias. Later focus handoffs are unaffected. |
 | `urgent_repeat` | bool | `true` | When `true`, the urgent ripple re-fires every `urgent_repeat_interval_ms` until the window is focused or its hint clears, instead of firing once. `urgent_pulse` is an alias. |
 | `urgent_repeat_interval_ms` | integer | `1500` | Milliseconds between urgent-repeat pulses, clamped to `100`–`60000`. `urgent_interval_ms` and `urgent_interval` are aliases. |
-| `shapes` | space-separated list | `ring` | Compatibility mode: any combination of `ring`, `square`, `droplet`, and `cross`. Assigning this key automatically selects `preset = legacy`. `shape` and `form` are aliases. |
+| `shapes` | list, e.g. `[ring, droplet]` | `ring` | Compatibility mode: any combination of `ring`, `square`, `droplet`, and `cross`. Assigning this key automatically selects `preset = legacy`. `shape` and `form` are aliases. |
 | `color` | color | `8EDDFF` | RGB tint. Use bare `RRGGBB` or bare `#RRGGBB`/`#RRGGBBAA` — the parser looks ahead for six or eight hex digits after `#` and only treats it as a comment when that lookahead fails, so quoting is never required for a well-formed hex color. A malformed one (wrong digit count, or extra characters right after the digits with no separating space/`,`/`]`/`)`/`}`) *is* read as `#` starting a comment, silently dropping everything after it on that line — the field then keeps its previous or default value with no warning, so a truncated hex color is a silent no-op, not a parse error. Alpha in the color form is currently ignored; use `peak_alpha`. |
 | `secondary_color` | color | `E8FCFF` | Gradient, membrane, and highlight tint. `accent_color` and `highlight_color` are aliases. |
 | `peak_radius` | positive float | `220` | Maximum radius in logical pixels. `radius` is an alias. |
@@ -1164,7 +1161,7 @@ Configures the Phase R1 impulse ripple shared by window-map, focus-change, and u
 | `edge_offset` | float | `0` | Signed distance normal to a side: positive moves outside the window, negative moves inside. |
 | `offset` | `<dx>x<dy>` | `0x0` | Logical-pixel offset added to the selected anchor. |
 | `layer` | enum | `above-windows` | `above-all`, `above-windows`, `below-windows`, or `below-all`. |
-| `triggers` | space-separated list | `map` | Any combination of `map`, `focus`, and `urgent`. |
+| `triggers` | list, e.g. `[map, urgent]` | `map` | Any combination of `map`, `focus`, and `urgent`. |
 
 ```
 ripple_preset edge-jelly {
@@ -1456,7 +1453,7 @@ udev backend only — winit's nested host input never reaches a real libinput de
 | `swipe_left`, `swipe_right`, `swipe_up`, `swipe_down` | action | Runs any ordinary TideWM action after a dominant-axis swipe crosses `workspace_swipe_distance` (default 200). |
 | `gesture_pinch_fingers` | integer | Finger count for `pinch_in` / `pinch_out`. |
 | `pinch_in`, `pinch_out` | action | Runs after the completed pinch reaches scale 0.8 / 1.2 respectively. |
-| `modifier_pan_fingers` | integer, unset by default | A swipe with this many fingers, held together with `pointer_modifier`, moves/pans the same way `pointer_modifier`+left-drag does -- the touch itself is the "grab," no button needed. Over a window it picks the window up (tiled or floating, same decision the mouse path makes, including Ocean smart-tiling swap and reattachment); over empty Ocean canvas it pans the camera. |
+| `modifier_pan_fingers` | integer, unset by default | A swipe with this many fingers, held together with `drag_modifier`, moves/pans the same way `drag_modifier`+left-drag does -- the touch itself is the "grab," no button needed. Over a window it picks the window up (tiled or floating, same decision the mouse path makes, including Ocean smart-tiling swap and reattachment); over empty Ocean canvas it pans the camera. |
 
 ```
 input {
@@ -1800,15 +1797,11 @@ a known-safe fallback table without rewriting the file. The fallback clears
 on the next successful config reload or TideWM restart.
 
 See [Action strings](#action-strings) for every value a bind can take. A later
-`bind` on the same chord overrides an earlier one. The old
-`bind <chord> = <action>` line form no longer parses at all — it is a compile
-error (`expected `bind <combo> { ... }``), not a deprecated alias, so an old
-config using it needs the mechanical `= action` → `{ action }` rewrite (see
-"The line-based grammar is gone" above) before it will load.
+`bind` on the same chord overrides an earlier one.
 
 ### `mode <name> { }`
 
-A temporary alternate keybind table (sway/Hyprland's "mode" idea), same `bind` statements as the top level (no modifier prefix needed if the submap's own binds are unmodified, like the shipped `nav` example). Entered via a `submap:<name>` action, which **fully replaces** the base binds — not layered on top of them — until an explicit `exit-mode` bind. Not tied to focus; stays active until you explicitly leave it. A config reload that drops or renames the active submap auto-exits back to the base binds.
+A temporary alternate keybind table (sway/Hyprland's "mode" idea), same `bind` statements as the top level (no modifier prefix needed if the mode's own binds are unmodified, like the shipped `nav` example). Entered via a `mode:<name>` action, which **fully replaces** the base binds — not layered on top of them — until an explicit `exit-mode` bind. Not tied to focus; stays active until you explicitly leave it. A config reload that drops or renames the active mode auto-exits back to the base binds.
 
 ```
 mode nav {
@@ -1820,7 +1813,7 @@ mode nav {
 }
 ```
 
-Query which submap (if any) is active via `tidectl active-submap` or the IPC `active-submap` request.
+Query which mode (if any) is active via `tidectl active-mode` or the IPC `active-mode` request.
 
 ## Action strings
 
@@ -1880,14 +1873,14 @@ The same set of strings works after `bind ... { }` at the top level or inside a 
 - `ocean-surface-window` — place the focused window at world Y=0 and center the camera on it
 
 The generated example uses `$move = CTRL` for camera arrows and keyboard zoom,
-while pointer-anchored wheel zoom uses `pointer_modifier`. Depth examples use
+while pointer-anchored wheel zoom uses `drag_modifier`. Depth examples use
 the main `$mod` layer. These are ordinary explicit `bind` lines: TideWM never
 synthesizes Ocean or Depth bindings behind the config, and deleting or
 rewriting a line removes or changes it completely.
 
 **Modes**
-- `mode:<name>` (alias `submap:<name>`, still accepted — the shipped default config uses this spelling) — enter a `mode <name> { }` block
-- `exit-mode` — `exit-submap` is not an alias for this; it does not parse as a valid action
+- `mode:<name>` — enter a `mode <name> { }` block
+- `exit-mode` — leave the active mode
 - `toggle-overview` — schematic grid of every workspace on the current output (see README's Features list; not live thumbnails)
 
 **Classic Depth Deck** (all no-op while `classic_depth.enabled = false`)
@@ -1915,7 +1908,7 @@ rewriting a line removes or changes it completely.
 `$XDG_RUNTIME_DIR/tidewm-<pid>.sock`: one JSON request line in, one JSON response line out, per connection. Read queries return structured data; `{"request": "action", "action": "<any string above>"}` runs any action string. `{"request":"batch","actions":["workspace:2","spawn:kitty"]}` validates the complete list first, then executes up to 128 actions in order, so an invalid later item cannot leave a half-run batch. This is genuinely the same path a keybind press uses (`config::parse_action` → `Smallvil::run_action`).
 Normal process termination through SIGINT, SIGTERM, or SIGHUP exits through the compositor event loop and removes this socket. SIGKILL and machine/process failure cannot run cleanup; PID-scoped discovery and stale-socket handling cover that unavoidable case.
 
-Queries: `outputs`, `workspaces`, `windows`, `focused-window`, `active-submap`, `keyboard-layouts`, `diagnostics`. `keyboard-layouts` returns `{"current_idx": N, "names": [...], "codes": [...]}` — the zero-based active layout, every keymap layout name, and the configured `xkb_layout` codes positionally (the same `current_idx`/`names` pair niri's `keyboard-layouts` request reports, so a client written for one needs no new parsing for the other). `{"request": "eval", "expression": "<wave expression>"}` evaluates on the live session Lua (config variables, section tables, and the refreshed `tide` table) and returns the value as JSON.
+Queries: `outputs`, `workspaces`, `windows`, `focused-window`, `active-mode`, `keyboard-layouts`, `diagnostics`. `keyboard-layouts` returns `{"current_idx": N, "names": [...], "codes": [...]}` — the zero-based active layout, every keymap layout name, and the configured `xkb_layout` codes positionally (the same `current_idx`/`names` pair niri's `keyboard-layouts` request reports, so a client written for one needs no new parsing for the other). `{"request": "eval", "expression": "<wave expression>"}` evaluates on the live session Lua (config variables, section tables, and the refreshed `tide` table) and returns the value as JSON.
 The `windows` query describes every protocol-mapped toplevel, including clients on inactive Classic workspaces, parked group tabs, and Depth Deck entries; visibility in the current output scene is not treated as mapping state.
 `tidectl` gives connection, request-write, one-shot-response, and subscription-handshake I/O 10 seconds to complete. One-shot replies are limited to 16 MiB and each newline-delimited subscription record to 256 KiB. After the subscribe acknowledgement, the read deadline is removed: an event stream may correctly remain quiet for any length of time, but no single peer-controlled record can grow memory without bound.
 In Ocean, `outputs` reports `active_workspace: null`, the current two-axis
@@ -1925,7 +1918,7 @@ are navigation targets rather than real workspaces. Ocean window entries use
 multiple outputs in shared mode). `entry_output` identifies monitor membership
 in independent mode, and serves as an input/focus hint in shared mode.
 
-`diagnostics` is the compositor-side half of `tidectl doctor`/`report`: version, git commit, build profile and date, backend (`winit`/`udev`), uptime, spatial engine, `water_effects`, config path and current parse warnings, XWayland enablement, session-lock state, layer-surface count, and keybind/submap counts. It exists so a bug report can state exactly which build ran without guessing from the host.
+`diagnostics` is the compositor-side half of `tidectl doctor`/`report`: version, git commit, build profile and date, backend (`winit`/`udev`), uptime, spatial engine, `water_effects`, config path and current parse warnings, XWayland enablement, session-lock state, layer-surface count, and keybind/mode counts. It exists so a bug report can state exactly which build ran without guessing from the host.
 
 **Subscribe (event stream).** The same socket also supports a long-lived mode for reactive widgets (a waybar module, an eww `deflisten`, a QuickShell socket reader) that shouldn't have to poll the queries above. Send `{"request": "subscribe", "events": ["window", "workspace", "focus", "urgent", "depth", "config", "layout"]}` as the first and only request on a fresh connection; omitting `events` (or sending an empty array) subscribes to all seven channels. The server replies with one ack line (`{"ok": true, "data": {"subscription_id": <n>, "events": [...]}}` — the resolved channel list, so a typo'd filter is visible at handshake time instead of silently matching nothing), then keeps the connection open and writes one `{"event": "<kind>", "data": ...}` line per matching change until the client disconnects. The connection's lifetime is the subscription's lifetime.
 
@@ -1941,10 +1934,10 @@ tidectl focused-window
 tidectl workspace 3            # shorthand for action workspace:3
 tidectl move-to-workspace 2
 tidectl spawn kitty
-tidectl submap nav              # shorthand for action submap:nav
+tidectl mode nav                # shorthand for action mode:nav
 tidectl action toggle-floating  # explicit passthrough, works for any action string
 tidectl batch workspace:2 spawn:kitty
-tidectl active-submap
+tidectl active-mode
 tidectl keyboard-layouts                   # current_idx / names / codes (--json for scripting)
 tidectl eval "theme.primary"               # evaluate on the live session Lua
 tidectl eval "tide.workspace"              # the tide table is refreshed first
@@ -2042,7 +2035,7 @@ continues requiring fresh user input for focus.
 
 ## Scroll spatial engine
 
-The guide, with examples and limits, is [SCROLL.md](SCROLL.md). This is the key reference.
+The guide, with examples, is in [TECHNICAL_REPORT.md](TECHNICAL_REPORT.md#scroll-engine). This is the key reference.
 
 `engine = scroll` selects Scroll at startup and on reload; `tidectl engine scroll` (bind action `engine:scroll`) switches the running session without rewriting config. `classic` and `ocean` work the same way.
 

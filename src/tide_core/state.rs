@@ -289,13 +289,13 @@ pub struct Smallvil {
     /// than expected, the same self-extending `TimeoutAction::ToDuration`
     /// idiom `winit.rs`'s own redraw timer already uses.
     cursor_idle_timer_armed: bool,
-    /// `Some(name)` while a `[submap.<name>]` keybind table is active
-    /// (`Action::EnterSubmap`/`ExitSubmap`, `input.rs`'s keybind-matching
-    /// closure). `None` means the base `[keybinds]` table is in effect.
+    /// `Some(name)` while a `mode <name> { }` keybind table is active
+    /// (`Action::EnterMode`/`ExitMode`, `input.rs`'s keybind-matching
+    /// closure). `None` means the base top-level bind table is in effect.
     /// Not tied to focus or any other implicit event -- only an explicit
-    /// `exit-submap` bind clears it, matching sway/Hyprland's own "mode"
+    /// `exit-mode` bind clears it, matching sway/Hyprland's own "mode"
     /// behavior.
-    pub active_submap: Option<String>,
+    pub active_mode: Option<String>,
     /// Emergency table is separate from Waves and starts only after the
     /// deliberate Ctrl+Alt+Escape rescue chord. A successful config reload
     /// clears it. Ordinary non-XKB helper keys held for arbitrary chords are
@@ -642,7 +642,7 @@ pub struct Smallvil {
     /// client capture combos the compositor would otherwise intercept
     /// (Alt+Tab etc.) for its guest. The gate itself is in `input.rs`'s
     /// keyboard filter -- an active inhibitor on the keyboard-focused
-    /// surface forwards everything instead of matching `[keybinds]`.
+    /// surface forwards everything instead of matching binds.
     pub keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState,
     /// `zwp_pointer_gestures_v1`: touchpad swipe/pinch/hold for clients
     /// that bind it (browsers, map apps, image viewers). Pure global
@@ -761,7 +761,7 @@ pub struct Smallvil {
     #[allow(clippy::type_complexity)]
     pub set_gamma: Option<Box<dyn FnMut(&Output, &[u16], &[u16], &[u16]) -> bool>>,
     /// `wp_fractional_scale_manager_v1`: lets clients render at
-    /// non-integer output scales (the `[[output]] scale` config knob
+    /// non-integer output scales (the `output { scale }` config knob
     /// already accepts fractions; without this global clients only ever
     /// saw the integer-rounded `wl_output` scale). Preferred scales are
     /// pushed to surfaces from `new_fractional_scale` (handlers/mod.rs)
@@ -1054,7 +1054,7 @@ pub struct Smallvil {
     pub output_pins: HashMap<WlSurface, String>,
 
     /// (output, workspace) pairs that have already fired their
-    /// `[[workspace_rule]] on_created_empty` command (see
+    /// `workspace_rule { on_created_empty }` command (see
     /// `apply_workspace_switch`). TideWM's numbered workspaces always
     /// exist as addressable slots -- there is no real create/destroy
     /// lifecycle to hook a one-shot event on the way Hyprland can -- so
@@ -1570,7 +1570,7 @@ impl Smallvil {
     /// Gathers every fact `WindowRule::matches`/`matches_initial` need for
     /// one surface (identity, PID, XWayland-ness, current urgency, spawn-time
     /// identity, startup-window-ness) and folds the matching
-    /// `[[window_rule]]` entries into one effective rule. The single
+    /// `rule { }` entries into one effective rule. The single
     /// chokepoint every other resolver in this file goes through, so a new
     /// match criterion only needs wiring here once instead of at each call
     /// site.
@@ -1761,7 +1761,7 @@ impl Smallvil {
         &self,
         hit: &crate::layout::SplitHit,
     ) -> Vec<crate::layout::SplitResizeHandle> {
-        let config = self.config.connected_vessels;
+        let config = self.config.vessels;
         let (falloff, max_splits) = if self.config.water_effects && config.enabled {
             (config.falloff, config.max_splits)
         } else {
@@ -3920,7 +3920,7 @@ impl Smallvil {
             cursor_idle_timer_armed: false,
             redraw_requests: crate::redraw::RedrawRequests::global(),
             redraw_wakeup: None,
-            active_submap: None,
+            active_mode: None,
             rescue_keybinds_active: false,
             helper_keys_down: HashSet::new(),
 
@@ -7042,7 +7042,7 @@ impl Smallvil {
 
     /// The workspace a mapped window currently belongs to, tiled or
     /// floating -- `None` under Ocean (no workspace concept) or for a
-    /// window not currently tracked by either. Feeds `[[workspace_rule]]`
+    /// window not currently tracked by either. Feeds `workspace_rule { }`
     /// decoration-base resolution below.
     fn workspace_of_surface(&self, surface: &WlSurface) -> Option<u32> {
         self.layout.workspace_of(surface).or_else(|| {
@@ -10235,7 +10235,7 @@ impl Smallvil {
         self.request_redraw();
     }
 
-    /// Fires `[[workspace_rule]] on_created_empty` the first time this
+    /// Fires `workspace_rule { on_created_empty }` the first time this
     /// (output, workspace) pair is switched into while it has zero
     /// windows -- see `workspace_created_empty_fired`'s own doc for why
     /// "first empty switch-into" is the closest honest analog available,
@@ -10467,7 +10467,7 @@ impl Smallvil {
     }
 
     /// The effective adaptive-sync preference for `output_name`: its own
-    /// `[[output]]` override if set, else the global `adaptive_sync`
+    /// `output { }` override if set, else the global `adaptive_sync`
     /// default. The udev render path consumes this resolution and applies it
     /// through Smithay's DRM compositor.
     pub(crate) fn adaptive_sync_for(&self, output_name: &str) -> crate::config::AdaptiveSync {
@@ -14499,14 +14499,14 @@ impl Smallvil {
                     self.layer_alpha_masks.clear();
                 }
                 // A reload that dropped or renamed the currently-active
-                // submap would otherwise leave every key silently
+                // mode would otherwise leave every key silently
                 // unmatched (falling through as plain input) with no
                 // indication why -- exit back to the base keybinds
                 // instead, the same table a name that never existed at
                 // all would resolve to.
-                if let Some(name) = &self.active_submap {
-                    if !self.config.submaps.contains_key(name) {
-                        self.active_submap = None;
+                if let Some(name) = &self.active_mode {
+                    if !self.config.modes.contains_key(name) {
+                        self.active_mode = None;
                     }
                 }
                 self.layout
@@ -14776,7 +14776,7 @@ fn directional_score(
 }
 
 /// `loc + delta` with per-axis saturation. Output positions arrive as
-/// full-range i32 (config `[[output]]`, `zwlr_output_manager` wire
+/// full-range i32 (config `output { }`, `zwlr_output_manager` wire
 /// values) and `delta` is a difference of two stored positions, so plain
 /// `i32` addition on adversarial values would panic in debug and wrap in
 /// release.

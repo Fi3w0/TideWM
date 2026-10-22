@@ -2,9 +2,14 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.163 · 2026-10-22 — Config cleanup
+
+- Old pre-Wave spellings are gone: `spatial_engine`/`wm_mode` (use `engine`), `pointer_modifier`/`mouse_modifier` (use `drag_modifier`), `submap:` (use `mode:`), `float_physics enabled` (use `tier`), `0x` colors and space-separated lists (use `[a, b]`). A config still using one gets an "unknown key" warning and keeps the default.
+- `tidectl active-submap` and `tidectl submap` are now `active-mode` and `mode`.
+
 ## 0.90.157 – 0.90.162 · 2026-10-22 — Scroll
 
-- **New Scroll engine.** Each monitor gets its own scrolling strip of apps, niri-style, next to Classic and Ocean. Switch live with `tidectl engine scroll|classic|ocean`, no relog. See [SCROLL.md](SCROLL.md).
+- **New Scroll engine.** Each monitor gets its own scrolling strip of apps, niri-style, next to Classic and Ocean. Switch live with `tidectl engine scroll|classic|ocean`, no relog. See the [Scroll guide](TECHNICAL_REPORT.md#scroll-engine).
 - App width, neighbor peeks, centering and gaps are all config values (`tile_proportion`, `center_focused`, `gaps`), and `resize-*` actions change the focused app's width live.
 - Fullscreen apps move with their column instead of covering the neighbors.
 - Moving the mouse focuses what's under it without scrolling the strip, so crossing monitors or clicking a peek never slides things away.

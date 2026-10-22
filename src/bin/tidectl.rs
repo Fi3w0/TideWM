@@ -695,7 +695,7 @@ fn build_request(args: &[String]) -> Result<Value, String> {
         "workspaces" => Ok(json!({ "request": "workspaces" })),
         "windows" => Ok(json!({ "request": "windows" })),
         "focused-window" | "focused" => Ok(json!({ "request": "focused-window" })),
-        "active-submap" => Ok(json!({ "request": "active-submap" })),
+        "active-mode" => Ok(json!({ "request": "active-mode" })),
         "keyboard-layouts" | "layout" => Ok(json!({ "request": "keyboard-layouts" })),
         "eval" if !rest.is_empty() => Ok(json!({
             "request": "eval",
@@ -721,7 +721,7 @@ fn build_request(args: &[String]) -> Result<Value, String> {
             rest.join(" ")
         ))),
         "spawn" if !rest.is_empty() => Ok(action_request(&format!("spawn:{}", join_quoted(rest)))),
-        "submap" if !rest.is_empty() => Ok(action_request(&format!("submap:{}", rest.join(" ")))),
+        "mode" if !rest.is_empty() => Ok(action_request(&format!("mode:{}", rest.join(" ")))),
         _ => Ok(action_request(&args.join(" "))),
     }
 }
@@ -839,7 +839,7 @@ fn print_response(command: &str, data: &Value) {
         "workspaces" => print_workspaces(data),
         "windows" => print_windows(data),
         "focused-window" | "focused" => print_window(data),
-        "active-submap" => match data.as_str() {
+        "active-mode" => match data.as_str() {
             Some(name) => println!("{name}"),
             None => println!("(none, base keybinds active)"),
         },
@@ -993,7 +993,7 @@ QUERIES:
     workspaces          list known workspaces (output, number, active, window count)
     windows             list currently mapped windows
     focused-window       (alias: focused) the currently focused window, if any
-    active-submap        the currently active `submap <name> {{ }}` block, if any
+    active-mode         the currently active `mode <name> {{ }}` block, if any
     resolve-window --pid <PID> | --app-id <ID> | --window-id <ID>
                         resolve a notification source; ambiguous matches fail
     keyboard-layouts     current XKB layout (`--json`: current_idx, names, codes)
@@ -1024,7 +1024,7 @@ ACTIONS:
         raise-window, lower-window, focus-urgent, toggle-dpms,
         cycle-focus, focus-left/right/up/down, swap-left/right/up/down,
         group-left/right/up/down, ungroup, cycle-tab-next/prev, quit,
-        submap:<name>, exit-submap, layout:bsp, layout:master,
+        mode:<name>, exit-mode, layout:bsp, layout:master,
         master-grow, master-shrink, resize-left/right/up/down,
         move-left/right/up/down, snap:left/right/top/bottom,
         snap:top-left/top-right/bottom-left/bottom-right, snap:fullscreen,
@@ -1039,7 +1039,7 @@ ACTIONS:
         tidectl move-to-workspace <N>      same as "move-to-workspace:N"
         tidectl swap-workspaces <output>   same as "swap-workspaces:<output>"
         tidectl spawn <cmd...>             same as "spawn:<cmd...>"
-        tidectl submap <name>              same as "submap:<name>"
+        tidectl mode <name>                same as "mode:<name>"
         tidectl action <string>            explicit passthrough
         tidectl batch <action>...          validate then execute up to 128 actions
 

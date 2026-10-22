@@ -163,7 +163,7 @@ fn invalidate_slots(slots: &mut [Option<Entry>], positions: Option<Vec<usize>>) 
 
 /// Reads `path`, recursively resolving its own `include "..."` entries
 /// (relative to `path`'s own directory, `~` expanded) into one merged
-/// [`Entry`] list -- the Waves equivalent of the old `load_toml_merged`.
+/// [`Entry`] list.
 /// Merge order: every include is folded in left-to-right, then the
 /// including file's own (non-`include`) entries are folded on top last,
 /// so they always win -- matches this project's established multi-file

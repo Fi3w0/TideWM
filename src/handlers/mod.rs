@@ -659,7 +659,7 @@ delegate_presentation!(Smallvil);
 //
 // wp-fractional-scale-v1
 //
-// The `[[output]] scale` config knob has always accepted fractions, but
+// The `output { scale }` config knob has always accepted fractions, but
 // without this global clients only ever saw the integer wl_output scale
 // and rendered blurry at 1.25x/1.5x. `new_fractional_scale` resolves the
 // surface's output the same way anvil does (primary scan-out output,

@@ -45,4 +45,4 @@ cargo run --locked                # runs nested inside your current session
 
 - Describe *what* changed and *why*, not just a restatement of the diff.
 - Note any RAM/perf impact if the change touches rendering, animation, or anything per-frame.
-- Update the docs the change touches: a short line in `CHANGELOG.md`, the full detail in `DEV_CHANGELOG.md`, and `README.md` / `TECHNICAL_REPORT.md` / `DOCUMENTATION.md` / `SCROLL.md` when features, build steps or config change. See [SECURITY.md](SECURITY.md) instead if it's a security-relevant change.
+- Update the docs the change touches: a short line in `CHANGELOG.md`, the full detail in `DEV_CHANGELOG.md`, and `README.md` / `TECHNICAL_REPORT.md` / `DOCUMENTATION.md` when features, build steps or config change. See [SECURITY.md](SECURITY.md) instead if it's a security-relevant change.

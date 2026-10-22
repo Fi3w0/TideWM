@@ -364,7 +364,7 @@ pub struct Layouts {
     /// nothing left tiled on it.
     algorithms: HashMap<(String, u32), LayoutAlgorithm>,
     default_algorithm: LayoutAlgorithm,
-    /// Per-workspace-number default from `[[workspace_rule]]`, one level
+    /// Per-workspace-number default from `workspace_rule { }`, one level
     /// weaker than an explicit `algorithms` entry (a live `layout:<algo>`
     /// action on this specific (output, workspace) is the user actively
     /// choosing something right now, so it should keep winning) but one
@@ -577,7 +577,7 @@ impl Layouts {
     }
 
     /// The tiling algorithm active for `output`'s `workspace`: an explicit
-    /// `set_algorithm` override first, then a `[[workspace_rule]]` default
+    /// `set_algorithm` override first, then a `workspace_rule { }` default
     /// for this workspace number, then the global configured default.
     pub fn algorithm(&self, output: &str, workspace: u32) -> LayoutAlgorithm {
         self.algorithms
@@ -612,7 +612,7 @@ impl Layouts {
         }
     }
 
-    /// Sets the whole `[[workspace_rule]]`-derived per-workspace-number
+    /// Sets the whole `workspace_rule { }`-derived per-workspace-number
     /// layout map at once (see `algorithm`'s fallback chain and this
     /// struct's `workspace_algorithm_overrides` field doc). Called once at
     /// startup and again on every config reload, same as

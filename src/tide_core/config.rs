@@ -73,8 +73,8 @@ impl Mods {
 
 /// Which tiling geometry a workspace uses (see `layout::Layouts::layout`).
 /// Not `Deserialize` -- like `Action`, this is resolved from the same
-/// string syntax `[keybinds]`/the `default_layout` config key use (see
-/// `parse_layout_algorithm`), not derived directly from TOML, so an
+/// string syntax binds/the `default_layout` config key use (see
+/// `parse_layout_algorithm`), not deserialized directly, so an
 /// unrecognized value can be handled differently depending on whether it
 /// came from a keybind (drop the bind) or the top-level default (warn and
 /// fall back) instead of failing the whole config either way.
@@ -161,13 +161,13 @@ pub enum SplitBias {
 /// follows the full pointer displacement; parallel ancestor splits receive
 /// `falloff ^ tree_distance` of it, capped to `max_splits` total handles.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ConnectedVesselsConfig {
+pub struct VesselsConfig {
     pub enabled: bool,
     pub falloff: f32,
     pub max_splits: u8,
 }
 
-impl Default for ConnectedVesselsConfig {
+impl Default for VesselsConfig {
     fn default() -> Self {
         Self {
             enabled: true,
@@ -212,8 +212,7 @@ impl Default for SwayConfig {
 /// boxes with mass, buoyancy, collisions, and a wave field" tier from the
 /// spatial roadmap: real velocity state (`crate::float_physics::FloatBody`)
 /// stepped by a fixed-timestep integrator so floating windows can actually
-/// exchange collision impulses, high-end only. `enabled = true|false` is
-/// still accepted as a legacy alias for `light`/`off`.
+/// exchange collision impulses, high-end only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FloatPhysicsTier {
     Off,
@@ -965,15 +964,15 @@ pub enum Action {
     MoveToWorkspace(WorkspaceRef),
     /// Swaps the current output's active workspace content with the named
     /// output's. No default keybind -- output names are machine-specific
-    /// (see `[[output]]`), so there's nothing sensible to bind out of the box.
+    /// (see `output { }`), so there's nothing sensible to bind out of the box.
     SwapWorkspacesWithOutput(String),
-    /// Switches which keybind table is consulted (sway/Hyprland's "mode"/
-    /// "submap" idea): a temporary layer of binds on top of `[keybinds]`,
+    /// Switches which keybind table is consulted (sway/Hyprland's "mode"
+    /// idea): a temporary layer of binds on top of the top-level binds,
     /// entered by name and left active until an explicit `exit-mode`
     /// bind, not tied to focus or any other implicit event. See
-    /// `Config::submaps`, `Smallvil::active_submap`.
-    EnterSubmap(String),
-    ExitSubmap,
+    /// `Config::modes`, `Smallvil::active_mode`.
+    EnterMode(String),
+    ExitMode,
     /// Switches the current output's active workspace to this tiling
     /// algorithm. See `LayoutAlgorithm`, `layout::Layouts::set_algorithm`.
     SetLayout(LayoutAlgorithm),
@@ -1160,7 +1159,7 @@ pub struct Config {
     /// BSP resize pressure propagated through parallel ancestor splits.
     /// `water_effects` is the master bypass; this block can independently
     /// restore the legacy one-split resize path.
-    pub connected_vessels: ConnectedVesselsConfig,
+    pub vessels: VesselsConfig,
     /// Optional lateral sway for dragged floating windows. Opt-in and
     /// bypassed by the `water_effects` master toggle like viscosity.
     pub sway: SwayConfig,
@@ -1309,8 +1308,8 @@ pub struct Config {
     pub rescue_keybinds: Vec<Keybind>,
     pub input: InputConfig,
     pub xwayland: XwaylandConfig,
-    pub spawn_at_startup: Vec<String>,
-    /// Global adaptive-sync default; a `[[output]]`'s own `adaptive_sync`
+    pub spawn: Vec<String>,
+    /// Global adaptive-sync default; a `output { }`'s own `adaptive_sync`
     /// beats it, same override shape `gaps`/`scale`/etc. already use. See
     /// `AdaptiveSync`'s own doc for what actually happens with this today.
     pub adaptive_sync: AdaptiveSync,
@@ -1333,9 +1332,9 @@ pub struct Config {
     /// Per-workspace-number overrides (layout default, decoration base,
     /// `on_created_empty`). See `WorkspaceRule`, `Config::resolve_workspace_rule`.
     pub workspace_rules: Vec<WorkspaceRule>,
-    /// Named alternate keybind tables (`[submap.<name>]`), each parsed the
-    /// same way `[keybinds]` is. See `Action::EnterSubmap`.
-    pub submaps: HashMap<String, Vec<Keybind>>,
+    /// Named alternate keybind tables (`mode <name> { }`), each parsed the
+    /// same way top-level binds are. See `Action::EnterMode`.
+    pub modes: HashMap<String, Vec<Keybind>>,
     /// Environment variables to set for TideWM's own process (so, e.g.,
     /// `XCURSOR_THEME` here actually affects the cursor theme TideWM loads
     /// itself, not just child processes) and to push into the systemd/
@@ -1600,8 +1599,8 @@ impl Config {
                 )
             })
             .collect();
-        let submaps = raw
-            .submaps
+        let modes = raw
+            .modes
             .iter()
             .map(|(name, binds)| {
                 let parsed = binds
@@ -1648,7 +1647,7 @@ impl Config {
         });
         let pointer_modifier = parse_modifiers(&raw.pointer_modifier).unwrap_or_else(|| {
             warnings.push(format!(
-                "Invalid pointer_modifier \"{}\"; using Super",
+                "Invalid drag_modifier \"{}\"; using Super",
                 raw.pointer_modifier
             ));
             Mods {
@@ -1671,7 +1670,7 @@ impl Config {
             .keybinds
             .iter()
             .filter_map(|(combo, action)| parse_keybind(combo, action, false, &mut Vec::new()))
-            .filter(|bind| !matches!(bind.action, Action::EnterSubmap(_)))
+            .filter(|bind| !matches!(bind.action, Action::EnterMode(_)))
             .collect();
         warnings.append(&mut raw.shader_warnings);
         let env = raw
@@ -1701,7 +1700,7 @@ impl Config {
             builtin_wallpaper: raw.builtin_wallpaper,
             viscosity: raw.viscosity.clamp(0.0, 4.0),
             backdrop_capture_scale: raw.backdrop_capture_scale.clamp(1, 4),
-            connected_vessels: raw.connected_vessels,
+            vessels: raw.vessels,
             sway: raw.sway,
             float_physics: raw.float_physics,
             currents: raw.currents,
@@ -1742,14 +1741,14 @@ impl Config {
             rescue_keybinds,
             input: raw.input,
             xwayland: raw.xwayland,
-            spawn_at_startup: raw.spawn_at_startup,
+            spawn: raw.spawn,
             outputs: raw.outputs,
             gpu: GpuConfig::from_raw(raw.gpu, &mut warnings),
             switch_events: SwitchEventsConfig::from_raw(raw.switch_events),
             window_rules: raw.window_rules,
             layer_rules: raw.layer_rules,
             workspace_rules: raw.workspace_rules,
-            submaps,
+            modes,
             env,
         };
         (config, warnings)
@@ -1813,7 +1812,7 @@ impl Config {
         base.merge_over(&tuning)
     }
 
-    /// Folds every `[[window_rule]]` entry matching `app_id`/`title` into
+    /// Folds every `rule { }` entry matching `app_id`/`title` into
     /// one effective rule: later matching entries override an earlier
     /// one's `workspace`/`output` (last match wins, so a more specific
     /// rule can sit after a general one and win), while `float`/
@@ -2063,7 +2062,7 @@ impl Config {
             .find_map(|rule| rule.ignore_alpha)
     }
 
-    /// The `layout` field of every `[[workspace_rule]]` that set one,
+    /// The `layout` field of every `workspace_rule { }` that set one,
     /// keyed by workspace number -- feeds `Layouts::set_workspace_algorithm_overrides`
     /// directly from `Smallvil::new`/`reload_config`, the same "resolve
     /// once here, not per `retile()`" shape `default_layout` already uses.
@@ -2108,7 +2107,7 @@ impl Config {
             .map(|(name, definition)| (name.as_str(), definition))
     }
 
-    /// Folds every `[[workspace_rule]]` naming `workspace` into one
+    /// Folds every `workspace_rule { }` naming `workspace` into one
     /// effective rule, last-match-wins per field -- same fold shape as
     /// `resolve_window_rules`, just against a single numeric match instead
     /// of several identity criteria.
@@ -2167,7 +2166,7 @@ struct RawConfig {
     builtin_wallpaper: bool,
     viscosity: f64,
     backdrop_capture_scale: i32,
-    connected_vessels: ConnectedVesselsConfig,
+    vessels: VesselsConfig,
     sway: SwayConfig,
     float_physics: FloatPhysicsConfig,
     currents: CurrentsConfig,
@@ -2221,7 +2220,7 @@ struct RawConfig {
     bsp_split_bias: String,
     /// Raw `"<N> <name>"` lines, one per `workspace_name` entry, resolved
     /// via `parse_workspace_names`. Repeatable/accumulating like
-    /// `spawn_at_startup` (see `waves::assign_is_multi`), not a scalar --
+    /// `spawn` (see `waves::assign_is_multi`), not a scalar --
     /// a config defines many of these, one per named workspace.
     workspace_names: Vec<String>,
     /// Raw `"<N|name> <pixels>"` lines, one per `workspace_gaps` entry,
@@ -2232,14 +2231,14 @@ struct RawConfig {
     keybinds: HashMap<String, String>,
     input: InputConfig,
     xwayland: XwaylandConfig,
-    spawn_at_startup: Vec<String>,
+    spawn: Vec<String>,
     outputs: Vec<OutputConfig>,
     gpu: GpuConfigRaw,
     switch_events: SwitchEventsRaw,
     window_rules: Vec<WindowRule>,
     layer_rules: Vec<LayerRule>,
     workspace_rules: Vec<WorkspaceRule>,
-    submaps: HashMap<String, HashMap<String, String>>,
+    modes: HashMap<String, HashMap<String, String>>,
     env: HashMap<String, String>,
 }
 
@@ -2306,23 +2305,21 @@ impl Default for RawConfig {
                 format!("move-to-workspace:{workspace}"),
             );
         }
-        keybinds.insert("Super+N".to_string(), "submap:nav".to_string());
+        keybinds.insert("Super+N".to_string(), "mode:nav".to_string());
 
-        // A submap (sway/Hyprland's "mode" idea): a temporary alternate
-        // keybind table, entered above via Super+N, left active until its
-        // own exit-mode bind -- not tied to focus or any other implicit
-        // event. This one's a vim-motion focus-move mode (h/j/k/l with no
-        // modifier held); a resize mode is the more common example
-        // elsewhere, but needs a keyboard resize action this project
-        // doesn't have yet.
-        let mut nav_submap = HashMap::new();
-        nav_submap.insert("h".to_string(), "focus-left".to_string());
-        nav_submap.insert("l".to_string(), "focus-right".to_string());
-        nav_submap.insert("k".to_string(), "focus-up".to_string());
-        nav_submap.insert("j".to_string(), "focus-down".to_string());
-        nav_submap.insert("Escape".to_string(), "exit-mode".to_string());
-        let mut submaps = HashMap::new();
-        submaps.insert("nav".to_string(), nav_submap);
+        // A mode (sway/Hyprland's idea): a temporary alternate keybind
+        // table, entered above via Super+N, left active until its own
+        // exit-mode bind -- not tied to focus or any other implicit event.
+        // This one's a vim-motion focus-move mode (h/j/k/l with no
+        // modifier held).
+        let mut nav_mode = HashMap::new();
+        nav_mode.insert("h".to_string(), "focus-left".to_string());
+        nav_mode.insert("l".to_string(), "focus-right".to_string());
+        nav_mode.insert("k".to_string(), "focus-up".to_string());
+        nav_mode.insert("j".to_string(), "focus-down".to_string());
+        nav_mode.insert("Escape".to_string(), "exit-mode".to_string());
+        let mut modes = HashMap::new();
+        modes.insert("nav".to_string(), nav_mode);
 
         Self {
             terminal: "kitty".to_string(),
@@ -2343,7 +2340,7 @@ impl Default for RawConfig {
             snap: SnapConfig::default(),
             builtin_wallpaper: true,
             viscosity: 1.0,
-            connected_vessels: ConnectedVesselsConfig::default(),
+            vessels: VesselsConfig::default(),
             sway: SwayConfig::default(),
             float_physics: FloatPhysicsConfig::default(),
             currents: CurrentsConfig::default(),
@@ -2384,14 +2381,14 @@ impl Default for RawConfig {
             keybinds,
             input: InputConfig::default(),
             xwayland: XwaylandConfig::default(),
-            spawn_at_startup: Vec::new(),
+            spawn: Vec::new(),
             outputs: Vec::new(),
             gpu: GpuConfigRaw::default(),
             switch_events: SwitchEventsRaw::default(),
             window_rules: Vec::new(),
             layer_rules: Vec::new(),
             workspace_rules: Vec::new(),
-            submaps,
+            modes,
             env: HashMap::new(),
         }
     }
@@ -2408,7 +2405,7 @@ pub struct InputConfig {
     /// xkbcommon rules/model/layout/variant/options. Empty string / `None`
     /// (the default for each) means "let xkbcommon fall back to the
     /// `XKB_DEFAULT_*` env vars," same as `XkbConfig::default()` -- so an
-    /// empty `[input]` section changes nothing versus today.
+    /// empty `input { }` block changes nothing versus today.
     pub xkb_rules: String,
     pub xkb_model: String,
     pub xkb_layout: String,
@@ -2730,7 +2727,7 @@ fn parse_gpu_selector(value: &str, allow_auto: bool) -> Option<GpuSelector> {
     }
 }
 
-/// Parsed `[switch_events]` entries: one optional [`Action`] per lid /
+/// Parsed `switch_events { }` entries: one optional [`Action`] per lid /
 /// tablet-mode transition. Reaches the compositor through the same
 /// `Smallvil::run_action` every keybind and IPC `action` request uses, so
 /// anything a keybind can do, a lid event can do too -- but you almost
@@ -2747,7 +2744,7 @@ pub struct SwitchEventsConfig {
 
 /// String form of [`SwitchEventsConfig`], kept separate because [`Action`]
 /// isn't `Deserialize` -- it's parsed from the same string syntax
-/// `[keybinds]` values use (see `parse_action`). Matches the keybinds
+/// bind values use (see `parse_action`). Matches the keybinds
 /// pattern of storing raw strings in `RawConfig` and resolving them in
 /// `Config::from_raw`.
 #[derive(Debug, Default)]
@@ -2769,7 +2766,7 @@ impl SwitchEventsConfig {
     }
 }
 
-/// One `[[window_rule]]` entry: match newly-mapped windows by `app_id`/
+/// One `rule { }` entry: match newly-mapped windows by `app_id`/
 /// `title`/`pid`/`xwayland` (i3/sway's `for_window`, Hyprland's
 /// `windowrule` idea) and apply
 /// a placement before the window's first tile/floating rect is ever
@@ -2816,11 +2813,11 @@ pub struct WindowRule {
     /// every resolve via `Smallvil::workspace_of_surface`, so a rule keyed
     /// on it applies to whatever happens to live on that workspace number
     /// right now, on any output (same "workspace number on any output"
-    /// convention `workspace_gaps`/`[[workspace_rule]]` already use), and
+    /// convention `workspace_gaps`/`workspace_rule { }` already use), and
     /// stops applying the moment a window leaves. This is how "per-
     /// workspace persistent window-rule overrides" are built: `rule {
     /// on_workspace = N; ... }` layers its effects on top of
-    /// `[[workspace_rule]]`'s own border/rounding/shadow/layout base for
+    /// `workspace_rule { }`'s own border/rounding/shadow/layout base for
     /// workspace N, the same precedence chain `border_config_for_surface`
     /// already runs, just reusable for the rest of `WindowRule`'s effect
     /// surface (opacity, glass, viscosity, tags, ...) instead of being
@@ -2971,7 +2968,7 @@ pub struct WindowRule {
     /// Per-app analytical-border overrides.
     pub border: Option<BorderOverrides>,
     /// Exact floating placement (top-left corner), `<x>x<y>` -- the same
-    /// syntax `[[output]]`'s `position` already uses. No-op unless the
+    /// syntax `output { }`'s `position` already uses. No-op unless the
     /// window ends up floating (from `float`/`pin`/the auto-float
     /// heuristic), same "only means something once floating" restriction
     /// `pseudo_tile` has in reverse for tiled.
@@ -4868,7 +4865,7 @@ pub struct WorkspaceRule {
     /// actively choosing something for *this* output's instance of the
     /// workspace, not the workspace's own resting default.
     pub layout: Option<LayoutAlgorithm>,
-    /// Layered as a base underneath any matching `[[window_rule]]`
+    /// Layered as a base underneath any matching `rule { }`
     /// override for a window that happens to live on this workspace (see
     /// `Smallvil::border_config_for_surface`), not merged field-by-field
     /// against other matching `workspace_rule` blocks -- only one
@@ -5106,8 +5103,7 @@ fn load_raw_config_in(
 /// Lowers a fully-merged Waves entry list into a `RawConfig`, starting
 /// from its defaults and overwriting whatever was actually present.
 /// Unknown keys/blocks warn and are ignored rather than failing the whole
-/// config -- same forgiving convention TOML loading always used (a typo
-/// shouldn't take down a working session).
+/// config (a typo shouldn't take down a working session).
 /// Parses the Wave engine's serialized list form (`["a", "b"]`) into
 /// items; returns `None` for anything that is not a list.
 fn parse_list_value(value: &str) -> Option<Vec<String>> {
@@ -5144,8 +5140,8 @@ fn parse_list_value(value: &str) -> Option<Vec<String>> {
     }
 }
 
-/// Parses a duration value into milliseconds: a bare number (the legacy
-/// `_ms` key spelling) or a unit-suffixed literal (`600ms`, `1.5s`,
+/// Parses a duration value into milliseconds: a bare number of
+/// milliseconds (the `_ms` keys) or a unit-suffixed literal (`600ms`, `1.5s`,
 /// `90m`) as the Wave engine's duration values serialize to. Returns
 /// `None` for zero/negative or unparseable values.
 fn parse_duration_ms(value: &str) -> Option<u32> {
@@ -5363,7 +5359,7 @@ fn lower_entries(entries: &[waves::Entry]) -> RawConfig {
     // generated default file and the explicit rescue layer, never merged
     // invisibly underneath a user's bindings.
     raw.keybinds.clear();
-    raw.submaps.clear();
+    raw.modes.clear();
     for entry in entries {
         match entry {
             waves::Entry::VarDef(_, _) => {
@@ -5424,10 +5420,8 @@ fn is_known_top_level_key(key: &str) -> bool {
 fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
     match key {
         "terminal" => raw.terminal = value.to_string(),
-        "spatial_engine" | "engine" | "wm_mode" => raw.spatial_engine = value.to_string(),
-        "pointer_modifier" | "mouse_modifier" | "drag_modifier" => {
-            raw.pointer_modifier = value.to_string()
-        }
+        "engine" => raw.spatial_engine = value.to_string(),
+        "drag_modifier" => raw.pointer_modifier = value.to_string(),
         "welcome_hint" => set_bool(&mut raw.show_welcome_hint, key, value),
         "reload_toast" => set_bool(&mut raw.show_config_reload_toast, key, value),
         "water_effects" => set_bool(&mut raw.water_effects, key, value),
@@ -5472,8 +5466,8 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
         // already let every occurrence of this one key through instead of
         // deduping to the last (see `waves::assign_is_multi`).
         "spawn" => match parse_list_value(value) {
-            Some(items) => raw.spawn_at_startup.extend(items),
-            None => raw.spawn_at_startup.push(value.to_string()),
+            Some(items) => raw.spawn.extend(items),
+            None => raw.spawn.push(value.to_string()),
         },
         other => tracing::warn!(key = %other, value, "Unknown config key, ignoring"),
     }
@@ -5487,7 +5481,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "snap" => apply_snap_block(&mut raw.snap, body),
         "shaders" => apply_shaders_block(raw, body),
         "shader" => lower_shader_block(raw, header, body),
-        "vessels" => apply_connected_vessels_block(&mut raw.connected_vessels, body),
+        "vessels" => apply_connected_vessels_block(&mut raw.vessels, body),
         "sway" => apply_sway_block(&mut raw.sway, body),
         "physics" => apply_float_physics_block(&mut raw.float_physics, body),
         "currents" => apply_currents_block(&mut raw.currents, body),
@@ -5529,10 +5523,10 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "mode" => {
             let name = header.trim();
             if name.is_empty() {
-                tracing::warn!("`submap` block needs a name, ignoring");
+                tracing::warn!("`mode` block needs a name, ignoring");
                 return;
             }
-            let binds = raw.submaps.entry(name.to_string()).or_default();
+            let binds = raw.modes.entry(name.to_string()).or_default();
             for entry in body {
                 match entry {
                     waves::Entry::Bind(combo, action) => {
@@ -5540,7 +5534,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
                     }
                     _ => tracing::warn!(
                         name,
-                        "A `submap` block may only contain `bind` statements, ignoring an entry"
+                        "A `mode` block may only contain `bind` statements, ignoring an entry"
                     ),
                 }
             }
@@ -6819,30 +6813,24 @@ fn apply_workspace_transition_block(cfg: &mut WorkspaceTransitionConfig, body: &
     }
 }
 
-fn apply_connected_vessels_block(cfg: &mut ConnectedVesselsConfig, body: &[waves::Entry]) {
+fn apply_connected_vessels_block(cfg: &mut VesselsConfig, body: &[waves::Entry]) {
     for entry in body {
         let waves::Entry::Assign(key, value) = entry else {
-            tracing::warn!("Unexpected entry in `connected_vessels` block, ignoring");
+            tracing::warn!("Unexpected entry in `vessels` block, ignoring");
             continue;
         };
         match key.as_str() {
             "enabled" => set_bool(&mut cfg.enabled, key, value),
             "falloff" | "damping" => match value.parse::<f32>() {
                 Ok(value) if value.is_finite() => cfg.falloff = value.clamp(0.0, 1.0),
-                _ => tracing::warn!(
-                    value,
-                    "Expected connected_vessels.falloff from 0 to 1, ignoring"
-                ),
+                _ => tracing::warn!(value, "Expected vessels.falloff from 0 to 1, ignoring"),
             },
             "max_splits" | "depth" => match value.parse::<u8>() {
                 Ok(value) if (1..=8).contains(&value) => cfg.max_splits = value,
-                _ => tracing::warn!(
-                    value,
-                    "Expected connected_vessels.max_splits from 1 to 8, ignoring"
-                ),
+                _ => tracing::warn!(value, "Expected vessels.max_splits from 1 to 8, ignoring"),
             },
             other => {
-                tracing::warn!(key = %other, "Unknown key in `connected_vessels` block, ignoring")
+                tracing::warn!(key = %other, "Unknown key in `vessels` block, ignoring")
             }
         }
     }
@@ -6882,22 +6870,12 @@ fn apply_float_physics_block(cfg: &mut FloatPhysicsConfig, body: &[waves::Entry]
         match entry {
             waves::Entry::Assign(key, value) => match key.as_str() {
                 "tier" => match value.trim().to_ascii_lowercase().as_str() {
-                    "off" | "false" => cfg.tier = FloatPhysicsTier::Off,
-                    "light" | "true" => cfg.tier = FloatPhysicsTier::Light,
+                    "off" => cfg.tier = FloatPhysicsTier::Off,
+                    "light" => cfg.tier = FloatPhysicsTier::Light,
                     "full" => cfg.tier = FloatPhysicsTier::Full,
                     _ => tracing::warn!(
                         value,
                         "Expected float_physics.tier: off light full, ignoring"
-                    ),
-                },
-                // Legacy alias from before `full` existed: a plain on/off
-                // switch mapped to `light`/`off`.
-                "enabled" => match parse_bool(value) {
-                    Some(true) => cfg.tier = FloatPhysicsTier::Light,
-                    Some(false) => cfg.tier = FloatPhysicsTier::Off,
-                    None => tracing::warn!(
-                        value,
-                        "Expected `true` or `false` for float_physics.enabled, ignoring"
                     ),
                 },
                 "response" | "gain" => match value.parse::<f32>() {
@@ -7107,7 +7085,7 @@ fn parse_glass_animation(value: &str) -> Option<GlassAnimation> {
 fn apply_water_glass_block(cfg: &mut WaterGlassConfig, body: &[waves::Entry]) {
     for entry in body {
         let waves::Entry::Assign(key, value) = entry else {
-            tracing::warn!("Unexpected entry in `water_glass` block, ignoring");
+            tracing::warn!("Unexpected entry in `glass` block, ignoring");
             continue;
         };
         match key.as_str() {
@@ -7138,16 +7116,21 @@ fn apply_water_glass_block(cfg: &mut WaterGlassConfig, body: &[waves::Entry]) {
                     "Expected water_glass.settle_ms from 100 to 10000, ignoring"
                 ),
             },
-            other => tracing::warn!(key = %other, "Unknown key in `water_glass` block, ignoring"),
+            other => tracing::warn!(key = %other, "Unknown key in `glass` block, ignoring"),
         }
     }
 }
 
-/// Parses a space-separated list of non-negative integers. `None` when any
-/// token fails to parse. Used by the caustics idle-decay tiers.
+/// The items of a Wave list value (`[a, b]`), or a lone scalar as a
+/// one-item list.
+fn list_items(value: &str) -> Vec<String> {
+    parse_list_value(value).unwrap_or_else(|| vec![value.trim().to_string()])
+}
+
+/// Parses a list of non-negative integers. `None` when any item fails to
+/// parse. Used by the caustics idle-decay tiers.
 fn parse_u32_list(value: &str) -> Option<Vec<u32>> {
-    let items = parse_list_value(value)
-        .unwrap_or_else(|| value.split_whitespace().map(str::to_string).collect());
+    let items = list_items(value);
     let list: Vec<u32> = items
         .iter()
         .map(|token| token.parse::<u32>().ok())
@@ -7155,12 +7138,10 @@ fn parse_u32_list(value: &str) -> Option<Vec<u32>> {
     (!list.is_empty()).then_some(list)
 }
 
-/// A list of duration values: either the Wave engine's serialized list
-/// form (`[600ms, 1s]`) or the legacy whitespace-separated form. Each
-/// item goes through [`parse_duration_ms`].
+/// A list of duration values (`[600ms, 1s]`). Each item goes through
+/// [`parse_duration_ms`].
 fn parse_duration_list(value: &str) -> Option<Vec<u64>> {
-    let items = parse_list_value(value)
-        .unwrap_or_else(|| value.split_whitespace().map(str::to_string).collect());
+    let items = list_items(value);
     let list: Vec<u64> = items
         .iter()
         .map(|item| parse_duration_ms(item).map(u64::from))
@@ -8210,23 +8191,13 @@ fn decode_hex_rgb(hex: &str) -> Option<[f32; 3]> {
 }
 
 /// Shadow colors keep their alpha channel, unlike ripple/frost colors which
-/// have a separate dedicated alpha knob. Accepts bare/`#` hex and the
-/// legacy `0xAARRGGBB` form.
+/// have a separate dedicated alpha knob. Accepts bare or `#` hex
+/// (`RRGGBB` or `RRGGBBAA`).
 fn parse_rgba_color(value: &str) -> Option<[f32; 4]> {
     let value = value
         .trim()
         .strip_prefix('#')
         .unwrap_or_else(|| value.trim());
-    if let Some(hex) = value.strip_prefix("0x") {
-        if hex.len() != 8 {
-            return None;
-        }
-        let a = u8::from_str_radix(&hex[0..2], 16).ok()?;
-        let r = u8::from_str_radix(&hex[2..4], 16).ok()?;
-        let g = u8::from_str_radix(&hex[4..6], 16).ok()?;
-        let b = u8::from_str_radix(&hex[6..8], 16).ok()?;
-        return Some([r, g, b, a].map(|channel| channel as f32 / 255.0));
-    }
     decode_hex_rgba(value)
 }
 
@@ -8517,8 +8488,7 @@ fn apply_popup_block(cfg: &mut PopupConfig, body: &[waves::Entry]) {
 
 fn parse_shapes(value: &str) -> Option<Vec<RippleShape>> {
     let mut out = Vec::new();
-    let tokens = parse_list_value(value)
-        .unwrap_or_else(|| value.split_whitespace().map(str::to_string).collect());
+    let tokens = list_items(value);
     for tok in tokens {
         match tok.as_str() {
             "ring" => out.push(RippleShape::Ring),
@@ -8568,8 +8538,7 @@ fn parse_ripple_size_mode(value: &str) -> Option<RippleSizeMode> {
 
 fn parse_triggers(value: &str) -> Option<Vec<RippleTrigger>> {
     let mut out = Vec::new();
-    let tokens = parse_list_value(value)
-        .unwrap_or_else(|| value.split_whitespace().map(str::to_string).collect());
+    let tokens = list_items(value);
     for tok in tokens {
         match tok.as_str() {
             "map" => out.push(RippleTrigger::Map),
@@ -8785,8 +8754,8 @@ fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                 },
                 "sway" => set_opt_bool(&mut rule.sway, key, value),
                 "float_physics" => match value.as_str() {
-                    "off" | "false" => rule.float_physics = Some(FloatPhysicsTier::Off),
-                    "light" | "true" => rule.float_physics = Some(FloatPhysicsTier::Light),
+                    "off" => rule.float_physics = Some(FloatPhysicsTier::Off),
+                    "light" => rule.float_physics = Some(FloatPhysicsTier::Light),
                     "full" => rule.float_physics = Some(FloatPhysicsTier::Full),
                     _ => tracing::warn!(
                         value,
@@ -9287,10 +9256,10 @@ fn ensure_private_owned_dir(dir: &Path, uid: u32) -> std::io::Result<()> {
 /// diagnostics panel instead of only a `tracing::warn!` line nobody sees
 /// during normal use: dropped entries (bad key name, bad action), and, when
 /// `lint_footguns` is set, a heads-up for a modifier-less bind on a key
-/// normally used for typing. `lint_footguns` is false for submap tables --
-/// bare keys there are the whole point of a submap (see the default `nav`
-/// submap's bare `Escape = exit-mode`), only the always-active base
-/// `[keybinds]` table can silently steal a key from every other window.
+/// normally used for typing. `lint_footguns` is false for mode tables --
+/// bare keys there are the whole point of a mode (see the default `nav`
+/// mode's bare `Escape = exit-mode`), only the always-active base
+/// top-level bind table can silently steal a key from every other window.
 fn parse_keybind(
     combo: &str,
     action: &str,
@@ -9420,7 +9389,7 @@ fn is_typing_key(key_name: &str) -> bool {
 }
 
 /// Also the entry point for `ipc.rs`'s `action` request -- the exact same
-/// string syntax used in `[keybinds]`, so anything a keybind can trigger is
+/// string syntax used in binds, so anything a keybind can trigger is
 /// IPC-addressable for free, including actions added by later phases.
 pub(crate) fn parse_action(action: &str) -> Option<Action> {
     if let Some(cmd) = action.strip_prefix("spawn:") {
@@ -9458,10 +9427,7 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         ));
     }
     if let Some(name) = action.strip_prefix("mode:") {
-        return Some(Action::EnterSubmap(name.to_string()));
-    }
-    if let Some(name) = action.strip_prefix("submap:") {
-        return Some(Action::EnterSubmap(name.to_string()));
+        return Some(Action::EnterMode(name.to_string()));
     }
     if let Some(name) = action.strip_prefix("layout:") {
         return match parse_layout_algorithm(name) {
@@ -9528,7 +9494,7 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         return (!name.trim().is_empty()).then(|| Action::ToggleTag(name.trim().to_string()));
     }
     match action {
-        "exit-mode" => Some(Action::ExitSubmap),
+        "exit-mode" => Some(Action::ExitMode),
         "master-grow" => Some(Action::GrowMaster),
         "master-shrink" => Some(Action::ShrinkMaster),
         "toggle-overview" => Some(Action::ToggleOverview),
@@ -9857,7 +9823,7 @@ gpu {
 /// comment) so a fresh install looks like the two-file layout this
 /// project's own docs already recommend. Mirrors `RawConfig::default()`'s
 /// hardcoded fallback bind-for-bind (see the `default_layout_keybinds_...`
-/// and `default_submap_...` tests below, which assert both agree) --
+/// and `default_mode_...` tests below, which assert both agree) --
 /// `RawConfig::default()` is the ultimate hard fallback used when no
 /// config exists at all or parsing fails outright, so the two must never
 /// silently diverge.
@@ -9939,11 +9905,11 @@ bind $mod+Shift+8  { move-to-workspace:8 }
 bind $mod+Shift+9  { move-to-workspace:9 }
 bind $mod+Shift+0  { move-to-workspace:10 }
 
-# ~~~~~~~~~~~~~~~~~ submaps ~~~~~~~~~~~~~~~~~
+# ~~~~~~~~~~~~~~~~~ modes ~~~~~~~~~~~~~~~~~
 
-# A submap (sway/Hyprland's "mode"): a temporary keybind layer, entered
+# A mode (like sway/Hyprland's): a temporary keybind layer, entered
 # below, left active until its own exit -- not tied to focus.
-bind $mod+N  { submap:nav }
+bind $mod+N  { mode:nav }
 mode nav {
     bind h  { focus-left }
     bind l { focus-right }
@@ -9956,7 +9922,7 @@ mode nav {
 
 # Off by default: these chords are ones apps use themselves (Ctrl+arrows
 # is word-jump in every editor), and the actions only do anything once
-# spatial_engine = ocean in config.wave anyway. Uncomment when you switch.
+# engine = ocean in config.wave anyway. Uncomment when you switch.
 # bind Ctrl+Left { ocean-pan-left }
 # bind Ctrl+Right { ocean-pan-right }
 # bind Ctrl+Up { ocean-pan-up }
@@ -10049,7 +10015,7 @@ mod tests {
 
     #[test]
     fn switch_events_parse_valid_actions_and_drop_invalid_ones() {
-        // Same string syntax `[keybinds]` uses, including the colon-prefixed
+        // Same string syntax binds use, including the colon-prefixed
         // forms. An unrecognized action string matches the keybind path:
         // logged as a warning, dropped to `None`, never panics the whole
         // config -- a typo in one switch event must not silently disable
@@ -10278,9 +10244,9 @@ mod tests {
 
     #[test]
     fn switch_events_default_to_all_unset() {
-        // Empty TOML section -> no actions, switch events become a pure
-        // no-op. This is what ships out of the box and what an empty
-        // `[switch_events]` block in an existing config produces.
+        // No entries -> no actions, switch events become a pure no-op.
+        // This is what ships out of the box and what an empty
+        // `switch_events { }` block in an existing config produces.
         let parsed = SwitchEventsConfig::from_raw(SwitchEventsRaw::default());
 
         assert!(parsed.lid_close.is_none());
@@ -10355,7 +10321,7 @@ mod tests {
 
     #[test]
     fn window_rule_with_no_criteria_never_matches() {
-        // A blank [[window_rule]] block (or one that's only actions, no
+        // A blank `rule { }` block (or one that's only actions, no
         // app_id/title) is far more likely to be a config mistake than an
         // intentional "match every window" -- never silently apply it.
         let blank = WindowRule {
@@ -10987,7 +10953,7 @@ mod tests {
             builtin_wallpaper: true,
             viscosity: 1.0,
             backdrop_capture_scale: 1,
-            connected_vessels: ConnectedVesselsConfig::default(),
+            vessels: VesselsConfig::default(),
             sway: SwayConfig::default(),
             float_physics: FloatPhysicsConfig::default(),
             currents: CurrentsConfig::default(),
@@ -11028,11 +10994,11 @@ mod tests {
             rescue_keybinds: Vec::new(),
             input: InputConfig::default(),
             xwayland: XwaylandConfig::default(),
-            spawn_at_startup: Vec::new(),
+            spawn: Vec::new(),
             outputs: Vec::new(),
             gpu: GpuConfig::default(),
             switch_events: SwitchEventsConfig::default(),
-            submaps: HashMap::new(),
+            modes: HashMap::new(),
             env: HashMap::new(),
             window_rules: vec![
                 WindowRule {
@@ -11073,7 +11039,7 @@ mod tests {
     fn ocean_selector_reefs_bookmarks_and_actions_parse_without_resolution_defaults() {
         assert!(!OceanConfig::default().shared_canvas);
         let entries = wave_entries(
-            "spatial_engine = ocean\n\
+            "engine = ocean\n\
              ocean {\n\
                  shared_canvas = true\n\
                  camera_step = 720\n\
@@ -11204,7 +11170,7 @@ mod tests {
         assert!(warnings.is_empty(), "should not warn: {warnings:?}");
         assert_eq!(raw.gaps, 8);
         assert_eq!(raw.terminal, "kitty");
-        assert_eq!(raw.spawn_at_startup, vec!["waybar".to_string()]);
+        assert_eq!(raw.spawn, vec!["waybar".to_string()]);
         assert_eq!(
             raw.keybinds.get("SUPER+Q").map(String::as_str),
             Some("close-window")
@@ -11214,9 +11180,8 @@ mod tests {
 
     #[test]
     fn load_raw_config_new_syntax_error_is_authoritative() {
-        // @mod is new-only syntax, so the Wave parser's error must
-        // surface. A fallback to the old grammar would silently misparse
-        // `gaps = $extra` as a raw string.
+        // The Wave parser's error must surface rather than `gaps = $extra`
+        // being taken as a raw string.
         let dir = TestDir::new("wave-error-authoritative");
         let main = dir.write(
             "config.wave",
@@ -11358,17 +11323,17 @@ mod tests {
         );
         let (raw, _, _, _) = load_raw_config(&main).expect("should parse");
         assert_eq!(
-            raw.spawn_at_startup,
+            raw.spawn,
             vec![
                 "waybar".to_string(),
                 "swaybg -i ~/wallpaper.png -m fill".to_string()
             ]
         );
-        // legacy scalar spelling still works
+        // a lone scalar is a one-item list
         let dir = TestDir::new("wave-spawn-scalar");
-        let main = dir.write("config.wave", "spawn = [waybar]\n");
+        let main = dir.write("config.wave", "spawn = waybar\n");
         let (raw, _, _, _) = load_raw_config(&main).expect("should parse");
-        assert_eq!(raw.spawn_at_startup, vec!["waybar".to_string()]);
+        assert_eq!(raw.spawn, vec!["waybar".to_string()]);
     }
 
     #[test]
@@ -11514,7 +11479,7 @@ mod tests {
     }
 
     #[test]
-    fn rename_map_canonical_and_legacy_names_lower_identically() {
+    fn canonical_names_parse_and_old_spellings_are_ignored() {
         let dir = TestDir::new("wave-renames");
         let new = dir.write(
             "config.wave",
@@ -11552,32 +11517,39 @@ mod tests {
         assert_eq!(raw_new.default_layout, "master");
         assert_eq!(raw_new.master_orientation, "top");
         assert_eq!(raw_new.bsp_split_bias, "horizontal");
-        assert!(raw_new.submaps.contains_key("nav"));
+        assert!(raw_new.modes.contains_key("nav"));
 
-        // Legacy spellings are gone: they warn as unknown keys and are
-        // ignored, never silently applied.
+        // Old spellings are never applied: each one warns as an unknown
+        // key and the default stays.
         let dir = TestDir::new("wave-renames-rejected");
         let old = dir.write(
             "config.wave",
-            "spatial_engine = classic\n\
+            "spatial_engine = ocean\n\
+             wm_mode = ocean\n\
+             pointer_modifier = ALT\n\
+             mouse_modifier = ALT\n\
              default_layout = master\n",
         );
         let (raw, _, _, _) = load_raw_config(&old).expect("config still loads");
         assert!(
             raw.default_layout.is_empty(),
-            "legacy default_layout must be ignored"
+            "default_layout must be ignored"
         );
         assert_eq!(
             raw.spatial_engine, "classic",
-            "the default engine must still apply"
+            "the default engine must stay"
+        );
+        assert_eq!(
+            raw.pointer_modifier, "super",
+            "the default modifier must stay"
         );
     }
 
     #[test]
-    fn mode_actions_alias_submap_actions() {
+    fn mode_actions_parse() {
         let parsed = |s: &str| parse_action(s).expect("should parse");
-        assert!(matches!(parsed("mode:nav"), Action::EnterSubmap(n) if n == "nav"));
-        assert!(matches!(parsed("exit-mode"), Action::ExitSubmap));
+        assert!(matches!(parsed("mode:nav"), Action::EnterMode(n) if n == "nav"));
+        assert!(matches!(parsed("exit-mode"), Action::ExitMode));
     }
 
     #[test]
@@ -11599,8 +11571,7 @@ mod tests {
     /// test, cleaned up on drop -- these tests exercise real file I/O
     /// (`load_raw_config` resolving `include` paths relative to the file
     /// doing the including), which in-memory AST construction can't cover.
-    /// Evaluates a Wave config to its entry list (the line-based
-    /// `waves::parse` was removed with the old grammar).
+    /// Evaluates a Wave config to its entry list.
     fn wave_entries(s: &str) -> Vec<waves::Entry> {
         wave::evaluate(s, Path::new("test.wave")).expect("config should evaluate")
     }
@@ -11795,7 +11766,7 @@ mod tests {
             }
         );
 
-        let entries = wave_entries("@mod = ALT\npointer_modifier = mod .. \"+SHIFT\"\n");
+        let entries = wave_entries("@mod = ALT\ndrag_modifier = mod .. \"+SHIFT\"\n");
         let raw = lower_entries(&entries);
         assert_eq!(
             Config::from_raw(raw).0.pointer_modifier,
@@ -12001,11 +11972,11 @@ mod tests {
              }\n",
         );
         let config = Config::from_raw(lower_entries(&entries)).0;
-        assert!(!config.connected_vessels.enabled);
-        assert_eq!(config.connected_vessels.falloff, 1.0);
-        assert_eq!(config.connected_vessels.max_splits, 7);
+        assert!(!config.vessels.enabled);
+        assert_eq!(config.vessels.falloff, 1.0);
+        assert_eq!(config.vessels.max_splits, 7);
 
-        let defaults = parse_default_config().connected_vessels;
+        let defaults = parse_default_config().vessels;
         assert!(defaults.enabled);
         assert_eq!(defaults.falloff, 0.5);
         assert_eq!(defaults.max_splits, 4);
@@ -12230,24 +12201,25 @@ mod tests {
             None
         );
 
-        // Legacy true/false aliases still map onto light/off, both globally
-        // and per rule.
-        let legacy = wave_entries(
+        // Only tier names select a tier: the old true/false switch is
+        // ignored, both globally and per rule.
+        let old = wave_entries(
             "physics {\n\
              enabled = true\n\
+             tier = true\n\
              }\n\
              rule {\n\
              app_id = kitty\n\
              float_physics = true\n\
              }\n",
         );
-        let legacy_config = Config::from_raw(lower_entries(&legacy)).0;
-        assert_eq!(legacy_config.float_physics.tier, FloatPhysicsTier::Light);
+        let old_config = Config::from_raw(lower_entries(&old)).0;
+        assert_eq!(old_config.float_physics.tier, FloatPhysicsTier::Off);
         assert_eq!(
-            legacy_config
+            old_config
                 .resolve_window_rules(facts_for("kitty"))
                 .float_physics,
-            Some(FloatPhysicsTier::Light)
+            None
         );
 
         let defaults = parse_default_config().float_physics;
@@ -12345,7 +12317,7 @@ mod tests {
         );
         assert!(warnings
             .iter()
-            .any(|warning| warning.contains("Invalid pointer_modifier")));
+            .any(|warning| warning.contains("Invalid drag_modifier")));
     }
 
     #[test]
@@ -13278,7 +13250,7 @@ shader tinted-blur {
              sharp = true\n\
              ignore_window = false\n\
              color = 11223380\n\
-             color_inactive = 0x40102030\n\
+             color_inactive = 10203040\n\
              urgent_color = 00CCFFC0\n\
              opacity = 0.8\n\
              inactive_opacity = 0.5\n\
@@ -13665,7 +13637,7 @@ shader tinted-blur {
     }
 
     #[test]
-    fn default_submap_parses_from_both_the_in_memory_and_written_defaults() {
+    fn default_mode_parses_from_both_the_in_memory_and_written_defaults() {
         // Two independently hand-maintained representations of the same
         // default (see `RawConfig::default()` and `DEFAULT_KEYBINDS_WAVE`'s
         // own doc note) -- assert both actually agree, not just that one
@@ -13675,9 +13647,9 @@ shader tinted-blur {
             parse_default_config(),
         ] {
             let nav = config
-                .submaps
+                .modes
                 .get("nav")
-                .expect("default config should ship a `nav` submap");
+                .expect("default config should ship a `nav` mode");
             let find = |key: &str| {
                 nav.iter()
                     .find(|b| b.keysym == xkb::keysym_from_name(key, xkb::KEYSYM_CASE_INSENSITIVE))
@@ -13700,28 +13672,27 @@ shader tinted-blur {
             ));
             assert!(matches!(
                 find("Escape").map(|b| &b.action),
-                Some(Action::ExitSubmap)
+                Some(Action::ExitMode)
             ));
 
             let enters_nav = config
                 .keybinds
                 .iter()
-                .any(|b| matches!(&b.action, Action::EnterSubmap(name) if name == "nav"));
+                .any(|b| matches!(&b.action, Action::EnterMode(name) if name == "nav"));
             assert!(
                 enters_nav,
-                "default keybinds should have a bind entering the `nav` submap"
+                "default keybinds should have a bind entering the `nav` mode"
             );
         }
     }
 
     #[test]
     fn default_layout_keybinds_parse_from_both_the_in_memory_and_written_defaults() {
-        // Same two-representations-must-agree check as the submap test
+        // Same two-representations-must-agree check as the mode test
         // above, for the layout-algorithm keybinds: also catches, for free,
         // a duplicate `bind` for the same combo in DEFAULT_KEYBINDS_WAVE
-        // (last one silently wins there, unlike a literal duplicate TOML
-        // key, which used to fail the parse loudly -- worth a second look
-        // at the template by eye if this test ever breaks unexpectedly).
+        // (last one silently wins there -- worth a second look at the
+        // template by eye if this test ever breaks unexpectedly).
         for (config, main) in [
             (
                 Config::from_raw(RawConfig::default()).0,
@@ -13832,18 +13803,18 @@ shader tinted-blur {
     }
 
     #[test]
-    fn bare_typing_key_in_a_submap_is_not_flagged() {
-        // Submaps rely on bare keys by design (the default `nav` submap's
+    fn bare_typing_key_in_a_mode_is_not_flagged() {
+        // Modes rely on bare keys by design (the default `nav` mode's
         // own Escape = exit-mode) -- only the always-active base table
         // can silently steal a key from every other window.
         let mut raw = RawConfig::default();
-        let mut submap = HashMap::new();
-        submap.insert("a".to_string(), "close-window".to_string());
-        raw.submaps.insert("test".to_string(), submap);
+        let mut mode = HashMap::new();
+        mode.insert("a".to_string(), "close-window".to_string());
+        raw.modes.insert("test".to_string(), mode);
         let (_, warnings) = Config::from_raw(raw);
         assert!(
             !warnings.iter().any(|w| w.contains('a')),
-            "submap binds must not trigger the base-table footgun lint: {warnings:?}"
+            "mode binds must not trigger the base-table footgun lint: {warnings:?}"
         );
     }
 
@@ -13902,8 +13873,7 @@ shader tinted-blur {
         assert_eq!(parse("00FFFF"), Some([0.0, 1.0, 1.0]));
         assert_eq!(parse("#00FFFF"), Some([0.0, 1.0, 1.0]));
         assert_eq!(parse("00FFFF80"), Some([0.0, 1.0, 1.0]));
-        // the Hyprland-style rgb()/rgba() text forms are gone with the
-        // old grammar
+        // only hex: no rgb()/rgba() text forms
         assert_eq!(parse("rgb(0,255,255)"), None);
         assert_eq!(parse("rgba(00FFFF, 128)"), None);
     }
@@ -14081,10 +14051,8 @@ shader tinted-blur {
         assert_eq!(parse("00FFFF"), Some([0.0, 1.0, 1.0, 1.0]));
         assert_eq!(parse("#00FFFF"), Some([0.0, 1.0, 1.0, 1.0]));
         assert_eq!(parse("00FFFF80"), Some([0.0, 1.0, 1.0, 0.5019608]));
-        // 0x form is AARRGGBB
-        assert_eq!(parse("0x8000FFFF"), Some([0.0, 1.0, 1.0, 0.5019608]));
-        // the Hyprland-style rgb()/rgba() text forms are gone with the
-        // old grammar
+        // only hex: no 0xAARRGGBB, no rgb()/rgba() text forms
+        assert_eq!(parse("0x8000FFFF"), None);
         assert_eq!(parse("rgb(0,255,255)"), None);
     }
 

@@ -2,6 +2,20 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.163 — Old config spellings removed
+
+- The last pre-Wave spellings no longer parse. Each now warns as an unknown key and leaves the default in place:
+  - `spatial_engine` and `wm_mode` (use `engine`);
+  - `pointer_modifier` and `mouse_modifier` (use `drag_modifier`, which the generated config already writes);
+  - the `submap:<name>` action (use `mode:<name>`);
+  - `float_physics { enabled = true|false }` and `true`/`false` as a physics tier, globally or per rule (use `tier = off|light|full`);
+  - `0xAARRGGBB` colors (use `RRGGBBAA`);
+  - space-separated lists such as `triggers = "map urgent"` (use `[map, urgent]`; a lone value still works).
+- The generated default config enters its `nav` mode with `mode:nav`.
+- IPC and `tidectl` say mode instead of submap: `active-mode` (was `active-submap`), `tidectl mode <name>` (was `tidectl submap`), and `mode_count` in diagnostics (was `submap_count`).
+- Internal names follow the config: `Action::EnterMode`/`ExitMode`, `Config::modes`, `active_mode`, `vessels`, `spawn`. Comments no longer describe TOML tables or the removed grammar.
+- Tests now assert that the old spellings are ignored. 654 tests, strict Clippy, fmt and the optimized release build pass.
+
 ## 0.90.162 — Scroll input honors the client window-geometry offset
 
 - Pointer input in Scroll (and Ocean, plus the Classic fullscreen fallback) now maps into the surface's coordinate space the same way rendering already does. A placement rect locates the window's `xdg_surface` geometry, which a client may inset from its surface: GTK reserves a CSD shadow margin there (Firefox reports one), while Qt/kitty report zero. Without the correction every hover and click in Firefox landed about 19x17 px up-left of the cursor.
@@ -33,7 +47,7 @@ Every TideWM release in full technical detail, newest first. For a short summary
 - `tidectl engine classic|ocean|scroll` changes the live engine without relogging. Classic/Scroll preserve the existing workspace trees; Ocean uses the established reef migration. Locks, exclusive layers and active grabs block switching. The runtime choice lasts until a config reload selects another engine.
 - Directional focus reveals the next tile. Configured workspace-swipe gestures follow the scrolling viewport when no explicit swipe action overrides them; cancellation restores the starting view. Viewport changes retile/redraw their own output. Outputs IPC includes scroll offset and policy.
 - Static appearance reloads now request a frame even with reload toasts and animations disabled. The nested glass check exposed that appearance-only changes could otherwise wait indefinitely for unrelated client damage.
-- Scope and remaining interaction work are listed in SCROLL.md: this is not full niri column/stack/drag parity.
+- Scope and remaining interaction work were listed in SCROLL.md (now part of TECHNICAL_REPORT.md): this is not full niri column/stack/drag parity.
 
 ## 0.90.157 — Window activation and notification-source resolution
 

@@ -6,7 +6,7 @@ The quick technical picture: what TideWM is built from, what works, what's been 
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). Underneath is a complete tiling window manager: BSP, master/stack and cascade layouts, workspaces, multi-monitor, layer shell, IPC and XWayland. On top sits the water look (ripples, waves, glass, shadows, physics), and every piece of it is a config toggle.
 
-Current version: **0.90.162**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
+Current version: **0.90.163**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
 
 ## Architecture
 
@@ -16,11 +16,80 @@ Current version: **0.90.162**, beta. 1.0 waits for a wider real-hardware pass (I
   - **Ocean:** one zoomable 2D canvas with a camera per monitor.
   - **Scroll:** a scrolling strip of apps per monitor, niri-style.
 
-  How they relate: [SPATIAL_MODEL.md](SPATIAL_MODEL.md).
+  How they relate: [SPATIAL_MODEL.md](SPATIAL_MODEL.md). Scroll is covered [below](#scroll-engine).
 - **XWayland** through [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite), so X11 apps arrive as ordinary Wayland windows.
 - **One render pipeline.** Glass, shadows, rounding, borders and animations are drawn once per frame from a shared window-placement snapshot. The same path feeds both backends, screenshots, screen sharing and workspace transitions, so an effect never needs a second implementation.
 - **Config:** [Wave](WAVE.md), data on the surface and Lua underneath. It's hot-reloaded, and a broken edit never half-applies.
 - **Memory:** about 50 MB PSS for plain tiling and 60–70 MB with the full water stack on AMD. About 100 MB on NVIDIA, a third of which is the driver's own mappings. 2 GB is a hard ceiling for feature growth, not a target.
+
+## Scroll engine
+
+Scroll gives every monitor its own strip of apps that you slide along, niri-style. New apps join the strip instead of shrinking the ones already there, and an app never ends up half on one monitor and half on another. Groups, glass, shadows, animations, screenshots and screen sharing work exactly as in Classic and Ocean.
+
+### Switching
+
+```sh
+tidectl engine scroll
+tidectl engine classic   # or ocean, to go back
+```
+
+This switches the running session without touching your config. To make Scroll your default, set `engine = scroll` in `config.wave`. You can also bind it, for example `bind $mod+Ctrl+S { engine:scroll }`. A switch is refused while the screen is locked, while a launcher or other exclusive-keyboard layer is open, or during a drag.
+
+### Configuration
+
+Every key is optional, reloads live and is measured against the monitor's usable area. These are the defaults:
+
+```wave
+scroll {
+    workspaces       = separate     # or sections
+    orientation      = horizontal   # or vertical
+    tile_proportion  = 0.5          # 0.1 – 1.0 of the viewport
+    center_focused   = false
+    gesture_distance = 1200
+}
+```
+
+- **`tile_proportion`** is how much of the screen a new app takes:
+  - `1.0` fills the screen;
+  - `0.94` leaves a narrow peek of the neighbors;
+  - `0.5` fits two apps side by side.
+
+  Apps you resized by hand keep their own size.
+- **`center_focused`:** with `true`, the focused app always sits in the middle, even the first, last or only one. With `false`, the strip moves only as far as needed to show it.
+- **`orientation`:** horizontal or vertical strips. For a free 2D layout, use Ocean.
+- **`workspaces`:** `separate` gives each workspace its own strip and scroll position. `sections` lays a monitor's workspaces end to end in one strip, and switching workspace jumps to its section. In both modes, scratchpads stay separate and floating windows float above the strip.
+- **`gesture_distance`:** how far a touchpad swipe travels per screen. The swipe uses your workspace-swipe finger count.
+- **Spacing** comes from the global `gaps`.
+
+A nearly full-width setup with neighbor peeks:
+
+```wave
+scroll {
+    tile_proportion = 0.94
+    center_focused  = true
+}
+gaps = 8
+```
+
+### Moving around
+
+Scroll uses your existing binds. It adds none of its own.
+
+| Action | In Scroll |
+| --- | --- |
+| `focus-left/right` (`up/down` when vertical) | Focus the neighbor and slide it into view |
+| `swap-left/right` | Move the focused app along the strip |
+| `resize-left/right` (`up/down` when vertical) | Make the focused app narrower or wider |
+| `scroll-left/right/up/down` | Slide the strip half a screen |
+| Touchpad swipe | Slide the strip with your fingers |
+
+Focusing with the mouse never moves the strip: hovering with `focus_follows_mouse`, clicking, touch and tablet pens all leave it alone. You can cross to another monitor or click a neighbor's peek without anything sliding away. Keyboard focus, `tidectl focus-window` / `focus-app` and notification clicks do bring the app into view. When the strip slides under a still mouse, the app now under the pointer gets the wheel and clicks right away.
+
+Switching between Classic and Scroll keeps your layout trees intact. Switching to or from Ocean converts the layout, and Ocean's camera history and bookmarks don't carry over.
+
+**Coming soon:** stacked columns (several apps in one column), consume/expel, and resizing columns with the mouse.
+
+For tools: each `tidectl outputs` entry has a `scroll` object (`offset`, `orientation`, `workspaces`). The full key reference is in [DOCUMENTATION.md](DOCUMENTATION.md#scroll-spatial-engine).
 
 ## Feature status
 
@@ -125,7 +194,7 @@ Everything except screen sharing (file chooser, settings, printing) goes to `xdg
 ## Roadmap
 
 - **Wider hardware coverage:** Intel GPUs and an end-to-end hybrid-laptop run.
-- **Scroll:** the niri features still missing, such as stacked columns, consume/expel, pointer resizing of columns, and drag-to-insert previews.
+- **Scroll:** stacked columns, consume/expel and mouse-resizing of columns (coming soon), then drag-to-insert previews.
 - **Physics and Ocean extras on real hardware:** floating-window physics, the compass and the minimap are tested nested only.
 - **Feel tuning:** viscosity, sway, depth timing and transition presets get refined against real use.
 - **Lower VRAM:** measure large glass windows before considering a shared blur buffer per monitor.
@@ -138,7 +207,7 @@ Everything except screen sharing (file chooser, settings, printing) goes to `xdg
 - [DOCUMENTATION.md](DOCUMENTATION.md): every config key, action and IPC request
 - [WAVE.md](WAVE.md): the config format
 - [SPATIAL_MODEL.md](SPATIAL_MODEL.md): Classic, Ocean and Scroll
-- [SCROLL.md](SCROLL.md): the Scroll engine guide
+- [Scroll engine](#scroll-engine): the Scroll guide, in this file
 - [CHANGELOG.md](CHANGELOG.md): what changed, in short; [DEV_CHANGELOG.md](DEV_CHANGELOG.md) has the full detail
 - [packaging/README.md](packaging/README.md): distro packages
 - [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [LICENSING.md](LICENSING.md)

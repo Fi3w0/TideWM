@@ -2,7 +2,7 @@
 
 TideWM is one compositor with three spatial engines. The engine decides where windows live and how you move between them. Everything else stays the same whichever one you pick: water, glass, animations, rules, IPC and protocols.
 
-Pick one with `engine = classic|ocean|scroll` in `config.wave`, or switch the running session with `tidectl engine <name>`. Either way, every open window moves across in place, with no restart. (`spatial_engine` is accepted as an older spelling of `engine`.)
+Pick one with `engine = classic|ocean|scroll` in `config.wave`, or switch the running session with `tidectl engine <name>`. Either way, every open window moves across in place, with no restart.
 
 ## Classic
 
@@ -43,7 +43,7 @@ Each monitor gets a strip of apps you slide along, niri-style. Under the hood Sc
 
 By default each workspace has its own strip. With `scroll { workspaces = sections }`, a monitor's workspaces are laid end to end in one strip. Scratchpads stay separate and floating windows float above the strip.
 
-Configuration, keys and limits: [SCROLL.md](SCROLL.md).
+Configuration and keys: [TECHNICAL_REPORT.md](TECHNICAL_REPORT.md#scroll-engine).
 
 ## Switching engines
 

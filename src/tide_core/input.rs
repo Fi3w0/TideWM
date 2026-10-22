@@ -1023,7 +1023,7 @@ impl Smallvil {
                             && keysym == Keysym::Escape
                         {
                             data.rescue_keybinds_active = true;
-                            data.active_submap = None;
+                            data.active_mode = None;
                             data.helper_keys_down.clear();
                             data.toast = Toast::new(
                                 "Rescue keybinds active until config reload",
@@ -1075,7 +1075,7 @@ impl Smallvil {
                         // keysym's own held state, since staying held is
                         // what keeps it open. Independent of `table`
                         // entirely (checked regardless of an active
-                        // submap/rescue-mode) so it stays reachable the
+                        // mode/rescue-mode) so it stays reachable the
                         // same way the screencast picker's own keys do.
                         //
                         // Only intercepted if a peek actually opened.
@@ -1105,22 +1105,22 @@ impl Smallvil {
                             }
                         }
 
-                        // A submap fully replaces the base table rather
+                        // A mode fully replaces the base table rather
                         // than layering on top of it (matches sway/
                         // Hyprland: while "in a mode," only that mode's
                         // own binds fire as compositor actions -- an
-                        // empty slice for an active_submap name that
-                        // somehow isn't in `submaps` shouldn't happen
+                        // empty slice for an active_mode name that
+                        // somehow isn't in `modes` shouldn't happen
                         // (reload_config clears it if the name vanishes),
                         // but degrades safely to "nothing matches,
                         // everything forwards" rather than panicking.
                         let table: &[Keybind] = if data.rescue_keybinds_active {
                             &data.config.rescue_keybinds
                         } else {
-                            match &data.active_submap {
+                            match &data.active_mode {
                                 Some(name) => data
                                     .config
-                                    .submaps
+                                    .modes
                                     .get(name)
                                     .map(Vec::as_slice)
                                     .unwrap_or(&[]),
@@ -3098,15 +3098,15 @@ impl Smallvil {
                 };
                 self.swap_workspaces(&this_output, &other_output);
             }
-            Action::EnterSubmap(name) => {
-                if self.config.submaps.contains_key(&name) {
-                    self.active_submap = Some(name);
+            Action::EnterMode(name) => {
+                if self.config.modes.contains_key(&name) {
+                    self.active_mode = Some(name);
                 } else {
-                    tracing::warn!(name, "submap not found in config, ignoring");
+                    tracing::warn!(name, "mode not found in config, ignoring");
                 }
             }
-            Action::ExitSubmap => {
-                self.active_submap = None;
+            Action::ExitMode => {
+                self.active_mode = None;
             }
             Action::SetLayout(algorithm) => {
                 self.set_layout_algorithm(algorithm);

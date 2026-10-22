@@ -69,7 +69,7 @@ enum Request {
         app_id: Option<String>,
         pid: Option<i32>,
     },
-    ActiveSubmap,
+    ActiveMode,
     /// XKB layout group and layout names, for bars showing or switching
     /// the input language. Same shape as niri's `keyboard-layouts`:
     /// `current_idx` is a zero-based index into `names`; `codes` is
@@ -850,7 +850,7 @@ fn handle_request(state: &mut Smallvil, request: Request) -> serde_json::Value {
             pid,
         } => resolve_window_response(state, window_id, app_id.as_deref(), pid),
 
-        Request::ActiveSubmap => json!({ "ok": true, "data": state.active_submap }),
+        Request::ActiveMode => json!({ "ok": true, "data": state.active_mode }),
         Request::KeyboardLayouts => match state.keyboard_layouts() {
             Some((group, names)) => json!({ "ok": true, "data": {
                 "current_idx": group,
@@ -1139,7 +1139,7 @@ fn diagnostics_json(state: &Smallvil) -> serde_json::Value {
         })
         .sum();
     let keybinds = state.config.keybinds.len();
-    let submaps = state.config.submaps.len();
+    let modes = state.config.modes.len();
     #[cfg(feature = "screencast")]
     let screencast_feature = state.screencast.is_some();
     #[cfg(not(feature = "screencast"))]
@@ -1181,7 +1181,7 @@ fn diagnostics_json(state: &Smallvil) -> serde_json::Value {
         "session_lock": !matches!(state.session_lock, crate::tide_core::state::SessionLock::Unlocked),
         "layer_surfaces": layer_surfaces,
         "keybind_count": keybinds,
-        "submap_count": submaps,
+        "mode_count": modes,
         "screencast_feature": screencast_feature,
     })
 }

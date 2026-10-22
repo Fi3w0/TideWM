@@ -4,7 +4,7 @@
 
 Wave is a config format that is data on the surface and Lua underneath. This file explains what that means, why it exists, and where it has rough edges. It is not a reference manual: the exhaustive key-by-key reference lives in `DOCUMENTATION.md`. Read this first, reach for that when you need a key.
 
-Wave is TideWM's config format. It replaced an older line-based grammar, which is gone; this file describes Wave as it is today.
+Wave is TideWM's config format.
 
 The name "Wave" was already taken by another language, so the standalone, tool-agnostic version of this format is **[Scorium](https://github.com/Scorium-lang/scorium-rs)**: same grammar, its own parser crate, embeddable in any project that uses YAML or JSON today. TideWM keeps calling its config format Wave; outside TideWM it is Scorium.
 
@@ -178,7 +178,7 @@ Same function, same semantics, one registry. The node form is sugar, not a secon
 - **Execution and output are bounded.** Each config chunk, event handler, and `tidectl eval` runs with its own instruction and wall-clock budget on the compositor thread. Includes are bounded by nesting depth, file count, aggregate source bytes, and generated entries. A handler can queue at most 256 actions, and `spawn()`/`action()` are unavailable outside an active handler. Eval results reject table cycles and stop at 64 levels, 10,000 values, or a 1 MiB JSON response instead of exhausting the compositor's stack or memory.
 - **A bare duration number is milliseconds.** `duration = 600` and `duration = 600ms` are the same value; the unit suffix is optional on a leaf assignment (it just isn't inferred inside an expression — see "Durations are values" below).
 - **Loops use `$i`.** A loop variable references through the same `$` in strings. It looks like a config variable and is not one, which is exactly why it uses the same marker.
-- **An unrecognized top-level key warns and is dropped, not applied.** This now includes every old pre-Wave key/block/action spelling the format once accepted as a migration alias (that compatibility layer is fully removed) — a stale name gets a one-line "unknown config key" warning in the panel and its value never takes effect, so a config that still uses one silently keeps the default for that field. This is different from an unrecognized *block* keyword whose body only sets keys that aren't valid at the top level (e.g. a stale `connected_vessels { }`/`water_glass { }`): that's indistinguishable from a Lua computation block like `theme { }`, so it's dropped with no warning at all. See DOCUMENTATION.md's `vessels { }`/`glass { }`/`mode { }` sections.
+- **An unrecognized top-level key warns and is dropped, not applied.** A misspelled key gets a one-line "unknown config key" warning and its value never takes effect, so that field keeps its default. An unrecognized *block* whose body only sets keys that aren't valid at the top level is different: it's indistinguishable from a Lua computation block like `theme { }`, so it's dropped with no warning at all.
 
 ## The desugaring contract (for implementers)
 

@@ -606,7 +606,7 @@ fn op_token_len(chars: &[char], i: usize) -> Option<usize> {
 /// Re-classifies a statically known variable's text as a Lua literal:
 /// numbers, booleans, colors, and durations stay typed; anything else is
 /// a quoted string. This is what makes `@mod = SUPER` usable as
-/// `pointer_modifier = mod` in an expression.
+/// `drag_modifier = mod` in an expression.
 fn classify_literal(text: &str) -> String {
     if is_number(text) || matches!(text, "true" | "false") {
         text.to_string()
@@ -2172,8 +2172,7 @@ pub(crate) fn lua_value_to_json(value: Value) -> Result<serde_json::Value, Strin
     Ok(json)
 }
 
-/// Compiles and evaluates a Wave file, returning the same [`Entry`] list
-/// the line-based parser produces.
+/// Compiles and evaluates a Wave file into its [`Entry`] list.
 #[allow(dead_code)] // exercised by tests; W7's tidectl eval consumes it
 pub(crate) fn evaluate(source: &str, path: &Path) -> Result<Vec<Entry>, String> {
     let lua_source = compile(source, path)?;

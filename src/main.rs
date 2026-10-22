@@ -142,7 +142,7 @@ fn reap_spawned_children(state: &mut Smallvil) {
 /// from untrusted config content. An unterminated quote falls back to the
 /// plain whitespace split, so a config that relied on a literal quote keeps
 /// working. Shared by every spawn call site in the compositor
-/// (`-s`/`--spawn` below, `config.spawn_at_startup`, and `Action::Spawn`
+/// (`-s`/`--spawn` below, `config.spawn`, and `Action::Spawn`
 /// in `input.rs`) so they all get the same argument support for free.
 pub(crate) fn spawn(cmd: &str) -> std::io::Result<()> {
     let parts =
@@ -212,7 +212,7 @@ fn split_command(cmd: &str) -> Option<Vec<String>> {
     Some(args)
 }
 
-/// Applies `[env]` (`config.env`) to this process via `set_var`, before the
+/// Applies `env { }` (`config.env`) to this process via `set_var`, before the
 /// backend starts -- so e.g. an `XCURSOR_THEME` override actually reaches
 /// `cursor::Theme::load()` (called from `init_udev`, right after this),
 /// not just processes TideWM spawns later. Called separately from, and
@@ -322,7 +322,7 @@ fn configure_session_environment() {
     }
 }
 
-// Exports TideWM's graphical-session variables plus any `[env]` entries
+// Exports TideWM's graphical-session variables plus any `env { }` entries
 // into the systemd user session and the D-Bus session-activation environment,
 // so anything activated by either (a portal backend, a polkit agent) sees a
 // real graphical session instead of whatever it inherited from before TideWM
@@ -851,7 +851,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // server to open a window in) vs standalone TTY session, same
     // convention anvil and niri use for their own backend auto-selection.
     // Checked before `apply_user_env` so a stray WAYLAND_DISPLAY/DISPLAY in
-    // `[env]` can't retroactively change which backend gets picked.
+    // `env { }` can't retroactively change which backend gets picked.
     let nested =
         std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
 
@@ -975,7 +975,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    for cmd in &state.config.spawn_at_startup {
+    for cmd in &state.config.spawn {
         if let Err(err) = spawn(cmd) {
             tracing::warn!(%err, cmd, "Failed to spawn startup command");
         }
