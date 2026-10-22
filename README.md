@@ -14,6 +14,7 @@
 **[<kbd> <br> Docs <br> </kbd>](DOCUMENTATION.md)**
 **[<kbd> <br> Technical&nbsp;report <br> </kbd>](TECHNICAL_REPORT.md)**
 **[<kbd> <br> Config <br> </kbd>](#configuration)**
+**[<kbd> <br> Changelog <br> </kbd>](CHANGELOG.md)**
 
 </div>
 
@@ -34,11 +35,22 @@ Underneath the water is a real tiling window manager: fast keyboard-driven layou
 ## Why people are trying it
 
 - **It actually looks like something.** Ripples on open, wave transitions between workspaces, glass and shadow on your windows, floating windows that drift like they're sitting on water. Every bit of it is a config toggle, and none of it costs you performance you'll notice.
-- **Choose how windows are organized.** Classic keeps numbered workspaces, Ocean gives you a zoomable 2D canvas, and [Scroll](TECHNICAL_REPORT.md#scroll-engine) gives each monitor its own niri-style scrolling strip. Switch between them live, without restarting.
-- **Runs on what you already own.** On AMD: ~60-70MB PSS at idle with the full water stack on and ~63MB with nine frosted-glass windows, about half of Hyprland on the same hardware. On NVIDIA (RTX 3060): ~100MB PSS idle (a third of it the driver's own mappings), 69MB of compositor VRAM and under 0.5% of one CPU core, staying flat with ten blurred windows open. It only climbs past that if you turn on more than the defaults.
-- **Genuinely yours.** Every ripple, wave, border, and shadow is a value in a config file, hot-reloaded on save. Nothing about how it looks is hardcoded. If that's not enough, write your own GLSL effect for a window and chain up to four passes of it (opt-in, see [Custom shaders](DOCUMENTATION.md#custom-shaders)).
+- **Three ways to organize windows**, switchable live without a restart (more below).
+- **Runs on what you already own.** About 60–70 MB of memory with the full water stack on AMD, roughly half of Hyprland on the same machine. On an RTX 3060 it idles under 0.5% of one CPU core with 69 MB of VRAM, and stays flat with ten blurred windows open.
+- **Genuinely yours.** Every ripple, wave, border and shadow is a value in a config file, hot-reloaded on save. Nothing about how it looks is hardcoded. If that's not enough, write your own GLSL effect for a window and chain up to four passes of it ([Custom shaders](DOCUMENTATION.md#custom-shaders)).
+- **Made to be scripted.** `tidectl` can query and control everything, and `tidectl subscribe` streams windows, workspaces, focus, monitors, keybind modes and Scroll changes, so a bar or widget never has to poll.
+
+## Three ways to organize windows
+
+- **Classic:** numbered workspaces per monitor with BSP, master/stack or cascade tiling. The Depth Deck lets you park a tile out of the way and swap it back in.
+- **Ocean:** one zoomable 2D canvas with a camera per monitor. Group windows into reefs, or drag them anywhere.
+- **Scroll:** a niri-style strip of apps per monitor. Stack apps in a column or turn a column into tabs, cycle preset widths, Mod-drag to resize one column without touching the rest, and drop a dragged tile exactly where the highlight shows. See the [Scroll guide](TECHNICAL_REPORT.md#scroll-engine).
+
+`tidectl engine classic|ocean|scroll` switches between them and carries every open window across. How they fit together: [SPATIAL_MODEL.md](SPATIAL_MODEL.md).
 
 ## Try it
+
+**Fully supported:** Arch and Gentoo, the distros TideWM is built and tested on daily. Everything else should work, and reports are welcome.
 
 **Fastest:** one command per distro installs TideWM as a real package (Gentoo overlay, Arch `PKGBUILD`, NixOS flake + module). See [packaging/README.md](packaging/README.md):
 
@@ -47,8 +59,6 @@ packaging/gentoo/install.sh     # Gentoo
 packaging/arch/install.sh       # Arch and derivatives
 NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:Fi3w0/TideWM  # Nix; bundled logo is noncommercial
 ```
-
-**Fully supported:** Arch and Gentoo, the distros TideWM is built and tested on daily. Everything else should work, and reports are welcome.
 
 **From source** on anything else: Rust stable plus a handful of Wayland/GPU dev libraries, then `./install.sh`:
 
@@ -69,10 +79,8 @@ sudo emerge --ask dev-util/pkgconf dev-libs/wayland dev-libs/libinput x11-libs/l
 ```bash
 git clone https://github.com/Fi3w0/TideWM.git
 cd TideWM
-# `--features screencast` enables the portal screen-share backend (off by
-# default: it pulls in the zbus async runtime and PipeWire threads, and
-# needs `clang`/`libclang` on the machine for pipewire-sys's build step).
-# Without it, OBS/portal clients see no capture sources at all.
+# `screencast` adds screen sharing for OBS, Discord and browsers
+# (it needs clang/libclang to build).
 cargo build --release --locked --features screencast
 cargo run --locked --features screencast   # opens nested inside your current session, safe to try
 ```
@@ -85,12 +93,15 @@ openSUSE and everything else, plus setting it up as a real login session: see [T
 
 | Shortcut               | Action                      |
 | ---------------------- | --------------------------- |
-| `Super+Enter`          | Open a terminal             |
+| `Super+Enter`          | Open a terminal              |
+| `Super+Q`              | Close the window             |
 | `Super+H/J/K/L`        | Focus a direction            |
+| `Super+Shift+H/J/K/L`  | Move the window that way     |
 | `Super+V`              | Float a window               |
 | `Super+F`              | Fullscreen                   |
 | `Super+1`..`Super+0`   | Switch workspace             |
 | `Super+O`              | Workspace overview           |
+| `Super+Shift+Q`        | Quit TideWM                  |
 
 Everything here is rebindable, and this is a small slice of what's available. The full action/keybind/IPC catalog lives in [DOCUMENTATION.md](DOCUMENTATION.md).
 
