@@ -13035,8 +13035,13 @@ impl Smallvil {
         };
         let head = columns[column].windows[0].clone();
         match action {
-            ColumnAction::SwitchPresetWidth => {
-                if let Some(width) = crate::scroll::next_preset(
+            ColumnAction::SwitchPresetWidth | ColumnAction::SwitchPresetWidthBack => {
+                let step = if action == ColumnAction::SwitchPresetWidth {
+                    crate::scroll::next_preset
+                } else {
+                    crate::scroll::previous_preset
+                };
+                if let Some(width) = step(
                     self.config.scroll.preset_widths.as_slice(),
                     columns[column].width,
                 ) {

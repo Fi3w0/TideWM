@@ -181,6 +181,17 @@ pub fn next_preset(presets: &[f64], current: f64) -> Option<f64> {
         .or_else(|| presets.first().copied())
 }
 
+/// `next_preset` backwards: the last preset narrower than `current`,
+/// wrapping to the widest.
+pub fn previous_preset(presets: &[f64], current: f64) -> Option<f64> {
+    presets
+        .iter()
+        .rev()
+        .copied()
+        .find(|preset| *preset < current - 1e-3)
+        .or_else(|| presets.last().copied())
+}
+
 #[derive(Default)]
 pub struct ScrollState {
     pub config: Option<ScrollConfig>,
@@ -616,6 +627,9 @@ mod tests {
         assert_eq!(next_preset(presets.as_slice(), 0.4), Some(0.5));
         assert_eq!(next_preset(presets.as_slice(), 0.5), Some(2.0 / 3.0));
         assert_eq!(next_preset(presets.as_slice(), 0.9), Some(1.0 / 3.0));
+        assert_eq!(previous_preset(presets.as_slice(), 0.6), Some(0.5));
+        assert_eq!(previous_preset(presets.as_slice(), 0.5), Some(1.0 / 3.0));
+        assert_eq!(previous_preset(presets.as_slice(), 0.2), Some(2.0 / 3.0));
         assert!(PresetWidths::new(&[]).is_none());
         // Duplicates collapse before the size limit applies.
         assert!(PresetWidths::new(&[0.5; 17]).is_some());

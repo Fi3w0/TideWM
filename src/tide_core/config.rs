@@ -869,6 +869,8 @@ pub enum ColumnAction {
     Expel,
     /// Cycle the column through `scroll.preset_widths`.
     SwitchPresetWidth,
+    /// `SwitchPresetWidth` in the other direction.
+    SwitchPresetWidthBack,
     /// Set or adjust the column width (`set-column-width:<v>`).
     SetWidth(crate::scroll::SizeChange),
     /// Toggle the column between full width and its previous width.
@@ -9637,6 +9639,7 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "consume-into-column" => Some(Action::Column(ColumnAction::ConsumeInto)),
         "expel-from-column" => Some(Action::Column(ColumnAction::Expel)),
         "switch-preset-width" => Some(Action::Column(ColumnAction::SwitchPresetWidth)),
+        "switch-preset-width-back" => Some(Action::Column(ColumnAction::SwitchPresetWidthBack)),
         "maximize-column" => Some(Action::Column(ColumnAction::Maximize)),
         "expand-column" => Some(Action::Column(ColumnAction::Expand)),
         "center-column" => Some(Action::Column(ColumnAction::Center)),

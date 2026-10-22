@@ -1840,6 +1840,7 @@ The same set of strings works after `bind ... { }` at the top level or inside a 
 - `consume-into-column` — Scroll only: pull the next column's first window into the focused column
 - `expel-from-column` — Scroll only: move the focused window out of its shared column into a new column right after
 - `switch-preset-width` — Scroll only: set the column to the next wider `scroll.preset_widths` entry, wrapping to the narrowest
+- `switch-preset-width-back` — Scroll only: the same, backwards: the next narrower entry, wrapping to the widest
 - `maximize-column` — Scroll only: toggle the column between full width and the width it had before
 - `expand-column` — Scroll only: widen the column into the space the other fully visible columns leave
 - `center-column` — Scroll only: center the focused column once, even the first or last one (the strip may show empty space past its end until the next focus change)
