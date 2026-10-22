@@ -1835,7 +1835,10 @@ The same set of strings works after `bind ... { }` at the top level or inside a 
 - `cycle-focus` — most-recently-used order, not z-order
 - `focus-urgent` — jump to whichever window is currently marked urgent, if any
 - `focus-left` / `focus-right` / `focus-up` / `focus-down` — Classic selects by live screen geometry. Ocean compares the current camera projection, keeps the camera still for a visible neighbor, and glides it to an off-camera neighbor using `ocean.camera_animation_ms`/`camera_sway`; screen pins use their viewport position.
-- `swap-left` / `swap-right` / `swap-up` / `swap-down`
+- `swap-left` / `swap-right` / `swap-up` / `swap-down` — in Scroll, along the strip moves the whole column, across it reorders inside the column
+- `consume-or-expel-left` / `consume-or-expel-right` — Scroll only: a window alone joins the neighbor column on that side; a window sharing a column leaves it for a new column on that side
+- `consume-into-column` — Scroll only: pull the next column's first window into the focused column
+- `expel-from-column` — Scroll only: move the focused window out of its shared column into a new column right after
 - `resize-left` / `resize-right` / `resize-up` / `resize-down` — shrink/grow the focused floating window by 24 logical pixels, or resize its nearest BSP split and connected parallel ancestors
 - `move-left` / `move-right` / `move-up` / `move-down` — step the focused floating window 24 logical pixels, no-op on a tiled one
 - `snap:left` / `snap:right` / `snap:top` / `snap:bottom` / `snap:top-left` / `snap:top-right` / `snap:bottom-left` / `snap:bottom-right` — place the focused Classic floater with the same zone, usable-area, gap, and rule policy as pointer snapping; disabled zones no-op
@@ -2057,6 +2060,6 @@ scroll {
 | `center_focused` | bool | `false` | Center every revealed app, including the first, last and only one. `false` moves only as far as needed. |
 | `gesture_distance` | positive float | `1200` | Touchpad travel per viewport. A sensitivity, not a monitor width. |
 
-Spacing follows `gaps`. `focus-*` reveals neighbors, `swap-*` reorders, `resize-*` changes extent along the strip and `scroll-left/right/up/down` slides half a viewport. No binds are added automatically. Pointer focus (hover, click, touch, tablet) never moves the strip; keyboard focus, `focus-window`/`focus-app` and notification activation reveal the target.
+Spacing follows `gaps`. A column holds one window or several stacked ones. Along the strip, `focus-*` moves between columns (landing on the window last focused there), `swap-*` moves the whole column and `resize-*` changes the column width; across the strip, they move focus, reorder and resize inside the column. `consume-or-expel-left/right`, `consume-into-column` and `expel-from-column` edit columns (see [Action strings](#action-strings)). New windows open as a column after the focused column. `scroll-left/right/up/down` slides half a viewport. No binds are added automatically. Pointer focus (hover, click, touch, tablet) never moves the strip; keyboard focus, `focus-window`/`focus-app` and notification activation reveal the target.
 
 In Scroll mode each `outputs` entry has a `scroll` object with `offset`, `orientation` and `workspaces`; with centering on, `offset` can be negative.

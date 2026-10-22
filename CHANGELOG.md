@@ -2,6 +2,12 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.164 · 2026-10-22 — Stacked Scroll columns
+
+- Scroll columns can hold several apps stacked on top of each other, niri-style. `consume-or-expel-left/right`, `consume-into-column` and `expel-from-column` build and split them.
+- Left/right moves between columns and lands on the app you last used there; up/down moves inside a column. `swap-*` and `resize-*` work on columns along the strip and on apps inside a column across it.
+- New apps open after the focused column instead of splitting it.
+
 ## 0.90.163 · 2026-10-22 — Config cleanup
 
 - Old pre-Wave spellings are gone: `spatial_engine`/`wm_mode` (use `engine`), `pointer_modifier`/`mouse_modifier` (use `drag_modifier`), `submap:` (use `mode:`), `float_physics enabled` (use `tier`), `0x` colors and space-separated lists (use `[a, b]`). A config still using one gets an "unknown key" warning and keeps the default.

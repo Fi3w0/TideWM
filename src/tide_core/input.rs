@@ -2825,6 +2825,7 @@ impl Smallvil {
                 }
             }
             Action::ScrollView(direction) => self.scroll_view(direction),
+            Action::Column(action) => self.column_action(action),
             Action::FocusWindow(id) => {
                 if let Some(surface) = self.window_surface_by_id(id) {
                     self.activate_toplevel(&surface);

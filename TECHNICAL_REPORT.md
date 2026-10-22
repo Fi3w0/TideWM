@@ -6,7 +6,7 @@ The quick technical picture: what TideWM is built from, what works, what's been 
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). Underneath is a complete tiling window manager: BSP, master/stack and cascade layouts, workspaces, multi-monitor, layer shell, IPC and XWayland. On top sits the water look (ripples, waves, glass, shadows, physics), and every piece of it is a config toggle.
 
-Current version: **0.90.163**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
+Current version: **0.90.164**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
 
 ## Architecture
 
@@ -75,19 +75,29 @@ gaps = 8
 
 Scroll uses your existing binds. It adds none of its own.
 
+A column holds one app or several stacked ones. The table is for horizontal strips; on vertical strips the two directions trade places.
+
 | Action | In Scroll |
 | --- | --- |
-| `focus-left/right` (`up/down` when vertical) | Focus the neighbor and slide it into view |
-| `swap-left/right` | Move the focused app along the strip |
-| `resize-left/right` (`up/down` when vertical) | Make the focused app narrower or wider |
+| `focus-left/right` | Focus the next column, on the app you last used there, and slide it into view |
+| `focus-up/down` | Focus the app above or below in the same column |
+| `swap-left/right` | Move the whole column along the strip |
+| `swap-up/down` | Move the app up or down inside its column |
+| `resize-left/right` | Make the column narrower or wider |
+| `resize-up/down` | Make the app shorter or taller inside a shared column |
+| `consume-or-expel-left/right` | Alone: join the column on that side. Sharing a column: leave it for a new column on that side |
+| `consume-into-column` | Pull the next column's first app into this column |
+| `expel-from-column` | Move the app out into its own column, right after |
 | `scroll-left/right/up/down` | Slide the strip half a screen |
 | Touchpad swipe | Slide the strip with your fingers |
+
+New apps open as their own column right after the focused column, never in the middle of it. Closing the top app of a column keeps the rest of the column and its width.
 
 Focusing with the mouse never moves the strip: hovering with `focus_follows_mouse`, clicking, touch and tablet pens all leave it alone. You can cross to another monitor or click a neighbor's peek without anything sliding away. Keyboard focus, `tidectl focus-window` / `focus-app` and notification clicks do bring the app into view. When the strip slides under a still mouse, the app now under the pointer gets the wheel and clicks right away.
 
 Switching between Classic and Scroll keeps your layout trees intact. Switching to or from Ocean converts the layout, and Ocean's camera history and bookmarks don't carry over.
 
-**Coming soon:** stacked columns (several apps in one column), consume/expel, and resizing columns with the mouse.
+**Coming soon:** resizing columns with the mouse.
 
 For tools: each `tidectl outputs` entry has a `scroll` object (`offset`, `orientation`, `workspaces`). The full key reference is in [DOCUMENTATION.md](DOCUMENTATION.md#scroll-spatial-engine).
 
@@ -194,7 +204,7 @@ Everything except screen sharing (file chooser, settings, printing) goes to `xdg
 ## Roadmap
 
 - **Wider hardware coverage:** Intel GPUs and an end-to-end hybrid-laptop run.
-- **Scroll:** stacked columns, consume/expel and mouse-resizing of columns (coming soon), then drag-to-insert previews.
+- **Scroll:** mouse-resizing of columns (coming soon), then drag-to-insert previews.
 - **Physics and Ocean extras on real hardware:** floating-window physics, the compass and the minimap are tested nested only.
 - **Feel tuning:** viscosity, sway, depth timing and transition presets get refined against real use.
 - **Lower VRAM:** measure large glass windows before considering a shared blur buffer per monitor.

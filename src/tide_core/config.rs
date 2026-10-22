@@ -857,6 +857,18 @@ pub enum LayoutSwitch {
     Name(String),
 }
 
+/// What a Scroll column action does to the focused window's column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnAction {
+    /// Leave a shared column for a new one on that side, or join the
+    /// neighbor column when alone.
+    ConsumeOrExpel { forward: bool },
+    /// Pull the next column's first window into this column.
+    ConsumeInto,
+    /// Move the focused window out of its shared column.
+    Expel,
+}
+
 #[derive(Debug, Clone)]
 pub enum Action {
     Spawn(String),
@@ -1026,6 +1038,9 @@ pub enum Action {
     FocusWindow(u64),
     SetEngine(SpatialEngine),
     ScrollView(Direction),
+    /// Scroll column editing (niri's consume/expel family). No-op outside
+    /// Scroll.
+    Column(ColumnAction),
     /// Sends a graceful close request to every mapped window of the given
     /// app_id -- the dock's "quit app". Apps that confirm-and-close on
     /// their own handle it; anything stuck must be killed by the caller.
@@ -9557,6 +9572,14 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "cycle-tab-next" => Some(Action::CycleTabForward),
         "cycle-tab-prev" => Some(Action::CycleTabBackward),
         "quit" => Some(Action::Quit),
+        "consume-or-expel-left" => Some(Action::Column(ColumnAction::ConsumeOrExpel {
+            forward: false,
+        })),
+        "consume-or-expel-right" => Some(Action::Column(ColumnAction::ConsumeOrExpel {
+            forward: true,
+        })),
+        "consume-into-column" => Some(Action::Column(ColumnAction::ConsumeInto)),
+        "expel-from-column" => Some(Action::Column(ColumnAction::Expel)),
         other if other.starts_with("switch-layout:") => {
             let target = &other["switch-layout:".len()..];
             if target.is_empty() {

@@ -1,7 +1,29 @@
 use super::*;
 use crate::scroll::{self, Orientation, WorkspaceMode};
 
-type ScrollSlot = (u32, Option<Window>, f64, f64);
+/// One window (or an empty workspace section) placed on the strip. Every
+/// row of a column shares the column's `start`/`extent`.
+#[derive(Clone)]
+struct ScrollSlot {
+    workspace: u32,
+    window: Option<Window>,
+    start: f64,
+    extent: f64,
+    row: usize,
+    weights: Vec<f64>,
+}
+
+/// A column as an ordered list of its windows plus its width (the head's
+/// proportion of the viewport).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ScrollColumn {
+    pub(crate) windows: Vec<WlSurface>,
+    pub(crate) width: f64,
+}
+
+fn surface_of(window: &Window) -> Option<WlSurface> {
+    window.toplevel().map(|t| t.wl_surface().clone())
+}
 
 impl Layouts {
     pub(crate) fn scroll_key(&self, workspace: u32) -> u32 {
@@ -14,6 +36,267 @@ impl Layouts {
             0
         } else {
             workspace
+        }
+    }
+
+    /// The windows of one workspace grouped into columns, in strip order.
+    fn window_columns(&self, output: &str, workspace: u32) -> Vec<Vec<Window>> {
+        let mut columns: Vec<Vec<Window>> = Vec::new();
+        for window in self.windows_in(output, workspace) {
+            let stacked = surface_of(&window).is_some_and(|s| self.scroll.is_stacked(&s));
+            match columns.last_mut() {
+                Some(column) if stacked => column.push(window),
+                _ => columns.push(vec![window]),
+            }
+        }
+        columns
+    }
+
+    /// Columns of `output`/`workspace` as surfaces plus widths.
+    pub(crate) fn scroll_columns(&self, output: &str, workspace: u32) -> Vec<ScrollColumn> {
+        self.window_columns(output, workspace)
+            .into_iter()
+            .map(|column| {
+                let windows: Vec<WlSurface> = column.iter().filter_map(surface_of).collect();
+                let width = windows
+                    .first()
+                    .map(|head| self.scroll.proportion(head))
+                    .unwrap_or_else(|| self.scroll.config.unwrap_or_default().tile_proportion);
+                ScrollColumn { windows, width }
+            })
+            .filter(|column| !column.windows.is_empty())
+            .collect()
+    }
+
+    /// Rewrites one workspace's window order and stacking to `columns`. The
+    /// tree keeps its leaves; only their contents move, through swaps.
+    pub(crate) fn set_scroll_columns(
+        &mut self,
+        output: &str,
+        workspace: u32,
+        columns: Vec<ScrollColumn>,
+    ) {
+        let key = (output.to_string(), workspace);
+        let target: Vec<WlSurface> = columns
+            .iter()
+            .flat_map(|column| column.windows.iter().cloned())
+            .collect();
+        let mut current: Vec<WlSurface> = self
+            .windows_in(output, workspace)
+            .iter()
+            .filter_map(surface_of)
+            .collect();
+        if target.len() != current.len() || target.iter().any(|s| !current.contains(s)) {
+            return;
+        }
+        if let Some(tree) = self.trees.get_mut(&key) {
+            for index in 0..target.len() {
+                if current[index] != target[index] {
+                    let Some(from) = current.iter().position(|s| s == &target[index]) else {
+                        continue;
+                    };
+                    tree.swap(&current[index], &current[from]);
+                    current.swap(index, from);
+                }
+            }
+        }
+        for column in &columns {
+            for (row, surface) in column.windows.iter().enumerate() {
+                self.scroll.set_stacked(surface, row > 0);
+                if row > 0 {
+                    self.scroll.clear_proportion(surface);
+                }
+            }
+            if let Some(head) = column.windows.first() {
+                self.scroll.resize(head.clone(), column.width);
+            }
+        }
+        self.bump_topology_revision();
+    }
+
+    /// `(column, row)` of `surface` within its workspace.
+    pub(crate) fn scroll_position(&self, surface: &WlSurface) -> Option<(usize, usize)> {
+        let (output, workspace) = self.key_of(surface)?;
+        self.scroll_columns(&output, workspace)
+            .iter()
+            .enumerate()
+            .find_map(|(column, c)| {
+                c.windows
+                    .iter()
+                    .position(|s| s == surface)
+                    .map(|row| (column, row))
+            })
+    }
+
+    /// Applies `edit` to the columns of `surface`'s workspace and writes the
+    /// result back when it returns true.
+    fn edit_scroll_columns(
+        &mut self,
+        surface: &WlSurface,
+        edit: impl FnOnce(&mut Vec<ScrollColumn>, usize, usize, f64) -> bool,
+    ) -> bool {
+        let Some((output, workspace)) = self.key_of(surface) else {
+            return false;
+        };
+        let mut columns = self.scroll_columns(&output, workspace);
+        let Some((column, row)) = columns.iter().enumerate().find_map(|(c, col)| {
+            col.windows
+                .iter()
+                .position(|s| s == surface)
+                .map(|r| (c, r))
+        }) else {
+            return false;
+        };
+        let default_width = self.scroll.config.unwrap_or_default().tile_proportion;
+        if !edit(&mut columns, column, row, default_width) {
+            return false;
+        }
+        columns.retain(|c| !c.windows.is_empty());
+        self.set_scroll_columns(&output, workspace, columns);
+        true
+    }
+
+    /// niri's consume-or-expel: a window sharing a column leaves it for a new
+    /// column on that side; a window alone joins the neighbor column.
+    pub(crate) fn scroll_consume_or_expel(&mut self, surface: &WlSurface, forward: bool) -> bool {
+        self.edit_scroll_columns(surface, |columns, column, row, default_width| {
+            if columns[column].windows.len() > 1 {
+                let window = columns[column].windows.remove(row);
+                let at = if forward { column + 1 } else { column };
+                columns.insert(
+                    at,
+                    ScrollColumn {
+                        windows: vec![window],
+                        width: default_width,
+                    },
+                );
+                return true;
+            }
+            let Some(target) = (if forward {
+                column.checked_add(1)
+            } else {
+                column.checked_sub(1)
+            })
+            .filter(|target| *target < columns.len()) else {
+                return false;
+            };
+            let window = columns[column].windows.remove(0);
+            columns[target].windows.push(window);
+            true
+        })
+    }
+
+    /// Pulls the first window of the next column into this one.
+    pub(crate) fn scroll_consume_into_column(&mut self, surface: &WlSurface) -> bool {
+        self.edit_scroll_columns(surface, |columns, column, _, _| {
+            if column + 1 >= columns.len() {
+                return false;
+            }
+            let window = columns[column + 1].windows.remove(0);
+            columns[column].windows.push(window);
+            true
+        })
+    }
+
+    /// Moves a window out of a shared column into a new column right after.
+    pub(crate) fn scroll_expel_from_column(&mut self, surface: &WlSurface) -> bool {
+        self.edit_scroll_columns(surface, |columns, column, row, default_width| {
+            if columns[column].windows.len() < 2 {
+                return false;
+            }
+            let window = columns[column].windows.remove(row);
+            columns.insert(
+                column + 1,
+                ScrollColumn {
+                    windows: vec![window],
+                    width: default_width,
+                },
+            );
+            true
+        })
+    }
+
+    /// Moves the whole column by `delta` places along the strip, or to the
+    /// first/last place when `to_end` is set.
+    pub(crate) fn scroll_move_column(
+        &mut self,
+        surface: &WlSurface,
+        delta: isize,
+        to_end: bool,
+    ) -> bool {
+        self.edit_scroll_columns(surface, |columns, column, _, _| {
+            let last = columns.len() - 1;
+            let target = if to_end {
+                if delta < 0 {
+                    0
+                } else {
+                    last
+                }
+            } else {
+                match column.checked_add_signed(delta) {
+                    Some(target) if target <= last => target,
+                    _ => return false,
+                }
+            };
+            if target == column {
+                return false;
+            }
+            let moved = columns.remove(column);
+            columns.insert(target, moved);
+            true
+        })
+    }
+
+    /// Moves a window up or down inside its column.
+    pub(crate) fn scroll_move_in_column(&mut self, surface: &WlSurface, delta: isize) -> bool {
+        self.edit_scroll_columns(surface, |columns, column, row, _| {
+            let rows = columns[column].windows.len();
+            match row.checked_add_signed(delta) {
+                Some(target) if target < rows => {
+                    columns[column].windows.swap(row, target);
+                    true
+                }
+                _ => false,
+            }
+        })
+    }
+
+    /// Where a new window goes when `target` is focused: after the last
+    /// window of `target`'s column, so a new window never splits a column.
+    pub(crate) fn scroll_insert_target(&self, target: &WlSurface) -> WlSurface {
+        let Some((output, workspace)) = self.key_of(target) else {
+            return target.clone();
+        };
+        self.scroll_columns(&output, workspace)
+            .into_iter()
+            .find(|column| column.windows.contains(target))
+            .and_then(|column| column.windows.last().cloned())
+            .unwrap_or_else(|| target.clone())
+    }
+
+    /// Keeps a column intact when its head leaves: the next window becomes
+    /// the head and inherits the column width. Call before removing.
+    pub(crate) fn scroll_detach(&mut self, surface: &WlSurface) {
+        let Some((output, workspace)) = self.key_of(surface) else {
+            return;
+        };
+        let order: Vec<WlSurface> = self
+            .windows_in(&output, workspace)
+            .iter()
+            .filter_map(surface_of)
+            .collect();
+        let Some(index) = order.iter().position(|s| s == surface) else {
+            return;
+        };
+        if !self.scroll.is_stacked(surface) {
+            if let Some(next) = order.get(index + 1).filter(|n| self.scroll.is_stacked(n)) {
+                let next = next.clone();
+                self.scroll.set_stacked(&next, false);
+                if self.scroll.has_proportion(surface) {
+                    let width = self.scroll.proportion(surface);
+                    self.scroll.resize(next, width);
+                }
+            }
         }
     }
 
@@ -45,23 +328,46 @@ impl Layouts {
         let mut start = 0.0;
         let mut result = Vec::new();
         for number in owners {
-            let windows = self.windows_in(output, number);
-            if windows.is_empty() {
-                result.push((number, None, start, viewport));
+            let columns = self.window_columns(output, number);
+            if columns.is_empty() {
+                result.push(ScrollSlot {
+                    workspace: number,
+                    window: None,
+                    start,
+                    extent: viewport,
+                    row: 0,
+                    weights: vec![1.0],
+                });
                 start += viewport + f64::from(gap.max(0));
-            } else {
-                for window in windows {
-                    let proportion = window
-                        .toplevel()
-                        .map(|t| self.scroll.proportion(t.wl_surface()))
-                        .unwrap_or(cfg.tile_proportion);
-                    let extent = window
-                        .toplevel()
-                        .and_then(|t| self.scroll.fullscreen_extents.get(t.wl_surface()).copied())
-                        .unwrap_or_else(|| (viewport * proportion).round().max(1.0));
-                    result.push((number, Some(window), start, extent));
-                    start += extent + f64::from(gap.max(0));
+                continue;
+            }
+            for column in columns {
+                let surfaces: Vec<Option<WlSurface>> = column.iter().map(surface_of).collect();
+                let proportion = surfaces[0]
+                    .as_ref()
+                    .map(|s| self.scroll.proportion(s))
+                    .unwrap_or(cfg.tile_proportion);
+                let extent = surfaces
+                    .iter()
+                    .flatten()
+                    .filter_map(|s| self.scroll.fullscreen_extents.get(s).copied())
+                    .reduce(f64::max)
+                    .unwrap_or_else(|| (viewport * proportion).round().max(1.0));
+                let weights: Vec<f64> = surfaces
+                    .iter()
+                    .map(|s| s.as_ref().map(|s| self.scroll.weight(s)).unwrap_or(1.0))
+                    .collect();
+                for (row, window) in column.into_iter().enumerate() {
+                    result.push(ScrollSlot {
+                        workspace: number,
+                        window: Some(window),
+                        start,
+                        extent,
+                        row,
+                        weights: weights.clone(),
+                    });
                 }
+                start += extent + f64::from(gap.max(0));
             }
         }
         result
@@ -87,9 +393,9 @@ impl Layouts {
         let centered = self.scroll.config.is_some_and(|cfg| cfg.center_focused);
         let minimum = slots
             .first()
-            .map(|(_, _, start, extent)| {
+            .map(|slot| {
                 if centered {
-                    start - ((viewport - extent) / 2.0).max(0.0)
+                    slot.start - ((viewport - slot.extent) / 2.0).max(0.0)
                 } else {
                     0.0
                 }
@@ -97,13 +403,13 @@ impl Layouts {
             .unwrap_or(0.0);
         let maximum = slots
             .last()
-            .map(|(_, _, start, extent)| {
+            .map(|slot| {
                 let trailing = if centered {
-                    ((viewport - extent) / 2.0).max(0.0)
+                    ((viewport - slot.extent) / 2.0).max(0.0)
                 } else {
                     0.0
                 };
-                start + extent - viewport + trailing
+                slot.start + slot.extent - viewport + trailing
             })
             .unwrap_or(0.0)
             .max(minimum);
@@ -126,13 +432,11 @@ impl Layouts {
         let key = self.scroll_key(workspace);
         let mut offset = self.scroll.offset(output, key).clamp(minimum, maximum);
         if self.scroll_section_requests.remove(output).is_some() && key == 0 {
-            if let Some((_, _, start, extent)) =
-                slots.iter().find(|(number, _, _, _)| *number == workspace)
-            {
+            if let Some(slot) = slots.iter().find(|slot| slot.workspace == workspace) {
                 offset = scroll::reveal(
                     0.0,
-                    *start,
-                    *extent,
+                    slot.start,
+                    slot.extent,
                     viewport,
                     self.scroll.config.unwrap_or_default().center_focused,
                 )
@@ -153,13 +457,25 @@ impl Layouts {
         let offset = self.scroll.offset(output, self.scroll_key(workspace));
         self.scroll_slots(output, workspace, area, gap)
             .into_iter()
-            .filter_map(|(_, window, start, extent)| {
-                window.map(|window| {
-                    (
-                        window,
-                        scroll::tile_rect(area, start, extent, offset, gap, cfg.orientation),
+            .filter_map(|slot| {
+                let window = slot.window?;
+                // A fullscreen window takes its whole column.
+                let fullscreen = surface_of(&window)
+                    .is_some_and(|s| self.scroll.fullscreen_extents.contains_key(&s));
+                let rect = if fullscreen {
+                    scroll::tile_rect(area, slot.start, slot.extent, offset, gap, cfg.orientation)
+                } else {
+                    scroll::column_tile_rect(
+                        area,
+                        slot.start,
+                        slot.extent,
+                        offset,
+                        gap,
+                        cfg.orientation,
+                        (slot.row, &slot.weights),
                     )
-                })
+                };
+                Some((window, rect))
             })
             .collect()
     }
@@ -187,8 +503,8 @@ impl Layouts {
             area,
             gap,
         );
-        let Some((_, _, start, extent)) = slots.iter().find(|(_, window, _, _)| {
-            window
+        let Some(slot) = slots.iter().find(|slot| {
+            slot.window
                 .as_ref()
                 .is_some_and(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface))
         }) else {
@@ -198,8 +514,14 @@ impl Layouts {
         let previous = self.scroll.offset(&output, key);
         let viewport = self.scroll_viewport(area, gap);
         let (minimum, maximum) = self.scroll_bounds(&slots, viewport);
-        let offset = scroll::reveal(previous, *start, *extent, viewport, cfg.center_focused)
-            .clamp(minimum, maximum);
+        let offset = scroll::reveal(
+            previous,
+            slot.start,
+            slot.extent,
+            viewport,
+            cfg.center_focused,
+        )
+        .clamp(minimum, maximum);
         self.scroll.set_offset(&output, key, offset);
         (previous - offset).abs() > f64::EPSILON
     }
@@ -225,6 +547,130 @@ impl Layouts {
 mod tests {
     use super::*;
     use crate::{ocean::test_protocol::ProtocolFixture, scroll::ScrollConfig};
+
+    fn surface(window: &Window) -> WlSurface {
+        window.toplevel().unwrap().wl_surface().clone()
+    }
+
+    fn shape(layouts: &Layouts) -> Vec<Vec<WlSurface>> {
+        layouts
+            .scroll_columns("screen", 1)
+            .into_iter()
+            .map(|c| c.windows)
+            .collect()
+    }
+
+    #[test]
+    fn consume_expel_and_moves_keep_columns_contiguous() {
+        let mut protocol = ProtocolFixture::new();
+        let mut layouts = Layouts::default();
+        layouts.scroll.config = Some(ScrollConfig::default());
+        let w: Vec<_> = (0..4).map(|_| protocol.window()).collect();
+        let s: Vec<_> = w.iter().map(surface).collect();
+        for window in &w {
+            layouts.insert("screen", 1, window.clone(), None);
+        }
+        assert_eq!(shape(&layouts).len(), 4);
+
+        // Alone: consume-or-expel joins the neighbor column on that side.
+        assert!(layouts.scroll_consume_or_expel(&s[1], false));
+        assert_eq!(
+            shape(&layouts),
+            vec![
+                vec![s[0].clone(), s[1].clone()],
+                vec![s[2].clone()],
+                vec![s[3].clone()]
+            ]
+        );
+        // Shared: it leaves for a new column on that side.
+        assert!(layouts.scroll_consume_or_expel(&s[1], true));
+        assert_eq!(shape(&layouts).len(), 4);
+        assert_eq!(shape(&layouts)[1], vec![s[1].clone()]);
+        // Consume the next column's first window, then expel it again.
+        assert!(layouts.scroll_consume_into_column(&s[2]));
+        assert_eq!(shape(&layouts)[2], vec![s[2].clone(), s[3].clone()]);
+        assert!(!layouts.scroll_consume_into_column(&s[3]));
+        assert!(layouts.scroll_move_in_column(&s[3], -1));
+        assert_eq!(shape(&layouts)[2], vec![s[3].clone(), s[2].clone()]);
+        // Moving a column moves all of its windows, to the front too.
+        assert!(layouts.scroll_move_column(&s[2], -1, true));
+        assert!(!layouts.scroll_move_column(&s[2], -1, true));
+        assert_eq!(shape(&layouts)[0], vec![s[3].clone(), s[2].clone()]);
+        assert!(layouts.scroll_expel_from_column(&s[3]));
+        assert_eq!(shape(&layouts).len(), 4);
+        assert!(!layouts.scroll_move_column(&s[0], 5, false));
+    }
+
+    #[test]
+    fn new_windows_follow_the_column_and_a_closed_head_keeps_it() {
+        let mut protocol = ProtocolFixture::new();
+        let mut layouts = Layouts::default();
+        layouts.scroll.config = Some(ScrollConfig::default());
+        let first = protocol.window();
+        let second = protocol.window();
+        layouts.insert("screen", 1, first.clone(), None);
+        layouts.insert("screen", 1, second.clone(), None);
+        assert!(layouts.scroll_consume_or_expel(&surface(&second), false));
+        layouts.scroll.resize(surface(&first), 0.8);
+        // Opening next to the head lands after the whole column.
+        let third = protocol.window();
+        layouts.insert("screen", 1, third.clone(), Some(&surface(&first)));
+        assert_eq!(
+            shape(&layouts),
+            vec![
+                vec![surface(&first), surface(&second)],
+                vec![surface(&third)]
+            ]
+        );
+        // Closing the head promotes the next row with the column width.
+        layouts.remove(&surface(&first));
+        let columns = layouts.scroll_columns("screen", 1);
+        assert_eq!(columns[0].windows, vec![surface(&second)]);
+        assert_eq!(columns[0].width, 0.8);
+        assert_eq!(columns.len(), 2);
+    }
+
+    #[test]
+    fn stacked_rows_share_the_column_and_split_its_height() {
+        let mut protocol = ProtocolFixture::new();
+        let mut layouts = Layouts::default();
+        layouts.scroll.config = Some(ScrollConfig::default());
+        let top = protocol.window();
+        let bottom = protocol.window();
+        let next = protocol.window();
+        for window in [&top, &bottom, &next] {
+            layouts.insert("screen", 1, window.clone(), None);
+        }
+        assert!(layouts.scroll_consume_or_expel(&surface(&bottom), false));
+        layouts.scroll.set_weight(&surface(&bottom), 3.0);
+        let area = Rectangle::new((0, 0).into(), (1216, 816).into());
+        let rects = layouts.layout("screen", 1, area, 8);
+        let (a, b, c) = (rects[0].1, rects[1].1, rects[2].1);
+        assert_eq!(a.loc.x, b.loc.x);
+        assert_eq!(a.size.w, b.size.w);
+        assert_eq!(a.loc.y + a.size.h + 8, b.loc.y);
+        assert_eq!(b.size.h, 3 * a.size.h);
+        assert_eq!(c.loc.x, a.loc.x + a.size.w + 8);
+        assert_eq!(c.size.h, 800);
+    }
+
+    #[test]
+    fn swapped_windows_trade_column_slots() {
+        let mut protocol = ProtocolFixture::new();
+        let mut layouts = Layouts::default();
+        layouts.scroll.config = Some(ScrollConfig::default());
+        let w: Vec<_> = (0..3).map(|_| protocol.window()).collect();
+        for window in &w {
+            layouts.insert("screen", 1, window.clone(), None);
+        }
+        let s: Vec<_> = w.iter().map(surface).collect();
+        assert!(layouts.scroll_consume_or_expel(&s[1], false));
+        layouts.swap(&s[1], &s[2]);
+        assert_eq!(
+            shape(&layouts),
+            vec![vec![s[0].clone(), s[2].clone()], vec![s[1].clone()]]
+        );
+    }
 
     #[test]
     fn strips_preserve_sizes_and_scroll_only_the_owning_output() {

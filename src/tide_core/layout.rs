@@ -470,10 +470,22 @@ impl Layouts {
         let surface = window
             .toplevel()
             .map(|toplevel| toplevel.wl_surface().clone());
+        // A new window starts its own Scroll column, placed after the whole
+        // column of `target` so it never splits one.
+        let target = target.map(|target| {
+            if self.scroll.config.is_some() && self.owners.get(target) == Some(&key) {
+                self.scroll_insert_target(target)
+            } else {
+                target.clone()
+            }
+        });
+        if let Some(surface) = &surface {
+            self.scroll.set_stacked(surface, false);
+        }
         self.trees
             .entry(key.clone())
             .or_default()
-            .insert(window, target);
+            .insert(window, target.as_ref());
         if let Some(surface) = surface {
             let old = self.owners.insert(surface, key);
             debug_assert!(old.is_none(), "a tiled surface must have exactly one owner");
@@ -548,6 +560,7 @@ impl Layouts {
         let Some(key) = self.owners.get(surface).cloned() else {
             return;
         };
+        self.scroll_detach(surface);
         let removed = self
             .trees
             .get_mut(&key)
@@ -679,6 +692,9 @@ impl Layouts {
         }
         if let Some(layout) = self.trees.get_mut(&key_a) {
             layout.swap(a, b);
+            // Scroll columns belong to positions: the windows trade places
+            // and each takes over the other's column slot.
+            self.scroll.swap_slots(a, b);
             self.bump_topology_revision();
         }
     }
@@ -824,6 +840,8 @@ impl Layouts {
             })
             .collect();
         self.owners.clear();
+        // Ocean rebuilds the order, so Scroll columns cannot survive it.
+        self.scroll.clear_columns();
         drained
     }
 

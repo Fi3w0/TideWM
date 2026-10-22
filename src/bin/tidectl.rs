@@ -1027,6 +1027,7 @@ ACTIONS:
         mode:<name>, exit-mode, layout:bsp, layout:master,
         master-grow, master-shrink, resize-left/right/up/down,
         move-left/right/up/down, snap:left/right/top/bottom,
+        consume-or-expel-left/right, consume-into-column, expel-from-column,
         snap:top-left/top-right/bottom-left/bottom-right, snap:fullscreen,
         toggle-overview
 

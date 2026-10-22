@@ -2,6 +2,14 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.164 — Scroll columns: stacking, consume and expel
+
+- Scroll columns can hold several windows. Columns derive from the workspace window order: a window marked `stacked` continues the column before it, so every column is a contiguous run whose head carries the width. Rows split the cross axis by per-window weights with `gaps` between them. Classic ignores this metadata, so Classic↔Scroll round trips are lossless (a nested round trip is pixel-identical); migrating to Ocean clears it.
+- Along the strip, `focus-*` steps one column (across workspace sections too) and lands on the column's most recently focused window; `swap-*` moves the whole column; `resize-*` changes the column width. Across the strip they move focus, reorder and resize (row weight) inside the column.
+- New actions: `consume-or-expel-left/right`, `consume-into-column`, `expel-from-column`. Edits reorder tree leaves through swaps, so the tree and its owners stay authoritative.
+- A new window opens after the whole focused column instead of splitting it. Closing a column head promotes the next row and keeps the column width. Swapping two windows (drag, cross-tree) trades their column slots.
+- Unit tests cover consume/expel, column and row moves, insertion, head removal, slot swaps and the row geometry; a nested run with real kitty clients checked consume, MRU column focus, row resize and swap, insertion after a column, head close and the Classic round trip. 659 tests, strict Clippy, fmt and the optimized release build pass.
+
 ## 0.90.163 — Old config spellings removed
 
 - The last pre-Wave spellings no longer parse. Each now warns as an unknown key and leaves the default in place:

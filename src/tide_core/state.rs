@@ -12458,6 +12458,110 @@ impl Smallvil {
         }
     }
 
+    /// Whether `direction` runs along the Scroll strip, and its step (-1/1).
+    fn scroll_axis_step(&self, direction: Direction) -> (bool, isize) {
+        let along = matches!(
+            (self.config.scroll.orientation, direction),
+            (
+                crate::scroll::Orientation::Horizontal,
+                Direction::Left | Direction::Right
+            ) | (
+                crate::scroll::Orientation::Vertical,
+                Direction::Up | Direction::Down
+            )
+        );
+        let step = if matches!(direction, Direction::Left | Direction::Up) {
+            -1
+        } else {
+            1
+        };
+        (along, step)
+    }
+
+    /// The window Scroll focus moves to from `focused`. Along the strip it
+    /// steps one column, across workspace sections too, and lands on the
+    /// window most recently focused in that column; across the strip it
+    /// steps one row inside the column.
+    fn scroll_focus_target(
+        &mut self,
+        focused: &WlSurface,
+        direction: Direction,
+    ) -> Option<WlSurface> {
+        let owner = self.layout.output_of(focused)?.to_owned();
+        let output = self.output_by_name(&owner)?;
+        let area = self.output_tiling_area(&output)?;
+        let workspace = self.layout.active_workspace(&owner);
+        let gap = self.gaps_for(&owner, workspace);
+        let strip: Vec<WlSurface> = self
+            .layout
+            .layout(&owner, workspace, area, gap)
+            .iter()
+            .filter_map(|(w, _)| w.toplevel().map(|t| t.wl_surface().clone()))
+            .collect();
+        // Consecutive strip windows form one column while they are stacked
+        // and share a workspace.
+        let mut columns: Vec<Vec<WlSurface>> = Vec::new();
+        for surface in strip {
+            let joins = self.layout.scroll.is_stacked(&surface)
+                && columns.last().and_then(|c| c.last()).is_some_and(|prev| {
+                    self.layout.workspace_of(prev) == self.layout.workspace_of(&surface)
+                });
+            match columns.last_mut() {
+                Some(column) if joins => column.push(surface),
+                _ => columns.push(vec![surface]),
+            }
+        }
+        let (column, row) = columns
+            .iter()
+            .enumerate()
+            .find_map(|(c, col)| col.iter().position(|s| s == focused).map(|r| (c, r)))?;
+        let (along, step) = self.scroll_axis_step(direction);
+        if !along {
+            return columns[column].get(row.checked_add_signed(step)?).cloned();
+        }
+        let target = columns.get(column.checked_add_signed(step)?)?;
+        self.focus_history
+            .iter()
+            .find(|s| target.contains(s))
+            .cloned()
+            .or_else(|| target.get(row.min(target.len() - 1)).cloned())
+    }
+
+    /// Retiles after a column edit and keeps the edited window in view.
+    fn scroll_columns_changed(&mut self, surface: &WlSurface) {
+        self.retile();
+        self.reveal_scroll_window(surface);
+        self.request_redraw();
+    }
+
+    /// Runs one Scroll column action on the focused tiled window.
+    pub(crate) fn column_action(&mut self, action: crate::config::ColumnAction) {
+        if self.config.spatial_engine != crate::config::SpatialEngine::Scroll {
+            return;
+        }
+        let Some(focused) = self.focused_window_surface() else {
+            return;
+        };
+        if !self.layout.contains(&focused)
+            || self.fullscreen.contains_key(&focused)
+            || self.group_of(&focused).is_some()
+        {
+            return;
+        }
+        let changed = match action {
+            crate::config::ColumnAction::ConsumeOrExpel { forward } => {
+                self.layout.scroll_consume_or_expel(&focused, forward)
+            }
+            crate::config::ColumnAction::ConsumeInto => {
+                self.layout.scroll_consume_into_column(&focused)
+            }
+            crate::config::ColumnAction::Expel => self.layout.scroll_expel_from_column(&focused),
+        };
+        if changed {
+            self.scroll_columns_changed(&focused);
+        }
+    }
+
     pub(crate) fn scroll_view(&mut self, direction: Direction) {
         if self.config.spatial_engine != crate::config::SpatialEngine::Scroll
             || self.activation_blocked()
@@ -13226,39 +13330,8 @@ impl Smallvil {
         if self.config.spatial_engine == crate::config::SpatialEngine::Scroll
             && self.layout.contains(&focused)
         {
-            let Some(owner) = self.layout.output_of(&focused).map(str::to_owned) else {
-                return;
-            };
-            let Some(output) = self.output_by_name(&owner) else {
-                return;
-            };
-            let Some(area) = self.output_tiling_area(&output) else {
-                return;
-            };
-            let workspace = self.layout.active_workspace(&owner);
-            let layout =
-                self.layout
-                    .layout(&owner, workspace, area, self.gaps_for(&owner, workspace));
-            let Some(index) = layout
-                .iter()
-                .position(|(w, _)| w.toplevel().is_some_and(|t| t.wl_surface() == &focused))
-            else {
-                return;
-            };
-            let delta = match (self.config.scroll.orientation, direction) {
-                (crate::scroll::Orientation::Horizontal, Direction::Left)
-                | (crate::scroll::Orientation::Vertical, Direction::Up) => -1,
-                (crate::scroll::Orientation::Horizontal, Direction::Right)
-                | (crate::scroll::Orientation::Vertical, Direction::Down) => 1,
-                _ => return,
-            };
-            if let Some((next, _)) = index
-                .checked_add_signed(delta)
-                .and_then(|index| layout.get(index))
-            {
-                if let Some(toplevel) = next.toplevel() {
-                    self.activate_toplevel(toplevel.wl_surface());
-                }
+            if let Some(next) = self.scroll_focus_target(&focused, direction) {
+                self.activate_toplevel(&next);
             }
             return;
         }
@@ -13295,6 +13368,16 @@ impl Smallvil {
             return;
         };
         if !self.layout.contains(&focused) {
+            return;
+        }
+        if self.config.spatial_engine == crate::config::SpatialEngine::Scroll {
+            let moved = match self.scroll_axis_step(direction) {
+                (true, step) => self.layout.scroll_move_column(&focused, step, false),
+                (false, step) => self.layout.scroll_move_in_column(&focused, step),
+            };
+            if moved {
+                self.scroll_columns_changed(&focused);
+            }
             return;
         }
         let Some(current) = self
@@ -13386,14 +13469,43 @@ impl Smallvil {
             let Some(area) = self.output_tiling_area(&output) else {
                 return;
             };
-            let extent = match (self.config.scroll.orientation, direction) {
-                (crate::scroll::Orientation::Horizontal, Direction::Left | Direction::Right) => {
-                    area.size.w
+            let (along, _) = self.scroll_axis_step(direction);
+            if !along {
+                // Across the strip: the window's share of a shared column.
+                let Some((column, _)) = self.layout.scroll_position(&surface) else {
+                    return;
+                };
+                let Some(workspace) = self.layout.workspace_of(&surface) else {
+                    return;
+                };
+                if self.layout.scroll_columns(&owner, workspace)[column]
+                    .windows
+                    .len()
+                    < 2
+                {
+                    return;
                 }
-                (crate::scroll::Orientation::Vertical, Direction::Up | Direction::Down) => {
-                    area.size.h
+                let cross = match self.config.scroll.orientation {
+                    crate::scroll::Orientation::Horizontal => window.geometry().size.h,
+                    crate::scroll::Orientation::Vertical => window.geometry().size.w,
                 }
-                _ => return,
+                .max(1);
+                let delta = if matches!(direction, Direction::Right | Direction::Down) {
+                    STEP
+                } else {
+                    -STEP
+                };
+                let weight = self.layout.scroll.weight(&surface)
+                    * f64::from((cross + delta).max(1))
+                    / f64::from(cross);
+                self.layout.scroll.set_weight(&surface, weight);
+                self.retile();
+                self.request_redraw();
+                return;
+            }
+            let extent = match self.config.scroll.orientation {
+                crate::scroll::Orientation::Horizontal => area.size.w,
+                crate::scroll::Orientation::Vertical => area.size.h,
             }
             .max(1);
             let delta = if matches!(direction, Direction::Right | Direction::Down) {
