@@ -117,7 +117,21 @@ impl TileMoveGrab {
                 .and_then(|(window, _)| window.toplevel().map(|t| t.wl_surface().clone()))
                 .filter(|surface| *surface != self.surface);
             if let Some(target) = target {
-                data.layout.swap(&self.surface, &target);
+                let zone = data
+                    .scroll_drop_target(
+                        &self.surface,
+                        &self.output,
+                        self.workspace,
+                        self.last_location,
+                    )
+                    .filter(|(scroll_target, _, _)| scroll_target == &target)
+                    .map(|(_, zone, _)| zone);
+                match zone {
+                    Some(zone) if zone != crate::scroll::DropZone::Swap => {
+                        data.layout.scroll_drop(&self.surface, &target, zone);
+                    }
+                    _ => data.layout.swap(&self.surface, &target),
+                }
             }
         }
     }
@@ -156,6 +170,18 @@ impl PointerGrab<Smallvil> for TileMoveGrab {
         );
         data.space
             .map_element(self.window.clone(), new_location, false);
+        // Scroll shows where the drop lands: a new column, a place in a
+        // column, or a swap.
+        let hint = data
+            .scroll_drop_target(&self.surface, &self.output, self.workspace, event.location)
+            .map(|(_, zone, rect)| {
+                let thickness = data.gaps_for(&self.output, self.workspace).max(6);
+                (
+                    self.output.clone(),
+                    crate::scroll::drop_hint(rect, zone, data.config.scroll.orientation, thickness),
+                )
+            });
+        data.set_drag_preview(hint);
         data.request_redraw();
     }
 
@@ -277,6 +303,7 @@ impl PointerGrab<Smallvil> for TileMoveGrab {
             self.commit(data);
         }
         data.classic_tile_drag = None;
+        data.set_drag_preview(None);
         // Motion moved only the visual Space element. Always snap it back
         // to authoritative tiling, including on cancellation.
         data.retile_viscous();

@@ -2314,6 +2314,73 @@ impl Smallvil {
         self.request_redraw();
     }
 
+    /// Shows (or with `None` hides) a drag hint rectangle through the
+    /// snap-preview element, in the snap preview's color and opacity.
+    pub(crate) fn set_drag_preview(&mut self, preview: Option<(String, Rectangle<i32, Logical>)>) {
+        let Some((output, rect)) = preview else {
+            if self.snap_preview.take().is_some() {
+                self.request_redraw();
+            }
+            return;
+        };
+        let color = [
+            self.config.snap.preview_color[0],
+            self.config.snap.preview_color[1],
+            self.config.snap.preview_color[2],
+            1.0,
+        ];
+        let unchanged = self
+            .snap_preview
+            .as_ref()
+            .is_some_and(|p| p.output == output && p.rect == rect);
+        if unchanged {
+            return;
+        }
+        match &mut self.snap_preview {
+            Some(preview) => {
+                preview.output = output;
+                preview.rect = rect;
+                preview.buffer.update(rect.size, color);
+            }
+            None => {
+                self.snap_preview = Some(SnapPreview {
+                    output,
+                    rect,
+                    buffer: SolidColorBuffer::new(rect.size, color),
+                });
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// The tile under `point` on a Scroll strip and where a drop there
+    /// lands, for a tiled drag of `moving` on `output`'s `workspace`.
+    pub(crate) fn scroll_drop_target(
+        &self,
+        moving: &WlSurface,
+        output: &str,
+        workspace: u32,
+        point: Point<f64, Logical>,
+    ) -> Option<(WlSurface, crate::scroll::DropZone, Rectangle<i32, Logical>)> {
+        if self.config.spatial_engine != crate::config::SpatialEngine::Scroll {
+            return None;
+        }
+        let area = self.output_tiling_area(&self.output_by_name(output)?)?;
+        let (window, rect) = self
+            .layout
+            .layout(output, workspace, area, self.gaps_for(output, workspace))
+            .into_iter()
+            .find(|(_, rect)| rect.to_f64().contains(point))?;
+        let target = window.toplevel()?.wl_surface().clone();
+        if &target == moving
+            || self.layout.workspace_of(&target) != self.layout.workspace_of(moving)
+        {
+            return None;
+        }
+        let zone = crate::scroll::drop_zone(rect, point, self.config.scroll.orientation);
+        Some((target, zone, rect))
+    }
+
     pub(crate) fn apply_snap_target(
         &mut self,
         window: &Window,
@@ -12720,6 +12787,87 @@ impl Smallvil {
         })
     }
 
+    /// Turns `focused`'s Scroll column into one tab group (tabs in column
+    /// order, `focused` stays the visible tab), or a tab group back into a
+    /// stacked column in tab order, where the group was.
+    fn toggle_column_tabbed(&mut self, focused: &WlSurface) {
+        if self.fullscreen.contains_key(focused) {
+            return;
+        }
+        if let Some(idx) = self.group_of(focused) {
+            let members: Vec<WlSurface> = self.groups[idx]
+                .members
+                .iter()
+                .map(|member| member.surface.clone())
+                .collect();
+            let leaf = members[self.groups[idx].active].clone();
+            for member in members.iter().filter(|member| **member != leaf) {
+                self.ungroup(member);
+            }
+            let (Some(output), Some(workspace)) = (
+                self.layout.output_of(&leaf).map(str::to_owned),
+                self.layout.workspace_of(&leaf),
+            ) else {
+                return;
+            };
+            let mut columns = self.layout.scroll_columns(&output, workspace);
+            let Some(at) = columns.iter().position(|c| c.windows.contains(&leaf)) else {
+                return;
+            };
+            let width = columns[at].width;
+            for column in &mut columns {
+                column.windows.retain(|s| !members.contains(s));
+            }
+            columns[at].windows = members
+                .iter()
+                .filter(|s| self.layout.contains(s))
+                .cloned()
+                .collect();
+            columns[at].width = width;
+            columns.retain(|c| !c.windows.is_empty());
+            self.layout.set_scroll_columns(&output, workspace, columns);
+            self.focus_window(Some(focused.clone()), SERIAL_COUNTER.next_serial());
+            self.scroll_columns_changed(focused);
+            return;
+        }
+        let (Some(output), Some(workspace)) = (
+            self.layout.output_of(focused).map(str::to_owned),
+            self.layout.workspace_of(focused),
+        ) else {
+            return;
+        };
+        let Some(column) = self
+            .layout
+            .scroll_columns(&output, workspace)
+            .into_iter()
+            .find(|c| c.windows.contains(focused))
+        else {
+            return;
+        };
+        if column.windows.len() < 2
+            || column
+                .windows
+                .iter()
+                .any(|s| self.group_of(s).is_some() || self.fullscreen.contains_key(s))
+        {
+            return;
+        }
+        let head = column.windows[0].clone();
+        for other in &column.windows[1..] {
+            self.group_with(&head, other);
+        }
+        if let Some(idx) = self.group_of(&head) {
+            if let Some(position) = self.groups[idx]
+                .members
+                .iter()
+                .position(|m| &m.surface == focused)
+            {
+                self.group_activate_tab(idx, position);
+            }
+        }
+        self.scroll_columns_changed(focused);
+    }
+
     /// Retiles after a column edit and keeps the edited window in view.
     fn scroll_columns_changed(&mut self, surface: &WlSurface) {
         self.retile();
@@ -12790,6 +12938,10 @@ impl Smallvil {
                         self.request_redraw();
                     }
                 }
+                return;
+            }
+            ColumnAction::ToggleTabbed => {
+                self.toggle_column_tabbed(&focused);
                 return;
             }
             ColumnAction::FocusEnd { last } => {
@@ -13114,6 +13266,12 @@ impl Smallvil {
             placements.push((surface, rect));
         }
 
+        // Render elements take output-local physical positions; placements
+        // are global logical rects.
+        let Some(output_geo) = self.space.output_geometry(output) else {
+            return Vec::new();
+        };
+        let scale = output.current_scale().fractional_scale();
         let mut elements = Vec::new();
         for group in &mut self.groups {
             if self.config.spatial_engine.uses_workspaces() && group.output != output_name {
@@ -13143,7 +13301,10 @@ impl Smallvil {
             }
 
             if let Some(buffer) = &group.strip {
-                let location = (rect.loc.x as f64, rect.loc.y as f64);
+                let location = (
+                    f64::from(rect.loc.x - output_geo.loc.x) * scale,
+                    f64::from(rect.loc.y - output_geo.loc.y) * scale,
+                );
                 if let Some(element) = crate::tab_strip::render_element(buffer, renderer, location)
                 {
                     elements.push(element);

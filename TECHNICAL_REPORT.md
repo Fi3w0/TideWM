@@ -6,7 +6,7 @@ The quick technical picture: what TideWM is built from, what works, what's been 
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). Underneath is a complete tiling window manager: BSP, master/stack and cascade layouts, workspaces, multi-monitor, layer shell, IPC and XWayland. On top sits the water look (ripples, waves, glass, shadows, physics), and every piece of it is a config toggle.
 
-Current version: **0.90.166**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
+Current version: **0.90.167**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
 
 ## Architecture
 
@@ -103,8 +103,10 @@ A column holds one app or several stacked ones. The table is for horizontal stri
 | `center-column` | Center the column once, even at the ends of the strip |
 | `focus-column-first/last` | Jump to the first or last column |
 | `move-column-first/last` | Move the column to the start or end |
+| `toggle-column-tabbed` | Turn the column into tabs (one app shown, a tab bar on top), and back |
 | `scroll-left/right/up/down` | Slide the strip half a screen |
 | Mod + right-drag | Drag sideways to resize the column, up/down to resize the app in a shared column |
+| Mod + left-drag | Drop near a tile's left or right edge for a new column there, near its top or bottom to join that column, or in the middle to swap. A highlight shows where it lands |
 | Touchpad swipe | Slide the strip with your fingers |
 
 New apps open as their own column right after the focused column, never in the middle of it. Closing the top app of a column keeps the rest of the column and its width.
@@ -218,7 +220,7 @@ Everything except screen sharing (file chooser, settings, printing) goes to `xdg
 ## Roadmap
 
 - **Wider hardware coverage:** Intel GPUs and an end-to-end hybrid-laptop run.
-- **Scroll:** tabbed columns and drag-to-insert previews.
+- **Scroll:** feel-tuning of the new column features on real hardware.
 - **Physics and Ocean extras on real hardware:** floating-window physics, the compass and the minimap are tested nested only.
 - **Feel tuning:** viscosity, sway, depth timing and transition presets get refined against real use.
 - **Lower VRAM:** measure large glass windows before considering a shared blur buffer per monitor.

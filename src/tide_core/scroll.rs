@@ -257,6 +257,75 @@ impl ScrollState {
     }
 }
 
+/// Where a dragged tile lands relative to the tile under the pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropZone {
+    /// A new column before the target's column.
+    ColumnBefore,
+    /// A new column after the target's column.
+    ColumnAfter,
+    /// Into the target's column, before the target.
+    Before,
+    /// Into the target's column, after the target.
+    After,
+    /// Trade places with the target.
+    Swap,
+}
+
+/// The zone of `rect` under `point`: the outer quarters along the strip
+/// make new columns, the outer quarters across it join the column, and the
+/// middle swaps.
+pub fn drop_zone(
+    rect: Rectangle<i32, Logical>,
+    point: smithay::utils::Point<f64, Logical>,
+    orientation: Orientation,
+) -> DropZone {
+    let fraction =
+        |value: f64, start: i32, size: i32| (value - f64::from(start)) / f64::from(size.max(1));
+    let (along, across) = match orientation {
+        Orientation::Horizontal => (
+            fraction(point.x, rect.loc.x, rect.size.w),
+            fraction(point.y, rect.loc.y, rect.size.h),
+        ),
+        Orientation::Vertical => (
+            fraction(point.y, rect.loc.y, rect.size.h),
+            fraction(point.x, rect.loc.x, rect.size.w),
+        ),
+    };
+    if along < 0.25 {
+        DropZone::ColumnBefore
+    } else if along > 0.75 {
+        DropZone::ColumnAfter
+    } else if across < 0.25 {
+        DropZone::Before
+    } else if across > 0.75 {
+        DropZone::After
+    } else {
+        DropZone::Swap
+    }
+}
+
+/// The preview a drop zone shows: a bar on the target's landing edge, or
+/// the whole target for a swap.
+pub fn drop_hint(
+    rect: Rectangle<i32, Logical>,
+    zone: DropZone,
+    orientation: Orientation,
+    thickness: i32,
+) -> Rectangle<i32, Logical> {
+    let t = thickness.max(2);
+    let horizontal = orientation == Orientation::Horizontal;
+    let (x, y, w, h) = (rect.loc.x, rect.loc.y, rect.size.w, rect.size.h);
+    let (x, y, w, h) = match (zone, horizontal) {
+        (DropZone::Swap, _) => (x, y, w, h),
+        (DropZone::ColumnBefore, true) | (DropZone::Before, false) => (x, y, t, h),
+        (DropZone::ColumnAfter, true) | (DropZone::After, false) => (x + w - t, y, t, h),
+        (DropZone::Before, true) | (DropZone::ColumnBefore, false) => (x, y, w, t),
+        (DropZone::After, true) | (DropZone::ColumnAfter, false) => (x, y + h - t, w, t),
+    };
+    Rectangle::new((x, y).into(), (w.max(1), h.max(1)).into())
+}
+
 /// Find the smallest viewport movement that reveals a tile, or center it.
 /// Oversized tiles align their leading edge instead of oscillating sides.
 pub fn reveal(offset: f64, start: f64, extent: f64, viewport: f64, center: bool) -> f64 {
@@ -396,6 +465,35 @@ mod tests {
         let distant = tile_rect(area, 1e30, 500., 0., 7, Orientation::Horizontal);
         assert!(distant.loc.x.checked_add(distant.size.w).is_some());
     }
+    #[test]
+    fn drop_zones_split_tiles_into_edges_and_middle() {
+        use smithay::utils::Point;
+        let rect = Rectangle::new((100, 0).into(), (400, 800).into());
+        let at = |x: f64, y: f64| drop_zone(rect, Point::from((x, y)), Orientation::Horizontal);
+        assert_eq!(at(150.0, 400.0), DropZone::ColumnBefore);
+        assert_eq!(at(450.0, 400.0), DropZone::ColumnAfter);
+        assert_eq!(at(300.0, 100.0), DropZone::Before);
+        assert_eq!(at(300.0, 700.0), DropZone::After);
+        assert_eq!(at(300.0, 400.0), DropZone::Swap);
+        // Vertical strips swap the axes.
+        assert_eq!(
+            drop_zone(rect, Point::from((300.0, 100.0)), Orientation::Vertical),
+            DropZone::ColumnBefore
+        );
+        assert_eq!(
+            drop_hint(rect, DropZone::ColumnAfter, Orientation::Horizontal, 6),
+            Rectangle::new((494, 0).into(), (6, 800).into())
+        );
+        assert_eq!(
+            drop_hint(rect, DropZone::Before, Orientation::Horizontal, 6),
+            Rectangle::new((100, 0).into(), (400, 6).into())
+        );
+        assert_eq!(
+            drop_hint(rect, DropZone::Swap, Orientation::Horizontal, 6),
+            rect
+        );
+    }
+
     #[test]
     fn presets_cycle_upward_and_wrap() {
         let presets = PresetWidths::new(&[0.5, 1.0 / 3.0, 2.0 / 3.0, 0.5]).unwrap();

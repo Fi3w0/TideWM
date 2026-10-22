@@ -879,6 +879,9 @@ pub enum ColumnAction {
     FocusEnd { last: bool },
     /// Move the column to the first or last place.
     MoveToEnd { last: bool },
+    /// Turn the column into one tab group, or a tab group back into a
+    /// stacked column.
+    ToggleTabbed,
 }
 
 #[derive(Debug, Clone)]
@@ -9630,6 +9633,7 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "focus-column-last" => Some(Action::Column(ColumnAction::FocusEnd { last: true })),
         "move-column-first" => Some(Action::Column(ColumnAction::MoveToEnd { last: false })),
         "move-column-last" => Some(Action::Column(ColumnAction::MoveToEnd { last: true })),
+        "toggle-column-tabbed" => Some(Action::Column(ColumnAction::ToggleTabbed)),
         other if other.starts_with("switch-layout:") => {
             let target = &other["switch-layout:".len()..];
             if target.is_empty() {

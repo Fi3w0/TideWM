@@ -2,6 +2,12 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.167 · 2026-10-22 — Tabbed columns and drag-to-insert
+
+- `toggle-column-tabbed` turns a Scroll column into tabs and back.
+- Dragging a tile in Scroll can drop it as a new column or into another column, not just swap, with a highlight showing where it lands.
+- Tab bars line up with their window on scaled monitors (they drifted left at 125%).
+
 ## 0.90.166 · 2026-10-22 — More IPC
 
 - `tidectl windows` reports each window's pid, position and size, and its Scroll column and row.

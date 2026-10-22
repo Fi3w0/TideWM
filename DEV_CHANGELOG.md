@@ -2,6 +2,13 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.167 — Tabbed Scroll columns and drag-to-insert
+
+- `toggle-column-tabbed` turns a Scroll column into one tab group, anchored on the head so tabs follow column order and the focused window stays the visible tab; toggled again, the group's members become a stacked column in tab order in the group's place. It reuses the existing group machinery (tab strip, `cycle-tab-*`, parking).
+- Tiled drags in Scroll drop by zone of the tile under the pointer (`scroll::drop_zone`): outer quarters along the strip insert a new column before/after, outer quarters across it insert into the column above/below, the middle swaps as before. A dragged window that was alone keeps its column width; one taken out of a shared column gets the default. The landing spot is previewed through the snap-preview element (`set_drag_preview`, snap preview color/opacity), cleared on release or cancellation.
+- Fix: group tab strips were positioned at the window's global logical location, but render elements take output-local physical positions. They drifted left by the scale factor at fractional scales (≈ x/1.25 at 1.25) and would be misplaced on any output not at the origin. Classic and Scroll were both affected.
+- Tests cover drop zones, hint rects and every drop kind. A nested run with real kitty clients checked tabbing a stacked column, cycling tabs, untabbing back to the same column order, and the tab strip aligned with its window at 1.25 scale. Pointer drags cannot be injected into nested winit, so drag-to-insert needs a native check. 666 tests, strict Clippy, fmt and the optimized release build pass.
+
 ## 0.90.166 — IPC: window geometry, layers and state-change events
 
 - `windows` entries gain `pid`, `geometry` (global logical rect from the Space, `null` while unmapped) and, in Scroll, `scroll: {column, row, column_width, row_weight}`.

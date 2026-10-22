@@ -261,6 +261,50 @@ impl Layouts {
         })
     }
 
+    /// Drops `moving` relative to `target` (same workspace) per `zone`.
+    /// `Swap` is left to `Layouts::swap`.
+    pub(crate) fn scroll_drop(
+        &mut self,
+        moving: &WlSurface,
+        target: &WlSurface,
+        zone: scroll::DropZone,
+    ) -> bool {
+        if moving == target || self.key_of(moving) != self.key_of(target) {
+            return false;
+        }
+        let target = target.clone();
+        self.edit_scroll_columns(moving, |columns, column, row, default_width| {
+            let alone = columns[column].windows.len() == 1;
+            let width = if alone {
+                columns[column].width
+            } else {
+                default_width
+            };
+            let window = columns[column].windows.remove(row);
+            columns.retain(|c| !c.windows.is_empty());
+            let Some((at, at_row)) = columns.iter().enumerate().find_map(|(c, col)| {
+                col.windows
+                    .iter()
+                    .position(|s| s == &target)
+                    .map(|r| (c, r))
+            }) else {
+                return false;
+            };
+            let single = |window| ScrollColumn {
+                windows: vec![window],
+                width,
+            };
+            match zone {
+                scroll::DropZone::ColumnBefore => columns.insert(at, single(window)),
+                scroll::DropZone::ColumnAfter => columns.insert(at + 1, single(window)),
+                scroll::DropZone::Before => columns[at].windows.insert(at_row, window),
+                scroll::DropZone::After => columns[at].windows.insert(at_row + 1, window),
+                scroll::DropZone::Swap => return false,
+            }
+            true
+        })
+    }
+
     /// Where a new window goes when `target` is focused: after the last
     /// window of `target`'s column, so a new window never splits a column.
     pub(crate) fn scroll_insert_target(&self, target: &WlSurface) -> WlSurface {
@@ -786,6 +830,44 @@ mod tests {
             .scroll_available_width(&surface(&w[1]), area, 8)
             .unwrap();
         assert!((width - 0.742).abs() < 1e-9, "{width}");
+    }
+
+    #[test]
+    fn drops_insert_new_columns_or_join_a_column_at_either_end() {
+        let mut protocol = ProtocolFixture::new();
+        let mut layouts = Layouts::default();
+        layouts.scroll.config = Some(ScrollConfig::default());
+        let w: Vec<_> = (0..3).map(|_| protocol.window()).collect();
+        for window in &w {
+            layouts.insert("screen", 1, window.clone(), None);
+        }
+        let s: Vec<_> = w.iter().map(surface).collect();
+        use scroll::DropZone::*;
+        // Into the middle column, above its window.
+        assert!(layouts.scroll_drop(&s[0], &s[1], Before));
+        assert_eq!(
+            shape(&layouts),
+            vec![vec![s[0].clone(), s[1].clone()], vec![s[2].clone()]]
+        );
+        // Out again as a new column after the last column.
+        assert!(layouts.scroll_drop(&s[0], &s[2], ColumnAfter));
+        assert_eq!(
+            shape(&layouts),
+            vec![vec![s[1].clone()], vec![s[2].clone()], vec![s[0].clone()]]
+        );
+        // Below a window, then a new column before the first.
+        assert!(layouts.scroll_drop(&s[2], &s[0], After));
+        assert_eq!(
+            shape(&layouts),
+            vec![vec![s[1].clone()], vec![s[0].clone(), s[2].clone()]]
+        );
+        assert!(layouts.scroll_drop(&s[2], &s[1], ColumnBefore));
+        assert_eq!(
+            shape(&layouts),
+            vec![vec![s[2].clone()], vec![s[1].clone()], vec![s[0].clone()]]
+        );
+        assert!(!layouts.scroll_drop(&s[2], &s[2], After));
+        assert!(!layouts.scroll_drop(&s[2], &s[1], Swap));
     }
 
     #[test]
