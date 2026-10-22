@@ -1,133 +1,118 @@
 # TideWM — Technical Report
 
-A fast technical reference for TideWM: what it is, what's implemented, current hardware-verification status, and how to build it. For the pitch, see [README.md](README.md). For the full config/action/IPC reference, see [DOCUMENTATION.md](DOCUMENTATION.md). For the Classic/Ocean spatial-engine design, see [SPATIAL_MODEL.md](SPATIAL_MODEL.md). For release-by-release detail, see [CHANGELOG.md](CHANGELOG.md).
+The quick technical picture: what TideWM is built from, what works, what's been tested on real hardware, and how to build it. For the pitch, see [README.md](README.md). For every config key, action and IPC request, see [DOCUMENTATION.md](DOCUMENTATION.md).
 
 ## What it is
 
-A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). A full tiling-WM feature set (BSP/master-stack/cascade layouts, workspaces, multi-monitor, layer-shell, IPC, XWayland) with a water/aqua render identity layered on top as a fully toggleable effect stack, plus a second spatial engine ("Ocean") as an alternative to numbered workspaces.
+A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). Underneath is a complete tiling window manager: BSP, master/stack and cascade layouts, workspaces, multi-monitor, layer shell, IPC and XWayland. On top sits the water look (ripples, waves, glass, shadows, physics), and every piece of it is a config toggle.
 
-Current development version: **0.90.159**, second major pre-release. 1.0 is intentionally reserved until the effect stack and Ocean get a broader real-hardware pass (see CHANGELOG).
+Current version: **0.90.162**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
 
 ## Architecture
 
-- **Two backends**: `winit` (nested inside an existing session, the primary dev/test loop) and `udev`/DRM (standalone TTY session, the real daily-driver path).
-- **Three spatial engines**, chosen with `engine = classic|ocean|scroll` and switchable live on a config hot reload, migrating every window in place with no restart.
-- **XWayland** via a spawned [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite) process rather than an embedded X11 window manager, so X11 clients arrive as ordinary `xdg_shell` surfaces.
-- **Render pipeline**: one shared backdrop-capture pipeline feeds water-glass/frost glass, then shadow, then rounding/borders, then window-open/close/move animation. Each output render or desktop capture shares one frame-owned placement snapshot across those consumers; the same element walk feeds both backends, screenshots, screencasts, and workspace-transition captures, so effects don't need parallel implementations per output path.
-- **RAM target**: effect-scaled with a 2GB absolute ceiling. Real measurements come in far below that: ~50MB PSS for a plain tiling setup (effects off), ~60-70MB PSS idle and ~63MB with nine glass windows with the full water stack on (real AMD, 0.90.59) -- roughly half of same-machine Hyprland.
+- **Two backends.** `winit` runs TideWM nested inside your current desktop (safe to try, the main dev loop). `udev`/DRM is the real standalone session you log into.
+- **Three spatial engines**, switchable live with `tidectl engine` or a config reload, carrying every open window across:
+  - **Classic:** numbered workspaces per monitor, with the Depth Deck for parking tiles.
+  - **Ocean:** one zoomable 2D canvas with a camera per monitor.
+  - **Scroll:** a scrolling strip of apps per monitor, niri-style.
+
+  How they relate: [SPATIAL_MODEL.md](SPATIAL_MODEL.md).
+- **XWayland** through [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite), so X11 apps arrive as ordinary Wayland windows.
+- **One render pipeline.** Glass, shadows, rounding, borders and animations are drawn once per frame from a shared window-placement snapshot. The same path feeds both backends, screenshots, screen sharing and workspace transitions, so an effect never needs a second implementation.
+- **Config:** [Wave](WAVE.md), data on the surface and Lua underneath. It's hot-reloaded, and a broken edit never half-applies.
+- **Memory:** about 50 MB PSS for plain tiling and 60–70 MB with the full water stack on AMD. About 100 MB on NVIDIA, a third of which is the driver's own mappings. 2 GB is a hard ceiling for feature growth, not a target.
 
 ## Feature status
 
 | Area | Status |
 | --- | --- |
-| Tiling: BSP, master/stack, cascade (aspect-adapting rows, drag-resize, liquid pour/drain) | Done |
-| Workspaces, scratchpads (classic + named), per-window pinning | Done |
-| Multi-monitor, hotplug, independent tiling tree per output, mixed-DPI | Done |
-| Hybrid/multi-GPU client render offload | Implemented with Smithay `GpuManager`, DMA-BUF feedback, and primary-node early import; real AMD+Nvidia laptop verification pending. Outputs remain confined to one selected GPU. |
-| Window groups (tabbed), floating, fullscreen, maximize, pseudo-tiling | Done |
-| Layer-shell (bars, launchers, lock screens) | Done; content-only layer commits preserve tiled drag positions and stacking (.142), with protocol regression coverage for mixed-scale outputs, exclusive-zone changes and unmap/remap; maintainer-confirmed fixed on native NVIDIA with video wallpapers |
+| Tiling: BSP, master/stack, cascade, floating layout, snapping | Done |
+| Workspaces, scratchpads, pinning, window groups (tabs), fullscreen, maximize | Done |
+| Classic, Ocean and Scroll engines, live switching | Done |
+| Multi-monitor, hotplug, mixed scale, dragging tiles between monitors | Done |
+| Layer shell (bars, launchers, wallpapers, lock screens) | Done |
 | XWayland | Done, via xwayland-satellite |
-| Screenshots, clipboard, session lock | Done; per-window capture through ext-image-copy-capture and hyprland-toplevel-export-v1 |
-| PipeWire screencasting | Done (`--features screencast`), verified end to end via real OBS and Discord on standalone hardware |
-| IPC: request/response plus an event-stream subscribe mode | Done |
-| `tidectl` CLI, including `doctor`/`report` for bug triage | Done |
-| Water/decoration render stack: impulse ripples, wave workspace transitions, tiled/floating water-glass and per-app liquid frost glass, analytical shadows, animated gradient borders, rounded clipping, configurable window animations, move/resize viscosity, connected-vessel BSP resizing, opt-in floating sway, automatic depth/buoyancy, ambient caustics | Done; tiled/liquid frost is release-GLES nested-verified in Classic/Ocean, standalone AMD remains, and the earlier stack is standalone-AMD-verified |
-| Custom shaders (`shaders { }`, `shader "<name>" { }`): opt-in user `.frag` effects over a window's backdrop, up to four chained stages with `save`/`get` and extra texture bindings, per-window and per-workspace assignment, bounded budgets | Done through Phase 7B; Mesa software-GLES tests and native NVIDIA daily-config two-program rendering/zero compile failures verified; broader combinations remain |
-| Classic Depth Deck (tiled-window park/swap recall) | Done, standalone-AMD-verified |
-| Ocean spatial engine: reefs, per-output cameras, sink/dredge/surface depth, bookmarks, freeform window detach, smart tiling, live Classic↔Ocean migration | Core standalone-AMD-verified; .141 independent monitor membership/default and optional shared canvas protocol-tested; independent dual-monitor views maintainer-confirmed on native NVIDIA with animated wallpapers and a completed showcase; quantified performance and native shared-mode checks pending |
-| Ocean compass (off-screen urgent/deep glow cues) and whole-world overview minimap | Done, nested-verified only |
-| Continuous swim navigation (trackpad swipe between workspaces) | Done, real-touchpad-verified |
-| Floating-window ocean physics (`float_physics { tier = light|full }`): disturbance-driven bob/drift, `full` adds mass/collisions/a traveling wave field | Done, nested-verified only |
-| Ocean currents: bounded render-only downstream drift for visible unfocused floating windows, with focus/drag pause | Done, release-GLES nested-verified on AMD |
-| Weighted buoyancy: per-app render-only mass/sink for Classic and Ocean floaters, with Ocean flow attenuation | Done, release-GLES nested-verified on AMD under Ocean; Classic shares the validated render path |
-| Nvidia support | Standalone DRM backend verified on a real RTX 3060 (proprietary 595.99.02, two outputs at mixed scale, 2026-09-25); nested verified earlier |
-| VT scanout recovery and nested refresh scheduling | Checked DRM-master/input recovery and rational absolute nested deadlines implemented; unit coverage includes partial failures, fractional rates, and same-size/same-scale monitor changes. Live VT failure injection and mixed-refresh host moves remain pending |
+| Screenshots, per-window capture, clipboard, session lock | Done |
+| Screen sharing (OBS, Discord) through TideWM's own portal | Done with `--features screencast` |
+| IPC and `tidectl` (queries, event stream, `doctor`, `report`, `perf`) | Done |
+| Water stack: ripples, wave transitions, water/frost glass, shadows, gradient borders, viscosity, sway, buoyancy, caustics, currents | Done |
+| Custom GLSL shaders (up to four chained passes) | Done |
+| Floating-window ocean physics, Ocean compass and minimap | Done; tested nested only |
+| Hardware cursors, explicit sync, direct scanout feedback, VRR | Done |
+| Multi-GPU client offload | Done; not yet tested on a hybrid laptop |
 | AUR package | Not yet |
 
-## Native performance and buffer synchronization
+## Hardware
 
-Native outputs expose cumulative CPU-side render timings and scanout/cursor/fence/backdrop counters through `tidectl perf --json`. Cursor-plane assignment uses Smithay’s software fallback; `hardware_cursor = false` forces composition. Surface DMA-BUF feedback follows actual frame states and offers primary-plane formats only when the selected renderer can also import them, while retaining configured offload formats.
+| Hardware | Status |
+| --- | --- |
+| **AMD** | Main development hardware. Standalone session, the whole water stack, touchpad gestures and Ocean are verified here. |
+| **NVIDIA** | Daily driver on an RTX 3060 (proprietary driver, open kernel modules) with two monitors at mixed scale (1.0 and 1.25). Glass, shaders, screen sharing, XWayland, games and all three engines work. Idle: about 0.5% of one CPU core and 69 MB of compositor VRAM. |
+| **Intel** | Untested. Reports welcome. |
+| **Hybrid AMD + NVIDIA laptops** | GPU selection and offload are implemented and unit-tested, but not yet run end to end on a laptop. |
 
-`linux-drm-syncobj-v1` is advertised only with runtime syncobj-eventfd support. Acquire points defer transactions before import; applied release points follow Smithay buffer references. Unused transaction releases survive cancellation/destruction, and reattaching a buffer adopts its new points without losing damage progression. Real kernel timeline/DMA-BUF regressions exercise these lifetimes on both available render nodes without a nested desktop or modesetting. All 630 tests, strict Clippy, formatting and the clean optimized release pass. The maintainer installed .148 and tested native Classic monitor drag and fullscreen Sober; IPC confirms clean release `91273d2`, and DP-4 cursor-plane use is observed. The two Sober benchmark averages are 3368.1 and 3030.7 FPS against the recorded KWin animated baseline of 2872.1, with partial/unpaired resource windows and no isolated feature attribution. Fractional cursor-plane validation, KMS/VT/DPMS/hotplug and post-change Lost Coast checks remain pending.
-
-Tiled drags transfer to the destination’s active layout in Classic and Ocean. Transient previews do not alter membership; completed transfers preserve groups, parked tabs, scale and pins. Protocol regressions cover ownership, cancellation state, empty destinations and grouped transfer across mixed scales; Classic native monitor drag is maintainer-confirmed; native Ocean and extended cancellation/group validation remain pending.
-
-## Hardware verification
-
-- **2026-10-06 continuation:** native NVIDIA release .119 fixes cross-monitor first-drag invisibility (maintainer-confirmed), natural floating size and accumulated keyboard resize. Wayland/XWayland GL, mixed-scale screenshots, native sizing/persistence and isolated Classic/Ocean behavior were exercised. The .120/.122 presentation-state/identity and .121 capture-readiness fixes follow reproduced native protocol failures. Final .122 passes 599 tests, strict Clippy, release build and live nested presentation/capture probes; loaded-native .122 protocol checks remain pending. See `report.md` for exact evidence, resource measurements and remaining hardware debt.
-- **AMD**: primary development and test hardware. The standalone `udev`/DRM backend, the full water/decoration render stack, swim's real-touchpad gesture path, and Ocean's core navigation (reefs, cameras, freeform drag) are all verified here.
-- **Latest standalone AMD health pass (2026-08-13)**: release 0.90.72 on Renoir completed full-output and cursor-overlay screencopy, reversible workspace transitions with ordered IPC events, invalid-action/batch/eval handling, and 100 one-shot plus 20 interrupted subscription connections without descriptor or PSS growth. Doctor remained all-pass with no TideWM panic/error or coredump. One-window PSS settled at 86.8 MiB after the reload/capture pass. The configured 24-fps caustics were the dominant continuous CPU/GPU cost; see `report.md` for the measured A/B and its whole-GPU caveat.
-- **Latest NVIDIA resource pass (2026-10-06)**: 0.90.138 on the same RTX 3060, same procedure as below: idle one window 0.46% CPU, PSS 99 MiB / RSS 143 MiB, 69 MiB TideWM VRAM; ten blurred kitty windows 0.20% CPU, RSS 145 MiB, 70 MiB TideWM VRAM; three close/open cycles and 100 queries + 20 interrupted subscribers return to identical PSS and descriptors. About 45% less PSS and 47% less TideWM VRAM than 0.90.106. Details in `report.md`.
-- **Previous standalone NVIDIA pass (2026-09-25)**: 0.90.106 (`13b104e`, `fiw/testing-fixes`) on the RTX 3060 above: doctor all-pass; full-output and cursor-overlay `grim`; unknown actions, an invalid mixed batch, eval syntax errors and a runaway eval loop (execution budget) all failed cleanly; oversized, garbage and truncated IPC requests left the compositor running; 100 one-shot queries plus 20 interrupted subscribers left PSS and descriptors unchanged. Idle ~1% of one core, 131 MiB TideWM VRAM; nine frost windows ~0-1% CPU and 139 MiB. PSS plateaus near 180 MiB after warm-up, of which ~60-95 MiB is `/dev/nvidia*` mappings; open/close cycles returned to the same value with a flat heap, so this is not a leak.
-- **Nvidia**: standalone `udev`/DRM backend verified on a real RTX 3060 (proprietary 595.99.02 with the open kernel modules, Gentoo, kernel 7.2.7), logged in from the display manager as a real session. GLES renders on the dGPU with the Radeon iGPU excluded through `gpu { render = vendor:nvidia; exclude = [vendor:amd] }`; two outputs run together (2560×1440@144 at 1.25×, 1920×1080@180 at 1.0×). The overlay-plane workaround branch runs for every output on this driver and scanout is correct on both; no overlay-specific test was done. Frost glass, custom shaders, screencopy, xwayland-satellite, portal and drag and drop worked. Measured cost is in `report.md`. The nested backend was verified earlier on the same card.
-- **Hybrid GPU**: selection/exclusion, render-node feedback, cross-device import, hot add/remove, and VT lifecycle compile and unit-test clean. The required end-to-end AMD+Nvidia PRIME/offload run is pending on the handoff laptop; do not call this hardware-verified until a non-primary game buffer displays correctly there at sustained frame rate.
-- **Intel**: untested so far.
-- **Still nested-only**: Ocean compass/overview, floating-window ocean physics (both tiers), `canvas_pan_button`, `modifier_pan_fingers`.
+**Distros:** Arch and Gentoo are fully supported and tested. On Gentoo, both systemd and OpenRC work. Fedora, Debian/Ubuntu, openSUSE and NixOS have build instructions or packages and should work, but they get less testing. TideWM needs no particular init system: libseat and libudev are enough.
 
 ## Building
 
-**Rust toolchain**: stable, 1.86+.
-
-**Native dependencies:**
+**Rust:** stable, 1.86 or newer.
 
 | Library | Notes |
 | --- | --- |
-| `pkg-config` | Build-time only |
-| `wayland` | `libwayland-client`/`-server`/`-egl` |
-| `libudev` | `systemd-libs` on systemd distros, `eudev`/`libudev-zero` elsewhere; doesn't require systemd |
-| `libinput` | |
-| `libxkbcommon` | |
+| `pkg-config` | Build only |
+| `wayland` | Client, server and EGL libraries |
+| `libudev` | `systemd-libs` on systemd distros, `eudev` or `libudev-zero` elsewhere |
+| `libinput`, `libxkbcommon`, `libdrm` | |
 | `mesa` | `libEGL`, `libgbm` |
-| `libdrm` | |
-| `libseat` | The `seatd` package on most distros; also works against systemd-logind |
-| `clang`/`libclang` | Build-time only, and only if building with `--features screencast` -- `pipewire-sys`'s bindgen step needs it. `install.sh` always builds with this feature on, so it's needed for that path even if you don't care about screen-sharing. |
+| `libseat` | `seatd`, or systemd-logind |
+| `clang` / `libclang` | Build only, and only with `--features screencast` (`install.sh` always enables it) |
 
 ```bash
-# Arch (add `clang` if building with --features screencast, e.g. via install.sh)
+# Arch (add clang for screencast)
 sudo pacman -S pkg-config wayland systemd-libs libinput libxkbcommon mesa libdrm seatd
 
-# Fedora (add `clang` if building with --features screencast, e.g. via install.sh)
+# Gentoo, systemd or OpenRC (skip sys-fs/eudev if systemd is installed; add llvm-core/clang for screencast)
+sudo emerge --ask dev-util/pkgconf dev-libs/wayland dev-libs/libinput \
+    x11-libs/libxkbcommon media-libs/mesa x11-libs/libdrm sys-auth/seatd sys-fs/eudev
+
+# Fedora (add clang for screencast)
 sudo dnf install pkgconf-pkg-config wayland-devel systemd-devel libinput-devel \
     libxkbcommon-devel mesa-libEGL-devel mesa-libgbm-devel libdrm-devel libseat-devel
 
-# Debian / Ubuntu (add `libclang-dev` if building with --features screencast, e.g. via install.sh)
+# Debian / Ubuntu (add libclang-dev for screencast)
 sudo apt install pkg-config libwayland-dev libudev-dev libinput-dev \
     libxkbcommon-dev libegl1-mesa-dev libgbm-dev libdrm-dev libseat-dev
 
-# openSUSE (add `clang` if building with --features screencast, e.g. via install.sh)
+# openSUSE (add clang for screencast)
 sudo zypper install pkgconf-pkg-config wayland-devel libudev-devel libinput-devel \
     libxkbcommon-devel Mesa-libEGL-devel Mesa-libgbm-devel libdrm-devel libseat-devel
-
-# Gentoo (systemd or OpenRC profile -- sys-fs/eudev covers libudev on a
-# non-systemd profile; skip it if sys-apps/systemd is already merged. Add
-# sys-devel/clang if building with --features screencast, e.g. via install.sh)
-sudo emerge --ask dev-util/pkgconf dev-libs/wayland dev-libs/libinput \
-    x11-libs/libxkbcommon media-libs/mesa x11-libs/libdrm sys-auth/seatd sys-fs/eudev
 ```
 
-These package names are believed correct but only actually exercised on Arch (the maintainer's own distro) — if the build fails looking for one on your distro, that's exactly the kind of report worth [opening an issue](https://github.com/Fi3w0/TideWM/issues/new/choose) for. The library list above (not the package names) is what actually matters if you need to hunt one down yourself.
+If a package name is wrong on your distro, the library list above is what matters, and an [issue](https://github.com/Fi3w0/TideWM/issues/new/choose) helps everyone.
 
-Optional: [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite) for X11 apps (`xwayland.enabled = false` to skip it).
+Optional: [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite) for X11 apps (`xwayland.enabled = false` turns it off).
 
 ```bash
 git clone https://github.com/Fi3w0/TideWM.git
 cd TideWM
-cargo build --release --locked
+cargo build --release --locked --features screencast
 ```
+
+Or skip all of this and install a real package: [packaging/README.md](packaging/README.md).
 
 ### Running
 
 ```bash
-cargo run --locked
+cargo run --locked --features screencast
 ```
 
-Backend auto-selects: nested (`winit`) when `WAYLAND_DISPLAY`/`DISPLAY` is set, standalone TTY/DRM (`udev`) otherwise. Switch to a free VT with neither set to try it standalone.
+TideWM picks the backend itself: nested when `WAYLAND_DISPLAY` or `DISPLAY` is set, standalone otherwise.
 
-To launch from a display manager (GDM, SDDM, greetd): put the `TideWM` binary (note the case; `[[bin]] name` in `Cargo.toml` builds it capitalized, and `tidewm.desktop`'s `Exec=` line expects exactly that) on `PATH`, copy `share/wayland-sessions/tidewm.desktop` into `/usr/share/wayland-sessions/`, and copy `share/icons/TideWM-logo-faithful-4k.png` to `/usr/share/pixmaps/tidewm.png` for the session picker's icon. `./install.sh` does all three, so re-running it after a change is the only step needed to pick up a new build at the next login.
+To log in from a display manager (SDDM, GDM, greetd), run `./install.sh`. It installs the `TideWM` binary (capitalized: the session file expects exactly that name), the session entry and its icon. Run it again after pulling to update.
 
 ### Screen sharing
 
-Discord, OBS, and anything else that shares your screen go through `xdg-desktop-portal`, not TideWM directly. TideWM implements its own `org.freedesktop.impl.portal.ScreenCast` backend, so no `xdg-desktop-portal-gnome`/GTK4 chain is required. The PipeWire buffer path (SHM/MemFd) delivers real frames, verified end to end on a standalone TTY session through both real OBS and real Discord. DMA-BUF export stays disabled.
+Discord, OBS and other screen-sharing apps go through `xdg-desktop-portal`. TideWM ships its own ScreenCast backend, so you don't need the GNOME portal stack:
 
 ```bash
 cargo build --release --locked --features screencast
@@ -135,51 +120,25 @@ sudo cp share/xdg-desktop-portal/tidewm.portal /usr/share/xdg-desktop-portal/por
 sudo cp share/xdg-desktop-portal/tidewm-portals.conf /usr/share/xdg-desktop-portal/
 ```
 
-`tidewm-portals.conf`'s `default=gtk` line routes every portal interface *other* than ScreenCast (file chooser, print, settings/appearance, etc.) to `xdg-desktop-portal-gtk`, a separate, much lighter package than the `xdg-desktop-portal-gnome` chain mentioned above (GTK3, not GTK4/libadwaita/nautilus). Install it too, or those other portal requests have no backend to answer them: `sudo pacman -S xdg-desktop-portal-gtk` on Arch, `xdg-desktop-portal-gtk` on Fedora/Debian/openSUSE.
-
-`xdg-desktop-portal` itself must already be installed (most distros ship it by default). Log in through TideWM's own session entry so `xdg-desktop-portal` picks up `XDG_CURRENT_DESKTOP=tidewm` and reads the config above.
-
-Native `tidectl perf --json` exposes per-output scanout/cursor-plane decisions, fence counts and cumulative CPU-side scene/backdrop/render/queue/wait timings. These distinguish submission work from blocking waits; they are not GPU timestamps or proof of a throughput improvement. Native overhead and gaming verification of .144 remain pending.
+Everything except screen sharing (file chooser, settings, printing) goes to `xdg-desktop-portal-gtk`, so install it too. Log in through TideWM's own session entry so the portal sees `XDG_CURRENT_DESKTOP=tidewm`. Frames travel over shared memory; DMA-BUF export is off.
 
 ## Roadmap
 
-- **Rendering validation (2026-10-07)**: optimized .142 GLES captures match wallpaper and a patterned client through an identity effect at scales 1, 1.25, 1.5 and 2; static effects stop updating and captured textures release. These isolated winit checks use private KWin virtual outputs and explicit output-management scale settings. Native .142 verifies opaque-wallpaper pause/uncover resume and both full-resolution PipeWire monitor streams (60/60 nonempty frames each at negotiated 30 Hz); capture cadence is not display presentation cadence. A separate native first-feedback check receives presentation timestamps on both monitors with refresh intervals matching their configured 144/180 Hz modes; continuous cadence and cross-output traces remain pending. .143 scopes routine window/layer commits and full physics/current/buoyancy damage to affected window placements, retaining old/new commit extents, with 627 passing tests and protocol/scene regressions. Its optimized 1.25-scale GLES check verifies animated content and all three motion paths, return to static, identity parity and texture release; native page-flip/performance verification remains pending.
-- **Audit follow-through**: real-DRM cadence verification for P-12, VT recovery/failure checks for the new checked ownership path, mixed-refresh nested host moves, idle-maintenance measurement for M-55, and fresh review of the remaining medium findings in `report.md`. M-37 now has a checked public-API workaround on the existing Smithay pin; upgrading the pin remains separate compatibility work.
-- **Lower TideWM-owned VRAM**: active capture cost is measurable through `tidectl perf`, adjustable with `backdrop_capture_scale`, and reclaimed after the last output stops presenting a glass surface; `builtin_wallpaper = false` also avoids the fallback texture. Measure representative large glass windows before considering a shared per-output blur framebuffer, whose different overlap/occlusion semantics need an explicit design decision. Client surface buffers remain outside compositor control.
-- **Non-water motion presets**: smooth window move/resize and workspace motion that works with `water_effects = false`, exposed as Wave-selectable presets and tunable fields. Exact feel and defaults require maintainer approval before implementation.
-- **Feel-tuning** across viscosity, sway, depth timings, cascade's drag feel, floating-window ocean physics, and the transition/ripple presets. All ship with working defaults; the actual feel still gets refined against real use.
-- **Standalone hardware pass** for what's still nested-only: the Ocean compass/overview, and both floating-window ocean physics tiers.
-- **AUR package**: build from source for now.
-- **Design-pending identity features** (parking lot, needs a design conversation before pickup): tide contexts and workspace depth-moods. Currents, Cascade's pour/drain visual, and non-sorting weighted buoyancy are implemented with their approved contracts.
+- **Wider hardware coverage:** Intel GPUs and an end-to-end hybrid-laptop run.
+- **Scroll:** the niri features still missing, such as stacked columns, consume/expel, pointer resizing of columns, and drag-to-insert previews.
+- **Physics and Ocean extras on real hardware:** floating-window physics, the compass and the minimap are tested nested only.
+- **Feel tuning:** viscosity, sway, depth timing and transition presets get refined against real use.
+- **Lower VRAM:** measure large glass windows before considering a shared blur buffer per monitor.
+- **Design-pending ideas:** tide contexts and workspace depth-moods, which need a design conversation first.
+- **AUR package.**
 
 ## Docs map
 
-- [README.md](README.md) — the pitch and quick start
-- [DOCUMENTATION.md](DOCUMENTATION.md) — full config-key, action-string, and IPC reference
-- [SPATIAL_MODEL.md](SPATIAL_MODEL.md) — Classic vs. Ocean engine design
-- [CHANGELOG.md](CHANGELOG.md) — release-by-release history
-- [CONTRIBUTING.md](CONTRIBUTING.md) / [SECURITY.md](SECURITY.md)
-
-## Shared activation IPC
-
-Exact-window activation and MRU app activation share hidden-workspace/group
-reveal and Ocean camera navigation. Notification producers can resolve their
-source window through bounded PID ancestry or explicit selectors; ambiguous
-terminal-server matches fail. No notification daemon is embedded. Protocol-state
-regressions cover hidden Classic activation, stale IDs and lock refusal; native
-notification-click and Ocean camera visuals remain to be verified.
-
-## Experimental Scroll engine
-
-Independent output strips support separate workspace views or continuous tiled
-workspace sections, horizontal/vertical orientation, focus reveal, proportional
-sizes, shared groups, keyboard resize and configured touchpad viewport gestures.
-The existing renderer/effects/capture pipeline consumes the same placements.
-Centered focus includes edge/sole columns; configurable widths can expose neighbor
-peeks. Pointer routing follows animated Scroll placement and refreshes without
-physical mouse motion, preserving keyboard-selected focus and active grabs, and
-pointer-driven focus never scrolls the strip while keyboard/IPC activation does.
-Classic/Scroll preserve membership trees; Ocean migration remains the existing
-conversion. See SCROLL.md for limits and validation. Native dual-output, physical
-touchpad and hotplug checks are still pending; no performance improvement is
-claimed from the nested rendering checks.
+- [README.md](README.md): the pitch and quick start
+- [DOCUMENTATION.md](DOCUMENTATION.md): every config key, action and IPC request
+- [WAVE.md](WAVE.md): the config format
+- [SPATIAL_MODEL.md](SPATIAL_MODEL.md): Classic, Ocean and Scroll
+- [SCROLL.md](SCROLL.md): the Scroll engine guide
+- [CHANGELOG.md](CHANGELOG.md): what changed, in short; [DEV_CHANGELOG.md](DEV_CHANGELOG.md) has the full detail
+- [packaging/README.md](packaging/README.md): distro packages
+- [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [LICENSING.md](LICENSING.md)

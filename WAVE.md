@@ -4,7 +4,7 @@
 
 Wave is a config format that is data on the surface and Lua underneath. This file explains what that means, why it exists, and where it has rough edges. It is not a reference manual: the exhaustive key-by-key reference lives in `DOCUMENTATION.md`. Read this first, reach for that when you need a key.
 
-Wave is TideWM's config format. The line-based grammar it replaced was removed with the rewrite; `WAVE.md` describes the format as it is, and the rewrite's roadmap lives in `AGENT.md`.
+Wave is TideWM's config format. It replaced an older line-based grammar, which is gone; this file describes Wave as it is today.
 
 The name "Wave" was already taken by another language, so the standalone, tool-agnostic version of this format is **[Scorium](https://github.com/Scorium-lang/scorium-rs)**: same grammar, its own parser crate, embeddable in any project that uses YAML or JSON today. TideWM keeps calling its config format Wave; outside TideWM it is Scorium.
 

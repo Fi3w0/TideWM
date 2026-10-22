@@ -1,173 +1,66 @@
 # TideWM spatial model
 
-TideWM is one compositor with three selectable spatial engines. The engine
-changes window ownership and navigation, but it is not a startup-only choice
-anymore: a hot reload that flips `spatial_engine` migrates every live window
-between the models in place (see "Migration" below). Water, glass, animations,
-and other visual features remain independent toggles.
+TideWM is one compositor with three spatial engines. The engine decides where windows live and how you move between them. Everything else stays the same whichever one you pick: water, glass, animations, rules, IPC and protocols.
+
+Pick one with `engine = classic|ocean|scroll` in `config.wave`, or switch the running session with `tidectl engine <name>`. Either way, every open window moves across in place, with no restart. (`spatial_engine` is accepted as an older spelling of `engine`.)
 
 ## Classic
 
-Classic keeps TideWM's current per-output numbered workspaces and tiling
-algorithms. Depth is a per-workspace **Depth Deck**, not another workspace:
+Numbered workspaces per monitor, each with its own tiling tree (BSP, master/stack, cascade or floating).
 
-- **Surface:** the ordinary visible tiled/floating scene.
-- **Shallows:** automatic attention cooling from the existing visual depth
-  system; it does not change layout membership.
-- **Deep Deck:** windows explicitly parked out of the active layout while the
-  client stays alive and remains owned by that workspace.
+Classic adds depth through the **Depth Deck**, an opt-in per-workspace parking spot (`classic_depth { enabled = true }`):
 
-The opt-in `classic_depth { enabled = true }` block enables the feature; it is
-off by default and independent of automatic visual depth. The primary
-interaction is fast and reversible: park the focused tiled window,
-dive into the current workspace's deck, select a window, and recall it. When a
-surface tile is focused, recall swaps the selected deep window into that exact
-tile and parks the displaced window in the same deck slot. Empty-surface recall
-restores the selected window as a normal tile. Automatic structural parking is
-off by default and will not be considered until the manual workflow proves
-useful.
+- **Surface:** your normal tiled and floating windows.
+- **Shallows:** windows you haven't touched in a while dim and cool down a little. This is visual only (see `depth { }`) and never changes the layout.
+- **Deep Deck:** windows you parked out of the layout. They stay alive and stay on that workspace.
 
-The fast path is direct rather than modal: Depth Down/Up rotates the focused
-tile through the workspace's deck in opposite directions, with a vertical
-pressure wave showing direction. The full deck remains the overview for random
-access.
+How you use it:
+
+- **Depth Down / Up** rotates the focused tile through the deck, with a vertical pressure wave showing the direction.
+- **Dive** opens the whole deck so you can pick any window.
+- **Recall:** if a tile is focused, the chosen window swaps into that tile and the old one takes its place in the deck. On an empty workspace, it simply comes back as a tile.
+
+Nothing parks itself automatically.
 
 ## Ocean
 
-Ocean has no real numbered workspaces. It owns one continuous 2D world with
-independently panning and zooming per-output cameras. By default, each monitor
-sees only its own windows and uses separate tiling trees, even when cameras
-overlap or zoom out. Setting `shared_canvas = true` inside `ocean { }` enables the original
-shared visibility: traveling a camera can reveal another monitor's windows.
-This setting reloads live; screen pins always stay on their pinned output.
+Ocean has no numbered workspaces. It's one continuous 2D world, and each monitor has its own camera that pans and zooms.
 
-The continuous navigation model remains the same in both modes:
-
-- **X** is continuous lateral travel between working regions.
-- **Y** is physical window depth/position, not a row of disguised workspaces.
-- Reefs provide local BSP/master/cascade organization without dividing the
-  world into workspace pages.
-- Reefs are optional organization, not a movement restriction: the configured
-  move or resize drag detaches a tile into a freely placed world rectangle,
-  while dragging empty canvas pans the camera at the current zoom. Overlapping
-  floaters keep an explicit front-to-back stack and clicks raise predictably.
-- Smart tiling can keep a tiled drag inside its reef for tile-to-tile swaps and
-  reattach a floater released near a tile, preserving a custom attached size
-  while the reef tree remains the ownership authority; the tree itself stays
-  frozen for the gesture, so the dragged window's render placement is
-  overridden separately to lift it out and follow the pointer (it renders as
-  `PlacementKind::Floating` for the drag's duration, so a `floating_only`
-  border/shadow/rounding rule applies to it only while dragging), with the
-  current swap target picking up a magnet-style border highlight. Drag feel
-  itself is reasoned from the render pipeline, not live-verified -- nested
-  winit has no pointer-drag injection, the same gap viscosity and the other
-  interactive grabs carry.
-- All of the above is also reachable from a touchpad with no button press at
-  all: `modifier_pan_fingers` starts the identical grab a mouse drag would
-  from a configured-finger-count swipe held together with `pointer_modifier`,
-  driven by synthetic pointer motion built from the gesture's own delta.
-- Bookmarks provide named return points and a compatibility surface for tools
-  that expect workspace-like destinations.
-- An optional camera-anchored adaptive guide field provides scale and motion
-  cues through empty world space; it is not a workspace boundary.
-- A small viewport-center marker appears only after camera movement and fades
-  away after 4.2 seconds by default, keeping orientation without permanent UI.
-- Attention/buoyancy and render LOD are separate from physical Y, so focusing a
-  deep window does not teleport it to the surface.
-
-Depth Down/Up visits only reef origins and explicitly world-placed floating or
-sunk windows. Local tile rows are deliberately excluded, because treating
-them as navigation stops recreates vertical workspaces. Sinking, dredging, and
-surfacing are explicit actions; focusing a deep window alone never changes its
-world Y. The bioluminescent compass makes distant or urgent windows discoverable: a
-soft glow at the viewport edge points toward each off-screen urgent window
-(in any direction) and each deep window (below the viewport). Travel stays
-explicit.
+- **Separate by default:** each monitor sees only its own windows and keeps its own tiling. Set `ocean { shared_canvas = true }` and a camera can travel over to another monitor's windows. Windows pinned to a monitor always stay on it.
+- **X** is moving sideways between working areas. **Y** is depth, not a stack of disguised workspaces.
+- **Reefs** are local tiling areas (BSP, master/stack or cascade) placed in the world. They help organize things but don't fence you in. A move or resize drag lifts a tile out into a freely placed window, and dragging empty canvas pans the camera.
+- **Smart tiling:** a tiled drag can swap tiles inside its reef, and a floating window dropped near a tile snaps back into the reef. The target tile lights up while you aim.
+- **Touchpad:** `modifier_pan_fingers` gives every mouse drag gesture a touchpad equivalent, no button press needed.
+- **Bookmarks** are named places to return to. Tools that expect workspaces can use them.
+- **Optional orientation aids:** a light guide grid in empty space, and a small center marker that appears after the camera moves and fades after a few seconds.
+- **Depth travel:** Depth Down/Up visits reef origins and windows you placed or sank on purpose; ordinary tile rows are skipped. Sinking, dredging and surfacing are always explicit, and focusing a deep window never drags it to the surface.
+- **Compass:** a soft glow at the screen edge points toward urgent windows and deep windows that are off screen.
+- **Minimap:** an overview of the whole world.
 
 ## Scroll
 
-Scroll shares the durable per-output/workspace window registry with Classic and
-supplies a different geometry policy: ordered tiles and a viewport offset.
-Classic's BSP trees retain membership, insertion order and group slots, so a
-Classic/Scroll round trip does not rebuild them. Scroll offsets and requested
-tile proportions are lightweight metadata; no alternate client objects or
-render textures are kept for an inactive engine.
+Each monitor gets a strip of apps you slide along, niri-style. Under the hood Scroll shares Classic's per-monitor, per-workspace window registry. It adds only a scroll position and per-app sizes, so switching between Classic and Scroll keeps your trees, insertion order and groups exactly as they were.
 
-Each output scrolls independently. Workspaces select separate strips by default;
-`scroll { workspaces = sections }` presents tiled workspace sections in one
-continuous strip per output. Scratchpads remain separate. Floating windows keep
-their existing workspace overlay/pin behavior. See SCROLL.md for configuration,
-current limits and verification status.
+By default each workspace has its own strip. With `scroll { workspaces = sections }`, a monitor's workspaces are laid end to end in one strip. Scratchpads stay separate and floating windows float above the strip.
 
-`tidectl engine classic|ocean|scroll` selects an engine for the running session.
-Config reload can also select it. Locks and ongoing grabs block migration.
-Scroll/Classic to Ocean and back use the existing reef conversion; Ocean camera
-history and bookmarks still have no workspace counterpart.
+Configuration, keys and limits: [SCROLL.md](SCROLL.md).
 
-## Migration
+## Switching engines
 
-A config reload that changes `spatial_engine` migrates every live window in
-place instead of restarting:
+- **Classic ↔ Scroll:** the same trees, just laid out differently. Nothing is lost.
+- **Classic or Scroll → Ocean:** each monitor's workspaces become reefs on their own island of the world, spaced by your configured gaps. The camera lands on the reef of the workspace you were looking at. Floating windows keep their place, pins become Ocean screen pins, and parked Depth Deck windows are recalled first. Groups and fullscreen or maximized windows carry across.
+- **Ocean → Classic or Scroll:** reefs, from left to right, become workspaces 1..N on the monitor whose camera is closest. Floating windows land on the nearest reef, clamped onto the screen. Bookmarks and camera history have no workspace equivalent and are dropped.
+- Master/stack and cascade reefs run as BSP inside Ocean. Switching back restores each workspace's layout where it can.
+- A switch is refused while the screen is locked, while a launcher or other exclusive-keyboard layer is open, or during a drag. It waits if no monitor is connected. TideWM never guesses a screen size.
 
-- **Classic → Ocean:** each output's populated workspace trees move whole into
-  reefs (both engines embed the same `BspLayout`, so it is a move, not a
-  rebuild). Every output receives a disjoint world island sized from its live
-  logical viewport and populated workspace count; reefs use the configured
-  window gap rather than a fixed resolution or spacing guess. The camera
-  points at the previously-active workspace's reef. Floating windows translate
-  from their output-global position to the corresponding reef-local world
-  position; pinned windows become Ocean screen pins. Depth-deck windows are
-  recalled to their tiles first (the deck's picker overlay is dropped). Tab
-  groups and fullscreen/maximized entries carry across.
-- **Ocean → Classic:** reefs sorted left-to-right become workspaces `1..N` on
-  the output whose camera is nearest to each reef; the active workspace is the
-  reef each output's camera is looking at. Floating windows land on the
-  globally nearest reef (using both axes), translate back through that reef's
-  origin and the live output origin, then clamp into the output's visible area;
-  screen-pinned windows re-enter the `pinned` set. Bookmarks and camera history
-  have no Classic counterpart and are dropped. Migration is deferred if no
-  output currently has geometry; TideWM never invents a fallback resolution.
+## What's shared
 
-Ocean-reef-per-workspace Master/Cascade workspaces reflow as BSP under Ocean
-(reefs only run the BSP layout algorithm); migrating back restores each
-workspace's remembered algorithm where a stub tree survived the round trip.
+All three engines share the compositor core, window registry, Wayland protocols, rendering, effects, input, IPC and accessibility. Each owns only its spatial state:
 
-## Shared and separate state
+- **Classic:** workspace trees per monitor, the Depth Deck and restore slots.
+- **Scroll:** Classic's trees plus each strip's scroll position and per-app sizes.
+- **Ocean:** reef trees, world positions, cameras, bookmarks and depth.
 
-Both engines share the compositor core, Wayland objects, window/protocol
-registry, rendering, effects, input plumbing, IPC transport, and accessibility
-infrastructure. They do not share spatial ownership:
+Each engine hands the renderer the same list of placed windows (`src/tide_core/placement.rs`): which window goes where on screen, its zoom, and whether it is tiled, floating or fullscreen. That's why every effect works the same everywhere.
 
-- `ClassicSpace` owns `(output, workspace)`, layout leaves, deck membership,
-  and restore slots.
-- `OceanSpace` now owns reef-local BSP trees, world rectangles, independent
-  per-output pan/zoom cameras, floating world rectangles, output membership
-  (entry-output hints when shared),
-  configured/runtime bookmarks, and physical depth travel/actions.
-
-Both produce the same model-neutral placed-window render input. S2 established
-that boundary in `src/tide_core/placement.rs`: rendering receives a window,
-logical rectangle, fractional view transform, authoritative/preview role, and
-content-size policy, plus tiled/floating and normal/fullscreen presentation
-flags. Classic and Ocean now both produce this contract from their own
-authoritative state.
-
-Waves owns every keyboard binding, and pointer gestures are explicit config
-(`pointer_modifier` plus Ocean's selectable/disableable canvas button).
-Selecting an engine or enabling Depth never inserts hidden keyboard chords;
-the generated Alt/Super/Ctrl/P layers are editable examples.
-`Ctrl+Alt+Escape` is the separate temporary recovery path for a self-locked
-config.
-
-## Delivery order
-
-1. **Done:** manual Classic Depth Deck: park, navigate, swap-recall, cancel.
-2. Optional Classic auto-park policy, only after real-use validation.
-3. **Done:** model-neutral placement boundary for the shared renderer.
-4. **Done:** Ocean world coordinates, cameras, reefs, and bookmarks.
-5. **Done:** Ocean pan/zoom canvas feel and physical sink/dredge/surface travel.
-6. **Done:** Ocean compass and whole-world overview minimap.
-7. **Done:** live Classic↔Ocean migration (hot reload flips `spatial_engine` in place).
-
-The existing continuous workspace swim is an S0 Classic navigation bridge. It
-is useful on its own, but it is not the Ocean data model.
+Keybinds always come from your config. Picking an engine or enabling the Depth Deck never adds hidden shortcuts. `Ctrl+Alt+Escape` stays reserved as an emergency way out of a config that locked you out.

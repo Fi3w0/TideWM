@@ -1,150 +1,97 @@
-# Scroll engine — initial implementation
+# Scroll
 
-Scroll is TideWM's experimental third spatial engine. Each monitor has its own
-strip; windows never become part of a strip spanning physical monitors. Window
-ownership, groups, protocols and the render/effect pipeline remain shared.
+Scroll is TideWM's third spatial engine, next to Classic and Ocean. Every monitor gets its own strip of apps that you slide along, niri-style. New apps join the strip instead of shrinking the ones already there. Each strip belongs to one monitor: an app never ends up half on one screen and half on another.
+
+Groups, glass, shadows, animations, screenshots and screen sharing all work in Scroll exactly as they do in the other engines.
 
 ## Try it
 
-Build/install through your normal packaging workflow, then select the engine:
+Switch the running session, no relog needed:
 
 ```sh
 tidectl engine scroll
-tidectl engine classic
-tidectl engine ocean
+tidectl engine classic   # or ocean, to go back
 ```
 
-Switching changes the running session without relogging and does not edit config.
-A subsequent reload follows the `engine` selected in the file. Locked sessions,
-exclusive keyboard layers and active grabs block a switch. No keys are inserted.
-
-To select Scroll in the configuration:
+This doesn't touch your config file. To make Scroll your default, set it in `config.wave`:
 
 ```wave
 engine = scroll
+```
+
+You can also bind the switch, for example `bind $mod+Ctrl+S { engine:scroll }`. A switch is refused while the screen is locked, while a launcher or other exclusive-keyboard layer is open, or during a drag.
+
+## Configuration
+
+Every key is optional, reloads live and is measured against the monitor's usable area. These are the defaults:
+
+```wave
 scroll {
-    workspaces = separate
-    orientation = horizontal
-    tile_proportion = 0.5
-    center_focused = false
+    workspaces       = separate     # or sections
+    orientation      = horizontal   # or vertical
+    tile_proportion  = 0.5          # 0.1 – 1.0 of the viewport
+    center_focused   = false
     gesture_distance = 1200
 }
 ```
 
-`workspaces = separate` retains an independent strip position for each numbered
-or named workspace. Use only one workspace on each output for a simple two-strip
-workflow. `sections` presents the output's tiled workspace contents consecutively;
-selecting a workspace navigates to its section. Names remain the existing
-workspace names. Sections have single workspace ownership, not overlapping tag
-filters. Scratchpads stay separate. Floating windows keep their current workspace
-overlay behavior rather than being translated into the tiled strip.
+- **`tile_proportion`** is how much of the screen a new app takes:
+  - `1.0` fills the screen;
+  - `0.94` leaves a narrow peek of the neighbors on each side;
+  - `0.85` shows more of them;
+  - `0.5` fits two apps side by side.
 
-The primary axis can be horizontal or vertical. Both axes at once belong to
-Ocean's 2D model and are not implemented by Scroll. The default tile proportion
-is half the usable viewport; opening more tiles does not reduce existing widths.
-`center_focused` optionally centers every focused tile, including the first,
-last and sole column, using empty margins at the strip ends. Otherwise only
-enough of the view moves to reveal it. The extent can be changed with existing keyboard resize
-actions along the strip axis. Viewport movement uses existing window-motion
-animation settings; direct gesture updates follow the finger.
+  Apps you resized by hand keep their own size.
+- **`center_focused`:** with `true`, the focused app always sits in the middle, even the first, last or only one. With `false`, the strip moves only as far as needed to bring the app into view.
+- **`orientation`:** strips can run horizontally or vertically. For a free 2D layout, use Ocean.
+- **`workspaces`:**
+  - `separate` (the default) gives each workspace its own strip with its own scroll position.
+  - `sections` lays a monitor's workspaces end to end in one continuous strip, and switching workspace jumps to its section.
 
-Existing directional focus actions navigate tiled strip neighbors. The
-`scroll-left/right/up/down` actions move half a viewport along the selected axis.
-The configured workspace-swipe finger count controls direct scrolling when no
-explicit swipe action takes priority. Cancelling restores its starting offset.
-Gesture distance is configurable sensitivity, independent of output resolution.
+  In both modes, scratchpads stay separate and floating windows float above the strip as usual.
+- **`gesture_distance`:** how far you swipe on the touchpad to move one screen's worth. The swipe uses your configured workspace-swipe finger count.
+- **Spacing** comes from the global `gaps`.
 
-## Width, neighbor peeks and alignment
-
-These settings reload live and use the current output's usable logical size:
+A nearly full-width setup with neighbor peeks:
 
 ```wave
 scroll {
     tile_proportion = 0.94
-    center_focused = true
+    center_focused  = true
 }
 gaps = 8
 ```
 
-`tile_proportion` accepts 0.1–1.0: `1.0` fills the viewport, `0.94` leaves a
-narrow neighbor peek, `0.85` exposes more context, and `0.5` fits about two apps.
-This is a default width; existing per-window keyboard resizes retain their own
-proportions. `center_focused = true` balances the available space around the
-selected app; `false` moves only as far as necessary to reveal it. Outer and
-inter-column spacing follow `gaps`; there is no fixed monitor-pixel peek size.
-The same settings apply to heights with `orientation = vertical`.
+## Moving around
 
-Directional focus navigates apps; directional swap reorders them. Existing
-`resize-left/right` actions adjust width for horizontal strips; `resize-up/down`
-adjust height for vertical strips. Bind these actions to the keys you prefer.
-Movement timing/easing follows `animations.movement`; pointer-focus refresh
-keeps wheel input on the visible client after navigation, without warping the
-mouse or replacing keyboard-selected focus. Physical mouse motion still follows
-`input.focus_follows_mouse`, including its pointer-grab and exclusive-layer rules.
+Scroll uses your existing binds. It adds none of its own.
 
-Pointer coordinates are surface coordinates. A client may inset its
-`xdg_surface` window geometry from the surface (GTK reserves a CSD shadow
-margin there -- Firefox reports one, Qt/kitty report zero), so Scroll input
-subtracts that margin exactly like the renderer does. Otherwise every hover
-and click in a GTK app lands offset by the margin even though the strip is
-correct.
+| Action | In Scroll |
+| --- | --- |
+| `focus-left/right` (`up/down` for vertical) | Focus the neighbor app and slide it into view |
+| `swap-left/right` | Move the focused app along the strip |
+| `resize-left/right` (`up/down` for vertical) | Make the focused app narrower or wider |
+| `scroll-left/right/up/down` | Slide the strip half a screen |
+| Touchpad swipe | Slide the strip with your fingers; let go and it stays |
 
-Pointer focus itself never scrolls. Hover (`focus_follows_mouse`), a press, a
-touch contact and a tablet tip focus what is already under the pointer and leave
-the viewport alone -- crossing onto another monitor must not scroll the strip
-the cursor just entered, and clicking a neighbor's peek must not slide it out
-from under the click. Keyboard focus actions, `tidectl focus-window`/`focus-app`,
-notification activation, map/close focus repairs and depth recall still reveal
-the focused column. `center_focused = true` centers that reveal; `false` moves
-only when the column is not already visible.
+Focusing an app with the mouse never moves the strip: hovering with `focus_follows_mouse`, clicking, touch and tablet pens all leave it alone. So you can cross to another monitor or click a neighbor's peek without anything sliding away. Keyboard focus, `tidectl focus-window` / `focus-app` and notification clicks do bring the app into view.
 
-## Engine and feature boundaries
+When the strip slides under a still mouse, the app now under the pointer gets the wheel and clicks right away, without nudging the mouse.
 
-Classic and Scroll share the existing workspace registry and membership trees;
-Scroll adds viewport and requested-size metadata. Returning to Classic restores
-the retained BSP structure. Ocean conversions use the existing reef migration,
-including its loss of model-specific camera/bookmark history. All three engines
-produce the shared placed-window scene. Offscreen tiles retain live protocol
-ownership; output rendering and pointer lookup filter by their owning monitor.
+## Limits
 
-Existing floating windows, pins, fullscreen, tab groups, Depth Deck and effects
-use the shared paths. This is an initial scrolling policy, not all of niri's
-column interactions: multi-window stacked columns, consume/expel operations,
-scroll-specific pointer resizing, drag insertion previews and velocity-based
-release snapping are not implemented. Tiled drag currently retains TideWM's
-existing swap/transfer behavior. Per-section floating canvas placement and an
-all-engine unified overview need further design/work.
+Scroll is a scrolling layout, not a full copy of niri. Not there yet:
 
-## Activation and notifications
+- several apps stacked in one column, and consume/expel;
+- resizing columns by dragging their edge with the mouse;
+- drop previews and velocity snapping when dragging. A tiled drag swaps or moves windows the same way it does in Classic.
 
-`tidectl focus-window ID` reveals an exact live window; `focus-app APP_ID` picks
-the most recently focused matching app, including hidden workspace windows.
-`tidectl --json resolve-window --pid PID` finds a notification producer's nearest
-window-owning ancestor. Exact window/app selectors can narrow the result.
-Ambiguous terminal servers return candidate IDs instead of guessing a session.
-See DOCUMENTATION.md for wire requests and mapping-lifetime limits.
+Switching between Classic and Scroll keeps your layout trees intact. Switching to or from Ocean converts the layout, and Ocean's camera history and bookmarks don't carry over.
 
-Notification presentation stays in the shell. Abyssal's companion change supports
-an explicit window-ID hint, app-ID hint or exact desktop-entry/app-ID match;
-application-provided actions keep priority. Its optional `tide-notify` script
-resolves a target before sending the notification. Claude hooks are not installed
-by this compositor change.
+## For tools and scripts
 
-## Verification
+- `tidectl outputs` (and `--json`) includes a `scroll` object per monitor with `offset`, `orientation` and `workspaces`. With centering on, the offset can be negative.
+- `tidectl focus-window ID` and `focus-app APP_ID` bring an app into view, even on a hidden workspace.
+- `tidectl --json resolve-window --pid PID` finds the window that owns a process, for notification daemons.
 
-- Geometry/protocol-state regressions exercise independent output offsets,
-  sections, scratchpad separation, small/extreme coordinates, hidden activation,
-  ambiguity, lock refusal and all six directed engine transitions.
-- Private virtual-host nested GLES checks use actual GTK clients and captures:
-  stable tile sizes during scrolling, horizontal/vertical navigation, sections,
-  hidden workspace activation, PID lookup, group-tab migration, scrolling away from a fullscreen column, fullscreen
-  restoration and shared frost captures. The native desktop is not involved.
-- Physical dual-output drag/scale/hotplug, actual touchpad gesture feel and the
-  complete feature matrix remain native validation work. Nested winit exposes
-  only one output, so it cannot establish those results. No CPU/GPU or memory
-  improvement is claimed from a debug rendering run.
-
-Reference implementations inspected: niri `e5f9cf628884c6c31d6083f5723403b790bae881`
-(`layout/scrolling.rs`, workspace/monitor activation) and AngelOS
-`672857addc5f647a2202433c561212b181e30965` (dock/window-ID activation). The code uses
-TideWM's existing Smithay pin and dependencies; niri is not added as a dependency.
+Wire-level details: [DOCUMENTATION.md](DOCUMENTATION.md#ipc-and-tidectl).

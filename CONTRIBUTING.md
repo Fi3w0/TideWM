@@ -32,8 +32,8 @@ cargo run --locked                # runs nested inside your current session
 
 - **Match the surrounding module's style** rather than introducing a new pattern for the same problem.
 - **No AI co-author trailers on commits. Author must be a human.** Use AI tools if you want, but you own and understand every line you submit.
-- **Small, focused commits.** One logical change per commit, plain imperative subject line (no `feat:`/`fix:` prefixes). Add a short body explaining *why*, when the *why* isn't obvious from the diff.
-- **Mind the RAM budget.** 2GB is the absolute ceiling -- a tripwire for runaway feature growth, not a resting point; real usage is far below it (~50MB PSS plain tiling, ~60-70MB idle and ~63MB with nine glass windows with the full water stack on, real AMD, 0.90.59 -- roughly half of same-machine Hyprland). Avoid per-frame allocations, unbounded caches, or dependencies that drag in a large runtime for a small feature. When actually measuring, use a `--release` build and PSS (`grep Pss /proc/<pid>/smaps_rollup`), not a debug build's raw RSS -- a debug binary and its shared driver stack can dwarf the real marginal cost of a change.
+- **Small, focused commits.** One logical change per commit, with a conventional prefix and an imperative subject: `feat: add …`, `fix: keep …`, `docs: …`. Add a short body explaining *why* when the diff doesn't make it obvious.
+- **Mind the RAM budget.** 2GB is the absolute ceiling -- a tripwire for runaway feature growth, not a resting point; real usage is far below it (~50MB PSS plain tiling and ~60-70MB with the full water stack on AMD, ~100MB on NVIDIA where a third is the driver's own mappings). Avoid per-frame allocations, unbounded caches, or dependencies that drag in a large runtime for a small feature. When actually measuring, use a `--release` build and PSS (`grep Pss /proc/<pid>/smaps_rollup`), not a debug build's raw RSS -- a debug binary and its shared driver stack can dwarf the real marginal cost of a change.
 - **No `unsafe` without a comment justifying it** and, ideally, a narrower safe wrapper around it.
 
 ## Testing
@@ -45,4 +45,4 @@ cargo run --locked                # runs nested inside your current session
 
 - Describe *what* changed and *why*, not just a restatement of the diff.
 - Note any RAM/perf impact if the change touches rendering, animation, or anything per-frame.
-- Update `README.md` / `TECHNICAL_REPORT.md` / `CHANGELOG.md` / `DOCUMENTATION.md` if the change affects features, build steps, or config. See [SECURITY.md](SECURITY.md) instead if it's a security-relevant change.
+- Update the docs the change touches: a short line in `CHANGELOG.md`, the full detail in `DEV_CHANGELOG.md`, and `README.md` / `TECHNICAL_REPORT.md` / `DOCUMENTATION.md` / `SCROLL.md` when features, build steps or config change. See [SECURITY.md](SECURITY.md) instead if it's a security-relevant change.

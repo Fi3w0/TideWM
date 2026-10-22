@@ -64,7 +64,7 @@ on "workspace-changed" {
 
 **Live queries.** `tidectl eval <expression>` evaluates on the running session's Lua — config variables, section tables, and the live `tide` table are all answerable (`tidectl eval "theme.primary"`, `tidectl eval "tide.workspace"`).
 
-The line-based grammar is gone; Wave is the only grammar. Old configs were migrated (the mechanical changes: `$mod = SUPER` becomes `@mod = SUPER`, `bind X = Y` becomes `bind X { Y }`, `$wave(...)` becomes `wave(...)` in values, `spawn_at_startup` lines become one `spawn = [...]` list) and the old spellings no longer parse: a legacy key is an unknown-key warning.
+**Coming from the old line-based format?** `$mod = SUPER` is now `@mod = SUPER`, `bind X = Y` is `bind X { Y }`, `$wave(...)` is `wave(...)`, and `spawn_at_startup` lines become one `spawn = [...]` list. Old spellings no longer parse.
 
 **Multi-file:** `include "path.wave"` as its own statement, repeatable (one per line), in any file (the main one, or one it includes). Each path resolves relative to the file that lists it; `~/` expands to your home directory. Rules:
 
@@ -74,7 +74,7 @@ The line-based grammar is gone; Wave is the only grammar. Old configs were migra
 - **The including file's own keys always win over anything it includes.** If `config.wave` includes `overrides.wave`, and both set `gaps`, `config.wave`'s own value wins — put an override directly in the file doing the including, not in a file you list last.
 - A broken include (missing, unreadable, unparseable, or a cycle) is skipped with a warning; it doesn't fail the whole config.
 - The config directory is watched recursively (`*.wave` files only, dotfiles/dotdirs skipped) — editing any included file hot-reloads exactly like editing the main file.
-- An unrecognized *top-level key* (`key = value`) warns and is ignored — this is what happens to every old pre-Wave key/block/action spelling now (that migration-alias layer is fully removed). An unrecognized *block keyword* is different: if its body only sets keys that aren't valid at the top level, it's indistinguishable from a Lua computation block like `theme { }` and is silently dropped with **no warning at all** — this is what happens if you write a stale `connected_vessels { }`, `water_glass { }`, or `submap <name> { }` (the canonical spellings are `vessels { }`, `glass { }`, and `mode <name> { }`; see their sections below).
+- An unrecognized *top-level key* (`key = value`) warns and is ignored. An unrecognized *block keyword* is different: if its body only sets keys that aren't valid at the top level, it's indistinguishable from a Lua computation block like `theme { }` and is silently dropped with **no warning at all** — this is what happens if you write a stale `connected_vessels { }`, `water_glass { }`, or `submap <name> { }` (the canonical spellings are `vessels { }`, `glass { }`, and `mode <name> { }`; see their sections below).
 
 ## Wallpaper behavior
 
@@ -301,7 +301,7 @@ the non-water motion packs: `silk`, `snappy`, `gentle`, `cinematic`, and
 move/resize motion even when `water_effects = false`; all values remain
 individually editable in Wave. Existing presets and the default keep those two
 new controls disabled for compatibility. The
-`hypr-smooth` preset mirrors the maintainer's real Hyprland window settings:
+`hypr-smooth` preset mirrors a typical smooth Hyprland animation setup:
 open geometry uses the 300ms `overshot` curve, close geometry uses the 300ms
 `easeInOut` curve, both slide through the nearest output edge, both fade on a
 separate 400ms `easeInOut` clock, and layout motion uses 400ms `easeInOut`.
@@ -429,7 +429,7 @@ direct `half_life` takes precedence and works regardless of `water_effects`.
 A matching `rule { viscosity = ... }` overrides only the legacy liquid value
 for one app.
 
-### `vessels { }` (old spelling `connected_vessels { }` does not parse — see "Multi-file" above)
+### `vessels { }`
 
 Connected-vessel resize spreads BSP pressure beyond the nearest split. The
 split selected by a direct border drag, modifier-right-drag, or keyboard resize
@@ -712,7 +712,7 @@ ocean {
 
 ### `compass { }`
 
-Bioluminescent edge-glow compass for the Ocean engine (spatial roadmap S5).
+Bioluminescent edge-glow compass for the Ocean engine.
 When a window sits outside the output camera's viewport, a soft glow appears
 at the viewport edge in that window's direction, keeping off-screen windows
 discoverable without navigating to them:
@@ -756,8 +756,8 @@ compass {
 
 ### `minimap { }`
 
-Whole-world overview minimap for the Ocean engine (spatial roadmap S5's
-other half, alongside the compass). Hold the configured `key` to peek: a
+Whole-world overview minimap for the Ocean engine, the compass's
+companion. Hold the configured `key` to peek: a
 schematic map of the triggering monitor's windows and camera in independent
 mode. With `ocean.shared_canvas = true`, it shows every window in the shared
 world, plus every connected output's current camera viewport (its own viewport
@@ -850,10 +850,10 @@ classic_depth {
     wave_alpha = 0.72
 }
 
-# Added automatically while enabled unless those combos are already used:
-# $mod+D       = depth-down
-# $mod+Shift+D = depth-up
-# $mod+Ctrl+D  = dive
+# No keys are added for you; bind the actions yourself, for example:
+bind $mod+D       { depth-down }
+bind $mod+Shift+D { depth-up }
+bind $mod+Ctrl+D  { dive }
 ```
 
 ### `depth { }`
@@ -1203,7 +1203,7 @@ warn and safely fall back. Selection order is system defaults → named preset
 → global overrides → per-app named preset → per-app overrides, so a rule can
 reuse a bundle and still change one field locally.
 
-### `glass { }` (old spelling `water_glass { }` does not parse — see "Multi-file" above)
+### `glass { }`
 
 Controls how the water-glass refraction distortion moves over time. The glass
 layer itself is selected per window by the `glass` rule (or the legacy
@@ -1806,7 +1806,7 @@ error (`expected `bind <combo> { ... }``), not a deprecated alias, so an old
 config using it needs the mechanical `= action` → `{ action }` rewrite (see
 "The line-based grammar is gone" above) before it will load.
 
-### `mode <name> { }` (old spelling `submap <name> { }` does not parse — see "Multi-file" above)
+### `mode <name> { }`
 
 A temporary alternate keybind table (sway/Hyprland's "mode" idea), same `bind` statements as the top level (no modifier prefix needed if the submap's own binds are unmodified, like the shipped `nav` example). Entered via a `submap:<name>` action, which **fully replaces** the base binds — not layered on top of them — until an explicit `exit-mode` bind. Not tied to focus; stays active until you explicitly leave it. A config reload that drops or renames the active submap auto-exits back to the base binds.
 
@@ -1844,7 +1844,7 @@ The same set of strings works after `bind ... { }` at the top level or inside a 
 - `focus-left` / `focus-right` / `focus-up` / `focus-down` — Classic selects by live screen geometry. Ocean compares the current camera projection, keeps the camera still for a visible neighbor, and glides it to an off-camera neighbor using `ocean.camera_animation_ms`/`camera_sway`; screen pins use their viewport position.
 - `swap-left` / `swap-right` / `swap-up` / `swap-down`
 - `resize-left` / `resize-right` / `resize-up` / `resize-down` — shrink/grow the focused floating window by 24 logical pixels, or resize its nearest BSP split and connected parallel ancestors
-- `move-left` / `move-right` / `move-up` / `move-down` — step the focused floating window 24 logical pixels, no-op on a tiled one (spatial roadmap Phase 4's keyboard escape hatch alongside `toggle-floating`)
+- `move-left` / `move-right` / `move-up` / `move-down` — step the focused floating window 24 logical pixels, no-op on a tiled one
 - `snap:left` / `snap:right` / `snap:top` / `snap:bottom` / `snap:top-left` / `snap:top-right` / `snap:bottom-left` / `snap:bottom-right` — place the focused Classic floater with the same zone, usable-area, gap, and rule policy as pointer snapping; disabled zones no-op
 - `snap:fullscreen` — resizes the focused Classic floater to fill the whole usable area, the same as the drag-to-snap top-center drop zone; not real fullscreen protocol state
 - `layout:bsp` / `layout:master` / `layout:cascade` / `layout:floating` — switch the current workspace's tiling algorithm
@@ -1986,7 +1986,7 @@ Native DRM sessions advertise `linux-drm-syncobj-v1` when the selected device su
 | `wlr-foreign-toplevel-management-v1` | Bidirectional toplevel control (waybar's `wlr/taskbar`, ags v1) | Done |
 | `ext-workspace-v1` | Workspace listing and activation for bars (no compositor-specific TideWM waybar module exists, so this is the protocol-native alternative to polling `tidectl`) | Done for the scope this first pass covers — one group per output, `activate` request/capability only (`deactivate`/`assign`/`remove`/`create_workspace` are capability-gated off), no `output_enter`/`output_leave` (harmless for a single monitor, a multi-output client can't yet tell groups apart) and no per-workspace `urgent` bit. Verified live in a nested session with a throwaway `wayland-client` binary: bound the global, received all 12 workspaces (`workspace_count = 12`) with correct `state`/`capabilities`, and a real `activate()` request sent from the client switched the compositor's active workspace, confirmed both by a follow-up `state` event and `tidectl workspaces` |
 | `wlr-screencopy-unstable-v1` + `ext-image-copy-capture-v1` | Screenshots (`grim`) | Done — output and per-window ext capture; SHM everywhere plus direct DMA-BUF rendering for full-output wlr capture on DRM sessions. Capture wakeups are scoped to their target output. |
-| `hyprland-toplevel-export-v1` | Per-window capture by wlr toplevel handle (Quickshell's `ScreencopyView`, task-switcher/overview previews) | Done — version 2, SHM, same queue/privacy/lock rules as the other capture protocols. The version-1 request addresses a Hyprland window address and fails its frame. |
+| `hyprland-toplevel-export-v1` | Per-window capture by wlr toplevel handle (task-switcher and overview previews) | Done — version 2, SHM, same queue/privacy/lock rules as the other capture protocols. The version-1 request addresses a Hyprland window address and fails its frame. |
 | `wlr-data-control-unstable-v1` | Clipboard managers (`cliphist`, `wl-clip-persist`) | Done, including primary selection |
 | `wp-security-context-v1` | Sandboxed Wayland listener and policy identity | Done — sandboxed clients are denied session-lock, IME/virtual-keyboard, global clipboard control, capture, output-control, and foreign-toplevel/workspace globals |
 | `xdg-output-manager-v1` | Output geometry disclosure | Done |
@@ -2042,10 +2042,9 @@ continues requiring fresh user input for focus.
 
 ## Scroll spatial engine
 
-See [SCROLL.md](SCROLL.md) for the experimental third engine and its current
-interaction limits. `engine = scroll` selects it at startup/reload;
-`tidectl engine scroll` (bind action `engine:scroll`) selects it live. `classic`
-and `ocean` are also accepted. This runtime selection does not rewrite config.
+The guide, with examples and limits, is [SCROLL.md](SCROLL.md). This is the key reference.
+
+`engine = scroll` selects Scroll at startup and on reload; `tidectl engine scroll` (bind action `engine:scroll`) switches the running session without rewriting config. `classic` and `ocean` work the same way.
 
 ```wave
 scroll {
@@ -2057,35 +2056,14 @@ scroll {
 }
 ```
 
-`workspaces`: `separate` or `sections`; `orientation`: `horizontal` or `vertical`.
-`tile_proportion` is the viewport fraction from 0.1 through 1.0; `0.94` gives a
-nearly full-width app with a narrow neighbor peek, while `1.0` fills the usable
-viewport. `center_focused = true` centers the focused tile even at either end
-of the strip or when it is the only tile; `false` moves only enough to reveal it.
-Spacing follows `gaps`. Positive finite
-`gesture_distance` controls touchpad travel per viewport; it is a sensitivity
-setting, not an assumed monitor width. The existing configured workspace-swipe
-finger count drives scrolling, unless explicit swipe actions take priority.
-`scroll-left/right/up/down` moves half a viewport along the selected axis.
-Existing `focus-*` actions reveal neighboring tiles, and `resize-*` changes tile
-extent along that axis. No additional bindings are inserted automatically.
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `workspaces` | `separate` \| `sections` | `separate` | One strip per workspace, or a monitor's workspaces laid end to end in one strip. |
+| `orientation` | `horizontal` \| `vertical` | `horizontal` | Strip direction. |
+| `tile_proportion` | float, `0.1`–`1.0` | `0.5` | Share of the usable viewport a new app takes. `1.0` fills it; `0.94` leaves a narrow neighbor peek. |
+| `center_focused` | bool | `false` | Center every revealed app, including the first, last and only one. `false` moves only as far as needed. |
+| `gesture_distance` | positive float | `1200` | Touchpad travel per viewport. A sensitivity, not a monitor width. |
 
-Pointer input is mapped into each client's surface coordinates: a window's
-`xdg_surface` geometry may be inset from its surface by a client-declared
-margin (GTK's CSD shadow), and Scroll subtracts it exactly like the renderer,
-so clicks and hovers in GTK/Firefox windows land under the cursor.
+Spacing follows `gaps`. `focus-*` reveals neighbors, `swap-*` reorders, `resize-*` changes extent along the strip and `scroll-left/right/up/down` slides half a viewport. No binds are added automatically. Pointer focus (hover, click, touch, tablet) never moves the strip; keyboard focus, `focus-window`/`focus-app` and notification activation reveal the target.
 
-Pointer focus never scrolls. `focus_follows_mouse`, a press, a touch contact and
-a tablet tip focus what is under the pointer and leave the viewport exactly
-where it is, so moving the pointer onto another monitor does not scroll that
-monitor's strip and clicking a neighbor's peek does not slide it away. Keyboard
-navigation, `focus-window`/`focus-app`, notification activation, map/close focus
-repairs and depth recall still reveal the target column, centered when
-`center_focused = true`. With `center_focused = false` the viewport moves only
-when the focused column is not already visible; with `true` every revealed
-column is centered.
-
-Each entry from `outputs` includes a `scroll` object in Scroll mode with
-`offset`, `orientation` and `workspaces`. A centered leading margin can produce
-a negative offset. Workspace numbers/names retain their
-existing IPC meaning; sections are a presentation of their tiled members.
+In Scroll mode each `outputs` entry has a `scroll` object with `offset`, `orientation` and `workspaces`; with centering on, `offset` can be negative.
