@@ -13089,11 +13089,19 @@ impl Smallvil {
                 self.toggle_column_tabbed(&focused);
                 return;
             }
-            ColumnAction::FocusEnd { last } => {
-                let target = if last {
-                    columns.last()
-                } else {
-                    columns.first()
+            ColumnAction::FocusEnd { .. } | ColumnAction::FocusWrap { .. } => {
+                let target = match action {
+                    ColumnAction::FocusEnd { last: true } => columns.last(),
+                    ColumnAction::FocusWrap { forward } if columns.len() > 1 => {
+                        let count = columns.len();
+                        columns.get(if forward {
+                            (column + 1) % count
+                        } else {
+                            (column + count - 1) % count
+                        })
+                    }
+                    ColumnAction::FocusWrap { .. } => None,
+                    _ => columns.first(),
                 };
                 if let Some(target) = target {
                     let next = self

@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.172 · 2026-10-22 — Wrap-around column focus
+
+- `focus-column-right-or-first` and `focus-column-left-or-last` move focus along the strip and wrap at the ends.
+
 ## 0.90.171 · 2026-10-22 — Preset widths backwards
 
 - `switch-preset-width-back` steps through `preset_widths` the other way.

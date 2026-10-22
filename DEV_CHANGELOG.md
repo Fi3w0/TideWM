@@ -2,6 +2,11 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.172 — Wrap-around column focus
+
+- `ColumnAction::FocusWrap { forward }` (niri's `focus-column-right-or-first` / `focus-column-left-or-last`) shares the `FocusEnd` arm: the target column is `column ± 1` modulo the column count, landing on the window last focused there. A single column is a no-op.
+- Nested run with three columns from the last: right-or-first twice → first, second; left-or-last twice → first, last. 668 tests, strict Clippy, fmt pass.
+
 ## 0.90.171 — switch-preset-width-back
 
 - `ColumnAction::SwitchPresetWidthBack` and `scroll::previous_preset`, the mirror of `next_preset`: the last preset narrower than the current width by more than 1e-3, wrapping to the widest. Shares the `SwitchPresetWidth` arm.

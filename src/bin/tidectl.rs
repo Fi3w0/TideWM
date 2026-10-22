@@ -1060,7 +1060,8 @@ ACTIONS:
         move-left/right/up/down, snap:left/right/top/bottom,
         consume-or-expel-left/right, consume-into-column, expel-from-column,
         switch-preset-width(-back), set-column-width:<+10%|50%|800>, maximize-column, expand-column, center-column,
-        focus-column-first/last, move-column-first/last, toggle-column-tabbed,
+        focus-column-first/last, focus-column-right-or-first,
+        focus-column-left-or-last, move-column-first/last, toggle-column-tabbed,
         snap:top-left/top-right/bottom-left/bottom-right, snap:fullscreen,
         toggle-overview
 
