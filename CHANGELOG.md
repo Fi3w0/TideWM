@@ -2,6 +2,12 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.166 · 2026-10-22 — More IPC
+
+- `tidectl windows` reports each window's pid, position and size, and its Scroll column and row.
+- New `tidectl focused-output` and `tidectl layers`.
+- `tidectl subscribe` gains `output`, `mode`, `engine` and `scroll` events, so bars and scripts never need to poll for them.
+
 ## 0.90.165 · 2026-10-22 — Scroll mouse resize and column actions
 
 - Mod + right-drag resizes a Scroll column, and an app's height in a shared column.

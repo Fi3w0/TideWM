@@ -70,6 +70,11 @@ enum Request {
         pid: Option<i32>,
     },
     ActiveMode,
+    /// The output the user is working on (where keybinds land), in the same
+    /// shape as one `outputs` entry.
+    FocusedOutput,
+    /// Every mapped layer-shell surface: namespace, layer, output.
+    Layers,
     /// XKB layout group and layout names, for bars showing or switching
     /// the input language. Same shape as niri's `keyboard-layouts`:
     /// `current_idx` is a zero-based index into `names`; `codes` is
@@ -132,10 +137,19 @@ pub(crate) enum EventKind {
     Config,
     /// `layout-changed`.
     Layout,
+    /// `output-changed`: a monitor appeared, disappeared, or changed mode,
+    /// scale, position or transform.
+    Output,
+    /// `mode-changed`: a `mode <name> { }` keybind table was entered or left.
+    Mode,
+    /// `engine-changed`: the spatial engine switched.
+    Engine,
+    /// `scroll-changed`: a Scroll strip's position or columns changed.
+    Scroll,
 }
 
 impl EventKind {
-    const ALL: [EventKind; 7] = [
+    const ALL: [EventKind; 11] = [
         EventKind::Window,
         EventKind::Workspace,
         EventKind::Focus,
@@ -143,6 +157,10 @@ impl EventKind {
         EventKind::Depth,
         EventKind::Config,
         EventKind::Layout,
+        EventKind::Output,
+        EventKind::Mode,
+        EventKind::Engine,
+        EventKind::Scroll,
     ];
 
     /// Lowercase kebab string used in the ack and in the `events` array of
@@ -158,6 +176,10 @@ impl EventKind {
             EventKind::Depth => "depth",
             EventKind::Config => "config",
             EventKind::Layout => "layout",
+            EventKind::Output => "output",
+            EventKind::Mode => "mode",
+            EventKind::Engine => "engine",
+            EventKind::Scroll => "scroll",
         }
     }
 }
@@ -224,6 +246,21 @@ pub(crate) enum IpcEvent {
         names: Vec<String>,
         codes: Vec<String>,
     },
+    /// `change` is `added`, `removed` or `changed`.
+    OutputChanged {
+        output: String,
+        change: &'static str,
+    },
+    ModeChanged {
+        mode: Option<String>,
+    },
+    EngineChanged {
+        from: &'static str,
+        to: &'static str,
+    },
+    ScrollChanged {
+        output: String,
+    },
 }
 
 impl IpcEvent {
@@ -241,6 +278,10 @@ impl IpcEvent {
             IpcEvent::DepthChanged { .. } => EventKind::Depth,
             IpcEvent::ConfigReloaded => EventKind::Config,
             IpcEvent::LayoutChanged { .. } => EventKind::Layout,
+            IpcEvent::OutputChanged { .. } => EventKind::Output,
+            IpcEvent::ModeChanged { .. } => EventKind::Mode,
+            IpcEvent::EngineChanged { .. } => EventKind::Engine,
+            IpcEvent::ScrollChanged { .. } => EventKind::Scroll,
         }
     }
 
@@ -259,6 +300,10 @@ impl IpcEvent {
             IpcEvent::DepthChanged { .. } => "depth-changed",
             IpcEvent::ConfigReloaded => "config-reloaded",
             IpcEvent::LayoutChanged { .. } => "layout-changed",
+            IpcEvent::OutputChanged { .. } => "output-changed",
+            IpcEvent::ModeChanged { .. } => "mode-changed",
+            IpcEvent::EngineChanged { .. } => "engine-changed",
+            IpcEvent::ScrollChanged { .. } => "scroll-changed",
         }
     }
 
@@ -318,6 +363,14 @@ impl IpcEvent {
                 "names": names,
                 "codes": codes,
             }),
+            IpcEvent::OutputChanged { output, change } => json!({
+                "output": output,
+                "change": change,
+                "info": output_json(state, output),
+            }),
+            IpcEvent::ModeChanged { mode } => json!({ "mode": mode }),
+            IpcEvent::EngineChanged { from, to } => json!({ "from": from, "to": to }),
+            IpcEvent::ScrollChanged { output } => scroll_json(state, output),
             IpcEvent::ConfigReloaded => serde_json::Value::Null,
         };
         let mut line = serde_json::to_vec(&json!({ "event": self.event_name(), "data": data }))
@@ -851,6 +904,11 @@ fn handle_request(state: &mut Smallvil, request: Request) -> serde_json::Value {
         } => resolve_window_response(state, window_id, app_id.as_deref(), pid),
 
         Request::ActiveMode => json!({ "ok": true, "data": state.active_mode }),
+        Request::FocusedOutput => {
+            let name = state.primary_output().map(|output| output.name());
+            json!({ "ok": true, "data": name.and_then(|name| output_json(state, &name)) })
+        }
+        Request::Layers => json!({ "ok": true, "data": layers_json(state) }),
         Request::KeyboardLayouts => match state.keyboard_layouts() {
             Some((group, names)) => json!({ "ok": true, "data": {
                 "current_idx": group,
@@ -1045,6 +1103,59 @@ fn outputs_json(state: &Smallvil) -> serde_json::Value {
         })
         .collect();
     json!(outputs)
+}
+
+/// One `outputs` entry by name, or `None` once the output is gone.
+fn output_json(state: &Smallvil, name: &str) -> Option<serde_json::Value> {
+    outputs_json(state)
+        .as_array()?
+        .iter()
+        .find(|entry| entry["name"] == name)
+        .cloned()
+}
+
+/// A Scroll strip: position plus its columns as window ids and widths.
+fn scroll_json(state: &Smallvil, output: &str) -> serde_json::Value {
+    let workspace = state.layout.active_workspace(output);
+    let columns: Vec<_> = state
+        .layout
+        .scroll_columns(output, workspace)
+        .into_iter()
+        .map(|column| {
+            let ids: Vec<_> = column
+                .windows
+                .iter()
+                .map(|surface| state.foreign_toplevel_numeric_ids.get(surface).copied())
+                .collect();
+            json!({ "width": column.width, "windows": ids })
+        })
+        .collect();
+    json!({
+        "output": output,
+        "workspace": workspace,
+        "offset": state.layout.scroll.offset(output, state.layout.scroll_key(workspace)),
+        "columns": columns,
+    })
+}
+
+fn layers_json(state: &Smallvil) -> serde_json::Value {
+    let mut layers = Vec::new();
+    for output in state.space.outputs() {
+        let map = smithay::desktop::layer_map_for_output(output);
+        for layer in map.layers() {
+            let geometry = map.layer_geometry(layer);
+            layers.push(json!({
+                "namespace": layer.namespace(),
+                "layer": format!("{:?}", layer.layer()).to_ascii_lowercase(),
+                "output": output.name(),
+                "geometry": geometry.map(|g| json!({
+                    "x": g.loc.x, "y": g.loc.y, "width": g.size.w, "height": g.size.h,
+                })),
+                "pid": state.client_pid(layer.wl_surface()),
+            }));
+        }
+    }
+    json!(layers)
 }
 
 fn workspaces_json(state: &Smallvil) -> serde_json::Value {
@@ -1427,7 +1538,27 @@ fn window_json(
         "maximized": state.maximized.contains_key(surface)
             && !state.fullscreen.contains_key(surface),
         "focused": focused == Some(surface),
+        "pid": state.client_pid(surface),
+        "geometry": state.space.element_geometry(window).map(|g| json!({
+            "x": g.loc.x, "y": g.loc.y, "width": g.size.w, "height": g.size.h,
+        })),
     });
+    if state.config.spatial_engine == crate::config::SpatialEngine::Scroll {
+        if let Some((column, row)) = state.layout.scroll_position(surface) {
+            entry["scroll"] = json!({
+                "column": column,
+                "row": row,
+                "column_width": state
+                    .layout
+                    .output_of(surface)
+                    .zip(state.layout.workspace_of(surface))
+                    .and_then(|(output, workspace)| {
+                        state.layout.scroll_columns(output, workspace).get(column).map(|c| c.width)
+                    }),
+                "row_weight": state.layout.scroll.weight(surface),
+            });
+        }
+    }
     if ocean_engine {
         entry["entry_output"] = json!(state.ocean.entry_output(surface));
     }
@@ -1914,5 +2045,57 @@ mod tests {
         assert_eq!(EventKind::Urgent.wire_name(), "urgent");
         assert_eq!(EventKind::Depth.wire_name(), "depth");
         assert_eq!(EventKind::Config.wire_name(), "config");
+        assert_eq!(EventKind::Output.wire_name(), "output");
+        assert_eq!(EventKind::Mode.wire_name(), "mode");
+        assert_eq!(EventKind::Engine.wire_name(), "engine");
+        assert_eq!(EventKind::Scroll.wire_name(), "scroll");
+        // Every kind round-trips through the subscribe request's parser.
+        for kind in EventKind::ALL {
+            let parsed: EventKind = serde_json::from_value(json!(kind.wire_name())).unwrap();
+            assert_eq!(parsed, kind);
+        }
+    }
+
+    #[test]
+    fn state_change_events_have_their_own_channels() {
+        let events = [
+            (
+                IpcEvent::OutputChanged {
+                    output: "DP-1".into(),
+                    change: "added",
+                },
+                EventKind::Output,
+                "output-changed",
+            ),
+            (
+                IpcEvent::ModeChanged {
+                    mode: Some("nav".into()),
+                },
+                EventKind::Mode,
+                "mode-changed",
+            ),
+            (
+                IpcEvent::EngineChanged {
+                    from: "classic",
+                    to: "scroll",
+                },
+                EventKind::Engine,
+                "engine-changed",
+            ),
+            (
+                IpcEvent::ScrollChanged {
+                    output: "DP-1".into(),
+                },
+                EventKind::Scroll,
+                "scroll-changed",
+            ),
+        ];
+        for (event, kind, name) in events {
+            assert_eq!(event.kind(), kind);
+            assert_eq!(event.event_name(), name);
+            let only = HashSet::from([kind]);
+            assert!(event_matches(&only, &event));
+            assert!(!event_matches(&HashSet::from([EventKind::Window]), &event));
+        }
     }
 }

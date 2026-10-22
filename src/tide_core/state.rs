@@ -309,6 +309,9 @@ pub struct Smallvil {
     /// early-return on every state change. See `ipc::IpcSubscriber` for
     /// the per-connection fields and lifecycle.
     pub(crate) ipc_subscribers: HashMap<usize, crate::ipc::IpcSubscriber>,
+    /// Last state `emit_state_change_events` reported, `None` until a
+    /// subscriber or handler first needs it.
+    ipc_seen: Option<IpcSeenState>,
     /// One-shot retry timer for subscriber bytes that did not fit in the
     /// kernel socket buffer. `None` during the normal fully-drained state, so
     /// IPC adds no periodic wakeup to an idle compositor.
@@ -1138,6 +1141,23 @@ pub struct Smallvil {
 }
 
 /// One member of a `WindowGroup`.
+/// What `emit_state_change_events` last reported.
+#[derive(Clone)]
+struct IpcSeenState {
+    outputs: HashMap<String, u64>,
+    mode: Option<String>,
+    engine: &'static str,
+    scroll: HashMap<String, u64>,
+}
+
+fn engine_name(engine: crate::config::SpatialEngine) -> &'static str {
+    match engine {
+        crate::config::SpatialEngine::Classic => "classic",
+        crate::config::SpatialEngine::Ocean => "ocean",
+        crate::config::SpatialEngine::Scroll => "scroll",
+    }
+}
+
 pub struct GroupMember {
     pub ui_node_id: u64,
     pub surface: WlSurface,
@@ -3508,6 +3528,139 @@ impl Smallvil {
     /// A subscriber whose `pending` exceeds `SUBSCRIBER_PENDING_CAP` after
     /// the attempt is retired via `remove_ipc_subscriber` -- bounded
     /// memory wins over best-effort delivery to a wedged client.
+    /// Emits `output-changed`, `mode-changed`, `engine-changed` and
+    /// `scroll-changed` by comparing a small fingerprint of that state with
+    /// the last one reported. Runs once per event-loop dispatch, so every
+    /// path that changes the state is covered without hooks at each site.
+    /// Skipped entirely while nobody listens.
+    pub(crate) fn emit_state_change_events(&mut self) {
+        const NAMES: [&str; 4] = [
+            "output-changed",
+            "mode-changed",
+            "engine-changed",
+            "scroll-changed",
+        ];
+        let listening =
+            !self.ipc_subscribers.is_empty() || NAMES.iter().any(|name| self.has_lua_handler(name));
+        if !listening {
+            self.ipc_seen = None;
+            return;
+        }
+        let now = self.ipc_seen_state();
+        let Some(before) = self.ipc_seen.replace(now.clone()) else {
+            return;
+        };
+        use crate::ipc::IpcEvent;
+        for (name, fingerprint) in &now.outputs {
+            match before.outputs.get(name) {
+                None => self.emit_ipc_event(IpcEvent::OutputChanged {
+                    output: name.clone(),
+                    change: "added",
+                }),
+                Some(old) if old != fingerprint => self.emit_ipc_event(IpcEvent::OutputChanged {
+                    output: name.clone(),
+                    change: "changed",
+                }),
+                _ => {}
+            }
+        }
+        for name in before
+            .outputs
+            .keys()
+            .filter(|name| !now.outputs.contains_key(*name))
+        {
+            self.emit_ipc_event(IpcEvent::OutputChanged {
+                output: name.clone(),
+                change: "removed",
+            });
+        }
+        if before.mode != now.mode {
+            self.emit_ipc_event(IpcEvent::ModeChanged {
+                mode: now.mode.clone(),
+            });
+        }
+        if before.engine != now.engine {
+            self.emit_ipc_event(IpcEvent::EngineChanged {
+                from: before.engine,
+                to: now.engine,
+            });
+        }
+        for (name, fingerprint) in &now.scroll {
+            if before.scroll.get(name) != Some(fingerprint) {
+                self.emit_ipc_event(IpcEvent::ScrollChanged {
+                    output: name.clone(),
+                });
+            }
+        }
+    }
+
+    fn ipc_seen_state(&self) -> IpcSeenState {
+        use std::hash::{Hash, Hasher};
+        let fingerprint = |write: &dyn Fn(&mut std::collections::hash_map::DefaultHasher)| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            write(&mut hasher);
+            hasher.finish()
+        };
+        let outputs = self
+            .space
+            .outputs()
+            .map(|output| {
+                let print = fingerprint(&|h| {
+                    let loc = output.current_location();
+                    (loc.x, loc.y).hash(h);
+                    output
+                        .current_mode()
+                        .map(|m| (m.size.w, m.size.h, m.refresh))
+                        .hash(h);
+                    output.current_scale().fractional_scale().to_bits().hash(h);
+                    format!("{:?}", output.current_transform()).hash(h);
+                });
+                (output.name(), print)
+            })
+            .collect();
+        let scrolling = self.config.spatial_engine == crate::config::SpatialEngine::Scroll;
+        let scroll = if scrolling {
+            self.space
+                .outputs()
+                .map(|output| {
+                    let name = output.name();
+                    let workspace = self.layout.active_workspace(&name);
+                    let print = fingerprint(&|h| {
+                        workspace.hash(h);
+                        self.layout
+                            .scroll
+                            .offset(&name, self.layout.scroll_key(workspace))
+                            .to_bits()
+                            .hash(h);
+                        for column in self.layout.scroll_columns(&name, workspace) {
+                            column.width.to_bits().hash(h);
+                            for surface in &column.windows {
+                                self.foreign_toplevel_numeric_ids.get(surface).hash(h);
+                            }
+                        }
+                    });
+                    (name, print)
+                })
+                .collect()
+        } else {
+            HashMap::new()
+        };
+        IpcSeenState {
+            outputs,
+            mode: self.active_mode.clone(),
+            engine: engine_name(self.config.spatial_engine),
+            scroll,
+        }
+    }
+
+    fn has_lua_handler(&self, name: &str) -> bool {
+        self.config_lua
+            .globals()
+            .get::<mlua::Table>("_handlers")
+            .and_then(|handlers| handlers.get::<mlua::Value>(name))
+            .is_ok_and(|value| matches!(value, mlua::Value::Table(_)))
+    }
+
     pub(crate) fn emit_ipc_event(&mut self, event: crate::ipc::IpcEvent) {
         // Wave `on "event"` handlers run regardless of subscribers.
         self.run_lua_handlers(&event);
@@ -3925,6 +4078,7 @@ impl Smallvil {
             helper_keys_down: HashSet::new(),
 
             ipc_subscribers: HashMap::new(),
+            ipc_seen: None,
             ipc_flush_token: None,
             next_ipc_subscriber_id: 1,
 

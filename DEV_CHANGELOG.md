@@ -2,6 +2,13 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.166 — IPC: window geometry, layers and state-change events
+
+- `windows` entries gain `pid`, `geometry` (global logical rect from the Space, `null` while unmapped) and, in Scroll, `scroll: {column, row, column_width, row_weight}`.
+- New queries `focused-output` (the output keybinds land on, as one `outputs` entry) and `layers` (namespace, layer, output, geometry, pid per mapped layer surface). `tidectl focused-output` and `tidectl layers` print them.
+- New subscribe channels and events: `output-changed` (`added`/`removed`/`changed` plus the output entry), `mode-changed`, `engine-changed` (`from`/`to`) and `scroll-changed` (offset plus columns as window ids and widths). They come from comparing a small per-output fingerprint once per event-loop dispatch instead of hooks at every mutation site, and the comparison is skipped while no subscriber or Wave handler listens. Wave `on "..."` handlers receive them too.
+- Tests cover the wire names, subscribe parsing of every channel and the new events' channels. A nested run with real kitty clients streamed `mode-changed`, `scroll-changed` and `engine-changed`, and checked the new window fields and `focused-output`. `layers` and `output-changed` need a native session (nested has no layer clients or output changes). 664 tests, strict Clippy, fmt and the optimized release build pass.
+
 ## 0.90.165 — Scroll mouse resize and niri column actions
 
 - Modifier+right-drag on a Scroll tile starts `ScrollResizeGrab`: motion along the strip changes the column width (head proportion over the usable viewport), motion across it scales the window's row weight when the column is shared. It runs before the BSP/cascade lookups, which find nothing in Scroll.

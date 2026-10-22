@@ -1009,6 +1009,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (the release was queued but unflushed, so kitty kept repeating), and
     // the near-frozen redraw rate on an all-tiled udev-backend desktop.
     let result = event_loop.run(None, &mut state, move |state| {
+        state.emit_state_change_events();
         let _ = state.display_handle.flush_clients();
     });
 

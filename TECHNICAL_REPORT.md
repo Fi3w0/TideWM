@@ -6,7 +6,7 @@ The quick technical picture: what TideWM is built from, what works, what's been 
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). Underneath is a complete tiling window manager: BSP, master/stack and cascade layouts, workspaces, multi-monitor, layer shell, IPC and XWayland. On top sits the water look (ripples, waves, glass, shadows, physics), and every piece of it is a config toggle.
 
-Current version: **0.90.165**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
+Current version: **0.90.166**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
 
 ## Architecture
 
@@ -113,7 +113,7 @@ Focusing with the mouse never moves the strip: hovering with `focus_follows_mous
 
 Switching between Classic and Scroll keeps your layout trees intact. Switching to or from Ocean converts the layout, and Ocean's camera history and bookmarks don't carry over.
 
-For tools: each `tidectl outputs` entry has a `scroll` object (`offset`, `orientation`, `workspaces`). The full key reference is in [DOCUMENTATION.md](DOCUMENTATION.md#scroll-spatial-engine).
+For tools: each `tidectl outputs` entry has a `scroll` object (`offset`, `orientation`, `workspaces`), each `windows` entry says which column and row it's in, and `tidectl subscribe scroll` streams the strip's columns whenever they move or change. The full key reference is in [DOCUMENTATION.md](DOCUMENTATION.md#scroll-spatial-engine).
 
 ## Feature status
 
@@ -127,7 +127,7 @@ For tools: each `tidectl outputs` entry has a `scroll` object (`offset`, `orient
 | XWayland | Done, via xwayland-satellite |
 | Screenshots, per-window capture, clipboard, session lock | Done |
 | Screen sharing (OBS, Discord) through TideWM's own portal | Done with `--features screencast` |
-| IPC and `tidectl` (queries, event stream, `doctor`, `report`, `perf`) | Done |
+| IPC and `tidectl`: windows with geometry and Scroll position, outputs, layers, an event stream for windows, workspaces, focus, monitors, modes, engine and Scroll, plus `doctor`, `report`, `perf` | Done |
 | Water stack: ripples, wave transitions, water/frost glass, shadows, gradient borders, viscosity, sway, buoyancy, caustics, currents | Done |
 | Custom GLSL shaders (up to four chained passes) | Done |
 | Floating-window ocean physics, Ocean compass and minimap | Done; tested nested only |

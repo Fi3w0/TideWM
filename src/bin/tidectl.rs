@@ -696,6 +696,8 @@ fn build_request(args: &[String]) -> Result<Value, String> {
         "windows" => Ok(json!({ "request": "windows" })),
         "focused-window" | "focused" => Ok(json!({ "request": "focused-window" })),
         "active-mode" => Ok(json!({ "request": "active-mode" })),
+        "focused-output" => Ok(json!({ "request": "focused-output" })),
+        "layers" => Ok(json!({ "request": "layers" })),
         "keyboard-layouts" | "layout" => Ok(json!({ "request": "keyboard-layouts" })),
         "eval" if !rest.is_empty() => Ok(json!({
             "request": "eval",
@@ -843,6 +845,14 @@ fn print_response(command: &str, data: &Value) {
             Some(name) => println!("{name}"),
             None => println!("(none, base keybinds active)"),
         },
+        "focused-output" => {
+            if data.is_null() {
+                println!("(no output)");
+            } else {
+                print_outputs(&Value::Array(vec![data.clone()]));
+            }
+        }
+        "layers" => print_layers(data),
         "keyboard-layouts" | "layout" => print_keyboard_layouts(data),
         "eval" => println!("{}", serde_json::to_string_pretty(data).unwrap_or_default()),
         _ => println!("ok"),
@@ -871,6 +881,24 @@ fn print_keyboard_layouts(data: &Value) {
         code,
         pick(names)
     );
+}
+
+fn print_layers(data: &Value) {
+    for layer in data.as_array().into_iter().flatten() {
+        let text = |key: &str| {
+            layer
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_string()
+        };
+        println!(
+            "{}  layer={}  output={}",
+            text("namespace"),
+            text("layer"),
+            text("output")
+        );
+    }
 }
 
 fn print_outputs(data: &Value) {
@@ -993,6 +1021,8 @@ QUERIES:
     workspaces          list known workspaces (output, number, active, window count)
     windows             list currently mapped windows
     focused-window       (alias: focused) the currently focused window, if any
+    focused-output      the output keybinds land on (same fields as outputs)
+    layers              mapped layer-shell surfaces (namespace, layer, output)
     active-mode         the currently active `mode <name> {{ }}` block, if any
     resolve-window --pid <PID> | --app-id <ID> | --window-id <ID>
                         resolve a notification source; ambiguous matches fail
@@ -1002,7 +1032,8 @@ STREAMING:
     subscribe [event...]   long-lived: print one JSON line per event
                         ({{"event": "...", "data": ...}}) until TideWM exits.
                         Event names: window, workspace, focus, urgent,
-                        depth, config. No names subscribes to all. Use
+                        depth, config, layout, output, mode, engine,
+                        scroll. No names subscribes to all. Use
                         --socket to point at a specific compositor.
 
 DIAGNOSTICS:
