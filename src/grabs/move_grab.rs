@@ -273,7 +273,7 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
         };
         data.ocean.clear_tile_drag();
         if !snapped {
-            data.sync_visible_floating_window(&self.window);
+            data.sync_visible_floating_window(&self.window, true);
         }
     }
 }

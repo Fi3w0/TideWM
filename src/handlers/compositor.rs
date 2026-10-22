@@ -218,7 +218,7 @@ impl CompositorHandler for Smallvil {
             // The resize helper may have adjusted top/left placement only
             // after Window::on_commit. Persist the settled floating geometry
             // and cross-output ownership after that final adjustment.
-            self.sync_visible_floating_window(&window);
+            self.sync_visible_floating_window(&window, false);
             if !self.window_is_visible(surface) {
                 self.enforce_floating_size_constraints(surface);
             }

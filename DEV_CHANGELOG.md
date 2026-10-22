@@ -2,6 +2,11 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.176 — Strip floaters keep their output on commit
+
+- `sync_visible_floating_window(window, dropped)` runs on every floating commit (`handlers/compositor.rs`) and re-derived the owner from the largest output overlap. A strip-anchored floater scrolled toward a neighbor's coordinates (where it is not drawn) was retagged to that neighbor on its next commit, so it appeared there. Plain commits now keep a strip floater's tag output; only the end of an interactive move (`move_grab.rs`, `dropped = true`) may hand it to another output. Reported natively by the maintainer on .175.
+- 668 tests, strict Clippy, fmt pass; nested float-anchor regression passes. Native two-monitor confirmation pending. Known limit: while a strip floater is dragged across outputs it is drawn only on its tag output until dropped.
+
 ## 0.90.175 — Per-event and per-tick work trimmed (external audit of .168)
 
 - `run_lua_handlers` checks `_handlers[event]` before `sync_tide()`, so configs without a handler for an event no longer rebuild the `tide` table on every focus/workspace/window/scroll event.

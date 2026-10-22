@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.176 · 2026-10-22 — Floating windows stay on their monitor
+
+- With `float_anchor = strip`, a floating window could jump to the other monitor after the strip scrolled it toward that side. It now stays on its own monitor until you drag it to another one.
+
 ## 0.90.175 · 2026-10-22 — Less idle work
 
 - Moving the mouse with focus-follows-mouse does less hit-testing per motion.

@@ -5441,7 +5441,12 @@ impl Smallvil {
     /// crossing an output transfers it to that output's active workspace;
     /// otherwise later workspace actions would still treat it as belonging
     /// to the output where the drag began.
-    pub(crate) fn sync_visible_floating_window(&mut self, window: &Window) {
+    ///
+    /// `dropped` is true only at the end of an interactive move. A
+    /// strip-anchored Scroll floater otherwise keeps its output: scrolling
+    /// can leave its rect mostly over a neighbor's coordinates without it
+    /// being shown there, and a plain commit must not hand it over.
+    pub(crate) fn sync_visible_floating_window(&mut self, window: &Window, dropped: bool) {
         let Some(surface) = window
             .toplevel()
             .map(|toplevel| toplevel.wl_surface().clone())
@@ -5482,8 +5487,10 @@ impl Smallvil {
         // Grab teardown holds the pointer mutex. If the window overlaps no
         // output, retain its live owner or use a stable remaining output;
         // primary_output() would re-enter that mutex through its fallback.
-        let owner = self
-            .output_for_window(window)
+        let keep_strip_owner = !dropped && self.scroll_strip_floater(&surface);
+        let owner = (!keep_strip_owner)
+            .then(|| self.output_for_window(window))
+            .flatten()
             .or_else(|| {
                 self.floating_workspace
                     .get(&surface)
