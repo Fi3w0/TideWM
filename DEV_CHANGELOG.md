@@ -2,6 +2,11 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.178 — Reveal strip floaters on navigation focus
+
+- `reveal_scroll_window` hands strip floaters to `reveal_strip_floater`, which pans the strip by the floater's overflow past the output's tiling area (leading edge first when it is larger than the screen), clamped to `scroll_reach`, clears explicit-center margins and retiles that output; `anchor_scroll_floaters` then moves the floater with the strip. Only `FocusOrigin::Navigation` reaches it, so pointer focus still never moves the strip. Hidden workspaces, fullscreen and maximized floaters are skipped.
+- Nested run: floater at x 1530 on a 1280 px output with offset 0; `focus-window` on it moved the offset to 650 and the floater to x 880. 668 tests, strict Clippy, fmt pass.
+
 ## 0.90.177 — float_rescue
 
 - Hot-reloadable `scroll.float_rescue` (default `true`). After `anchor_scroll_floaters`, `rescue_scroll_floaters` maps each visible strip floater (not fullscreen/maximized) into strip coordinates and compares it with `Layouts::scroll_reach` (the `[minimum, maximum + viewport]` range the strip can show, from the existing `scroll_bounds`). A floater wholly outside that range is translated onto the output along the strip axis, nearest edge first. Reachable off-screen floaters are left alone. Reported natively: a floater whose columns closed was unreachable by scrolling or Alt+Tab.

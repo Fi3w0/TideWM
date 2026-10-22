@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.178 · 2026-10-22 — Alt+Tab finds floating windows
+
+- With `float_anchor = strip`, switching to a floating window that is off-screen (Alt+Tab, keyboard focus, notifications) scrolls the strip to it.
+
 ## 0.90.177 · 2026-10-22 — No more lost floating windows
 
 - With `float_anchor = strip`, closing the apps around a floating window could leave it off-screen where the strip can no longer scroll. It now comes back onto the screen. `scroll { float_rescue = false }` keeps the old behavior.

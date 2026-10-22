@@ -12720,6 +12720,10 @@ impl Smallvil {
         if self.config.spatial_engine != crate::config::SpatialEngine::Scroll {
             return;
         }
+        if self.scroll_strip_floater(surface) {
+            self.reveal_strip_floater(surface);
+            return;
+        }
         let Some(owner) = self.layout.output_of(surface).map(str::to_owned) else {
             return;
         };
@@ -12734,6 +12738,57 @@ impl Smallvil {
         if self.layout.scroll_reveal(surface, area, gap) {
             self.retile_filtered(false, None, Some(&output.name()));
         }
+    }
+
+    /// Scrolls the strip just far enough to show a strip-anchored floater
+    /// that sits off-screen along it; the floater rides along through
+    /// `anchor_scroll_floaters`. Bounded like any other pan.
+    fn reveal_strip_floater(&mut self, surface: &WlSurface) {
+        let Some(tag) = self.floating_workspace.get(surface) else {
+            return;
+        };
+        let (owner, workspace, window) = (tag.output.clone(), tag.workspace, tag.window.clone());
+        if self.layout.active_workspace(&owner) != workspace
+            || self.fullscreen.contains_key(surface)
+            || self.maximized.contains_key(surface)
+        {
+            return;
+        }
+        let (Some(output), Some(rect)) = (
+            self.output_by_name(&owner),
+            self.space.element_geometry(&window),
+        ) else {
+            return;
+        };
+        let Some(area) = self.output_tiling_area(&output) else {
+            return;
+        };
+        let gap = self.gaps_for(&owner, workspace);
+        let horizontal = self.config.scroll.orientation == crate::scroll::Orientation::Horizontal;
+        let (start, size, origin, extent) = if horizontal {
+            (rect.loc.x, rect.size.w, area.loc.x, area.size.w)
+        } else {
+            (rect.loc.y, rect.size.h, area.loc.y, area.size.h)
+        };
+        let shift = if start < origin {
+            start - origin
+        } else if start + size > origin + extent {
+            (start + size - (origin + extent)).min(start - origin)
+        } else {
+            return;
+        };
+        let (offset, first, last) = self.layout.scroll_reach(&owner, workspace, area, gap);
+        let viewport = self.layout.scroll_viewport(area, gap);
+        let maximum = (last - viewport).max(first);
+        let target = (offset + f64::from(shift)).clamp(first, maximum);
+        if (target - offset).abs() < 0.5 {
+            return;
+        }
+        let key = self.layout.scroll_key(workspace);
+        self.layout.scroll.set_margins(&owner, key, false);
+        self.layout.scroll.set_offset(&owner, key, target);
+        self.retile_filtered(false, None, Some(&owner));
+        self.request_output_redraw(&output);
     }
 
     /// Whether `direction` runs along the Scroll strip, and its step (-1/1).
