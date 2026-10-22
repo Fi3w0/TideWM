@@ -27,12 +27,59 @@ pub enum Orientation {
     Vertical,
 }
 
+/// When revealing a column centers it (niri's `center-focused-column`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CenterMode {
+    /// Move only as far as needed.
+    #[default]
+    Never,
+    /// Always center the revealed column.
+    Always,
+    /// Center only when the column is not already fully visible.
+    OnOverflow,
+}
+
+/// Most preset widths a config can list.
+pub const MAX_PRESET_WIDTHS: usize = 16;
+
+/// Ascending column widths for `switch-preset-width`, stored inline so the
+/// config stays `Copy`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PresetWidths {
+    values: [f64; MAX_PRESET_WIDTHS],
+    len: usize,
+}
+impl PresetWidths {
+    /// Sorted, deduplicated widths; `None` when empty or too many.
+    pub fn new(widths: &[f64]) -> Option<Self> {
+        let mut sorted = widths.to_vec();
+        sorted.sort_by(f64::total_cmp);
+        sorted.dedup();
+        if sorted.is_empty() || sorted.len() > MAX_PRESET_WIDTHS {
+            return None;
+        }
+        let mut values = [0.0; MAX_PRESET_WIDTHS];
+        values[..sorted.len()].copy_from_slice(&sorted);
+        Some(Self {
+            values,
+            len: sorted.len(),
+        })
+    }
+    pub fn as_slice(&self) -> &[f64] {
+        &self.values[..self.len]
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ScrollConfig {
     pub workspaces: WorkspaceMode,
     pub orientation: Orientation,
     pub tile_proportion: f64,
-    pub center_focused: bool,
+    pub center_focused: CenterMode,
+    /// Center a workspace's only column regardless of `center_focused`.
+    pub always_center_single: bool,
+    /// Widths `switch-preset-width` cycles through.
+    pub preset_widths: PresetWidths,
     pub gesture_distance: f64,
 }
 impl Default for ScrollConfig {
@@ -41,10 +88,23 @@ impl Default for ScrollConfig {
             workspaces: WorkspaceMode::Separate,
             orientation: Orientation::Horizontal,
             tile_proportion: 0.5,
-            center_focused: false,
+            center_focused: CenterMode::Never,
+            always_center_single: false,
+            preset_widths: PresetWidths::new(&[1.0 / 3.0, 0.5, 2.0 / 3.0])
+                .expect("default presets are valid"),
             gesture_distance: 1200.0,
         }
     }
+}
+
+/// The preset after `current` (the first one wider by more than a pixel's
+/// worth), wrapping to the narrowest.
+pub fn next_preset(presets: &[f64], current: f64) -> Option<f64> {
+    presets
+        .iter()
+        .copied()
+        .find(|preset| *preset > current + 1e-3)
+        .or_else(|| presets.first().copied())
 }
 
 #[derive(Default)]
@@ -58,6 +118,10 @@ pub struct ScrollState {
     stacked: HashSet<WlSurface>,
     /// Relative height (or width, for vertical strips) inside a column.
     weights: HashMap<WlSurface, f64>,
+    /// Width a maximized column returns to, keyed by its head.
+    restore_widths: HashMap<WlSurface, f64>,
+    /// Strips an explicit `center-column` left with end margins.
+    margins: HashSet<(String, u32)>,
 }
 impl ScrollState {
     pub fn offset(&self, output: &str, workspace: u32) -> f64 {
@@ -74,6 +138,16 @@ impl ScrollState {
             } else {
                 self.offsets.insert(key, value);
             }
+        }
+    }
+    pub fn has_margins(&self, output: &str, workspace: u32) -> bool {
+        self.margins.contains(&(output.to_owned(), workspace))
+    }
+    pub fn set_margins(&mut self, output: &str, workspace: u32, on: bool) {
+        if on {
+            self.margins.insert((output.to_owned(), workspace));
+        } else {
+            self.margins.remove(&(output.to_owned(), workspace));
         }
     }
     pub fn proportion(&self, surface: &WlSurface) -> f64 {
@@ -147,6 +221,17 @@ impl ScrollState {
         self.set_weight(a, weight_b);
         self.set_weight(b, weight_a);
     }
+    /// Toggles `head`'s column between full width and its previous width.
+    pub fn toggle_maximized(&mut self, head: &WlSurface) {
+        match self.restore_widths.remove(head) {
+            Some(width) if self.proportion(head) >= 1.0 - 1e-6 => self.resize(head.clone(), width),
+            _ => {
+                self.restore_widths
+                    .insert(head.clone(), self.proportion(head));
+                self.resize(head.clone(), 1.0);
+            }
+        }
+    }
     pub fn clear_columns(&mut self) {
         self.stacked.clear();
         self.weights.clear();
@@ -156,8 +241,14 @@ impl ScrollState {
         self.fullscreen_extents.remove(surface);
         self.stacked.remove(surface);
         self.weights.remove(surface);
+        self.restore_widths.remove(surface);
     }
     pub fn prune(&mut self, populated: &[(String, u32)]) {
+        self.margins.retain(|(output, workspace)| {
+            populated
+                .iter()
+                .any(|(name, number)| name == output && (*workspace == 0 || number == workspace))
+        });
         self.offsets.retain(|(output, workspace), _| {
             populated
                 .iter()
@@ -305,6 +396,37 @@ mod tests {
         let distant = tile_rect(area, 1e30, 500., 0., 7, Orientation::Horizontal);
         assert!(distant.loc.x.checked_add(distant.size.w).is_some());
     }
+    #[test]
+    fn presets_cycle_upward_and_wrap() {
+        let presets = PresetWidths::new(&[0.5, 1.0 / 3.0, 2.0 / 3.0, 0.5]).unwrap();
+        assert_eq!(presets.as_slice().len(), 3);
+        assert_eq!(next_preset(presets.as_slice(), 0.4), Some(0.5));
+        assert_eq!(next_preset(presets.as_slice(), 0.5), Some(2.0 / 3.0));
+        assert_eq!(next_preset(presets.as_slice(), 0.9), Some(1.0 / 3.0));
+        assert!(PresetWidths::new(&[]).is_none());
+        // Duplicates collapse before the size limit applies.
+        assert!(PresetWidths::new(&[0.5; 17]).is_some());
+        let too_many: Vec<f64> = (0..17).map(|i| 0.1 + f64::from(i) * 0.05).collect();
+        assert!(PresetWidths::new(&too_many).is_none());
+    }
+
+    #[test]
+    fn maximize_toggles_back_to_the_previous_width() {
+        let mut fixture = crate::ocean::test_protocol::ProtocolFixture::new();
+        let head = fixture.window().toplevel().unwrap().wl_surface().clone();
+        let mut state = ScrollState::default();
+        state.resize(head.clone(), 0.4);
+        state.toggle_maximized(&head);
+        assert_eq!(state.proportion(&head), 1.0);
+        state.toggle_maximized(&head);
+        assert_eq!(state.proportion(&head), 0.4);
+        // A manual resize after maximizing starts a fresh maximize.
+        state.toggle_maximized(&head);
+        state.resize(head.clone(), 0.7);
+        state.toggle_maximized(&head);
+        assert_eq!(state.proportion(&head), 1.0);
+    }
+
     #[test]
     fn column_rows_split_the_cross_axis_by_weight_with_gaps() {
         let area = Rectangle::new((10, 20).into(), (1000, 616).into());

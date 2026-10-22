@@ -43,6 +43,8 @@ pub use tile_window_resize_grab::TileWindowResizeGrab;
 
 pub mod cascade_resize_grab;
 pub use cascade_resize_grab::CascadeResizeGrab;
+pub mod scroll_resize_grab;
+pub use scroll_resize_grab::{ScrollResizeGrab, ScrollResizeStart};
 
 #[cfg(test)]
 mod tests {

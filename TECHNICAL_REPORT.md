@@ -6,7 +6,7 @@ The quick technical picture: what TideWM is built from, what works, what's been 
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). Underneath is a complete tiling window manager: BSP, master/stack and cascade layouts, workspaces, multi-monitor, layer shell, IPC and XWayland. On top sits the water look (ripples, waves, glass, shadows, physics), and every piece of it is a config toggle.
 
-Current version: **0.90.164**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
+Current version: **0.90.165**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
 
 ## Architecture
 
@@ -41,11 +41,13 @@ Every key is optional, reloads live and is measured against the monitor's usable
 
 ```wave
 scroll {
-    workspaces       = separate     # or sections
-    orientation      = horizontal   # or vertical
-    tile_proportion  = 0.5          # 0.1 – 1.0 of the viewport
-    center_focused   = false
-    gesture_distance = 1200
+    workspaces           = separate               # or sections
+    orientation          = horizontal             # or vertical
+    tile_proportion      = 0.5                    # 0.1 – 1.0 of the viewport
+    center_focused       = never                  # always, on-overflow
+    always_center_single = false
+    preset_widths        = [0.333, 0.5, 0.667]
+    gesture_distance     = 1200
 }
 ```
 
@@ -55,7 +57,14 @@ scroll {
   - `0.5` fits two apps side by side.
 
   Apps you resized by hand keep their own size.
-- **`center_focused`:** with `true`, the focused app always sits in the middle, even the first, last or only one. With `false`, the strip moves only as far as needed to show it.
+- **`center_focused`:**
+  - `always` keeps the focused column in the middle, even the first, last or only one;
+  - `on-overflow` centers a column only when it isn't already fully on screen;
+  - `never` moves the strip only as far as needed.
+
+  `true` and `false` mean `always` and `never`.
+- **`always_center_single`:** a workspace with just one column keeps it centered.
+- **`preset_widths`:** the widths `switch-preset-width` steps through.
 - **`orientation`:** horizontal or vertical strips. For a free 2D layout, use Ocean.
 - **`workspaces`:** `separate` gives each workspace its own strip and scroll position. `sections` lays a monitor's workspaces end to end in one strip, and switching workspace jumps to its section. In both modes, scratchpads stay separate and floating windows float above the strip.
 - **`gesture_distance`:** how far a touchpad swipe travels per screen. The swipe uses your workspace-swipe finger count.
@@ -66,7 +75,7 @@ A nearly full-width setup with neighbor peeks:
 ```wave
 scroll {
     tile_proportion = 0.94
-    center_focused  = true
+    center_focused  = always
 }
 gaps = 8
 ```
@@ -88,7 +97,14 @@ A column holds one app or several stacked ones. The table is for horizontal stri
 | `consume-or-expel-left/right` | Alone: join the column on that side. Sharing a column: leave it for a new column on that side |
 | `consume-into-column` | Pull the next column's first app into this column |
 | `expel-from-column` | Move the app out into its own column, right after |
+| `switch-preset-width` | Step the column through `preset_widths` |
+| `maximize-column` | Full width, and back to the old width |
+| `expand-column` | Fill the space the other fully visible columns leave |
+| `center-column` | Center the column once, even at the ends of the strip |
+| `focus-column-first/last` | Jump to the first or last column |
+| `move-column-first/last` | Move the column to the start or end |
 | `scroll-left/right/up/down` | Slide the strip half a screen |
+| Mod + right-drag | Drag sideways to resize the column, up/down to resize the app in a shared column |
 | Touchpad swipe | Slide the strip with your fingers |
 
 New apps open as their own column right after the focused column, never in the middle of it. Closing the top app of a column keeps the rest of the column and its width.
@@ -96,8 +112,6 @@ New apps open as their own column right after the focused column, never in the m
 Focusing with the mouse never moves the strip: hovering with `focus_follows_mouse`, clicking, touch and tablet pens all leave it alone. You can cross to another monitor or click a neighbor's peek without anything sliding away. Keyboard focus, `tidectl focus-window` / `focus-app` and notification clicks do bring the app into view. When the strip slides under a still mouse, the app now under the pointer gets the wheel and clicks right away.
 
 Switching between Classic and Scroll keeps your layout trees intact. Switching to or from Ocean converts the layout, and Ocean's camera history and bookmarks don't carry over.
-
-**Coming soon:** resizing columns with the mouse.
 
 For tools: each `tidectl outputs` entry has a `scroll` object (`offset`, `orientation`, `workspaces`). The full key reference is in [DOCUMENTATION.md](DOCUMENTATION.md#scroll-spatial-engine).
 
@@ -204,7 +218,7 @@ Everything except screen sharing (file chooser, settings, printing) goes to `xdg
 ## Roadmap
 
 - **Wider hardware coverage:** Intel GPUs and an end-to-end hybrid-laptop run.
-- **Scroll:** mouse-resizing of columns (coming soon), then drag-to-insert previews.
+- **Scroll:** tabbed columns and drag-to-insert previews.
 - **Physics and Ocean extras on real hardware:** floating-window physics, the compass and the minimap are tested nested only.
 - **Feel tuning:** viscosity, sway, depth timing and transition presets get refined against real use.
 - **Lower VRAM:** measure large glass windows before considering a shared blur buffer per monitor.

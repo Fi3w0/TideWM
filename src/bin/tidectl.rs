@@ -1028,6 +1028,8 @@ ACTIONS:
         master-grow, master-shrink, resize-left/right/up/down,
         move-left/right/up/down, snap:left/right/top/bottom,
         consume-or-expel-left/right, consume-into-column, expel-from-column,
+        switch-preset-width, maximize-column, expand-column, center-column,
+        focus-column-first/last, move-column-first/last,
         snap:top-left/top-right/bottom-left/bottom-right, snap:fullscreen,
         toggle-overview
 

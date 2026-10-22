@@ -867,6 +867,18 @@ pub enum ColumnAction {
     ConsumeInto,
     /// Move the focused window out of its shared column.
     Expel,
+    /// Cycle the column through `scroll.preset_widths`.
+    SwitchPresetWidth,
+    /// Toggle the column between full width and its previous width.
+    Maximize,
+    /// Widen the column into the space other fully visible columns leave.
+    Expand,
+    /// Center the focused column once.
+    Center,
+    /// Focus the first (`last == false`) or last column.
+    FocusEnd { last: bool },
+    /// Move the column to the first or last place.
+    MoveToEnd { last: bool },
 }
 
 #[derive(Debug, Clone)]
@@ -7485,7 +7497,37 @@ fn apply_scroll_block(cfg: &mut crate::scroll::ScrollConfig, body: &[waves::Entr
                 Ok(value) if value.is_finite() && value > 0.0 => cfg.gesture_distance = value,
                 _ => tracing::warn!(value, "Expected a positive finite scroll.gesture_distance"),
             },
-            "center_focused" => set_bool(&mut cfg.center_focused, "scroll.center_focused", value),
+            "center_focused" => match value.as_str() {
+                "never" | "false" => cfg.center_focused = crate::scroll::CenterMode::Never,
+                "always" | "true" => cfg.center_focused = crate::scroll::CenterMode::Always,
+                "on-overflow" => cfg.center_focused = crate::scroll::CenterMode::OnOverflow,
+                _ => tracing::warn!(
+                    value,
+                    "Expected scroll.center_focused never, always or on-overflow"
+                ),
+            },
+            "always_center_single" => set_bool(
+                &mut cfg.always_center_single,
+                "scroll.always_center_single",
+                value,
+            ),
+            "preset_widths" => {
+                let widths: Option<Vec<f64>> = list_items(value)
+                    .iter()
+                    .map(|item| {
+                        item.parse::<f64>()
+                            .ok()
+                            .filter(|w| w.is_finite() && (0.1..=1.0).contains(w))
+                    })
+                    .collect();
+                match widths.as_deref().and_then(crate::scroll::PresetWidths::new) {
+                    Some(widths) => cfg.preset_widths = widths,
+                    _ => tracing::warn!(
+                        value,
+                        "Expected scroll.preset_widths as a list of 1 to 16 widths from 0.1 to 1.0"
+                    ),
+                }
+            }
             _ => tracing::warn!(key, "Unknown scroll setting"),
         }
     }
@@ -9580,6 +9622,14 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         })),
         "consume-into-column" => Some(Action::Column(ColumnAction::ConsumeInto)),
         "expel-from-column" => Some(Action::Column(ColumnAction::Expel)),
+        "switch-preset-width" => Some(Action::Column(ColumnAction::SwitchPresetWidth)),
+        "maximize-column" => Some(Action::Column(ColumnAction::Maximize)),
+        "expand-column" => Some(Action::Column(ColumnAction::Expand)),
+        "center-column" => Some(Action::Column(ColumnAction::Center)),
+        "focus-column-first" => Some(Action::Column(ColumnAction::FocusEnd { last: false })),
+        "focus-column-last" => Some(Action::Column(ColumnAction::FocusEnd { last: true })),
+        "move-column-first" => Some(Action::Column(ColumnAction::MoveToEnd { last: false })),
+        "move-column-last" => Some(Action::Column(ColumnAction::MoveToEnd { last: true })),
         other if other.starts_with("switch-layout:") => {
             let target = &other["switch-layout:".len()..];
             if target.is_empty() {
@@ -10006,6 +10056,28 @@ mod tests {
             crate::scroll::Orientation::Vertical
         );
         assert_eq!(config.scroll.tile_proportion, 0.6);
+        let center_entries = wave_entries(
+            "scroll {\n center_focused = on-overflow\n always_center_single = true\n preset_widths = [0.75, 0.25, 0.5]\n }\n",
+        );
+        let centered = Config::from_raw(lower_entries(&center_entries)).0;
+        assert_eq!(
+            centered.scroll.center_focused,
+            crate::scroll::CenterMode::OnOverflow
+        );
+        assert!(centered.scroll.always_center_single);
+        assert_eq!(centered.scroll.preset_widths.as_slice(), &[0.25, 0.5, 0.75]);
+        let center_entries =
+            wave_entries("scroll {\n center_focused = true\n preset_widths = [0.05]\n }\n");
+        let centered = Config::from_raw(lower_entries(&center_entries)).0;
+        assert_eq!(
+            centered.scroll.center_focused,
+            crate::scroll::CenterMode::Always
+        );
+        assert_eq!(
+            centered.scroll.preset_widths.as_slice().len(),
+            3,
+            "invalid presets keep the defaults"
+        );
         assert_eq!(config.scroll.gesture_distance, 900.0);
         let entries = wave_entries("engine = scroll\nscroll {\n workspaces = sections\n orientation = vertical\n tile_proportion = 0.6\n}\n");
         let (parsed, warnings) = Config::from_raw(lower_entries(&entries));

@@ -373,6 +373,33 @@ impl Layouts {
         result
     }
 
+    /// Whether revealing `slot` from `offset` should center it.
+    fn scroll_centers(
+        &self,
+        slots: &[ScrollSlot],
+        slot: &ScrollSlot,
+        offset: f64,
+        viewport: f64,
+    ) -> bool {
+        let Some(cfg) = self.scroll.config else {
+            return false;
+        };
+        let columns = slots
+            .iter()
+            .filter(|s| s.window.is_some() && s.row == 0)
+            .count();
+        if cfg.always_center_single && columns == 1 {
+            return true;
+        }
+        match cfg.center_focused {
+            scroll::CenterMode::Never => false,
+            scroll::CenterMode::Always => true,
+            scroll::CenterMode::OnOverflow => {
+                slot.start < offset || slot.start + slot.extent > offset + viewport
+            }
+        }
+    }
+
     fn scroll_viewport(&self, area: Rectangle<i32, Logical>, gap: i32) -> f64 {
         let gap = gap
             .max(0)
@@ -389,8 +416,10 @@ impl Layouts {
 
     /// Centering permits empty margins at either end of the strip, so the
     /// first, last and sole tile can align like every interior tile.
-    fn scroll_bounds(&self, slots: &[ScrollSlot], viewport: f64) -> (f64, f64) {
-        let centered = self.scroll.config.is_some_and(|cfg| cfg.center_focused);
+    fn scroll_bounds(&self, slots: &[ScrollSlot], viewport: f64, key: (&str, u32)) -> (f64, f64) {
+        let centered = self.scroll.config.is_some_and(|cfg| {
+            cfg.center_focused != scroll::CenterMode::Never || cfg.always_center_single
+        }) || self.scroll.has_margins(key.0, key.1);
         let minimum = slots
             .first()
             .map(|slot| {
@@ -428,19 +457,14 @@ impl Layouts {
         }
         let slots = self.scroll_slots(output, workspace, area, gap);
         let viewport = self.scroll_viewport(area, gap);
-        let (minimum, maximum) = self.scroll_bounds(&slots, viewport);
         let key = self.scroll_key(workspace);
+        let (minimum, maximum) = self.scroll_bounds(&slots, viewport, (output, key));
         let mut offset = self.scroll.offset(output, key).clamp(minimum, maximum);
         if self.scroll_section_requests.remove(output).is_some() && key == 0 {
             if let Some(slot) = slots.iter().find(|slot| slot.workspace == workspace) {
-                offset = scroll::reveal(
-                    0.0,
-                    slot.start,
-                    slot.extent,
-                    viewport,
-                    self.scroll.config.unwrap_or_default().center_focused,
-                )
-                .clamp(minimum, maximum);
+                let center = self.scroll_centers(&slots, slot, 0.0, viewport);
+                offset = scroll::reveal(0.0, slot.start, slot.extent, viewport, center)
+                    .clamp(minimum, maximum);
             }
         }
         self.scroll.set_offset(output, key, offset);
@@ -486,9 +510,21 @@ impl Layouts {
         area: Rectangle<i32, Logical>,
         gap: i32,
     ) -> bool {
-        let Some(cfg) = self.scroll.config else {
+        self.scroll_reveal_with(surface, area, gap, None)
+    }
+
+    /// Reveals `surface`, forcing centering on or off with `center`, or
+    /// following the configured centering mode with `None`.
+    pub(crate) fn scroll_reveal_with(
+        &mut self,
+        surface: &WlSurface,
+        area: Rectangle<i32, Logical>,
+        gap: i32,
+        center: Option<bool>,
+    ) -> bool {
+        if self.scroll.config.is_none() {
             return false;
-        };
+        }
         let Some((output, workspace)) = self.key_of(surface) else {
             return false;
         };
@@ -513,17 +549,53 @@ impl Layouts {
         let key = self.scroll_key(workspace);
         let previous = self.scroll.offset(&output, key);
         let viewport = self.scroll_viewport(area, gap);
-        let (minimum, maximum) = self.scroll_bounds(&slots, viewport);
-        let offset = scroll::reveal(
-            previous,
-            slot.start,
-            slot.extent,
-            viewport,
-            cfg.center_focused,
-        )
-        .clamp(minimum, maximum);
+        // An explicit center may leave empty space past the strip's ends
+        // until the next ordinary reveal or pan.
+        self.scroll.set_margins(&output, key, center == Some(true));
+        let (minimum, maximum) = self.scroll_bounds(&slots, viewport, (&output, key));
+        let center =
+            center.unwrap_or_else(|| self.scroll_centers(&slots, slot, previous, viewport));
+        let offset = scroll::reveal(previous, slot.start, slot.extent, viewport, center)
+            .clamp(minimum, maximum);
         self.scroll.set_offset(&output, key, offset);
         (previous - offset).abs() > f64::EPSILON
+    }
+
+    /// The column width that fills the viewport space other fully visible
+    /// columns leave around `surface`'s column (niri's
+    /// expand-column-to-available-width).
+    pub(crate) fn scroll_available_width(
+        &self,
+        surface: &WlSurface,
+        area: Rectangle<i32, Logical>,
+        gap: i32,
+    ) -> Option<f64> {
+        let (output, workspace) = self.key_of(surface)?;
+        let shown = if self.scroll_key(workspace) == 0 {
+            self.active_workspace(&output)
+        } else {
+            workspace
+        };
+        let slots = self.scroll_slots(&output, shown, area, gap);
+        let viewport = self.scroll_viewport(area, gap);
+        let offset = self.scroll.offset(&output, self.scroll_key(workspace));
+        let own = slots.iter().find(|slot| {
+            slot.window
+                .as_ref()
+                .and_then(surface_of)
+                .is_some_and(|s| &s == surface)
+        })?;
+        let gap = f64::from(gap.max(0));
+        let taken: f64 = slots
+            .iter()
+            .filter(|slot| slot.row == 0 && slot.window.is_some())
+            .filter(|slot| (slot.start - own.start).abs() > f64::EPSILON)
+            .filter(|slot| {
+                slot.start >= offset - 0.5 && slot.start + slot.extent <= offset + viewport + 0.5
+            })
+            .map(|slot| slot.extent + gap)
+            .sum();
+        Some(((viewport - taken) / viewport).clamp(0.1, 1.0))
     }
 
     pub(crate) fn scroll_pan(
@@ -536,8 +608,9 @@ impl Layouts {
     ) {
         let slots = self.scroll_slots(output, workspace, area, gap);
         let viewport = self.scroll_viewport(area, gap);
-        let (minimum, maximum) = self.scroll_bounds(&slots, viewport);
         let key = self.scroll_key(workspace);
+        self.scroll.set_margins(output, key, false);
+        let (minimum, maximum) = self.scroll_bounds(&slots, viewport, (output, key));
         let offset = (self.scroll.offset(output, key) + delta * viewport).clamp(minimum, maximum);
         self.scroll.set_offset(output, key, offset);
     }
@@ -655,6 +728,67 @@ mod tests {
     }
 
     #[test]
+    fn on_overflow_centers_only_hidden_columns_and_single_columns_can_center() {
+        let mut protocol = ProtocolFixture::new();
+        let mut layouts = Layouts::default();
+        layouts.scroll.config = Some(ScrollConfig {
+            center_focused: scroll::CenterMode::OnOverflow,
+            tile_proportion: 0.4,
+            ..Default::default()
+        });
+        let w: Vec<_> = (0..4).map(|_| protocol.window()).collect();
+        for window in &w {
+            layouts.insert("screen", 1, window.clone(), None);
+        }
+        let area = Rectangle::new((0, 0).into(), (1016, 600).into());
+        // Column 2 is already fully visible: nothing moves.
+        assert!(!layouts.scroll_reveal(&surface(&w[1]), area, 8));
+        // Column 4 is off screen: it is centered, not edge-aligned.
+        assert!(layouts.scroll_reveal(&surface(&w[3]), area, 8));
+        let rect = layouts.layout("screen", 1, area, 8)[3].1;
+        assert!(
+            (2 * rect.loc.x + rect.size.w - area.size.w).abs() <= 1,
+            "{rect:?}"
+        );
+
+        let mut single = Layouts::default();
+        single.scroll.config = Some(ScrollConfig {
+            always_center_single: true,
+            tile_proportion: 0.4,
+            ..Default::default()
+        });
+        let only = protocol.window();
+        single.insert("screen", 1, only.clone(), None);
+        single.scroll_reveal(&surface(&only), area, 8);
+        single.prepare_scroll("screen", 1, area, 8);
+        let rect = single.layout("screen", 1, area, 8)[0].1;
+        assert!(
+            (2 * rect.loc.x + rect.size.w - area.size.w).abs() <= 1,
+            "{rect:?}"
+        );
+    }
+
+    #[test]
+    fn available_width_fills_the_space_other_visible_columns_leave() {
+        let mut protocol = ProtocolFixture::new();
+        let mut layouts = Layouts::default();
+        layouts.scroll.config = Some(ScrollConfig {
+            tile_proportion: 0.25,
+            ..Default::default()
+        });
+        let w: Vec<_> = (0..2).map(|_| protocol.window()).collect();
+        for window in &w {
+            layouts.insert("screen", 1, window.clone(), None);
+        }
+        // Viewport 1000 (1016 - 2*8); the other column takes 250 + 8.
+        let area = Rectangle::new((0, 0).into(), (1016, 600).into());
+        let width = layouts
+            .scroll_available_width(&surface(&w[1]), area, 8)
+            .unwrap();
+        assert!((width - 0.742).abs() < 1e-9, "{width}");
+    }
+
+    #[test]
     fn swapped_windows_trade_column_slots() {
         let mut protocol = ProtocolFixture::new();
         let mut layouts = Layouts::default();
@@ -715,7 +849,7 @@ mod tests {
         for orientation in [Orientation::Horizontal, Orientation::Vertical] {
             let mut layouts = Layouts::default();
             layouts.scroll.config = Some(ScrollConfig {
-                center_focused: true,
+                center_focused: scroll::CenterMode::Always,
                 tile_proportion: 0.94,
                 orientation,
                 ..Default::default()
@@ -746,7 +880,7 @@ mod tests {
             centered(layouts.layout("screen", 1, area, 8)[0].1);
             layouts.scroll_pan("screen", 1, area, 8, 100.0);
             centered(layouts.layout("screen", 1, area, 8)[1].1);
-            layouts.scroll.config.as_mut().unwrap().center_focused = false;
+            layouts.scroll.config.as_mut().unwrap().center_focused = scroll::CenterMode::Never;
             layouts.scroll_reveal(first.toplevel().unwrap().wl_surface(), area, 8);
             layouts.prepare_scroll("screen", 1, area, 8);
             assert_eq!(layouts.scroll.offset("screen", 1), 0.0);

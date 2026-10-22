@@ -2,6 +2,12 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.165 · 2026-10-22 — Scroll mouse resize and column actions
+
+- Mod + right-drag resizes a Scroll column, and an app's height in a shared column.
+- niri's column actions: `switch-preset-width` (with `preset_widths`), `maximize-column`, `expand-column`, `center-column`, `focus-column-first/last` and `move-column-first/last`.
+- `center_focused` can be `on-overflow`, and `always_center_single` keeps a lone column centered.
+
 ## 0.90.164 · 2026-10-22 — Stacked Scroll columns
 
 - Scroll columns can hold several apps stacked on top of each other, niri-style. `consume-or-expel-left/right`, `consume-into-column` and `expel-from-column` build and split them.

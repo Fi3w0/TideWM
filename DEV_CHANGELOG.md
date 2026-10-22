@@ -2,6 +2,13 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.165 — Scroll mouse resize and niri column actions
+
+- Modifier+right-drag on a Scroll tile starts `ScrollResizeGrab`: motion along the strip changes the column width (head proportion over the usable viewport), motion across it scales the window's row weight when the column is shared. It runs before the BSP/cascade lookups, which find nothing in Scroll.
+- `scroll.center_focused` takes `never`, `always` or `on-overflow` (`true`/`false` keep meaning always/never). `on-overflow` centers a column only when it is not fully visible at the current offset. `scroll.always_center_single` centers a lone column. `scroll.preset_widths` lists 1–16 widths from 0.1 to 1.0, stored inline so `ScrollConfig` stays `Copy`.
+- New actions: `switch-preset-width` (next wider preset, wrapping), `maximize-column` (toggles full width and back; a manual resize in between starts over), `expand-column` (fills what other fully visible columns leave), `center-column` (one-shot center; the strip may keep end margins until the next ordinary reveal or pan), `focus-column-first/last` (MRU window of the end column), `move-column-first/last`. Column edits still skip grouped and fullscreen windows; focus, width and centering actions do not.
+- Tests cover presets, maximize toggling, on-overflow and single-column centering, available width and the new config keys. A nested run with real kitty clients checked preset cycling, maximize/restore, expand, first/last and centering the last column. Pointer drags cannot be injected into nested winit, so the resize grab needs a native check. 663 tests, strict Clippy, fmt and the optimized release build pass.
+
 ## 0.90.164 — Scroll columns: stacking, consume and expel
 
 - Scroll columns can hold several windows. Columns derive from the workspace window order: a window marked `stacked` continues the column before it, so every column is a contiguous run whose head carries the width. Rows split the cross axis by per-window weights with `gaps` between them. Classic ignores this metadata, so Classic↔Scroll round trips are lossless (a nested round trip is pixel-identical); migrating to Ocean clears it.

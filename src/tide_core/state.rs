@@ -12527,6 +12527,45 @@ impl Smallvil {
             .or_else(|| target.get(row.min(target.len() - 1)).cloned())
     }
 
+    /// Starting state for a modifier+right-drag on a Scroll tile, or `None`
+    /// outside Scroll, for floating/fullscreen windows or without geometry.
+    pub(crate) fn scroll_resize_start(
+        &self,
+        surface: &WlSurface,
+    ) -> Option<crate::grabs::ScrollResizeStart> {
+        if self.config.spatial_engine != crate::config::SpatialEngine::Scroll
+            || !self.layout.contains(surface)
+            || self.fullscreen.contains_key(surface)
+        {
+            return None;
+        }
+        let owner = self.layout.output_of(surface)?.to_owned();
+        let workspace = self.layout.workspace_of(surface)?;
+        let output = self.output_by_name(&owner)?;
+        let area = self.output_tiling_area(&output)?;
+        let gap = self.gaps_for(&owner, workspace).max(0);
+        let (column, _) = self.layout.scroll_position(surface)?;
+        let columns = self.layout.scroll_columns(&owner, workspace);
+        let column = columns.get(column)?;
+        let horizontal = self.config.scroll.orientation == crate::scroll::Orientation::Horizontal;
+        let viewport = f64::from(if horizontal { area.size.w } else { area.size.h } - 2 * gap);
+        let row = (column.windows.len() > 1).then(|| {
+            let size = self
+                .mapped_toplevel_window(surface)
+                .map(|w| w.geometry().size)
+                .unwrap_or_default();
+            let cross = if horizontal { size.h } else { size.w };
+            (self.layout.scroll.weight(surface), f64::from(cross))
+        });
+        Some(crate::grabs::ScrollResizeStart {
+            head: column.windows.first()?.clone(),
+            width: column.width,
+            viewport,
+            row,
+            horizontal,
+        })
+    }
+
     /// Retiles after a column edit and keeps the edited window in view.
     fn scroll_columns_changed(&mut self, surface: &WlSurface) {
         self.retile();
@@ -12542,13 +12581,90 @@ impl Smallvil {
         let Some(focused) = self.focused_window_surface() else {
             return;
         };
-        if !self.layout.contains(&focused)
-            || self.fullscreen.contains_key(&focused)
-            || self.group_of(&focused).is_some()
-        {
+        if !self.layout.contains(&focused) {
             return;
         }
+        use crate::config::ColumnAction;
+        let (owner, workspace) = match (
+            self.layout.output_of(&focused).map(str::to_owned),
+            self.layout.workspace_of(&focused),
+        ) {
+            (Some(owner), Some(workspace)) => (owner, workspace),
+            _ => return,
+        };
+        let area = self
+            .output_by_name(&owner)
+            .and_then(|output| self.output_tiling_area(&output));
+        let gap = self.gaps_for(&owner, workspace);
+        let columns = self.layout.scroll_columns(&owner, workspace);
+        let Some((column, _)) = self.layout.scroll_position(&focused) else {
+            return;
+        };
+        let head = columns[column].windows[0].clone();
+        match action {
+            ColumnAction::SwitchPresetWidth => {
+                if let Some(width) = crate::scroll::next_preset(
+                    self.config.scroll.preset_widths.as_slice(),
+                    columns[column].width,
+                ) {
+                    self.layout.scroll.resize(head, width);
+                    self.scroll_columns_changed(&focused);
+                }
+                return;
+            }
+            ColumnAction::Maximize => {
+                self.layout.scroll.toggle_maximized(&head);
+                self.scroll_columns_changed(&focused);
+                return;
+            }
+            ColumnAction::Expand => {
+                if let Some(width) =
+                    area.and_then(|area| self.layout.scroll_available_width(&focused, area, gap))
+                {
+                    self.layout.scroll.resize(head, width);
+                    self.scroll_columns_changed(&focused);
+                }
+                return;
+            }
+            ColumnAction::Center => {
+                if let Some(area) = area {
+                    if self
+                        .layout
+                        .scroll_reveal_with(&focused, area, gap, Some(true))
+                    {
+                        self.retile();
+                        self.request_redraw();
+                    }
+                }
+                return;
+            }
+            ColumnAction::FocusEnd { last } => {
+                let target = if last {
+                    columns.last()
+                } else {
+                    columns.first()
+                };
+                if let Some(target) = target {
+                    let next = self
+                        .focus_history
+                        .iter()
+                        .find(|s| target.windows.contains(s))
+                        .cloned()
+                        .unwrap_or_else(|| target.windows[0].clone());
+                    self.activate_toplevel(&next);
+                }
+                return;
+            }
+            _ => {}
+        }
+        // Column edits leave grouped and fullscreen windows where they are.
+        let editable = !self.fullscreen.contains_key(&focused) && self.group_of(&focused).is_none();
         let changed = match action {
+            _ if !editable && !matches!(action, ColumnAction::MoveToEnd { .. }) => false,
+            ColumnAction::MoveToEnd { last } => {
+                self.layout
+                    .scroll_move_column(&focused, if last { 1 } else { -1 }, true)
+            }
             crate::config::ColumnAction::ConsumeOrExpel { forward } => {
                 self.layout.scroll_consume_or_expel(&focused, forward)
             }
@@ -12556,6 +12672,7 @@ impl Smallvil {
                 self.layout.scroll_consume_into_column(&focused)
             }
             crate::config::ColumnAction::Expel => self.layout.scroll_expel_from_column(&focused),
+            _ => false,
         };
         if changed {
             self.scroll_columns_changed(&focused);

@@ -1839,6 +1839,12 @@ The same set of strings works after `bind ... { }` at the top level or inside a 
 - `consume-or-expel-left` / `consume-or-expel-right` — Scroll only: a window alone joins the neighbor column on that side; a window sharing a column leaves it for a new column on that side
 - `consume-into-column` — Scroll only: pull the next column's first window into the focused column
 - `expel-from-column` — Scroll only: move the focused window out of its shared column into a new column right after
+- `switch-preset-width` — Scroll only: set the column to the next wider `scroll.preset_widths` entry, wrapping to the narrowest
+- `maximize-column` — Scroll only: toggle the column between full width and the width it had before
+- `expand-column` — Scroll only: widen the column into the space the other fully visible columns leave
+- `center-column` — Scroll only: center the focused column once, even the first or last one (the strip may show empty space past its end until the next focus change)
+- `focus-column-first` / `focus-column-last` — Scroll only: focus the first or last column, on its most recently focused window
+- `move-column-first` / `move-column-last` — Scroll only: move the focused column to the start or end of the strip
 - `resize-left` / `resize-right` / `resize-up` / `resize-down` — shrink/grow the focused floating window by 24 logical pixels, or resize its nearest BSP split and connected parallel ancestors
 - `move-left` / `move-right` / `move-up` / `move-down` — step the focused floating window 24 logical pixels, no-op on a tiled one
 - `snap:left` / `snap:right` / `snap:top` / `snap:bottom` / `snap:top-left` / `snap:top-right` / `snap:bottom-left` / `snap:bottom-right` — place the focused Classic floater with the same zone, usable-area, gap, and rule policy as pointer snapping; disabled zones no-op
@@ -2047,7 +2053,9 @@ scroll {
     workspaces = separate
     orientation = horizontal
     tile_proportion = 0.5
-    center_focused = false
+    center_focused = never
+    always_center_single = false
+    preset_widths = [0.333, 0.5, 0.667]
     gesture_distance = 1200
 }
 ```
@@ -2057,9 +2065,11 @@ scroll {
 | `workspaces` | `separate` \| `sections` | `separate` | One strip per workspace, or a monitor's workspaces laid end to end in one strip. |
 | `orientation` | `horizontal` \| `vertical` | `horizontal` | Strip direction. |
 | `tile_proportion` | float, `0.1`–`1.0` | `0.5` | Share of the usable viewport a new app takes. `1.0` fills it; `0.94` leaves a narrow neighbor peek. |
-| `center_focused` | bool | `false` | Center every revealed app, including the first, last and only one. `false` moves only as far as needed. |
+| `center_focused` | `never` \| `always` \| `on-overflow` | `never` | `always` centers every revealed column, including the first, last and only one; `on-overflow` centers only a column that isn't fully visible; `never` moves only as far as needed. `true`/`false` mean `always`/`never`. |
+| `always_center_single` | bool | `false` | Keep a workspace's only column centered whatever `center_focused` says. |
+| `preset_widths` | list of 1–16 widths, `0.1`–`1.0` | `[0.333, 0.5, 0.667]` | Widths `switch-preset-width` steps through, narrowest first after the widest. |
 | `gesture_distance` | positive float | `1200` | Touchpad travel per viewport. A sensitivity, not a monitor width. |
 
-Spacing follows `gaps`. A column holds one window or several stacked ones. Along the strip, `focus-*` moves between columns (landing on the window last focused there), `swap-*` moves the whole column and `resize-*` changes the column width; across the strip, they move focus, reorder and resize inside the column. `consume-or-expel-left/right`, `consume-into-column` and `expel-from-column` edit columns (see [Action strings](#action-strings)). New windows open as a column after the focused column. `scroll-left/right/up/down` slides half a viewport. No binds are added automatically. Pointer focus (hover, click, touch, tablet) never moves the strip; keyboard focus, `focus-window`/`focus-app` and notification activation reveal the target.
+Spacing follows `gaps`. A column holds one window or several stacked ones. Along the strip, `focus-*` moves between columns (landing on the window last focused there), `swap-*` moves the whole column and `resize-*` changes the column width; across the strip, they move focus, reorder and resize inside the column. `consume-or-expel-left/right`, `consume-into-column` and `expel-from-column` edit columns (see [Action strings](#action-strings)). New windows open as a column after the focused column. Modifier+right-drag on a Scroll tile resizes its column along the strip and, in a shared column, the window across it. `scroll-left/right/up/down` slides half a viewport. No binds are added automatically. Pointer focus (hover, click, touch, tablet) never moves the strip; keyboard focus, `focus-window`/`focus-app` and notification activation reveal the target.
 
 In Scroll mode each `outputs` entry has a `scroll` object with `offset`, `orientation` and `workspaces`; with centering on, `offset` can be negative.

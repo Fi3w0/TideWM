@@ -1753,6 +1753,22 @@ impl Smallvil {
                                 // resize above, and distinct from
                                 // TileResizeGrab (no modifier, requires
                                 // hitting the shared border pixel-exactly).
+                                if let Some(start) = self.scroll_resize_start(&wl_surface) {
+                                    self.focus_window_from_pointer(
+                                        Some(wl_surface.clone()),
+                                        serial,
+                                    );
+                                    let start_data = PointerGrabStartData {
+                                        focus: Some((wl_surface.clone(), loc.to_f64())),
+                                        button,
+                                        location: pointer.current_location(),
+                                    };
+                                    let grab = crate::grabs::ScrollResizeGrab::start(
+                                        start_data, wl_surface, start,
+                                    );
+                                    pointer.set_grab(self, grab, serial, Focus::Clear);
+                                    return;
+                                }
                                 let output = self.output_for_window(&window);
                                 let area = output.as_ref().and_then(|o| self.output_tiling_area(o));
                                 if let (Some(output), Some(area)) = (output, area) {
