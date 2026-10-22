@@ -5325,11 +5325,7 @@ impl Smallvil {
     /// any output yet; `reconcile_keyboard_focus` then clears keyboard
     /// focus entirely rather than leaking it to a window.
     fn lock_focus_target(&self) -> Option<WlSurface> {
-        let pointer_output = self
-            .seat
-            .get_pointer()
-            .and_then(|pointer| self.output_for_point(pointer.current_location()));
-        pointer_output
+        self.pointer_output()
             .and_then(|output| self.lock_surfaces.get(&output))
             .or_else(|| self.lock_surfaces.values().next())
             .map(|lock_surface| lock_surface.wl_surface().clone())
@@ -5735,6 +5731,13 @@ impl Smallvil {
             map.layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
                 .map(|layer| layer.cached_state().keyboard_interactivity)
         })
+    }
+
+    /// The output under the pointer.
+    pub(crate) fn pointer_output(&self) -> Option<Output> {
+        self.seat
+            .get_pointer()
+            .and_then(|pointer| self.output_for_point(pointer.current_location()))
     }
 
     /// Selects a deterministic ordinary-window fallback after the current

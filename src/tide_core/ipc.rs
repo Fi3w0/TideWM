@@ -73,6 +73,10 @@ enum Request {
     /// The output the user is working on (where keybinds land), in the same
     /// shape as one `outputs` entry.
     FocusedOutput,
+    /// The output under the pointer, whatever has keyboard focus, in the
+    /// same shape as one `outputs` entry. For launchers and popups that
+    /// should open where the user is looking.
+    PointerOutput,
     /// Every mapped layer-shell surface: namespace, layer, output.
     Layers,
     /// XKB layout group and layout names, for bars showing or switching
@@ -906,6 +910,10 @@ fn handle_request(state: &mut Smallvil, request: Request) -> serde_json::Value {
         Request::ActiveMode => json!({ "ok": true, "data": state.active_mode }),
         Request::FocusedOutput => {
             let name = state.primary_output().map(|output| output.name());
+            json!({ "ok": true, "data": name.and_then(|name| output_json(state, &name)) })
+        }
+        Request::PointerOutput => {
+            let name = state.pointer_output().map(|output| output.name());
             json!({ "ok": true, "data": name.and_then(|name| output_json(state, &name)) })
         }
         Request::Layers => json!({ "ok": true, "data": layers_json(state) }),

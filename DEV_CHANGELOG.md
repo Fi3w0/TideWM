@@ -2,6 +2,11 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.173 — pointer-output IPC query
+
+- `Request::PointerOutput` / `tidectl pointer-output` returns `output_json` for `Smallvil::pointer_output()` (seat pointer location through `output_for_point`), independent of keyboard focus and window ownership. `focused-output` keeps its focus-follows-mouse-aware `primary_output` semantics. `lock_focus_target` now uses the same helper.
+- Nested run with no windows: raw IPC and `tidectl` both report the output. Single-output host only; multi-monitor not exercised. 668 tests, strict Clippy, fmt pass.
+
 ## 0.90.172 — Wrap-around column focus
 
 - `ColumnAction::FocusWrap { forward }` (niri's `focus-column-right-or-first` / `focus-column-left-or-last`) shares the `FocusEnd` arm: the target column is `column ± 1` modulo the column count, landing on the window last focused there. A single column is a no-op.

@@ -697,6 +697,7 @@ fn build_request(args: &[String]) -> Result<Value, String> {
         "focused-window" | "focused" => Ok(json!({ "request": "focused-window" })),
         "active-mode" => Ok(json!({ "request": "active-mode" })),
         "focused-output" => Ok(json!({ "request": "focused-output" })),
+        "pointer-output" => Ok(json!({ "request": "pointer-output" })),
         "layers" => Ok(json!({ "request": "layers" })),
         "keyboard-layouts" | "layout" => Ok(json!({ "request": "keyboard-layouts" })),
         "eval" if !rest.is_empty() => Ok(json!({
@@ -845,7 +846,7 @@ fn print_response(command: &str, data: &Value) {
             Some(name) => println!("{name}"),
             None => println!("(none, base keybinds active)"),
         },
-        "focused-output" => {
+        "focused-output" | "pointer-output" => {
             if data.is_null() {
                 println!("(no output)");
             } else {
@@ -1022,6 +1023,7 @@ QUERIES:
     windows             list currently mapped windows
     focused-window       (alias: focused) the currently focused window, if any
     focused-output      the output keybinds land on (same fields as outputs)
+    pointer-output      the output under the mouse, ignoring focus (same fields)
     layers              mapped layer-shell surfaces (namespace, layer, output)
     active-mode         the currently active `mode <name> {{ }}` block, if any
     resolve-window --pid <PID> | --app-id <ID> | --window-id <ID>
