@@ -444,7 +444,7 @@ impl Layouts {
         }
     }
 
-    fn scroll_viewport(&self, area: Rectangle<i32, Logical>, gap: i32) -> f64 {
+    pub(crate) fn scroll_viewport(&self, area: Rectangle<i32, Logical>, gap: i32) -> f64 {
         let gap = gap
             .max(0)
             .min(area.size.w.min(area.size.h).saturating_sub(1) / 2);

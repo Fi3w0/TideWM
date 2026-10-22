@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.170 · 2026-10-22 — Exact column widths
+
+- `set-column-width:<v>` sets a Scroll column to `50%`, `800` pixels, or grows/shrinks it with `+10%`, `-10%`, `+100`.
+
 ## 0.90.169 · 2026-10-22 — Floating windows that stay on the strip
 
 - New `scroll { float_anchor = strip }`: floating windows stay where you left them on the strip and scroll away with it instead of following the camera. The default `screen` keeps the old behavior.

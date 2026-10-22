@@ -85,6 +85,67 @@ pub struct ScrollConfig {
     pub float_anchor: FloatAnchor,
 }
 
+/// A column width or window height change: `50%`, `+10%`, `-10%`,
+/// `800` or `+40` (logical pixels). Percentages are kept in hundredths so
+/// the action stays `Eq`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SizeChange {
+    Percent { hundredths: i32, relative: bool },
+    Pixels { pixels: i32, relative: bool },
+}
+impl SizeChange {
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        let relative = text.starts_with(['+', '-']);
+        if let Some(number) = text.strip_suffix('%') {
+            let value = number
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite())?;
+            if !relative && value <= 0.0 {
+                return None;
+            }
+            let hundredths = (value * 100.0).round();
+            (hundredths.abs() <= 100_000.0).then_some(Self::Percent {
+                hundredths: hundredths as i32,
+                relative,
+            })
+        } else {
+            let pixels = text.parse::<i32>().ok()?;
+            (relative || pixels > 0).then_some(Self::Pixels { pixels, relative })
+        }
+    }
+
+    /// The new share of `viewport` (logical pixels) starting from
+    /// `current`, bounded like every other column width.
+    pub fn apply(self, current: f64, viewport: f64) -> f64 {
+        let viewport = viewport.max(1.0);
+        let next = match self {
+            Self::Percent {
+                hundredths,
+                relative,
+            } => {
+                let share = f64::from(hundredths) / 10_000.0;
+                if relative {
+                    current + share
+                } else {
+                    share
+                }
+            }
+            Self::Pixels { pixels, relative } => {
+                let share = f64::from(pixels) / viewport;
+                if relative {
+                    current + share
+                } else {
+                    share
+                }
+            }
+        };
+        next.clamp(0.1, 1.0)
+    }
+}
+
 /// What a floating window is fixed to while the strip scrolls.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum FloatAnchor {
@@ -466,6 +527,21 @@ pub fn column_tile_rect(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn size_change_forms() {
+        let parse = |t| SizeChange::parse(t).unwrap().apply(0.5, 1000.0);
+        assert!((parse("+10%") - 0.6).abs() < 1e-9);
+        assert!((parse("-10%") - 0.4).abs() < 1e-9);
+        assert!((parse("33.3%") - 0.333).abs() < 1e-9);
+        assert!((parse("800") - 0.8).abs() < 1e-9);
+        assert!((parse("+100") - 0.6).abs() < 1e-9);
+        assert_eq!(parse("-90%"), 0.1);
+        assert_eq!(parse("5000"), 1.0);
+        for bad in ["", "abc", "0", "0%", "%", "nan%", "50px"] {
+            assert_eq!(SizeChange::parse(bad), None, "{bad}");
+        }
+    }
 
     #[test]
     fn float_shift_tracks_whole_pixels() {

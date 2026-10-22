@@ -1845,6 +1845,7 @@ The same set of strings works after `bind ... { }` at the top level or inside a 
 - `center-column` — Scroll only: center the focused column once, even the first or last one (the strip may show empty space past its end until the next focus change)
 - `focus-column-first` / `focus-column-last` — Scroll only: focus the first or last column, on its most recently focused window
 - `move-column-first` / `move-column-last` — Scroll only: move the focused column to the start or end of the strip
+- `set-column-width:<v>` — Scroll only: set the focused column's width. `50%` or `33.3%` is a share of the usable viewport, `800` is logical pixels, and a leading `+`/`-` (`+10%`, `-10%`, `+100`) changes the current width. The result stays between 10% and 100% of the viewport
 - `toggle-float-anchor` — Scroll only: switch `scroll.float_anchor` between `screen` and `strip` for the running session; a config reload restores the configured value
 - `toggle-column-tabbed` — Scroll only: turn the focused column into one tab group (tabs in column order, the focused window stays visible), or a tab group back into a stacked column in tab order
 - `resize-left` / `resize-right` / `resize-up` / `resize-down` — shrink/grow the focused floating window by 24 logical pixels, or resize its nearest BSP split and connected parallel ancestors

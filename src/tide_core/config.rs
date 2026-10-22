@@ -869,6 +869,8 @@ pub enum ColumnAction {
     Expel,
     /// Cycle the column through `scroll.preset_widths`.
     SwitchPresetWidth,
+    /// Set or adjust the column width (`set-column-width:<v>`).
+    SetWidth(crate::scroll::SizeChange),
     /// Toggle the column between full width and its previous width.
     Maximize,
     /// Widen the column into the space other fully visible columns leave.
@@ -9643,6 +9645,10 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "move-column-first" => Some(Action::Column(ColumnAction::MoveToEnd { last: false })),
         "move-column-last" => Some(Action::Column(ColumnAction::MoveToEnd { last: true })),
         "toggle-column-tabbed" => Some(Action::Column(ColumnAction::ToggleTabbed)),
+        other if other.starts_with("set-column-width:") => {
+            crate::scroll::SizeChange::parse(&other["set-column-width:".len()..])
+                .map(|change| Action::Column(ColumnAction::SetWidth(change)))
+        }
         other if other.starts_with("switch-layout:") => {
             let target = &other["switch-layout:".len()..];
             if target.is_empty() {

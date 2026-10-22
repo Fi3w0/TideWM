@@ -13045,6 +13045,15 @@ impl Smallvil {
                 }
                 return;
             }
+            ColumnAction::SetWidth(change) => {
+                if let Some(area) = area {
+                    let viewport = self.layout.scroll_viewport(area, gap);
+                    let width = change.apply(columns[column].width, viewport);
+                    self.layout.scroll.resize(head, width);
+                    self.scroll_columns_changed(&focused);
+                }
+                return;
+            }
             ColumnAction::Maximize => {
                 self.layout.scroll.toggle_maximized(&head);
                 self.scroll_columns_changed(&focused);

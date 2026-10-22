@@ -2,6 +2,11 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.170 — set-column-width
+
+- `set-column-width:<v>` (niri's `set-column-width`) as `ColumnAction::SetWidth(SizeChange)`. `scroll::SizeChange` parses `50%`, `33.3%`, `800`, `+10%`, `-10%`, `+100`, `-100`; percentages are stored in hundredths so `ColumnAction` stays `Copy + Eq`. `apply` converts pixels through `scroll_viewport` (the same viewport column extents use, so `800` yields an 800 px tile) and clamps to the existing 0.1–1.0 column range. Absolute zero/negative values and unit suffixes are rejected at parse time, so a bad bind is an unknown action rather than a silent no-op.
+- Nested run (virtual KWin host, 1260 px viewport): `50%` 630, `+10%` 756, `-20%` 504, `800` 800, `+100` 900, `5000` clamped to 1260. 668 tests (1 new), strict Clippy, fmt pass.
+
 ## 0.90.169 — Strip-anchored Scroll floaters
 
 - Hot-reloadable `scroll.float_anchor = screen | strip` (default `screen`, unchanged behavior) and the `toggle-float-anchor` action, which flips it until the next reload.
