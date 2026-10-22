@@ -5508,6 +5508,29 @@ impl Smallvil {
                 (name, workspace)
             });
 
+        // A strip floater is drawn only on its owner, so a drop straddling
+        // two outputs would leave part of it clipped: slide it fully onto
+        // the owner (as far as it fits).
+        let mut rect = rect;
+        if dropped && self.scroll_strip_floater(&surface) {
+            if let Some(bounds) = owner
+                .as_ref()
+                .and_then(|(name, _)| self.output_by_name(name))
+                .and_then(|output| self.space.output_geometry(&output))
+            {
+                let fit = |loc: i32, size: i32, origin: i32, extent: i32| {
+                    loc.clamp(origin, (origin + extent - size).max(origin))
+                };
+                let loc = Point::from((
+                    fit(rect.loc.x, rect.size.w, bounds.loc.x, bounds.size.w),
+                    fit(rect.loc.y, rect.size.h, bounds.loc.y, bounds.size.h),
+                ));
+                if loc != rect.loc {
+                    rect.loc = loc;
+                    self.space.map_element(window.clone(), loc, false);
+                }
+            }
+        }
         let Some(tag) = self.floating_workspace.get_mut(&surface) else {
             // The floating tag can vanish mid-commit if an unmap raced this
             // sync; never crash the compositor over a stale rect write.

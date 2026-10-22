@@ -2,6 +2,11 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.180 — Dropped strip floaters fit their owner output
+
+- On `dropped` sync, a strip floater is clamped fully inside its new owner output's geometry (per axis, as far as its size allows) and remapped, since the .169 owner filter clips whatever overhangs onto a neighbor. Reported natively on .179: after dropping across the monitor edge only half the window was visible.
+- 668 tests, strict Clippy, fmt pass. Single virtual output nested, so the cross-output drop is a native check.
+
 ## 0.90.179 — Draw dragged strip floaters on the target output
 
 - `classic_render_placements` exempts surfaces in `floating_dragging` (set unconditionally by `MoveSurfaceGrab` motion, cleared on unset) from the strip-floater owner filter added in .169, so a floater dragged across outputs is drawn on both while the grab lasts. The drop retags it as in .176.
