@@ -798,6 +798,9 @@ fn scroll_navigation_refreshes_stationary_pointer_without_stealing_keyboard_focu
         fixture.request(surface + 1, 1, &[surface + 2], &[]);
         fixture.request(6, 1, &[surface + 3, surface], &[]);
         fixture.request(surface + 3, 2, &[1000, 600], &[]);
+        // A GTK-style CSD shadow margin: the window geometry is inset from the
+        // surface, exactly like Firefox. Pointer input must subtract it.
+        fixture.request(surface + 1, 3, &[19, 17, 962, 566], &[]);
         fixture.request(surface, 6, &[], &[]);
         let serial = fixture
             .dispatch()
@@ -820,6 +823,56 @@ fn scroll_navigation_refreshes_stationary_pointer_without_stealing_keyboard_focu
         .iter()
         .map(|window| window.toplevel().unwrap().wl_surface().clone())
         .collect();
+
+    // A client-declared window-geometry offset must not shift pointer input.
+    // The surface sits at `rect.loc - geometry.loc` and the coordinates the
+    // client receives are relative to that surface; dropping the offset is
+    // what made GTK/Firefox clicks land 19x17 px up-left of the cursor.
+    // The second column is the revealed one here (mapping it focused it), so
+    // probe that window; its neighbor sits off-screen at x - 1000.
+    let location = fixture.state.space.element_location(&windows[1]).unwrap();
+    let probe = (location.x as f64 + 300.0, location.y as f64 + 200.0).into();
+    let under = fixture.state.surface_under(probe);
+    assert_eq!(
+        under
+            .as_ref()
+            .map(|(surface, origin)| (surface.clone(), *origin)),
+        Some((
+            surfaces[1].clone(),
+            (f64::from(location.x - 19), f64::from(location.y - 17)).into()
+        ))
+    );
+    fixture.state.seat.get_pointer().unwrap().motion(
+        &mut fixture.state,
+        under,
+        &MotionEvent {
+            location: probe,
+            serial: SERIAL_COUNTER.next_serial(),
+            time: 1,
+        },
+    );
+    fixture
+        .state
+        .seat
+        .get_pointer()
+        .unwrap()
+        .frame(&mut fixture.state);
+    let events = fixture.dispatch();
+    let (_, _, body) = events
+        .iter()
+        .find(|(object, opcode, _)| (*object, *opcode) == (8, 2))
+        .expect("no wl_pointer.motion after the geometry-offset probe");
+    let client_x = f64::from(i32::from_ne_bytes(body[4..8].try_into().unwrap())) / 256.0;
+    let client_y = f64::from(i32::from_ne_bytes(body[8..12].try_into().unwrap())) / 256.0;
+    assert!(
+        (client_x - 319.0).abs() < 0.02,
+        "client pointer x {client_x}, expected 319 (300 + the 19px margin)"
+    );
+    assert!(
+        (client_y - 217.0).abs() < 0.02,
+        "client pointer y {client_y}, expected 217 (200 + the 17px margin)"
+    );
+
     let pointer = fixture.state.seat.get_pointer().unwrap();
     fixture.state.activate_toplevel(&surfaces[0]);
     fixture.dispatch();

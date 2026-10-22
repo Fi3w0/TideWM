@@ -2,6 +2,12 @@
 
 All notable changes to TideWM are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.162 — Scroll input honors the client window-geometry offset
+
+- Pointer input in Scroll (and Ocean, plus the Classic fullscreen fallback) now maps into the surface's coordinate space the same way rendering already does. A placement rect locates the window's `xdg_surface` geometry, which a client may inset from its surface: GTK reserves a CSD shadow margin there (Firefox reports one), while Qt/kitty report zero. Without the correction every hover and click in Firefox landed about 19x17 px up-left of the cursor.
+- Classic ordinary windows were already correct because `Space::element_under` returns the render location (surface origin). `Space::element_location`, used by placements and the Classic fullscreen fallback, is the geometry origin and now gets the same correction.
+- The real-window Scroll regression sets a 19x17 geometry offset on its clients and asserts the exact `wl_pointer.motion` coordinates the client receives (a point 300,200 into the window must arrive as 319,217). It fails without the fix.
+
 ## 0.90.161 — Scroll keeps its strip still for pointer focus
 
 - Pointer-driven focus no longer moves a Scroll viewport. `focus_follows_mouse` hover, a press, a touch contact and a tablet tip focus the window already under the pointer and leave the strip where it is, so moving the pointer onto the other monitor does not scroll that monitor and clicking a neighbor's peek does not slide it out from under the click.

@@ -1250,6 +1250,18 @@ pub(crate) enum FocusOrigin {
     Pointer,
 }
 
+/// Pointer space is surface space. A placement -- and `Space::element_location`
+/// -- locates the window's `xdg_surface` *geometry*, and a client may declare
+/// that geometry with a non-zero offset inside its surface. GTK reserves a CSD
+/// shadow margin there (Firefox reports one; Qt/kitty report zero), and the
+/// renderer already places the surface at `rect.loc - geometry().loc`, so any
+/// input mapping built from a placement has to subtract the same margin or
+/// every hover and click shifts by it. `Space::element_under` is the exception:
+/// it returns the render location (surface origin) directly.
+fn surface_origin(window: &Window, rect_loc: Point<i32, Logical>) -> Point<i32, Logical> {
+    rect_loc - window.geometry().loc
+}
+
 /// Gesture streams captured by compositor bindings instead of forwarded via
 /// wp-pointer-gestures. A stream is claimed at Begin and remains owned until
 /// End so clients never receive a partial gesture.
@@ -4274,7 +4286,8 @@ impl Smallvil {
                     self.render_placements(&output).and_then(|placements| {
                         placements.into_iter().find_map(|placement| {
                             let rect = self.placement_input_rect(&placement);
-                            let view_local = pos - rect.loc.to_f64();
+                            let origin = surface_origin(&placement.window, rect.loc);
+                            let view_local = pos - origin.to_f64();
                             if view_local.x < 0.0
                                 || view_local.y < 0.0
                                 || view_local.x >= rect.size.w as f64
@@ -4292,7 +4305,7 @@ impl Smallvil {
                                 .map(|(surface, point)| {
                                     (
                                         surface,
-                                        rect.loc.to_f64()
+                                        origin.to_f64()
                                             + Point::from((
                                                 point.x as f64 * placement.view_scale,
                                                 point.y as f64 * placement.view_scale,
@@ -4308,12 +4321,15 @@ impl Smallvil {
                                 // through a floating window into a tile.
                                 .or_else(|| {
                                     placement.window.toplevel().map(|toplevel| {
-                                        (toplevel.wl_surface().clone(), rect.loc.to_f64())
+                                        (toplevel.wl_surface().clone(), origin.to_f64())
                                     })
                                 })
                         })
                     })
                 } else {
+                    // `Space::element_under` already returns the surface
+                    // render location (`map location - geometry().loc`), so
+                    // this branch needs no geometry correction.
                     self.space
                         .element_under(pos)
                         .and_then(|(window, location)| {
@@ -4377,7 +4393,12 @@ impl Smallvil {
                     && local.y >= 0.0
                     && local.x < rect.size.w as f64
                     && local.y < rect.size.h as f64)
-                    .then_some((placement.window, rect.loc))
+                    .then(|| {
+                        (
+                            placement.window.clone(),
+                            surface_origin(&placement.window, rect.loc),
+                        )
+                    })
             })
     }
 
@@ -4393,7 +4414,8 @@ impl Smallvil {
                     .filter(crate::placement::PlacedWindow::is_fullscreen)
                     .find_map(|placement| {
                         let rect = self.placement_input_rect(&placement);
-                        let view_local = pos - rect.loc.to_f64();
+                        let origin = surface_origin(&placement.window, rect.loc);
+                        let view_local = pos - origin.to_f64();
                         if view_local.x < 0.0
                             || view_local.y < 0.0
                             || view_local.x >= rect.size.w as f64
@@ -4411,7 +4433,7 @@ impl Smallvil {
                             .map(|(surface, point)| {
                                 (
                                     surface,
-                                    rect.loc.to_f64()
+                                    origin.to_f64()
                                         + Point::from((
                                             point.x as f64 * placement.view_scale,
                                             point.y as f64 * placement.view_scale,
@@ -4425,7 +4447,7 @@ impl Smallvil {
                             // that interval instead of clicking through.
                             .or_else(|| {
                                 placement.window.toplevel().map(|toplevel| {
-                                    (toplevel.wl_surface().clone(), rect.loc.to_f64())
+                                    (toplevel.wl_surface().clone(), origin.to_f64())
                                 })
                             })
                     })
@@ -4441,9 +4463,10 @@ impl Smallvil {
             })
             .find_map(|window| {
                 let location = self.space.element_location(window)?;
+                let origin = surface_origin(window, location);
                 window
-                    .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
-                    .map(|(surface, point)| (surface, (point + location).to_f64()))
+                    .surface_under(pos - origin.to_f64(), WindowSurfaceType::ALL)
+                    .map(|(surface, point)| (surface, origin.to_f64() + point.to_f64()))
             })
     }
 

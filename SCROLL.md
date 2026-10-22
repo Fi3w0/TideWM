@@ -82,6 +82,13 @@ keeps wheel input on the visible client after navigation, without warping the
 mouse or replacing keyboard-selected focus. Physical mouse motion still follows
 `input.focus_follows_mouse`, including its pointer-grab and exclusive-layer rules.
 
+Pointer coordinates are surface coordinates. A client may inset its
+`xdg_surface` window geometry from the surface (GTK reserves a CSD shadow
+margin there -- Firefox reports one, Qt/kitty report zero), so Scroll input
+subtracts that margin exactly like the renderer does. Otherwise every hover
+and click in a GTK app lands offset by the margin even though the strip is
+correct.
+
 Pointer focus itself never scrolls. Hover (`focus_follows_mouse`), a press, a
 touch contact and a tablet tip focus what is already under the pointer and leave
 the viewport alone -- crossing onto another monitor must not scroll the strip

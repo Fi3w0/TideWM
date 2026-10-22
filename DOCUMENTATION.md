@@ -2070,6 +2070,11 @@ finger count drives scrolling, unless explicit swipe actions take priority.
 Existing `focus-*` actions reveal neighboring tiles, and `resize-*` changes tile
 extent along that axis. No additional bindings are inserted automatically.
 
+Pointer input is mapped into each client's surface coordinates: a window's
+`xdg_surface` geometry may be inset from its surface by a client-declared
+margin (GTK's CSD shadow), and Scroll subtracts it exactly like the renderer,
+so clicks and hovers in GTK/Firefox windows land under the cursor.
+
 Pointer focus never scrolls. `focus_follows_mouse`, a press, a touch contact and
 a tablet tip focus what is under the pointer and leave the viewport exactly
 where it is, so moving the pointer onto another monitor does not scroll that
