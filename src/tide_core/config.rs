@@ -883,6 +883,8 @@ pub enum ColumnAction {
     FocusEnd { last: bool },
     /// Focus the next (`forward`) or previous column, wrapping at the ends.
     FocusWrap { forward: bool },
+    /// Focus the first (`last == false`) or last window inside the column.
+    FocusRowEnd { last: bool },
     /// Move the column to the first or last place.
     MoveToEnd { last: bool },
     /// Turn the column into one tab group, or a tab group back into a
@@ -9647,6 +9649,8 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "center-column" => Some(Action::Column(ColumnAction::Center)),
         "focus-column-first" => Some(Action::Column(ColumnAction::FocusEnd { last: false })),
         "focus-column-last" => Some(Action::Column(ColumnAction::FocusEnd { last: true })),
+        "focus-window-top" => Some(Action::Column(ColumnAction::FocusRowEnd { last: false })),
+        "focus-window-bottom" => Some(Action::Column(ColumnAction::FocusRowEnd { last: true })),
         "focus-column-right-or-first" => {
             Some(Action::Column(ColumnAction::FocusWrap { forward: true }))
         }

@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.174 · 2026-10-22 — Column top and bottom
+
+- `focus-window-top` and `focus-window-bottom` jump to the first or last window of a stacked Scroll column.
+
 ## 0.90.173 · 2026-10-22 — Monitor under the mouse
 
 - New `tidectl pointer-output` (IPC `pointer-output`): the monitor under the mouse, even with nothing focused, so launchers and shell popups can open where you are.

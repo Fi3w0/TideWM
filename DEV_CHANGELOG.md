@@ -2,6 +2,11 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.174 — focus-window-top/bottom
+
+- `ColumnAction::FocusRowEnd { last }` (niri's `focus-window-top` / `focus-window-bottom`) activates the first/last window of the focused column; already there is a no-op.
+- Nested run with a three-window stacked column built by `consume-into-column`: bottom → last row, top → first row, top again stays. 668 tests, strict Clippy, fmt pass.
+
 ## 0.90.173 — pointer-output IPC query
 
 - `Request::PointerOutput` / `tidectl pointer-output` returns `output_json` for `Smallvil::pointer_output()` (seat pointer location through `output_for_point`), independent of keyboard focus and window ownership. `focused-output` keeps its focus-follows-mouse-aware `primary_output` semantics. `lock_focus_target` now uses the same helper.

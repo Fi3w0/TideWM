@@ -1839,6 +1839,7 @@ The same set of strings works after `bind ... { }` at the top level or inside a 
 - `consume-or-expel-left` / `consume-or-expel-right` — Scroll only: a window alone joins the neighbor column on that side; a window sharing a column leaves it for a new column on that side
 - `consume-into-column` — Scroll only: pull the next column's first window into the focused column
 - `expel-from-column` — Scroll only: move the focused window out of its shared column into a new column right after
+- `focus-window-top` / `focus-window-bottom` — Scroll only: focus the first/last window of the focused column
 - `focus-column-right-or-first` / `focus-column-left-or-last` — Scroll only: focus the next/previous column along the strip, wrapping to the other end (the window last focused in that column)
 - `switch-preset-width` — Scroll only: set the column to the next wider `scroll.preset_widths` entry, wrapping to the narrowest
 - `switch-preset-width-back` — Scroll only: the same, backwards: the next narrower entry, wrapping to the widest

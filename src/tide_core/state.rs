@@ -13092,6 +13092,18 @@ impl Smallvil {
                 self.toggle_column_tabbed(&focused);
                 return;
             }
+            ColumnAction::FocusRowEnd { last } => {
+                let windows = &columns[column].windows;
+                let target = if last {
+                    windows.last()
+                } else {
+                    windows.first()
+                };
+                if let Some(target) = target.filter(|target| **target != focused).cloned() {
+                    self.activate_toplevel(&target);
+                }
+                return;
+            }
             ColumnAction::FocusEnd { .. } | ColumnAction::FocusWrap { .. } => {
                 let target = match action {
                     ColumnAction::FocusEnd { last: true } => columns.last(),
