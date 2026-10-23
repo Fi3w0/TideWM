@@ -999,6 +999,11 @@ pub enum Action {
     /// where the click lands on one monitor while the focused window may
     /// sit on another.
     SwitchWorkspaceOn(String, WorkspaceRef),
+    /// `workspace-down` / `workspace-up` (niri's `focus-workspace-down`/
+    /// `focus-workspace-up`): step one numbered workspace on the focused
+    /// output. In Scroll with `scroll.workspace_scroll`, the camera slides
+    /// vertically instead of switching instantly.
+    WorkspaceStep(i32),
     MoveToWorkspace(WorkspaceRef),
     /// Swaps the current output's active workspace content with the named
     /// output's. No default keybind -- output names are machine-specific
@@ -7526,6 +7531,16 @@ fn apply_scroll_block(cfg: &mut crate::scroll::ScrollConfig, body: &[waves::Entr
                 _ => tracing::warn!(value, "Expected scroll.float_anchor screen or strip"),
             },
             "float_rescue" => set_bool(&mut cfg.float_rescue, "scroll.float_rescue", value),
+            "workspace_scroll" => {
+                set_bool(&mut cfg.workspace_scroll, "scroll.workspace_scroll", value)
+            }
+            "workspace_scroll_duration" => match parse_duration_ms(value) {
+                Some(ms) if (1..=10_000).contains(&ms) => cfg.workspace_scroll_duration_ms = ms,
+                _ => tracing::warn!(
+                    value,
+                    "Expected scroll.workspace_scroll_duration from 1 to 10000ms"
+                ),
+            },
             "always_center_single" => set_bool(
                 &mut cfg.always_center_single,
                 "scroll.always_center_single",
@@ -9472,6 +9487,12 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
     if let Some(cmd) = action.strip_prefix("spawn:") {
         return Some(Action::Spawn(cmd.to_string()));
     }
+    if matches!(action, "workspace-up" | "focus-workspace-up") {
+        return Some(Action::WorkspaceStep(-1));
+    }
+    if matches!(action, "workspace-down" | "focus-workspace-down") {
+        return Some(Action::WorkspaceStep(1));
+    }
     if let Some(n) = action.strip_prefix("workspace:") {
         return Some(Action::SwitchWorkspace(parse_workspace_ref(n)));
     }
@@ -10164,6 +10185,42 @@ mod tests {
             Some(Action::SwitchWorkspace(WorkspaceRef::Number(2)))
         ));
         assert!(parsed.tablet_mode_off.is_none());
+    }
+
+    #[test]
+    fn workspace_step_parses_short_and_niri_names() {
+        assert!(matches!(
+            parse_action("workspace-down"),
+            Some(Action::WorkspaceStep(1))
+        ));
+        assert!(matches!(
+            parse_action("workspace-up"),
+            Some(Action::WorkspaceStep(-1))
+        ));
+        assert!(matches!(
+            parse_action("focus-workspace-down"),
+            Some(Action::WorkspaceStep(1))
+        ));
+        assert!(matches!(
+            parse_action("focus-workspace-up"),
+            Some(Action::WorkspaceStep(-1))
+        ));
+    }
+
+    #[test]
+    fn scroll_workspace_scroll_parses_and_keeps_defaults_otherwise() {
+        let mut cfg = crate::scroll::ScrollConfig::default();
+        apply_scroll_block(
+            &mut cfg,
+            &wave_entries("workspace_scroll = true\nworkspace_scroll_duration = 300ms"),
+        );
+        assert!(cfg.workspace_scroll);
+        assert_eq!(cfg.workspace_scroll_duration_ms, 300);
+        assert_eq!(
+            crate::scroll::ScrollConfig::default().workspace_scroll_duration_ms,
+            220
+        );
+        assert!(crate::scroll::ScrollConfig::default().workspace_scroll);
     }
 
     #[test]

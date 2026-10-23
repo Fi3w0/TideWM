@@ -153,6 +153,73 @@ impl SwimCamera {
     }
 }
 
+/// Vertical workspace-scroll camera for the Scroll engine. Workspaces are
+/// stacked top to bottom: a step starts one output height away from the
+/// target and settles to rest while the previous workspace stays visible as
+/// a live, non-interactive preview sliding out the opposite side.
+///
+/// Deliberately separate from [`SwimCamera`]: swim is a continuous,
+/// gesture-driven horizontal pan across workspaces with no logical change
+/// until a half-spot crossing, while this is a discrete one-step camera
+/// around a switch that has already happened (the logical workspace changes
+/// immediately, like niri's vertical workspace scroll).
+#[derive(Debug, Default)]
+pub struct WorkspaceScrollCamera {
+    /// Camera offset at the start of the slide, in output heights. Negative
+    /// while the view starts above the new workspace (a step down), positive
+    /// for a step up.
+    from: f32,
+    /// Workspace that was active before the step, rendered as the outgoing
+    /// preview for the animation's lifetime.
+    neighbor: Option<u32>,
+    /// Progress from 0 to 1, eased on sample so the slide settles instead of
+    /// stopping linearly.
+    animation: Option<Animation>,
+}
+
+impl WorkspaceScrollCamera {
+    /// Start a one-step camera from `from` (normally `-1.0` for a step down,
+    /// `1.0` for a step up) toward rest. A zero duration keeps no state and
+    /// leaves the switch instantaneous.
+    pub fn start(from: f32, neighbor: u32, duration: Duration) -> Self {
+        if duration.is_zero() {
+            return Self::default();
+        }
+        Self {
+            from,
+            neighbor: Some(neighbor),
+            animation: Some(Animation::new(0.0, 1.0, Instant::now(), duration)),
+        }
+    }
+
+    pub fn current_offset(&self) -> f32 {
+        self.animation.as_ref().map_or(0.0, |animation| {
+            let eased = crate::animation::ease_progress(
+                crate::config::WindowAnimationCurve::CubicOut,
+                animation.value(),
+            );
+            self.from * (1.0 - eased)
+        })
+    }
+
+    pub fn neighbor(&self) -> Option<u32> {
+        self.neighbor
+    }
+
+    pub fn settling(&self) -> bool {
+        self.animation
+            .as_ref()
+            .is_some_and(|animation| !animation.finished())
+    }
+
+    /// Whether the entry can be dropped. Only meaningful once the sampled
+    /// offset is exactly at rest; callers request one final redraw when they
+    /// prune a finished entry so the last presented frame is at zero.
+    pub fn at_rest(&self) -> bool {
+        !self.settling() && self.current_offset() == 0.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,5 +400,24 @@ mod tests {
     fn workspace_edges_never_select_scratchpad_or_overflow() {
         assert!(visible_neighbors(1, -0.4, 4).is_empty());
         assert!(visible_neighbors(u32::MAX, 0.4, 4).is_empty());
+    }
+
+    #[test]
+    fn workspace_scroll_camera_settles_from_one_height_to_rest() {
+        let camera = WorkspaceScrollCamera::start(-1.0, 4, Duration::from_millis(10));
+        assert!(camera.settling());
+        assert_eq!(camera.neighbor(), Some(4));
+        assert!(camera.current_offset() <= 0.0);
+        std::thread::sleep(Duration::from_millis(15));
+        assert!(!camera.settling());
+        assert_eq!(camera.current_offset(), 0.0);
+        assert!(camera.at_rest());
+    }
+
+    #[test]
+    fn zero_duration_workspace_scroll_keeps_no_state() {
+        let camera = WorkspaceScrollCamera::start(-1.0, 4, Duration::ZERO);
+        assert!(camera.at_rest());
+        assert_eq!(camera.neighbor(), None);
     }
 }

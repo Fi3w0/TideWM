@@ -477,6 +477,11 @@ pub struct Smallvil {
     /// still `Layouts::active`'s `u32`); at rest it is zero and the entry
     /// asks for no frames.
     pub(crate) swim_cameras: HashMap<String, crate::swim::SwimCamera>,
+    /// Vertical workspace-slide camera, one entry per output while a
+    /// `workspace-up`/`workspace-down` step settles. At rest the entry is
+    /// removed; the logical workspace changes immediately, the camera only
+    /// animates the already-applied switch.
+    pub(crate) workspace_scroll_cameras: HashMap<String, crate::swim::WorkspaceScrollCamera>,
     /// Last already-imported surface tree for each visible mapped window.
     /// Texture handles are cloned, not framebuffer contents; the entry is
     /// transferred to the bounded close list on unmap.
@@ -2959,7 +2964,16 @@ impl Smallvil {
             .map(|camera| camera.current_offset())
             .unwrap_or(0.0);
         let output_width = output_geo.size.w as f64;
-        let active_view_offset = Point::from((-(camera_offset as f64) * output_width, 0.0));
+        let output_height = output_geo.size.h as f64;
+        let vertical_offset = self
+            .workspace_scroll_cameras
+            .get(&output_name)
+            .map(|camera| camera.current_offset())
+            .unwrap_or(0.0);
+        let active_view_offset = Point::from((
+            -(camera_offset as f64) * output_width,
+            -(vertical_offset as f64) * output_height,
+        ));
         let scrolling = self.config.spatial_engine == crate::config::SpatialEngine::Scroll;
         let mut result: Vec<crate::placement::PlacedWindow> = self
             .space
@@ -3011,11 +3025,20 @@ impl Smallvil {
                 } else {
                     crate::placement::PlacementStack::Normal
                 };
+                // Pinned windows stay on screen through every workspace
+                // change, so a vertical workspace slide must not carry them
+                // out of view. (Horizontal swim offset is left untouched,
+                // matching its existing behavior.)
+                let view_offset = if surface.is_some_and(|surface| self.pinned.contains(surface)) {
+                    Point::from((active_view_offset.x, 0.0))
+                } else {
+                    active_view_offset
+                };
                 let placement = crate::placement::PlacedWindow::authoritative(
                     window.clone(),
                     Rectangle::new(location, window.geometry().size),
                 )
-                .with_view_offset(active_view_offset)
+                .with_view_offset(view_offset)
                 .with_kind(kind)
                 .with_stack(stack);
                 // Space's cached output membership is refreshed later in the
@@ -3028,100 +3051,139 @@ impl Smallvil {
             })
             .collect();
 
-        if !self.swim_enabled() {
-            return Some(result);
-        }
-        let neighbors = crate::swim::visible_neighbors(
-            self.layout.active_workspace(&output_name),
-            camera_offset,
-            self.config.swim.neighbors,
-        );
-        if neighbors.is_empty() {
+        let vertical_camera = self.workspace_scroll_cameras.get(&output_name);
+        if !self.swim_enabled() && vertical_camera.is_none() {
             return Some(result);
         }
         let Some(area) = self.output_tiling_area(output) else {
             return Some(result);
         };
-        for neighbor in neighbors {
-            let view_offset = Point::from((
-                (neighbor.delta as f64 - camera_offset as f64) * output_width,
-                0.0,
-            ));
-            // Floating windows are frontmost among ordinary windows. Their
-            // relative order is already not retained while hidden (the
-            // workspace-switch map pass reads this same bounded tag map),
-            // so using its iteration order matches the existing model.
-            result.extend(
-                self.floating_workspace
-                    .iter()
-                    .filter(|(surface, tag)| {
-                        tag.output == output_name
-                            && tag.workspace == neighbor.workspace
-                            && !self.pinned.contains(*surface)
-                    })
-                    .map(|(surface, tag)| {
-                        let mut rect = tag.rect;
-                        if self
-                            .fullscreen
-                            .get(surface)
-                            .is_some_and(|entry| entry.output == output_name)
-                        {
-                            rect = output_geo;
-                        } else if self
-                            .maximized
-                            .get(surface)
-                            .is_some_and(|entry| entry.output == output_name)
-                        {
-                            rect = crate::layout::inset(
-                                area,
-                                self.gaps_for(&output_name, neighbor.workspace),
-                            );
-                        }
-                        let stack = if self
-                            .fullscreen
-                            .get(surface)
-                            .is_some_and(|entry| entry.output == output_name)
-                        {
-                            crate::placement::PlacementStack::Fullscreen
-                        } else {
-                            crate::placement::PlacementStack::Normal
-                        };
-                        crate::placement::PlacedWindow::preview(tag.window.clone(), rect)
-                            .with_view_offset(view_offset)
-                            .with_kind(crate::placement::PlacementKind::Floating)
-                            .with_stack(stack)
-                    }),
+        if self.swim_enabled() {
+            let neighbors = crate::swim::visible_neighbors(
+                self.layout.active_workspace(&output_name),
+                camera_offset,
+                self.config.swim.neighbors,
             );
+            for neighbor in neighbors {
+                let view_offset = Point::from((
+                    (neighbor.delta as f64 - camera_offset as f64) * output_width,
+                    0.0,
+                ));
+                self.append_workspace_previews(
+                    &output_name,
+                    neighbor.workspace,
+                    area,
+                    output_geo,
+                    view_offset,
+                    &mut result,
+                );
+            }
+        }
+        if let Some(camera) = vertical_camera {
+            if let Some(previous) = camera.neighbor() {
+                let active = self.layout.active_workspace(&output_name);
+                let delta = i64::from(previous) - i64::from(active);
+                if delta != 0 {
+                    let view_offset = Point::from((
+                        0.0,
+                        (delta as f64 - camera.current_offset() as f64) * output_height,
+                    ));
+                    self.append_workspace_previews(
+                        &output_name,
+                        previous,
+                        area,
+                        output_geo,
+                        view_offset,
+                        &mut result,
+                    );
+                }
+            }
+        }
+        Some(result)
+    }
 
-            let mut tiled = self.layout.layout(
-                &output_name,
-                neighbor.workspace,
-                area,
-                self.gaps_for(&output_name, neighbor.workspace),
-            );
-            // Mirror the active `Space` walk's front-to-back direction.
-            // Tiled windows usually do not overlap, but cascade does.
-            tiled.reverse();
-            result.extend(tiled.into_iter().map(|(window, mut rect)| {
-                let mut stack = crate::placement::PlacementStack::Normal;
-                if let Some(surface) = window.toplevel().map(|toplevel| toplevel.wl_surface()) {
+    /// Appends one workspace's floating and tiled windows as non-interactive
+    /// preview placements at `view_offset`. Shared by horizontal swim and the
+    /// vertical workspace slide so both render the same live content.
+    fn append_workspace_previews(
+        &self,
+        output_name: &str,
+        workspace: u32,
+        area: Rectangle<i32, Logical>,
+        output_geo: Rectangle<i32, Logical>,
+        view_offset: Point<f64, Logical>,
+        result: &mut Vec<crate::placement::PlacedWindow>,
+    ) {
+        // Floating windows are frontmost among ordinary windows. Their
+        // relative order is already not retained while hidden (the
+        // workspace-switch map pass reads this same bounded tag map),
+        // so using its iteration order matches the existing model.
+        result.extend(
+            self.floating_workspace
+                .iter()
+                .filter(|(surface, tag)| {
+                    tag.output == output_name
+                        && tag.workspace == workspace
+                        && !self.pinned.contains(*surface)
+                })
+                .map(|(surface, tag)| {
+                    let mut rect = tag.rect;
                     if self
                         .fullscreen
                         .get(surface)
                         .is_some_and(|entry| entry.output == output_name)
                     {
                         rect = output_geo;
-                        stack = crate::placement::PlacementStack::Fullscreen;
-                    } else if self.pseudo_tiled.contains(surface) {
-                        rect = crate::layout::scale_centered(rect, self.config.pseudo_tile_scale);
+                    } else if self
+                        .maximized
+                        .get(surface)
+                        .is_some_and(|entry| entry.output == output_name)
+                    {
+                        rect = crate::layout::inset(area, self.gaps_for(output_name, workspace));
                     }
+                    let stack = if self
+                        .fullscreen
+                        .get(surface)
+                        .is_some_and(|entry| entry.output == output_name)
+                    {
+                        crate::placement::PlacementStack::Fullscreen
+                    } else {
+                        crate::placement::PlacementStack::Normal
+                    };
+                    crate::placement::PlacedWindow::preview(tag.window.clone(), rect)
+                        .with_view_offset(view_offset)
+                        .with_kind(crate::placement::PlacementKind::Floating)
+                        .with_stack(stack)
+                }),
+        );
+
+        let mut tiled = self.layout.layout(
+            output_name,
+            workspace,
+            area,
+            self.gaps_for(output_name, workspace),
+        );
+        // Mirror the active `Space` walk's front-to-back direction.
+        // Tiled windows usually do not overlap, but cascade does.
+        tiled.reverse();
+        result.extend(tiled.into_iter().map(|(window, mut rect)| {
+            let mut stack = crate::placement::PlacementStack::Normal;
+            if let Some(surface) = window.toplevel().map(|toplevel| toplevel.wl_surface()) {
+                if self
+                    .fullscreen
+                    .get(surface)
+                    .is_some_and(|entry| entry.output == output_name)
+                {
+                    rect = output_geo;
+                    stack = crate::placement::PlacementStack::Fullscreen;
+                } else if self.pseudo_tiled.contains(surface) {
+                    rect = crate::layout::scale_centered(rect, self.config.pseudo_tile_scale);
                 }
-                crate::placement::PlacedWindow::preview(window, rect)
-                    .with_view_offset(view_offset)
-                    .with_stack(stack)
-            }));
-        }
-        Some(result)
+            }
+            crate::placement::PlacedWindow::preview(window, rect)
+                .with_view_offset(view_offset)
+                .with_stack(stack)
+        }));
     }
 
     /// Spatial-engine boundary consumed by the shared renderer. Classic and
@@ -4232,6 +4294,7 @@ impl Smallvil {
             buoyancy_camera_revision: 0,
             buoyancy_camera_was_moving: false,
             swim_cameras: HashMap::new(),
+            workspace_scroll_cameras: HashMap::new(),
             window_frame_snapshots: HashMap::new(),
             closing_window_animations: Vec::new(),
             window_depths: HashMap::new(),
@@ -6073,6 +6136,7 @@ impl Smallvil {
         self.pending_workspace_transitions.clear();
         self.workspace_transitions.clear();
         self.workspace_glides.clear();
+        self.workspace_scroll_cameras.clear();
         self.depth_transitions.clear();
         // Backdrop textures also contain unlocked client pixels. Unlock
         // recaptures visible glass before composing its first desktop frame.
@@ -6750,6 +6814,20 @@ impl Smallvil {
             self.window_float_ambient.remove(&surface);
         }
         self.swim_cameras.retain(|_, camera| !camera.at_rest());
+        if self
+            .workspace_scroll_cameras
+            .values()
+            .any(crate::swim::WorkspaceScrollCamera::at_rest)
+            && matches!(self.session_lock, SessionLock::Unlocked)
+        {
+            // The camera samples its final zero offset on the tick that
+            // finishes it. Ask for one more frame before dropping the entry
+            // so the last presented frame is not left a fraction of a
+            // workspace off.
+            self.request_redraw();
+        }
+        self.workspace_scroll_cameras
+            .retain(|_, camera| !camera.at_rest());
         self.ocean.prune_completed_camera_motions();
         self.closing_window_animations
             .retain(|closing| !closing.finished());
@@ -6794,6 +6872,7 @@ impl Smallvil {
                 .values()
                 .any(crate::buoyancy::BuoyancyState::needs_frame)
             || !self.swim_cameras.is_empty()
+            || !self.workspace_scroll_cameras.is_empty()
             || self.ocean.has_active_camera_motion()
             || (self.config.spatial_engine == crate::config::SpatialEngine::Ocean
                 && self.config.ocean.canvas_marker
@@ -6829,6 +6908,7 @@ impl Smallvil {
             || self.workspace_glides.contains_key(&name)
             || self.depth_transitions.contains_key(&name)
             || self.swim_cameras.contains_key(&name)
+            || self.workspace_scroll_cameras.contains_key(&name)
             || self.ocean.has_active_camera_motion_on(&name)
             || (self.config.spatial_engine == crate::config::SpatialEngine::Ocean
                 && self.config.ocean.canvas_marker
@@ -9366,6 +9446,7 @@ impl Smallvil {
         self.ocean_canvases.remove(output_name);
         self.compasses.remove(output_name);
         self.swim_cameras.remove(output_name);
+        self.workspace_scroll_cameras.remove(output_name);
         self.caustics.remove(output_name);
         // Same "connector name might mean something else entirely on
         // replug" reasoning as the rest of this function: a fired
@@ -10369,6 +10450,51 @@ impl Smallvil {
 
     /// Switches one output's visible workspace without destroying hidden
     /// content. Pinned windows remain visible; exclusive layers block the action.
+    /// `workspace-up`/`workspace-down`: step one numbered workspace on the
+    /// focused output. Scroll can animate the step as a vertical camera
+    /// slide (`scroll.workspace_scroll`), keeping columns horizontal; every
+    /// other engine and configuration uses the ordinary switch. Scratchpad
+    /// workspaces are reserved and never participate.
+    pub(crate) fn workspace_step(&mut self, step: i32) {
+        if step == 0 || self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+            return;
+        }
+        let Some(output) = self.primary_output() else {
+            return;
+        };
+        let output_name = output.name();
+        let current = self.layout.active_workspace(&output_name);
+        if is_scratchpad_workspace(current) {
+            return;
+        }
+        let target = (i64::from(current) + i64::from(step)).clamp(1, i64::from(u32::MAX)) as u32;
+        if target == current {
+            return;
+        }
+
+        let animate = self.config.spatial_engine == crate::config::SpatialEngine::Scroll
+            && self.config.scroll.workspace_scroll
+            && self.config.scroll.workspaces == crate::scroll::WorkspaceMode::Separate;
+        self.workspace_scroll_cameras.remove(&output_name);
+        if !animate {
+            self.switch_workspace(&output, target);
+            return;
+        }
+
+        self.switch_workspace_immediate(&output, target);
+        if self.layout.active_workspace(&output_name) != target {
+            return;
+        }
+        let from = if step > 0 { -1.0 } else { 1.0 };
+        let duration =
+            Duration::from_millis(u64::from(self.config.scroll.workspace_scroll_duration_ms));
+        self.workspace_scroll_cameras.insert(
+            output_name,
+            crate::swim::WorkspaceScrollCamera::start(from, current, duration),
+        );
+        self.request_redraw();
+    }
+
     pub fn switch_workspace(&mut self, output: &Output, workspace: u32) {
         if self.exclusive_layer().is_some() {
             return;
@@ -10461,6 +10587,9 @@ impl Smallvil {
     fn apply_workspace_switch(&mut self, output: &Output, current: u32, workspace: u32) {
         self.close_depth_deck();
         let output_name = output.name();
+        // Any switch supersedes an in-flight vertical workspace slide. The
+        // step action re-inserts its camera after this call returns.
+        self.workspace_scroll_cameras.remove(&output_name);
         self.workspace_previous.insert(output_name.clone(), current);
 
         // Hide everything on the outgoing workspace. Tiled windows come
@@ -15370,6 +15499,12 @@ impl Smallvil {
                         for camera in self.swim_cameras.values_mut() {
                             camera.snap_to_rest();
                         }
+                    }
+                    if self.config.spatial_engine != crate::config::SpatialEngine::Scroll
+                        || !self.config.scroll.workspace_scroll
+                        || self.config.scroll.workspaces != crate::scroll::WorkspaceMode::Separate
+                    {
+                        self.workspace_scroll_cameras.clear();
                     }
                     self.window_opacity.clear();
                     self.window_glass_modes.clear();

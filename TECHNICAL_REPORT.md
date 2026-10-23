@@ -50,6 +50,8 @@ scroll {
     gesture_distance     = 1200
     float_anchor         = screen                 # or strip
     float_rescue         = true
+    workspace_scroll     = true                   # vertical workspace camera
+    workspace_scroll_duration = 220ms
 }
 ```
 
@@ -68,6 +70,7 @@ scroll {
 - **`always_center_single`:** a workspace with just one column keeps it centered.
 - **`preset_widths`:** the widths `switch-preset-width` steps through.
 - **`orientation`:** horizontal or vertical strips. For a free 2D layout, use Ocean.
+- **`workspace_scroll`:** `workspace-down`/`workspace-up` slide vertically between workspaces (the previous one stays live underneath) while the columns keep scrolling horizontally. `workspace_scroll = false` makes those actions switch instantly; `workspace_scroll_duration` sets the slide length. Only `workspaces = separate`; scratchpads and Ocean do not participate. No keybinds are added automatically.
 - **`workspaces`:** `separate` gives each workspace its own strip and scroll position. `sections` lays a monitor's workspaces end to end in one strip, and switching workspace jumps to its section. In both modes, scratchpads stay separate, and floating windows float above the strip or stay on it (see `float_anchor`).
 - **`gesture_distance`:** how far a touchpad swipe travels per screen. The swipe uses your workspace-swipe finger count.
 - **`float_anchor`:** `screen` keeps floating windows where they are on the monitor while the strip scrolls. `strip` leaves each one at its spot on the strip, so it scrolls away with the columns and comes back when you return. Pinned windows and scratchpads always stay on screen. `toggle-float-anchor` flips it until the next reload.

@@ -2,6 +2,11 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.181 · 2026-10-23 — Vertical workspace scroll
+
+- New `workspace-down` / `workspace-up` actions (also niri's `focus-workspace-down` / `focus-workspace-up`) step one workspace on the focused output.
+- In Scroll the step now slides the camera vertically: the outgoing workspace stays live while the incoming one scrolls in, so columns keep moving left/right and workspaces move up/down. `scroll { workspace_scroll = false }` restores the instant switch, and `workspace_scroll_duration` sets the slide length (default 220ms).
+
 ## 0.90.180 · 2026-10-22 — No half-visible floaters after a drop
 
 - With `float_anchor = strip`, dropping a floating window across two monitors slides it fully onto the monitor it belongs to instead of leaving half of it cut off.

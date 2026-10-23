@@ -86,6 +86,13 @@ pub struct ScrollConfig {
     /// With `float_anchor = strip`, move a floater the strip can no longer
     /// scroll to (its columns closed) back onto the screen.
     pub float_rescue: bool,
+    /// Animate `workspace-up`/`workspace-down` as a vertical camera slide
+    /// across the workspace stack. Columns keep their horizontal strip; the
+    /// outgoing workspace stays visible as a live preview while the incoming
+    /// one slides in. Only meaningful with `workspaces = separate`.
+    pub workspace_scroll: bool,
+    /// Vertical workspace-slide duration, milliseconds.
+    pub workspace_scroll_duration_ms: u32,
 }
 
 /// A column width or window height change: `50%`, `+10%`, `-10%`,
@@ -171,6 +178,8 @@ impl Default for ScrollConfig {
             gesture_distance: 1200.0,
             float_anchor: FloatAnchor::Screen,
             float_rescue: true,
+            workspace_scroll: true,
+            workspace_scroll_duration_ms: 220,
         }
     }
 }

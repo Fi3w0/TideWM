@@ -3074,6 +3074,7 @@ impl Smallvil {
                     self.switch_workspace(&output, workspace);
                 }
             }
+            Action::WorkspaceStep(step) => self.workspace_step(step),
             Action::MoveToWorkspace(workspace) => {
                 if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
                     tracing::warn!(

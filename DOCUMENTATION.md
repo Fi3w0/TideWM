@@ -1871,6 +1871,7 @@ The same set of strings works after `bind ... { }` at the top level or inside a 
 **Workspaces**
 - `workspace:<N>` — Classic switches to workspace `N`; Ocean jumps to numeric bookmark/reef `N` without creating a workspace
 - `workspace-on:<output-name>:<N>` — the same switch on the named output instead of the focused one; meant for bars, where a click on one monitor's workspace strip must not switch the monitor that holds the focused window (`tidectl workspace-on DP-4 3`)
+- `workspace-down` / `workspace-up` (aliases `focus-workspace-down` / `focus-workspace-up`) — step one numbered workspace on the focused output; in Scroll the step slides vertically as a camera move. Clamps at workspace 1 (workspace 0 is the scratchpad)
 - `move-to-workspace:<N>` — move the focused window to workspace `N`
 - `swap-workspaces:<output-name>` — swap this output's and the named output's active-workspace content
 - `workspace:<name>` / `move-to-workspace:<name>` — same two actions, addressed by a `workspace_name` alias instead of a number (see below) — a workspace's real identity is always its number, this is just another way to spell it
@@ -2065,6 +2066,8 @@ scroll {
     gesture_distance = 1200
     float_anchor = screen
     float_rescue = true
+    workspace_scroll = true
+    workspace_scroll_duration = 220ms
 }
 ```
 
@@ -2079,6 +2082,10 @@ scroll {
 | `gesture_distance` | positive float | `1200` | Touchpad travel per viewport. A sensitivity, not a monitor width. |
 | `float_anchor` | `screen` \| `strip` | `screen` | `screen` keeps floating windows fixed on the monitor while the strip scrolls under them. `strip` keeps each floating window at its place on the strip, so it scrolls away with the columns and comes back when you scroll back; it may sit off-screen along the strip and is drawn only on its own monitor. Pinned windows and scratchpads always stay on screen. `toggle-float-anchor` flips it until the next reload. |
 | `float_rescue` | bool | `true` | With `float_anchor = strip`: when the columns around a floating window close and the strip can no longer scroll to it, move it onto the screen at the nearest edge. `false` leaves it where it was, off-screen. Keyboard focus, Alt+Tab, `focus-window` and notification activation on an off-screen strip floater scroll the strip just far enough to show it; pointer focus never does. |
+| `workspace_scroll` | bool | `true` | Animate `workspace-up`/`workspace-down` as a vertical camera slide: the outgoing workspace stays live while the incoming one scrolls in from below/above. Columns keep their horizontal strip, so the two axes work together. Requires `workspaces = separate`; `false` switches instantly. |
+| `workspace_scroll_duration` | duration, 1–10000ms | `220ms` | Vertical workspace-slide length. |
+
+With `workspace_scroll`, `workspace-down`/`workspace-up` slide vertically to the next/previous numbered workspace on the focused output. The logical switch happens at once (the bar and focus follow it), the outgoing workspace is rendered as a live preview during the slide, and pinned windows stay on screen. This is the vertical counterpart of the strip's horizontal camera; `workspaces = sections` keeps the single-strip section jump instead. Scratchpad workspaces and Ocean do not participate.
 
 Spacing follows `gaps`. A column holds one window or several stacked ones. Along the strip, `focus-*` moves between columns (landing on the window last focused there), `swap-*` moves the whole column and `resize-*` changes the column width; across the strip, they move focus, reorder and resize inside the column. `consume-or-expel-left/right`, `consume-into-column` and `expel-from-column` edit columns (see [Action strings](#action-strings)). New windows open as a column after the focused column. Modifier+right-drag on a Scroll tile resizes its column along the strip and, in a shared column, the window across it. A modifier+left-drag drop lands by zone of the tile under the pointer: the outer quarters along the strip insert a new column before/after it, the outer quarters across it insert into its column above/below it, and the middle swaps. While dragging, a bar (or the whole tile, for a swap) previews the landing spot in the `snap` preview color and opacity. `scroll-left/right/up/down` slides half a viewport. No binds are added automatically. Pointer focus (hover, click, touch, tablet) never moves the strip; keyboard focus, `focus-window`/`focus-app` and notification activation reveal the target.
 

@@ -2,6 +2,15 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.181 — Vertical workspace scroll in Scroll
+
+- `Action::WorkspaceStep(i32)` parses `workspace-up`/`workspace-down` and niri's `focus-workspace-up`/`focus-workspace-down`. `Smallvil::workspace_step` resolves the focused output, clamps at workspace 1 (workspace 0 is the scratchpad) and steps the number; Ocean is a no-op and Classic keeps the existing switch/transition path.
+- In Scroll with `scroll.workspace_scroll` (also requires `workspaces = separate`), the logical switch happens immediately through `switch_workspace_immediate` (no water transition), then a per-output `swim::WorkspaceScrollCamera` starts at `-1` for a step down or `+1` for a step up and samples to zero with a cubic-out ease. `apply_workspace_switch` drops any in-flight camera, so the step action re-inserts its own after the switch.
+- `classic_render_placements` applies `-offset * output_height` to the active workspace's authoritative placements and renders the previous workspace as preview placements at `(delta - offset) * output_height`, using the same live preview helper horizontal swim now shares (`append_workspace_previews`: floating, tiled, fullscreen, maximized, pseudo-tiled). Pinned windows keep their vertical position so they stay on screen. Columns keep their own horizontal strip offset; no new texture or framebuffer.
+- The camera is pruned at rest by `has_active_animation`; a finished entry requests one final redraw before removal so the last frame is at exactly zero. Lock, output removal, a reload that disables the feature and any other workspace switch all clear the camera.
+- `scroll.workspace_scroll` defaults true (the actions themselves are opt-in binds) and `scroll.workspace_scroll_duration` defaults 220ms. Docs, tidectl help and the Scroll action table updated.
+- Nested validation: kwin_wayland virtual host, debug TideWM, two Kitty clients on workspaces 1 and 2 with distinct backgrounds. `workspace-down` produced a mid-slide frame split red/blue and ended on workspace 2; `workspace-up` produced the reverse split and returned to workspace 1; diagnostics reported zero config warnings. Frames in `.hermes/worklogs/vertical-workspace-scroll/` (also `~/.cache/tidewm-scroll-enable/vertical/`). 672 tests (648 + 15 + 9), strict Clippy, fmt, release build pass. Native activation still needs Fiw's relog into 0.90.181.
+
 ## 0.90.180 — Dropped strip floaters fit their owner output
 
 - On `dropped` sync, a strip floater is clamped fully inside its new owner output's geometry (per axis, as far as its size allows) and remapped, since the .169 owner filter clips whatever overhangs onto a neighbor. Reported natively on .179: after dropping across the monitor edge only half the window was visible.
