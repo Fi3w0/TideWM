@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.182 · 2026-10-23 — Vertical scroll stays on its monitor
+
+- `workspace-up` after stepping onto an empty workspace keeps using the monitor that received the step instead of falling back to the pointer's monitor. This was visible on two monitors: Down switched one screen, Up scrolled the other.
+
 ## 0.90.181 · 2026-10-23 — Vertical workspace scroll
 
 - New `workspace-down` / `workspace-up` actions (also niri's `focus-workspace-down` / `focus-workspace-up`) step one workspace on the focused output.

@@ -1013,6 +1013,11 @@ pub struct Smallvil {
     /// `scratchpad_previous` above: that one only tracks the scratchpad's
     /// own toggle, this tracks every ordinary workspace switch.
     workspace_previous: HashMap<String, u32>,
+    /// Output that received the last `workspace-up`/`workspace-down` step.
+    /// Used only while no visible window holds focus (an empty workspace):
+    /// `primary_output` then falls back to the pointer, which may be on the
+    /// other monitor and would step the wrong screen on the way back.
+    workspace_step_output: Option<String>,
 
     /// Tiled windows that keep `config.pseudo_tile_scale` of their tile's
     /// size instead of filling it -- a rect override `retile()` applies,
@@ -4410,6 +4415,7 @@ impl Smallvil {
             initial_toplevel_identity: HashMap::new(),
             remembered_floating_sizes: HashMap::new(),
             workspace_previous: HashMap::new(),
+            workspace_step_output: None,
             pseudo_tiled: HashSet::new(),
             urgent: HashSet::new(),
             urgent_pulse_last: HashMap::new(),
@@ -9447,6 +9453,9 @@ impl Smallvil {
         self.compasses.remove(output_name);
         self.swim_cameras.remove(output_name);
         self.workspace_scroll_cameras.remove(output_name);
+        if self.workspace_step_output.as_deref() == Some(output_name) {
+            self.workspace_step_output = None;
+        }
         self.caustics.remove(output_name);
         // Same "connector name might mean something else entirely on
         // replug" reasoning as the rest of this function: a fired
@@ -10459,10 +10468,24 @@ impl Smallvil {
         if step == 0 || self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
             return;
         }
-        let Some(output) = self.primary_output() else {
+        // With a visible focused window, follow it. On an empty workspace
+        // there is no focus, and `primary_output` falls back to the pointer
+        // or the first output -- which may be the other monitor. Reuse the
+        // output of the previous step in exactly that case so Down then Up
+        // returns the same screen.
+        let output = if self.focused_window_surface().is_some() {
+            self.primary_output()
+        } else {
+            self.workspace_step_output
+                .as_deref()
+                .and_then(|name| self.output_by_name(name))
+                .or_else(|| self.primary_output())
+        };
+        let Some(output) = output else {
             return;
         };
         let output_name = output.name();
+        self.workspace_step_output = Some(output_name.clone());
         let current = self.layout.active_workspace(&output_name);
         if is_scratchpad_workspace(current) {
             return;

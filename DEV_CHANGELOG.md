@@ -2,6 +2,11 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.182 — Keep vertical workspace steps on the stepped output
+
+- `Smallvil::workspace_step` preferred `primary_output`, whose fallback chain reaches the pointer when no visible window holds focus. Stepping onto an empty workspace therefore cleared focus, and the next `workspace-up` used the pointer's monitor (the other screen) instead of returning. Added `workspace_step_output: Option<String>`: a step with a focused window still follows that window, while a step without one reuses the monitor of the previous step. Cleared when that output is removed.
+- Reproduced live: `workspace-down` on DP-4 moved it to workspace 2 and dropped focus; `workspace-up` left it on 2 because the pointer was on HDMI-A-2. 672 tests, strict Clippy, fmt, release build pass; the multi-monitor round trip needs a native retest after relog.
+
 ## 0.90.181 — Vertical workspace scroll in Scroll
 
 - `Action::WorkspaceStep(i32)` parses `workspace-up`/`workspace-down` and niri's `focus-workspace-up`/`focus-workspace-down`. `Smallvil::workspace_step` resolves the focused output, clamps at workspace 1 (workspace 0 is the scratchpad) and steps the number; Ocean is a no-op and Classic keeps the existing switch/transition path.
