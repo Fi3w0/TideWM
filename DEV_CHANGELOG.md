@@ -2,6 +2,11 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.185 — Mouse height resize for a single Scroll window
+
+- `scroll_resize_start` only set `ScrollResizeStart.row` when the column had two or more windows, so the grab's `across`/`delta.y` branch was skipped for a lone tile and only the column width moved. The new `scroll::row_resize_enabled(rows, stack)` is shared by the mouse grab and `keyboard_resize`: a shared column always resizes rows, a single-window column only with `stack = scroll`/`hybrid` (with `fit` it already fills the column).
+- 677 tests (653 + 15 + 9), strict Clippy, fmt and the release build pass. The keyboard path was verified live on .184 (a lone 1031 px window shrank to 959 px with three `resize-up` steps); the mouse grab change is covered by the shared predicate and the existing grab math, and needs a native drag check after relog.
+
 ## 0.90.184 — Mouse wheel v120 gate
 
 - The Scroll stack-wheel branch gated on `vertical_amount != 0.0`. A mouse wheel can report `amount(Vertical) == Some(0.0)` with only `amount_v120` set, so the branch was skipped and the event was forwarded to the client (which scrolled its own content). The gate now accepts a nonzero discrete v120 as well; `stack_wheel_delta` already preferred it. Touchpad continuous deltas are unchanged.

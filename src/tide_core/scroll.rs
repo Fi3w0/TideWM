@@ -608,6 +608,13 @@ pub fn column_tile_rect(
     }
 }
 
+/// Whether a column's rows can be resized vertically. A shared column
+/// always can; a single-window column only when the stack camera is enabled
+/// (`scroll` or `hybrid`), because with `fit` the window already fills it.
+pub fn row_resize_enabled(rows: usize, mode: StackMode) -> bool {
+    rows > 1 || mode != StackMode::Fit
+}
+
 /// Absolute row heights for one Scroll column, before gaps.
 ///
 /// `available` is the column's cross-axis size minus the outer gaps and the
@@ -849,6 +856,14 @@ mod tests {
             vertical.loc.x + vertical.size.w,
             area.loc.x + area.size.w - 8
         );
+    }
+
+    #[test]
+    fn single_window_row_resize_only_with_a_stack_camera() {
+        assert!(!row_resize_enabled(1, StackMode::Fit));
+        assert!(row_resize_enabled(2, StackMode::Fit));
+        assert!(row_resize_enabled(1, StackMode::Scroll));
+        assert!(row_resize_enabled(1, StackMode::Hybrid));
     }
 
     #[test]

@@ -13059,14 +13059,15 @@ impl Smallvil {
         let column = columns.get(column)?;
         let horizontal = self.config.scroll.orientation == crate::scroll::Orientation::Horizontal;
         let viewport = f64::from(if horizontal { area.size.w } else { area.size.h } - 2 * gap);
-        let row = (column.windows.len() > 1).then(|| {
-            let size = self
-                .mapped_toplevel_window(surface)
-                .map(|w| w.geometry().size)
-                .unwrap_or_default();
-            let cross = if horizontal { size.h } else { size.w };
-            (self.layout.scroll.weight(surface), f64::from(cross))
-        });
+        let row = crate::scroll::row_resize_enabled(column.windows.len(), self.config.scroll.stack)
+            .then(|| {
+                let size = self
+                    .mapped_toplevel_window(surface)
+                    .map(|w| w.geometry().size)
+                    .unwrap_or_default();
+                let cross = if horizontal { size.h } else { size.w };
+                (self.layout.scroll.weight(surface), f64::from(cross))
+            });
         Some(crate::grabs::ScrollResizeStart {
             head: column.windows.first()?.clone(),
             width: column.width,
@@ -14461,7 +14462,7 @@ impl Smallvil {
                 let rows = self.layout.scroll_columns(&owner, workspace)[column]
                     .windows
                     .len();
-                if rows < 2 && self.config.scroll.stack == crate::scroll::StackMode::Fit {
+                if !crate::scroll::row_resize_enabled(rows, self.config.scroll.stack) {
                     return;
                 }
                 let cross = match self.config.scroll.orientation {

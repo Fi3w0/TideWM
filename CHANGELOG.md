@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.185 · 2026-10-23 — Height resize for a lone Scroll window
+
+- With `scroll.stack = hybrid` or `scroll`, modifier+right-drag on a lone Scroll window now changes its height as well as the column width. Previously the vertical part was skipped unless the column had at least two windows, so a single window only resized sideways. `stack = fit` keeps a lone window filling the column, and `Super+Ctrl+↑/↓` already did this from the keyboard.
+
 ## 0.90.184 · 2026-10-23 — Mouse wheel reaches the stack camera
 
 - A mouse wheel sends only discrete v120 counts, but the Mod+wheel stack handler required a continuous axis amount; the event fell through to the client. It now accepts either form, so a wheel notch pans the column instead of scrolling the app.
