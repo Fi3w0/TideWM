@@ -2,6 +2,11 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.184 — Mouse wheel v120 gate
+
+- The Scroll stack-wheel branch gated on `vertical_amount != 0.0`. A mouse wheel can report `amount(Vertical) == Some(0.0)` with only `amount_v120` set, so the branch was skipped and the event was forwarded to the client (which scrolled its own content). The gate now accepts a nonzero discrete v120 as well; `stack_wheel_delta` already preferred it. Touchpad continuous deltas are unchanged.
+- 676 tests, strict Clippy, fmt, release build pass. Native .184 check: one Super+wheel notch moved the stack camera (T A y -242 -> 16 and back) without changing the workspace; touchpad continuous remains to test.
+
 ## 0.90.183 — Scroll stack camera
 
 - `scroll::StackMode` (`fit`, `scroll`, `hybrid`) plus `scroll.stack_height` (0.5) and `scroll.stack_min_height` (0.33). `hybrid` computes `max(1/N, min)`, so two or three windows still divide exactly and a fourth starts overflow.

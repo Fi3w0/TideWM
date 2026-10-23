@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.184 · 2026-10-23 — Mouse wheel reaches the stack camera
+
+- A mouse wheel sends only discrete v120 counts, but the Mod+wheel stack handler required a continuous axis amount; the event fell through to the client. It now accepts either form, so a wheel notch pans the column instead of scrolling the app.
+
 ## 0.90.183 · 2026-10-23 — Scroll stacks that scroll
 
 - A Scroll column can now be taller than the screen. `scroll.stack = hybrid` (the default) divides the height while every window keeps at least `stack_min_height` (33%); below that the windows keep a readable height and the column scrolls. `stack = scroll` uses a fixed `stack_height` (50% by default); `stack = fit` keeps the old always-fits layout.

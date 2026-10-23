@@ -2330,7 +2330,8 @@ impl Smallvil {
                         .config
                         .pointer_modifier
                         .is_held_by(self.held_modifiers())
-                    && vertical_amount != 0.0
+                    && (vertical_amount != 0.0
+                        || vertical_amount_discrete.is_some_and(|v120| v120 != 0.0))
                 {
                     let surface = self
                         .seat
