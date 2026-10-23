@@ -27,6 +27,20 @@ pub enum Orientation {
     Vertical,
 }
 
+/// How a Scroll column's windows share the vertical axis.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StackMode {
+    /// Divide the column height between the windows; the column always fits.
+    #[default]
+    Fit,
+    /// Give every window `stack_height` of the column area; the column may
+    /// extend past the viewport and the stack camera scrolls it.
+    Scroll,
+    /// Divide while the share stays at least `stack_min_height`; below that,
+    /// keep the minimum and scroll the stack instead.
+    Hybrid,
+}
+
 /// When revealing a column centers it (niri's `center-focused-column`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CenterMode {
@@ -86,6 +100,13 @@ pub struct ScrollConfig {
     /// With `float_anchor = strip`, move a floater the strip can no longer
     /// scroll to (its columns closed) back onto the screen.
     pub float_rescue: bool,
+    /// How a column's windows share the vertical axis: fit, scroll, or a
+    /// hybrid that fits until a minimum readable height then scrolls.
+    pub stack: StackMode,
+    /// Share of the column area a window takes in `scroll` mode.
+    pub stack_height: f64,
+    /// Minimum share a window keeps in `hybrid` before the stack scrolls.
+    pub stack_min_height: f64,
     /// Animate `workspace-up`/`workspace-down` as a vertical camera slide
     /// across the workspace stack. Columns keep their horizontal strip; the
     /// outgoing workspace stays visible as a live preview while the incoming
@@ -178,6 +199,9 @@ impl Default for ScrollConfig {
             gesture_distance: 1200.0,
             float_anchor: FloatAnchor::Screen,
             float_rescue: true,
+            stack: StackMode::Hybrid,
+            stack_height: 0.5,
+            stack_min_height: 0.33,
             workspace_scroll: true,
             workspace_scroll_duration_ms: 220,
         }
@@ -222,6 +246,9 @@ pub struct ScrollState {
     margins: HashSet<(String, u32)>,
     /// Offset, in whole pixels, floating windows were last placed against.
     float_offsets: HashMap<(String, u32), i32>,
+    /// Vertical stack camera, keyed by the column head. Only used when
+    /// `scroll.stack` is not `Fit`.
+    stack_offsets: HashMap<WlSurface, f64>,
 }
 impl ScrollState {
     /// Records `offset` as the one floating windows now sit against and
@@ -280,6 +307,27 @@ impl ScrollState {
     pub fn clear_proportion(&mut self, surface: &WlSurface) {
         self.proportions.remove(surface);
     }
+    pub fn stack_offset(&self, head: &WlSurface) -> f64 {
+        self.stack_offsets.get(head).copied().unwrap_or(0.0)
+    }
+    pub fn set_stack_offset(&mut self, head: &WlSurface, value: f64) {
+        if !value.is_finite() {
+            return;
+        }
+        if value.abs() < 0.001 {
+            self.stack_offsets.remove(head);
+        } else {
+            self.stack_offsets.insert(head.clone(), value.max(0.0));
+        }
+    }
+    pub fn clear_stack_offset(&mut self, head: &WlSurface) {
+        self.stack_offsets.remove(head);
+    }
+    pub fn transfer_stack_offset(&mut self, old: &WlSurface, new: &WlSurface) {
+        if let Some(offset) = self.stack_offsets.remove(old) {
+            self.stack_offsets.insert(new.clone(), offset);
+        }
+    }
     pub fn is_stacked(&self, surface: &WlSurface) -> bool {
         self.stacked.contains(surface)
     }
@@ -314,6 +362,7 @@ impl ScrollState {
         let weight = self.weight(old);
         self.weights.remove(&new);
         self.set_weight(&new, weight);
+        self.transfer_stack_offset(old, &new);
     }
     /// Two windows trade places: each takes the other's column slot
     /// (stacking, width, row share).
@@ -333,6 +382,13 @@ impl ScrollState {
         self.weights.remove(b);
         self.set_weight(a, weight_b);
         self.set_weight(b, weight_a);
+        let (offset_a, offset_b) = (self.stack_offsets.remove(a), self.stack_offsets.remove(b));
+        if let Some(offset) = offset_b {
+            self.stack_offsets.insert(a.clone(), offset);
+        }
+        if let Some(offset) = offset_a {
+            self.stack_offsets.insert(b.clone(), offset);
+        }
     }
     /// Toggles `head`'s column between full width and its previous width.
     pub fn toggle_maximized(&mut self, head: &WlSurface) {
@@ -355,6 +411,7 @@ impl ScrollState {
         self.stacked.remove(surface);
         self.weights.remove(surface);
         self.restore_widths.remove(surface);
+        self.clear_stack_offset(surface);
     }
     pub fn prune(&mut self, populated: &[(String, u32)]) {
         self.margins.retain(|(output, workspace)| {
@@ -367,6 +424,8 @@ impl ScrollState {
                 .iter()
                 .any(|(name, number)| name == output && (*workspace == 0 || number == workspace))
         });
+        // Stack offsets are keyed by live column heads; `forget`/detach
+        // already drop them when a head goes away, so nothing to scan here.
     }
 }
 
@@ -549,6 +608,89 @@ pub fn column_tile_rect(
     }
 }
 
+/// Absolute row heights for one Scroll column, before gaps.
+///
+/// `available` is the column's cross-axis size minus the outer gaps and the
+/// gaps between rows. `Fit` normalizes the weights to exactly fill it;
+/// `Scroll` gives each window `stack_height` of it (but never less than an
+/// equal share, so one window still fills); `Hybrid` does the same with
+/// `stack_min_height`, which keeps dividing until the minimum would be
+/// crossed and only then lets the column overflow.
+pub fn column_row_heights(
+    available: f64,
+    weights: &[f64],
+    mode: StackMode,
+    stack_height: f64,
+    stack_min_height: f64,
+) -> Vec<f64> {
+    let n = weights.len().max(1);
+    let available = available.max(1.0);
+    let sum_w: f64 = weights
+        .iter()
+        .map(|w| w.max(0.0))
+        .sum::<f64>()
+        .max(f64::EPSILON);
+    let base = match mode {
+        StackMode::Fit => available / n as f64,
+        StackMode::Scroll => available * stack_height.max(1.0 / n as f64),
+        StackMode::Hybrid => available * stack_min_height.max(1.0 / n as f64),
+    };
+    weights
+        .iter()
+        .map(|w| {
+            let w = w.max(0.0);
+            let height = match mode {
+                StackMode::Fit => available * w / sum_w,
+                StackMode::Scroll | StackMode::Hybrid => base * w,
+            };
+            height.max(1.0)
+        })
+        .collect()
+}
+
+/// The rect of row `row` in a horizontally scrolling column at `y_offset`.
+/// Unlike [`column_tile_rect`], heights are absolute and may add up past the
+/// viewport, which is what lets the stack camera scroll a tall column.
+#[allow(clippy::too_many_arguments)] // Mirrors column_tile_rect plus heights/y_offset.
+pub fn column_tile_rect_stacked(
+    area: Rectangle<i32, Logical>,
+    start: f64,
+    extent: f64,
+    offset: f64,
+    gap: i32,
+    heights: &[f64],
+    row: usize,
+    y_offset: f64,
+) -> Rectangle<i32, Logical> {
+    let gap = gap
+        .max(0)
+        .min(area.size.w.min(area.size.h).saturating_sub(1) / 2);
+    let rows = heights.len().max(1);
+    let row = row.min(rows - 1);
+    let x = f64::from(area.loc.x) + f64::from(gap);
+    let y = f64::from(area.loc.y) + f64::from(gap);
+    let above: f64 = heights
+        .iter()
+        .take(row)
+        .map(|height| height.max(1.0) + f64::from(gap))
+        .sum();
+    let bounded = |value: f64, size: i32| {
+        value
+            .round()
+            .clamp(f64::from(i32::MIN), f64::from(i32::MAX - size.max(1))) as i32
+    };
+    let width = (extent.round() as i32).max(1);
+    let height = (heights.get(row).copied().unwrap_or(1.0).round() as i32).max(1);
+    Rectangle::new(
+        (
+            bounded(x + start - offset, width),
+            bounded(y + above - y_offset, height),
+        )
+            .into(),
+        (width, height).into(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -707,5 +849,32 @@ mod tests {
             vertical.loc.x + vertical.size.w,
             area.loc.x + area.size.w - 8
         );
+    }
+
+    #[test]
+    fn stack_modes_compute_fit_scroll_and_hybrid_heights() {
+        let fit = column_row_heights(300.0, &[1.0; 3], StackMode::Fit, 0.5, 0.33);
+        assert!((fit.iter().sum::<f64>() - 300.0).abs() < 1e-6);
+        let scroll = column_row_heights(300.0, &[1.0; 3], StackMode::Scroll, 0.5, 0.33);
+        assert!((scroll[0] - 150.0).abs() < 1e-6);
+        assert!((scroll.iter().sum::<f64>() - 450.0).abs() < 1e-6);
+        let hybrid_fit = column_row_heights(300.0, &[1.0; 3], StackMode::Hybrid, 0.5, 0.33);
+        assert!((hybrid_fit[0] - 100.0).abs() < 1e-6);
+        let hybrid_overflow = column_row_heights(300.0, &[1.0; 4], StackMode::Hybrid, 0.5, 0.33);
+        assert!((hybrid_overflow[0] - 99.0).abs() < 1e-6);
+        assert!((hybrid_overflow.iter().sum::<f64>() - 396.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn stacked_rect_places_rows_by_absolute_height_and_camera_offset() {
+        let area = Rectangle::new((0, 0).into(), (400, 300).into());
+        let heights = [120.0, 120.0, 120.0];
+        let first = column_tile_rect_stacked(area, 0., 400., 0., 8, &heights, 0, 0.);
+        let second = column_tile_rect_stacked(area, 0., 400., 0., 8, &heights, 1, 0.);
+        let third = column_tile_rect_stacked(area, 0., 400., 0., 8, &heights, 2, 50.);
+        assert_eq!(first.loc.y, 8);
+        assert_eq!(second.loc.y, 8 + 128);
+        assert_eq!(third.loc.y, 8 + 2 * 128 - 50);
+        assert_eq!(third.size.h, 120);
     }
 }

@@ -2,6 +2,15 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.183 — Scroll stack camera
+
+- `scroll::StackMode` (`fit`, `scroll`, `hybrid`) plus `scroll.stack_height` (0.5) and `scroll.stack_min_height` (0.33). `hybrid` computes `max(1/N, min)`, so two or three windows still divide exactly and a fourth starts overflow.
+- `column_row_heights` and `column_tile_rect_stacked` give a horizontal column absolute row heights and a vertical camera offset instead of normalizing weights to the viewport. `ScrollSlot` carries the column head; `ScrollState.stack_offsets` remembers one offset per head and transfers it when the head leaves (detach, replace, swap).
+- `scroll_reveal_with` now also calls `scroll_reveal_stack`, so every navigation focus (keyboard, Alt+Tab, IPC, notification activation) reveals the row vertically as well as the column horizontally. `scroll_stack_pan` backs the new `scroll-up`/`scroll-down` half-viewport pan and the wheel.
+- `input.rs` consumes `Mod+wheel` vertical in Scroll when `stack != fit`: a mouse notch moves a quarter of the visible column (`stack_wheel_delta`), a touchpad delta is continuous. It never leaks to the client while the modifier is held; horizontal wheel is left alone for now.
+- `keyboard_resize` across the strip now allows a single-window column when the stack can overflow, and reveals after the weight change. `scroll_view` Up/Down pans the stack instead of no-oping in horizontal Scroll.
+- 676 tests (652 + 15 + 9), strict Clippy, fmt and the release build pass. Nested: four Kitty clients in one column (blue/red/green/purple). The fourth started partly below the viewport; `focus-window`/`focus-down` revealed it, `focus-up` returned to the top, `scroll-down` shifted the column, and `resize-up` shrank the focused height. Captures in `.hermes/worklogs/scroll-stack-camera/`. Native wheel/relog check owed.
+
 ## 0.90.182 — Keep vertical workspace steps on the stepped output
 
 - `Smallvil::workspace_step` preferred `primary_output`, whose fallback chain reaches the pointer when no visible window holds focus. Stepping onto an empty workspace therefore cleared focus, and the next `workspace-up` used the pointer's monitor (the other screen) instead of returning. Added `workspace_step_output: Option<String>`: a step with a focused window still follows that window, while a step without one reuses the monitor of the previous step. Cleared when that output is removed.

@@ -50,6 +50,9 @@ scroll {
     gesture_distance     = 1200
     float_anchor         = screen                 # or strip
     float_rescue         = true
+    stack                = hybrid                 # fit, scroll, hybrid
+    stack_height         = 0.5
+    stack_min_height     = 0.33
     workspace_scroll     = true                   # vertical workspace camera
     workspace_scroll_duration = 220ms
 }
@@ -70,6 +73,7 @@ scroll {
 - **`always_center_single`:** a workspace with just one column keeps it centered.
 - **`preset_widths`:** the widths `switch-preset-width` steps through.
 - **`orientation`:** horizontal or vertical strips. For a free 2D layout, use Ocean.
+- **`stack`:** horizontal Scroll can keep a column's windows readable and let the column overflow: `hybrid` divides the height until `stack_min_height`, then scrolls; `scroll` uses `stack_height` per window; `fit` always divides. The stack camera is per column and remembers its position; `focus-up`/`down` reveals a window, `scroll-up`/`down` pans half a viewport, and `Super+wheel` up/down pans continuously. Workspace scrolling is a separate vertical axis and is not involved.
 - **`workspace_scroll`:** `workspace-down`/`workspace-up` slide vertically between workspaces (the previous one stays live underneath) while the columns keep scrolling horizontally. `workspace_scroll = false` makes those actions switch instantly; `workspace_scroll_duration` sets the slide length. Only `workspaces = separate`; scratchpads and Ocean do not participate. No keybinds are added automatically.
 - **`workspaces`:** `separate` gives each workspace its own strip and scroll position. `sections` lays a monitor's workspaces end to end in one strip, and switching workspace jumps to its section. In both modes, scratchpads stay separate, and floating windows float above the strip or stay on it (see `float_anchor`).
 - **`gesture_distance`:** how far a touchpad swipe travels per screen. The swipe uses your workspace-swipe finger count.

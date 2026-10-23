@@ -7531,6 +7531,24 @@ fn apply_scroll_block(cfg: &mut crate::scroll::ScrollConfig, body: &[waves::Entr
                 _ => tracing::warn!(value, "Expected scroll.float_anchor screen or strip"),
             },
             "float_rescue" => set_bool(&mut cfg.float_rescue, "scroll.float_rescue", value),
+            "stack" => match value.as_str() {
+                "fit" => cfg.stack = crate::scroll::StackMode::Fit,
+                "scroll" => cfg.stack = crate::scroll::StackMode::Scroll,
+                "hybrid" => cfg.stack = crate::scroll::StackMode::Hybrid,
+                _ => tracing::warn!(value, "Expected scroll.stack fit, scroll or hybrid"),
+            },
+            "stack_height" => match value.parse::<f64>() {
+                Ok(height) if height.is_finite() && (0.1..=1.0).contains(&height) => {
+                    cfg.stack_height = height
+                }
+                _ => tracing::warn!(value, "Expected scroll.stack_height from 0.1 to 1.0"),
+            },
+            "stack_min_height" => match value.parse::<f64>() {
+                Ok(height) if height.is_finite() && (0.1..=1.0).contains(&height) => {
+                    cfg.stack_min_height = height
+                }
+                _ => tracing::warn!(value, "Expected scroll.stack_min_height from 0.1 to 1.0"),
+            },
             "workspace_scroll" => {
                 set_bool(&mut cfg.workspace_scroll, "scroll.workspace_scroll", value)
             }
@@ -10221,6 +10239,29 @@ mod tests {
             220
         );
         assert!(crate::scroll::ScrollConfig::default().workspace_scroll);
+        assert_eq!(
+            crate::scroll::ScrollConfig::default().stack,
+            crate::scroll::StackMode::Hybrid
+        );
+        assert_eq!(crate::scroll::ScrollConfig::default().stack_height, 0.5);
+        assert_eq!(
+            crate::scroll::ScrollConfig::default().stack_min_height,
+            0.33
+        );
+    }
+
+    #[test]
+    fn scroll_stack_modes_and_heights_parse() {
+        let mut cfg = crate::scroll::ScrollConfig::default();
+        apply_scroll_block(
+            &mut cfg,
+            &wave_entries("stack = scroll\nstack_height = 0.6\nstack_min_height = 0.4"),
+        );
+        assert_eq!(cfg.stack, crate::scroll::StackMode::Scroll);
+        assert_eq!(cfg.stack_height, 0.6);
+        assert_eq!(cfg.stack_min_height, 0.4);
+        apply_scroll_block(&mut cfg, &wave_entries("stack = fit"));
+        assert_eq!(cfg.stack, crate::scroll::StackMode::Fit);
     }
 
     #[test]

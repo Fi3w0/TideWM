@@ -121,6 +121,15 @@ fn suppress_consumed_pointer_release(
     }
 }
 
+/// Pixel travel for one Mod+wheel stack step. A discrete mouse notch moves
+/// a quarter of the visible column; touchpad deltas are continuous and use a
+/// small pixel gain so they feel like the same camera.
+fn stack_wheel_delta(amount: f64, discrete: Option<f64>, viewport: f64) -> f64 {
+    discrete
+        .map(|v120| v120 / 120.0 * viewport * 0.25)
+        .unwrap_or(amount * 3.0)
+}
+
 fn modifier_move_completed(cancelled: bool, unlocked: bool) -> bool {
     !cancelled && unlocked
 }
@@ -2312,6 +2321,48 @@ impl Smallvil {
                     }
                 }
 
+                // Scroll's optional stack camera: Mod+wheel up/down pans the
+                // focused column vertically. Horizontal Mod+wheel is left to
+                // the client for now; without Mod the event passes through.
+                if self.config.spatial_engine == crate::config::SpatialEngine::Scroll
+                    && self.config.scroll.stack != crate::scroll::StackMode::Fit
+                    && self
+                        .config
+                        .pointer_modifier
+                        .is_held_by(self.held_modifiers())
+                    && vertical_amount != 0.0
+                {
+                    let surface = self
+                        .seat
+                        .get_pointer()
+                        .and_then(|pointer| pointer.current_focus())
+                        .or_else(|| self.focused_window_surface());
+                    if let Some(surface) = surface {
+                        let surface = self.surface_root(&surface).unwrap_or(surface);
+                        if self.layout.contains(&surface) {
+                            let owner = self.layout.output_of(&surface).map(str::to_owned);
+                            if let Some(owner) = owner {
+                                if let Some(output) = self.output_by_name(&owner) {
+                                    if let Some(area) = self.output_tiling_area(&output) {
+                                        let gap = self
+                                            .gaps_for(&owner, self.layout.active_workspace(&owner));
+                                        let viewport = f64::from(area.size.h - 2 * gap).max(1.0);
+                                        let delta = stack_wheel_delta(
+                                            vertical_amount,
+                                            vertical_amount_discrete,
+                                            viewport,
+                                        );
+                                        self.scroll_stack_wheel(&surface, delta);
+                                    }
+                                }
+                            }
+                            // Mod+wheel belongs to the compositor even when
+                            // the column fits; never leak it to the client.
+                            return;
+                        }
+                    }
+                }
+
                 // niri's `scroll-factor`: multiplies the continuous scroll
                 // delta for whatever window currently has pointer focus.
                 // Discrete wheel-click (v120) counts are left alone --
@@ -3535,6 +3586,13 @@ mod tests {
             floating_resize_edge(rect(), Point::from((299.0, 299.0)), 4.0),
             Some(ResizeEdge::BOTTOM_RIGHT)
         );
+    }
+
+    #[test]
+    fn stack_wheel_maps_mouse_notches_and_touchpad_pixels() {
+        assert!((stack_wheel_delta(0.0, Some(120.0), 800.0) - 200.0).abs() < 1e-6);
+        assert!((stack_wheel_delta(0.0, Some(-120.0), 800.0) + 200.0).abs() < 1e-6);
+        assert!((stack_wheel_delta(10.0, None, 800.0) - 30.0).abs() < 1e-6);
     }
 
     #[test]

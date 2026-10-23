@@ -13476,6 +13476,38 @@ impl Smallvil {
         {
             return;
         }
+        // Horizontal Scroll with a stack camera: Up/Down pans the focused
+        // column vertically instead of doing nothing. Left/Right keep the
+        // ordinary horizontal half-viewport pan below.
+        if self.config.scroll.orientation == crate::scroll::Orientation::Horizontal
+            && self.config.scroll.stack != crate::scroll::StackMode::Fit
+            && matches!(direction, Direction::Up | Direction::Down)
+        {
+            let Some(focused) = self.focused_window_surface() else {
+                return;
+            };
+            let Some(owner) = self.layout.output_of(&focused).map(str::to_owned) else {
+                return;
+            };
+            let Some(output) = self.output_by_name(&owner) else {
+                return;
+            };
+            let Some(area) = self.output_tiling_area(&output) else {
+                return;
+            };
+            let gap = self.gaps_for(&owner, self.layout.active_workspace(&owner));
+            let viewport = f64::from(area.size.h - 2 * gap).max(1.0);
+            let delta = if direction == Direction::Down {
+                viewport * 0.5
+            } else {
+                -viewport * 0.5
+            };
+            if self.layout.scroll_stack_pan(&focused, area, gap, delta) {
+                self.retile();
+                self.request_redraw();
+            }
+            return;
+        }
         let delta = match (self.config.scroll.orientation, direction) {
             (crate::scroll::Orientation::Horizontal, Direction::Left)
             | (crate::scroll::Orientation::Vertical, Direction::Up) => -0.5,
@@ -13495,6 +13527,28 @@ impl Smallvil {
             .scroll_pan(&output.name(), workspace, area, gap, delta);
         self.retile_filtered(false, None, Some(&output.name()));
         self.request_output_redraw(&output);
+    }
+
+    /// Pans the vertical stack camera of the column containing `surface`.
+    /// Returns whether the offset changed.
+    pub(crate) fn scroll_stack_wheel(&mut self, surface: &WlSurface, delta: f64) -> bool {
+        let Some(owner) = self.layout.output_of(surface).map(str::to_owned) else {
+            return false;
+        };
+        let Some(output) = self.output_by_name(&owner) else {
+            return false;
+        };
+        let Some(area) = self.output_tiling_area(&output) else {
+            return false;
+        };
+        let workspace = self.layout.active_workspace(&owner);
+        let gap = self.gaps_for(&owner, workspace);
+        if self.layout.scroll_stack_pan(surface, area, gap, delta) {
+            self.retile_filtered(false, None, Some(&owner));
+            self.request_output_redraw(&output);
+            return true;
+        }
+        false
     }
 
     pub(crate) fn update_scroll_gesture(
@@ -14404,11 +14458,10 @@ impl Smallvil {
                 let Some(workspace) = self.layout.workspace_of(&surface) else {
                     return;
                 };
-                if self.layout.scroll_columns(&owner, workspace)[column]
+                let rows = self.layout.scroll_columns(&owner, workspace)[column]
                     .windows
-                    .len()
-                    < 2
-                {
+                    .len();
+                if rows < 2 && self.config.scroll.stack == crate::scroll::StackMode::Fit {
                     return;
                 }
                 let cross = match self.config.scroll.orientation {
@@ -14426,6 +14479,7 @@ impl Smallvil {
                     / f64::from(cross);
                 self.layout.scroll.set_weight(&surface, weight);
                 self.retile();
+                self.reveal_scroll_window(&surface);
                 self.request_redraw();
                 return;
             }

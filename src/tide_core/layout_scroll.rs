@@ -11,6 +11,9 @@ struct ScrollSlot {
     extent: f64,
     row: usize,
     weights: Vec<f64>,
+    /// First surface of the column (the head), used to key its vertical
+    /// stack camera. `None` for an empty workspace section.
+    head: Option<WlSurface>,
 }
 
 /// A column as an ordered list of its windows plus its width (the head's
@@ -338,10 +341,117 @@ impl Layouts {
                 self.scroll.set_stacked(&next, false);
                 if self.scroll.has_proportion(surface) {
                     let width = self.scroll.proportion(surface);
-                    self.scroll.resize(next, width);
+                    self.scroll.resize(next.clone(), width);
                 }
+                self.scroll.transfer_stack_offset(surface, &next);
+            } else {
+                self.scroll.clear_stack_offset(surface);
             }
         }
+    }
+
+    /// Heights, viewport and overflow bound for `surface`'s column, plus the
+    /// column head and row. `None` outside an overflowing horizontal column.
+    fn scroll_stack_metrics(
+        &self,
+        surface: &WlSurface,
+        area: Rectangle<i32, Logical>,
+        gap: i32,
+    ) -> Option<(WlSurface, usize, Vec<f64>, f64, f64, i32)> {
+        let cfg = self.scroll.config?;
+        if cfg.orientation != crate::scroll::Orientation::Horizontal
+            || cfg.stack == crate::scroll::StackMode::Fit
+        {
+            return None;
+        }
+        let (output, workspace) = self.key_of(surface)?;
+        let active = self.active_workspace(&output);
+        let workspace = if self.scroll_key(workspace) == 0 {
+            active
+        } else {
+            workspace
+        };
+        let columns = self.scroll_columns(&output, workspace);
+        let (column, row) = self.scroll_position(surface)?;
+        let column = columns.get(column)?;
+        let head = column.windows.first()?.clone();
+        let gap = gap
+            .max(0)
+            .min(area.size.w.min(area.size.h).saturating_sub(1) / 2);
+        let n = column.windows.len().max(1);
+        let available =
+            (f64::from(area.size.h - 2 * gap) - f64::from(gap) * (n - 1) as f64).max(1.0);
+        let weights: Vec<f64> = column
+            .windows
+            .iter()
+            .map(|s| self.scroll.weight(s))
+            .collect();
+        let heights = crate::scroll::column_row_heights(
+            available,
+            &weights,
+            cfg.stack,
+            cfg.stack_height,
+            cfg.stack_min_height,
+        );
+        let viewport = f64::from(area.size.h - 2 * gap).max(1.0);
+        let content = heights
+            .iter()
+            .map(|height| height.max(1.0) + f64::from(gap))
+            .sum::<f64>()
+            - f64::from(gap);
+        let maximum = (content - viewport).max(0.0);
+        Some((head, row, heights, viewport, maximum, gap))
+    }
+
+    /// Reveals `surface`'s row in its column's vertical stack camera.
+    pub(crate) fn scroll_reveal_stack(
+        &mut self,
+        surface: &WlSurface,
+        area: Rectangle<i32, Logical>,
+        gap: i32,
+    ) -> bool {
+        let Some((head, row, heights, viewport, maximum, gap)) =
+            self.scroll_stack_metrics(surface, area, gap)
+        else {
+            return false;
+        };
+        let previous = self.scroll.stack_offset(&head).clamp(0.0, maximum);
+        let top = heights
+            .iter()
+            .take(row)
+            .map(|height| height.max(1.0) + f64::from(gap))
+            .sum::<f64>();
+        let bottom = top + heights.get(row).copied().unwrap_or(1.0).max(1.0);
+        let mut offset = previous;
+        if top < offset {
+            offset = top;
+        }
+        if bottom > offset + viewport {
+            offset = bottom - viewport;
+        }
+        let offset = offset.clamp(0.0, maximum);
+        self.scroll.set_stack_offset(&head, offset);
+        (offset - previous).abs() > 0.5
+    }
+
+    /// Pans the vertical stack camera of `surface`'s column by `delta`
+    /// logical pixels (positive scrolls toward lower windows).
+    pub(crate) fn scroll_stack_pan(
+        &mut self,
+        surface: &WlSurface,
+        area: Rectangle<i32, Logical>,
+        gap: i32,
+        delta: f64,
+    ) -> bool {
+        let Some((head, _row, _heights, _viewport, maximum, _gap)) =
+            self.scroll_stack_metrics(surface, area, gap)
+        else {
+            return false;
+        };
+        let previous = self.scroll.stack_offset(&head).clamp(0.0, maximum);
+        let offset = (previous + delta).clamp(0.0, maximum);
+        self.scroll.set_stack_offset(&head, offset);
+        (offset - previous).abs() > 0.5
     }
 
     fn scroll_slots(
@@ -381,6 +491,7 @@ impl Layouts {
                     extent: viewport,
                     row: 0,
                     weights: vec![1.0],
+                    head: None,
                 });
                 start += viewport + f64::from(gap.max(0));
                 continue;
@@ -409,6 +520,7 @@ impl Layouts {
                         extent,
                         row,
                         weights: weights.clone(),
+                        head: surfaces.first().cloned().flatten(),
                     });
                 }
                 start += extent + f64::from(gap.max(0));
@@ -540,6 +652,7 @@ impl Layouts {
     ) -> Vec<(Window, Rectangle<i32, Logical>)> {
         let cfg = self.scroll.config.unwrap_or_default();
         let offset = self.scroll.offset(output, self.scroll_key(workspace));
+        let horizontal = cfg.orientation == crate::scroll::Orientation::Horizontal;
         self.scroll_slots(output, workspace, area, gap)
             .into_iter()
             .filter_map(|slot| {
@@ -549,6 +662,44 @@ impl Layouts {
                     .is_some_and(|s| self.scroll.fullscreen_extents.contains_key(&s));
                 let rect = if fullscreen {
                     scroll::tile_rect(area, slot.start, slot.extent, offset, gap, cfg.orientation)
+                } else if horizontal && cfg.stack != crate::scroll::StackMode::Fit {
+                    let gap = gap
+                        .max(0)
+                        .min(area.size.w.min(area.size.h).saturating_sub(1) / 2);
+                    let rows = slot.weights.len().max(1);
+                    let available = (f64::from(area.size.h - 2 * gap)
+                        - f64::from(gap) * (rows - 1) as f64)
+                        .max(1.0);
+                    let heights = scroll::column_row_heights(
+                        available,
+                        &slot.weights,
+                        cfg.stack,
+                        cfg.stack_height,
+                        cfg.stack_min_height,
+                    );
+                    let viewport = f64::from(area.size.h - 2 * gap).max(1.0);
+                    let content = heights
+                        .iter()
+                        .map(|height| height.max(1.0) + f64::from(gap))
+                        .sum::<f64>()
+                        - f64::from(gap);
+                    let maximum = (content - viewport).max(0.0);
+                    let y_offset = slot
+                        .head
+                        .as_ref()
+                        .map(|head| self.scroll.stack_offset(head))
+                        .unwrap_or(0.0)
+                        .min(maximum);
+                    scroll::column_tile_rect_stacked(
+                        area,
+                        slot.start,
+                        slot.extent,
+                        offset,
+                        gap,
+                        &heights,
+                        slot.row,
+                        y_offset,
+                    )
                 } else {
                     scroll::column_tile_rect(
                         area,
@@ -619,7 +770,9 @@ impl Layouts {
         let offset = scroll::reveal(previous, slot.start, slot.extent, viewport, center)
             .clamp(minimum, maximum);
         self.scroll.set_offset(&output, key, offset);
-        (previous - offset).abs() > f64::EPSILON
+        let x_changed = (previous - offset).abs() > f64::EPSILON;
+        let y_changed = self.scroll_reveal_stack(surface, area, gap);
+        x_changed || y_changed
     }
 
     /// The column width that fills the viewport space other fully visible

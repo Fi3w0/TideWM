@@ -2,6 +2,12 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.183 · 2026-10-23 — Scroll stacks that scroll
+
+- A Scroll column can now be taller than the screen. `scroll.stack = hybrid` (the default) divides the height while every window keeps at least `stack_min_height` (33%); below that the windows keep a readable height and the column scrolls. `stack = scroll` uses a fixed `stack_height` (50% by default); `stack = fit` keeps the old always-fits layout.
+- `focus-up`/`focus-down` (bound to `Super+↑/↓` in this setup) walk the column and reveal the window; `Super+wheel` up/down pans the stack under the pointer, mouse notch or continuous touchpad. Horizontal columns and the separate niri-style workspace slide are untouched.
+- `Super+Ctrl+↑/↓` resizes the focused window's height.
+
 ## 0.90.182 · 2026-10-23 — Vertical scroll stays on its monitor
 
 - `workspace-up` after stepping onto an empty workspace keeps using the monitor that received the step instead of falling back to the pointer's monitor. This was visible on two monitors: Down switched one screen, Up scrolled the other.
