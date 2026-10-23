@@ -17,7 +17,7 @@ use smithay::{
     },
     desktop::layer_map_for_output,
     input::{
-        keyboard::{keysyms, FilterResult, Keysym, Layout, ModifiersState},
+        keyboard::{keysyms, FilterResult, Keysym, KeysymHandle, Layout, ModifiersState},
         pointer::{
             AxisFrame, ButtonEvent, Focus, GestureHoldBeginEvent, GestureHoldEndEvent,
             GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
@@ -85,7 +85,13 @@ impl MappedInputDevice for WinitVirtualDevice {
 /// both `H` and `P+H`, holding P must pick the more specific chord regardless
 /// of the HashMap iteration order the config was lowered from. Additional held
 /// helpers therefore select the matching bind with the largest helper set.
-fn matching_keybind<'a>(
+///
+/// The active layout's keysym is tried first, then the layout-agnostic Latin
+/// fallback supplied by [`keybind_syms`]. Preferring the active layout keeps
+/// an explicit non-Latin bind working when that layout is selected, while the
+/// fallback lets ordinary Latin binds (`Super+V`) survive a switch to a
+/// Cyrillic layout, where the same physical key reports `Cyrillic_em`.
+fn matching_keybind_for_sym<'a>(
     table: &'a [Keybind],
     keysym: Keysym,
     modifiers: &ModifiersState,
@@ -101,6 +107,57 @@ fn matching_keybind<'a>(
                 && (ocean_selected || !crate::config::is_ocean_action(&bind.action))
         })
         .max_by_key(|bind| bind.held_keysyms.len())
+}
+
+fn matching_keybind<'a>(
+    table: &'a [Keybind],
+    active: Keysym,
+    latin: Option<Keysym>,
+    modifiers: &ModifiersState,
+    helpers: &HashSet<Keysym>,
+    ocean_selected: bool,
+) -> Option<&'a Keybind> {
+    matching_keybind_for_sym(table, active, modifiers, helpers, ocean_selected).or_else(|| {
+        latin.and_then(|latin| {
+            matching_keybind_for_sym(table, latin, modifiers, helpers, ocean_selected)
+        })
+    })
+}
+
+/// The keysyms a key press can match a bind against: the active layout's raw
+/// keysym plus, when different, the Latin keysym the same physical key
+/// produces in another configured layout. Smithay's
+/// `raw_latin_sym_or_raw_current_sym` is exactly this fallback: it returns the
+/// active keysym when that is already ASCII/non-printable, and otherwise finds
+/// the first ASCII keysym for the same keycode in the configured layouts.
+fn keybind_syms(handle: &KeysymHandle<'_>) -> Option<(Keysym, Option<Keysym>)> {
+    let active = *handle.raw_syms().first()?;
+    let latin = handle
+        .raw_latin_sym_or_raw_current_sym()
+        .filter(|latin| *latin != active);
+    Some((active, latin))
+}
+
+fn keybind_sym_matches(active: Keysym, latin: Option<Keysym>, expected: Keysym) -> bool {
+    active == expected || latin == Some(expected)
+}
+
+/// Every raw keysym this physical key produces across the configured layouts.
+/// Helper-key bookkeeping needs the whole set rather than just the active/Latin
+/// pair: if a helper is pressed in Cyrillic, then the layout is switched before
+/// its release, removing only the release event's current aliases would leave
+/// the original Cyrillic keysym stuck down in `helper_keys_down`.
+fn all_layout_syms(handle: &KeysymHandle<'_>) -> Vec<Keysym> {
+    let mut syms = handle.raw_syms();
+    let xkb = handle.xkb().lock().unwrap();
+    for layout in xkb.layouts() {
+        for &sym in xkb.raw_syms_for_key_in_layout(handle.raw_code(), layout) {
+            if !syms.contains(&sym) {
+                syms.push(sym);
+            }
+        }
+    }
+    syms
 }
 
 /// Applies the paired-release suppression used when compositor-owned UI
@@ -799,6 +856,9 @@ impl Smallvil {
             self.minimap_trigger_down = false;
             self.close_minimap_peek();
         }
+        // Helper-key presses have the same filter-closure-only bookkeeping,
+        // and the synthesized releases above bypass that closure as well.
+        self.helper_keys_down.clear();
     }
 
     pub(crate) fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>)
@@ -958,9 +1018,12 @@ impl Smallvil {
                         }
 
                         if key_state != KeyState::Pressed {
-                            let released = handle.raw_syms().first().cloned();
-                            if released.is_some_and(|keysym| data.helper_keys_down.remove(&keysym))
-                            {
+                            let released_syms = all_layout_syms(&handle);
+                            let mut released_helper = false;
+                            for keysym in &released_syms {
+                                released_helper |= data.helper_keys_down.remove(keysym);
+                            }
+                            if released_helper {
                                 return FilterResult::Intercept(());
                             }
 
@@ -977,7 +1040,7 @@ impl Smallvil {
                             // required modifier releasing while the
                             // trigger key stays down.
                             let trigger_released = data.minimap_trigger_down
-                                && released == Some(data.config.minimap.keysym);
+                                && released_syms.contains(&data.config.minimap.keysym);
                             if data.minimap_trigger_down {
                                 let held = Mods {
                                     ctrl: modifiers.ctrl,
@@ -1012,8 +1075,8 @@ impl Smallvil {
                             return FilterResult::Forward;
                         }
 
-                        let keysym = match handle.raw_syms().first().cloned() {
-                            Some(keysym) => keysym,
+                        let (keysym, latin_keysym) = match keybind_syms(&handle) {
+                            Some(keysyms) => keysyms,
                             None => return FilterResult::Forward,
                         };
 
@@ -1096,7 +1159,7 @@ impl Smallvil {
                         // keybind on the same combo for zero benefit
                         // (exactly what a Classic-engine config, the
                         // common case, would otherwise get).
-                        if data.config.minimap.keysym == keysym {
+                        if keybind_sym_matches(keysym, latin_keysym, data.config.minimap.keysym) {
                             let held = Mods {
                                 ctrl: modifiers.ctrl,
                                 alt: modifiers.alt,
@@ -1139,6 +1202,7 @@ impl Smallvil {
                         let action = matching_keybind(
                             table,
                             keysym,
+                            latin_keysym,
                             modifiers,
                             &data.helper_keys_down,
                             data.config.spatial_engine == crate::config::SpatialEngine::Ocean,
@@ -1151,11 +1215,22 @@ impl Smallvil {
                                 data.run_action(action);
                                 FilterResult::Intercept(())
                             }
-                            None if table.iter().any(|bind| bind.uses_helper_key(keysym)) => {
-                                data.helper_keys_down.insert(keysym);
-                                FilterResult::Intercept(())
+                            None => {
+                                // Helper keys are ordinary keys too, so a
+                                // press in Cyrillic must be recognized as
+                                // the same configured Latin helper (and
+                                // stored under every layout alias so the
+                                // release below can clear all of them).
+                                let helper_syms = all_layout_syms(&handle);
+                                if table.iter().any(|bind| {
+                                    helper_syms.iter().any(|sym| bind.uses_helper_key(*sym))
+                                }) {
+                                    data.helper_keys_down.extend(helper_syms);
+                                    FilterResult::Intercept(())
+                                } else {
+                                    FilterResult::Forward
+                                }
                             }
-                            None => FilterResult::Forward,
                         }
                     },
                 );
@@ -3528,23 +3603,89 @@ mod tests {
 
         let none = HashSet::new();
         assert!(matches!(
-            matching_keybind(&table, h, &ModifiersState::default(), &none, true,)
+            matching_keybind(&table, h, None, &ModifiersState::default(), &none, true,)
                 .map(|bind| &bind.action),
             Some(Action::ToggleFullscreen)
         ));
 
         let one = HashSet::from([p]);
         assert!(matches!(
-            matching_keybind(&table, h, &ModifiersState::default(), &one, true)
+            matching_keybind(&table, h, None, &ModifiersState::default(), &one, true)
                 .map(|bind| &bind.action),
             Some(Action::CloseWindow)
         ));
 
         let two = HashSet::from([p, r]);
         assert!(matches!(
-            matching_keybind(&table, h, &ModifiersState::default(), &two, true)
+            matching_keybind(&table, h, None, &ModifiersState::default(), &two, true)
                 .map(|bind| &bind.action),
             Some(Action::ToggleFloating)
+        ));
+    }
+
+    #[test]
+    fn latin_bind_matches_cyrillic_layout_alias() {
+        let v = xkb::keysym_from_name("v", xkb::KEYSYM_CASE_INSENSITIVE);
+        let cyrillic_em = xkb::keysym_from_name("Cyrillic_em", xkb::KEYSYM_CASE_INSENSITIVE);
+        let table = [Keybind {
+            mods: Default::default(),
+            held_keysyms: Vec::new(),
+            keysym: v,
+            action: Action::CloseWindow,
+        }];
+        let none = HashSet::new();
+
+        assert!(matching_keybind(
+            &table,
+            cyrillic_em,
+            Some(v),
+            &ModifiersState::default(),
+            &none,
+            true,
+        )
+        .is_some());
+        assert!(matching_keybind(
+            &table,
+            cyrillic_em,
+            None,
+            &ModifiersState::default(),
+            &none,
+            true,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn active_layout_bind_wins_over_latin_alias() {
+        let v = xkb::keysym_from_name("v", xkb::KEYSYM_CASE_INSENSITIVE);
+        let cyrillic_em = xkb::keysym_from_name("Cyrillic_em", xkb::KEYSYM_CASE_INSENSITIVE);
+        let table = [
+            Keybind {
+                mods: Default::default(),
+                held_keysyms: Vec::new(),
+                keysym: cyrillic_em,
+                action: Action::ToggleFullscreen,
+            },
+            Keybind {
+                mods: Default::default(),
+                held_keysyms: Vec::new(),
+                keysym: v,
+                action: Action::CloseWindow,
+            },
+        ];
+        let none = HashSet::new();
+
+        assert!(matches!(
+            matching_keybind(
+                &table,
+                cyrillic_em,
+                Some(v),
+                &ModifiersState::default(),
+                &none,
+                true,
+            )
+            .map(|bind| &bind.action),
+            Some(Action::ToggleFullscreen)
         ));
     }
 

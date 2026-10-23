@@ -1784,7 +1784,11 @@ while held and runs the action when H is pressed; `P+R+H` and combinations
 such as `P+Ctrl+H` work too. P has no reserved meaning—it is a normal key
 unless a bind uses it. A completely bare action such as
 `bind F { toggle-fullscreen }` is valid and intentionally captures F from
-clients. Key names match the unshifted keysym, case-insensitively.
+clients. Key names match the unshifted keysym, case-insensitively. Matching
+uses the active layout first, then the Latin keysym the same physical key
+produces in the other configured layouts, so `Super+V` still fires after
+switching to `ru` (where that key reports `Cyrillic_em`). A bind written for a
+non-Latin keysym wins while its layout is active.
 
 Variables are reusable chord pieces. The shipped default uses one,
 `@mod = SUPER`, for everything; nothing stops splitting binds across

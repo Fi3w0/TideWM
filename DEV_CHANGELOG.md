@@ -2,6 +2,13 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.186 — Layout-agnostic keybinds
+
+- Keybind matching used `handle.raw_syms().first()`, which is the active layout's keysym. With `xkb_layout = us,ru,es`, pressing the physical V key under `ru` produced `Cyrillic_em`, so every Latin letter bind (`Super+V`, helper chords, minimap trigger) silently stopped matching.
+- `keybind_syms()` returns the active raw keysym plus `handle.raw_latin_sym_or_raw_current_sym()` when it differs. `matching_keybind()` tries the active keysym first, then the Latin fallback, so a bind explicitly written for a non-Latin keysym still wins in its layout.
+- `all_layout_syms()` collects the key's raw keysyms across `Xkb::layouts()`. Helper-key presses are stored under every alias and releases remove all of them, including after a layout switch; minimap trigger release uses the same set. `release_stuck_keys()` now clears `helper_keys_down` too, since its synthesized releases bypass the filter closure.
+- 679 tests (655 + 15 + 9), strict Clippy, fmt and the release build pass. Two new unit tests cover the Latin fallback and active-layout precedence; a live `us,ru` switch check is still needed after relog.
+
 ## 0.90.185 — Mouse height resize for a single Scroll window
 
 - `scroll_resize_start` only set `ScrollResizeStart.row` when the column had two or more windows, so the grab's `across`/`delta.y` branch was skipped for a lone tile and only the column width moved. The new `scroll::row_resize_enabled(rows, stack)` is shared by the mouse grab and `keyboard_resize`: a shared column always resizes rows, a single-window column only with `stack = scroll`/`hybrid` (with `fit` it already fills the column).
