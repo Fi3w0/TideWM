@@ -2,6 +2,13 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.191 — Respect client minimum sizes in Classic tiling
+
+- The persistent tile-size refusal guard floated any window whose committed size differed from the promised slot for three commits over 500 ms. A normal client with an XDG minimum larger than its BSP slot (Spotify: minimum width 800 vs proposed 761; Firefox: 638 vs 244) therefore fell out of tiling after a resize. This was not the `.190` Ocean pointer work.
+- `note_tiled_size_refusal` now reads `SurfaceCachedState.min_size` and recognizes an axis where the committed size sits at that minimum while the promised slot is smaller. It clears the refusal/flutter records, grows the nearest BSP split by the missing pixels (`Layouts::resize_target_by`), and retiles. If no BSP split can grow (master/cascade, lone window, or an output smaller than the minimum), the window stays tiled at its minimum instead of floating.
+- The old fallback is preserved for genuinely tile-averse clients with no matching minimum, such as an mpv video locked to a different aspect. Pure coverage covers the min-vs-refusal classification; nested Classic validation used two real GTK toplevels, one with an 800×600 size request: after mapping and 2 s it remained tiled at 800×704, and 15 keyboard resize steps kept it tiled rather than floating.
+- 700 tests (675 + 16 + 9), strict Clippy/fmt and release build pass. Native Spotify/Firefox resize on HDMI remains the user's post-install gate.
+
 ## 0.90.190 — Ocean camera-scaled pointer coordinates
 
 - Ocean's camera zoom is a compositor-side render scale: `RescaleRenderElement` grows the client surface around its geometry origin, while `PointerHandle::motion` still delivered `event.location - surface_origin` in compositor logical units. At zoom 2 a click halfway across a window arrived at the far edge, and at any non-1 zoom hover/click targets drifted in every client. Scroll and zoom 1 were unaffected, which made it look like a Scroll/Firefox-specific regression.

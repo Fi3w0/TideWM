@@ -2686,7 +2686,7 @@ dependencies = [
 
 [[package]]
 name = "tidewm"
-version = "0.90.190"
+version = "0.90.191"
 dependencies = [
  "accesskit",
  "accesskit_unix",

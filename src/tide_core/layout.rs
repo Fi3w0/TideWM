@@ -303,10 +303,11 @@ impl BspLayout {
         } else {
             -1.0
         };
-        self.set_ratio(
-            &hit.path,
-            current + delta_pixels as f32 * sign / span as f32,
-        );
+        let next = (current + delta_pixels as f32 * sign / span as f32).clamp(0.05, 0.95);
+        if (next - current).abs() <= f32::EPSILON {
+            return false;
+        }
+        self.set_ratio(&hit.path, next);
         true
     }
 }
@@ -1102,6 +1103,34 @@ impl Layouts {
         self.trees
             .get(&(output.to_string(), workspace))?
             .ratio_at(path)
+    }
+
+    /// Grows the nearest BSP split around `surface` by `delta_pixels` on
+    /// `axis`. Used when a client's XDG minimum size is larger than the slot
+    /// the layout produced: a real layout constraint should resize the tree,
+    /// not eject the window into floating. Master/cascade/Scroll return false.
+    pub(crate) fn resize_target_by(
+        &mut self,
+        output: &str,
+        workspace: u32,
+        area: Rectangle<i32, Logical>,
+        surface: &WlSurface,
+        axis: Axis,
+        delta_pixels: f64,
+    ) -> bool {
+        if self.scroll.config.is_some() || self.algorithm(output, workspace) != LayoutAlgorithm::Bsp
+        {
+            return false;
+        }
+        let bias = self.split_bias;
+        let Some(layout) = self.trees.get_mut(&(output.to_string(), workspace)) else {
+            return false;
+        };
+        let changed = layout.resize_target_by(surface, area, bias, axis, delta_pixels);
+        if changed {
+            self.bump_topology_revision();
+        }
+        changed
     }
 
     pub fn set_ratio(&mut self, output: &str, workspace: u32, path: &[Side], ratio: f32) {

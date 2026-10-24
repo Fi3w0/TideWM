@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.191 · 2026-10-24 — Client minimum sizes stay tiled
+
+- Classic no longer ejects a tiled window into floating when its XDG minimum size is larger than the slot the layout proposed. The BSP split surrounding the window grows to fit, and the window stays tiled. The old floating fallback remains only for clients that refuse a tile size without a minimum-size reason (for example a video player locked to its own aspect).
+
 ## 0.90.190 · 2026-10-24 — Ocean zoom keeps clicks under the pointer
 
 - Ocean camera zoom scales windows visually, but pointer delivery still used the unscaled compositor coordinate. At any zoom other than 1, clicks and hover landed away from the cursor in every client; returning to zoom 1 or switching back to Scroll made it disappear. Pointer events now apply the inverse camera scale, and Ocean re-resolves the pointer target after zoom/pan and when an empty-canvas drag ends. Restored the GTK/Firefox geometry-offset mapping under camera scaling as well.
