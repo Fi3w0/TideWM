@@ -73,6 +73,12 @@ smithay::backend::renderer::element::render_elements! {
     Glass = RelocateRenderElement<OutputRenderElements>,
 }
 
+/// Capture elements use logical geometry at the source output's scale; the
+/// framebuffer dimensions are already physical pixels.
+fn toplevel_capture_tracker(size: Size<i32, BufferCoords>, scale: f64) -> OutputDamageTracker {
+    OutputDamageTracker::new((size.w, size.h), scale, Transform::Normal)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CaptureQueueLimit {
     Client,
@@ -575,8 +581,7 @@ impl Smallvil {
                     );
                 }
             }
-            let mut damage_tracker =
-                OutputDamageTracker::new((size.w, size.h), 1.0, Transform::Normal);
+            let mut damage_tracker = toplevel_capture_tracker(size, scale);
             if let Err(err) = damage_tracker.render_output(
                 renderer,
                 &mut target,
@@ -748,7 +753,7 @@ impl Smallvil {
             // Layer frost and layer shaders, as both visible backends add them.
             glass_layers.extend(self.layer_glass_elements(renderer, &output));
             self.drop_glass_over_blocked_layers(&output, &mut glass_layers);
-            let (depth_elements, depth_surfaces) =
+            let (mut depth_elements, depth_surfaces) =
                 self.depth_frame_elements(renderer, &output, &placements);
             // Glass windows render in their normal z-slot; only
             // depth-replaced windows are skipped.
@@ -769,6 +774,7 @@ impl Smallvil {
                 &output,
                 &placements,
                 &skip,
+                &mut depth_elements,
                 &mut glass_layers,
                 backdrop,
             ) {
@@ -779,7 +785,6 @@ impl Smallvil {
                     elements.extend(workspace_transition);
                     elements.extend(workspace_glide);
                     elements.extend(closing_windows);
-                    elements.extend(depth_elements);
                     elements.extend(space_elements);
                     if let Some(wallpaper) = self.wallpaper_element(&output, renderer) {
                         elements.push(OutputRenderElements::Wallpaper(wallpaper));
@@ -1320,6 +1325,59 @@ mod tests {
             None,
         );
         output
+    }
+
+    #[test]
+    fn toplevel_capture_fills_the_physical_canvas_at_each_source_scale() {
+        use smithay::backend::{
+            allocator::Fourcc,
+            renderer::element::memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
+        };
+        let Some(mut renderer) = crate::shader_effect::software_renderer() else {
+            eprintln!("SKIP: software EGL unavailable");
+            return;
+        };
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let size =
+                Size::<i32, BufferCoords>::from(((80.0 * scale) as i32, (60.0 * scale) as i32));
+            // Like a client surface, memory elements derive physical bounds
+            // from the scale supplied by the damage tracker at draw time.
+            let buffer = MemoryRenderBuffer::from_slice(
+                &[255, 0, 255, 255].repeat(80 * 60),
+                Fourcc::Abgr8888,
+                (80, 60),
+                1,
+                Transform::Normal,
+                None,
+            );
+            let element = MemoryRenderBufferRenderElement::from_buffer(
+                &mut renderer,
+                (0.0, 0.0),
+                &buffer,
+                None,
+                None,
+                None,
+                Kind::Unspecified,
+            )
+            .unwrap();
+            let mut texture: GlesTexture = renderer.create_buffer(Fourcc::Abgr8888, size).unwrap();
+            let mut target = renderer.bind(&mut texture).unwrap();
+            toplevel_capture_tracker(size, scale)
+                .render_output(&mut renderer, &mut target, 0, &[element], [0.0; 4])
+                .unwrap();
+            let mapping = renderer
+                .copy_framebuffer(&target, Rectangle::from_size(size), Fourcc::Abgr8888)
+                .unwrap();
+            drop(target);
+            let pixels = renderer.map_texture(&mapping).unwrap();
+            for pixel in pixels.chunks_exact(4) {
+                assert_eq!(
+                    pixel,
+                    [255, 0, 255, 255],
+                    "unfilled capture at source scale {scale}"
+                );
+            }
+        }
     }
 
     #[test]

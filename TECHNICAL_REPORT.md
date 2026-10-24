@@ -6,7 +6,7 @@ The quick technical picture: what TideWM is built from, what works, what's been 
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). Underneath is a complete tiling window manager: BSP, master/stack and cascade layouts, workspaces, multi-monitor, layer shell, IPC and XWayland. On top sits the water look (ripples, waves, glass, shadows, physics), and every piece of it is a config toggle.
 
-Current version: **0.90.168**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
+Current version: **0.90.187**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
 
 ## Architecture
 
@@ -21,6 +21,7 @@ Current version: **0.90.168**, beta. 1.0 waits for a wider real-hardware pass (I
 - **One render pipeline.** Glass, shadows, rounding, borders and animations are drawn once per frame from a shared window-placement snapshot. The same path feeds both backends, screenshots, screen sharing and workspace transitions, so an effect never needs a second implementation.
 - **Config:** [Wave](WAVE.md), data on the surface and Lua underneath. It's hot-reloaded, and a broken edit never half-applies.
 - **Memory:** about 50 MB PSS for plain tiling and 60–70 MB with the full water stack on AMD. About 100 MB on NVIDIA, a third of which is the driver's own mappings. 2 GB is a hard ceiling for feature growth, not a target.
+- **Attention-depth artwork:** shared PNG/JPEG/static WebP or looping GIF in place of deep windows' live pixels. One source/current frame, per-context GPU imports, optional title strips and one GIF clock; decoding stays off the compositor thread. Config and typed live IPC share the same settings. Hidden-workspace/locked/powered-off views pause animation. This does not suspend clients or their callbacks; GPU/CPU/RAM savings depend on the workload. See [`depth { }`](DOCUMENTATION.md#depth--).
 
 ## Scroll engine
 
@@ -137,13 +138,13 @@ For tools: each `tidectl outputs` entry has a `scroll` object (`offset`, `orient
 
 | Area | Status |
 | --- | --- |
-| Tiling: BSP, master/stack, cascade, floating layout, snapping | Done |
+| Tiling: BSP, master/stack, cascade, floating layout, snapping | Done; first-map floats center within usable output bounds, dialogs follow parent output; `output = focused` resolves retained focus independently of the pointer. |
 | Workspaces, scratchpads, pinning, window groups (tabs), fullscreen, maximize | Done |
 | Classic, Ocean and Scroll engines, live switching | Done |
 | Multi-monitor, hotplug, mixed scale, dragging tiles between monitors | Done |
 | Layer shell (bars, launchers, wallpapers, lock screens) | Done |
 | XWayland | Done, via xwayland-satellite |
-| Screenshots, per-window capture, clipboard, session lock | Done |
+| Screenshots, per-window capture, clipboard, session lock | Done; per-window capture canvas and rendering use the same source-output scale, preserving client subsurfaces/popups. |
 | Screen sharing (OBS, Discord) through TideWM's own portal | Done with `--features screencast` |
 | IPC and `tidectl`: windows with geometry and Scroll position, outputs, layers, an event stream for windows, workspaces, focus, monitors, modes, engine and Scroll, plus `doctor`, `report`, `perf` | Done |
 | Water stack: ripples, wave transitions, water/frost glass, shadows, gradient borders, viscosity, sway, buoyancy, caustics, currents | Done |

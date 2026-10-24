@@ -72,6 +72,11 @@ impl PointerGrab<Smallvil> for OceanPanGrab {
         handle.button(data, event);
         if !handle.current_pressed().contains(&self.start_data.button) {
             handle.unset_grab(self, data, event.serial, event.time, true);
+            // Canvas panning clears pointer focus while the grab is active.
+            // Re-resolve it at the release location after the grab releases
+            // the pointer handle, so the window under the cursor gets its
+            // hover/cursor state back without requiring another motion.
+            data.queue_pointer_focus_refresh();
         }
     }
 
@@ -164,7 +169,9 @@ impl PointerGrab<Smallvil> for OceanPanGrab {
         &self.start_data
     }
 
-    fn unset(&mut self, _data: &mut Smallvil) {}
+    fn unset(&mut self, data: &mut Smallvil) {
+        data.queue_pointer_focus_refresh();
+    }
 }
 
 fn camera_delta_for_drag(screen_delta: Point<f64, Logical>, zoom: f64) -> Point<f64, Logical> {

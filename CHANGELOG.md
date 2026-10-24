@@ -2,6 +2,33 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.192 · 2026-10-24 — Minimum-size tiles wrap instead of leaving the screen
+
+- Classic BSP now uses each tile's XDG minimum size when choosing split directions. If a horizontal row would push a minimum-width window off the output, the affected subtree splits vertically instead; when neither direction fits, the old overflow behavior remains.
+- This keeps the three-window Spotify/Firefox/Discord case on-screen without floating any of them. Explicit `split_bias` overrides still win.
+
+## 0.90.191 · 2026-10-24 — Client minimum sizes stay tiled
+
+- Classic no longer ejects a tiled window into floating when its XDG minimum size is larger than the slot the layout proposed. The BSP split surrounding the window grows to fit, and the window stays tiled. The old floating fallback remains only for clients that refuse a tile size without a minimum-size reason (for example a video player locked to its own aspect).
+
+## 0.90.190 · 2026-10-24 — Ocean zoom keeps clicks under the pointer
+
+- Ocean camera zoom scales windows visually, but pointer delivery still used the unscaled compositor coordinate. At any zoom other than 1, clicks and hover landed away from the cursor in every client; returning to zoom 1 or switching back to Scroll made it disappear. Pointer events now apply the inverse camera scale, and Ocean re-resolves the pointer target after zoom/pan and when an empty-canvas drag ends. Restored the GTK/Firefox geometry-offset mapping under camera scaling as well.
+
+## 0.90.189 · 2026-10-24 — Window previews fill their capture
+
+- Per-window previews at scaled outputs now render at the same scale as their capture canvas. Previously the client appeared smaller inside a larger image, leaving transparent/black fields or exposed glass backdrop in Alt+Tab and other window-capture consumers. This affected both tiled and floating windows; client popups and decorations remain included.
+
+## 0.90.188 · 2026-10-24 — Floating windows open on screen
+
+- New floating windows open centered in their chosen monitor's usable area instead of inheriting an off-screen Scroll tile. Explicit positions and sizes remain exact where they fit; oversized windows shrink as far as their minimum size allows. Dialogs follow their parent unless a rule chooses another output.
+- `rule { output = focused }` (aliases `camera` and `current`) opens on the focused window/camera's monitor rather than whichever monitor holds the pointer. Persistent output pins still use connector names. Interactive floating toggles keep visible geometry.
+
+## 0.90.187 · 2026-10-24 — Shared backgrounds for inactive windows
+
+- Automatic depth can show a chosen image or looping GIF instead of its deep-window card. Windows share the source and animation; GPU imports are cached per renderer context. Optional titles use small strips, with cover/contain fitting and urgent borders retained.
+- `tidectl depth` reads settings/resource state; `tidectl depth set` changes artwork, fitting, titles, enablement and timings live. The same settings live in `depth { }` for persistence. Failed files fall back to cards, hidden views pause GIF, and depth replacements respect window stacking. This does not suspend applications; resource savings depend on the workload.
+
 ## 0.90.186 · 2026-10-24 — Keybinds survive a layout switch
 
 - Keybinds now match the active layout first, then the Latin keysym the same physical key produces in your other configured layouts. `Super+V` keeps working while `ru` is active even though XKB reports `Cyrillic_em` for that key; shifted variants, helper chords and the minimap trigger get the same treatment.

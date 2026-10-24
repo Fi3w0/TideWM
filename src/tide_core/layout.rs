@@ -21,6 +21,7 @@ use smithay::{
     desktop::Window,
     reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::{Logical, Point, Rectangle},
+    wayland::{compositor::with_states, shell::xdg::SurfaceCachedState},
 };
 
 use crate::config::{LayoutAlgorithm, MasterOrientation, SplitBias};
@@ -199,7 +200,7 @@ impl BspLayout {
     ) -> Vec<(Window, Rectangle<i32, Logical>)> {
         let mut out = Vec::new();
         if let Some(root) = &self.root {
-            collect(root, area, bias, &mut out);
+            collect(root, area, bias, gap, &mut out);
         }
         for (_, rect) in &mut out {
             *rect = inset(*rect, gap);
@@ -303,10 +304,11 @@ impl BspLayout {
         } else {
             -1.0
         };
-        self.set_ratio(
-            &hit.path,
-            current + delta_pixels as f32 * sign / span as f32,
-        );
+        let next = (current + delta_pixels as f32 * sign / span as f32).clamp(0.05, 0.95);
+        if (next - current).abs() <= f32::EPSILON {
+            return false;
+        }
+        self.set_ratio(&hit.path, next);
         true
     }
 }
@@ -1104,6 +1106,34 @@ impl Layouts {
             .ratio_at(path)
     }
 
+    /// Grows the nearest BSP split around `surface` by `delta_pixels` on
+    /// `axis`. Used when a client's XDG minimum size is larger than the slot
+    /// the layout produced: a real layout constraint should resize the tree,
+    /// not eject the window into floating. Master/cascade/Scroll return false.
+    pub(crate) fn resize_target_by(
+        &mut self,
+        output: &str,
+        workspace: u32,
+        area: Rectangle<i32, Logical>,
+        surface: &WlSurface,
+        axis: Axis,
+        delta_pixels: f64,
+    ) -> bool {
+        if self.scroll.config.is_some() || self.algorithm(output, workspace) != LayoutAlgorithm::Bsp
+        {
+            return false;
+        }
+        let bias = self.split_bias;
+        let Some(layout) = self.trees.get_mut(&(output.to_string(), workspace)) else {
+            return false;
+        };
+        let changed = layout.resize_target_by(surface, area, bias, axis, delta_pixels);
+        if changed {
+            self.bump_topology_revision();
+        }
+        changed
+    }
+
     pub fn set_ratio(&mut self, output: &str, workspace: u32, path: &[Side], ratio: f32) {
         if let Some(layout) = self.trees.get_mut(&(output.to_string(), workspace)) {
             layout.set_ratio(path, ratio);
@@ -1472,14 +1502,14 @@ fn collect_split_path(
         else {
             return;
         };
+        let (axis, first_area, second_area) = split_node(node, area, *ratio, bias, 0);
         out.push(PathSplit {
             path: path.clone(),
-            axis: split_axis(area, bias),
+            axis,
             area,
             ratio: *ratio,
         });
         let Some(side) = next_side else { return };
-        let (first_area, second_area) = split(area, *ratio, bias);
         path.push(side);
         match side {
             Side::First => {
@@ -1533,8 +1563,7 @@ fn collect_resize_splits(
         else {
             return;
         };
-        let (first_area, second_area) = split(area, *ratio, bias);
-        let axis = split_axis(area, bias);
+        let (axis, first_area, second_area) = split_node(node, area, *ratio, bias, 0);
         let hit = SplitHit {
             output: String::new(),
             workspace: 0,
@@ -1582,8 +1611,7 @@ fn hit_test(
             return None;
         };
 
-        let (first_area, second_area) = split(area, *ratio, bias);
-        let axis = split_axis(area, bias);
+        let (axis, first_area, second_area) = split_node(node, area, *ratio, bias, gap);
         let threshold = (gap as f64).max(4.0);
         let on_border = match axis {
             Axis::Horizontal => {
@@ -1648,6 +1676,7 @@ fn collect(
     node: &Node,
     area: Rectangle<i32, Logical>,
     bias: SplitBias,
+    gap: i32,
     out: &mut Vec<(Window, Rectangle<i32, Logical>)>,
 ) {
     let mut pending = vec![(node, area)];
@@ -1659,7 +1688,7 @@ fn collect(
                 first,
                 second,
             } => {
-                let (first_area, second_area) = split(area, *ratio, bias);
+                let (_, first_area, second_area) = split_node(node, area, *ratio, bias, gap);
                 pending.push((second, second_area));
                 pending.push((first, first_area));
             }
@@ -1680,13 +1709,185 @@ fn collect_windows(node: &Node, out: &mut Vec<Window>) {
     }
 }
 
-/// Which way a split at `area` runs: `bias` overrides the adaptive choice
-/// when set to anything but `Auto`, otherwise wide area -> side-by-side,
-/// tall area -> stacked. The single source of truth `split()`'s own axis
-/// choice and every `Axis` metadata computation (`hit_test`,
-/// `collect_resize_splits`) route through, so the two can't drift apart --
-/// this project has been burned before by the same invariant enforced in
-/// more than one place independently (see the Z-order note in AGENT.md).
+/// A leaf's client-declared minimum footprint. Zero-sized minima are not a
+/// constraint; use one pixel so arithmetic stays well-formed.
+fn leaf_minimum(window: &Window) -> (i32, i32) {
+    let minimum = window
+        .toplevel()
+        .map(|toplevel| {
+            with_states(toplevel.wl_surface(), |states| {
+                let mut guard = states.cached_state.get::<SurfaceCachedState>();
+                guard.current().min_size
+            })
+        })
+        .unwrap_or_else(|| (0, 0).into());
+    (minimum.w.max(1), minimum.h.max(1))
+}
+
+/// Component-wise lower bound for a subtree. A split can choose either
+/// orientation, so taking the smaller width and height independently is
+/// deliberately optimistic; it is a feasibility hint for choosing the split
+/// axis, not a promised rectangle. The actual per-node choice below still
+/// falls back to the aspect-driven axis when neither orientation fits.
+fn subtree_minimum(node: &Node, gap: i32) -> (i32, i32) {
+    let gap = gap.max(0);
+    match node {
+        Node::Leaf(window) => leaf_minimum(window),
+        Node::Split { first, second, .. } => {
+            let (fw, fh) = subtree_minimum(first, gap);
+            let (sw, sh) = subtree_minimum(second, gap);
+            let horizontal = (fw.saturating_add(sw).saturating_add(gap), fh.max(sh));
+            let vertical = (fw.max(sw), fh.saturating_add(sh).saturating_add(gap));
+            (horizontal.0.min(vertical.0), horizontal.1.min(vertical.1))
+        }
+    }
+}
+
+/// Clamp a split ratio so both children get at least their minimum footprint
+/// along the chosen axis, when the area can satisfy both. If it cannot, keep
+/// the usual 5%-95% safety range and let the layout overflow rather than
+/// collapsing a child.
+fn clamp_split_ratio(
+    axis: Axis,
+    area: Rectangle<i32, Logical>,
+    ratio: f32,
+    first: (i32, i32),
+    second: (i32, i32),
+) -> f32 {
+    let span = match axis {
+        Axis::Horizontal => area.size.w,
+        Axis::Vertical => area.size.h,
+    };
+    let (first_min, second_min) = match axis {
+        Axis::Horizontal => (first.0, second.0),
+        Axis::Vertical => (first.1, second.1),
+    };
+    if span <= 0 {
+        return ratio.clamp(0.05, 0.95);
+    }
+    let low = first_min as f32 / span as f32;
+    let high = 1.0 - second_min as f32 / span as f32;
+    if low <= high {
+        ratio.clamp(low.max(0.05), high.min(0.95))
+    } else {
+        ratio.clamp(0.05, 0.95)
+    }
+}
+
+fn split_areas(
+    node: &Node,
+    area: Rectangle<i32, Logical>,
+    ratio: f32,
+    axis: Axis,
+    gap: i32,
+) -> (Rectangle<i32, Logical>, Rectangle<i32, Logical>) {
+    let Node::Split { first, second, .. } = node else {
+        return (area, area);
+    };
+    let first_min = subtree_minimum(first, gap);
+    let second_min = subtree_minimum(second, gap);
+    let ratio = clamp_split_ratio(axis, area, ratio, first_min, second_min);
+    match axis {
+        Axis::Horizontal => {
+            let first_w = (area.size.w as f32 * ratio).round() as i32;
+            let first = Rectangle::new(area.loc, (first_w, area.size.h).into());
+            let second = Rectangle::new(
+                (area.loc.x + first_w, area.loc.y).into(),
+                (area.size.w - first_w, area.size.h).into(),
+            );
+            (first, second)
+        }
+        Axis::Vertical => {
+            let first_h = (area.size.h as f32 * ratio).round() as i32;
+            let first = Rectangle::new(area.loc, (area.size.w, first_h).into());
+            let second = Rectangle::new(
+                (area.loc.x, area.loc.y + first_h).into(),
+                (area.size.w, area.size.h - first_h).into(),
+            );
+            (first, second)
+        }
+    }
+}
+
+/// Recursively test whether a subtree can fit without overflowing a leaf's
+/// client minimum. Children may choose their own orientation, which is what
+/// distinguishes a real two-row result from the optimistic component-wise
+/// bounds in `subtree_minimum`.
+fn fits_node(node: &Node, area: Rectangle<i32, Logical>, gap: i32) -> bool {
+    match node {
+        Node::Leaf(window) => {
+            let (min_w, min_h) = leaf_minimum(window);
+            area.size.w >= min_w && area.size.h >= min_h
+        }
+        Node::Split {
+            ratio,
+            first,
+            second,
+        } => {
+            for axis in [Axis::Horizontal, Axis::Vertical] {
+                let (first_area, second_area) = split_areas(node, area, *ratio, axis, gap);
+                if fits_node(first, first_area, gap) && fits_node(second, second_area, gap) {
+                    return true;
+                }
+            }
+            false
+        }
+    }
+}
+
+/// Which way a split at `area` should run. Keep the ordinary aspect-driven
+/// choice whenever it can fit both children's minimum footprints. If only
+/// the other orientation fits, choose it; this is what turns an over-wide
+/// row of minimum-sized windows into a vertical stack instead of pushing a
+/// window off the output. When neither fits, preserve the default overflow
+/// behavior rather than inventing an arbitrary compromise.
+fn split_axis_for_node(
+    node: &Node,
+    area: Rectangle<i32, Logical>,
+    bias: SplitBias,
+    gap: i32,
+) -> Axis {
+    if matches!(bias, SplitBias::Horizontal | SplitBias::Vertical) {
+        return split_axis(area, bias);
+    }
+    let Node::Split {
+        ratio,
+        first,
+        second,
+    } = node
+    else {
+        return split_axis(area, bias);
+    };
+    let (h_first, h_second) = split_areas(node, area, *ratio, Axis::Horizontal, gap);
+    let horizontal_fits = fits_node(first, h_first, gap) && fits_node(second, h_second, gap);
+    let (v_first, v_second) = split_areas(node, area, *ratio, Axis::Vertical, gap);
+    let vertical_fits = fits_node(first, v_first, gap) && fits_node(second, v_second, gap);
+    match (horizontal_fits, vertical_fits) {
+        (true, false) => Axis::Horizontal,
+        (false, true) => Axis::Vertical,
+        _ => split_axis(area, bias),
+    }
+}
+
+fn split_node(
+    node: &Node,
+    area: Rectangle<i32, Logical>,
+    ratio: f32,
+    bias: SplitBias,
+    gap: i32,
+) -> (Axis, Rectangle<i32, Logical>, Rectangle<i32, Logical>) {
+    let Node::Split { first, second, .. } = node else {
+        return (split_axis(area, bias), area, area);
+    };
+    let axis = split_axis_for_node(node, area, bias, gap);
+    let (first_area, second_area) = split_areas(node, area, ratio, axis, gap);
+    let _ = (first, second);
+    (axis, first_area, second_area)
+}
+
+/// Which way a split at `area` runs when no minimum-size information is
+/// considered: `bias` overrides the adaptive choice when set to anything but
+/// `Auto`, otherwise wide area -> side-by-side, tall area -> stacked.
 fn split_axis(area: Rectangle<i32, Logical>, bias: SplitBias) -> Axis {
     match bias {
         SplitBias::Horizontal => Axis::Horizontal,
@@ -1698,33 +1899,6 @@ fn split_axis(area: Rectangle<i32, Logical>, bias: SplitBias) -> Axis {
                 Axis::Vertical
             }
         }
-    }
-}
-
-/// Wide area -> side-by-side split; tall area -> stacked split, unless
-/// `bias` forces one way. Decided fresh every layout pass from the area's
-/// own aspect ratio (or the override), not stored.
-fn split(
-    area: Rectangle<i32, Logical>,
-    ratio: f32,
-    bias: SplitBias,
-) -> (Rectangle<i32, Logical>, Rectangle<i32, Logical>) {
-    if split_axis(area, bias) == Axis::Horizontal {
-        let first_w = (area.size.w as f32 * ratio).round() as i32;
-        let first = Rectangle::new(area.loc, (first_w, area.size.h).into());
-        let second = Rectangle::new(
-            (area.loc.x + first_w, area.loc.y).into(),
-            (area.size.w - first_w, area.size.h).into(),
-        );
-        (first, second)
-    } else {
-        let first_h = (area.size.h as f32 * ratio).round() as i32;
-        let first = Rectangle::new(area.loc, (area.size.w, first_h).into());
-        let second = Rectangle::new(
-            (area.loc.x, area.loc.y + first_h).into(),
-            (area.size.w, area.size.h - first_h).into(),
-        );
-        (first, second)
     }
 }
 
@@ -2122,6 +2296,36 @@ fn cascade_row_count_score(count: usize, rows: usize, target_aspect: f32) -> f32
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ocean::test_protocol::ProtocolFixture;
+
+    #[test]
+    fn bsp_auto_stacks_min_widths_inside_the_output() {
+        let mut protocol = ProtocolFixture::new();
+        let first = protocol.window_with_min((800, 200));
+        let second = protocol.window_with_min((940, 200));
+        let third = protocol.window_with_min((638, 200));
+        assert_eq!(leaf_minimum(&first), (800, 200));
+        assert_eq!(leaf_minimum(&second), (940, 200));
+        assert_eq!(leaf_minimum(&third), (638, 200));
+
+        let mut layout = BspLayout::default();
+        layout.insert(first, None);
+        layout.insert(second, None);
+        layout.insert(third, None);
+        let area = area(1920, 1080);
+        let rects = layout.layout(area, 8, SplitBias::Auto);
+        assert_eq!(rects.len(), 3);
+        for (_, rect) in &rects {
+            assert!(rect.loc.x >= 0 && rect.loc.y >= 0, "{rect:?}");
+            assert!(rect.loc.x + rect.size.w <= 1920, "{rect:?}");
+            assert!(rect.loc.y + rect.size.h <= 1080, "{rect:?}");
+        }
+        for (index, (_, left)) in rects.iter().enumerate() {
+            for (_, right) in &rects[index + 1..] {
+                assert!(!left.overlaps(*right), "{left:?} overlaps {right:?}");
+            }
+        }
+    }
 
     #[test]
     fn swapping_empty_active_workspaces_does_not_allocate_layout_trees() {

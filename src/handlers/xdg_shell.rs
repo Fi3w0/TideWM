@@ -821,25 +821,11 @@ fn swallowed_restore_destination(
     child_owner.or(live_fallback).unwrap_or(stored_owner)
 }
 
-/// Whether `map_toplevel`'s placement/state conversion below is guaranteed
-/// to send its own protocol configure, making the earlier tiled-size
-/// configure `retile()` sends redundant (and, for a client like a terminal,
-/// a visible one-frame re-flow of its content). `rule.maximize`,
-/// `rule.fullscreen`, and `rule.pseudo_tile` each end in a call that
-/// configures unconditionally (`do_maximize_request`/`do_fullscreen_request`/
-/// `toggle_pseudo_tile`'s own `retile()`); an explicit rule position/size
-/// guarantees `apply_floating_placement`, which also configures
-/// unconditionally. A plain `float`/`pin`/auto-float conversion with no
-/// rule-provided position/size is deliberately excluded: `toggle_floating`'s
-/// tiled-to-floating branch sends no configure of its own, so skipping the
-/// only one that exists would leave the window's stored `FloatingTag::rect`
-/// out of sync with whatever size the client's buffer actually settles at.
+/// First-map floating placement replaces the transient tiled configure.
+/// It either configures the resolved size or preserves an already matching
+/// natural size. Maximize/fullscreen/pseudo-tile also configure themselves.
 fn skips_first_tile_configure(rule: &crate::config::WindowRule, implicit_float: bool) -> bool {
-    rule.maximize
-        || rule.fullscreen
-        || rule.pseudo_tile
-        || ((rule.float || rule.pin || implicit_float)
-            && (rule.position.is_some() || rule.size.is_some()))
+    rule.maximize || rule.fullscreen || rule.pseudo_tile || rule.float || rule.pin || implicit_float
 }
 
 impl Smallvil {
@@ -1021,6 +1007,72 @@ impl Smallvil {
             return;
         }
 
+        // A client may refuse a slot because the slot is smaller than its
+        // own XDG minimum size. That is not a "tile-averse" client: it is a
+        // real layout constraint, and Hyprland/niri keep such windows tiled.
+        // Grow the nearest BSP split instead, and never trip the floating
+        // fallback for this case. If the layout cannot grow (master/cascade,
+        // a lone window, or an output smaller than the minimum), leave the
+        // window tiled at its requested minimum rather than ejecting it.
+        let min_size = smithay::wayland::compositor::with_states(surface, |states| {
+            let mut guard = states
+                .cached_state
+                .get::<smithay::wayland::shell::xdg::SurfaceCachedState>();
+            guard.current().min_size
+        });
+        let width_at_min =
+            client_minimum_constrains_axis(actual.w, expected.w, min_size.w, SIZE_TOLERANCE);
+        let height_at_min =
+            client_minimum_constrains_axis(actual.h, expected.h, min_size.h, SIZE_TOLERANCE);
+        if width_at_min || height_at_min {
+            self.tiled_size_refusals.remove(surface);
+            self.flutter_floated.remove(surface);
+            let mut grew = false;
+            let location = self
+                .layout
+                .output_of(surface)
+                .map(str::to_string)
+                .zip(self.layout.workspace_of(surface))
+                .and_then(|(output, workspace)| {
+                    let output = self.output_by_name(&output)?;
+                    let area = self.output_tiling_area(&output)?;
+                    Some((output.name(), workspace, area))
+                });
+            if let Some((output, workspace, area)) = location {
+                if width_at_min {
+                    grew |= self.layout.resize_target_by(
+                        &output,
+                        workspace,
+                        area,
+                        surface,
+                        crate::layout::Axis::Horizontal,
+                        f64::from(actual.w - expected.w),
+                    );
+                }
+                if height_at_min {
+                    grew |= self.layout.resize_target_by(
+                        &output,
+                        workspace,
+                        area,
+                        surface,
+                        crate::layout::Axis::Vertical,
+                        f64::from(actual.h - expected.h),
+                    );
+                }
+            }
+            if grew {
+                self.retile();
+            }
+            tracing::debug!(
+                expected = ?expected,
+                actual = ?actual,
+                min = ?min_size,
+                grew,
+                "tiled window constrained by client minimum; keeping tiled"
+            );
+            return;
+        }
+
         let now = std::time::Instant::now();
         let record = self.tiled_size_refusals.entry(surface.clone()).or_default();
         if record.first_refusal_at.is_none() {
@@ -1098,10 +1150,23 @@ impl Smallvil {
             .get(surface)
             .and_then(|entry| self.output_by_name(&entry.output))
             .or_else(|| {
-                rule.pin_output
-                    .as_deref()
-                    .or(rule.output.as_deref())
-                    .and_then(|name| self.output_by_name(name))
+                // A persistent pin is always a connector, never a dynamic
+                // alias. An unavailable pin retains its existing fallback.
+                if let Some(name) = rule.pin_output.as_deref() {
+                    self.output_by_name(name)
+                } else {
+                    rule.output
+                        .as_deref()
+                        .and_then(|name| self.initial_rule_output(name))
+                }
+            })
+            .or_else(|| {
+                self.unmapped_toplevels
+                    .get(surface)
+                    .and_then(|window| window.toplevel())
+                    .and_then(|toplevel| toplevel.parent())
+                    .and_then(|parent| self.preferred_output_for_toplevel(&parent))
+                    .and_then(|name| self.output_by_name(&name))
             })
             .or_else(|| self.primary_output());
         let Some(output) = output else {
@@ -1256,7 +1321,7 @@ impl Smallvil {
                     (size.w, size.h)
                 })
             });
-            self.apply_floating_placement(surface, rule.position, effective_size);
+            self.place_initial_floating(surface, &output, workspace, &rule, effective_size);
             if rule.pin && ocean_engine {
                 self.ocean.refresh_screen_pin(surface, &output.name());
             }
@@ -2018,6 +2083,21 @@ pub(crate) fn ancestor_pids(pid: i32) -> Vec<i32> {
     ancestors
 }
 
+/// True when a commit landed at a client minimum *because* the requested
+/// tile was smaller than that minimum. Ordinary stale commits and mpv-style
+/// tile-averse clients do not satisfy the second clause.
+fn client_minimum_constrains_axis(
+    actual: i32,
+    expected: i32,
+    minimum: i32,
+    tolerance: i32,
+) -> bool {
+    minimum > 0
+        && actual >= minimum
+        && (actual - minimum).abs() <= tolerance
+        && expected < minimum - tolerance
+}
+
 /// Whether a toplevel's min/max size pins at least one dimension, sway's
 /// `wants_floating` rule: both min dimensions nonzero, and either the
 /// width or the height range collapses to a single value. Such a window
@@ -2034,12 +2114,24 @@ fn is_dimension_pinned(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_dimension_pinned, lifecycle_transition, remove_flutter_tracking, retain_flutter_record,
-        skips_first_tile_configure, swallowed_restore_destination, ToplevelIdentityChange,
-        ToplevelTracking, ToplevelTransition, FLUTTER_WINDOW,
+        client_minimum_constrains_axis, is_dimension_pinned, lifecycle_transition,
+        remove_flutter_tracking, retain_flutter_record, skips_first_tile_configure,
+        swallowed_restore_destination, ToplevelIdentityChange, ToplevelTracking,
+        ToplevelTransition, FLUTTER_WINDOW,
     };
     use crate::state::LifecycleFlutter;
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn client_minimum_only_suppresses_the_float_when_the_tile_is_too_small() {
+        assert!(client_minimum_constrains_axis(800, 761, 800, 8));
+        assert!(!client_minimum_constrains_axis(800, 800, 800, 8));
+        assert!(client_minimum_constrains_axis(800, 790, 800, 8));
+        // mpv-style: smaller than the tile with no minimum.
+        assert!(!client_minimum_constrains_axis(531, 1016, 0, 8));
+        // Bigger than the minimum for another reason: leave the guard alone.
+        assert!(!client_minimum_constrains_axis(900, 761, 800, 8));
+    }
 
     #[test]
     fn role_without_buffer_stays_unmapped() {
@@ -2142,20 +2234,18 @@ mod tests {
     }
 
     #[test]
-    fn plain_float_conversion_without_a_size_rule_keeps_the_tile_configure() {
-        // toggle_floating's tiled-to-floating branch sends no configure of
-        // its own for these, so the first (tiled) configure must not be
-        // withheld -- otherwise the client's buffer size and the stored
-        // FloatingTag::rect would disagree forever.
+    fn first_map_float_conversion_replaces_the_tile_configure() {
+        // Centered first-map placement now supplies the resolved floating
+        // size instead of inheriting a transient Scroll tile configure.
         let mut rule = crate::config::WindowRule::default();
         assert!(!skips_first_tile_configure(&rule, false));
         rule.float = true;
-        assert!(!skips_first_tile_configure(&rule, false));
+        assert!(skips_first_tile_configure(&rule, false));
         rule.float = false;
         rule.pin = true;
-        assert!(!skips_first_tile_configure(&rule, false));
+        assert!(skips_first_tile_configure(&rule, false));
         rule.pin = false;
-        assert!(!skips_first_tile_configure(&rule, true)); // implicit_float alone
+        assert!(skips_first_tile_configure(&rule, true)); // implicit_float alone
     }
 
     #[test]
@@ -2180,9 +2270,7 @@ mod tests {
         };
         assert!(skips_first_tile_configure(&pseudo_tile, false));
 
-        // A plain float/pin/implicit-float conversion only skips once
-        // apply_floating_placement is guaranteed too, i.e. a rule-provided
-        // position or size is set.
+        // Explicit geometry follows the same first-map placement path.
         let sized_float = WindowRule {
             float: true,
             size: Some((640, 480)),
@@ -2263,3 +2351,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "floating_placement_test.rs"]
+mod floating_placement_test;

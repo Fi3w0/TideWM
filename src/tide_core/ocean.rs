@@ -1722,6 +1722,12 @@ impl OceanSpace {
         self.screen_pins.contains_key(surface)
     }
 
+    pub(crate) fn screen_pin_view_scale(&self, surface: &WlSurface) -> Option<f64> {
+        self.screen_pins
+            .get(surface)
+            .map(|pin| pin.view_scale.max(0.05))
+    }
+
     /// Keeps screen-pinned windows reachable when an output's logical
     /// viewport shrinks after a scale or transform change. Pins are stored
     /// in output-local coordinates, so world geometry and camera state stay

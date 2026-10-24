@@ -380,7 +380,7 @@ pub fn init_winit(
                             &glass_surfaces,
                         );
                         glass_layers.extend(state.layer_glass_elements(renderer, &entry.output));
-                        let (depth_elements, depth_surfaces) =
+                        let (mut depth_elements, depth_surfaces) =
                             state.depth_frame_elements(renderer, &entry.output, &placements);
                         // Only skip from the normal walk what actually got a
                         // replacement element built -- a shader-compile
@@ -424,6 +424,7 @@ pub fn init_winit(
                             &entry.output,
                             &placements,
                             &skip,
+                            &mut depth_elements,
                             &mut glass_layers,
                             backdrop,
                         ) {
@@ -479,7 +480,6 @@ pub fn init_winit(
                         elements.extend(workspace_transition);
                         elements.extend(workspace_glide);
                         elements.extend(closing_windows);
-                        elements.extend(depth_elements);
                         elements.extend(space_elements);
                         elements.extend(
                             wallpaper_element

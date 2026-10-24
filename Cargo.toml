@@ -1,6 +1,6 @@
 [package]
 name = "tidewm"
-version = "0.90.186"
+version = "0.90.192"
 edition = "2021"
 license = "GPL-3.0-or-later"
 # Verified floor: wayland-protocols 0.32.13 requires 1.86 (1.85 fails to
@@ -28,6 +28,8 @@ notify = "8"
 calloop = { version = "0.14", features = ["signals"] }
 fontdue = "0.9.3"
 png = "0.18"
+# Keep the verified Rust 1.86 floor; 0.25.10 requires Rust 1.88.
+image = { version = "=0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 regex = "1"
 xcursor = "0.3"
 wayland-protocols-wlr = "0.3.12"

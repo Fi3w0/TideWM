@@ -121,6 +121,8 @@ smithay::backend::renderer::element::render_elements! {
     /// cursor.rs) are both single CPU-composited memory buffers -- no need
     /// for two variants wrapping the same underlying element type.
     Composited = MemoryRenderBufferRenderElement<GlesRenderer>,
+    /// Shared attention-depth image, with an independent per-window damage ID.
+    DepthImage = crate::depth_background::DepthImageElement,
     /// Static GPU copy of the built-in wallpaper. Unlike `Composited`, this
     /// does not retain the native artwork in CPU memory after import.
     Wallpaper = TextureRenderElement<GlesTexture>,
@@ -2058,8 +2060,8 @@ fn render_surface(
         state.snap_preview_element(output)
     };
 
-    let (depth_elements, depth_surfaces) = if locked {
-        (Vec::new(), Vec::new())
+    let (mut depth_elements, depth_surfaces) = if locked {
+        (HashMap::new(), Vec::new())
     } else {
         state.depth_frame_elements(renderer, output, &placements)
     };
@@ -2102,6 +2104,7 @@ fn render_surface(
             output,
             &placements,
             &replaced_surfaces,
+            &mut depth_elements,
             &mut glass_layers,
             backdrop,
         )?
@@ -2180,7 +2183,6 @@ fn render_surface(
     elements.extend(workspace_transition);
     elements.extend(workspace_glide);
     elements.extend(closing_windows);
-    elements.extend(depth_elements);
     elements.extend(space_elements);
     elements.extend(wallpaper_element.map(OutputRenderElements::Wallpaper));
     elements.extend(lock_elements.into_iter().map(OutputRenderElements::Lock));

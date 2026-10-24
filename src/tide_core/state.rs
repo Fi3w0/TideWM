@@ -494,8 +494,12 @@ pub struct Smallvil {
     /// map and removed on unmap/destroy, so time-based sinking cannot grow
     /// state beyond the current mapped toplevel count.
     pub(crate) window_depths: HashMap<WlSurface, crate::depth::WindowDepth>,
-    /// Cached title-card buffers for tier-two-and-deeper windows. A window
-    /// returning to live content or unmapping evicts its buffer immediately.
+    /// Shared artwork source, CPU frame and per-renderer texture imports.
+    pub(crate) depth_background: crate::depth_background::DepthBackground,
+    depth_background_timer: Option<RegistrationToken>,
+    depth_background_deadline: Option<Instant>,
+    /// With artwork these buffers contain only the optional title strip.
+    /// Returning to live content or unmapping evicts a window's buffer.
     pub(crate) depth_schematics: HashMap<WlSurface, crate::depth::DepthSchematic>,
     /// Shared analytical cool-wash/urgent-border shader.
     pub(crate) depth_overlay_program: Option<GlesPixelProgram>,
@@ -1290,6 +1294,44 @@ pub(crate) enum FocusOrigin {
 /// it returns the render location (surface origin) directly.
 fn surface_origin(window: &Window, rect_loc: Point<i32, Logical>) -> Point<i32, Logical> {
     rect_loc - window.geometry().loc
+}
+
+/// Surface origin for a camera-scaled placement. Ocean renders a window's
+/// surface tree around its *geometry* origin and then scales it by the camera
+/// zoom; a client geometry offset therefore has to be scaled with it. Keeping
+/// this beside `surface_origin` makes the input and renderer transforms use
+/// the same coordinates.
+fn surface_origin_for_view_parts(
+    rect_loc: Point<i32, Logical>,
+    geometry_loc: Point<i32, Logical>,
+    view_scale: f64,
+) -> Point<f64, Logical> {
+    let scale = view_scale.max(0.05);
+    Point::from((
+        rect_loc.x as f64 - geometry_loc.x as f64 * scale,
+        rect_loc.y as f64 - geometry_loc.y as f64 * scale,
+    ))
+}
+
+fn surface_origin_for_view(
+    window: &Window,
+    rect_loc: Point<i32, Logical>,
+    view_scale: f64,
+) -> Point<f64, Logical> {
+    surface_origin_for_view_parts(rect_loc, window.geometry().loc, view_scale)
+}
+
+/// Camera zoom is a compositor-side scale. Smithay's WlPointer applies a
+/// client scale to the local coordinate after `PointerHandle` subtracts the
+/// surface origin, so Ocean supplies the inverse zoom for the duration of one
+/// pointer event. Zoom 1 (and every non-Ocean engine) needs no override.
+fn client_scale_for_view_scale(view_scale: f64) -> Option<f64> {
+    let scale = view_scale.max(0.05);
+    if (scale - 1.0).abs() < 0.0001 {
+        None
+    } else {
+        Some(1.0 / scale)
+    }
 }
 
 /// Gesture streams captured by compositor bindings instead of forwarded via
@@ -3243,13 +3285,14 @@ impl Smallvil {
     /// Builds the front-to-back desktop stack with explicit fullscreen/layer
     /// ordering. `skip` removes window surfaces during backdrop capture;
     /// `glass_layers` are reinserted immediately behind their owning windows.
-    #[allow(clippy::mutable_key_type)] // WlSurface-keyed glass layer map
+    #[allow(clippy::mutable_key_type, clippy::too_many_arguments)] // WlSurface-keyed scene layers
     pub(crate) fn desktop_render_elements(
         &mut self,
         renderer: &mut GlesRenderer,
         output: &Output,
         placements: &[crate::placement::PlacedWindow],
         skip: &[WlSurface],
+        depth_layers: &mut HashMap<WlSurface, Vec<crate::backend::udev::OutputRenderElements>>,
         glass_layers: &mut HashMap<WlSurface, Vec<crate::backend::udev::OutputRenderElements>>,
         backdrop: Vec<crate::backend::udev::OutputRenderElements>,
     ) -> Option<Vec<crate::backend::udev::OutputRenderElements>> {
@@ -3283,6 +3326,7 @@ impl Smallvil {
             rounded_program: Option<&GlesTexProgram>,
             border_program: Option<&GlesPixelProgram>,
             placements: &[crate::placement::PlacedWindow],
+            depth_layers: &mut HashMap<WlSurface, Vec<crate::backend::udev::OutputRenderElements>>,
             glass_layers: &mut HashMap<WlSurface, Vec<crate::backend::udev::OutputRenderElements>>,
             result: &mut Vec<crate::backend::udev::OutputRenderElements>,
         ) {
@@ -3296,6 +3340,11 @@ impl Smallvil {
                 let surface = entry.surface();
                 if entry.is_fullscreen() != fullscreen {
                     continue;
+                }
+                if entry.replacement_eligible() {
+                    if let Some(layers) = surface.and_then(|surface| depth_layers.remove(surface)) {
+                        result.extend(layers);
+                    }
                 }
                 // `skip` contains active-space surfaces rebuilt by depth or
                 // glass passes. Neighbor previews have no replacement pass;
@@ -3444,6 +3493,7 @@ impl Smallvil {
             rounded_program.as_ref(),
             border_program.as_ref(),
             placements,
+            &mut *depth_layers,
             &mut *glass_layers,
             &mut result,
         );
@@ -3485,6 +3535,7 @@ impl Smallvil {
             rounded_program.as_ref(),
             border_program.as_ref(),
             placements,
+            &mut *depth_layers,
             &mut *glass_layers,
             &mut result,
         );
@@ -3604,6 +3655,7 @@ impl Smallvil {
         if !enabled {
             self.depth_schematics.clear();
         }
+        self.poll_depth_background();
         if changed {
             self.request_redraw();
         }
@@ -3941,6 +3993,83 @@ impl Smallvil {
         }
     }
 
+    pub(crate) fn apply_depth_settings(
+        &mut self,
+        next: crate::config::DepthConfig,
+        reload_background: bool,
+    ) {
+        if reload_background || next.background != self.config.depth.background {
+            self.depth_background.reset();
+            for depth in self.window_depths.values_mut() {
+                depth.artwork_id = smithay::backend::renderer::element::Id::new();
+            }
+        }
+        self.config.depth = next;
+        self.depth_schematics.clear();
+        for depth in self.window_depths.values_mut() {
+            depth.visual_changed();
+        }
+        self.depth_last_tick = Instant::now() - Duration::from_millis(100);
+        self.update_window_depths();
+        self.request_redraw();
+    }
+
+    /// One decoder wakeup/deadline for the entire artwork, regardless of window count.
+    fn poll_depth_background(&mut self) {
+        let enabled = self.config.water_effects && self.config.depth.enabled;
+        let path = enabled
+            .then(|| self.config.depth.background.clone())
+            .flatten();
+        let visible = path.is_some()
+            && self.depth_background.can_present()
+            && matches!(self.session_lock, SessionLock::Unlocked)
+            && self.space.outputs().any(|output| {
+                if !self.wlr_output_power_management_state.is_on(output) {
+                    return false;
+                }
+                let Some(view) = self.space.output_geometry(output) else {
+                    return false;
+                };
+                self.render_placements(output).is_some_and(|placements| {
+                    placements.iter().any(|p| {
+                        p.replacement_eligible()
+                            && p.rect.overlaps(view)
+                            && p.surface()
+                                .and_then(|s| self.window_depths.get(s))
+                                .is_some_and(|depth| depth.tier() >= 2)
+                    })
+                })
+            });
+        let now = Instant::now();
+        let old_status = self.depth_background.status();
+        self.depth_background
+            .configure(path.as_deref(), visible, now);
+        if self.depth_background.poll(now) {
+            self.request_redraw();
+        }
+        if self.depth_background.status() != old_status {
+            self.emit_ipc_event(crate::ipc::IpcEvent::DepthBackgroundChanged);
+        }
+        let deadline = self.depth_background.deadline();
+        if deadline != self.depth_background_deadline {
+            if let Some(token) = self.depth_background_timer.take() {
+                self.loop_handle.remove(token);
+            }
+            self.depth_background_deadline = deadline;
+            if let Some(deadline) = deadline {
+                self.depth_background_timer = self
+                    .loop_handle
+                    .insert_source(Timer::from_deadline(deadline), |_, _, state| {
+                        state.depth_background_timer = None;
+                        state.depth_background_deadline = None;
+                        state.poll_depth_background();
+                        TimeoutAction::Drop
+                    })
+                    .ok();
+            }
+        }
+    }
+
     /// Builds the depth-specific replacement/overlay elements for one output.
     /// The returned surface list contains only deep windows whose schematic
     /// replacement was successfully built, so callers can safely omit those
@@ -3951,14 +4080,15 @@ impl Smallvil {
         output: &Output,
         placements: &[crate::placement::PlacedWindow],
     ) -> (
-        Vec<crate::backend::udev::OutputRenderElements>,
+        HashMap<WlSurface, Vec<crate::backend::udev::OutputRenderElements>>,
         Vec<WlSurface>,
     ) {
+        self.poll_depth_background();
         if !self.config.water_effects || !self.config.depth.enabled {
-            return (Vec::new(), Vec::new());
+            return (HashMap::new(), Vec::new());
         }
         let Some(output_geo) = self.space.output_geometry(output) else {
-            return (Vec::new(), Vec::new());
+            return (HashMap::new(), Vec::new());
         };
         let visible: Vec<(WlSurface, Rectangle<i32, Logical>)> = placements
             .iter()
@@ -3972,6 +4102,9 @@ impl Smallvil {
                     visual.offset.y.round() as i32,
                 ));
                 rect.size = visual.rounded_size_or(placement.window.geometry().size);
+                if !rect.overlaps(output_geo) {
+                    return None;
+                }
                 Some((
                     surface,
                     Rectangle::new(rect.loc - output_geo.loc, rect.size),
@@ -3980,17 +4113,34 @@ impl Smallvil {
             .collect();
         let program =
             crate::depth::depth_overlay_program(&mut self.depth_overlay_program, renderer);
-        let mut elements = Vec::new();
+        #[allow(clippy::mutable_key_type)]
+        let mut layers = HashMap::new();
         let mut replaced = Vec::new();
 
         for (surface, area) in visible {
+            let mut elements = Vec::new();
             let Some(depth) = self.window_depths.get(&surface) else {
                 continue;
             };
             let tier = depth.tier();
             let urgent = self.urgent.contains(&surface);
 
-            if let Some(program) = program.as_ref().filter(|_| tier == 1 || urgent) {
+            let artwork = if tier >= 2 {
+                self.depth_background.render_element(
+                    renderer,
+                    area,
+                    self.config.depth.background_fit,
+                    output.current_scale().fractional_scale(),
+                    depth.artwork_id.clone(),
+                )
+            } else {
+                None
+            };
+            let has_artwork = artwork.is_some();
+            if let Some(program) = program
+                .as_ref()
+                .filter(|_| tier == 1 || urgent || has_artwork)
+            {
                 elements.push(crate::backend::udev::OutputRenderElements::DepthOverlay(
                     crate::depth::DepthOverlayElement::new(
                         depth,
@@ -3998,39 +4148,82 @@ impl Smallvil {
                         program.clone(),
                         &self.config.depth,
                         urgent,
+                        has_artwork,
                     ),
                 ));
             }
 
             if tier < 2 {
                 self.depth_schematics.remove(&surface);
+                if !elements.is_empty() {
+                    layers.insert(surface, elements);
+                }
                 continue;
             }
 
             let size = (area.size.w.max(1), area.size.h.max(1));
-            let rebuild = self
-                .depth_schematics
-                .get(&surface)
-                .is_none_or(|schematic| !schematic.matches(size, tier, &self.config.depth));
-            if rebuild {
-                let title = crate::tab_strip::window_title(&surface);
-                self.depth_schematics.insert(
-                    surface.clone(),
-                    crate::depth::DepthSchematic::build(size, &title, tier, &self.config.depth),
-                );
+            // Artwork only needs a short title strip, never a window-sized CPU copy.
+            if !has_artwork || self.config.depth.show_title {
+                let rebuild = self.depth_schematics.get(&surface).is_none_or(|schematic| {
+                    !schematic.matches(size, tier, &self.config.depth, has_artwork)
+                });
+                if rebuild {
+                    // Identity-change callbacks invalidate this cache; avoid
+                    // cloning/rasterizing a title on every GIF frame.
+                    let title = if self.config.depth.show_title {
+                        crate::tab_strip::window_title(&surface)
+                    } else {
+                        String::new()
+                    };
+                    self.depth_schematics.insert(
+                        surface.clone(),
+                        crate::depth::DepthSchematic::build(
+                            size,
+                            &title,
+                            tier,
+                            &self.config.depth,
+                            has_artwork,
+                        ),
+                    );
+                }
+                let Some(element) = self.depth_schematics.get(&surface).and_then(|schematic| {
+                    schematic.render_element(
+                        renderer,
+                        (
+                            area.loc.x as f64 * output.current_scale().fractional_scale(),
+                            area.loc.y as f64 * output.current_scale().fractional_scale(),
+                        ),
+                    )
+                }) else {
+                    continue;
+                };
+                elements.push(crate::backend::udev::OutputRenderElements::Composited(
+                    element,
+                ));
+            } else {
+                self.depth_schematics.remove(&surface);
             }
-            let Some(element) = self.depth_schematics.get(&surface).and_then(|schematic| {
-                schematic.render_element(renderer, (area.loc.x as f64, area.loc.y as f64))
-            }) else {
-                continue;
-            };
+            if let Some(artwork) = artwork {
+                elements.push(crate::backend::udev::OutputRenderElements::DepthImage(
+                    artwork,
+                ));
+                let alpha = self.config.depth.schematic_alpha;
+                let color = self.config.depth.schematic_color;
+                elements.push(crate::backend::udev::OutputRenderElements::Dim(
+                    SolidColorRenderElement::new(
+                        depth.artwork_id.namespaced(1),
+                        area.to_physical_precise_round(output.current_scale().fractional_scale()),
+                        depth.commit,
+                        [color[0] * alpha, color[1] * alpha, color[2] * alpha, alpha],
+                        Kind::Unspecified,
+                    ),
+                ));
+            }
+            layers.insert(surface.clone(), elements);
             replaced.push(surface);
-            elements.push(crate::backend::udev::OutputRenderElements::Composited(
-                element,
-            ));
         }
 
-        (elements, replaced)
+        (layers, replaced)
     }
 
     pub fn new(event_loop: &mut EventLoop<'static, Smallvil>, display: Display<Self>) -> Self {
@@ -4186,6 +4379,14 @@ impl Smallvil {
         let idle_inhibit_manager_state = IdleInhibitManagerState::new::<Self>(&dh);
         let idle_notifier_state = IdleNotifierState::<Self>::new(&dh, loop_handle.clone());
 
+        let (depth_wake, depth_source) =
+            smithay::reexports::calloop::ping::make_ping().expect("creating depth artwork wakeup");
+        loop_handle
+            .insert_source(depth_source, |(), _, state: &mut Smallvil| {
+                state.poll_depth_background();
+            })
+            .expect("registering depth artwork wakeup");
+
         Self {
             start_time,
             display_handle: dh,
@@ -4304,6 +4505,9 @@ impl Smallvil {
             closing_window_animations: Vec::new(),
             window_depths: HashMap::new(),
             depth_schematics: HashMap::new(),
+            depth_background: crate::depth_background::DepthBackground::new(depth_wake),
+            depth_background_timer: None,
+            depth_background_deadline: None,
             depth_overlay_program: None,
             depth_last_tick: Instant::now(),
             pending_workspace_transitions: HashMap::new(),
@@ -4610,29 +4814,31 @@ impl Smallvil {
                     self.render_placements(&output).and_then(|placements| {
                         placements.into_iter().find_map(|placement| {
                             let rect = self.placement_input_rect(&placement);
-                            let origin = surface_origin(&placement.window, rect.loc);
-                            let view_local = pos - origin.to_f64();
-                            if view_local.x < 0.0
-                                || view_local.y < 0.0
-                                || view_local.x >= rect.size.w as f64
-                                || view_local.y >= rect.size.h as f64
+                            let scale = placement.view_scale.max(0.05);
+                            let origin =
+                                surface_origin_for_view(&placement.window, rect.loc, scale);
+                            let local = Point::from((
+                                (pos.x - origin.x) / scale,
+                                (pos.y - origin.y) / scale,
+                            ));
+                            let bbox = placement.window.bbox_with_popups().to_f64();
+                            if local.x < bbox.loc.x
+                                || local.y < bbox.loc.y
+                                || local.x >= bbox.loc.x + bbox.size.w
+                                || local.y >= bbox.loc.y + bbox.size.h
                             {
                                 return None;
                             }
-                            let local = Point::from((
-                                view_local.x / placement.view_scale,
-                                view_local.y / placement.view_scale,
-                            ));
                             placement
                                 .window
                                 .surface_under(local, WindowSurfaceType::ALL)
                                 .map(|(surface, point)| {
                                     (
                                         surface,
-                                        origin.to_f64()
+                                        origin
                                             + Point::from((
-                                                point.x as f64 * placement.view_scale,
-                                                point.y as f64 * placement.view_scale,
+                                                point.x as f64 * scale,
+                                                point.y as f64 * scale,
                                             )),
                                     )
                                 })
@@ -4644,9 +4850,10 @@ impl Smallvil {
                                 // focus the topmost root instead of clicking
                                 // through a floating window into a tile.
                                 .or_else(|| {
-                                    placement.window.toplevel().map(|toplevel| {
-                                        (toplevel.wl_surface().clone(), origin.to_f64())
-                                    })
+                                    placement
+                                        .window
+                                        .toplevel()
+                                        .map(|toplevel| (toplevel.wl_surface().clone(), origin))
                                 })
                         })
                     })
@@ -4738,29 +4945,28 @@ impl Smallvil {
                     .filter(crate::placement::PlacedWindow::is_fullscreen)
                     .find_map(|placement| {
                         let rect = self.placement_input_rect(&placement);
-                        let origin = surface_origin(&placement.window, rect.loc);
-                        let view_local = pos - origin.to_f64();
-                        if view_local.x < 0.0
-                            || view_local.y < 0.0
-                            || view_local.x >= rect.size.w as f64
-                            || view_local.y >= rect.size.h as f64
+                        let scale = placement.view_scale.max(0.05);
+                        let origin = surface_origin_for_view(&placement.window, rect.loc, scale);
+                        let local =
+                            Point::from(((pos.x - origin.x) / scale, (pos.y - origin.y) / scale));
+                        let bbox = placement.window.bbox_with_popups().to_f64();
+                        if local.x < bbox.loc.x
+                            || local.y < bbox.loc.y
+                            || local.x >= bbox.loc.x + bbox.size.w
+                            || local.y >= bbox.loc.y + bbox.size.h
                         {
                             return None;
                         }
-                        let local = Point::from((
-                            view_local.x / placement.view_scale,
-                            view_local.y / placement.view_scale,
-                        ));
                         placement
                             .window
                             .surface_under(local, WindowSurfaceType::ALL)
                             .map(|(surface, point)| {
                                 (
                                     surface,
-                                    origin.to_f64()
+                                    origin
                                         + Point::from((
-                                            point.x as f64 * placement.view_scale,
-                                            point.y as f64 * placement.view_scale,
+                                            point.x as f64 * scale,
+                                            point.y as f64 * scale,
                                         )),
                                 )
                             })
@@ -4770,9 +4976,10 @@ impl Smallvil {
                             // Keep the topmost root authoritative during
                             // that interval instead of clicking through.
                             .or_else(|| {
-                                placement.window.toplevel().map(|toplevel| {
-                                    (toplevel.wl_surface().clone(), origin.to_f64())
-                                })
+                                placement
+                                    .window
+                                    .toplevel()
+                                    .map(|toplevel| (toplevel.wl_surface().clone(), origin))
                             })
                     })
             });
@@ -4972,11 +5179,10 @@ impl Smallvil {
             .then_some(output)
     }
 
-    /// Chooses the output for an action with no stronger spatial hint. With
-    /// focus-follows-mouse, prefer the pointer output unless an exclusive
-    /// layer owns focus; otherwise prefer focused-window ownership. Fall back
-    /// through the other focus signal and then any mapped output.
-    pub(crate) fn primary_output(&self) -> Option<Output> {
+    /// Retained window/camera focus, independent of focus-follows-mouse's
+    /// preference for an unrelated pointer output. Also used by first-map
+    /// `output = focused` rules while a launcher owns keyboard focus.
+    pub(crate) fn focused_output(&self) -> Option<Output> {
         let intended_output = self.window_focus.as_ref().and_then(|surface| {
             self.pointer_output_for_surface(surface)
                 .or_else(|| self.rendered_output_for_surface(surface))
@@ -5008,29 +5214,36 @@ impl Smallvil {
                 let root = self.surface_root(&surface)?;
                 self.rendered_output_for_surface(&root)
             });
+        intended_output.or(focused_output)
+    }
+
+    /// Resolves a spawn-only rule output. Persistent output pins deliberately
+    /// bypass this helper: their value is always a real connector name.
+    pub(crate) fn initial_rule_output(&self, name: &str) -> Option<Output> {
+        match name {
+            "focused" | "camera" | "current" => {
+                self.focused_output().or_else(|| self.primary_output())
+            }
+            name => self.output_by_name(name),
+        }
+    }
+
+    /// Chooses the output for an action with no stronger spatial hint. With
+    /// focus-follows-mouse, prefer the pointer output unless an exclusive
+    /// layer owns focus; otherwise prefer focused-window ownership.
+    pub(crate) fn primary_output(&self) -> Option<Output> {
+        let focused_output = self.focused_output();
         let pointer_output = self
             .seat
             .get_pointer()
             .and_then(|p| self.output_for_point(p.current_location()));
         let first_output = || self.space.outputs().next().cloned();
-
-        // Mirror `focus_follows_mouse`'s own runtime gate: pointer-driven
-        // spawn is suspended while an Exclusive layer owns the keyboard, so
-        // a launcher or lock screen can't redirect new windows to whatever
-        // output the pointer drifted onto during the interaction.
         let prefer_pointer =
             self.config.input.focus_follows_mouse && self.exclusive_layer().is_none();
-
         if prefer_pointer {
-            pointer_output
-                .or(intended_output)
-                .or(focused_output)
-                .or_else(first_output)
+            pointer_output.or(focused_output).or_else(first_output)
         } else {
-            intended_output
-                .or(focused_output)
-                .or(pointer_output)
-                .or_else(first_output)
+            focused_output.or(pointer_output).or_else(first_output)
         }
     }
 
@@ -5408,6 +5621,72 @@ impl Smallvil {
             .map(|lock_surface| lock_surface.wl_surface().clone())
     }
 
+    /// Smithay's `WlPointer` converts a logical pointer location into client
+    /// coordinates with the client's `client_scale`. Ocean's camera zoom is a
+    /// compositor-side scale, so a one-unit logical motion over a window at
+    /// zoom 2 must arrive as 0.5 client units. Use the inverse camera zoom as
+    /// a temporary client scale while delivering the event; surface commits
+    /// run after this event handler returns, so the scale cannot leak into
+    /// rendering or damage bookkeeping.
+    fn pointer_client_scale_for_surface(&self, surface: &WlSurface) -> Option<f64> {
+        if self.config.spatial_engine != crate::config::SpatialEngine::Ocean {
+            return None;
+        }
+        let root = self.surface_root(surface)?;
+        let output = self.rendered_output_for_surface(&root)?;
+        if self.fullscreen.contains_key(&root) || self.maximized.contains_key(&root) {
+            return Some(1.0);
+        }
+        if let Some(scale) = self.ocean.screen_pin_view_scale(&root) {
+            return Some(scale);
+        }
+        Some(self.ocean.camera(&output.name()).zoom.max(0.05))
+    }
+
+    fn set_pointer_client_scale(&self, surface: &WlSurface, scale: f64) -> Option<f64> {
+        let client = self.display_handle.get_client(surface.id()).ok()?;
+        let state = client.get_data::<ClientState>()?;
+        let previous = state.compositor_state.client_scale();
+        state.compositor_state.set_client_scale(scale);
+        Some(previous)
+    }
+
+    /// The camera scale used for pointer coordinates on `surface`, or 1.0
+    /// outside Ocean. Constraint regions live in client coordinates and need
+    /// the same inverse transform as pointer motion.
+    pub(crate) fn pointer_view_scale_for_surface(&self, surface: &WlSurface) -> f64 {
+        self.pointer_client_scale_for_surface(surface)
+            .unwrap_or(1.0)
+    }
+
+    /// Temporarily apply Ocean's inverse camera scale to the client that owns
+    /// `surface`. Returns the previous client scale for restoration. `None`
+    /// means the client already needs no transform (Classic/Scroll, fullscreen,
+    /// or an unscaled placement).
+    pub(crate) fn apply_pointer_client_scale(&self, surface: &WlSurface) -> Option<f64> {
+        let view_scale = self.pointer_client_scale_for_surface(surface)?;
+        let client_scale = client_scale_for_view_scale(view_scale)?;
+        self.set_pointer_client_scale(surface, client_scale)
+    }
+
+    pub(crate) fn restore_pointer_client_scale(&self, surface: &WlSurface, previous: f64) {
+        let Ok(client) = self.display_handle.get_client(surface.id()) else {
+            return;
+        };
+        let Some(state) = client.get_data::<ClientState>() else {
+            return;
+        };
+        state.compositor_state.set_client_scale(previous);
+    }
+
+    /// Queue a pointer-target refresh after a camera change. The refresh
+    /// reads the pointer handle, so it must run outside a grab callback.
+    pub(crate) fn queue_pointer_focus_refresh(&mut self) {
+        self.loop_handle.insert_idle(|state| {
+            state.refresh_pointer_focus();
+        });
+    }
+
     /// Re-resolves enter/leave at the current pointer location after the
     /// surface stack changes without physical motion. Also clamps that
     /// location into the live output union first: an output-management
@@ -5415,11 +5694,22 @@ impl Smallvil {
     /// pointer was last over, and nothing else re-validates its stored
     /// position outside of a real subsequent motion event.
     pub(crate) fn refresh_pointer_focus(&mut self) {
+        if self
+            .seat
+            .get_pointer()
+            .is_none_or(|pointer| pointer.is_grabbed())
+        {
+            return;
+        }
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
         let pos = self.clamp_to_outputs(pointer.current_location());
         let under = self.surface_under(pos);
+        let focus_surface = under.as_ref().map(|(surface, _)| surface.clone());
+        let previous = focus_surface
+            .as_ref()
+            .and_then(|surface| self.apply_pointer_client_scale(surface));
         let serial = SERIAL_COUNTER.next_serial();
         let time = self.start_time.elapsed().as_millis() as u32;
         pointer.motion(
@@ -5431,6 +5721,9 @@ impl Smallvil {
                 time,
             },
         );
+        if let (Some(surface), Some(previous)) = (focus_surface.as_ref(), previous) {
+            self.restore_pointer_client_scale(surface, previous);
+        }
         pointer.frame(self);
     }
 
@@ -5449,11 +5742,14 @@ impl Smallvil {
         });
     }
 
-    /// Moving a strip changes the pointer target even with a stationary mouse.
-    /// Keep keyboard focus selected by navigation; only refresh pointer routing.
+    /// Moving a strip or an Ocean camera changes the pointer target even with
+    /// a stationary mouse. Keep keyboard focus selected by navigation; only
+    /// refresh pointer routing.
     pub(crate) fn refresh_scroll_pointer_focus(&mut self) {
-        if self.config.spatial_engine != crate::config::SpatialEngine::Scroll
-            || self.activation_blocked()
+        if !matches!(
+            self.config.spatial_engine,
+            crate::config::SpatialEngine::Scroll | crate::config::SpatialEngine::Ocean
+        ) || self.activation_blocked()
             || self
                 .seat
                 .get_pointer()
@@ -6834,7 +7130,11 @@ impl Smallvil {
         }
         self.workspace_scroll_cameras
             .retain(|_, camera| !camera.at_rest());
+        let camera_was_active = self.ocean.has_active_camera_motion();
         self.ocean.prune_completed_camera_motions();
+        if camera_was_active && !self.ocean.has_active_camera_motion() {
+            self.queue_pointer_focus_refresh();
+        }
         self.closing_window_animations
             .retain(|closing| !closing.finished());
         self.ripples.retain(|ripple| !ripple.finished());
@@ -7904,11 +8204,15 @@ impl Smallvil {
         // captures itself -- and two overlapping glass windows read what's
         // below the pair rather than each other's raw surfaces, which is
         // the trade that makes the shared list possible.
+        let (mut depth_layers, deep_surfaces) =
+            self.depth_frame_elements(renderer, output, placements);
+        let skip: Vec<WlSurface> = surfaces.iter().cloned().chain(deep_surfaces).collect();
         let Some(space_elements) = self.desktop_render_elements(
             renderer,
             output,
             placements,
-            &surfaces,
+            &skip,
+            &mut depth_layers,
             &mut HashMap::new(),
             Vec::new(),
         ) else {
@@ -8205,12 +8509,15 @@ impl Smallvil {
         // layers are all excluded from the list, so one build serves every
         // layer's capture and no blurred layer ever captures itself or a
         // sibling blurred layer.
-        let skip = layer_surfaces;
+        let (mut depth_layers, deep_surfaces) =
+            self.depth_frame_elements(renderer, output, placements);
+        let skip: Vec<WlSurface> = layer_surfaces.into_iter().chain(deep_surfaces).collect();
         let Some(space_elements) = self.desktop_render_elements(
             renderer,
             output,
             placements,
             &skip,
+            &mut depth_layers,
             &mut HashMap::new(),
             Vec::new(),
         ) else {
@@ -8766,7 +9073,7 @@ impl Smallvil {
         #[allow(clippy::mutable_key_type)]
         let mut glass_layers =
             self.glass_layer_elements(renderer, output, &placements, &glass_surfaces);
-        let (depth_elements, depth_surfaces) =
+        let (mut depth_elements, depth_surfaces) =
             self.depth_frame_elements(renderer, output, &placements);
         // Glass windows render in their normal z-slot; only depth-replaced
         // windows are skipped.
@@ -8782,13 +9089,13 @@ impl Smallvil {
             output,
             &placements,
             &skip,
+            &mut depth_elements,
             &mut glass_layers,
             backdrop,
         )?;
         let closing_windows = self.closing_window_frame_elements(renderer, output);
         let elements: Vec<crate::backend::udev::OutputRenderElements> = closing_windows
             .into_iter()
-            .chain(depth_elements)
             .chain(space_elements)
             .chain(
                 self.wallpaper_capture_element(output, renderer)
@@ -10229,6 +10536,7 @@ impl Smallvil {
                 self.retile();
                 if was_tiled {
                     self.enforce_floating_size_constraints(surface);
+                    self.rescue_toggled_floating(surface);
                 }
                 self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
                     surface: surface.clone(),
@@ -10358,6 +10666,7 @@ impl Smallvil {
         self.retile();
         if was_tiled {
             self.enforce_floating_size_constraints(surface);
+            self.rescue_toggled_floating(surface);
         }
         self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
             surface: surface.clone(),
@@ -12144,6 +12453,101 @@ impl Smallvil {
             names,
             codes: self.keyboard_layout_codes(),
         });
+    }
+
+    /// Tiling work area expressed in the active engine's placement coordinates.
+    fn floating_placement_area(&self, output: &Output) -> Option<Rectangle<i32, Logical>> {
+        let area = self.output_tiling_area(output)?;
+        if self.config.spatial_engine != crate::config::SpatialEngine::Ocean {
+            return Some(area);
+        }
+        let geometry = self.space.output_geometry(output)?;
+        let camera = self.ocean.camera(&output.name());
+        let zoom = camera.zoom.max(0.05);
+        Some(Rectangle::new(
+            (
+                (camera.origin.x + f64::from(area.loc.x - geometry.loc.x) / zoom).round() as i32,
+                (camera.origin.y + f64::from(area.loc.y - geometry.loc.y) / zoom).round() as i32,
+            )
+                .into(),
+            (
+                (f64::from(area.size.w) / zoom).round().max(1.0) as i32,
+                (f64::from(area.size.h) / zoom).round().max(1.0) as i32,
+            )
+                .into(),
+        ))
+    }
+
+    /// New floats are placed in visible output coordinates, never at their
+    /// transient tile/Scroll-strip location. Interactive toggles do not use
+    /// this centering policy.
+    pub(crate) fn place_initial_floating(
+        &mut self,
+        surface: &WlSurface,
+        output: &Output,
+        workspace: u32,
+        rule: &crate::config::WindowRule,
+        size: Option<(i32, i32)>,
+    ) {
+        let Some(bounds) = self.floating_placement_area(output) else {
+            return;
+        };
+        let Some(window) = self.mapped_toplevel_window(surface) else {
+            return;
+        };
+        let constraints = self.floating_size_constraints_with_rule(surface, rule);
+        // Keep explicit geometry exact wherever it fits the work area. Only
+        // automatic natural-size placement reserves the usual workspace gap.
+        let area = if rule.position.is_some() || rule.size.is_some() {
+            bounds
+        } else {
+            crate::layout::inset(bounds, self.gaps_for(&output.name(), workspace))
+        };
+        let rect = initial_floating_rect(
+            area,
+            rule.position.map(Point::from),
+            size.map(Size::from).unwrap_or(window.geometry().size),
+            constraints,
+        );
+        self.apply_floating_placement(
+            surface,
+            Some((rect.loc.x, rect.loc.y)),
+            Some((rect.size.w, rect.size.h)),
+        );
+    }
+
+    /// Rescue only an off-screen interactive untile. A visible window keeps
+    /// its existing location and size.
+    fn rescue_toggled_floating(&mut self, surface: &WlSurface) {
+        if self.fullscreen.contains_key(surface) || self.maximized.contains_key(surface) {
+            return;
+        }
+        let owner = self
+            .floating_workspace
+            .get(surface)
+            .map(|tag| tag.output.as_str())
+            .or_else(|| self.ocean.entry_output(surface));
+        let Some(output) = owner.and_then(|name| self.output_by_name(name)) else {
+            return;
+        };
+        let Some(bounds) = self.floating_placement_area(&output) else {
+            return;
+        };
+        let current = self
+            .ocean
+            .floating_rect(surface)
+            .or_else(|| self.floating_workspace.get(surface).map(|tag| tag.rect));
+        if let Some(current) = current {
+            // A tile entirely within the output must not jump on toggle.
+            let rect = fit_floating_rect_visible(current, bounds);
+            if rect != current {
+                self.apply_floating_placement(
+                    surface,
+                    Some((rect.loc.x, rect.loc.y)),
+                    Some((rect.size.w, rect.size.h)),
+                );
+            }
+        }
     }
 
     /// Applies a `[[rule]]`-specified exact position/size to a floating
@@ -15552,6 +15956,10 @@ impl Smallvil {
                         self.window_frame_snapshots.clear();
                     }
                     self.depth_schematics.clear();
+                    self.depth_background.reset();
+                    for depth in self.window_depths.values_mut() {
+                        depth.artwork_id = smithay::backend::renderer::element::Id::new();
+                    }
                     self.depth_last_tick = Instant::now() - Duration::from_millis(100);
                     self.update_window_depths();
                     let any_workspace_animation = (self.config.water_effects
@@ -16001,6 +16409,47 @@ fn squared_center_distance(a: Rectangle<i32, Logical>, b: Rectangle<i32, Logical
     dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy))
 }
 
+/// Stronger first-map/untile clamp. Reuse the ordinary rescue first, then
+/// fully contain each axis that fits; an unavoidably oversized client keeps
+/// its leading edge accessible. Wide arithmetic handles negative outputs.
+fn fit_floating_rect_visible(
+    rect: Rectangle<i32, Logical>,
+    bounds: Rectangle<i32, Logical>,
+) -> Rectangle<i32, Logical> {
+    let mut rect = clamp_rect_visible(rect, bounds);
+    let axis = |value: i32, origin: i32, extent: i32, size: i32| {
+        let last = (i64::from(origin) + i64::from(extent) - i64::from(size))
+            .max(i64::from(origin))
+            .min(i64::from(i32::MAX));
+        i64::from(value).clamp(i64::from(origin), last) as i32
+    };
+    rect.loc.x = axis(rect.loc.x, bounds.loc.x, bounds.size.w, rect.size.w);
+    rect.loc.y = axis(rect.loc.y, bounds.loc.y, bounds.size.h, rect.size.h);
+    rect
+}
+
+fn initial_floating_rect(
+    bounds: Rectangle<i32, Logical>,
+    position: Option<Point<i32, Logical>>,
+    size: Size<i32, Logical>,
+    constraints: crate::window_size::FloatingSizeConstraints,
+) -> Rectangle<i32, Logical> {
+    // Client/rule minima win over the output cap, just as for resizing.
+    let size = constraints.clamp((size.w.min(bounds.size.w), size.h.min(bounds.size.h)).into());
+    let centered_axis = |origin: i32, extent: i32, size: i32| {
+        (i64::from(origin) + i64::from((extent - size).max(0)) / 2)
+            .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+    };
+    let loc = position.unwrap_or_else(|| {
+        (
+            centered_axis(bounds.loc.x, bounds.size.w, size.w),
+            centered_axis(bounds.loc.y, bounds.size.h, size.h),
+        )
+            .into()
+    });
+    fit_floating_rect_visible(Rectangle::new(loc, size), bounds)
+}
+
 /// Keeps at least a small, grabbable part of a floating window inside the
 /// target working area after an output move. Raw origin translation can put
 /// almost the entire window off-screen when the destination is smaller.
@@ -16091,6 +16540,66 @@ fn tide_workspace_value(engine: crate::config::SpatialEngine, first_workspace: O
 mod tests {
     use super::*;
     use smithay::output::{PhysicalProperties, Subpixel};
+
+    #[test]
+    fn initial_float_centers_within_reserved_area_and_preserves_valid_position() {
+        let area = Rectangle::new((-1500, 80).into(), (1400, 900).into());
+        let constraints = crate::window_size::FloatingSizeConstraints::from_hints(
+            (0, 0).into(),
+            (0, 0).into(),
+            &crate::config::WindowRule::default(),
+        );
+        let size = (600, 400).into();
+        assert_eq!(
+            initial_floating_rect(area, None, size, constraints),
+            Rectangle::new((-1100, 330).into(), size)
+        );
+        let position = (-1420, 120).into();
+        assert_eq!(
+            initial_floating_rect(area, Some(position), size, constraints),
+            Rectangle::new(position, size)
+        );
+        assert_eq!(
+            initial_floating_rect(
+                area,
+                Some((3907, 9000).into()),
+                (5000, 4000).into(),
+                constraints
+            ),
+            area
+        );
+    }
+
+    #[test]
+    fn initial_float_respects_client_minimum_even_when_larger_than_output() {
+        let area = Rectangle::new((100, 80).into(), (700, 500).into());
+        let constraints = crate::window_size::FloatingSizeConstraints::from_hints(
+            (900, 600).into(),
+            (0, 0).into(),
+            &crate::config::WindowRule::default(),
+        );
+        assert_eq!(
+            initial_floating_rect(area, None, (1200, 900).into(), constraints),
+            Rectangle::new(area.loc, (900, 600).into())
+        );
+    }
+
+    #[test]
+    fn untile_clamp_preserves_visible_rect_and_rescues_offscreen_without_resizing() {
+        let bounds = Rectangle::new((1200, 30).into(), (1000, 700).into());
+        let visible = Rectangle::new((1250, 90).into(), (600, 400).into());
+        assert_eq!(fit_floating_rect_visible(visible, bounds), visible);
+        let offscreen = Rectangle::new((3907, -9000).into(), visible.size);
+        assert_eq!(
+            fit_floating_rect_visible(offscreen, bounds),
+            Rectangle::new((1600, 30).into(), visible.size)
+        );
+        let huge = Rectangle::new((3907, -9000).into(), (3000, 2000).into());
+        assert_eq!(
+            fit_floating_rect_visible(huge, bounds),
+            Rectangle::new(bounds.loc, huge.size)
+        );
+    }
 
     #[test]
     fn presentation_moves_to_the_first_new_frame_even_with_a_slower_destination() {
@@ -16520,6 +17029,26 @@ mod tests {
     fn group_removal_dissolves_a_two_member_group_regardless_of_which_side_closes() {
         assert_eq!(group_removal_outcome(2, 0, 0), (0, true));
         assert_eq!(group_removal_outcome(2, 0, 1), (0, true));
+    }
+
+    #[test]
+    fn ocean_camera_scale_inverts_pointer_coordinates() {
+        assert_eq!(client_scale_for_view_scale(1.0), None);
+        assert_eq!(client_scale_for_view_scale(2.0), Some(0.5));
+        assert_eq!(client_scale_for_view_scale(0.5), Some(2.0));
+        // Keep the existing lower clamp shared with placement math.
+        assert_eq!(client_scale_for_view_scale(0.0), Some(20.0));
+    }
+
+    #[test]
+    fn ocean_camera_scales_a_csd_geometry_offset_with_the_window() {
+        let origin =
+            surface_origin_for_view_parts(Point::from((100, 200)), Point::from((19, 17)), 2.0);
+        assert_eq!(origin, Point::from((62.0, 166.0)));
+        assert_eq!(
+            surface_origin_for_view_parts(Point::from((100, 200)), Point::from((19, 17)), 1.0),
+            Point::from((81.0, 183.0))
+        );
     }
 }
 
