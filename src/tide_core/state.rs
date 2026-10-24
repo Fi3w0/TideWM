@@ -3635,6 +3635,7 @@ impl Smallvil {
         } else {
             HashSet::new()
         };
+        let focused = self.focused_window_surface();
         let mut changed = false;
         // Collect per-surface tier transitions while we still hold the
         // mutable borrow on `window_depths`, then emit after the loop --
@@ -3642,8 +3643,13 @@ impl Smallvil {
         let mut tier_changes: Vec<(WlSurface, u8)> = Vec::new();
         for (surface, depth) in self.window_depths.iter_mut() {
             let old_tier = depth.tier();
-            let local_changed = if enabled && !exempt.contains(surface) {
-                depth.update(&self.config.depth)
+            let focused_now = focused.as_ref() == Some(surface);
+            let local_changed = if focused_now {
+                // Focus is an ongoing form of attention, not just the event
+                // that granted it. Keep the timer fresh and stay on surface.
+                depth.update(&self.config.depth, true)
+            } else if enabled && !exempt.contains(surface) {
+                depth.update(&self.config.depth, false)
             } else {
                 depth.reset_disabled()
             };

@@ -856,7 +856,7 @@ bind $mod+Ctrl+D  { dive }
 
 ### `depth { }`
 
-Configures automatic attention depth and buoyancy. A mapped window starts at the surface. After `sink_after_ms` without focus or keyboard input it moves to tier 1, keeping its live content with reduced opacity and a cool-water wash. Each additional `tier_interval_ms` moves it one tier deeper, capped by `max_tier`; tier 2 and below use a cached box-and-title schematic instead of live client pixels. Focusing, clicking, or typing into the window returns it to tier 0 immediately. Urgent windows retain a bright bioluminescent border at every tier.
+Configures automatic attention depth and buoyancy. A mapped window starts at the surface. A window that currently holds keyboard focus always stays at tier 0 and keeps refreshing its inactivity clock; it never sinks merely because the user held focus for longer than `sink_after_ms`. After `sink_after_ms` without focus or keyboard input an unfocused window moves to tier 1, keeping its live content with reduced opacity and a cool-water wash. Each additional `tier_interval_ms` moves it one tier deeper, capped by `max_tier`; tier 2 and below use a cached box-and-title schematic instead of live client pixels. Focusing, clicking, or typing into the window returns it to tier 0 immediately. Urgent windows retain a bright bioluminescent border at every tier.
 
 Depth state is bounded to one small record per mapped toplevel. Schematic buffers are evicted when a window resurfaces, unmaps, or is destroyed. The inactivity scan reuses the backend’s bounded timer and is throttled to 10Hz. `water_effects = false` disables the model regardless of this block.
 

@@ -130,8 +130,19 @@ impl WindowDepth {
         true
     }
 
-    pub fn update(&mut self, cfg: &DepthConfig) -> bool {
-        let wanted = tier_for_elapsed(self.last_attention.elapsed(), cfg);
+    pub fn update(&mut self, cfg: &DepthConfig, focused: bool) -> bool {
+        // A focused window is being used even while it is otherwise idle.
+        // Keep its attention clock fresh and force it back to the surface;
+        // otherwise holding focus for longer than `sink_after_ms` would sink
+        // the very window the user is typing into.
+        if focused {
+            self.last_attention = Instant::now();
+        }
+        let wanted = if focused {
+            0
+        } else {
+            tier_for_elapsed(self.last_attention.elapsed(), cfg)
+        };
         if wanted == self.tier {
             return false;
         }
@@ -488,6 +499,30 @@ mod tests {
             ..DepthConfig::default()
         };
         assert_eq!(tier_for_elapsed(Duration::from_secs(20), &cfg), 0);
+    }
+
+    #[test]
+    fn focused_window_never_sinks_and_refreshes_attention() {
+        let cfg = DepthConfig {
+            enabled: true,
+            sink_after_ms: 10,
+            tier_interval_ms: 10,
+            max_tier: 2,
+            ..DepthConfig::default()
+        };
+        let mut depth = WindowDepth::new();
+        depth.last_attention = Instant::now() - Duration::from_secs(1);
+
+        assert!(depth.update(&cfg, false));
+        assert_eq!(depth.tier(), 2);
+
+        assert!(depth.update(&cfg, true));
+        assert_eq!(depth.tier(), 0);
+
+        // Focusing must also restart the inactivity clock, not just clear
+        // the current tier: an immediate unfocused tick stays at the surface.
+        assert!(!depth.update(&cfg, false));
+        assert_eq!(depth.tier(), 0);
     }
 
     #[test]
