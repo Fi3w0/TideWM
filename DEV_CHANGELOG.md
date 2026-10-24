@@ -2,6 +2,11 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.189 — Match toplevel capture rendering to source scale
+
+- `render_one_capture` sized a toplevel framebuffer using the source output scale, but created its `OutputDamageTracker` at 1.0. Surface elements use the tracker scale for their destination geometry, so at 1.25 the client covered only about 64% of the advertised canvas area; the remainder stayed transparent or showed the window's own glass. Use the source scale in the toplevel tracker, matching output capture. No bbox crop, shell workaround or client-tree change.
+- Regression coverage renders a real memory surface through the production tracker on software EGL and checks every framebuffer pixel at scales 1, 1.25, 1.5 and 2. It fails before the fix at 1.25 on a transparent pixel. Direct SHM protocol checks compare complete solid-colour Kitty captures in tiled/floating modes, rather than only a centre pixel. The old scale-1 screenshot evidence alone cannot distinguish capture padding from aspect-fit letterboxing in its square UI harness.
+
 ## 0.90.188 — First-map floating placement and focused output rules
 
 - Extracted the retained window/keyboard output resolution into `focused_output`, shared with `primary_output`. Spawn-only `output` resolves `focused`/`camera`/`current` at map time before pointer-prioritizing fallback; `pin_output` remains a literal connector. Parented toplevels without a resolved explicit output use their parent's owner before primary placement.

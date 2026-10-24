@@ -144,7 +144,7 @@ For tools: each `tidectl outputs` entry has a `scroll` object (`offset`, `orient
 | Multi-monitor, hotplug, mixed scale, dragging tiles between monitors | Done |
 | Layer shell (bars, launchers, wallpapers, lock screens) | Done |
 | XWayland | Done, via xwayland-satellite |
-| Screenshots, per-window capture, clipboard, session lock | Done |
+| Screenshots, per-window capture, clipboard, session lock | Done; per-window capture canvas and rendering use the same source-output scale, preserving client subsurfaces/popups. |
 | Screen sharing (OBS, Discord) through TideWM's own portal | Done with `--features screencast` |
 | IPC and `tidectl`: windows with geometry and Scroll position, outputs, layers, an event stream for windows, workspaces, focus, monitors, modes, engine and Scroll, plus `doctor`, `report`, `perf` | Done |
 | Water stack: ripples, wave transitions, water/frost glass, shadows, gradient borders, viscosity, sway, buoyancy, caustics, currents | Done |

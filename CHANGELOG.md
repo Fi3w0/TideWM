@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.189 · 2026-10-24 — Window previews fill their capture
+
+- Per-window previews at scaled outputs now render at the same scale as their capture canvas. Previously the client appeared smaller inside a larger image, leaving transparent/black fields or exposed glass backdrop in Alt+Tab and other window-capture consumers. This affected both tiled and floating windows; client popups and decorations remain included.
+
 ## 0.90.188 · 2026-10-24 — Floating windows open on screen
 
 - New floating windows open centered in their chosen monitor's usable area instead of inheriting an off-screen Scroll tile. Explicit positions and sizes remain exact where they fit; oversized windows shrink as far as their minimum size allows. Dialogs follow their parent unless a rule chooses another output.
