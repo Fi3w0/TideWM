@@ -138,7 +138,7 @@ For tools: each `tidectl outputs` entry has a `scroll` object (`offset`, `orient
 
 | Area | Status |
 | --- | --- |
-| Tiling: BSP, master/stack, cascade, floating layout, snapping | Done |
+| Tiling: BSP, master/stack, cascade, floating layout, snapping | Done; first-map floats center within usable output bounds, dialogs follow parent output; `output = focused` resolves retained focus independently of the pointer. |
 | Workspaces, scratchpads, pinning, window groups (tabs), fullscreen, maximize | Done |
 | Classic, Ocean and Scroll engines, live switching | Done |
 | Multi-monitor, hotplug, mixed scale, dragging tiles between monitors | Done |

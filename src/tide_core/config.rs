@@ -2899,9 +2899,10 @@ pub struct WindowRule {
     /// use, including 0 (the reserved scratchpad) if you want a window to
     /// always start hidden.
     pub workspace: Option<u32>,
-    /// Initial output by connector name (see the `outputs` IPC query, or
-    /// your logs). Falls back to the usual placement logic if unset, or if
-    /// no output with this name is currently connected.
+    /// Initial connector, or `focused` (`camera`/`current`) resolved at map
+    /// time from retained window/camera focus rather than the pointer output.
+    /// Unavailable connectors fall back through parent and primary output.
+    /// Persistent `pin_output` never interprets these dynamic aliases.
     pub output: Option<String>,
     /// Persistently pins the window to an output by connector name.
     /// Neither niri (`window-rule { open-on-output }`) nor Hyprland
@@ -10431,6 +10432,18 @@ mod tests {
             parse_layout_algorithm("floating"),
             Some(LayoutAlgorithm::Floating)
         );
+    }
+
+    #[test]
+    fn rule_output_aliases_remain_spawn_only_and_pin_output_remains_literal() {
+        for alias in ["focused", "camera", "current"] {
+            let rule = lower_window_rule_block(&[
+                waves::Entry::Assign("output".into(), alias.into()),
+                waves::Entry::Assign("pin_output".into(), "DP-1".into()),
+            ]);
+            assert_eq!(rule.output.as_deref(), Some(alias));
+            assert_eq!(rule.pin_output.as_deref(), Some("DP-1"));
+        }
     }
 
     #[test]

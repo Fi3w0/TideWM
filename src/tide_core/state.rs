@@ -5138,11 +5138,10 @@ impl Smallvil {
             .then_some(output)
     }
 
-    /// Chooses the output for an action with no stronger spatial hint. With
-    /// focus-follows-mouse, prefer the pointer output unless an exclusive
-    /// layer owns focus; otherwise prefer focused-window ownership. Fall back
-    /// through the other focus signal and then any mapped output.
-    pub(crate) fn primary_output(&self) -> Option<Output> {
+    /// Retained window/camera focus, independent of focus-follows-mouse's
+    /// preference for an unrelated pointer output. Also used by first-map
+    /// `output = focused` rules while a launcher owns keyboard focus.
+    pub(crate) fn focused_output(&self) -> Option<Output> {
         let intended_output = self.window_focus.as_ref().and_then(|surface| {
             self.pointer_output_for_surface(surface)
                 .or_else(|| self.rendered_output_for_surface(surface))
@@ -5174,29 +5173,36 @@ impl Smallvil {
                 let root = self.surface_root(&surface)?;
                 self.rendered_output_for_surface(&root)
             });
+        intended_output.or(focused_output)
+    }
+
+    /// Resolves a spawn-only rule output. Persistent output pins deliberately
+    /// bypass this helper: their value is always a real connector name.
+    pub(crate) fn initial_rule_output(&self, name: &str) -> Option<Output> {
+        match name {
+            "focused" | "camera" | "current" => {
+                self.focused_output().or_else(|| self.primary_output())
+            }
+            name => self.output_by_name(name),
+        }
+    }
+
+    /// Chooses the output for an action with no stronger spatial hint. With
+    /// focus-follows-mouse, prefer the pointer output unless an exclusive
+    /// layer owns focus; otherwise prefer focused-window ownership.
+    pub(crate) fn primary_output(&self) -> Option<Output> {
+        let focused_output = self.focused_output();
         let pointer_output = self
             .seat
             .get_pointer()
             .and_then(|p| self.output_for_point(p.current_location()));
         let first_output = || self.space.outputs().next().cloned();
-
-        // Mirror `focus_follows_mouse`'s own runtime gate: pointer-driven
-        // spawn is suspended while an Exclusive layer owns the keyboard, so
-        // a launcher or lock screen can't redirect new windows to whatever
-        // output the pointer drifted onto during the interaction.
         let prefer_pointer =
             self.config.input.focus_follows_mouse && self.exclusive_layer().is_none();
-
         if prefer_pointer {
-            pointer_output
-                .or(intended_output)
-                .or(focused_output)
-                .or_else(first_output)
+            pointer_output.or(focused_output).or_else(first_output)
         } else {
-            intended_output
-                .or(focused_output)
-                .or(pointer_output)
-                .or_else(first_output)
+            focused_output.or(pointer_output).or_else(first_output)
         }
     }
 
@@ -10402,6 +10408,7 @@ impl Smallvil {
                 self.retile();
                 if was_tiled {
                     self.enforce_floating_size_constraints(surface);
+                    self.rescue_toggled_floating(surface);
                 }
                 self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
                     surface: surface.clone(),
@@ -10531,6 +10538,7 @@ impl Smallvil {
         self.retile();
         if was_tiled {
             self.enforce_floating_size_constraints(surface);
+            self.rescue_toggled_floating(surface);
         }
         self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
             surface: surface.clone(),
@@ -12317,6 +12325,101 @@ impl Smallvil {
             names,
             codes: self.keyboard_layout_codes(),
         });
+    }
+
+    /// Tiling work area expressed in the active engine's placement coordinates.
+    fn floating_placement_area(&self, output: &Output) -> Option<Rectangle<i32, Logical>> {
+        let area = self.output_tiling_area(output)?;
+        if self.config.spatial_engine != crate::config::SpatialEngine::Ocean {
+            return Some(area);
+        }
+        let geometry = self.space.output_geometry(output)?;
+        let camera = self.ocean.camera(&output.name());
+        let zoom = camera.zoom.max(0.05);
+        Some(Rectangle::new(
+            (
+                (camera.origin.x + f64::from(area.loc.x - geometry.loc.x) / zoom).round() as i32,
+                (camera.origin.y + f64::from(area.loc.y - geometry.loc.y) / zoom).round() as i32,
+            )
+                .into(),
+            (
+                (f64::from(area.size.w) / zoom).round().max(1.0) as i32,
+                (f64::from(area.size.h) / zoom).round().max(1.0) as i32,
+            )
+                .into(),
+        ))
+    }
+
+    /// New floats are placed in visible output coordinates, never at their
+    /// transient tile/Scroll-strip location. Interactive toggles do not use
+    /// this centering policy.
+    pub(crate) fn place_initial_floating(
+        &mut self,
+        surface: &WlSurface,
+        output: &Output,
+        workspace: u32,
+        rule: &crate::config::WindowRule,
+        size: Option<(i32, i32)>,
+    ) {
+        let Some(bounds) = self.floating_placement_area(output) else {
+            return;
+        };
+        let Some(window) = self.mapped_toplevel_window(surface) else {
+            return;
+        };
+        let constraints = self.floating_size_constraints_with_rule(surface, rule);
+        // Keep explicit geometry exact wherever it fits the work area. Only
+        // automatic natural-size placement reserves the usual workspace gap.
+        let area = if rule.position.is_some() || rule.size.is_some() {
+            bounds
+        } else {
+            crate::layout::inset(bounds, self.gaps_for(&output.name(), workspace))
+        };
+        let rect = initial_floating_rect(
+            area,
+            rule.position.map(Point::from),
+            size.map(Size::from).unwrap_or(window.geometry().size),
+            constraints,
+        );
+        self.apply_floating_placement(
+            surface,
+            Some((rect.loc.x, rect.loc.y)),
+            Some((rect.size.w, rect.size.h)),
+        );
+    }
+
+    /// Rescue only an off-screen interactive untile. A visible window keeps
+    /// its existing location and size.
+    fn rescue_toggled_floating(&mut self, surface: &WlSurface) {
+        if self.fullscreen.contains_key(surface) || self.maximized.contains_key(surface) {
+            return;
+        }
+        let owner = self
+            .floating_workspace
+            .get(surface)
+            .map(|tag| tag.output.as_str())
+            .or_else(|| self.ocean.entry_output(surface));
+        let Some(output) = owner.and_then(|name| self.output_by_name(name)) else {
+            return;
+        };
+        let Some(bounds) = self.floating_placement_area(&output) else {
+            return;
+        };
+        let current = self
+            .ocean
+            .floating_rect(surface)
+            .or_else(|| self.floating_workspace.get(surface).map(|tag| tag.rect));
+        if let Some(current) = current {
+            // A tile entirely within the output must not jump on toggle.
+            let rect = fit_floating_rect_visible(current, bounds);
+            if rect != current {
+                self.apply_floating_placement(
+                    surface,
+                    Some((rect.loc.x, rect.loc.y)),
+                    Some((rect.size.w, rect.size.h)),
+                );
+            }
+        }
     }
 
     /// Applies a `[[rule]]`-specified exact position/size to a floating
@@ -16178,6 +16281,47 @@ fn squared_center_distance(a: Rectangle<i32, Logical>, b: Rectangle<i32, Logical
     dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy))
 }
 
+/// Stronger first-map/untile clamp. Reuse the ordinary rescue first, then
+/// fully contain each axis that fits; an unavoidably oversized client keeps
+/// its leading edge accessible. Wide arithmetic handles negative outputs.
+fn fit_floating_rect_visible(
+    rect: Rectangle<i32, Logical>,
+    bounds: Rectangle<i32, Logical>,
+) -> Rectangle<i32, Logical> {
+    let mut rect = clamp_rect_visible(rect, bounds);
+    let axis = |value: i32, origin: i32, extent: i32, size: i32| {
+        let last = (i64::from(origin) + i64::from(extent) - i64::from(size))
+            .max(i64::from(origin))
+            .min(i64::from(i32::MAX));
+        i64::from(value).clamp(i64::from(origin), last) as i32
+    };
+    rect.loc.x = axis(rect.loc.x, bounds.loc.x, bounds.size.w, rect.size.w);
+    rect.loc.y = axis(rect.loc.y, bounds.loc.y, bounds.size.h, rect.size.h);
+    rect
+}
+
+fn initial_floating_rect(
+    bounds: Rectangle<i32, Logical>,
+    position: Option<Point<i32, Logical>>,
+    size: Size<i32, Logical>,
+    constraints: crate::window_size::FloatingSizeConstraints,
+) -> Rectangle<i32, Logical> {
+    // Client/rule minima win over the output cap, just as for resizing.
+    let size = constraints.clamp((size.w.min(bounds.size.w), size.h.min(bounds.size.h)).into());
+    let centered_axis = |origin: i32, extent: i32, size: i32| {
+        (i64::from(origin) + i64::from((extent - size).max(0)) / 2)
+            .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+    };
+    let loc = position.unwrap_or_else(|| {
+        (
+            centered_axis(bounds.loc.x, bounds.size.w, size.w),
+            centered_axis(bounds.loc.y, bounds.size.h, size.h),
+        )
+            .into()
+    });
+    fit_floating_rect_visible(Rectangle::new(loc, size), bounds)
+}
+
 /// Keeps at least a small, grabbable part of a floating window inside the
 /// target working area after an output move. Raw origin translation can put
 /// almost the entire window off-screen when the destination is smaller.
@@ -16268,6 +16412,66 @@ fn tide_workspace_value(engine: crate::config::SpatialEngine, first_workspace: O
 mod tests {
     use super::*;
     use smithay::output::{PhysicalProperties, Subpixel};
+
+    #[test]
+    fn initial_float_centers_within_reserved_area_and_preserves_valid_position() {
+        let area = Rectangle::new((-1500, 80).into(), (1400, 900).into());
+        let constraints = crate::window_size::FloatingSizeConstraints::from_hints(
+            (0, 0).into(),
+            (0, 0).into(),
+            &crate::config::WindowRule::default(),
+        );
+        let size = (600, 400).into();
+        assert_eq!(
+            initial_floating_rect(area, None, size, constraints),
+            Rectangle::new((-1100, 330).into(), size)
+        );
+        let position = (-1420, 120).into();
+        assert_eq!(
+            initial_floating_rect(area, Some(position), size, constraints),
+            Rectangle::new(position, size)
+        );
+        assert_eq!(
+            initial_floating_rect(
+                area,
+                Some((3907, 9000).into()),
+                (5000, 4000).into(),
+                constraints
+            ),
+            area
+        );
+    }
+
+    #[test]
+    fn initial_float_respects_client_minimum_even_when_larger_than_output() {
+        let area = Rectangle::new((100, 80).into(), (700, 500).into());
+        let constraints = crate::window_size::FloatingSizeConstraints::from_hints(
+            (900, 600).into(),
+            (0, 0).into(),
+            &crate::config::WindowRule::default(),
+        );
+        assert_eq!(
+            initial_floating_rect(area, None, (1200, 900).into(), constraints),
+            Rectangle::new(area.loc, (900, 600).into())
+        );
+    }
+
+    #[test]
+    fn untile_clamp_preserves_visible_rect_and_rescues_offscreen_without_resizing() {
+        let bounds = Rectangle::new((1200, 30).into(), (1000, 700).into());
+        let visible = Rectangle::new((1250, 90).into(), (600, 400).into());
+        assert_eq!(fit_floating_rect_visible(visible, bounds), visible);
+        let offscreen = Rectangle::new((3907, -9000).into(), visible.size);
+        assert_eq!(
+            fit_floating_rect_visible(offscreen, bounds),
+            Rectangle::new((1600, 30).into(), visible.size)
+        );
+        let huge = Rectangle::new((3907, -9000).into(), (3000, 2000).into());
+        assert_eq!(
+            fit_floating_rect_visible(huge, bounds),
+            Rectangle::new(bounds.loc, huge.size)
+        );
+    }
 
     #[test]
     fn presentation_moves_to_the_first_new_frame_even_with_a_slower_destination() {

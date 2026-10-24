@@ -2,6 +2,12 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.188 — First-map floating placement and focused output rules
+
+- Extracted the retained window/keyboard output resolution into `focused_output`, shared with `primary_output`. Spawn-only `output` resolves `focused`/`camera`/`current` at map time before pointer-prioritizing fallback; `pin_output` remains a literal connector. Parented toplevels without a resolved explicit output use their parent's owner before primary placement.
+- Separate first-map placement centers rule floats/pins, implicit dialogs, flutter floats and floating-layout windows in `output_tiling_area`, with workspace gaps for natural placement. Explicit geometry that fits is preserved; initial oversized sizes are capped before applying client/rule constraints, whose minima still win. A stronger visible-rect policy reuses `clamp_rect_visible` without changing its existing drag/hotplug semantics. Ocean work areas are transformed through the camera. Interactive untile only repairs off-screen coordinates, retaining visible size/location.
+- Floating conversion replaces the transient tiled configure, avoiding inherited strip sizes. Coverage includes real xdg-shell buffer/configure/ack mapping on two simulated outputs (focus versus pointer, all dynamic aliases and no-focus fallback, literal pins, natural/explicit/oversized placement, parent/explicit output precedence, interactive untile, floating layout and hidden workspace), plus pure geometry and config tests. Native install/relog remains a user-controlled step.
+
 ## 0.90.187 — Shared attention-depth artwork and live controls
 
 - `DepthBackground` owns one lazy source/current premultiplied BGRA frame. Bounded request/result channels keep one decode in flight on a worker. Static sources release encoded/decoder state after loading; GIF streams composited frames/disposal through image 0.25.9 and retains compressed data for looping. One shared deadline drives the timeline, with a 20ms minimum delay; inactive-workspace, locked and powered-off views pause without catching up. File/frame limits bound input and decoded dimensions; failures fall back and wait for reselection/reload.

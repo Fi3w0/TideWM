@@ -821,25 +821,11 @@ fn swallowed_restore_destination(
     child_owner.or(live_fallback).unwrap_or(stored_owner)
 }
 
-/// Whether `map_toplevel`'s placement/state conversion below is guaranteed
-/// to send its own protocol configure, making the earlier tiled-size
-/// configure `retile()` sends redundant (and, for a client like a terminal,
-/// a visible one-frame re-flow of its content). `rule.maximize`,
-/// `rule.fullscreen`, and `rule.pseudo_tile` each end in a call that
-/// configures unconditionally (`do_maximize_request`/`do_fullscreen_request`/
-/// `toggle_pseudo_tile`'s own `retile()`); an explicit rule position/size
-/// guarantees `apply_floating_placement`, which also configures
-/// unconditionally. A plain `float`/`pin`/auto-float conversion with no
-/// rule-provided position/size is deliberately excluded: `toggle_floating`'s
-/// tiled-to-floating branch sends no configure of its own, so skipping the
-/// only one that exists would leave the window's stored `FloatingTag::rect`
-/// out of sync with whatever size the client's buffer actually settles at.
+/// First-map floating placement replaces the transient tiled configure.
+/// It either configures the resolved size or preserves an already matching
+/// natural size. Maximize/fullscreen/pseudo-tile also configure themselves.
 fn skips_first_tile_configure(rule: &crate::config::WindowRule, implicit_float: bool) -> bool {
-    rule.maximize
-        || rule.fullscreen
-        || rule.pseudo_tile
-        || ((rule.float || rule.pin || implicit_float)
-            && (rule.position.is_some() || rule.size.is_some()))
+    rule.maximize || rule.fullscreen || rule.pseudo_tile || rule.float || rule.pin || implicit_float
 }
 
 impl Smallvil {
@@ -1098,10 +1084,23 @@ impl Smallvil {
             .get(surface)
             .and_then(|entry| self.output_by_name(&entry.output))
             .or_else(|| {
-                rule.pin_output
-                    .as_deref()
-                    .or(rule.output.as_deref())
-                    .and_then(|name| self.output_by_name(name))
+                // A persistent pin is always a connector, never a dynamic
+                // alias. An unavailable pin retains its existing fallback.
+                if let Some(name) = rule.pin_output.as_deref() {
+                    self.output_by_name(name)
+                } else {
+                    rule.output
+                        .as_deref()
+                        .and_then(|name| self.initial_rule_output(name))
+                }
+            })
+            .or_else(|| {
+                self.unmapped_toplevels
+                    .get(surface)
+                    .and_then(|window| window.toplevel())
+                    .and_then(|toplevel| toplevel.parent())
+                    .and_then(|parent| self.preferred_output_for_toplevel(&parent))
+                    .and_then(|name| self.output_by_name(&name))
             })
             .or_else(|| self.primary_output());
         let Some(output) = output else {
@@ -1256,7 +1255,7 @@ impl Smallvil {
                     (size.w, size.h)
                 })
             });
-            self.apply_floating_placement(surface, rule.position, effective_size);
+            self.place_initial_floating(surface, &output, workspace, &rule, effective_size);
             if rule.pin && ocean_engine {
                 self.ocean.refresh_screen_pin(surface, &output.name());
             }
@@ -2142,20 +2141,18 @@ mod tests {
     }
 
     #[test]
-    fn plain_float_conversion_without_a_size_rule_keeps_the_tile_configure() {
-        // toggle_floating's tiled-to-floating branch sends no configure of
-        // its own for these, so the first (tiled) configure must not be
-        // withheld -- otherwise the client's buffer size and the stored
-        // FloatingTag::rect would disagree forever.
+    fn first_map_float_conversion_replaces_the_tile_configure() {
+        // Centered first-map placement now supplies the resolved floating
+        // size instead of inheriting a transient Scroll tile configure.
         let mut rule = crate::config::WindowRule::default();
         assert!(!skips_first_tile_configure(&rule, false));
         rule.float = true;
-        assert!(!skips_first_tile_configure(&rule, false));
+        assert!(skips_first_tile_configure(&rule, false));
         rule.float = false;
         rule.pin = true;
-        assert!(!skips_first_tile_configure(&rule, false));
+        assert!(skips_first_tile_configure(&rule, false));
         rule.pin = false;
-        assert!(!skips_first_tile_configure(&rule, true)); // implicit_float alone
+        assert!(skips_first_tile_configure(&rule, true)); // implicit_float alone
     }
 
     #[test]
@@ -2180,9 +2177,7 @@ mod tests {
         };
         assert!(skips_first_tile_configure(&pseudo_tile, false));
 
-        // A plain float/pin/implicit-float conversion only skips once
-        // apply_floating_placement is guaranteed too, i.e. a rule-provided
-        // position or size is set.
+        // Explicit geometry follows the same first-map placement path.
         let sized_float = WindowRule {
             float: true,
             size: Some((640, 480)),
@@ -2263,3 +2258,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "floating_placement_test.rs"]
+mod floating_placement_test;

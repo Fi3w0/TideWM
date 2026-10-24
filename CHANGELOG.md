@@ -2,6 +2,11 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.188 · 2026-10-24 — Floating windows open on screen
+
+- New floating windows open centered in their chosen monitor's usable area instead of inheriting an off-screen Scroll tile. Explicit positions and sizes remain exact where they fit; oversized windows shrink as far as their minimum size allows. Dialogs follow their parent unless a rule chooses another output.
+- `rule { output = focused }` (aliases `camera` and `current`) opens on the focused window/camera's monitor rather than whichever monitor holds the pointer. Persistent output pins still use connector names. Interactive floating toggles keep visible geometry.
+
 ## 0.90.187 · 2026-10-24 — Shared backgrounds for inactive windows
 
 - Automatic depth can show a chosen image or looping GIF instead of its deep-window card. Windows share the source and animation; GPU imports are cached per renderer context. Optional titles use small strips, with cover/contain fitting and urgent borders retained.
