@@ -139,6 +139,12 @@ impl ProtocolFixture {
         fixture
     }
     pub(crate) fn window(&mut self) -> Window {
+        self.window_with_min((0, 0))
+    }
+
+    /// Creates a real xdg toplevel with an XDG minimum size. The commit makes
+    /// the cached min_size visible to layout tests before the first map.
+    pub(crate) fn window_with_min(&mut self, min: (i32, i32)) -> Window {
         let surface = self.next_id;
         let xdg_surface = surface + 1;
         let toplevel = surface + 2;
@@ -148,6 +154,12 @@ impl ProtocolFixture {
         payload.extend(surface.to_ne_bytes());
         self.request(4, 2, &payload);
         self.request(xdg_surface, 1, &toplevel.to_ne_bytes());
+        if min != (0, 0) {
+            let mut payload = min.0.to_ne_bytes().to_vec();
+            payload.extend(min.1.to_ne_bytes());
+            self.request(toplevel, 8, &payload);
+            self.request(surface, 6, &[]);
+        }
         self.dispatch();
         self.state.windows.pop().expect("xdg toplevel callback")
     }

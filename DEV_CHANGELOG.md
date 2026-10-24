@@ -2,6 +2,14 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.192 — Minimum-size-aware BSP wrapping
+
+- `.191` stopped the min-size floating guard from ejecting windows, but a three-column row could still run past the output when the sum of XDG minimum widths exceeded it (DP-4: Spotify 800 + Discord/Firefox 940/638 > 1920).
+- BSP's split choice now consults a recursive minimum footprint (`leaf_minimum`/`subtree_minimum`) and a real recursive fit check. It keeps the aspect-driven axis when both children fit, switches to the other axis when only that fits, and clamps the split ratio to the children's minimums. If neither direction fits, it falls back to the old overflow behavior.
+- The same `split_node` path feeds layout, hit-testing, resize handles and connected resize paths, so input and rendering use the same axis/ratio. The ratio clamp prevents a manual resize from requesting a tile smaller than a client's minimum.
+- Real protocol regression uses three 1920x1080 xdg toplevels with minimums 800x200, 940x200 and 638x200 and asserts all rectangles stay inside the output and do not overlap. Nested GTK window test with three size-request windows stays tiled; native DP-4 Spotify/Firefox/Discord test remains the post-install gate.
+- 701 tests (676 + 16 + 9), strict Clippy/fmt and release build pass; no push.
+
 ## 0.90.191 — Respect client minimum sizes in Classic tiling
 
 - The persistent tile-size refusal guard floated any window whose committed size differed from the promised slot for three commits over 500 ms. A normal client with an XDG minimum larger than its BSP slot (Spotify: minimum width 800 vs proposed 761; Firefox: 638 vs 244) therefore fell out of tiling after a resize. This was not the `.190` Ocean pointer work.

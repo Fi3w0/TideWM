@@ -2,6 +2,11 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.192 · 2026-10-24 — Minimum-size tiles wrap instead of leaving the screen
+
+- Classic BSP now uses each tile's XDG minimum size when choosing split directions. If a horizontal row would push a minimum-width window off the output, the affected subtree splits vertically instead; when neither direction fits, the old overflow behavior remains.
+- This keeps the three-window Spotify/Firefox/Discord case on-screen without floating any of them. Explicit `split_bias` overrides still win.
+
 ## 0.90.191 · 2026-10-24 — Client minimum sizes stay tiled
 
 - Classic no longer ejects a tiled window into floating when its XDG minimum size is larger than the slot the layout proposed. The BSP split surrounding the window grows to fit, and the window stays tiled. The old floating fallback remains only for clients that refuse a tile size without a minimum-size reason (for example a video player locked to its own aspect).
