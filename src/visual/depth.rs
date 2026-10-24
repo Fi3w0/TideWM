@@ -101,6 +101,7 @@ pub struct WindowDepth {
     last_attention: Instant,
     tier: u8,
     pub id: Id,
+    pub artwork_id: Id,
     pub commit: CommitCounter,
 }
 
@@ -110,6 +111,7 @@ impl WindowDepth {
             last_attention: Instant::now(),
             tier: 0,
             id: Id::new(),
+            artwork_id: Id::new(),
             commit: CommitCounter::default(),
         }
     }
@@ -170,6 +172,7 @@ impl DepthOverlayElement {
         program: GlesPixelProgram,
         cfg: &DepthConfig,
         urgent: bool,
+        artwork: bool,
     ) -> Self {
         Self {
             id: state.id.clone(),
@@ -182,8 +185,18 @@ impl DepthOverlayElement {
             } else {
                 0.0
             },
-            urgent_color: cfg.urgent_color,
-            urgent_alpha: if urgent { cfg.urgent_alpha } else { 0.0 },
+            urgent_color: if urgent {
+                cfg.urgent_color
+            } else {
+                cfg.border_color
+            },
+            urgent_alpha: if urgent {
+                cfg.urgent_alpha
+            } else if artwork {
+                1.0
+            } else {
+                0.0
+            },
         }
     }
 }
@@ -247,21 +260,35 @@ pub struct DepthSchematic {
     background: [u8; 3],
     background_alpha: u8,
     border: [u8; 3],
+    artwork: bool,
+    show_title: bool,
     buffer: MemoryRenderBuffer,
 }
 
 impl DepthSchematic {
-    pub fn matches(&self, size: (i32, i32), tier: u8, cfg: &DepthConfig) -> bool {
+    pub fn matches(&self, size: (i32, i32), tier: u8, cfg: &DepthConfig, artwork: bool) -> bool {
         self.size == size
+            && self.artwork == artwork
+            && self.show_title == cfg.show_title
             && self.tier == tier
             && self.background == rgb8(cfg.schematic_color)
             && self.background_alpha == alpha8(cfg.schematic_alpha)
             && self.border == rgb8(cfg.border_color)
     }
 
-    pub fn build(size: (i32, i32), title: &str, tier: u8, cfg: &DepthConfig) -> Self {
+    pub fn build(
+        size: (i32, i32),
+        title: &str,
+        tier: u8,
+        cfg: &DepthConfig,
+        artwork: bool,
+    ) -> Self {
         let width = size.0.max(1);
-        let height = size.1.max(1);
+        let height = if artwork {
+            size.1.clamp(1, 36)
+        } else {
+            size.1.max(1)
+        };
         let background = rgb8(cfg.schematic_color);
         let background_alpha = alpha8(cfg.schematic_alpha);
         let border = rgb8(cfg.border_color);
@@ -285,36 +312,40 @@ impl DepthSchematic {
                 background_alpha,
             ),
         );
-        let border_width = 3.min(width / 2).min(height / 2).max(1);
-        fill_rect(
-            &mut pixels,
-            width,
-            height,
-            (0, 0, width, border_width),
-            (border[0], border[1], border[2], 255),
-        );
-        fill_rect(
-            &mut pixels,
-            width,
-            height,
-            (0, height - border_width, width, border_width),
-            (border[0], border[1], border[2], 255),
-        );
-        fill_rect(
-            &mut pixels,
-            width,
-            height,
-            (0, 0, border_width, height),
-            (border[0], border[1], border[2], 255),
-        );
-        fill_rect(
-            &mut pixels,
-            width,
-            height,
-            (width - border_width, 0, border_width, height),
-            (border[0], border[1], border[2], 255),
-        );
-        draw_label(&mut pixels, width, height, crate::toast::font(), title);
+        if !artwork {
+            let border_width = 3.min(width / 2).min(height / 2).max(1);
+            fill_rect(
+                &mut pixels,
+                width,
+                height,
+                (0, 0, width, border_width),
+                (border[0], border[1], border[2], 255),
+            );
+            fill_rect(
+                &mut pixels,
+                width,
+                height,
+                (0, height - border_width, width, border_width),
+                (border[0], border[1], border[2], 255),
+            );
+            fill_rect(
+                &mut pixels,
+                width,
+                height,
+                (0, 0, border_width, height),
+                (border[0], border[1], border[2], 255),
+            );
+            fill_rect(
+                &mut pixels,
+                width,
+                height,
+                (width - border_width, 0, border_width, height),
+                (border[0], border[1], border[2], 255),
+            );
+        }
+        if cfg.show_title {
+            draw_label(&mut pixels, width, height, crate::toast::font(), title);
+        }
 
         let buffer = MemoryRenderBuffer::from_slice(
             &pixels,
@@ -325,7 +356,9 @@ impl DepthSchematic {
             None,
         );
         Self {
-            size: (width, height),
+            size,
+            artwork,
+            show_title: cfg.show_title,
             tier,
             background: rgb8(cfg.schematic_color),
             background_alpha,
@@ -455,6 +488,28 @@ mod tests {
             ..DepthConfig::default()
         };
         assert_eq!(tier_for_elapsed(Duration::from_secs(20), &cfg), 0);
+    }
+
+    #[test]
+    fn artwork_chrome_is_only_a_title_strip_and_tracks_title_visibility() {
+        let mut cfg = DepthConfig::default();
+        let card = DepthSchematic::build((1000, 800), "Kitty", 2, &cfg, true);
+        assert_eq!(card.size, (1000, 800));
+        card.buffer
+            .clone()
+            .render()
+            .draw(|pixels| {
+                assert_eq!(pixels.len(), 1000 * 36 * 4);
+                Ok::<_, ()>(Vec::new())
+            })
+            .unwrap();
+        assert!(card.matches((1000, 800), 2, &cfg, true));
+        assert!(!card.matches((1000, 800), 2, &cfg, false));
+        cfg.show_title = false;
+        assert!(!card.matches((1000, 800), 2, &cfg, true));
+        // Omitted titles still leave the original schematic frame/fallback.
+        let plain = DepthSchematic::build((1000, 800), "Kitty", 2, &cfg, false);
+        assert!(plain.matches((1000, 800), 2, &cfg, false));
     }
 
     #[test]

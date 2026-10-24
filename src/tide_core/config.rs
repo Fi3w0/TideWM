@@ -1570,6 +1570,12 @@ impl Config {
     /// which leaves any last-good program to the renderer's cache.
     fn load_shader_sources(&mut self, config_path: &Path) -> Vec<String> {
         let base_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+        if let Some(background) = &mut self.depth.background {
+            *background = waves::resolve_include_path(base_dir, &background.to_string_lossy());
+            if !self.source_paths.contains(background) {
+                self.source_paths.push(background.clone());
+            }
+        }
         let mut warnings = Vec::new();
         let mut loaded_bytes = 0usize;
         let mut names: Vec<&String> = self.shader_definitions.keys().collect();
@@ -4373,6 +4379,9 @@ impl Default for WorkspaceTransitionConfig {
 #[derive(Debug, Clone)]
 pub struct DepthConfig {
     pub enabled: bool,
+    pub background: Option<PathBuf>,
+    pub background_fit: DepthBackgroundFit,
+    pub show_title: bool,
     pub sink_after_ms: u32,
     pub tier_interval_ms: u32,
     /// Bounded visual depth. Tier one keeps live content; tier two and below
@@ -4394,6 +4403,9 @@ impl Default for DepthConfig {
         Self {
             // Opt-in: the blue wash / title cards surprise people who didn't ask for them.
             enabled: false,
+            background: None,
+            background_fit: DepthBackgroundFit::Cover,
+            show_title: true,
             sink_after_ms: 30_000,
             tier_interval_ms: 30_000,
             max_tier: 2,
@@ -4407,6 +4419,14 @@ impl Default for DepthConfig {
             urgent_alpha: 0.95,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DepthBackgroundFit {
+    #[default]
+    Cover,
+    Contain,
 }
 
 /// Explicit structural depth for the Classic spatial engine. This stays a
@@ -7385,6 +7405,22 @@ fn apply_depth_block(cfg: &mut DepthConfig, body: &[waves::Entry]) {
         };
         match key.as_str() {
             "enabled" => set_bool(&mut cfg.enabled, key, value),
+            "background" => {
+                cfg.background = if value.is_empty() || value == "none" {
+                    None
+                } else {
+                    Some(PathBuf::from(value))
+                };
+            }
+            "background_fit" => match value.as_str() {
+                "cover" => cfg.background_fit = DepthBackgroundFit::Cover,
+                "contain" => cfg.background_fit = DepthBackgroundFit::Contain,
+                _ => tracing::warn!(
+                    value,
+                    "Expected depth.background_fit cover or contain, ignoring"
+                ),
+            },
+            "show_title" => set_bool(&mut cfg.show_title, key, value),
             "sink_after_ms" | "delay_ms" => match parse_duration_ms(value) {
                 Some(value) if value <= 86_400_000 => cfg.sink_after_ms = value,
                 _ => tracing::warn!(
@@ -13754,6 +13790,26 @@ shader tinted-blur {
             assert_eq!(transition.spray_amount, 0.7);
             assert_eq!(transition.turbulence, 0.7);
         }
+    }
+
+    #[test]
+    fn depth_artwork_paths_are_watched_and_relative_to_main_config() {
+        let dir = TestDir::new("depth-artwork");
+        let main = dir.write("config.wave", "depth {\n background = \"art with spaces.gif\"\n background_fit = contain\n show_title = false\n}\n");
+        let (_, config, warnings) =
+            Config::reload_staged_from(&main, &wave::TideInfo::default()).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let path = main.parent().unwrap().join("art with spaces.gif");
+        assert_eq!(config.depth.background, Some(path.clone()));
+        assert_eq!(config.depth.background_fit, DepthBackgroundFit::Contain);
+        assert!(!config.depth.show_title);
+        assert!(config.source_paths.contains(&path));
+        let entries = wave_entries("depth {\n background = none\n}\n");
+        assert!(Config::from_raw(lower_entries(&entries))
+            .0
+            .depth
+            .background
+            .is_none());
     }
 
     #[test]

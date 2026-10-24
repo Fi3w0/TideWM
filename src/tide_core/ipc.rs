@@ -88,6 +88,11 @@ enum Request {
     /// profile, commit, backend, uptime, engine, config path and warnings,
     /// and counts that a bug report wants without guessing from the host.
     Diagnostics,
+    Depth,
+    SetDepth {
+        #[serde(flatten)]
+        settings: DepthUpdate,
+    },
     /// A point-in-time performance snapshot for `tidectl perf`: the
     /// compositor's own PSS/RSS/CPU-time/threads read from `/proc/self`
     /// and `getrusage` (so they're always about the right process, unlike
@@ -120,6 +125,65 @@ enum Request {
 }
 
 const MAX_BATCH_ACTIONS: usize = 128;
+
+/// A validated, atomic live override; never writes the user's config.
+#[derive(Deserialize, Debug, Default)]
+pub(crate) struct DepthUpdate {
+    enabled: Option<bool>,
+    background: Option<String>,
+    background_fit: Option<config::DepthBackgroundFit>,
+    show_title: Option<bool>,
+    sink_after_ms: Option<u32>,
+    tier_interval_ms: Option<u32>,
+    max_tier: Option<u8>,
+}
+
+impl DepthUpdate {
+    fn apply(
+        self,
+        current: &config::DepthConfig,
+        base: &std::path::Path,
+    ) -> Result<config::DepthConfig, String> {
+        if self.sink_after_ms.is_some_and(|v| v > 86_400_000)
+            || self
+                .tier_interval_ms
+                .is_some_and(|v| !(1..=86_400_000).contains(&v))
+            || self.max_tier.is_some_and(|v| !(1..=8).contains(&v))
+        {
+            return Err(
+                "depth timings must be within one day (interval >= 1ms), max_tier within 1..=8"
+                    .into(),
+            );
+        }
+        let mut next = current.clone();
+        if let Some(v) = self.enabled {
+            next.enabled = v;
+        }
+        if let Some(v) = self.background {
+            next.background = if v.is_empty() || v == "none" {
+                None
+            } else {
+                Some(crate::waves::resolve_include_path(base, &v))
+            };
+        }
+        if let Some(v) = self.background_fit {
+            next.background_fit = v;
+        }
+        if let Some(v) = self.show_title {
+            next.show_title = v;
+        }
+        if let Some(v) = self.sink_after_ms {
+            next.sink_after_ms = v;
+        }
+        if let Some(v) = self.tier_interval_ms {
+            next.tier_interval_ms = v;
+        }
+        if let Some(v) = self.max_tier {
+            next.max_tier = v;
+        }
+        Ok(next)
+    }
+}
 
 /// Subscriber-selected event channel. Matches the `events` array of a
 /// `subscribe` request: a subscriber with `filter.is_empty()` receives
@@ -241,6 +305,8 @@ pub(crate) enum IpcEvent {
         surface: WlSurface,
         tier: u8,
     },
+    DepthSettingsChanged,
+    DepthBackgroundChanged,
     ConfigReloaded,
     /// The active XKB layout group or the layout list changed. Carries the
     /// snapshot directly because it is read under the keyboard lock, where
@@ -279,7 +345,9 @@ impl IpcEvent {
             IpcEvent::WorkspaceChanged { .. } => EventKind::Workspace,
             IpcEvent::FocusChanged { .. } => EventKind::Focus,
             IpcEvent::UrgentChanged { .. } => EventKind::Urgent,
-            IpcEvent::DepthChanged { .. } => EventKind::Depth,
+            IpcEvent::DepthChanged { .. }
+            | IpcEvent::DepthSettingsChanged
+            | IpcEvent::DepthBackgroundChanged => EventKind::Depth,
             IpcEvent::ConfigReloaded => EventKind::Config,
             IpcEvent::LayoutChanged { .. } => EventKind::Layout,
             IpcEvent::OutputChanged { .. } => EventKind::Output,
@@ -302,6 +370,8 @@ impl IpcEvent {
             IpcEvent::FocusChanged { .. } => "focus-changed",
             IpcEvent::UrgentChanged { .. } => "urgent-changed",
             IpcEvent::DepthChanged { .. } => "depth-changed",
+            IpcEvent::DepthSettingsChanged => "depth-settings-changed",
+            IpcEvent::DepthBackgroundChanged => "depth-background-changed",
             IpcEvent::ConfigReloaded => "config-reloaded",
             IpcEvent::LayoutChanged { .. } => "layout-changed",
             IpcEvent::OutputChanged { .. } => "output-changed",
@@ -375,6 +445,7 @@ impl IpcEvent {
             IpcEvent::ModeChanged { mode } => json!({ "mode": mode }),
             IpcEvent::EngineChanged { from, to } => json!({ "from": from, "to": to }),
             IpcEvent::ScrollChanged { output } => scroll_json(state, output),
+            IpcEvent::DepthSettingsChanged | IpcEvent::DepthBackgroundChanged => depth_json(state),
             IpcEvent::ConfigReloaded => serde_json::Value::Null,
         };
         let mut line = serde_json::to_vec(&json!({ "event": self.event_name(), "data": data }))
@@ -925,6 +996,20 @@ fn handle_request(state: &mut Smallvil, request: Request) -> serde_json::Value {
             } }),
             None => json!({ "ok": false, "error": "no keyboard on the seat" }),
         },
+        Request::Depth => json!({ "ok": true, "data": depth_json(state) }),
+        Request::SetDepth { settings } => {
+            let path = config::Config::path();
+            let base = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+            let reload_background = settings.background.is_some();
+            match settings.apply(&state.config.depth, base) {
+                Ok(next) => {
+                    state.apply_depth_settings(next, reload_background);
+                    state.emit_ipc_event(IpcEvent::DepthSettingsChanged);
+                    json!({ "ok": true, "data": depth_json(state) })
+                }
+                Err(error) => json!({ "ok": false, "error": error }),
+            }
+        }
         Request::Diagnostics => json!({ "ok": true, "data": diagnostics_json(state) }),
         Request::Perf => json!({ "ok": true, "data": perf_snapshot_json(state) }),
         // Subscribe is intercepted upstream in `register_connection` before
@@ -1247,6 +1332,19 @@ fn focused_window_json(state: &Smallvil) -> serde_json::Value {
 /// checks (kernel, GPU, services) run in the CLI itself; this is the half
 /// only a running TideWM knows: what it is, how it was built, how long it's
 /// been up, what the config parser said, and what state it's in right now.
+pub(crate) fn depth_json(state: &Smallvil) -> serde_json::Value {
+    let cfg = &state.config.depth;
+    json!({
+        "enabled": cfg.enabled,
+        "effective_enabled": cfg.enabled && state.config.water_effects,
+        "background": cfg.background, "background_fit": cfg.background_fit,
+        "show_title": cfg.show_title, "sink_after_ms": cfg.sink_after_ms,
+        "tier_interval_ms": cfg.tier_interval_ms, "max_tier": cfg.max_tier,
+        "artwork": state.depth_background.diagnostics(),
+        "persistence": "live overrides last until config reload; edit depth {} to persist"
+    })
+}
+
 fn diagnostics_json(state: &Smallvil) -> serde_json::Value {
     let layer_surfaces: usize = state
         .space
@@ -1294,6 +1392,7 @@ fn diagnostics_json(state: &Smallvil) -> serde_json::Value {
         },
         "water_effects": state.config.water_effects,
         "memory_tier": memory_tier,
+        "depth": depth_json(state),
         "config_path": crate::config::Config::path(),
         "config_warnings": state.config_warnings,
         "xwayland_enabled": state.config.xwayland.enabled,
@@ -1349,6 +1448,7 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
             total.saturating_add(capture.estimated_texture_bytes())
         });
     let wallpaper_texture_bytes = state.builtin_wallpaper.estimated_texture_bytes();
+    let depth_texture_bytes = state.depth_background.estimated_texture_bytes();
     let caustics_texture_bytes = state.caustics.values().fold(0_u64, |total, caustics| {
         total.saturating_add(caustics.estimated_texture_bytes())
     });
@@ -1391,6 +1491,7 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
         .saturating_add(shader_stage_bytes)
         .saturating_add(layer_alpha_mask_bytes)
         .saturating_add(wallpaper_texture_bytes)
+        .saturating_add(depth_texture_bytes)
         .saturating_add(caustics_texture_bytes)
         .saturating_add(transition_texture_bytes);
     #[cfg(feature = "screencast")]
@@ -1416,7 +1517,8 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
         "cpu_user_us": cpu_user_us,
         "cpu_system_us": cpu_system_us,
         "threads": threads,
-        "animation_active": state.has_active_animation(),
+        "animation_active": state.has_active_animation() || state.depth_background.animating(),
+        "depth": depth_json(state),
         "water_effects": state.config.water_effects,
         "builtin_wallpaper": state.config.builtin_wallpaper,
         "screencast_feature": screencast_feature,
@@ -1429,9 +1531,10 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
             "layer_alpha_mask_bytes": layer_alpha_mask_bytes,
             "layer_alpha_mask_count": state.layer_alpha_masks.len(),
             "wallpaper_bytes": wallpaper_texture_bytes,
+            "depth_background_bytes": depth_texture_bytes,
             "caustics_bytes": caustics_texture_bytes,
             "workspace_transition_bytes": transition_texture_bytes,
-            "scope": "ARGB payload for TideWM-owned backdrop, wallpaper, caustics, and active water/non-water workspace-transition textures; excludes client buffers and driver overhead",
+            "scope": "ARGB payload for TideWM-owned backdrop, wallpaper, shared depth artwork, caustics, and active water/non-water workspace-transition textures; excludes title cards/strips, client buffers and driver overhead",
         },
         "custom_shaders": {
             "enabled": state.config.shaders_enabled,
@@ -1704,6 +1807,51 @@ pub(crate) fn navigation_regression(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn depth_updates_are_atomic_and_validate_types_ranges_and_path_expansion() {
+        let original = config::DepthConfig::default();
+        let update: DepthUpdate = serde_json::from_value(json!({
+            "enabled": true, "background": "art with spaces.gif",
+            "background_fit": "contain", "show_title": false,
+            "sink_after_ms": 100, "tier_interval_ms": 200, "max_tier": 3
+        }))
+        .unwrap();
+        let next = update
+            .apply(&original, std::path::Path::new("/tmp/config"))
+            .unwrap();
+        assert!(next.enabled);
+        assert!(!next.show_title);
+        assert_eq!(
+            next.background,
+            Some(PathBuf::from("/tmp/config/art with spaces.gif"))
+        );
+        assert_eq!(next.background_fit, config::DepthBackgroundFit::Contain);
+        assert_eq!(next.max_tier, 3);
+        assert!(!original.enabled);
+        for value in [
+            json!({"enabled":true,"max_tier":0}),
+            json!({"tier_interval_ms":0}),
+            json!({"sink_after_ms":86400001}),
+        ] {
+            let update: DepthUpdate = serde_json::from_value(value).unwrap();
+            assert!(update
+                .apply(&original, std::path::Path::new("/tmp"))
+                .is_err());
+            assert!(!original.enabled);
+        }
+        assert!(serde_json::from_value::<Request>(
+            json!({"request":"set-depth","background_fit":"stretch"})
+        )
+        .is_err());
+        let clear: DepthUpdate = serde_json::from_value(json!({"background":"none"})).unwrap();
+        assert!(clear
+            .apply(&next, std::path::Path::new("/tmp"))
+            .unwrap()
+            .background
+            .is_none());
+    }
+
     use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 
     /// Marker type satisfying both `ClientData` (for the throwaway test

@@ -642,6 +642,70 @@ fn read_bounded_to_end<R: Read>(reader: R, cap: usize) -> std::io::Result<Vec<u8
 /// through; everything else is an action, either one of the space-separated
 /// shorthands below or forwarded verbatim (covers exact keybind syntax
 /// typed directly, e.g. `tidectl workspace:3` or `tidectl toggle-floating`).
+fn depth_request(args: &[String]) -> Result<Value, String> {
+    if args.is_empty() {
+        return Ok(json!({"request": "depth"}));
+    }
+    if args[0] != "set" || args.len() < 3 || args.len() % 2 == 0 {
+        return Err("usage: tidectl depth [set --enabled on|off --background PATH|none --fit cover|contain --title on|off --sink-after-ms N --tier-interval-ms N --max-tier N]".into());
+    }
+    let mut request = json!({"request": "set-depth"});
+    for pair in args[1..].chunks_exact(2) {
+        let value = &pair[1];
+        let (key, parsed) = match pair[0].as_str() {
+            "--enabled" | "--title" => {
+                let flag = match value.as_str() {
+                    "on" | "true" => true,
+                    "off" | "false" => false,
+                    _ => return Err(format!("{} expects on or off", pair[0])),
+                };
+                (
+                    if pair[0] == "--enabled" {
+                        "enabled"
+                    } else {
+                        "show_title"
+                    },
+                    json!(flag),
+                )
+            }
+            "--fit" if value == "cover" || value == "contain" => ("background_fit", json!(value)),
+            "--background" => {
+                let path = if value == "none"
+                    || value.is_empty()
+                    || value.starts_with("~/")
+                    || Path::new(value).is_absolute()
+                {
+                    value.clone()
+                } else {
+                    env::current_dir()
+                        .map_err(|e| e.to_string())?
+                        .join(value)
+                        .to_string_lossy()
+                        .into_owned()
+                };
+                ("background", json!(path))
+            }
+            "--sink-after-ms" | "--tier-interval-ms" | "--max-tier" => {
+                let number = value
+                    .parse::<u32>()
+                    .map_err(|_| format!("{} expects an integer", pair[0]))?;
+                let key = match pair[0].as_str() {
+                    "--sink-after-ms" => "sink_after_ms",
+                    "--tier-interval-ms" => "tier_interval_ms",
+                    _ => "max_tier",
+                };
+                (key, json!(number))
+            }
+            other => return Err(format!("invalid depth option/value: {other} {value}")),
+        };
+        if request.get(key).is_some() {
+            return Err(format!("duplicate depth option: {}", pair[0]));
+        }
+        request[key] = parsed;
+    }
+    Ok(request)
+}
+
 fn build_request(args: &[String]) -> Result<Value, String> {
     let rest = &args[1..];
     match args[0].as_str() {
@@ -691,6 +755,7 @@ fn build_request(args: &[String]) -> Result<Value, String> {
             }
             Ok(request)
         }
+        "depth" => depth_request(rest),
         "outputs" => Ok(json!({ "request": "outputs" })),
         "workspaces" => Ok(json!({ "request": "workspaces" })),
         "windows" => Ok(json!({ "request": "windows" })),
@@ -855,7 +920,7 @@ fn print_response(command: &str, data: &Value) {
         }
         "layers" => print_layers(data),
         "keyboard-layouts" | "layout" => print_keyboard_layouts(data),
-        "eval" => println!("{}", serde_json::to_string_pretty(data).unwrap_or_default()),
+        "eval" | "depth" => println!("{}", serde_json::to_string_pretty(data).unwrap_or_default()),
         _ => println!("ok"),
     }
 }
@@ -1029,6 +1094,13 @@ QUERIES:
     resolve-window --pid <PID> | --app-id <ID> | --window-id <ID>
                         resolve a notification source; ambiguous matches fail
     keyboard-layouts     current XKB layout (`--json`: current_idx, names, codes)
+    depth                depth settings and shared-artwork resource state
+
+DEPTH (live overrides; edit depth {{}} in config.wave to persist):
+    tidectl depth set --enabled on --background "/path/to/art.gif"
+    tidectl depth set --fit cover|contain --title on|off
+    tidectl depth set --background none
+    tidectl depth set --sink-after-ms 30000 --tier-interval-ms 30000 --max-tier 2
 
 STREAMING:
     subscribe [event...]   long-lived: print one JSON line per event
@@ -1094,6 +1166,41 @@ tidewm-*.sock under $XDG_RUNTIME_DIR."#
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn depth_commands_preserve_paths_and_validate_whole_updates() {
+        let request =
+            |args: &[&str]| build_request(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(request(&["depth"]).unwrap(), json!({"request":"depth"}));
+        let update = request(&[
+            "depth",
+            "set",
+            "--background",
+            "/tmp/art with spaces.gif",
+            "--enabled",
+            "on",
+            "--fit",
+            "contain",
+            "--title",
+            "off",
+        ])
+        .unwrap();
+        assert_eq!(
+            update,
+            json!({"request":"set-depth", "background":"/tmp/art with spaces.gif",
+            "enabled":true, "background_fit":"contain", "show_title":false})
+        );
+        for args in [
+            &["depth", "set"][..],
+            &["depth", "set", "--enabled", "maybe"],
+            &["depth", "set", "--fit", "stretch"],
+            &["depth", "set", "--title", "on", "--title", "off"],
+            &["depth", "set", "--background"],
+            &["depth", "typo"],
+        ] {
+            assert!(request(args).is_err(), "{args:?}");
+        }
+    }
 
     #[test]
     fn navigation_commands_validate_selectors_and_preserve_identity() {

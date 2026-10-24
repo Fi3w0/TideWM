@@ -6,7 +6,7 @@ The quick technical picture: what TideWM is built from, what works, what's been 
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). Underneath is a complete tiling window manager: BSP, master/stack and cascade layouts, workspaces, multi-monitor, layer shell, IPC and XWayland. On top sits the water look (ripples, waves, glass, shadows, physics), and every piece of it is a config toggle.
 
-Current version: **0.90.168**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
+Current version: **0.90.187**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
 
 ## Architecture
 
@@ -21,6 +21,7 @@ Current version: **0.90.168**, beta. 1.0 waits for a wider real-hardware pass (I
 - **One render pipeline.** Glass, shadows, rounding, borders and animations are drawn once per frame from a shared window-placement snapshot. The same path feeds both backends, screenshots, screen sharing and workspace transitions, so an effect never needs a second implementation.
 - **Config:** [Wave](WAVE.md), data on the surface and Lua underneath. It's hot-reloaded, and a broken edit never half-applies.
 - **Memory:** about 50 MB PSS for plain tiling and 60–70 MB with the full water stack on AMD. About 100 MB on NVIDIA, a third of which is the driver's own mappings. 2 GB is a hard ceiling for feature growth, not a target.
+- **Attention-depth artwork:** shared PNG/JPEG/static WebP or looping GIF in place of deep windows' live pixels. One source/current frame, per-context GPU imports, optional title strips and one GIF clock; decoding stays off the compositor thread. Config and typed live IPC share the same settings. Hidden-workspace/locked/powered-off views pause animation. This does not suspend clients or their callbacks; GPU/CPU/RAM savings depend on the workload. See [`depth { }`](DOCUMENTATION.md#depth--).
 
 ## Scroll engine
 

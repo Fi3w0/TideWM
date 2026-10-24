@@ -13,6 +13,7 @@ pub(crate) mod compass;
 pub(crate) mod currents;
 pub(crate) mod decoration;
 pub(crate) mod depth;
+pub(crate) mod depth_background;
 pub(crate) mod depth_deck;
 pub(crate) mod depth_transition;
 pub(crate) mod error_overlay;

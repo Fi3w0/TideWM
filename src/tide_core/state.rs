@@ -494,8 +494,12 @@ pub struct Smallvil {
     /// map and removed on unmap/destroy, so time-based sinking cannot grow
     /// state beyond the current mapped toplevel count.
     pub(crate) window_depths: HashMap<WlSurface, crate::depth::WindowDepth>,
-    /// Cached title-card buffers for tier-two-and-deeper windows. A window
-    /// returning to live content or unmapping evicts its buffer immediately.
+    /// Shared artwork source, CPU frame and per-renderer texture imports.
+    pub(crate) depth_background: crate::depth_background::DepthBackground,
+    depth_background_timer: Option<RegistrationToken>,
+    depth_background_deadline: Option<Instant>,
+    /// With artwork these buffers contain only the optional title strip.
+    /// Returning to live content or unmapping evicts a window's buffer.
     pub(crate) depth_schematics: HashMap<WlSurface, crate::depth::DepthSchematic>,
     /// Shared analytical cool-wash/urgent-border shader.
     pub(crate) depth_overlay_program: Option<GlesPixelProgram>,
@@ -3243,13 +3247,14 @@ impl Smallvil {
     /// Builds the front-to-back desktop stack with explicit fullscreen/layer
     /// ordering. `skip` removes window surfaces during backdrop capture;
     /// `glass_layers` are reinserted immediately behind their owning windows.
-    #[allow(clippy::mutable_key_type)] // WlSurface-keyed glass layer map
+    #[allow(clippy::mutable_key_type, clippy::too_many_arguments)] // WlSurface-keyed scene layers
     pub(crate) fn desktop_render_elements(
         &mut self,
         renderer: &mut GlesRenderer,
         output: &Output,
         placements: &[crate::placement::PlacedWindow],
         skip: &[WlSurface],
+        depth_layers: &mut HashMap<WlSurface, Vec<crate::backend::udev::OutputRenderElements>>,
         glass_layers: &mut HashMap<WlSurface, Vec<crate::backend::udev::OutputRenderElements>>,
         backdrop: Vec<crate::backend::udev::OutputRenderElements>,
     ) -> Option<Vec<crate::backend::udev::OutputRenderElements>> {
@@ -3283,6 +3288,7 @@ impl Smallvil {
             rounded_program: Option<&GlesTexProgram>,
             border_program: Option<&GlesPixelProgram>,
             placements: &[crate::placement::PlacedWindow],
+            depth_layers: &mut HashMap<WlSurface, Vec<crate::backend::udev::OutputRenderElements>>,
             glass_layers: &mut HashMap<WlSurface, Vec<crate::backend::udev::OutputRenderElements>>,
             result: &mut Vec<crate::backend::udev::OutputRenderElements>,
         ) {
@@ -3296,6 +3302,11 @@ impl Smallvil {
                 let surface = entry.surface();
                 if entry.is_fullscreen() != fullscreen {
                     continue;
+                }
+                if entry.replacement_eligible() {
+                    if let Some(layers) = surface.and_then(|surface| depth_layers.remove(surface)) {
+                        result.extend(layers);
+                    }
                 }
                 // `skip` contains active-space surfaces rebuilt by depth or
                 // glass passes. Neighbor previews have no replacement pass;
@@ -3444,6 +3455,7 @@ impl Smallvil {
             rounded_program.as_ref(),
             border_program.as_ref(),
             placements,
+            &mut *depth_layers,
             &mut *glass_layers,
             &mut result,
         );
@@ -3485,6 +3497,7 @@ impl Smallvil {
             rounded_program.as_ref(),
             border_program.as_ref(),
             placements,
+            &mut *depth_layers,
             &mut *glass_layers,
             &mut result,
         );
@@ -3604,6 +3617,7 @@ impl Smallvil {
         if !enabled {
             self.depth_schematics.clear();
         }
+        self.poll_depth_background();
         if changed {
             self.request_redraw();
         }
@@ -3941,6 +3955,83 @@ impl Smallvil {
         }
     }
 
+    pub(crate) fn apply_depth_settings(
+        &mut self,
+        next: crate::config::DepthConfig,
+        reload_background: bool,
+    ) {
+        if reload_background || next.background != self.config.depth.background {
+            self.depth_background.reset();
+            for depth in self.window_depths.values_mut() {
+                depth.artwork_id = smithay::backend::renderer::element::Id::new();
+            }
+        }
+        self.config.depth = next;
+        self.depth_schematics.clear();
+        for depth in self.window_depths.values_mut() {
+            depth.visual_changed();
+        }
+        self.depth_last_tick = Instant::now() - Duration::from_millis(100);
+        self.update_window_depths();
+        self.request_redraw();
+    }
+
+    /// One decoder wakeup/deadline for the entire artwork, regardless of window count.
+    fn poll_depth_background(&mut self) {
+        let enabled = self.config.water_effects && self.config.depth.enabled;
+        let path = enabled
+            .then(|| self.config.depth.background.clone())
+            .flatten();
+        let visible = path.is_some()
+            && self.depth_background.can_present()
+            && matches!(self.session_lock, SessionLock::Unlocked)
+            && self.space.outputs().any(|output| {
+                if !self.wlr_output_power_management_state.is_on(output) {
+                    return false;
+                }
+                let Some(view) = self.space.output_geometry(output) else {
+                    return false;
+                };
+                self.render_placements(output).is_some_and(|placements| {
+                    placements.iter().any(|p| {
+                        p.replacement_eligible()
+                            && p.rect.overlaps(view)
+                            && p.surface()
+                                .and_then(|s| self.window_depths.get(s))
+                                .is_some_and(|depth| depth.tier() >= 2)
+                    })
+                })
+            });
+        let now = Instant::now();
+        let old_status = self.depth_background.status();
+        self.depth_background
+            .configure(path.as_deref(), visible, now);
+        if self.depth_background.poll(now) {
+            self.request_redraw();
+        }
+        if self.depth_background.status() != old_status {
+            self.emit_ipc_event(crate::ipc::IpcEvent::DepthBackgroundChanged);
+        }
+        let deadline = self.depth_background.deadline();
+        if deadline != self.depth_background_deadline {
+            if let Some(token) = self.depth_background_timer.take() {
+                self.loop_handle.remove(token);
+            }
+            self.depth_background_deadline = deadline;
+            if let Some(deadline) = deadline {
+                self.depth_background_timer = self
+                    .loop_handle
+                    .insert_source(Timer::from_deadline(deadline), |_, _, state| {
+                        state.depth_background_timer = None;
+                        state.depth_background_deadline = None;
+                        state.poll_depth_background();
+                        TimeoutAction::Drop
+                    })
+                    .ok();
+            }
+        }
+    }
+
     /// Builds the depth-specific replacement/overlay elements for one output.
     /// The returned surface list contains only deep windows whose schematic
     /// replacement was successfully built, so callers can safely omit those
@@ -3951,14 +4042,15 @@ impl Smallvil {
         output: &Output,
         placements: &[crate::placement::PlacedWindow],
     ) -> (
-        Vec<crate::backend::udev::OutputRenderElements>,
+        HashMap<WlSurface, Vec<crate::backend::udev::OutputRenderElements>>,
         Vec<WlSurface>,
     ) {
+        self.poll_depth_background();
         if !self.config.water_effects || !self.config.depth.enabled {
-            return (Vec::new(), Vec::new());
+            return (HashMap::new(), Vec::new());
         }
         let Some(output_geo) = self.space.output_geometry(output) else {
-            return (Vec::new(), Vec::new());
+            return (HashMap::new(), Vec::new());
         };
         let visible: Vec<(WlSurface, Rectangle<i32, Logical>)> = placements
             .iter()
@@ -3972,6 +4064,9 @@ impl Smallvil {
                     visual.offset.y.round() as i32,
                 ));
                 rect.size = visual.rounded_size_or(placement.window.geometry().size);
+                if !rect.overlaps(output_geo) {
+                    return None;
+                }
                 Some((
                     surface,
                     Rectangle::new(rect.loc - output_geo.loc, rect.size),
@@ -3980,17 +4075,34 @@ impl Smallvil {
             .collect();
         let program =
             crate::depth::depth_overlay_program(&mut self.depth_overlay_program, renderer);
-        let mut elements = Vec::new();
+        #[allow(clippy::mutable_key_type)]
+        let mut layers = HashMap::new();
         let mut replaced = Vec::new();
 
         for (surface, area) in visible {
+            let mut elements = Vec::new();
             let Some(depth) = self.window_depths.get(&surface) else {
                 continue;
             };
             let tier = depth.tier();
             let urgent = self.urgent.contains(&surface);
 
-            if let Some(program) = program.as_ref().filter(|_| tier == 1 || urgent) {
+            let artwork = if tier >= 2 {
+                self.depth_background.render_element(
+                    renderer,
+                    area,
+                    self.config.depth.background_fit,
+                    output.current_scale().fractional_scale(),
+                    depth.artwork_id.clone(),
+                )
+            } else {
+                None
+            };
+            let has_artwork = artwork.is_some();
+            if let Some(program) = program
+                .as_ref()
+                .filter(|_| tier == 1 || urgent || has_artwork)
+            {
                 elements.push(crate::backend::udev::OutputRenderElements::DepthOverlay(
                     crate::depth::DepthOverlayElement::new(
                         depth,
@@ -3998,39 +4110,82 @@ impl Smallvil {
                         program.clone(),
                         &self.config.depth,
                         urgent,
+                        has_artwork,
                     ),
                 ));
             }
 
             if tier < 2 {
                 self.depth_schematics.remove(&surface);
+                if !elements.is_empty() {
+                    layers.insert(surface, elements);
+                }
                 continue;
             }
 
             let size = (area.size.w.max(1), area.size.h.max(1));
-            let rebuild = self
-                .depth_schematics
-                .get(&surface)
-                .is_none_or(|schematic| !schematic.matches(size, tier, &self.config.depth));
-            if rebuild {
-                let title = crate::tab_strip::window_title(&surface);
-                self.depth_schematics.insert(
-                    surface.clone(),
-                    crate::depth::DepthSchematic::build(size, &title, tier, &self.config.depth),
-                );
+            // Artwork only needs a short title strip, never a window-sized CPU copy.
+            if !has_artwork || self.config.depth.show_title {
+                let rebuild = self.depth_schematics.get(&surface).is_none_or(|schematic| {
+                    !schematic.matches(size, tier, &self.config.depth, has_artwork)
+                });
+                if rebuild {
+                    // Identity-change callbacks invalidate this cache; avoid
+                    // cloning/rasterizing a title on every GIF frame.
+                    let title = if self.config.depth.show_title {
+                        crate::tab_strip::window_title(&surface)
+                    } else {
+                        String::new()
+                    };
+                    self.depth_schematics.insert(
+                        surface.clone(),
+                        crate::depth::DepthSchematic::build(
+                            size,
+                            &title,
+                            tier,
+                            &self.config.depth,
+                            has_artwork,
+                        ),
+                    );
+                }
+                let Some(element) = self.depth_schematics.get(&surface).and_then(|schematic| {
+                    schematic.render_element(
+                        renderer,
+                        (
+                            area.loc.x as f64 * output.current_scale().fractional_scale(),
+                            area.loc.y as f64 * output.current_scale().fractional_scale(),
+                        ),
+                    )
+                }) else {
+                    continue;
+                };
+                elements.push(crate::backend::udev::OutputRenderElements::Composited(
+                    element,
+                ));
+            } else {
+                self.depth_schematics.remove(&surface);
             }
-            let Some(element) = self.depth_schematics.get(&surface).and_then(|schematic| {
-                schematic.render_element(renderer, (area.loc.x as f64, area.loc.y as f64))
-            }) else {
-                continue;
-            };
+            if let Some(artwork) = artwork {
+                elements.push(crate::backend::udev::OutputRenderElements::DepthImage(
+                    artwork,
+                ));
+                let alpha = self.config.depth.schematic_alpha;
+                let color = self.config.depth.schematic_color;
+                elements.push(crate::backend::udev::OutputRenderElements::Dim(
+                    SolidColorRenderElement::new(
+                        depth.artwork_id.namespaced(1),
+                        area.to_physical_precise_round(output.current_scale().fractional_scale()),
+                        depth.commit,
+                        [color[0] * alpha, color[1] * alpha, color[2] * alpha, alpha],
+                        Kind::Unspecified,
+                    ),
+                ));
+            }
+            layers.insert(surface.clone(), elements);
             replaced.push(surface);
-            elements.push(crate::backend::udev::OutputRenderElements::Composited(
-                element,
-            ));
         }
 
-        (elements, replaced)
+        (layers, replaced)
     }
 
     pub fn new(event_loop: &mut EventLoop<'static, Smallvil>, display: Display<Self>) -> Self {
@@ -4186,6 +4341,14 @@ impl Smallvil {
         let idle_inhibit_manager_state = IdleInhibitManagerState::new::<Self>(&dh);
         let idle_notifier_state = IdleNotifierState::<Self>::new(&dh, loop_handle.clone());
 
+        let (depth_wake, depth_source) =
+            smithay::reexports::calloop::ping::make_ping().expect("creating depth artwork wakeup");
+        loop_handle
+            .insert_source(depth_source, |(), _, state: &mut Smallvil| {
+                state.poll_depth_background();
+            })
+            .expect("registering depth artwork wakeup");
+
         Self {
             start_time,
             display_handle: dh,
@@ -4304,6 +4467,9 @@ impl Smallvil {
             closing_window_animations: Vec::new(),
             window_depths: HashMap::new(),
             depth_schematics: HashMap::new(),
+            depth_background: crate::depth_background::DepthBackground::new(depth_wake),
+            depth_background_timer: None,
+            depth_background_deadline: None,
             depth_overlay_program: None,
             depth_last_tick: Instant::now(),
             pending_workspace_transitions: HashMap::new(),
@@ -7904,11 +8070,15 @@ impl Smallvil {
         // captures itself -- and two overlapping glass windows read what's
         // below the pair rather than each other's raw surfaces, which is
         // the trade that makes the shared list possible.
+        let (mut depth_layers, deep_surfaces) =
+            self.depth_frame_elements(renderer, output, placements);
+        let skip: Vec<WlSurface> = surfaces.iter().cloned().chain(deep_surfaces).collect();
         let Some(space_elements) = self.desktop_render_elements(
             renderer,
             output,
             placements,
-            &surfaces,
+            &skip,
+            &mut depth_layers,
             &mut HashMap::new(),
             Vec::new(),
         ) else {
@@ -8205,12 +8375,15 @@ impl Smallvil {
         // layers are all excluded from the list, so one build serves every
         // layer's capture and no blurred layer ever captures itself or a
         // sibling blurred layer.
-        let skip = layer_surfaces;
+        let (mut depth_layers, deep_surfaces) =
+            self.depth_frame_elements(renderer, output, placements);
+        let skip: Vec<WlSurface> = layer_surfaces.into_iter().chain(deep_surfaces).collect();
         let Some(space_elements) = self.desktop_render_elements(
             renderer,
             output,
             placements,
             &skip,
+            &mut depth_layers,
             &mut HashMap::new(),
             Vec::new(),
         ) else {
@@ -8766,7 +8939,7 @@ impl Smallvil {
         #[allow(clippy::mutable_key_type)]
         let mut glass_layers =
             self.glass_layer_elements(renderer, output, &placements, &glass_surfaces);
-        let (depth_elements, depth_surfaces) =
+        let (mut depth_elements, depth_surfaces) =
             self.depth_frame_elements(renderer, output, &placements);
         // Glass windows render in their normal z-slot; only depth-replaced
         // windows are skipped.
@@ -8782,13 +8955,13 @@ impl Smallvil {
             output,
             &placements,
             &skip,
+            &mut depth_elements,
             &mut glass_layers,
             backdrop,
         )?;
         let closing_windows = self.closing_window_frame_elements(renderer, output);
         let elements: Vec<crate::backend::udev::OutputRenderElements> = closing_windows
             .into_iter()
-            .chain(depth_elements)
             .chain(space_elements)
             .chain(
                 self.wallpaper_capture_element(output, renderer)
@@ -15552,6 +15725,10 @@ impl Smallvil {
                         self.window_frame_snapshots.clear();
                     }
                     self.depth_schematics.clear();
+                    self.depth_background.reset();
+                    for depth in self.window_depths.values_mut() {
+                        depth.artwork_id = smithay::backend::renderer::element::Id::new();
+                    }
                     self.depth_last_tick = Instant::now() - Duration::from_millis(100);
                     self.update_window_depths();
                     let any_workspace_animation = (self.config.water_effects

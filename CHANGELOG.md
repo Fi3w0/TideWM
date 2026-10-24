@@ -2,6 +2,11 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.187 · 2026-10-24 — Shared backgrounds for inactive windows
+
+- Automatic depth can show a chosen image or looping GIF instead of its deep-window card. Windows share the source and animation; GPU imports are cached per renderer context. Optional titles use small strips, with cover/contain fitting and urgent borders retained.
+- `tidectl depth` reads settings/resource state; `tidectl depth set` changes artwork, fitting, titles, enablement and timings live. The same settings live in `depth { }` for persistence. Failed files fall back to cards, hidden views pause GIF, and depth replacements respect window stacking. This does not suspend applications; resource savings depend on the workload.
+
 ## 0.90.186 · 2026-10-24 — Keybinds survive a layout switch
 
 - Keybinds now match the active layout first, then the Latin keysym the same physical key produces in your other configured layouts. `Super+V` keeps working while `ru` is active even though XKB reports `Cyrillic_em` for that key; shifted variants, helper chords and the minimap trigger get the same treatment.

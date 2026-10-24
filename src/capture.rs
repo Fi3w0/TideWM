@@ -748,7 +748,7 @@ impl Smallvil {
             // Layer frost and layer shaders, as both visible backends add them.
             glass_layers.extend(self.layer_glass_elements(renderer, &output));
             self.drop_glass_over_blocked_layers(&output, &mut glass_layers);
-            let (depth_elements, depth_surfaces) =
+            let (mut depth_elements, depth_surfaces) =
                 self.depth_frame_elements(renderer, &output, &placements);
             // Glass windows render in their normal z-slot; only
             // depth-replaced windows are skipped.
@@ -769,6 +769,7 @@ impl Smallvil {
                 &output,
                 &placements,
                 &skip,
+                &mut depth_elements,
                 &mut glass_layers,
                 backdrop,
             ) {
@@ -779,7 +780,6 @@ impl Smallvil {
                     elements.extend(workspace_transition);
                     elements.extend(workspace_glide);
                     elements.extend(closing_windows);
-                    elements.extend(depth_elements);
                     elements.extend(space_elements);
                     if let Some(wallpaper) = self.wallpaper_element(&output, renderer) {
                         elements.push(OutputRenderElements::Wallpaper(wallpaper));
