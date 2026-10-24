@@ -2,6 +2,12 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.190 — Ocean camera-scaled pointer coordinates
+
+- Ocean's camera zoom is a compositor-side render scale: `RescaleRenderElement` grows the client surface around its geometry origin, while `PointerHandle::motion` still delivered `event.location - surface_origin` in compositor logical units. At zoom 2 a click halfway across a window arrived at the far edge, and at any non-1 zoom hover/click targets drifted in every client. Scroll and zoom 1 were unaffected, which made it look like a Scroll/Firefox-specific regression.
+- Use Smithay's existing per-client `client_scale` as a temporary inverse camera scale while delivering pointer enter/motion/relative/axis events. `surface_under` now uses the camera-scaled surface origin (including the CSD geometry inset), so hit testing and delivered client coordinates agree at every zoom. The scale is restored before the event loop can process a surface commit, so it cannot leak into rendering/damage. Ocean pointer focus is re-resolved after zoom/pan animations and after `OceanPanGrab` releases; `PointerButton`'s existing refresh now also covers Ocean. Constraint regions use the same inverse scale.
+- Coverage: 699 tests (674 + 16 + 9), including pure checks for the scaled surface origin and inverse client scale. Native zoom click/hover on both outputs remains the user's post-install gate.
+
 ## 0.90.189 — Match toplevel capture rendering to source scale
 
 - `render_one_capture` sized a toplevel framebuffer using the source output scale, but created its `OutputDamageTracker` at 1.0. Surface elements use the tracker scale for their destination geometry, so at 1.25 the client covered only about 64% of the advertised canvas area; the remainder stayed transparent or showed the window's own glass. Use the source scale in the toplevel tracker, matching output capture. No bbox crop, shell workaround or client-tree change.

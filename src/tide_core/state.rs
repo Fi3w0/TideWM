@@ -1296,6 +1296,44 @@ fn surface_origin(window: &Window, rect_loc: Point<i32, Logical>) -> Point<i32, 
     rect_loc - window.geometry().loc
 }
 
+/// Surface origin for a camera-scaled placement. Ocean renders a window's
+/// surface tree around its *geometry* origin and then scales it by the camera
+/// zoom; a client geometry offset therefore has to be scaled with it. Keeping
+/// this beside `surface_origin` makes the input and renderer transforms use
+/// the same coordinates.
+fn surface_origin_for_view_parts(
+    rect_loc: Point<i32, Logical>,
+    geometry_loc: Point<i32, Logical>,
+    view_scale: f64,
+) -> Point<f64, Logical> {
+    let scale = view_scale.max(0.05);
+    Point::from((
+        rect_loc.x as f64 - geometry_loc.x as f64 * scale,
+        rect_loc.y as f64 - geometry_loc.y as f64 * scale,
+    ))
+}
+
+fn surface_origin_for_view(
+    window: &Window,
+    rect_loc: Point<i32, Logical>,
+    view_scale: f64,
+) -> Point<f64, Logical> {
+    surface_origin_for_view_parts(rect_loc, window.geometry().loc, view_scale)
+}
+
+/// Camera zoom is a compositor-side scale. Smithay's WlPointer applies a
+/// client scale to the local coordinate after `PointerHandle` subtracts the
+/// surface origin, so Ocean supplies the inverse zoom for the duration of one
+/// pointer event. Zoom 1 (and every non-Ocean engine) needs no override.
+fn client_scale_for_view_scale(view_scale: f64) -> Option<f64> {
+    let scale = view_scale.max(0.05);
+    if (scale - 1.0).abs() < 0.0001 {
+        None
+    } else {
+        Some(1.0 / scale)
+    }
+}
+
 /// Gesture streams captured by compositor bindings instead of forwarded via
 /// wp-pointer-gestures. A stream is claimed at Begin and remains owned until
 /// End so clients never receive a partial gesture.
@@ -4776,29 +4814,31 @@ impl Smallvil {
                     self.render_placements(&output).and_then(|placements| {
                         placements.into_iter().find_map(|placement| {
                             let rect = self.placement_input_rect(&placement);
-                            let origin = surface_origin(&placement.window, rect.loc);
-                            let view_local = pos - origin.to_f64();
-                            if view_local.x < 0.0
-                                || view_local.y < 0.0
-                                || view_local.x >= rect.size.w as f64
-                                || view_local.y >= rect.size.h as f64
+                            let scale = placement.view_scale.max(0.05);
+                            let origin =
+                                surface_origin_for_view(&placement.window, rect.loc, scale);
+                            let local = Point::from((
+                                (pos.x - origin.x) / scale,
+                                (pos.y - origin.y) / scale,
+                            ));
+                            let bbox = placement.window.bbox_with_popups().to_f64();
+                            if local.x < bbox.loc.x
+                                || local.y < bbox.loc.y
+                                || local.x >= bbox.loc.x + bbox.size.w
+                                || local.y >= bbox.loc.y + bbox.size.h
                             {
                                 return None;
                             }
-                            let local = Point::from((
-                                view_local.x / placement.view_scale,
-                                view_local.y / placement.view_scale,
-                            ));
                             placement
                                 .window
                                 .surface_under(local, WindowSurfaceType::ALL)
                                 .map(|(surface, point)| {
                                     (
                                         surface,
-                                        origin.to_f64()
+                                        origin
                                             + Point::from((
-                                                point.x as f64 * placement.view_scale,
-                                                point.y as f64 * placement.view_scale,
+                                                point.x as f64 * scale,
+                                                point.y as f64 * scale,
                                             )),
                                     )
                                 })
@@ -4810,9 +4850,10 @@ impl Smallvil {
                                 // focus the topmost root instead of clicking
                                 // through a floating window into a tile.
                                 .or_else(|| {
-                                    placement.window.toplevel().map(|toplevel| {
-                                        (toplevel.wl_surface().clone(), origin.to_f64())
-                                    })
+                                    placement
+                                        .window
+                                        .toplevel()
+                                        .map(|toplevel| (toplevel.wl_surface().clone(), origin))
                                 })
                         })
                     })
@@ -4904,29 +4945,28 @@ impl Smallvil {
                     .filter(crate::placement::PlacedWindow::is_fullscreen)
                     .find_map(|placement| {
                         let rect = self.placement_input_rect(&placement);
-                        let origin = surface_origin(&placement.window, rect.loc);
-                        let view_local = pos - origin.to_f64();
-                        if view_local.x < 0.0
-                            || view_local.y < 0.0
-                            || view_local.x >= rect.size.w as f64
-                            || view_local.y >= rect.size.h as f64
+                        let scale = placement.view_scale.max(0.05);
+                        let origin = surface_origin_for_view(&placement.window, rect.loc, scale);
+                        let local =
+                            Point::from(((pos.x - origin.x) / scale, (pos.y - origin.y) / scale));
+                        let bbox = placement.window.bbox_with_popups().to_f64();
+                        if local.x < bbox.loc.x
+                            || local.y < bbox.loc.y
+                            || local.x >= bbox.loc.x + bbox.size.w
+                            || local.y >= bbox.loc.y + bbox.size.h
                         {
                             return None;
                         }
-                        let local = Point::from((
-                            view_local.x / placement.view_scale,
-                            view_local.y / placement.view_scale,
-                        ));
                         placement
                             .window
                             .surface_under(local, WindowSurfaceType::ALL)
                             .map(|(surface, point)| {
                                 (
                                     surface,
-                                    origin.to_f64()
+                                    origin
                                         + Point::from((
-                                            point.x as f64 * placement.view_scale,
-                                            point.y as f64 * placement.view_scale,
+                                            point.x as f64 * scale,
+                                            point.y as f64 * scale,
                                         )),
                                 )
                             })
@@ -4936,9 +4976,10 @@ impl Smallvil {
                             // Keep the topmost root authoritative during
                             // that interval instead of clicking through.
                             .or_else(|| {
-                                placement.window.toplevel().map(|toplevel| {
-                                    (toplevel.wl_surface().clone(), origin.to_f64())
-                                })
+                                placement
+                                    .window
+                                    .toplevel()
+                                    .map(|toplevel| (toplevel.wl_surface().clone(), origin))
                             })
                     })
             });
@@ -5580,6 +5621,72 @@ impl Smallvil {
             .map(|lock_surface| lock_surface.wl_surface().clone())
     }
 
+    /// Smithay's `WlPointer` converts a logical pointer location into client
+    /// coordinates with the client's `client_scale`. Ocean's camera zoom is a
+    /// compositor-side scale, so a one-unit logical motion over a window at
+    /// zoom 2 must arrive as 0.5 client units. Use the inverse camera zoom as
+    /// a temporary client scale while delivering the event; surface commits
+    /// run after this event handler returns, so the scale cannot leak into
+    /// rendering or damage bookkeeping.
+    fn pointer_client_scale_for_surface(&self, surface: &WlSurface) -> Option<f64> {
+        if self.config.spatial_engine != crate::config::SpatialEngine::Ocean {
+            return None;
+        }
+        let root = self.surface_root(surface)?;
+        let output = self.rendered_output_for_surface(&root)?;
+        if self.fullscreen.contains_key(&root) || self.maximized.contains_key(&root) {
+            return Some(1.0);
+        }
+        if let Some(scale) = self.ocean.screen_pin_view_scale(&root) {
+            return Some(scale);
+        }
+        Some(self.ocean.camera(&output.name()).zoom.max(0.05))
+    }
+
+    fn set_pointer_client_scale(&self, surface: &WlSurface, scale: f64) -> Option<f64> {
+        let client = self.display_handle.get_client(surface.id()).ok()?;
+        let state = client.get_data::<ClientState>()?;
+        let previous = state.compositor_state.client_scale();
+        state.compositor_state.set_client_scale(scale);
+        Some(previous)
+    }
+
+    /// The camera scale used for pointer coordinates on `surface`, or 1.0
+    /// outside Ocean. Constraint regions live in client coordinates and need
+    /// the same inverse transform as pointer motion.
+    pub(crate) fn pointer_view_scale_for_surface(&self, surface: &WlSurface) -> f64 {
+        self.pointer_client_scale_for_surface(surface)
+            .unwrap_or(1.0)
+    }
+
+    /// Temporarily apply Ocean's inverse camera scale to the client that owns
+    /// `surface`. Returns the previous client scale for restoration. `None`
+    /// means the client already needs no transform (Classic/Scroll, fullscreen,
+    /// or an unscaled placement).
+    pub(crate) fn apply_pointer_client_scale(&self, surface: &WlSurface) -> Option<f64> {
+        let view_scale = self.pointer_client_scale_for_surface(surface)?;
+        let client_scale = client_scale_for_view_scale(view_scale)?;
+        self.set_pointer_client_scale(surface, client_scale)
+    }
+
+    pub(crate) fn restore_pointer_client_scale(&self, surface: &WlSurface, previous: f64) {
+        let Ok(client) = self.display_handle.get_client(surface.id()) else {
+            return;
+        };
+        let Some(state) = client.get_data::<ClientState>() else {
+            return;
+        };
+        state.compositor_state.set_client_scale(previous);
+    }
+
+    /// Queue a pointer-target refresh after a camera change. The refresh
+    /// reads the pointer handle, so it must run outside a grab callback.
+    pub(crate) fn queue_pointer_focus_refresh(&mut self) {
+        self.loop_handle.insert_idle(|state| {
+            state.refresh_pointer_focus();
+        });
+    }
+
     /// Re-resolves enter/leave at the current pointer location after the
     /// surface stack changes without physical motion. Also clamps that
     /// location into the live output union first: an output-management
@@ -5587,11 +5694,22 @@ impl Smallvil {
     /// pointer was last over, and nothing else re-validates its stored
     /// position outside of a real subsequent motion event.
     pub(crate) fn refresh_pointer_focus(&mut self) {
+        if self
+            .seat
+            .get_pointer()
+            .is_none_or(|pointer| pointer.is_grabbed())
+        {
+            return;
+        }
         let Some(pointer) = self.seat.get_pointer() else {
             return;
         };
         let pos = self.clamp_to_outputs(pointer.current_location());
         let under = self.surface_under(pos);
+        let focus_surface = under.as_ref().map(|(surface, _)| surface.clone());
+        let previous = focus_surface
+            .as_ref()
+            .and_then(|surface| self.apply_pointer_client_scale(surface));
         let serial = SERIAL_COUNTER.next_serial();
         let time = self.start_time.elapsed().as_millis() as u32;
         pointer.motion(
@@ -5603,6 +5721,9 @@ impl Smallvil {
                 time,
             },
         );
+        if let (Some(surface), Some(previous)) = (focus_surface.as_ref(), previous) {
+            self.restore_pointer_client_scale(surface, previous);
+        }
         pointer.frame(self);
     }
 
@@ -5621,11 +5742,14 @@ impl Smallvil {
         });
     }
 
-    /// Moving a strip changes the pointer target even with a stationary mouse.
-    /// Keep keyboard focus selected by navigation; only refresh pointer routing.
+    /// Moving a strip or an Ocean camera changes the pointer target even with
+    /// a stationary mouse. Keep keyboard focus selected by navigation; only
+    /// refresh pointer routing.
     pub(crate) fn refresh_scroll_pointer_focus(&mut self) {
-        if self.config.spatial_engine != crate::config::SpatialEngine::Scroll
-            || self.activation_blocked()
+        if !matches!(
+            self.config.spatial_engine,
+            crate::config::SpatialEngine::Scroll | crate::config::SpatialEngine::Ocean
+        ) || self.activation_blocked()
             || self
                 .seat
                 .get_pointer()
@@ -7006,7 +7130,11 @@ impl Smallvil {
         }
         self.workspace_scroll_cameras
             .retain(|_, camera| !camera.at_rest());
+        let camera_was_active = self.ocean.has_active_camera_motion();
         self.ocean.prune_completed_camera_motions();
+        if camera_was_active && !self.ocean.has_active_camera_motion() {
+            self.queue_pointer_focus_refresh();
+        }
         self.closing_window_animations
             .retain(|closing| !closing.finished());
         self.ripples.retain(|ripple| !ripple.finished());
@@ -16901,6 +17029,26 @@ mod tests {
     fn group_removal_dissolves_a_two_member_group_regardless_of_which_side_closes() {
         assert_eq!(group_removal_outcome(2, 0, 0), (0, true));
         assert_eq!(group_removal_outcome(2, 0, 1), (0, true));
+    }
+
+    #[test]
+    fn ocean_camera_scale_inverts_pointer_coordinates() {
+        assert_eq!(client_scale_for_view_scale(1.0), None);
+        assert_eq!(client_scale_for_view_scale(2.0), Some(0.5));
+        assert_eq!(client_scale_for_view_scale(0.5), Some(2.0));
+        // Keep the existing lower clamp shared with placement math.
+        assert_eq!(client_scale_for_view_scale(0.0), Some(20.0));
+    }
+
+    #[test]
+    fn ocean_camera_scales_a_csd_geometry_offset_with_the_window() {
+        let origin =
+            surface_origin_for_view_parts(Point::from((100, 200)), Point::from((19, 17)), 2.0);
+        assert_eq!(origin, Point::from((62.0, 166.0)));
+        assert_eq!(
+            surface_origin_for_view_parts(Point::from((100, 200)), Point::from((19, 17)), 1.0),
+            Point::from((81.0, 183.0))
+        );
     }
 }
 

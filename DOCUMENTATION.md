@@ -617,7 +617,8 @@ never moves or resizes a window. Reefs are named local BSP
 tiling zones, not pages, and bookmarks are named camera return points. The
 optional camera-anchored guide field moves and scales with the world, so empty
 travel remains legible instead of looking like windows sliding over a fixed
-wallpaper.
+wallpaper. Pointer hit-testing and client pointer coordinates follow the same
+camera scale, so a click stays under the cursor at every zoom level.
 
 Rendering derives one placement snapshot from each output's current camera and
 shares it across every consumer in that render pass, including glass capture,
@@ -699,7 +700,7 @@ ocean {
 | `canvas_grid_alpha` | float, `0`–`1` | `0.10` | Guide visibility. `0` is also a complete visual bypass. |
 | `canvas_marker` | boolean | `true` | Show a small point at the viewport center only after the Ocean camera moves. Independent from the grid. |
 | `canvas_marker_fade_ms` | integer, `0`–`30000` | `4200` | Inactivity fade duration for the center point. `0` disables it. |
-| `zoom_enabled` | boolean | `true` | Enables all Ocean zoom actions and the modifier-wheel gesture. When disabled the live camera is held at `1.0`. |
+| `zoom_enabled` | boolean | `true` | Enables all Ocean zoom actions and the modifier-wheel gesture. When disabled the live camera is held at `1.0`. Zoom scales both rendering and pointer coordinates to the client surface. |
 | `modifier_zoom` | boolean | `true` | With zoom enabled, physically holding `drag_modifier` while scrolling zooms around the pointer. |
 | `min_zoom` / `max_zoom` | float, `0.05`–`8` | `0.25` / `2.0` | Camera scale limits. |
 | `zoom_step` | float, `1.01`–`3` | `1.2` | Multiplicative keyboard/wheel zoom step. |

@@ -1320,6 +1320,10 @@ impl Smallvil {
                 // non-FPS clients like design tools use it for
                 // pressure-sensitive input too). Constraint enforcement
                 // only gates the regular `motion` call below.
+                let relative_surface = under.as_ref().map(|(s, _)| s.clone());
+                let relative_previous = relative_surface
+                    .as_ref()
+                    .and_then(|surface| self.apply_pointer_client_scale(surface));
                 pointer.relative_motion(
                     self,
                     under.as_ref().map(|(s, l)| (s.clone(), *l)),
@@ -1329,6 +1333,11 @@ impl Smallvil {
                         utime: event.time(),
                     },
                 );
+                if let (Some(surface), Some(previous)) =
+                    (relative_surface.as_ref(), relative_previous)
+                {
+                    self.restore_pointer_client_scale(surface, previous);
+                }
 
                 // Walk up from the focused surface (which may be a
                 // subsurface) to find any constraint registered on its
@@ -1410,6 +1419,10 @@ impl Smallvil {
                 let serial = SERIAL_COUNTER.next_serial();
                 let new_under = self.surface_under(new_loc);
 
+                let focus_surface = new_under.as_ref().map(|(surface, _)| surface.clone());
+                let previous = focus_surface
+                    .as_ref()
+                    .and_then(|surface| self.apply_pointer_client_scale(surface));
                 pointer.motion(
                     self,
                     new_under.clone(),
@@ -1419,6 +1432,9 @@ impl Smallvil {
                         time: event.time_msec(),
                     },
                 );
+                if let (Some(surface), Some(previous)) = (focus_surface.as_ref(), previous) {
+                    self.restore_pointer_client_scale(surface, previous);
+                }
                 pointer.frame(self);
                 self.focus_follows_mouse(new_loc, new_under.as_ref().map(|(s, _)| s));
 
@@ -1427,14 +1443,23 @@ impl Smallvil {
                 // call `activate()` to send `locked`/`confined` to the
                 // client, and clients wait on that signal before assuming
                 // the constraint is in effect.
-                if let Some((root_surf, surface_loc)) = new_under
-                    .as_ref()
-                    .and_then(|(s, l)| Some((self.root_with_constraint(s, &pointer)?, *l)))
+                if let Some((root_surf, surface_loc, view_scale)) =
+                    new_under.as_ref().and_then(|(s, l)| {
+                        Some((
+                            self.root_with_constraint(s, &pointer)?,
+                            *l,
+                            self.pointer_view_scale_for_surface(s),
+                        ))
+                    })
                 {
                     with_pointer_constraint(&root_surf, &pointer, |c| {
                         if let Some(c) = c {
                             if !c.is_active() {
-                                let local = (new_loc - surface_loc).to_i32_round();
+                                let local = Point::from((
+                                    (new_loc.x - surface_loc.x) / view_scale,
+                                    (new_loc.y - surface_loc.y) / view_scale,
+                                ))
+                                .to_i32_round();
                                 let in_region =
                                     c.region().map(|r| r.contains(local)).unwrap_or(true);
                                 if in_region {
@@ -1485,6 +1510,9 @@ impl Smallvil {
 
                 let under = self.surface_under(pos);
                 let hovered = under.as_ref().map(|(surface, _)| surface.clone());
+                let previous = hovered
+                    .as_ref()
+                    .and_then(|surface| self.apply_pointer_client_scale(surface));
 
                 pointer.motion(
                     self,
@@ -1495,6 +1523,9 @@ impl Smallvil {
                         time: event.time_msec(),
                     },
                 );
+                if let (Some(surface), Some(previous)) = (hovered.as_ref(), previous) {
+                    self.restore_pointer_client_scale(surface, previous);
+                }
                 pointer.frame(self);
                 self.focus_follows_mouse(pos, hovered.as_ref());
 
@@ -2390,6 +2421,7 @@ impl Smallvil {
                                     self.config.ocean.camera_animation_ms.min(120),
                                 ),
                             );
+                            self.refresh_pointer_focus();
                             self.request_redraw();
                             return;
                         }
@@ -2481,7 +2513,14 @@ impl Smallvil {
                 }
 
                 let pointer = self.seat.get_pointer().unwrap();
+                let focus_surface = pointer.current_focus();
+                let previous = focus_surface
+                    .as_ref()
+                    .and_then(|surface| self.apply_pointer_client_scale(surface));
                 pointer.axis(self, frame);
+                if let (Some(surface), Some(previous)) = (focus_surface.as_ref(), previous) {
+                    self.restore_pointer_client_scale(surface, previous);
+                }
                 pointer.frame(self);
             }
             InputEvent::SwitchToggle { event, .. } => {
@@ -3425,6 +3464,7 @@ impl Smallvil {
                     target,
                     Duration::from_millis(self.config.ocean.camera_animation_ms),
                 );
+                self.queue_pointer_focus_refresh();
                 self.request_redraw();
             }
             Action::OceanCenterFocused => {
