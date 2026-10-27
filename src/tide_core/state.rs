@@ -11092,16 +11092,27 @@ impl Smallvil {
         // an extra time (it no-ops unless something actually changed).
         self.refresh_space();
 
-        let next_focus = self
-            .space
-            .elements()
-            .rev()
-            .find(|w| {
-                self.output_for_window(w)
-                    .is_some_and(|o| o.name() == output_name)
-            })
-            .and_then(|w| w.toplevel())
-            .map(|t| t.wl_surface().clone());
+        let on_output = |w: &Window| {
+            self.output_for_window(w)
+                .is_some_and(|o| o.name() == output_name)
+        };
+        // The last window the user focused here wins. Stacking order is only
+        // a fallback: Scroll re-maps columns in strip order, so the topmost
+        // element is the last column, not the one the user was on.
+        let remembered = self.focus_history.iter().find(|surface| {
+            self.space
+                .elements()
+                .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == *surface))
+                .is_some_and(on_output)
+        });
+        let next_focus = remembered.cloned().or_else(|| {
+            self.space
+                .elements()
+                .rev()
+                .find(|w| on_output(w))
+                .and_then(|w| w.toplevel())
+                .map(|t| t.wl_surface().clone())
+        });
         self.focus_window(next_focus, SERIAL_COUNTER.next_serial());
     }
 

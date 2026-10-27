@@ -1241,11 +1241,24 @@ impl Smallvil {
             // Record only initial map; reattachment also calls `insert`.
             self.ocean.record_app_opened(surface.clone());
         } else {
+            // Like niri's per-workspace active column: open next to the last
+            // window used on this output's workspace, even when keyboard focus
+            // sits elsewhere (a launcher, the other monitor). Otherwise a new
+            // Scroll column lands at the end of the strip.
+            let name = output.name();
+            let on_strip = |s: &WlSurface| {
+                self.layout.output_of(s) == Some(name.as_str())
+                    && self.layout.workspace_of(s) == Some(workspace)
+            };
+            let anchor = focused
+                .clone()
+                .filter(|s| on_strip(s))
+                .or_else(|| self.focus_history.iter().find(|s| on_strip(s)).cloned());
             self.layout.insert(
-                &output.name(),
+                &name,
                 workspace,
                 window,
-                swallow_target.as_ref().or(focused.as_ref()),
+                swallow_target.as_ref().or(anchor.as_ref()),
             );
         }
         // Retile maps the window into Space before rule conversions look it

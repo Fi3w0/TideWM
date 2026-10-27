@@ -2,6 +2,10 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.195 — Refocus the remembered window after hiding a workspace
+
+- `refocus_after_hide` picked the topmost `Space` element on the output. Scroll re-maps columns in strip order, so that was always the last column. It now takes the most recent `focus_history` entry mapped on the output, falling back to stacking order. `map_toplevel` inserted next to `intended_window_surface()`; when that was not on the target strip (launcher layer, other output) `Layouts::insert` appended the column at the end. The anchor is now that focus if it is on the same (output, workspace), else the most recent `focus_history` entry there, matching niri's per-workspace `active_column_idx + 1` insert. Camera offsets were already per (output, workspace) in `ScrollState`. niri's close-restores-previous-view-offset is not replicated. 703 tests, strict Clippy pass; not yet verified natively.
+
 ## 0.90.194 — Owner-aware output membership for Scroll strips
 
 - `Space::refresh` sends `wl_surface.enter`/`leave` from bounding-box overlap alone. Scroll keeps off-screen columns (and `float_anchor = strip` floaters) at strip coordinates in the shared global space, so a column scrolled past DP-4's right edge overlapped HDMI-A-2's rectangle and entered it without ever being drawn there. Native repro on `.192` (2026-10-27): a GTK probe on DP-4 at x=1863 received `enter(HDMI-A-2)` while still on DP-4's strip; GTK/Firefox then read HDMI geometry and its integer scale 2.
