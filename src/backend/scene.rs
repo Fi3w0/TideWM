@@ -3,15 +3,13 @@
 //! cache updated by `Space::refresh`. A maintenance deadline must not control
 //! the first visible frame of a drag, map, resize, or output transition.
 
-use smithay::desktop::{space::SpaceElement, Space};
-
-pub(super) fn prepare_render_scene<E: SpaceElement + PartialEq>(space: &mut Space<E>) {
-    space.refresh();
+pub(super) fn prepare_render_scene(state: &mut crate::Smallvil) {
+    state.refresh_space();
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use smithay::desktop::{space::SpaceElement, Space};
     use smithay::{
         output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
         utils::{IsAlive, Logical, Point, Rectangle, Size, Transform},
@@ -82,7 +80,7 @@ mod tests {
             alive: Rc::new(Cell::new(true)),
         };
         space.map_element(window.clone(), (-600, 200), false);
-        prepare_render_scene(&mut space);
+        space.refresh();
         (space, window, left, right)
     }
 
@@ -93,17 +91,17 @@ mod tests {
         space.map_element(window.clone(), (-100, 200), false);
         // The actual Smithay cache reproduces the old missed first frame.
         assert_eq!(space.elements_for_output(&right).count(), 0);
-        prepare_render_scene(&mut space);
+        space.refresh();
         assert_eq!(space.elements_for_output(&left).count(), 1);
         assert_eq!(space.elements_for_output(&right).count(), 1);
 
         space.map_element(window.clone(), (100, 200), false);
-        prepare_render_scene(&mut space);
+        space.refresh();
         assert_eq!(space.elements_for_output(&left).count(), 0);
         assert_eq!(space.elements_for_output(&right).count(), 1);
         // Starting another drag in the reverse direction also refreshes now.
         space.map_element(window, (-600, 200), false);
-        prepare_render_scene(&mut space);
+        space.refresh();
         assert_eq!(space.elements_for_output(&left).count(), 1);
         assert_eq!(space.elements_for_output(&right).count(), 0);
     }
@@ -113,10 +111,10 @@ mod tests {
         let (mut space, window, left, right) = scene();
         window.size.set((700, 300).into());
         assert_eq!(space.elements_for_output(&right).count(), 0);
-        prepare_render_scene(&mut space);
+        space.refresh();
         assert_eq!(space.elements_for_output(&right).count(), 1);
         window.alive.set(false);
-        prepare_render_scene(&mut space);
+        space.refresh();
         assert_eq!(space.elements_for_output(&left).count(), 0);
         assert_eq!(space.elements_for_output(&right).count(), 0);
         assert_eq!(space.elements().count(), 0);

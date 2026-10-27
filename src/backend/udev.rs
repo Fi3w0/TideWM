@@ -1127,7 +1127,7 @@ pub fn init_udev(
             }
             let active = state.has_active_animation();
 
-            state.space.refresh();
+            state.refresh_space();
             state.popups.cleanup();
             state.refresh_popup_grab();
             state.cleanup_capture();
@@ -1621,7 +1621,7 @@ fn handle_connector_change(
                     // `unmap_output` only forgets the output; the
                     // wl_surface.leave events go out on the next refresh.
                     // Send them now, before the global is retracted below.
-                    state.space.refresh();
+                    state.refresh_space();
                     state.refresh_input_device_outputs();
                     let space = &state.space;
                     if let Some(theme) = state.cursor_theme.as_mut() {
@@ -1826,7 +1826,7 @@ fn render_surface(
 ) -> Option<Duration> {
     let frame_start = Instant::now();
     let mut sample = super::perf::RenderSample::default();
-    super::scene::prepare_render_scene(&mut state.space);
+    super::scene::prepare_render_scene(state);
     surface.dirty = false;
 
     let locked = !matches!(state.session_lock, SessionLock::Unlocked);

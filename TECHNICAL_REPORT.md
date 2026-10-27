@@ -6,7 +6,7 @@ The quick technical picture: what TideWM is built from, what works, what's been 
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). Underneath is a complete tiling window manager: BSP, master/stack and cascade layouts, workspaces, multi-monitor, layer shell, IPC and XWayland. On top sits the water look (ripples, waves, glass, shadows, physics), and every piece of it is a config toggle.
 
-Current version: **0.90.187**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
+Current version: **0.90.196**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
 
 ## Architecture
 
@@ -25,7 +25,7 @@ Current version: **0.90.187**, beta. 1.0 waits for a wider real-hardware pass (I
 
 ## Scroll engine
 
-Scroll gives every monitor its own strip of apps that you slide along, niri-style. New apps join the strip instead of shrinking the ones already there, and an app never ends up half on one monitor and half on another. Groups, glass, shadows, animations, screenshots and screen sharing work exactly as in Classic and Ocean.
+Scroll gives every monitor its own strip of apps that you slide along, niri-style. New apps join the strip instead of shrinking the ones already there, and an app never ends up half on one monitor and half on another. Apps are also only ever told they are on their own monitor: a column scrolled off the edge does not count as being on the neighbouring screen, so it keeps that monitor's scale and size. Groups, glass, shadows, animations, screenshots and screen sharing work exactly as in Classic and Ocean.
 
 ### Switching
 

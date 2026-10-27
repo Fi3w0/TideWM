@@ -3,7 +3,7 @@ use crate::{
     Smallvil,
 };
 use smithay::{
-    desktop::{Space, Window},
+    desktop::Window,
     input::pointer::{
         AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
         GesturePinchEndEvent, GesturePinchUpdateEvent, GestureSwipeBeginEvent,
@@ -408,7 +408,10 @@ pub(crate) fn ongoing(surface: &WlSurface) -> bool {
 }
 
 /// Should be called on `WlSurface::commit`
-pub fn handle_commit(space: &mut Space<Window>, surface: &WlSurface) -> Option<()> {
+pub fn handle_commit(
+    space: &mut crate::tide_core::window_space::WindowSpace,
+    surface: &WlSurface,
+) -> Option<()> {
     let window = space
         .elements()
         .find(|w| w.toplevel().unwrap().wl_surface() == surface)

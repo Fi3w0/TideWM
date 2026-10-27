@@ -31,7 +31,7 @@ use smithay::{
             surface_primary_scanout_output, under_from_surface_tree,
             update_surface_primary_scanout_output, OutputPresentationFeedback,
         },
-        PopupGrab, PopupManager, PopupUngrabStrategy, Space, Window, WindowSurfaceType,
+        PopupGrab, PopupManager, PopupUngrabStrategy, Window, WindowSurfaceType,
     },
     input::{
         keyboard::{Keysym, XkbConfig},
@@ -323,7 +323,7 @@ pub struct Smallvil {
     pub(crate) next_ipc_subscriber_id: usize,
 
     pub layout: Layouts,
-    pub space: Space<Window>,
+    pub space: crate::tide_core::window_space::WindowSpace,
     /// Per-mapped-window base/active/inactive/fullscreen alpha multipliers
     /// resolved from window rules. Missing entries preserve client alpha.
     pub(crate) window_opacity: HashMap<WlSurface, crate::config::WindowOpacity>,
@@ -562,8 +562,10 @@ pub struct Smallvil {
     /// `org_kde_kwin_server_decoration_manager`: KDE's older competing
     /// decoration protocol, same purpose as `xdg_decoration_state` for
     /// clients that speak this one instead (mostly Qt/KDE apps without
-    /// xdg-decoration support). Default mode `Server`, and `request_mode`
-    /// re-affirms it -- same enforcement shape as the xdg variant.
+    /// xdg-decoration support). Default mode `Server`; `new_decoration`
+    /// announces that policy once per decoration object, and repeat
+    /// `request_mode` requests are ignored to prevent the same feedback loop
+    /// the xdg handler avoids.
     pub kde_decoration_state: KdeDecorationState,
     pub layer_shell_state: WlrLayerShellState,
     pub shm_state: ShmState,
@@ -2009,7 +2011,7 @@ impl Smallvil {
         // stale and this always sees zero placements for a window just
         // mapped or just switched in. Cheap and idempotent to call an extra
         // time here.
-        self.space.refresh();
+        self.refresh_space();
         let Some(placements) = self.render_placements(output) else {
             return;
         };
@@ -4374,7 +4376,7 @@ impl Smallvil {
         //
         // Windows get a position and stacking order through mapping.
         // Outputs become views of a part of the Space and can be rendered via Space::render_output.
-        let space = Space::default();
+        let space = crate::tide_core::window_space::WindowSpace::default();
 
         let socket_name = Self::init_wayland_listener(display, event_loop);
 
@@ -5059,6 +5061,36 @@ impl Smallvil {
     /// iteration order. Used for click, drag, focus, and placement targets.
     pub(crate) fn output_for_point(&self, pos: Point<f64, Logical>) -> Option<Output> {
         stable_output_by_name(self.space.output_under(pos)).cloned()
+    }
+
+    /// `Space::refresh` with TideWM's output ownership applied first, so a
+    /// window never enters an output it is not drawn on. Use this instead
+    /// of calling `self.space.refresh()` directly.
+    pub(crate) fn refresh_space(&mut self) {
+        for window in self.space.elements() {
+            self.space
+                .set_output_owner(window, self.space_output_owner(window).as_ref());
+        }
+        self.space.refresh();
+    }
+
+    /// The single output a window may enter, or `None` for geometric
+    /// membership. Scroll tiles and strip floaters are positions on one
+    /// output's strip: off-screen parts can overlap a neighbouring output's
+    /// rectangle without ever being drawn there.
+    fn space_output_owner(&self, window: &Window) -> Option<Output> {
+        if self.config.spatial_engine != crate::config::SpatialEngine::Scroll {
+            return None;
+        }
+        let surface = window.toplevel()?.wl_surface();
+        let name = if self.layout.contains(surface) {
+            self.layout.output_of(surface)?
+        } else if self.scroll_strip_floater(surface) {
+            self.floating_workspace.get(surface)?.output.as_str()
+        } else {
+            return None;
+        };
+        self.output_by_name(name)
     }
 
     /// Ocean's independent membership, or the output containing the largest
@@ -6189,7 +6221,7 @@ impl Smallvil {
             if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
                 self.window_focus = self.topmost_ocean_surface(preferred_output);
             } else {
-                self.space.refresh();
+                self.refresh_space();
                 self.window_focus = preferred_output
                     .and_then(|output_name| {
                         self.space
@@ -7031,7 +7063,7 @@ impl Smallvil {
         }
         // Mapping may have happened since the last backend frame; Classic's
         // per-output Space cache must reflect those live windows before use.
-        self.space.refresh();
+        self.refresh_space();
         let outputs: Vec<Output> = self.space.outputs().cloned().collect();
         let mut requested = false;
         for output in outputs {
@@ -11060,18 +11092,29 @@ impl Smallvil {
         // `unmap_elem` calls preceded this, so without an explicit refresh
         // here it would see stale cache data. Cheap and idempotent to call
         // an extra time (it no-ops unless something actually changed).
-        self.space.refresh();
+        self.refresh_space();
 
-        let next_focus = self
-            .space
-            .elements()
-            .rev()
-            .find(|w| {
-                self.output_for_window(w)
-                    .is_some_and(|o| o.name() == output_name)
-            })
-            .and_then(|w| w.toplevel())
-            .map(|t| t.wl_surface().clone());
+        let on_output = |w: &Window| {
+            self.output_for_window(w)
+                .is_some_and(|o| o.name() == output_name)
+        };
+        // The last window the user focused here wins. Stacking order is only
+        // a fallback: Scroll re-maps columns in strip order, so the topmost
+        // element is the last column, not the one the user was on.
+        let remembered = self.focus_history.iter().find(|surface| {
+            self.space
+                .elements()
+                .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == *surface))
+                .is_some_and(on_output)
+        });
+        let next_focus = remembered.cloned().or_else(|| {
+            self.space
+                .elements()
+                .rev()
+                .find(|w| on_output(w))
+                .and_then(|w| w.toplevel())
+                .map(|t| t.wl_surface().clone())
+        });
         self.focus_window(next_focus, SERIAL_COUNTER.next_serial());
     }
 
@@ -11992,7 +12035,7 @@ impl Smallvil {
         for window in mapped {
             self.space.unmap_elem(&window);
         }
-        self.space.refresh();
+        self.refresh_space();
         match (self.config.spatial_engine, target) {
             (crate::config::SpatialEngine::Ocean, _) => self.migrate_ocean_to_classic(),
             (_, crate::config::SpatialEngine::Ocean) => self.migrate_classic_to_ocean(),

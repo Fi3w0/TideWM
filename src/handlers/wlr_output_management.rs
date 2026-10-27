@@ -9,7 +9,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use smithay::desktop::{Space, Window};
 use smithay::output::{Output, Scale};
 use smithay::reexports::wayland_server::{
     backend::{ClientId, GlobalId},
@@ -92,7 +91,7 @@ impl WlrOutputManagementState {
     /// sends `finished` for heads that disappeared, and finally broadcasts
     /// a fresh `done` serial. Call after any hotplug (map_output/
     /// unmap_output) or after a live output-management apply.
-    pub fn refresh(&mut self, space: &Space<Window>) {
+    pub fn refresh(&mut self, space: &crate::tide_core::window_space::WindowSpace) {
         let outputs: Vec<Output> = space.outputs().cloned().collect();
 
         for output in &outputs {
