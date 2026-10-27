@@ -2,6 +2,14 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.194 · 2026-10-27 — Scroll apps stay on their own monitor
+
+- In Scroll, a column scrolled past the edge of its monitor overlapped the neighbouring monitor's area, so TideWM told the app it was on that monitor too. Apps like Firefox then reported the other monitor's size, and GTK apps could pick up its scale. Apps on a Scroll strip are now only ever told about the monitor whose strip they are on. Classic floating windows that really span two monitors still count as being on both.
+
+## 0.90.193 · 2026-10-24 — Focused windows stay on the surface
+
+- Automatic depth no longer sinks the window you are using: a window that holds keyboard focus stays at tier 0 no matter how long it has had focus.
+
 ## 0.90.192 · 2026-10-24 — Minimum-size tiles wrap instead of leaving the screen
 
 - Classic BSP now uses each tile's XDG minimum size when choosing split directions. If a horizontal row would push a minimum-width window off the output, the affected subtree splits vertically instead; when neither direction fits, the old overflow behavior remains.

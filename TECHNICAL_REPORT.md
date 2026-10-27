@@ -25,7 +25,7 @@ Current version: **0.90.187**, beta. 1.0 waits for a wider real-hardware pass (I
 
 ## Scroll engine
 
-Scroll gives every monitor its own strip of apps that you slide along, niri-style. New apps join the strip instead of shrinking the ones already there, and an app never ends up half on one monitor and half on another. Groups, glass, shadows, animations, screenshots and screen sharing work exactly as in Classic and Ocean.
+Scroll gives every monitor its own strip of apps that you slide along, niri-style. New apps join the strip instead of shrinking the ones already there, and an app never ends up half on one monitor and half on another. Apps are also only ever told they are on their own monitor: a column scrolled off the edge does not count as being on the neighbouring screen, so it keeps that monitor's scale and size. Groups, glass, shadows, animations, screenshots and screen sharing work exactly as in Classic and Ocean.
 
 ### Switching
 

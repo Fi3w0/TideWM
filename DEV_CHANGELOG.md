@@ -2,6 +2,14 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.194 — Owner-aware output membership for Scroll strips
+
+- `Space::refresh` sends `wl_surface.enter`/`leave` from bounding-box overlap alone. Scroll keeps off-screen columns (and `float_anchor = strip` floaters) at strip coordinates in the shared global space, so a column scrolled past DP-4's right edge overlapped HDMI-A-2's rectangle and entered it without ever being drawn there. Native repro on `.192` (2026-10-27): a GTK probe on DP-4 at x=1863 received `enter(HDMI-A-2)` while still on DP-4's strip; GTK/Firefox then read HDMI geometry and its integer scale 2.
+- New `tide_core::window_space::WindowSpace` wraps `Space` with a private `SpaceElement` newtype around `Window`. A window may carry an owner output (stored in its user data); `output_enter` for any other output is turned into a leave. `set_output_owner` applies a change immediately (leave forbidden outputs, enter newly allowed overlapping ones) because `Space::refresh` only re-announces an output when the overlap rect changes. The wrapper mirrors the `Space` subset TideWM uses with plain `Window`s, so call sites are unchanged; `outputs_for_element` applies the rule, while `elements_for_output` keeps Smithay's geometric cache for rendering.
+- `Smallvil::refresh_space` assigns owners before every refresh: Scroll tiles own `layout.output_of`, strip floaters own their floating tag output, everything else (Classic, Ocean, ordinary floats) stays geometric. All direct `space.refresh()` calls and `backend::scene::prepare_render_scene` go through it.
+- Regression: real protocol test with two bound `wl_output`s side by side and two Scroll columns; focusing the first puts the second at x=1000..2000 over the neighbour output, and neither surface may receive `enter` for it. Verified to fail without the owner rule (`surface 14 entered the neighbour output`).
+- `0.90.193` (focused windows stay at depth tier 0) shipped without changelog entries; added to CHANGELOG.md above.
+
 ## 0.90.192 — Minimum-size-aware BSP wrapping
 
 - `.191` stopped the min-size floating guard from ejecting windows, but a three-column row could still run past the output when the sum of XDG minimum widths exceeded it (DP-4: Spotify 800 + Discord/Firefox 940/638 > 1920).

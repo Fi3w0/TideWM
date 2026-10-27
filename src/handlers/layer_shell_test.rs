@@ -346,7 +346,7 @@ fn wallpaper_frames_preserve_drag_and_exclusive_zone_changes_retile() {
         .state
         .space
         .map_element(dragged.clone(), destination_geo.loc, false);
-    fixture.state.space.refresh();
+    fixture.state.refresh_space();
     fixture.state.classic_tile_drag = Some(surface.clone());
     assert!(fixture
         .state
@@ -959,4 +959,232 @@ fn scroll_navigation_refreshes_stationary_pointer_without_stealing_keyboard_focu
         1000.0,
         "navigation focus did not reveal the off-screen column"
     );
+}
+
+#[test]
+fn scroll_columns_enter_only_their_own_output() {
+    const CHILD: &str = "TIDEWM_SCROLL_ENTER_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("tidewm-enter-test-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(root.join("config/tidewm")).unwrap();
+        std::fs::create_dir(root.join("runtime")).unwrap();
+        std::fs::set_permissions(root.join("runtime"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::write(root.join("config/tidewm/config.wave"), "engine = scroll\nwelcome_hint = false\nwater_effects = false\ngaps = 0\nscroll {\n tile_proportion = 1.0\n}\nanimations {\n enabled = false\n}\n").unwrap();
+        let name = concat!(
+            module_path!(),
+            "::scroll_columns_enter_only_their_own_output"
+        );
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name.split_once("::").unwrap().1, "--nocapture"])
+            .env(CHILD, "1")
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_RUNTIME_DIR", root.join("runtime"))
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(String::from_utf8_lossy(&result.stdout).contains("running 1 test"));
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    }
+    let mut event_loop = EventLoop::try_new().unwrap();
+    let state = Smallvil::new(&mut event_loop, Display::new().unwrap());
+    let (server, peer) = UnixStream::pair().unwrap();
+    state
+        .display_handle
+        .clone()
+        .insert_client(
+            server,
+            Arc::new(ClientState {
+                compositor_state: CompositorClientState::default(),
+                security_context: None,
+                disconnect_sender: None,
+            }),
+        )
+        .unwrap();
+    peer.set_nonblocking(true).unwrap();
+    let mut fixture = Fixture {
+        event_loop,
+        state,
+        peer,
+    };
+    // Two outputs side by side: the strip's off-screen column on the left
+    // output lies exactly inside the right output's rectangle.
+    let outputs: Vec<_> = ["strip-output", "neighbour-output"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let output = Output::new(
+                name.into(),
+                PhysicalProperties {
+                    size: (0, 0).into(),
+                    subpixel: Subpixel::Unknown,
+                    make: "test".into(),
+                    model: "test".into(),
+                    serial_number: "test".into(),
+                },
+            );
+            output.change_current_state(
+                Some(Mode {
+                    size: (1000, 600).into(),
+                    refresh: 60_000,
+                }),
+                None,
+                Some(Scale::Integer(1)),
+                Some((index as i32 * 1000, 0).into()),
+            );
+            output.create_global::<Smallvil>(&fixture.state.display_handle);
+            fixture
+                .state
+                .space
+                .map_output(&output, (index as i32 * 1000, 0));
+            output
+        })
+        .collect();
+    fixture.request(1, 1, &[2], &[]);
+    let globals: Vec<_> = fixture
+        .dispatch()
+        .into_iter()
+        .filter_map(|(object, opcode, body)| {
+            if object != 2 || opcode != 0 {
+                return None;
+            }
+            let name = u32::from_ne_bytes(body[..4].try_into().unwrap());
+            let length = u32::from_ne_bytes(body[4..8].try_into().unwrap()) as usize;
+            Some((
+                String::from_utf8(body[8..8 + length - 1].to_vec()).unwrap(),
+                name,
+            ))
+        })
+        .collect();
+    for (interface, id, version) in [
+        ("wl_compositor", 3_u32, 4_u32),
+        ("xdg_wm_base", 4, 1),
+        ("wp_single_pixel_buffer_manager_v1", 5, 1),
+        ("wp_viewporter", 6, 1),
+    ] {
+        let name = globals
+            .iter()
+            .find(|(candidate, _)| candidate == interface)
+            .unwrap()
+            .1;
+        let mut tail = string(interface);
+        tail.extend_from_slice(&version.to_ne_bytes());
+        tail.extend_from_slice(&id.to_ne_bytes());
+        fixture.request(2, 0, &[name], &tail);
+    }
+    // Bind every wl_output; the client-side id of each tells the outputs apart.
+    let mut output_ids = Vec::new();
+    for (index, (_, name)) in globals
+        .iter()
+        .filter(|(interface, _)| interface == "wl_output")
+        .enumerate()
+    {
+        let id = 7 + index as u32;
+        let mut tail = string("wl_output");
+        tail.extend_from_slice(&3_u32.to_ne_bytes());
+        tail.extend_from_slice(&id.to_ne_bytes());
+        fixture.request(2, 0, &[*name], &tail);
+        output_ids.push(id);
+    }
+    assert_eq!(output_ids.len(), 2);
+    let mut events = fixture.dispatch();
+    // wl_output.name (opcode 4, version 4+) is not bound here; match each
+    // binding to its output through the advertised geometry x instead.
+    let id_for_x = |events: &[(u32, u16, Vec<u8>)], x: i32| {
+        events
+            .iter()
+            .find(|(object, opcode, body)| {
+                output_ids.contains(object)
+                    && *opcode == 0
+                    && i32::from_ne_bytes(body[..4].try_into().unwrap()) == x
+            })
+            .map(|(object, _, _)| *object)
+            .unwrap()
+    };
+    let strip_id = id_for_x(&events, 0);
+    let neighbour_id = id_for_x(&events, 1000);
+
+    let mut surfaces = Vec::new();
+    for surface in [9_u32, 14] {
+        fixture.request(3, 0, &[surface], &[]);
+        fixture.request(4, 2, &[surface + 1, surface], &[]);
+        fixture.request(surface + 1, 1, &[surface + 2], &[]);
+        fixture.request(6, 1, &[surface + 3, surface], &[]);
+        fixture.request(surface + 3, 2, &[1000, 600], &[]);
+        fixture.request(surface, 6, &[], &[]);
+        let serial = fixture
+            .dispatch()
+            .into_iter()
+            .find_map(|(object, opcode, body)| {
+                (object == surface + 1 && opcode == 0)
+                    .then(|| u32::from_ne_bytes(body[..4].try_into().unwrap()))
+            })
+            .unwrap();
+        fixture.request(surface + 1, 4, &[serial], &[]);
+        fixture.request(5, 1, &[surface + 4, u32::MAX, 0, 0, u32::MAX], &[]);
+        fixture.request(surface, 1, &[surface + 4, 0, 0], &[]);
+        fixture.request(surface, 6, &[], &[]);
+        events.extend(fixture.dispatch());
+        surfaces.push(surface);
+    }
+    let windows: Vec<_> = fixture.state.space.elements().cloned().collect();
+    assert_eq!(windows.len(), 2);
+    for window in &windows {
+        assert_eq!(
+            fixture.state.output_for_window(window),
+            Some(outputs[0].clone()),
+            "both columns must live on the strip output"
+        );
+    }
+    // Focus the first column: the second now sits at x = 1000..2000, i.e.
+    // entirely inside the neighbour output's rectangle, never drawn there.
+    let first = windows
+        .iter()
+        .find(|window| window.toplevel().unwrap().wl_surface().id().protocol_id() == surfaces[0])
+        .unwrap()
+        .toplevel()
+        .unwrap()
+        .wl_surface()
+        .clone();
+    fixture.state.activate_toplevel(&first);
+    fixture.state.refresh_space();
+    events.extend(fixture.dispatch());
+    let second = windows
+        .iter()
+        .find(|window| window.toplevel().unwrap().wl_surface().id().protocol_id() == surfaces[1])
+        .unwrap();
+    let second_loc = fixture.state.space.element_location(second).unwrap();
+    assert!(
+        second_loc.x >= 1000,
+        "setup: the second column should be off-screen right, got {second_loc:?}"
+    );
+
+    let entered = |surface: u32, output: u32| {
+        events.iter().any(|(object, opcode, body)| {
+            *object == surface
+                && *opcode == 0
+                && u32::from_ne_bytes(body[..4].try_into().unwrap()) == output
+        })
+    };
+    assert!(
+        entered(surfaces[0], strip_id),
+        "first column never entered its output"
+    );
+    for surface in &surfaces {
+        assert!(
+            !entered(*surface, neighbour_id),
+            "surface {surface} entered the neighbour output it is not drawn on"
+        );
+    }
 }
