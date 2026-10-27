@@ -480,6 +480,10 @@ impl XdgDecorationHandler for Smallvil {
 delegate_xdg_decoration!(Smallvil);
 
 #[cfg(test)]
+#[path = "kde_decoration_test.rs"]
+mod kde_decoration_test;
+
+#[cfg(test)]
 mod decoration_tests {
     use super::decoration_configure_needed;
     use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
@@ -501,21 +505,29 @@ impl KdeDecorationHandler for Smallvil {
         &self.kde_decoration_state
     }
 
+    fn new_decoration(&mut self, _surface: &WlSurface, decoration: &OrgKdeKwinServerDecoration) {
+        // The protocol says the per-decoration `mode` event is emitted
+        // directly after the decoration is created. Announce TideWM's one
+        // policy -- server-side -- once here. `request_mode` must not repeat
+        // it: clients are free to answer every `mode` with another request,
+        // and the protocol explicitly makes loop prevention the compositor's
+        // responsibility (Smithay's KDE decoration docs say the same).
+        decoration.mode(Mode::Server);
+    }
+
     fn request_mode(
         &mut self,
         _surface: &WlSurface,
-        decoration: &OrgKdeKwinServerDecoration,
+        _decoration: &OrgKdeKwinServerDecoration,
         mode: WEnum<Mode>,
     ) {
-        // Same enforcement: re-advertise server regardless of what was
-        // requested. Unlike xdg-decoration above, this answer cannot form the
-        // set_mode/configure loop: `mode` is the reply to a request, not a
-        // configure a client reacts to, and the manager is created with
-        // server-side as its default, so a client that never asks still gets
-        // it. (Still need to read `mode` so the WEnum is consumed even on the
-        // no-op path.)
+        // Deliberately silent. The initial `mode(Server)` from
+        // `new_decoration` already told the client the policy; echoing it here
+        // is the feedback loop measured with Firefox/GTK (about 16k 12-byte
+        // round trips per second). A client only changes mode when a `mode`
+        // event confirms it, so silence leaves it on the advertised
+        // server-side mode. `mode` is read only to consume the WEnum.
         let _ = mode;
-        decoration.mode(Mode::Server);
     }
 }
 

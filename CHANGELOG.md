@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.196 · 2026-10-27 — KDE decoration requests stop looping
+
+- Apps using KDE's older server-decoration protocol no longer get a fresh answer to every decoration request. TideWM announces server-side once when the decoration object is created and ignores repeat requests, so clients that re-request client-side decoration on every event can no longer keep a CPU core busy.
+
 ## 0.90.195 · 2026-10-27 — Workspace switch returns to your window
 
 - Switching back to a workspace focuses the window you last used there instead of the last column of a Scroll strip.

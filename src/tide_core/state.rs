@@ -562,8 +562,10 @@ pub struct Smallvil {
     /// `org_kde_kwin_server_decoration_manager`: KDE's older competing
     /// decoration protocol, same purpose as `xdg_decoration_state` for
     /// clients that speak this one instead (mostly Qt/KDE apps without
-    /// xdg-decoration support). Default mode `Server`, and `request_mode`
-    /// re-affirms it -- same enforcement shape as the xdg variant.
+    /// xdg-decoration support). Default mode `Server`; `new_decoration`
+    /// announces that policy once per decoration object, and repeat
+    /// `request_mode` requests are ignored to prevent the same feedback loop
+    /// the xdg handler avoids.
     pub kde_decoration_state: KdeDecorationState,
     pub layer_shell_state: WlrLayerShellState,
     pub shm_state: ShmState,
