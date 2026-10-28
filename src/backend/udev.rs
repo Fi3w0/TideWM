@@ -250,6 +250,21 @@ impl UdevGpu {
         imported
     }
 
+    /// Frees textures and imports already released on every GPU node.
+    ///
+    /// Each rendered frame cleans only the renderer it drew with, so the
+    /// render-only GPUs that hold cross-GPU imports, and anything dropped
+    /// after the last frame of an idle desktop, would otherwise wait. Smithay
+    /// makes a context current only when it has something to destroy, so a
+    /// node with nothing queued is not woken from runtime suspend.
+    fn cleanup_texture_caches(&self) {
+        // The timer never runs inside a render, but stay safe if a borrow
+        // is ever held across it.
+        if let Ok(mut manager) = self.manager.try_borrow_mut() {
+            let _ = manager.cleanup_texture_cache();
+        }
+    }
+
     pub(crate) fn prepare_surface(&self, surface: &WlSurface) {
         let mut manager = self.manager.borrow_mut();
         if let Err(error) = manager.early_import(self.primary_render_node, surface) {
@@ -1102,9 +1117,19 @@ pub fn init_udev(
     // Continuous animation derives its wake period from the fastest live mode;
     // scheduled caustics uses its configured deadline directly.
     let device_for_timer = Rc::clone(&device);
+    let mut last_texture_cleanup = Instant::now();
     event_loop
         .handle()
         .insert_source(Timer::immediate(), move |_, _, state: &mut Smallvil| {
+            // Rate-limited, and never while VT-switched away: GL work on a
+            // paused device has nothing to free and nothing to gain.
+            if last_texture_cleanup.elapsed() >= TEXTURE_CACHE_CLEANUP_INTERVAL {
+                last_texture_cleanup = Instant::now();
+                let device = device_for_timer.borrow();
+                if device.drm.is_active() {
+                    device.gpu.cleanup_texture_caches();
+                }
+            }
             state.update_window_depths();
             state.update_urgent_pulses();
             state.update_float_physics_full();
@@ -1668,6 +1693,9 @@ fn handle_connector_change(
 /// How long a disconnected output's disabled `wl_output` global stays
 /// bindable, so clients that raced a bind still find it (niri uses the same).
 const OUTPUT_GLOBAL_REMOVE_DELAY: Duration = Duration::from_secs(10);
+
+/// How often the maintenance timer sweeps every GPU's released textures.
+const TEXTURE_CACHE_CLEANUP_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Retracts a disconnected output's `wl_output` global. Must run after every
 /// surface has left the output: a client that sees `global_remove` destroys
