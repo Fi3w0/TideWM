@@ -2,6 +2,16 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.211 — Substates `InputState` and `RenderState` (plan step 8d–8e)
+
+- Field lists approved by Fiw 2026-10-28: nested render groups, focus fields in `InputState`, compositor UI (`toast`, `config_error_overlay`, `overview`, `minimap_peek`, `depth_deck_overlay`, `welcome_hint`, `builtin_wallpaper`, `screencast_picker`) left on `Smallvil` for a later `UiState`. `seat` and the protocol `*_state` globals stay on `Smallvil`.
+- `cfb7193` (8e): `InputState` in `state/focus.rs`, reached as `self.input`, 28 fields: focus authority (`window_focus`, `on_demand_layer_focus`, `keyboard_focus`, `focus_history`, `cycling_focus`, `popup_grab`), key/bind state (`active_mode`, `rescue_keybinds_active`, `helper_keys_down`, `keyboard_layout_state`, `virtual_keyboard_keymap`, `configured_keymap`, `minimap_trigger_down`), pointer grabs and gestures (`compositor_gesture`, `suppressed_pointer_buttons`, `classic_tile_drag`, `floating_dragging`, `scroll_pointer_refresh_pending`, `last_pointer_motion`, `cursor_idle_timer_armed`, `last_activity`), cursor (`cursor_status`, `dnd_icon`, `cursor_theme`) and devices (`known_input_devices`, `input_device_outputs`, `is_lid_closed`, `is_tablet_mode`). 187 sites. `reconcile_keyboard_focus` remains the only writer of seat focus.
+- `d94e90a` (8d 1/3): `RenderState` in `state/render.rs`, reached as `self.render`; `render.gpu: RenderGpuState`, 22 fields: the twelve built-in shader programs, the custom-shader cache, and `backdrop_textures`, `layer_alpha_masks`, `layer_dim_buffers`, `window_frame_snapshots`, `depth_schematics`. This is where Ebb's accounting attaches. 108 sites.
+- `45636bd` (8d 2/3): `render.windows: RenderWindowsState`, 7 fields: `window_opacity`, `window_glass_modes`, `window_shader_assignments`, `layer_shader_assignments`, `glass_anim`, `window_depths`, `depth_last_tick`. 62 sites.
+- `f400c55` (8d 3/3): `render.motion: RenderMotionState`, 21 fields: ripples, window open/cascade/move/closing animations, workspace transitions and glides, depth transitions, swim/workspace-scroll cameras, per-output Ocean canvases/caustics/compasses, the depth background with its timer/deadline, `snap_preview`, `redraw_requests`, `redraw_wakeup`, `native_render_stats`. 185 sites; `config.caustics` untouched by the receiver filter.
+- Pure path moves: no accessors, no forwarding, no behavior change; each commit's non-structural files are identical to their parent after whitespace/rustfmt-brace normalization. Mover, wrapper (`nest_render.py`) and receipts: `.hermes/worklogs/substates-2026-10-28/`.
+- Each commit: 712 tests, fmt, strict Clippy (all and default features). All-feature release build; nested matrix with subscribers 61/0 vs `.210` and `.209`. Not run natively yet.
+
 ## 0.90.210 — Substates (plan step 8a–8c)
 
 - `7fec946` (8a): `IpcState` in `state/ipc.rs`, reached as `self.ipc`: `subscribers`, `seen`, `flush_token`, `next_subscriber_id` (the `ipc_` prefixes dropped inside the group).
