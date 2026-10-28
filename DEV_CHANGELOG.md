@@ -2,6 +2,12 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.202 — Extract the compositor initialization domain
+
+- Rename `src/tide_core/state.rs` to `state/mod.rs` and move only the approved `Smallvil::new` and `init_wayland_listener` methods verbatim to `state/init.rs`. The struct, fields, shared types, free helpers, remaining methods and tests stay in the parent module. The child uses `use super::*` plus initialization-only imports moved out of the parent.
+- No method or field visibility changes, forwarding methods, dependencies or behavior changes. The relocation is a separate commit from this version/changelog update; method text is checked byte for byte against the preceding source.
+- Validation: 709 locked all-feature/all-target tests, fmt, strict Clippy, all-feature release build, and all 61 nested runtime observations/capture hashes identical to the post-fullscreen-fix baseline. Native startup after this move has not been run.
+
 ## 0.90.201 — Avoid a recursive surface lock on tiled unfullscreen
 
 - `do_unfullscreen` resolves `tiled_rect_for_surface` before entering `ToplevelSurface::with_pending_state`. Smithay holds `PrivateSurfaceData` throughout that closure; BSP layout reads client size hints through `leaf_minimum`/`with_states`, which reacquired the same mutex and froze the event loop when another tile was present. Both the keybind/IPC toggle and client `unset_fullscreen` share this path. No layout or floating-restore behavior changes.

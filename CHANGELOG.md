@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.202 · 2026-10-28 — Initialization code organization
+
+- Moved compositor initialization into its own module as the first step in splitting the central state file. Behavior and configuration stay the same.
+
 ## 0.90.201 · 2026-10-28 — Leaving fullscreen keeps responding
 
 - Fixed a compositor freeze when leaving fullscreen on a tiled window in a split Classic layout. Restoring the tile now reads its size before locking the window's pending state.
