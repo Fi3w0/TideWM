@@ -32,7 +32,7 @@ use smithay::{
             exporter::gbm::GbmFramebufferExporter,
             DrmDevice, DrmDeviceFd, DrmDeviceNotifier, DrmEvent, DrmNode, NodeType,
         },
-        egl::{context::ContextPriority, EGLDevice, EGLDisplay},
+        egl::{EGLDevice, EGLDisplay},
         input::InputEvent,
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
@@ -82,7 +82,7 @@ use smithay::{
 use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
 
 use crate::{
-    backend::multigpu::{GbmGlesApi, ImportBridge},
+    backend::multigpu::{gbm_gles_api, GbmGlesApi, ImportBridge},
     config::{GpuSelector, GpuVendor},
     cursor,
     output_layout::{logical_output_size, resolve_output_position},
@@ -329,11 +329,7 @@ pub fn init_udev(
 
     let open_flags = OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK;
 
-    let api: GbmGlesApi =
-        smithay::backend::renderer::multigpu::gbm::GbmGlesBackend::with_context_priority(
-            ContextPriority::High,
-        );
-    let mut gpu_manager = GpuManager::new(api)?;
+    let mut gpu_manager = GpuManager::new(gbm_gles_api())?;
     let mut opened = Vec::new();
     for path in &gpu_paths {
         let node = match DrmNode::from_path(path) {
