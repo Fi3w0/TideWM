@@ -2,6 +2,12 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.203 — Extract state IPC event and subscriber coordination
+
+- Move the six approved methods `emit_state_change_events`, `ipc_seen_state`, `emit_ipc_event`, `flush_ipc_subscribers`, `arm_ipc_flush_timer` and `remove_ipc_subscriber` verbatim into `state/ipc.rs`. IPC fields, shared types and tests remain in `state/mod.rs`; `has_lua_handler` stays with configuration coordination.
+- No visibility changes: the existing `pub(crate)` entry points stay unchanged and the two internal helpers remain private. No behavior changes, forwarding methods, dependencies or method-body formatting. The pure relocation and version/changelog update are separate commits.
+- Validation: 709 all-feature/all-target tests, fmt, strict Clippy, all-feature release build, and 61 nested state/capture observations identical to the post-fullscreen-fix baseline. Live all-events and engine-only subscribers verify event delivery and filtering in all three engines. Native activation of this move has not been run.
+
 ## 0.90.202 — Extract the compositor initialization domain
 
 - Rename `src/tide_core/state.rs` to `state/mod.rs` and move only the approved `Smallvil::new` and `init_wayland_listener` methods verbatim to `state/init.rs`. The struct, fields, shared types, free helpers, remaining methods and tests stay in the parent module. The child uses `use super::*` plus initialization-only imports moved out of the parent.

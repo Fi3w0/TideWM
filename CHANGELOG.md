@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.203 · 2026-10-28 — IPC code organization
+
+- Moved state-change event and subscriber coordination into a dedicated state module. IPC behavior and configuration stay the same.
+
 ## 0.90.202 · 2026-10-28 — Initialization code organization
 
 - Moved compositor initialization into its own module as the first step in splitting the central state file. Behavior and configuration stay the same.
