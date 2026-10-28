@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.199 · 2026-10-28 — Screen sharing survives a monitor switching off
+
+- Turning off or unplugging a monitor you are sharing no longer kills the share. OBS, Discord and other apps keep the last picture while it is gone, and the live picture comes back by itself when the monitor returns. If it comes back at a different resolution, the share ends as before and you pick it again.
+
 ## 0.90.198 · 2026-10-28 — Current Smithay
 
 - TideWM now builds on current upstream Smithay instead of a revision from April. That brings upstream's memory-leak fixes for multi-GPU texture caches, failed imports and screen-capture error paths.
