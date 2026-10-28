@@ -2173,6 +2173,19 @@ impl Smallvil {
         // what should be visible; Classic retile intentionally does not walk
         // inactive workspaces to unmap stale Ocean placements.
         let mapped: Vec<Window> = self.space.elements().cloned().collect();
+        // Floating stacking order, topmost first. Classic keeps it only in
+        // `Space` (bottom to top), which the unmap below throws away.
+        let float_stack: Vec<WlSurface> =
+            if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+                self.ocean.floating_front_to_back().to_vec()
+            } else {
+                mapped
+                    .iter()
+                    .rev()
+                    .filter_map(|window| window.toplevel().map(|t| t.wl_surface().clone()))
+                    .filter(|surface| self.floating_workspace.contains_key(surface))
+                    .collect()
+            };
         // `rule { on_workspace }` is a live match criterion feeding cached
         // opacity/glass, and this migration is the one place a window's
         // workspace-number-or-lack-thereof changes wholesale (Classic
@@ -2188,7 +2201,7 @@ impl Smallvil {
         self.refresh_space();
         match (self.config.spatial_engine, target) {
             (crate::config::SpatialEngine::Ocean, _) => self.migrate_ocean_to_classic(),
-            (_, crate::config::SpatialEngine::Ocean) => self.migrate_classic_to_ocean(),
+            (_, crate::config::SpatialEngine::Ocean) => self.migrate_classic_to_ocean(&float_stack),
             _ => {} // Classic and Scroll share durable workspace membership.
         }
         self.config.spatial_engine = target;
@@ -2200,11 +2213,19 @@ impl Smallvil {
         self.retile_with_viscosity(false, None);
         // Classic retile maps trees only; restore visible migrated floaters.
         if target.uses_workspaces() {
-            let floating: Vec<(WlSurface, Rectangle<i32, Logical>, Window)> = self
+            let mut floating: Vec<(WlSurface, Rectangle<i32, Logical>, Window)> = self
                 .floating_workspace
                 .iter()
                 .map(|(surface, tag)| (surface.clone(), tag.rect, tag.window.clone()))
                 .collect();
+            // Each map raises, so map bottom first to keep the old stacking;
+            // floaters with no known position go underneath.
+            floating.sort_by_key(|(surface, _, _)| {
+                match float_stack.iter().position(|s| s == surface) {
+                    None => (false, std::cmp::Reverse(0)),
+                    Some(index) => (true, std::cmp::Reverse(index)),
+                }
+            });
             for (surface, rect, window) in floating {
                 let Some(tag) = self.floating_workspace.get(&surface) else {
                     continue;

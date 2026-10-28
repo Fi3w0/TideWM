@@ -11,8 +11,8 @@ use smithay::{
 use crate::config::Direction;
 
 use super::{
-    classic_rect_to_ocean, directional_score, ocean_classic_slot, ocean_island_origins,
-    ocean_rect_to_classic, ocean_reef_x, FloatingTag, SessionLock, Smallvil,
+    classic_rect_to_ocean, directional_score, is_scratchpad_workspace, ocean_classic_slot,
+    ocean_island_origins, ocean_rect_to_classic, ocean_reef_x, FloatingTag, SessionLock, Smallvil,
 };
 
 impl Smallvil {
@@ -565,7 +565,12 @@ impl Smallvil {
     /// populated workspace becomes a reef on that island's lateral line. The
     /// camera points at the previously-active workspace's reef, and floating
     /// windows translate from output-global to reef-local world coordinates.
-    pub(super) fn migrate_classic_to_ocean(&mut self) {
+    ///
+    /// Scratchpad workspaces have no place in the world: their trees and
+    /// unpinned floaters stay in `layout`/`floating_workspace`, hidden
+    /// because Ocean renders neither, and come back as they were.
+    /// `float_stack` is the floating stacking order, topmost first.
+    pub(super) fn migrate_classic_to_ocean(&mut self, float_stack: &[WlSurface]) {
         // Depth-deck windows have no Ocean counterpart: recall them to
         // their workspace tiles first so the tree move carries them. The
         // deck picker overlay is Classic UI and must not linger.
@@ -582,15 +587,48 @@ impl Smallvil {
             .filter_map(|output| Some((output.name(), self.space.output_geometry(output)?)))
             .collect();
 
-        // Snapshot the active workspace per output before draining.
+        // Snapshot the active workspace per output before draining. A shown
+        // scratchpad points the camera at the workspace it was opened from.
         let active: std::collections::HashMap<String, u32> = output_viewports
             .iter()
-            .map(|(name, _)| (name.clone(), self.layout.active_workspace(name)))
+            .map(|(name, _)| {
+                let mut workspace = self.layout.active_workspace(name);
+                if is_scratchpad_workspace(workspace) {
+                    workspace = self.scratchpad_previous.get(name).copied().unwrap_or(1);
+                }
+                (name.clone(), workspace)
+            })
             .collect();
 
         // Drain the trees first (each is unique per (output, workspace)).
-        let mut trees = self.layout.drain_for_migration();
-        let floating: Vec<(WlSurface, FloatingTag)> = self.floating_workspace.drain().collect();
+        let mut trees = self.layout.drain_for_migration(is_scratchpad_workspace);
+        // Pinned floaters show on every workspace, so they always migrate.
+        let moving: Vec<WlSurface> = self
+            .floating_workspace
+            .iter()
+            .filter(|(surface, tag)| {
+                !is_scratchpad_workspace(tag.workspace) || self.pinned.contains(*surface)
+            })
+            .map(|(surface, _)| surface.clone())
+            .collect();
+        let mut floating: Vec<(WlSurface, FloatingTag)> = moving
+            .into_iter()
+            .filter_map(|surface| {
+                let mut tag = self.floating_workspace.remove(&surface)?;
+                if is_scratchpad_workspace(tag.workspace) {
+                    tag.workspace = active.get(&tag.output).copied().unwrap_or(1);
+                }
+                Some((surface, tag))
+            })
+            .collect();
+        // Pushed topmost first, so Ocean's front-to-back stack keeps the
+        // Classic order; floaters with no known position go underneath.
+        floating.sort_by_key(|(surface, _)| {
+            float_stack
+                .iter()
+                .position(|s| s == surface)
+                .unwrap_or(usize::MAX)
+        });
         let reef_gap = self.config.gaps.max(0);
 
         // Assign disjoint islands before placing per-output reef sequences.
@@ -675,9 +713,9 @@ impl Smallvil {
             }
         }
         // `pinned` is a Classic-only set; Ocean represents pin status via
-        // screen pins. Clear it so the debug-build invariant (pinned
-        // windows stay in `floating_workspace`) holds under Ocean, where
-        // that map is drained.
+        // screen pins. Every pinned floater migrated above, so clearing it
+        // keeps the debug-build invariant (pinned windows stay in
+        // `floating_workspace`) true for the parked scratchpad floaters.
         self.pinned.clear();
 
         // Workspace-switch bookkeeping is Classic-only.

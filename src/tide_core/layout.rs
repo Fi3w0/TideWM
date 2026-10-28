@@ -823,12 +823,16 @@ impl Layouts {
     /// Returns `(output, workspace, tree)` triples, removing the tree and
     /// all associated per-workspace state (algorithm, master ratio, cascade
     /// state) from this `Layouts`. Empty trees are skipped -- they were
-    /// never real content, just lazily-created stubs.
-    pub(crate) fn drain_for_migration(&mut self) -> Vec<(String, u32, BspLayout)> {
+    /// never real content, just lazily-created stubs. Workspaces for which
+    /// `keep` returns true stay here untouched, with their owner index.
+    pub(crate) fn drain_for_migration(
+        &mut self,
+        keep: impl Fn(u32) -> bool,
+    ) -> Vec<(String, u32, BspLayout)> {
         let keys: Vec<(String, u32)> = self
             .trees
             .iter()
-            .filter(|(_, tree)| !tree.is_empty())
+            .filter(|((_, workspace), tree)| !tree.is_empty() && !keep(*workspace))
             .map(|(k, _)| k.clone())
             .collect();
         let drained = keys
@@ -838,10 +842,10 @@ impl Layouts {
                 self.master_ratio.remove(&key);
                 self.cascade_state.remove(&key);
                 let tree = self.trees.remove(&key)?;
+                unindex_tree_owners(&mut self.owners, &tree);
                 Some((key.0, key.1, tree))
             })
             .collect();
-        self.owners.clear();
         // Ocean rebuilds the order, so Scroll columns cannot survive it.
         self.scroll.clear_columns();
         drained
@@ -2696,14 +2700,14 @@ mod tests {
         layouts.set_algorithm("DP-1", 1, LayoutAlgorithm::Master);
         layouts.adjust_master_ratio("DP-1", 1, 0.1);
 
-        let drained = layouts.drain_for_migration();
+        let drained = layouts.drain_for_migration(|_| false);
         assert!(drained.is_empty());
         // The stub tree itself stays, as do its per-workspace settings.
         assert!(layouts.trees.contains_key(&("DP-1".to_string(), 1)));
         assert_eq!(layouts.algorithm("DP-1", 1), LayoutAlgorithm::Master);
 
         // Draining twice is a no-op.
-        assert!(layouts.drain_for_migration().is_empty());
+        assert!(layouts.drain_for_migration(|_| false).is_empty());
     }
 
     #[test]

@@ -429,3 +429,122 @@ fn engine_round_trip_keeps_membership_focus_and_floating_geometry() {
     }
     println!("engine transitions checked: {checked}");
 }
+
+const SCRATCHPAD_CONFIG: &str = r#"engine = classic
+welcome_hint = false
+water_effects = false
+gaps = 8
+animations {
+ enabled = false
+}
+rule {
+ app_id = f
+ output = A
+ float = true
+ position = "100x100"
+ size = "500x400"
+}
+"#;
+
+#[test]
+fn scratchpads_and_floating_stacking_survive_engine_changes() {
+    if run_isolated(
+        "scratchpads_and_floating_stacking_survive_engine_changes",
+        SCRATCHPAD_CONFIG,
+        "scratchpad transitions checked: 4",
+    ) {
+        return;
+    }
+    let mut f = two_output_fixture();
+    let tile = map(&mut f, "tile");
+    let scratch = map(&mut f, "scratch");
+    f.state
+        .focus_window(Some(scratch.clone()), SERIAL_COUNTER.next_serial());
+    f.state
+        .run_action(crate::config::Action::MoveToScratchpad(None));
+    let notes = map(&mut f, "notes");
+    f.state
+        .focus_window(Some(notes.clone()), SERIAL_COUNTER.next_serial());
+    f.state
+        .run_action(crate::config::Action::MoveToScratchpad(Some(
+            "notes".into(),
+        )));
+    // Six overlapping floaters; each new one maps on top.
+    let floaters: Vec<WlSurface> = (0..6).map(|_| map(&mut f, "f")).collect();
+    f.dispatch();
+    let a = f.state.output_by_name("A").unwrap();
+    let b = f.state.output_by_name("B").unwrap();
+    let stack = |f: &mut Fixture| -> Vec<usize> {
+        f.state.refresh_space();
+        f.state
+            .render_placements(&a)
+            .unwrap()
+            .iter()
+            .filter_map(|p| floaters.iter().position(|s| Some(s) == p.surface()))
+            .collect()
+    };
+    let classic_stack = stack(&mut f);
+    assert_eq!(classic_stack, vec![5, 4, 3, 2, 1, 0]);
+    let initial: Vec<Vec<Owner>> = [&tile, &scratch, &notes]
+        .iter()
+        .map(|s| owners(&f.state, s))
+        .collect();
+    let notes_ws = match initial[2][0] {
+        Owner::Tiled { workspace, .. } => workspace,
+        ref other => panic!("named scratchpad window not tiled: {other:?}"),
+    };
+    assert_eq!(
+        initial,
+        vec![
+            vec![Owner::Tiled {
+                output: "A".into(),
+                workspace: 1
+            }],
+            vec![Owner::Tiled {
+                output: "A".into(),
+                workspace: 0
+            }],
+            vec![Owner::Tiled {
+                output: "A".into(),
+                workspace: notes_ws
+            }],
+        ]
+    );
+
+    let mut checked = 0;
+    for target in [
+        SpatialEngine::Ocean,
+        SpatialEngine::Classic,
+        SpatialEngine::Scroll,
+        SpatialEngine::Classic,
+    ] {
+        assert!(f.state.migrate_spatial_engine(target));
+        f.dispatch();
+        assert_eq!(
+            stack(&mut f),
+            classic_stack,
+            "floating stack after {target:?}"
+        );
+        let now: Vec<Vec<Owner>> = [&tile, &scratch, &notes]
+            .iter()
+            .map(|s| owners(&f.state, s))
+            .collect();
+        if target == SpatialEngine::Ocean {
+            // Scratchpads stay parked in workspace storage, out of the world.
+            assert_eq!(now[0], vec![Owner::OceanTiled]);
+            assert_eq!(now[1..], initial[1..]);
+            for output in [&a, &b] {
+                let shown = f.state.render_placements(output).unwrap();
+                assert!(!shown
+                    .iter()
+                    .any(|p| p.surface() == Some(&scratch) || p.surface() == Some(&notes)));
+            }
+            let reefs = f.state.ocean.reef_rects_on_output("A");
+            assert_eq!(reefs.len(), 1, "only the real workspace becomes a reef");
+        } else {
+            assert_eq!(now, initial, "membership after {target:?}");
+        }
+        checked += 1;
+    }
+    println!("scratchpad transitions checked: {checked}");
+}
