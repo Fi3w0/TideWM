@@ -228,8 +228,8 @@ impl CompositorHandler for Smallvil {
     fn destroyed(&mut self, surface: &WlSurface) {
         super::explicit_sync::release_cancelled(surface);
         self.remove_surface_buffer_blockers(surface);
-        if self.classic_tile_drag.as_ref() == Some(surface) {
-            self.classic_tile_drag = None;
+        if self.input.classic_tile_drag.as_ref() == Some(surface) {
+            self.input.classic_tile_drag = None;
         }
         if let Some(client) = surface.client() {
             if let Some(client_state) = client.get_data::<ClientState>() {

@@ -349,14 +349,14 @@ fn wallpaper_frames_preserve_drag_and_exclusive_zone_changes_retile() {
         .space
         .map_element(dragged.clone(), destination_geo.loc, false);
     fixture.state.refresh_space();
-    fixture.state.classic_tile_drag = Some(surface.clone());
+    fixture.state.input.classic_tile_drag = Some(surface.clone());
     assert!(fixture
         .state
         .render_placements(destination)
         .unwrap()
         .iter()
         .any(|p| p.surface() == Some(&surface)));
-    fixture.state.classic_tile_drag = None;
+    fixture.state.input.classic_tile_drag = None;
     assert!(!fixture
         .state
         .render_placements(destination)

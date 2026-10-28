@@ -208,7 +208,7 @@ impl Smallvil {
         if cfg.idle_fps.is_empty() || cfg.idle_after_ms.is_empty() {
             return fps;
         }
-        let idle_ms = self.last_activity.elapsed().as_millis() as u64;
+        let idle_ms = self.input.last_activity.elapsed().as_millis() as u64;
         for (after_ms, tier_fps) in cfg.idle_after_ms.iter().zip(&cfg.idle_fps) {
             if idle_ms >= *after_ms {
                 fps = (*tier_fps).min(fps);
@@ -341,7 +341,7 @@ impl Smallvil {
             || self.spatial.engine.ownership() != crate::config::SpatialOwnership::Ocean
             || !self.config.minimap.enabled
             || !matches!(self.session_lock, SessionLock::Unlocked)
-            || (self.popup_grab.is_none()
+            || (self.input.popup_grab.is_none()
                 && self
                     .seat
                     .get_pointer()

@@ -491,8 +491,8 @@ impl Smallvil {
         let now = Instant::now();
         let mut changed = HashSet::new();
         for (surface, phase) in visible {
-            let paused =
-                focused.as_ref() == Some(&surface) || self.floating_dragging.contains(&surface);
+            let paused = focused.as_ref() == Some(&surface)
+                || self.input.floating_dragging.contains(&surface);
             let drift = self
                 .physics
                 .window_currents
@@ -591,7 +591,7 @@ impl Smallvil {
         let mut changed = HashSet::new();
         for (surface, state) in &mut self.physics.window_buoyancy {
             let paused =
-                focused.as_ref() == Some(surface) || self.floating_dragging.contains(surface);
+                focused.as_ref() == Some(surface) || self.input.floating_dragging.contains(surface);
             let target = if paused {
                 0.0
             } else {
@@ -997,10 +997,10 @@ impl Smallvil {
                 self.reveal_scroll_window(surface);
             }
         }
-        let previous_focus = self.window_focus.clone();
-        self.on_demand_layer_focus = None;
-        self.window_focus = surface.filter(|surface| self.window_is_visible(surface));
-        if let Some(surface) = self.window_focus.clone() {
+        let previous_focus = self.input.window_focus.clone();
+        self.input.on_demand_layer_focus = None;
+        self.input.window_focus = surface.filter(|surface| self.window_is_visible(surface));
+        if let Some(surface) = self.input.window_focus.clone() {
             self.note_depth_attention(&surface);
         }
         self.reconcile_keyboard_focus(serial);
@@ -1010,7 +1010,7 @@ impl Smallvil {
         // dropped (to None), or a map transaction. A freshly mapped window
         // receives focus and its map ripple in the same transaction; stacking
         // a focus ripple there makes two presets fight over the same frame.
-        if let Some(new_surface) = self.window_focus.clone() {
+        if let Some(new_surface) = self.input.window_focus.clone() {
             if animate_handoff
                 && previous_focus.as_ref() != Some(&new_surface)
                 && previous_focus.is_some()

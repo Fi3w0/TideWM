@@ -312,7 +312,7 @@ impl XdgShellHandler for Smallvil {
             keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
         }
         pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
-        self.popup_grab = Some(PopupGrabState {
+        self.input.popup_grab = Some(PopupGrabState {
             root,
             grab,
             has_keyboard_grab,
@@ -1303,10 +1303,13 @@ impl Smallvil {
                 self.spatial.workspaces.layout.output_of(s) == Some(name.as_str())
                     && self.spatial.workspaces.layout.workspace_of(s) == Some(workspace)
             };
-            let anchor = focused
-                .clone()
-                .filter(|s| on_strip(s))
-                .or_else(|| self.focus_history.iter().find(|s| on_strip(s)).cloned());
+            let anchor = focused.clone().filter(|s| on_strip(s)).or_else(|| {
+                self.input
+                    .focus_history
+                    .iter()
+                    .find(|s| on_strip(s))
+                    .cloned()
+            });
             self.spatial.workspaces.layout.insert(
                 &name,
                 workspace,
@@ -1686,7 +1689,7 @@ impl Smallvil {
         self.physics.window_float_ambient.remove(surface);
         self.physics.window_float_bodies.remove(surface);
         self.physics.window_currents.remove(surface);
-        self.floating_dragging.remove(surface);
+        self.input.floating_dragging.remove(surface);
         self.physics.window_buoyancy.remove(surface);
         self.physics.buoyancy_dirty = true;
         self.window_frame_snapshots.remove(surface);
@@ -1696,7 +1699,7 @@ impl Smallvil {
         self.depth_schematics.remove(surface);
         self.expected_tiled_size.remove(surface);
         self.tiled_size_refusals.remove(surface);
-        self.focus_history.retain(|s| s != surface);
+        self.input.focus_history.retain(|s| s != surface);
         // Closing the foreign-toplevel handle here (rather than only on
         // role destruction) means an xdg unmap also retires it; a later
         // remap announces a fresh handle from `map_toplevel`, which is what

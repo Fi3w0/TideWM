@@ -1054,6 +1054,7 @@ impl Smallvil {
             return;
         }
         let mut ordered: Vec<WlSurface> = self
+            .input
             .focus_history
             .iter()
             .filter(|s| windows.contains(s))
@@ -1073,9 +1074,9 @@ impl Smallvil {
             None => 0,
         };
         let next = ordered[next_index].clone();
-        self.cycling_focus = true;
+        self.input.cycling_focus = true;
         self.activate_toplevel(&next);
-        self.cycling_focus = false;
+        self.input.cycling_focus = false;
     }
 
     /// Turns `focused`'s Scroll column into one tab group (tabs in column

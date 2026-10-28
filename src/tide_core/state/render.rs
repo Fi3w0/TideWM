@@ -209,7 +209,7 @@ impl Smallvil {
                 // until it commits the tile size a large first buffer near
                 // an edge overlaps the neighbor output and would flash there.
                 if kind == crate::placement::PlacementKind::Tiled
-                    && surface != self.classic_tile_drag.as_ref()
+                    && surface != self.input.classic_tile_drag.as_ref()
                     && surface
                         .and_then(|surface| self.spatial.workspaces.layout.output_of(surface))
                         .is_some_and(|owner| owner != output_name)
@@ -222,7 +222,7 @@ impl Smallvil {
                 if kind == crate::placement::PlacementKind::Floating
                     && scrolling
                     && surface.is_some_and(|surface| {
-                        !self.floating_dragging.contains(surface)
+                        !self.input.floating_dragging.contains(surface)
                             && self.scroll_strip_floater(surface)
                             && self
                                 .spatial

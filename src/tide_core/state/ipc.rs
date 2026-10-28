@@ -64,7 +64,7 @@ impl Smallvil {
         let mut now = self.ipc_seen_state();
         // A drag or swipe moves the strip on every motion event; report
         // Scroll once, with the final state, when the interaction ends.
-        let interacting = self.compositor_gesture.is_some()
+        let interacting = self.input.compositor_gesture.is_some()
             || self
                 .seat
                 .get_pointer()
@@ -184,7 +184,7 @@ impl Smallvil {
         };
         IpcSeenState {
             outputs,
-            mode: self.active_mode.clone(),
+            mode: self.input.active_mode.clone(),
             engine: engine_name(self.spatial.engine),
             scroll,
         }

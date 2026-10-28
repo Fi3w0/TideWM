@@ -171,7 +171,7 @@ impl PointerGrab<Smallvil> for TileMoveGrab {
             return;
         }
 
-        data.classic_tile_drag = Some(self.surface.clone());
+        data.input.classic_tile_drag = Some(self.surface.clone());
         let delta = event.location - self.start_data.location;
         let new_location = self.initial_location.to_f64() + delta;
         let new_location = new_location.to_i32_round();
@@ -313,7 +313,7 @@ impl PointerGrab<Smallvil> for TileMoveGrab {
         if self.completion.take_complete() {
             self.commit(data);
         }
-        data.classic_tile_drag = None;
+        data.input.classic_tile_drag = None;
         data.set_drag_preview(None);
         // Motion moved only the visual Space element. Always snap it back
         // to authoritative tiling, including on cancellation.

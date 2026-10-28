@@ -89,7 +89,7 @@ impl SeatHandler for Smallvil {
         _seat: &Seat<Self>,
         image: smithay::input::pointer::CursorImageStatus,
     ) {
-        self.cursor_status = image;
+        self.input.cursor_status = image;
         self.request_redraw();
     }
 
@@ -118,7 +118,7 @@ impl smithay::input::tablet::TabletSeatHandler for Smallvil {
         _tool: &smithay::backend::input::TabletToolDescriptor,
         image: smithay::input::pointer::CursorImageStatus,
     ) {
-        self.cursor_status = image;
+        self.input.cursor_status = image;
         self.request_redraw();
     }
 }
@@ -159,7 +159,7 @@ impl WaylandDndGrabHandler for Smallvil {
                     source.cancel();
                     return;
                 };
-                self.dnd_icon = icon;
+                self.input.dnd_icon = icon;
                 let grab = DnDGrab::new_pointer(&self.display_handle, start_data, source, seat);
                 pointer.set_grab(self, grab, serial, Focus::Keep);
             }
@@ -172,7 +172,7 @@ impl WaylandDndGrabHandler for Smallvil {
                     source.cancel();
                     return;
                 };
-                self.dnd_icon = icon;
+                self.input.dnd_icon = icon;
                 let grab = DnDGrab::new_touch(&self.display_handle, start_data, source, seat);
                 touch.set_grab(self, grab, serial);
             }
@@ -188,11 +188,11 @@ impl DndGrabHandler for Smallvil {
         _seat: Seat<Self>,
         _location: Point<f64, Logical>,
     ) {
-        self.dnd_icon = None;
+        self.input.dnd_icon = None;
     }
 
     fn cancelled(&mut self, _seat: Seat<Self>, _location: Point<f64, Logical>) {
-        self.dnd_icon = None;
+        self.input.dnd_icon = None;
     }
 }
 

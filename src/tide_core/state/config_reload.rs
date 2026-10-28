@@ -342,8 +342,8 @@ impl Smallvil {
                 if self.backend_name == "udev"
                     && (env_change.touches("XCURSOR_THEME") || env_change.touches("XCURSOR_SIZE"))
                 {
-                    self.cursor_theme = crate::cursor::Theme::load();
-                    if self.cursor_theme.is_none() {
+                    self.input.cursor_theme = crate::cursor::Theme::load();
+                    if self.input.cursor_theme.is_none() {
                         warnings.push(
                             "Cursor theme from XCURSOR_THEME has no default cursor; using the fallback dot"
                                 .to_string(),
@@ -366,8 +366,8 @@ impl Smallvil {
                     self.custom_shader_programs
                         .retain_definitions(&self.config.shader_definitions),
                 );
-                self.rescue_keybinds_active = false;
-                self.helper_keys_down.clear();
+                self.input.rescue_keybinds_active = false;
+                self.input.helper_keys_down.clear();
                 // A live `workspace_count` change should show up in the
                 // ext-workspace-v1/IPC workspace listing immediately, same
                 // as everything else hot-reloadable. Cheap no-op diff when
@@ -542,9 +542,9 @@ impl Smallvil {
                 // indication why -- exit back to the base keybinds
                 // instead, the same table a name that never existed at
                 // all would resolve to.
-                if let Some(name) = &self.active_mode {
+                if let Some(name) = &self.input.active_mode {
                     if !self.config.modes.contains_key(name) {
-                        self.active_mode = None;
+                        self.input.active_mode = None;
                     }
                 }
                 self.spatial
@@ -622,7 +622,7 @@ impl Smallvil {
                         ));
                 }
                 self.retile();
-                if let Some(focus) = self.window_focus.clone() {
+                if let Some(focus) = self.input.window_focus.clone() {
                     self.reveal_scroll_window(&focus);
                 }
                 if !diff.is_empty() || had_error_overlay || !warnings.is_empty() {

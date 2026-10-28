@@ -652,7 +652,7 @@ impl Smallvil {
         }
         if !locked && composite_cursor && draw_cursor {
             let idle_hidden = self.config.cursor_hide_after_ms > 0
-                && self.last_pointer_motion.elapsed()
+                && self.input.last_pointer_motion.elapsed()
                     >= std::time::Duration::from_millis(self.config.cursor_hide_after_ms as u64);
             // Pointer-lock coordinates are stale; never capture a frozen glyph.
             let pointer_locked = self.pointer_is_locked();
@@ -660,12 +660,12 @@ impl Smallvil {
             let hidden = CursorImageStatus::Hidden;
             let cursor_status = if idle_hidden || pointer_locked {
                 &hidden
-            } else if matches!(self.cursor_status, CursorImageStatus::Hidden)
+            } else if matches!(self.input.cursor_status, CursorImageStatus::Hidden)
                 && self.config.cursor_always_visible
             {
                 &forced_visible
             } else {
-                &self.cursor_status
+                &self.input.cursor_status
             };
             let output_scale = output.current_scale();
             let scale = output_scale.fractional_scale();
@@ -707,6 +707,7 @@ impl Smallvil {
                     let local = (pointer_loc - output_loc.to_f64()).to_physical(scale);
                     let elapsed = self.start_time.elapsed();
                     let glyph = self
+                        .input
                         .cursor_theme
                         .as_mut()
                         .and_then(|theme| {

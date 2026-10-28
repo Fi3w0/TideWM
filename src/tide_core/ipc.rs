@@ -978,7 +978,7 @@ fn handle_request(state: &mut Smallvil, request: Request) -> serde_json::Value {
             pid,
         } => resolve_window_response(state, window_id, app_id.as_deref(), pid),
 
-        Request::ActiveMode => json!({ "ok": true, "data": state.active_mode }),
+        Request::ActiveMode => json!({ "ok": true, "data": state.input.active_mode }),
         Request::FocusedOutput => {
             let name = state.primary_output().map(|output| output.name());
             json!({ "ok": true, "data": name.and_then(|name| output_json(state, &name)) })

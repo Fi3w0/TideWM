@@ -444,21 +444,23 @@ impl Smallvil {
         apply_touchpad_config(&self.config.input.touchpad, device);
         let device_config = self.config.input.resolve_device(device.name().as_ref());
         apply_device_calibration(&device_config, device, false);
-        if !self.known_input_devices.contains(device) {
-            self.known_input_devices.push(device.clone());
+        if !self.input.known_input_devices.contains(device) {
+            self.input.known_input_devices.push(device.clone());
         }
         self.refresh_input_device_outputs();
     }
 
     pub(crate) fn unregister_input_device(&mut self, device: &InputDevice) {
-        self.known_input_devices.retain(|known| known != device);
-        self.input_device_outputs.remove(device);
+        self.input
+            .known_input_devices
+            .retain(|known| known != device);
+        self.input.input_device_outputs.remove(device);
     }
 
     pub(crate) fn reapply_input_device_config(&mut self, previous_rules: &[InputDeviceConfig]) {
         let current_rules = &self.config.input.devices;
         let touchpad = &self.config.input.touchpad;
-        for device in &mut self.known_input_devices {
+        for device in &mut self.input.known_input_devices {
             apply_touchpad_config(touchpad, device);
             let name = device.name().into_owned();
             let previous = InputDeviceConfig::resolve(previous_rules, &name);
@@ -472,7 +474,7 @@ impl Smallvil {
 
     pub(crate) fn refresh_input_device_outputs(&mut self) {
         let mut mappings = HashMap::new();
-        for device in &self.known_input_devices {
+        for device in &self.input.known_input_devices {
             let name = device.name();
             let config = self.config.input.resolve_device(name.as_ref());
             let Some(output_name) = config.map_to_output.as_deref() else {
@@ -488,7 +490,7 @@ impl Smallvil {
                 );
             }
         }
-        self.input_device_outputs = mappings;
+        self.input.input_device_outputs = mappings;
     }
 
     fn run_workspace_swipe(&mut self, delta_x: f64, delta_y: f64, threshold: f64) {
@@ -758,7 +760,7 @@ impl Smallvil {
     {
         let output = event
             .device()
-            .configured_output(&self.input_device_outputs)
+            .configured_output(&self.input.input_device_outputs)
             .filter(|output| self.space.output_geometry(output).is_some())
             .or_else(|| self.space.outputs().next().cloned())?;
         let geometry = self.space.output_geometry(&output)?;
@@ -774,7 +776,7 @@ impl Smallvil {
         position: Point<f64, Logical>,
     ) -> Point<f64, Logical> {
         if let Some(geometry) = device
-            .configured_output(&self.input_device_outputs)
+            .configured_output(&self.input.input_device_outputs)
             .and_then(|output| self.space.output_geometry(&output))
         {
             return crate::state::nearest_point_in_output_rects(position, [geometry])
@@ -887,13 +889,13 @@ impl Smallvil {
         // This is exactly the "stuck open" failure its state-checked
         // design exists to prevent: a lost real release is the whole
         // reason this function exists, so clear it explicitly here too.
-        if self.minimap_trigger_down {
-            self.minimap_trigger_down = false;
+        if self.input.minimap_trigger_down {
+            self.input.minimap_trigger_down = false;
             self.close_minimap_peek();
         }
         // Helper-key presses have the same filter-closure-only bookkeeping,
         // and the synthesized releases above bypass that closure as well.
-        self.helper_keys_down.clear();
+        self.input.helper_keys_down.clear();
     }
 
     pub(crate) fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>)
@@ -907,7 +909,7 @@ impl Smallvil {
             InputEvent::DeviceAdded { .. } | InputEvent::DeviceRemoved { .. }
         ) {
             self.idle_notifier_state.notify_activity(&self.seat);
-            self.last_activity = std::time::Instant::now();
+            self.input.last_activity = std::time::Instant::now();
         }
 
         match event {
@@ -1069,7 +1071,7 @@ impl Smallvil {
                             let released_syms = all_layout_syms(&handle);
                             let mut released_helper = false;
                             for keysym in &released_syms {
-                                released_helper |= data.helper_keys_down.remove(keysym);
+                                released_helper |= data.input.helper_keys_down.remove(keysym);
                             }
                             if released_helper {
                                 return FilterResult::Intercept(());
@@ -1087,9 +1089,9 @@ impl Smallvil {
                             // break: the trigger key itself releasing, or a
                             // required modifier releasing while the
                             // trigger key stays down.
-                            let trigger_released = data.minimap_trigger_down
+                            let trigger_released = data.input.minimap_trigger_down
                                 && released_syms.contains(&data.config.minimap.keysym);
-                            if data.minimap_trigger_down {
+                            if data.input.minimap_trigger_down {
                                 let held = Mods {
                                     ctrl: modifiers.ctrl,
                                     alt: modifiers.alt,
@@ -1097,7 +1099,7 @@ impl Smallvil {
                                     logo: modifiers.logo,
                                 };
                                 if trigger_released || !data.config.minimap.mods.is_held_by(held) {
-                                    data.minimap_trigger_down = false;
+                                    data.input.minimap_trigger_down = false;
                                     data.close_minimap_peek();
                                 }
                             }
@@ -1142,9 +1144,9 @@ impl Smallvil {
                             && !modifiers.logo
                             && keysym == Keysym::Escape
                         {
-                            data.rescue_keybinds_active = true;
-                            data.active_mode = None;
-                            data.helper_keys_down.clear();
+                            data.input.rescue_keybinds_active = true;
+                            data.input.active_mode = None;
+                            data.input.helper_keys_down.clear();
                             data.toast = Toast::new(
                                 "Rescue keybinds active until config reload",
                                 ToastKind::Info,
@@ -1219,7 +1221,7 @@ impl Smallvil {
                                     data.open_minimap_peek(&output);
                                 }
                                 if data.minimap_peek.is_some() {
-                                    data.minimap_trigger_down = true;
+                                    data.input.minimap_trigger_down = true;
                                     return FilterResult::Intercept(());
                                 }
                             }
@@ -1234,10 +1236,10 @@ impl Smallvil {
                         // (reload_config clears it if the name vanishes),
                         // but degrades safely to "nothing matches,
                         // everything forwards" rather than panicking.
-                        let table: &[Keybind] = if data.rescue_keybinds_active {
+                        let table: &[Keybind] = if data.input.rescue_keybinds_active {
                             &data.config.rescue_keybinds
                         } else {
-                            match &data.active_mode {
+                            match &data.input.active_mode {
                                 Some(name) => data
                                     .config
                                     .modes
@@ -1252,7 +1254,7 @@ impl Smallvil {
                             keysym,
                             latin_keysym,
                             modifiers,
-                            &data.helper_keys_down,
+                            &data.input.helper_keys_down,
                             data.spatial.engine.ownership()
                                 == crate::config::SpatialOwnership::Ocean,
                         )
@@ -1274,7 +1276,7 @@ impl Smallvil {
                                 if table.iter().any(|bind| {
                                     helper_syms.iter().any(|sym| bind.uses_helper_key(*sym))
                                 }) {
-                                    data.helper_keys_down.extend(helper_syms);
+                                    data.input.helper_keys_down.extend(helper_syms);
                                     FilterResult::Intercept(())
                                 } else {
                                     FilterResult::Forward
@@ -1597,7 +1599,7 @@ impl Smallvil {
                 let button_state = event.state();
 
                 if suppress_consumed_pointer_release(
-                    &mut self.suppressed_pointer_buttons,
+                    &mut self.input.suppressed_pointer_buttons,
                     button,
                     button_state,
                 ) {
@@ -1646,7 +1648,7 @@ impl Smallvil {
                 // only pointer-position read this path needs.
                 if self.minimap_peek.is_some() {
                     if button_state == ButtonState::Pressed {
-                        self.suppressed_pointer_buttons.insert(button);
+                        self.input.suppressed_pointer_buttons.insert(button);
                         self.minimap_click_travel();
                     }
                     return;
@@ -1660,7 +1662,7 @@ impl Smallvil {
                 // dismiss the popup before Smithay forwards the press.
                 if button_state == ButtonState::Pressed
                     && pointer.is_grabbed()
-                    && self.popup_grab.is_some()
+                    && self.input.popup_grab.is_some()
                 {
                     let pos = pointer.current_location();
                     if let Some(layer) = self.layer_under_pointer(pos) {
@@ -2634,7 +2636,7 @@ impl Smallvil {
                 match switch {
                     Switch::Lid => {
                         let closed = state == SwitchState::On;
-                        if std::mem::replace(&mut self.is_lid_closed, closed) == closed {
+                        if std::mem::replace(&mut self.input.is_lid_closed, closed) == closed {
                             tracing::trace!(
                                 closed,
                                 "Lid switch event with no state change, ignoring"
@@ -2653,7 +2655,7 @@ impl Smallvil {
                     }
                     Switch::TabletMode => {
                         let tablet = state == SwitchState::On;
-                        if std::mem::replace(&mut self.is_tablet_mode, tablet) == tablet {
+                        if std::mem::replace(&mut self.input.is_tablet_mode, tablet) == tablet {
                             tracing::trace!(
                                 tablet,
                                 "Tablet-mode switch event with no state change, ignoring"
@@ -2723,7 +2725,7 @@ impl Smallvil {
                             &output.name(),
                             self.spatial.workspaces.layout.scroll_key(workspace),
                         );
-                        self.compositor_gesture = Some(CompositorGesture::Scroll {
+                        self.input.compositor_gesture = Some(CompositorGesture::Scroll {
                             output: output.name(),
                             workspace,
                             initial_offset,
@@ -2742,7 +2744,7 @@ impl Smallvil {
                     // swipe_up/down/left/right bound at the same finger
                     // count `workspace_swipe_fingers` uses.
                     let swim = workspace_fallback && !action_match && self.swim_enabled();
-                    self.compositor_gesture = Some(CompositorGesture::Swipe {
+                    self.input.compositor_gesture = Some(CompositorGesture::Swipe {
                         workspace_fallback,
                         swim,
                         delta_x: 0.0,
@@ -2779,7 +2781,7 @@ impl Smallvil {
                     .then(|| self.start_gesture_modifier_move())
                     .flatten()
                 {
-                    self.compositor_gesture = Some(CompositorGesture::ModifierMove {
+                    self.input.compositor_gesture = Some(CompositorGesture::ModifierMove {
                         last_location: self.seat.get_pointer().unwrap().current_location(),
                         completion,
                     });
@@ -2797,7 +2799,7 @@ impl Smallvil {
             }
             InputEvent::GestureSwipeUpdate { event, .. } => {
                 let delta = BackendGestureSwipeUpdateEvent::delta(&event);
-                let modifier_move_from = match &self.compositor_gesture {
+                let modifier_move_from = match &self.input.compositor_gesture {
                     Some(CompositorGesture::ModifierMove { last_location, .. }) => {
                         Some(*last_location)
                     }
@@ -2806,7 +2808,7 @@ impl Smallvil {
                 if let Some(last_location) = modifier_move_from {
                     let new_location = self.clamp_to_outputs(last_location + delta);
                     if let Some(CompositorGesture::ModifierMove { last_location, .. }) =
-                        &mut self.compositor_gesture
+                        &mut self.input.compositor_gesture
                     {
                         *last_location = new_location;
                     }
@@ -2825,7 +2827,7 @@ impl Smallvil {
                 }
                 if let Some(CompositorGesture::Scroll {
                     output, workspace, ..
-                }) = &self.compositor_gesture
+                }) = &self.input.compositor_gesture
                 {
                     let output = output.clone();
                     let workspace = *workspace;
@@ -2837,7 +2839,7 @@ impl Smallvil {
                     delta_x,
                     delta_y,
                     ..
-                }) = &mut self.compositor_gesture
+                }) = &mut self.input.compositor_gesture
                 {
                     *delta_x += delta.x;
                     *delta_y += delta.y;
@@ -2870,11 +2872,11 @@ impl Smallvil {
                 // leaking the grab it started forever (nothing else would
                 // ever call `unset_grab` on it).
                 if matches!(
-                    &self.compositor_gesture,
+                    &self.input.compositor_gesture,
                     Some(CompositorGesture::ModifierMove { .. })
                 ) {
                     let Some(CompositorGesture::ModifierMove { completion, .. }) =
-                        self.compositor_gesture.take()
+                        self.input.compositor_gesture.take()
                     else {
                         unreachable!();
                     };
@@ -2889,14 +2891,14 @@ impl Smallvil {
                     return;
                 }
                 if matches!(
-                    self.compositor_gesture,
+                    self.input.compositor_gesture,
                     Some(CompositorGesture::Scroll { .. })
                 ) {
                     if let Some(CompositorGesture::Scroll {
                         output,
                         workspace,
                         initial_offset,
-                    }) = self.compositor_gesture.take()
+                    }) = self.input.compositor_gesture.take()
                     {
                         self.finish_scroll_gesture(
                             &output,
@@ -2912,7 +2914,7 @@ impl Smallvil {
                     swim,
                     delta_x,
                     delta_y,
-                }) = self.compositor_gesture.take()
+                }) = self.input.compositor_gesture.take()
                 {
                     if swim {
                         let locked = !matches!(self.session_lock, SessionLock::Unlocked);
@@ -2969,7 +2971,7 @@ impl Smallvil {
                     && matches!(self.session_lock, SessionLock::Unlocked)
                     && self.exclusive_layer().is_none();
                 if compositor_pinch {
-                    self.compositor_gesture = Some(CompositorGesture::Pinch { scale: 1.0 });
+                    self.input.compositor_gesture = Some(CompositorGesture::Pinch { scale: 1.0 });
                     return;
                 }
                 let pointer = self.seat.get_pointer().unwrap();
@@ -2983,7 +2985,8 @@ impl Smallvil {
                 );
             }
             InputEvent::GesturePinchUpdate { event, .. } => {
-                if let Some(CompositorGesture::Pinch { scale }) = &mut self.compositor_gesture {
+                if let Some(CompositorGesture::Pinch { scale }) = &mut self.input.compositor_gesture
+                {
                     *scale = BackendGesturePinchUpdateEvent::scale(&event);
                     return;
                 }
@@ -2999,7 +3002,9 @@ impl Smallvil {
                 );
             }
             InputEvent::GesturePinchEnd { event, .. } => {
-                if let Some(CompositorGesture::Pinch { scale }) = self.compositor_gesture.take() {
+                if let Some(CompositorGesture::Pinch { scale }) =
+                    self.input.compositor_gesture.take()
+                {
                     if !GestureEndEvent::cancelled(&event)
                         && matches!(self.session_lock, SessionLock::Unlocked)
                     {
@@ -3377,13 +3382,13 @@ impl Smallvil {
             }
             Action::EnterMode(name) => {
                 if self.config.modes.contains_key(&name) {
-                    self.active_mode = Some(name);
+                    self.input.active_mode = Some(name);
                 } else {
                     tracing::warn!(name, "mode not found in config, ignoring");
                 }
             }
             Action::ExitMode => {
-                self.active_mode = None;
+                self.input.active_mode = None;
             }
             Action::SetLayout(algorithm) => {
                 self.set_layout_algorithm(algorithm);

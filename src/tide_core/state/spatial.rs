@@ -212,9 +212,9 @@ impl Smallvil {
     /// documented elsewhere in this state module.
     pub(crate) fn set_floating_dragging(&mut self, surface: &WlSurface, dragging: bool) {
         if dragging {
-            self.floating_dragging.insert(surface.clone());
+            self.input.floating_dragging.insert(surface.clone());
         } else {
-            self.floating_dragging.remove(surface);
+            self.input.floating_dragging.remove(surface);
         }
         self.physics.buoyancy_dirty = true;
         self.request_redraw();
@@ -1270,7 +1270,7 @@ impl Smallvil {
                                 || self.physics.window_viscosity.contains_key(&surface))
                                 && self.retarget_window_viscosity(&surface, rect);
                             if matches!(
-                                self.compositor_gesture,
+                                self.input.compositor_gesture,
                                 Some(CompositorGesture::Scroll { .. })
                             ) {
                                 self.window_move_animations.remove(&surface);
@@ -1564,7 +1564,7 @@ impl Smallvil {
                 if !was_tiled {
                     self.physics.window_float_ambient.remove(surface);
                     self.physics.window_currents.remove(surface);
-                    self.floating_dragging.remove(surface);
+                    self.input.floating_dragging.remove(surface);
                     self.physics.window_buoyancy.remove(surface);
                 }
                 self.retile();
@@ -1714,7 +1714,7 @@ impl Smallvil {
             self.spatial.workspaces.floating_workspace.remove(surface);
             self.physics.window_float_ambient.remove(surface);
             self.physics.window_currents.remove(surface);
-            self.floating_dragging.remove(surface);
+            self.input.floating_dragging.remove(surface);
             self.physics.window_buoyancy.remove(surface);
             self.physics.buoyancy_dirty = true;
         }
@@ -2330,8 +2330,8 @@ impl Smallvil {
             return true;
         }
         if self.activation_blocked()
-            || self.classic_tile_drag.is_some()
-            || self.compositor_gesture.is_some()
+            || self.input.classic_tile_drag.is_some()
+            || self.input.compositor_gesture.is_some()
             || self
                 .seat
                 .get_pointer()
@@ -2443,7 +2443,7 @@ impl Smallvil {
         for surface in &migrated_surfaces {
             self.refresh_window_opacity_and_glass_for(surface);
         }
-        if let Some(focus) = self.window_focus.clone() {
+        if let Some(focus) = self.input.window_focus.clone() {
             self.reveal_scroll_window(&focus);
         }
         self.sync_tide();

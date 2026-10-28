@@ -41,15 +41,15 @@ impl Smallvil {
 
     pub(super) fn queue_scroll_pointer_refresh(&mut self) {
         if self.spatial.engine.projection() != Some(crate::config::WorkspaceProjection::Scroll)
-            || self.scroll_pointer_refresh_pending
+            || self.input.scroll_pointer_refresh_pending
         {
             return;
         }
-        self.scroll_pointer_refresh_pending = true;
+        self.input.scroll_pointer_refresh_pending = true;
         // Retiling may run inside a pointer grab while its handle is locked.
         // Enter/leave must run after that callback releases the handle.
         self.loop_handle.insert_idle(|state| {
-            state.scroll_pointer_refresh_pending = false;
+            state.input.scroll_pointer_refresh_pending = false;
             state.refresh_scroll_pointer_focus();
         });
     }
@@ -238,7 +238,8 @@ impl Smallvil {
             return columns[column].get(row.checked_add_signed(step)?).cloned();
         }
         let target = columns.get(column.checked_add_signed(step)?)?;
-        self.focus_history
+        self.input
+            .focus_history
             .iter()
             .find(|s| target.contains(s))
             .cloned()
@@ -616,6 +617,7 @@ impl Smallvil {
                 };
                 if let Some(target) = target {
                     let next = self
+                        .input
                         .focus_history
                         .iter()
                         .find(|s| target.windows.contains(s))

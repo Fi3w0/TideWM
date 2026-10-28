@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant},
+};
 
 use smithay::{
     desktop::{
@@ -6,7 +9,8 @@ use smithay::{
         WindowSurfaceType,
     },
     input::{
-        pointer::{MotionEvent, PointerHandle},
+        keyboard::Keysym,
+        pointer::{CursorImageStatus, MotionEvent, PointerHandle},
         Seat,
     },
     output::Output,
@@ -27,8 +31,153 @@ use crate::config::Direction;
 
 use super::{
     client_scale_for_view_scale, directional_score, is_window, surface_origin,
-    surface_origin_for_view, ClientState, FocusOrigin, KeyboardFocusTarget, SessionLock, Smallvil,
+    surface_origin_for_view, ClientState, CompositorGesture, FocusOrigin, KeyboardFocusTarget,
+    PopupGrabState, SessionLock, Smallvil,
 };
+
+/// Focus authority, key and bind state, pointer grabs and gestures, cursor
+/// and input devices (plan step 8e). `reconcile_keyboard_focus` stays the
+/// only writer of seat keyboard focus.
+pub(crate) struct InputState {
+    /// The window Tide intends to focus when no higher-priority layer owns
+    /// the keyboard. Kept separately from actual seat focus so an Exclusive
+    /// layer can preempt temporarily and then restore the exact window.
+    pub(super) window_focus: Option<WlSurface>,
+    /// Explicit/first-map OnDemand layer focus. Unlike Exclusive layers it
+    /// is not globally preemptive; a later window/empty click clears it.
+    pub(super) on_demand_layer_focus: Option<WlSurface>,
+    /// Last target applied to both wl_keyboard focus and XDG Activated.
+    /// Every mutation goes through `reconcile_keyboard_focus`.
+    pub(super) keyboard_focus: KeyboardFocusTarget,
+    /// Most-recently-focused-first order of every window that has ever
+    /// held keyboard focus, updated from `reconcile_keyboard_focus`'s own
+    /// activation-change block (except while `cycling_focus` is set, see
+    /// that field) and pruned in `detach_mapped_toplevel`. Drives
+    /// `cycle_focus`'s Alt-Tab ordering; a window not yet in this list
+    /// (freshly mapped but never focused) falls back to `Space`'s own
+    /// order, appended after every known entry.
+    pub(crate) focus_history: Vec<WlSurface>,
+    /// Set for the duration of `cycle_focus`'s own `focus_window` call, so
+    /// `reconcile_keyboard_focus` skips its normal `focus_history` reorder.
+    /// Without this, cycling itself would move whatever it just focused to
+    /// the front of the MRU list, which the *next* press then reads back as
+    /// "current" -- degenerating into an A/B two-window oscillation instead
+    /// of a real cycle, since the third-oldest window's position keeps
+    /// getting pushed out from under the walk before it's ever reached.
+    /// Found by manual trace, not observed live -- `cargo test` cannot
+    /// catch this class of bug (needs a real multi-press keybind sequence).
+    pub(super) cycling_focus: bool,
+    /// Active xdg-popup pointer/keyboard grab and the root shell surface it
+    /// belongs to. The focus authority treats a live popup keyboard grab as
+    /// the root retaining logical focus even while wl_keyboard targets a
+    /// descendant popup surface.
+    pub(crate) popup_grab: Option<PopupGrabState>,
+    /// `Some(name)` while a `mode <name> { }` keybind table is active
+    /// (`Action::EnterMode`/`ExitMode`, `input.rs`'s keybind-matching
+    /// closure). `None` means the base top-level bind table is in effect.
+    /// Not tied to focus or any other implicit event -- only an explicit
+    /// `exit-mode` bind clears it, matching sway/Hyprland's own "mode"
+    /// behavior.
+    pub active_mode: Option<String>,
+    /// Emergency table is separate from Waves and starts only after the
+    /// deliberate Ctrl+Alt+Escape rescue chord. A successful config reload
+    /// clears it. Ordinary non-XKB helper keys held for arbitrary chords are
+    /// tracked here so their press/release never leaks into clients.
+    pub(crate) rescue_keybinds_active: bool,
+    pub(crate) helper_keys_down: HashSet<Keysym>,
+    /// Last XKB layout group + layout names announced over IPC, so
+    /// `layout-changed` fires only on an actual change (the `grp:` xkb
+    /// option changes the group inside `keyboard.input`, where no action
+    /// runs). `None` until the first check.
+    pub(crate) keyboard_layout_state: Option<(u32, Vec<String>)>,
+    /// A virtual keyboard's keymap currently on the seat keyboard, if any.
+    pub(crate) virtual_keyboard_keymap:
+        Option<crate::handlers::virtual_keyboard::VirtualKeyboardKeymap>,
+    /// The configured keymap, saved while a virtual keyboard's replaces it.
+    pub(crate) configured_keymap: Option<smithay::input::keyboard::KeymapFile>,
+    /// Whether `config.minimap`'s trigger keysym is currently physically
+    /// held down. Tracked separately from XKB modifier state because the
+    /// trigger is an ordinary key, not a modifier -- mirrors
+    /// `helper_keys_down`'s own press/release bookkeeping shape.
+    pub(crate) minimap_trigger_down: bool,
+    /// Active compositor-consumed touchpad gesture. `None` means gesture
+    /// events continue through the ordinary client protocol path.
+    pub(crate) compositor_gesture: Option<CompositorGesture>,
+    /// Mouse presses consumed by compositor-owned modal UI whose matching
+    /// release must not be delivered to a client after that UI closes and
+    /// pointer focus is restored. Entries are button codes, not device-
+    /// specific assumptions; a fresh press clears a stale entry if a
+    /// release was lost across a backend/session transition.
+    pub(crate) suppressed_pointer_buttons: HashSet<u32>,
+    pub(crate) classic_tile_drag: Option<WlSurface>,
+    /// Floating move grabs currently under direct manipulation. Kept
+    /// separately from viscosity because viscosity may be disabled or may
+    /// keep settling briefly after the physical grab ends.
+    pub(crate) floating_dragging: HashSet<WlSurface>,
+    /// Coalesces strip hit-test refreshes outside pointer-grab callbacks.
+    pub(super) scroll_pointer_refresh_pending: bool,
+    /// Timestamp of the last real pointer motion (absolute or relative),
+    /// updated from `Smallvil::note_pointer_motion`. Drives
+    /// `config.cursor_hide_after_ms`'s auto-hide check at render time
+    /// (`backend/udev.rs`) -- authoritative regardless of why a given
+    /// render happened to run.
+    pub(crate) last_pointer_motion: Instant,
+    /// Whether a `cursor_hide_after_ms` wake-up timer is currently pending.
+    /// `note_pointer_motion` only arms a new timer when this is `false`,
+    /// rather than spawning a fresh calloop source on every single motion
+    /// event (a real mouse can fire hundreds of those a second) -- the one
+    /// live timer re-reads `last_pointer_motion` when it fires and
+    /// reschedules itself further out if motion happened more recently
+    /// than expected, the same self-extending `TimeoutAction::ToDuration`
+    /// idiom `winit.rs`'s own redraw timer already uses.
+    pub(super) cursor_idle_timer_armed: bool,
+    /// Timestamp of the last real input activity (any keyboard/pointer/
+    /// touch event reaching `process_input_event`). Drives the caustics
+    /// idle-decay tiers: after `caustics.idle_after_ms[i]` of no input, the
+    /// effective frame rate drops to `caustics.idle_fps[i]`, so an idle
+    /// desktop's always-on overlay winds down over minutes instead of
+    /// burning frames at full rate forever. Pointer motion alone is not
+    /// enough -- keys and touch must reset it too.
+    pub(crate) last_activity: Instant,
+    /// Only read by the udev backend (see `cursor.rs`, `backend/udev.rs`).
+    /// Under winit the host compositor draws the real cursor, so this is
+    /// tracked but never rendered from.
+    pub cursor_status: CursorImageStatus,
+    /// Icon surface of the active client drag'n'drop, drawn at the pointer.
+    pub dnd_icon: Option<WlSurface>,
+    /// Loaded xcursor theme for `CursorImageStatus::Named`, only populated
+    /// by the udev backend (`backend/udev.rs`, same pattern as `session`/
+    /// `udev_gpu` above). `None` under winit, and also under udev if no
+    /// theme could be loaded -- `cursor::fallback_glyph_element` covers that
+    /// case, see `cursor.rs`.
+    pub cursor_theme: Option<crate::cursor::Theme>,
+    /// Every libinput device currently attached to the udev seat. Keeping
+    /// the ref-counted handles lets config reload re-apply touchpad and
+    /// per-device calibration settings without waiting for another hotplug.
+    /// Always empty under winit.
+    pub known_input_devices: Vec<smithay::reexports::input::Device>,
+    /// Resolved libinput-device to live-output bindings. Rebuilt on device
+    /// topology, output topology, and config changes so input events only do
+    /// a hash lookup and clone an `Output` handle, with no per-event strings
+    /// or geometry search.
+    pub(crate) input_device_outputs:
+        HashMap<smithay::reexports::input::Device, smithay::output::Output>,
+    /// Laptop lid closed right now, per libinput's `Switch::Lid`
+    /// (`SwitchState::On` = closed). Tracked separately from the
+    /// configured `lid_close`/`lid_open` actions so an event whose state
+    /// matches what we already have is a no-op -- libinput sometimes
+    /// re-emits the current state after a suspend/resume cycle, and
+    /// without this dedup that would re-fire the action every wake.
+    /// Defaults to `false` (open); libinput does not report initial switch
+    /// state at seat-assign time, so a lid already closed when TideWM
+    /// starts won't be reflected here until the first real toggle. Same
+    /// shape as `is_tablet_mode` below.
+    pub is_lid_closed: bool,
+    /// Device is in tablet mode right now, per libinput's
+    /// `Switch::TabletMode` (`SwitchState::On` = tablet mode). Same
+    /// dedup-vs-libinput-resume rationale as `is_lid_closed`.
+    pub is_tablet_mode: bool,
+}
 
 impl Smallvil {
     /// Finds the topmost surface under `pos`, checking the same manually
@@ -350,7 +499,7 @@ impl Smallvil {
     /// preference for an unrelated pointer output. Also used by first-map
     /// `output = focused` rules while a launcher owns keyboard focus.
     pub(crate) fn focused_output(&self) -> Option<Output> {
-        let intended_output = self.window_focus.as_ref().and_then(|surface| {
+        let intended_output = self.input.window_focus.as_ref().and_then(|surface| {
             self.pointer_output_for_surface(surface)
                 .or_else(|| self.rendered_output_for_surface(surface))
                 .or_else(|| {
@@ -433,7 +582,7 @@ impl Smallvil {
     /// OnDemand target must be remembered as explicit intent.
     pub(crate) fn focus_layer(&mut self, surface: WlSurface, serial: smithay::utils::Serial) {
         if self.layer_keyboard_interactivity(&surface) == Some(KeyboardInteractivity::OnDemand) {
-            self.on_demand_layer_focus = Some(surface);
+            self.input.on_demand_layer_focus = Some(surface);
         }
         self.reconcile_keyboard_focus(serial);
     }
@@ -443,16 +592,22 @@ impl Smallvil {
     /// layer, valid OnDemand intent, valid visible window intent, then none.
     pub(crate) fn reconcile_keyboard_focus(&mut self, serial: smithay::utils::Serial) {
         if self
+            .input
             .window_focus
             .as_ref()
             .is_some_and(|surface| !self.window_is_visible(surface))
         {
-            self.window_focus = None;
+            self.input.window_focus = None;
         }
-        if self.on_demand_layer_focus.as_ref().is_some_and(|surface| {
-            self.layer_keyboard_interactivity(surface) != Some(KeyboardInteractivity::OnDemand)
-        }) {
-            self.on_demand_layer_focus = None;
+        if self
+            .input
+            .on_demand_layer_focus
+            .as_ref()
+            .is_some_and(|surface| {
+                self.layer_keyboard_interactivity(surface) != Some(KeyboardInteractivity::OnDemand)
+            })
+        {
+            self.input.on_demand_layer_focus = None;
         }
 
         // Locked takes absolute priority over everything else -- no window
@@ -468,17 +623,23 @@ impl Smallvil {
             self.exclusive_layer()
                 .map(|layer| KeyboardFocusTarget::Layer(layer.wl_surface().clone()))
                 .or_else(|| {
-                    self.on_demand_layer_focus
+                    self.input
+                        .on_demand_layer_focus
                         .clone()
                         .map(KeyboardFocusTarget::Layer)
                 })
-                .or_else(|| self.window_focus.clone().map(KeyboardFocusTarget::Window))
+                .or_else(|| {
+                    self.input
+                        .window_focus
+                        .clone()
+                        .map(KeyboardFocusTarget::Window)
+                })
                 .unwrap_or(KeyboardFocusTarget::None)
         };
 
         self.release_popup_grab_if_focus_leaves(&resolved);
 
-        let popup_keyboard_focus = self.popup_grab.as_ref().and_then(|popup| {
+        let popup_keyboard_focus = self.input.popup_grab.as_ref().and_then(|popup| {
             let owns_keyboard = popup.has_keyboard_grab
                 && !popup.grab.has_ended()
                 && resolved.surface() == Some(&popup.root);
@@ -491,9 +652,9 @@ impl Smallvil {
             .get_keyboard()
             .and_then(|keyboard| keyboard.current_focus());
         let focus_changed =
-            resolved != self.keyboard_focus || seat_surface.as_ref() != seat_target.as_ref();
+            resolved != self.input.keyboard_focus || seat_surface.as_ref() != seat_target.as_ref();
 
-        let old_window = match &self.keyboard_focus {
+        let old_window = match &self.input.keyboard_focus {
             KeyboardFocusTarget::Window(surface) => Some(surface.clone()),
             _ => None,
         };
@@ -503,7 +664,7 @@ impl Smallvil {
         };
 
         // Commit the target before mirroring activation to wlr-toplevel state.
-        self.keyboard_focus = resolved;
+        self.input.keyboard_focus = resolved;
 
         let mut activation_changed = false;
         if old_window != new_window {
@@ -531,9 +692,9 @@ impl Smallvil {
                         urgent: false,
                     });
                 }
-                if !self.cycling_focus {
-                    self.focus_history.retain(|s| s != &surface);
-                    self.focus_history.insert(0, surface);
+                if !self.input.cycling_focus {
+                    self.input.focus_history.retain(|s| s != &surface);
+                    self.input.focus_history.insert(0, surface);
                 }
             }
             // Focus handoff between two real windows (or window -> none).
@@ -561,10 +722,10 @@ impl Smallvil {
     /// pointer grab is released from a calloop idle so this remains safe if a
     /// future focus path originates inside a pointer-grab callback.
     fn release_popup_grab_if_focus_leaves(&mut self, target: &KeyboardFocusTarget) {
-        let leaving = self
-            .popup_grab
-            .as_ref()
-            .is_some_and(|popup| popup.has_keyboard_grab && target.surface() != Some(&popup.root));
+        let leaving =
+            self.input.popup_grab.as_ref().is_some_and(|popup| {
+                popup.has_keyboard_grab && target.surface() != Some(&popup.root)
+            });
         if !leaving {
             return;
         }
@@ -573,7 +734,7 @@ impl Smallvil {
     }
 
     pub(super) fn release_popup_grab(&mut self) {
-        let Some(mut popup) = self.popup_grab.take() else {
+        let Some(mut popup) = self.input.popup_grab.take() else {
             return;
         };
         let grab_serial = popup.grab.serial();
@@ -604,6 +765,7 @@ impl Smallvil {
 
     fn release_popup_grab_for_root(&mut self, root: &WlSurface) {
         if self
+            .input
             .popup_grab
             .as_ref()
             .is_some_and(|popup| &popup.root == root)
@@ -621,13 +783,14 @@ impl Smallvil {
     pub(crate) fn unmap_popup_grab(&mut self, surface: &WlSurface, root: Option<&WlSurface>) {
         if root.is_none()
             || self
+                .input
                 .popup_grab
                 .as_ref()
                 .is_none_or(|popup| Some(&popup.root) != root)
         {
             return;
         }
-        let Some(mut popup) = self.popup_grab.take() else {
+        let Some(mut popup) = self.input.popup_grab.take() else {
             return;
         };
         let topmost = popup.grab.current_grab();
@@ -637,7 +800,7 @@ impl Smallvil {
             PopupUngrabStrategy::All
         };
         popup.grab.ungrab(strategy);
-        self.popup_grab = Some(popup);
+        self.input.popup_grab = Some(popup);
         self.refresh_popup_grab();
         self.reconcile_keyboard_focus(SERIAL_COUNTER.next_serial());
     }
@@ -646,6 +809,7 @@ impl Smallvil {
     /// and restores both input devices to the centralized root focus.
     pub(crate) fn refresh_popup_grab(&mut self) {
         let ended = self
+            .input
             .popup_grab
             .as_ref()
             .is_some_and(|popup| popup.grab.has_ended());
@@ -653,7 +817,7 @@ impl Smallvil {
             return;
         }
 
-        let popup = self.popup_grab.take().unwrap();
+        let popup = self.input.popup_grab.take().unwrap();
         let grab_serial = popup.grab.serial();
         let previous_serial = popup.grab.previous_serial();
         let serial = SERIAL_COUNTER.next_serial();
@@ -675,14 +839,14 @@ impl Smallvil {
     /// a pointer-only menu grab.
     pub(crate) fn popup_grab_policy(&self, root: &WlSurface) -> Option<bool> {
         if self.mapped_toplevel_window(root).is_some() {
-            return matches!(&self.keyboard_focus, KeyboardFocusTarget::Window(surface) if surface == root)
+            return matches!(&self.input.keyboard_focus, KeyboardFocusTarget::Window(surface) if surface == root)
                 .then_some(true);
         }
 
         match self.layer_keyboard_interactivity(root)? {
             KeyboardInteractivity::None => Some(false),
             KeyboardInteractivity::OnDemand | KeyboardInteractivity::Exclusive => {
-                matches!(&self.keyboard_focus, KeyboardFocusTarget::Layer(surface) if surface == root)
+                matches!(&self.input.keyboard_focus, KeyboardFocusTarget::Layer(surface) if surface == root)
                     .then_some(true)
             }
         }
@@ -692,7 +856,7 @@ impl Smallvil {
     /// keyboard grab the real seat focus is a descendant popup surface, but
     /// compositor actions and IPC must continue to address its root window.
     pub(crate) fn focused_window_surface(&self) -> Option<WlSurface> {
-        match &self.keyboard_focus {
+        match &self.input.keyboard_focus {
             KeyboardFocusTarget::Window(surface) => Some(surface.clone()),
             KeyboardFocusTarget::None
             | KeyboardFocusTarget::Layer(_)
@@ -707,7 +871,7 @@ impl Smallvil {
     /// window-only view would miss the layer case -- but can't match on
     /// the private `KeyboardFocusTarget` itself.
     pub(crate) fn keyboard_focused_surface(&self) -> Option<&WlSurface> {
-        match &self.keyboard_focus {
+        match &self.input.keyboard_focus {
             KeyboardFocusTarget::Window(surface)
             | KeyboardFocusTarget::Layer(surface)
             | KeyboardFocusTarget::Lock(surface) => Some(surface),
@@ -825,7 +989,7 @@ impl Smallvil {
     /// placement policy, not user actions against the currently focused
     /// client.
     pub(crate) fn intended_window_surface(&self) -> Option<WlSurface> {
-        self.window_focus.clone()
+        self.input.window_focus.clone()
     }
 
     /// Applies XDG Activated to one tracked role. Looking through the
@@ -855,7 +1019,7 @@ impl Smallvil {
     /// elsewhere (`handlers/xdg_shell.rs`'s wlr-foreign-toplevel state
     /// mirroring) that need it without exposing the enum itself.
     pub(crate) fn is_window_activated(&self, surface: &WlSurface) -> bool {
-        matches!(&self.keyboard_focus, KeyboardFocusTarget::Window(s) if s == surface)
+        matches!(&self.input.keyboard_focus, KeyboardFocusTarget::Window(s) if s == surface)
     }
 
     pub(crate) fn window_is_visible(&self, surface: &WlSurface) -> bool {
@@ -892,19 +1056,25 @@ impl Smallvil {
         serial: smithay::utils::Serial,
     ) {
         if self
+            .input
             .window_focus
             .as_ref()
             .is_some_and(|surface| !self.window_is_visible(surface))
         {
-            self.window_focus = None;
+            self.input.window_focus = None;
         }
-        if self.on_demand_layer_focus.as_ref().is_some_and(|surface| {
-            self.layer_keyboard_interactivity(surface) != Some(KeyboardInteractivity::OnDemand)
-        }) {
-            self.on_demand_layer_focus = None;
+        if self
+            .input
+            .on_demand_layer_focus
+            .as_ref()
+            .is_some_and(|surface| {
+                self.layer_keyboard_interactivity(surface) != Some(KeyboardInteractivity::OnDemand)
+            })
+        {
+            self.input.on_demand_layer_focus = None;
         }
 
-        if self.window_focus.is_none() && self.config.input.focus_follows_mouse {
+        if self.input.window_focus.is_none() && self.config.input.focus_follows_mouse {
             if let Some(pos) = self
                 .seat
                 .get_pointer()
@@ -912,18 +1082,18 @@ impl Smallvil {
             {
                 if self.layer_under_pointer(pos).is_none() {
                     if let Some(surface) = self.window_at_layout_position(pos) {
-                        self.window_focus = Some(surface);
+                        self.input.window_focus = Some(surface);
                     }
                 }
             }
         }
 
-        if self.window_focus.is_none() {
+        if self.input.window_focus.is_none() {
             if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
-                self.window_focus = self.topmost_ocean_surface(preferred_output);
+                self.input.window_focus = self.topmost_ocean_surface(preferred_output);
             } else {
                 self.refresh_space();
-                self.window_focus = preferred_output
+                self.input.window_focus = preferred_output
                     .and_then(|output_name| {
                         self.space
                             .elements()
@@ -961,11 +1131,12 @@ impl Smallvil {
     ) {
         if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean
             && self
+                .input
                 .window_focus
                 .as_ref()
                 .is_some_and(|surface| self.rendered_output_for_surface(surface).is_none())
         {
-            self.window_focus = None;
+            self.input.window_focus = None;
         }
         self.repair_keyboard_focus(preferred_output, serial);
     }
@@ -981,8 +1152,8 @@ impl Smallvil {
             .scroll
             .prune(&self.spatial.workspaces.layout.populated_workspaces());
         self.release_popup_grab_for_root(surface);
-        if self.window_focus.as_ref() == Some(surface) {
-            self.window_focus = None;
+        if self.input.window_focus.as_ref() == Some(surface) {
+            self.input.window_focus = None;
         }
     }
 
@@ -991,8 +1162,8 @@ impl Smallvil {
     /// no separate bookkeeping here.
     pub(crate) fn forget_layer_focus(&mut self, surface: &WlSurface) {
         self.release_popup_grab_for_root(surface);
-        if self.on_demand_layer_focus.as_ref() == Some(surface) {
-            self.on_demand_layer_focus = None;
+        if self.input.on_demand_layer_focus.as_ref() == Some(surface) {
+            self.input.on_demand_layer_focus = None;
         }
     }
 
@@ -1054,7 +1225,7 @@ impl Smallvil {
         // The last window the user focused here wins. Stacking order is only
         // a fallback: Scroll re-maps columns in strip order, so the topmost
         // element is the last column, not the one the user was on.
-        let remembered = self.focus_history.iter().find(|surface| {
+        let remembered = self.input.focus_history.iter().find(|surface| {
             self.space
                 .elements()
                 .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == *surface))
@@ -1107,10 +1278,10 @@ impl Smallvil {
         let Some((group, names)) = self.keyboard_layouts() else {
             return;
         };
-        if self.keyboard_layout_state.as_ref() == Some(&(group, names.clone())) {
+        if self.input.keyboard_layout_state.as_ref() == Some(&(group, names.clone())) {
             return;
         }
-        self.keyboard_layout_state = Some((group, names.clone()));
+        self.input.keyboard_layout_state = Some((group, names.clone()));
         self.emit_ipc_event(crate::ipc::IpcEvent::LayoutChanged {
             group,
             names,
@@ -1137,23 +1308,23 @@ impl Smallvil {
     /// `None` there) -- only the udev backend composites its own cursor at
     /// all.
     pub(crate) fn note_pointer_motion(&mut self) {
-        self.last_pointer_motion = Instant::now();
+        self.input.last_pointer_motion = Instant::now();
         if self.config.cursor_hide_after_ms <= 0 || self.udev_gpu.is_none() {
             return;
         }
-        if self.cursor_idle_timer_armed {
+        if self.input.cursor_idle_timer_armed {
             return;
         }
-        self.cursor_idle_timer_armed = true;
+        self.input.cursor_idle_timer_armed = true;
         let delay = Duration::from_millis(self.config.cursor_hide_after_ms as u64);
         let result = self.loop_handle.insert_source(
             Timer::from_duration(delay),
             move |_, _, state: &mut Smallvil| {
                 let configured =
                     Duration::from_millis(state.config.cursor_hide_after_ms.max(0) as u64);
-                let elapsed = state.last_pointer_motion.elapsed();
+                let elapsed = state.input.last_pointer_motion.elapsed();
                 if elapsed >= configured {
-                    state.cursor_idle_timer_armed = false;
+                    state.input.cursor_idle_timer_armed = false;
                     state.request_redraw();
                     TimeoutAction::Drop
                 } else {
@@ -1162,7 +1333,7 @@ impl Smallvil {
             },
         );
         if let Err(err) = result {
-            self.cursor_idle_timer_armed = false;
+            self.input.cursor_idle_timer_armed = false;
             tracing::warn!(%err, "Failed to register cursor idle timer");
         }
     }
@@ -1257,7 +1428,8 @@ impl Smallvil {
             self.mapped_toplevel_window(surface).is_some()
                 && self.toplevel_identity(surface).0.as_deref() == Some(app_id)
         };
-        self.focus_history
+        self.input
+            .focus_history
             .iter()
             .find(|surface| matches(surface))
             .cloned()
@@ -1460,6 +1632,7 @@ impl Smallvil {
 
         // MRU windows first, then never-focused visible windows in Space order.
         let mut ordered: Vec<WlSurface> = self
+            .input
             .focus_history
             .iter()
             .filter(|s| windows.iter().any(|w| surface_of(w).as_ref() == Some(*s)))
@@ -1495,9 +1668,9 @@ impl Smallvil {
         if !self.spatial_is_tiled(&next_surface) {
             self.space.raise_element(next, false);
         }
-        self.cycling_focus = true;
+        self.input.cycling_focus = true;
         self.focus_window(Some(next_surface), SERIAL_COUNTER.next_serial());
-        self.cycling_focus = false;
+        self.input.cycling_focus = false;
     }
 
     /// Moves keyboard focus to the nearest window in `direction`. Classic

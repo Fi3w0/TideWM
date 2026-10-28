@@ -143,7 +143,7 @@ impl Smallvil {
     /// like the lock surface above. Without them a client that animates its
     /// drag image (Firefox tab previews) would freeze after the first commit.
     pub fn send_dnd_icon_frames(&self, output: &Output, time: Duration) {
-        if let Some(icon) = self.dnd_icon.as_ref() {
+        if let Some(icon) = self.input.dnd_icon.as_ref() {
             send_frames_surface_tree(icon, output, time, Some(Duration::ZERO), |_, _| {
                 Some(output.clone())
             });
@@ -669,7 +669,7 @@ impl Smallvil {
                 select,
             );
         }
-        let cursor = match &self.cursor_status {
+        let cursor = match &self.input.cursor_status {
             CursorImageStatus::Surface(surface)
                 if matches!(self.session_lock, SessionLock::Unlocked) =>
             {
@@ -678,7 +678,8 @@ impl Smallvil {
             _ => None,
         };
         for surface in cursor.into_iter().chain(
-            self.dnd_icon
+            self.input
+                .dnd_icon
                 .as_ref()
                 .filter(|_| matches!(self.session_lock, SessionLock::Unlocked)),
         ) {

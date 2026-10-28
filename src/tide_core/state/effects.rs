@@ -379,7 +379,7 @@ impl Smallvil {
     }
 
     pub(super) fn window_render_alpha_for(&self, surface: &WlSurface, fullscreen: bool) -> f32 {
-        let focused = matches!(&self.keyboard_focus, KeyboardFocusTarget::Window(focused) if focused == surface);
+        let focused = matches!(&self.input.keyboard_focus, KeyboardFocusTarget::Window(focused) if focused == surface);
         self.window_opacity
             .get(surface)
             .copied()
@@ -489,7 +489,7 @@ impl Smallvil {
     pub(super) fn surface_has_animated_border(&self, surface: &WlSurface) -> bool {
         let border = self.border_config_for_surface(surface);
         let focused = matches!(
-            &self.keyboard_focus,
+            &self.input.keyboard_focus,
             KeyboardFocusTarget::Window(focused) if focused == surface
         );
         let urgent = self.urgent.contains(surface);
@@ -529,7 +529,7 @@ impl Smallvil {
         // new render element, just the existing per-window border reused
         // for a different reason while the drag hint names this surface.
         let focused = matches!(
-            &self.keyboard_focus,
+            &self.input.keyboard_focus,
             KeyboardFocusTarget::Window(focused) if focused == surface
         ) || self.spatial.ocean.drag_hint() == Some(surface);
         let urgent = self.urgent.contains(surface);
@@ -622,7 +622,7 @@ impl Smallvil {
         );
         let physical_rect = logical_rect.to_physical_precise_round(output_scale);
         let focused = matches!(
-            &self.keyboard_focus,
+            &self.input.keyboard_focus,
             KeyboardFocusTarget::Window(focused) if focused == surface
         );
         let urgent = self.urgent.contains(surface);

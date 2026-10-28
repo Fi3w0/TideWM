@@ -36,7 +36,7 @@ use smithay::{
         session::libseat::LibSeatSession,
     },
     desktop::{PopupGrab, PopupManager, Window},
-    input::{keyboard::Keysym, pointer::CursorImageStatus, Seat, SeatState},
+    input::{Seat, SeatState},
     output::Output,
     reexports::{
         calloop::{LoopHandle, LoopSignal, RegistrationToken},
@@ -183,7 +183,8 @@ pub struct Smallvil {
     /// surfaced through the IPC `diagnostics` request so `tidectl report`
     /// can say which code path a bug ran on without guessing from env.
     pub(crate) backend_name: &'static str,
-    pub(crate) classic_tile_drag: Option<WlSurface>,
+    /// Focus authority, key and bind state, pointer grabs and gestures, cursor and input devices (plan step 8e).
+    pub(crate) input: focus::InputState,
     pub(crate) native_render_stats: HashMap<Output, crate::backend::perf::OutputRenderStats>,
     /// The session Lua state config evaluates into: config globals and
     /// section tables persist here after a load, which is what makes
@@ -204,20 +205,6 @@ pub struct Smallvil {
     /// graph. Installed by `main` after backend initialization and updated
     /// transactionally after each successful reload.
     pub(crate) config_watcher: Option<crate::config::ConfigWatcher>,
-    /// Every libinput device currently attached to the udev seat. Keeping
-    /// the ref-counted handles lets config reload re-apply touchpad and
-    /// per-device calibration settings without waiting for another hotplug.
-    /// Always empty under winit.
-    pub known_input_devices: Vec<smithay::reexports::input::Device>,
-    /// Resolved libinput-device to live-output bindings. Rebuilt on device
-    /// topology, output topology, and config changes so input events only do
-    /// a hash lookup and clone an `Output` handle, with no per-event strings
-    /// or geometry search.
-    pub(crate) input_device_outputs:
-        HashMap<smithay::reexports::input::Device, smithay::output::Output>,
-    /// Active compositor-consumed touchpad gesture. `None` means gesture
-    /// events continue through the ordinary client protocol path.
-    pub(crate) compositor_gesture: Option<CompositorGesture>,
     pub toast: Option<Toast>,
     /// Persistent config diagnostic rendered as a reserved top panel.  It
     /// is independent of `toast`: reload confirmations and short debug
@@ -235,17 +222,6 @@ pub struct Smallvil {
     /// open on the output that triggered it. Built once at peek-open, not
     /// rebuilt per frame -- see `open_minimap_peek`/`close_minimap_peek`.
     pub(crate) minimap_peek: Option<crate::minimap::MinimapPeek>,
-    /// Whether `config.minimap`'s trigger keysym is currently physically
-    /// held down. Tracked separately from XKB modifier state because the
-    /// trigger is an ordinary key, not a modifier -- mirrors
-    /// `helper_keys_down`'s own press/release bookkeeping shape.
-    pub(crate) minimap_trigger_down: bool,
-    /// Mouse presses consumed by compositor-owned modal UI whose matching
-    /// release must not be delivered to a client after that UI closes and
-    /// pointer focus is restored. Entries are button codes, not device-
-    /// specific assumptions; a fresh press clears a stale entry if a
-    /// release was lost across a backend/session transition.
-    pub(crate) suppressed_pointer_buttons: HashSet<u32>,
     /// Live spatial model. `config.spatial_engine` is only what the config
     /// file asks for; this is what is running.
     pub spatial: SpatialState,
@@ -265,47 +241,6 @@ pub struct Smallvil {
     /// an event instead of waiting for a fixed polling interval. The winit
     /// backend keeps its host-refresh timer and leaves this unset.
     redraw_wakeup: Option<smithay::reexports::calloop::ping::Ping>,
-    /// Timestamp of the last real pointer motion (absolute or relative),
-    /// updated from `Smallvil::note_pointer_motion`. Drives
-    /// `config.cursor_hide_after_ms`'s auto-hide check at render time
-    /// (`backend/udev.rs`) -- authoritative regardless of why a given
-    /// render happened to run.
-    pub(crate) last_pointer_motion: Instant,
-    /// Timestamp of the last real input activity (any keyboard/pointer/
-    /// touch event reaching `process_input_event`). Drives the caustics
-    /// idle-decay tiers: after `caustics.idle_after_ms[i]` of no input, the
-    /// effective frame rate drops to `caustics.idle_fps[i]`, so an idle
-    /// desktop's always-on overlay winds down over minutes instead of
-    /// burning frames at full rate forever. Pointer motion alone is not
-    /// enough -- keys and touch must reset it too.
-    pub(crate) last_activity: Instant,
-    /// Last XKB layout group + layout names announced over IPC, so
-    /// `layout-changed` fires only on an actual change (the `grp:` xkb
-    /// option changes the group inside `keyboard.input`, where no action
-    /// runs). `None` until the first check.
-    pub(crate) keyboard_layout_state: Option<(u32, Vec<String>)>,
-    /// Whether a `cursor_hide_after_ms` wake-up timer is currently pending.
-    /// `note_pointer_motion` only arms a new timer when this is `false`,
-    /// rather than spawning a fresh calloop source on every single motion
-    /// event (a real mouse can fire hundreds of those a second) -- the one
-    /// live timer re-reads `last_pointer_motion` when it fires and
-    /// reschedules itself further out if motion happened more recently
-    /// than expected, the same self-extending `TimeoutAction::ToDuration`
-    /// idiom `winit.rs`'s own redraw timer already uses.
-    cursor_idle_timer_armed: bool,
-    /// `Some(name)` while a `mode <name> { }` keybind table is active
-    /// (`Action::EnterMode`/`ExitMode`, `input.rs`'s keybind-matching
-    /// closure). `None` means the base top-level bind table is in effect.
-    /// Not tied to focus or any other implicit event -- only an explicit
-    /// `exit-mode` bind clears it, matching sway/Hyprland's own "mode"
-    /// behavior.
-    pub active_mode: Option<String>,
-    /// Emergency table is separate from Waves and starts only after the
-    /// deliberate Ctrl+Alt+Escape rescue chord. A successful config reload
-    /// clears it. Ordinary non-XKB helper keys held for arbitrary chords are
-    /// tracked here so their press/release never leaks into clients.
-    pub(crate) rescue_keybinds_active: bool,
-    pub(crate) helper_keys_down: HashSet<Keysym>,
 
     /// IPC event subscribers and the state they were last told about.
     pub(crate) ipc: ipc::IpcState,
@@ -393,16 +328,10 @@ pub struct Smallvil {
     /// bounded snapshot records below so unmapping never retains a client.
     pub(crate) cascade_window_animations:
         HashMap<WlSurface, crate::cascade_transition::CascadeTransition>,
-    /// Coalesces strip hit-test refreshes outside pointer-grab callbacks.
-    scroll_pointer_refresh_pending: bool,
     pub(crate) window_move_animations:
         HashMap<WlSurface, crate::window_animation::WindowVisualAnimation>,
     /// Render-only floating-window motion: physics, buoyancy, currents, sway and viscosity (plan step 8b).
     pub(crate) physics: physics::FloatPhysicsState,
-    /// Floating move grabs currently under direct manipulation. Kept
-    /// separately from viscosity because viscosity may be disabled or may
-    /// keep settling briefly after the physical grab ends.
-    pub(crate) floating_dragging: HashSet<WlSurface>,
     /// One bounded analytical fill while a Classic floating drag is inside
     /// a configured edge/corner snap zone. Dropped on every grab teardown.
     pub(crate) snap_preview: Option<SnapPreview>,
@@ -638,11 +567,6 @@ pub struct Smallvil {
     /// hidden from sandboxed security-context clients.
     #[allow(dead_code)]
     pub virtual_keyboard_manager_state: VirtualKeyboardManagerState,
-    /// A virtual keyboard's keymap currently on the seat keyboard, if any.
-    pub(crate) virtual_keyboard_keymap:
-        Option<crate::handlers::virtual_keyboard::VirtualKeyboardKeymap>,
-    /// The configured keymap, saved while a virtual keyboard's replaces it.
-    pub(crate) configured_keymap: Option<smithay::input::keyboard::KeymapFile>,
     /// `ext-foreign-toplevel-list-v1`: exposes every mapped toplevel to
     /// external tooling (bars, taskbars, window switchers) as a handle
     /// carrying title/app_id. One handle per mapped toplevel, created in
@@ -724,11 +648,6 @@ pub struct Smallvil {
     /// persistent popup role needs this separate signal across null-buffer
     /// unmap and later remap just like `unmapped_toplevels` below.
     pub(crate) unmapped_popup_surfaces: HashSet<WlSurface>,
-    /// Active xdg-popup pointer/keyboard grab and the root shell surface it
-    /// belongs to. The focus authority treats a live popup keyboard grab as
-    /// the root retaining logical focus even while wl_keyboard targets a
-    /// descendant popup surface.
-    pub(crate) popup_grab: Option<PopupGrabState>,
     /// XDG toplevel roles that exist but do not currently have a committed
     /// buffer. Protocol mapping is deliberately tracked separately from
     /// `Space`: switching workspaces also removes windows from `Space`, but
@@ -807,16 +726,6 @@ pub struct Smallvil {
     pub idle_inhibitors: HashMap<WlSurface, usize>,
 
     pub seat: Seat<Self>,
-    /// The window Tide intends to focus when no higher-priority layer owns
-    /// the keyboard. Kept separately from actual seat focus so an Exclusive
-    /// layer can preempt temporarily and then restore the exact window.
-    window_focus: Option<WlSurface>,
-    /// Explicit/first-map OnDemand layer focus. Unlike Exclusive layers it
-    /// is not globally preemptive; a later window/empty click clears it.
-    on_demand_layer_focus: Option<WlSurface>,
-    /// Last target applied to both wl_keyboard focus and XDG Activated.
-    /// Every mutation goes through `reconcile_keyboard_focus`.
-    keyboard_focus: KeyboardFocusTarget,
 
     /// Only populated by the udev backend, which is also the only place
     /// the `zwp_linux_dmabuf_v1` global actually gets created (see
@@ -835,20 +744,6 @@ pub struct Smallvil {
     /// compositor already owns that. `input.rs`'s VT-switch keybind
     /// detection calls `change_vt` on this when it's `Some`.
     pub session: Option<LibSeatSession>,
-
-    /// Only read by the udev backend (see `cursor.rs`, `backend/udev.rs`).
-    /// Under winit the host compositor draws the real cursor, so this is
-    /// tracked but never rendered from.
-    pub cursor_status: CursorImageStatus,
-    /// Icon surface of the active client drag'n'drop, drawn at the pointer.
-    pub dnd_icon: Option<WlSurface>,
-
-    /// Loaded xcursor theme for `CursorImageStatus::Named`, only populated
-    /// by the udev backend (`backend/udev.rs`, same pattern as `session`/
-    /// `udev_gpu` above). `None` under winit, and also under udev if no
-    /// theme could be loaded -- `cursor::fallback_glyph_element` covers that
-    /// case, see `cursor.rs`.
-    pub cursor_theme: Option<crate::cursor::Theme>,
 
     /// Windows currently fullscreen, keyed by surface. This is the
     /// authoritative "is this fullscreen right now" source `retile()` reads
@@ -950,42 +845,6 @@ pub struct Smallvil {
     /// for the `rule { tag = [...] }` match criterion. Cleared per-surface
     /// in `detach_mapped_toplevel`, same lifecycle as `urgent`/`pinned`.
     pub window_tags: HashMap<WlSurface, HashSet<String>>,
-
-    /// Most-recently-focused-first order of every window that has ever
-    /// held keyboard focus, updated from `reconcile_keyboard_focus`'s own
-    /// activation-change block (except while `cycling_focus` is set, see
-    /// that field) and pruned in `detach_mapped_toplevel`. Drives
-    /// `cycle_focus`'s Alt-Tab ordering; a window not yet in this list
-    /// (freshly mapped but never focused) falls back to `Space`'s own
-    /// order, appended after every known entry.
-    pub(crate) focus_history: Vec<WlSurface>,
-    /// Set for the duration of `cycle_focus`'s own `focus_window` call, so
-    /// `reconcile_keyboard_focus` skips its normal `focus_history` reorder.
-    /// Without this, cycling itself would move whatever it just focused to
-    /// the front of the MRU list, which the *next* press then reads back as
-    /// "current" -- degenerating into an A/B two-window oscillation instead
-    /// of a real cycle, since the third-oldest window's position keeps
-    /// getting pushed out from under the walk before it's ever reached.
-    /// Found by manual trace, not observed live -- `cargo test` cannot
-    /// catch this class of bug (needs a real multi-press keybind sequence).
-    cycling_focus: bool,
-
-    /// Laptop lid closed right now, per libinput's `Switch::Lid`
-    /// (`SwitchState::On` = closed). Tracked separately from the
-    /// configured `lid_close`/`lid_open` actions so an event whose state
-    /// matches what we already have is a no-op -- libinput sometimes
-    /// re-emits the current state after a suspend/resume cycle, and
-    /// without this dedup that would re-fire the action every wake.
-    /// Defaults to `false` (open); libinput does not report initial switch
-    /// state at seat-assign time, so a lid already closed when TideWM
-    /// starts won't be reflected here until the first real toggle. Same
-    /// shape as `is_tablet_mode` below.
-    pub is_lid_closed: bool,
-
-    /// Device is in tablet mode right now, per libinput's
-    /// `Switch::TabletMode` (`SwitchState::On` = tablet mode). Same
-    /// dedup-vs-libinput-resume rationale as `is_lid_closed`.
-    pub is_tablet_mode: bool,
 
     /// Windows sharing one `Layouts` leaf, tab-strip style: only the
     /// `active` member actually occupies the leaf (and so is mapped/
