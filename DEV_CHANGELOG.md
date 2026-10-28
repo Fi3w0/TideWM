@@ -2,6 +2,16 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.0 — `config.rs` split (plan step 9)
+
+- Layout approved by Fiw 2026-10-28: by domain (each file holds a domain's config types, their `Default`/`impl`s and the `apply_*`/`lower_*` functions that fill them), caller paths kept through explicit re-exports from `config/mod.rs`, tests moved verbatim.
+- `491bd32` renames `config.rs` to `config/mod.rs` (no content change); `45b4fae` moves the 4,279-line `mod tests` body to `config/tests.rs` (rustfmt re-indent plus two dropped trailing commas).
+- One commit per domain, each a verbatim move of whole top-level items plus their `impl` blocks: `defaults.rs` (`d5a0209`), `diff.rs` (`3292922`), `files.rs` (`eed2875`), `values.rs` (`841bec1`), `actions.rs` (`1e88c11`), `shaders.rs` (`480b58e`), `devices.rs` (`61f6c1a`), `rules.rs` (`e12ee0c`), `decoration.rs` (`08c1ae3`), `animation.rs` (`ad0878a`), `spatial.rs` (`b3d2617`). Where rustfmt rewrapped a line after a move, that is a separate `style:` commit.
+- `config/mod.rs` keeps `Config`, `RawConfig`, `lower_entries` and the top-level assign/block dispatch: 1,598 lines (was 14,441). Largest domain file: `animation.rs`, 1,796 lines.
+- Visibility: only `pub(super)`, and only where the compiler shows a use from `mod.rs`, a sibling domain or the tests (93 lines, each listed in its commit message and in `.hermes/worklogs/config-split-2026-10-28/whole-split-identity.json`). Test-only uses are imported under `#[cfg(test)]`. No accessors, no renames, no behavior or config-surface change; no file outside `config/` changes.
+- Whole-split identity vs `491bd32`: all 273 item blocks present; 270 byte-identical apart from added `pub(super)`, 3 differ only by rustfmt rewrapping; tests identical ignoring whitespace.
+- Each move commit: 712 tests, strict Clippy (all and default features); each `style:` commit adds fmt. All-feature release build; nested matrix with subscribers 61/0 vs `.211`. Not run natively yet.
+
 ## 0.90.211 — Substates `InputState` and `RenderState` (plan step 8d–8e)
 
 - Field lists approved by Fiw 2026-10-28: nested render groups, focus fields in `InputState`, compositor UI (`toast`, `config_error_overlay`, `overview`, `minimap_peek`, `depth_deck_overlay`, `welcome_hint`, `builtin_wallpaper`, `screencast_picker`) left on `Smallvil` for a later `UiState`. `seat` and the protocol `*_state` globals stay on `Smallvil`.

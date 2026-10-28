@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.0 · 2026-10-28 — Configuration code split by area
+
+- Internal cleanup that completes the architecture refactor: the configuration code is now split into one file per area (decoration, animation, spatial, rules, devices, actions, shaders and so on). Config files, keys and behavior stay exactly the same.
+
 ## 0.90.211 · 2026-10-28 — Grouped input and render state
 
 - Internal cleanup: focus, keyboard, pointer and input-device state, and the render side (shader programs and GPU textures, per-window render settings, animations and redraw scheduling) now each live in their own named group. Nothing changes for users.
