@@ -56,7 +56,8 @@ use wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_manager_v1::Z
 use crate::{config::Config, layout::Layouts};
 
 use super::{
-    trusted_client, ClientState, KeyboardFocusTarget, SessionLock, Smallvil, SpatialState,
+    ipc::IpcState, trusted_client, ClientState, KeyboardFocusTarget, SessionLock, Smallvil,
+    SpatialState,
 };
 
 use smithay::{
@@ -292,10 +293,12 @@ impl Smallvil {
             rescue_keybinds_active: false,
             helper_keys_down: HashSet::new(),
 
-            ipc_subscribers: HashMap::new(),
-            ipc_seen: None,
-            ipc_flush_token: None,
-            next_ipc_subscriber_id: 1,
+            ipc: IpcState {
+                subscribers: HashMap::new(),
+                seen: None,
+                flush_token: None,
+                next_subscriber_id: 1,
+            },
 
             layout: {
                 let mut layout = Layouts::default();

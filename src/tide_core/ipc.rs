@@ -466,7 +466,7 @@ fn snapshot_window(state: &Smallvil, surface: &WlSurface) -> Option<serde_json::
 }
 
 /// A long-lived subscribe connection. One per `subscribe` request, stored
-/// in `Smallvil::ipc_subscribers` keyed by a process-unique `usize` id.
+/// in `Smallvil::ipc.subscribers` keyed by a process-unique `usize` id.
 pub(crate) struct IpcSubscriber {
     /// Keeps this long-lived connection included in `MAX_CONNECTIONS`.
     /// The request-side lease is transferred here when a subscribe request
@@ -781,10 +781,10 @@ fn register_subscriber(
         }
     };
 
-    let id = state.next_ipc_subscriber_id;
-    state.next_ipc_subscriber_id += 1;
+    let id = state.ipc.next_subscriber_id;
+    state.ipc.next_subscriber_id += 1;
 
-    state.ipc_subscribers.insert(
+    state.ipc.subscribers.insert(
         id,
         IpcSubscriber {
             _connection_lease: connection_lease,
@@ -812,7 +812,7 @@ fn register_subscriber(
         }
     }))
     .unwrap_or_else(|_| br#"{"ok":true,"data":{"subscription_id":0,"events":[]}}"#.to_vec());
-    if let Some(sub) = state.ipc_subscribers.get_mut(&id) {
+    if let Some(sub) = state.ipc.subscribers.get_mut(&id) {
         sub.pending.extend(ack_line);
         sub.pending.push_back(b'\n');
         // Best-effort inline flush. The periodic `flush_ipc_subscribers`
@@ -833,7 +833,7 @@ fn register_subscriber(
             match reader.read(&mut buf) {
                 Ok(0) => {
                     // Clean client-side close.
-                    state.ipc_subscribers.remove(&id);
+                    state.ipc.subscribers.remove(&id);
                     Ok(PostAction::Remove)
                 }
                 Ok(_) => {
@@ -847,7 +847,7 @@ fn register_subscriber(
                 }
                 Err(err) => {
                     tracing::warn!(%err, "IPC subscriber read error; dropping");
-                    state.ipc_subscribers.remove(&id);
+                    state.ipc.subscribers.remove(&id);
                     Ok(PostAction::Remove)
                 }
             }
@@ -857,7 +857,7 @@ fn register_subscriber(
         Ok(token) => token,
         Err(err) => {
             tracing::warn!(%err, "Failed to register IPC subscriber EOF source; dropping subscriber");
-            state.ipc_subscribers.remove(&id);
+            state.ipc.subscribers.remove(&id);
             return;
         }
     };
@@ -865,7 +865,7 @@ fn register_subscriber(
     // `emit_ipc_event`/`flush_ipc_subscribers` can retire this source via
     // `loop_handle.remove`. Without it, a wedged subscriber's read source
     // would leak until the next EOF, which may never come.
-    if let Some(sub) = state.ipc_subscribers.get_mut(&id) {
+    if let Some(sub) = state.ipc.subscribers.get_mut(&id) {
         sub.read_token = Some(token);
     }
 }

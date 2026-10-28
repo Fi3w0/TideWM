@@ -1,8 +1,33 @@
 use std::collections::HashMap;
 
-use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
+use smithay::reexports::calloop::{
+    timer::{TimeoutAction, Timer},
+    RegistrationToken,
+};
 
 use super::{engine_name, IpcSeenState, Smallvil};
+
+/// IPC subscriber bookkeeping, grouped out of `Smallvil` (plan step 8a).
+pub(crate) struct IpcState {
+    /// Long-lived IPC subscribe connections, keyed by a process-unique id
+    /// assigned at subscribe time. Empty in the steady state where no
+    /// widget is connected, which makes `emit_ipc_event` a cheap
+    /// early-return on every state change. See `ipc::IpcSubscriber` for
+    /// the per-connection fields and lifecycle.
+    pub(crate) subscribers: HashMap<usize, crate::ipc::IpcSubscriber>,
+    /// Last state `emit_state_change_events` reported, `None` until a
+    /// subscriber or handler first needs it.
+    pub(super) seen: Option<IpcSeenState>,
+    /// One-shot retry timer for subscriber bytes that did not fit in the
+    /// kernel socket buffer. `None` during the normal fully-drained state, so
+    /// IPC adds no periodic wakeup to an idle compositor.
+    pub(crate) flush_token: Option<RegistrationToken>,
+    /// Next subscriber id. Monotonic across the process lifetime rather
+    /// than recycled, so a stale reference inside an in-flight calloop
+    /// callback can't accidentally target a fresh subscriber that reused
+    /// the same id.
+    pub(crate) next_subscriber_id: usize,
+}
 
 impl Smallvil {
     /// Broadcasts one state-change event to every matching IPC subscriber.
@@ -31,9 +56,9 @@ impl Smallvil {
             "scroll-changed",
         ];
         let listening =
-            !self.ipc_subscribers.is_empty() || NAMES.iter().any(|name| self.has_lua_handler(name));
+            !self.ipc.subscribers.is_empty() || NAMES.iter().any(|name| self.has_lua_handler(name));
         if !listening {
-            self.ipc_seen = None;
+            self.ipc.seen = None;
             return;
         }
         let mut now = self.ipc_seen_state();
@@ -45,12 +70,12 @@ impl Smallvil {
                 .get_pointer()
                 .is_some_and(|pointer| pointer.is_grabbed());
         if interacting {
-            if let Some(before) = &self.ipc_seen {
+            if let Some(before) = &self.ipc.seen {
                 now.scroll.clone_from(&before.scroll);
             }
         }
-        let Some(before) = self.ipc_seen.take() else {
-            self.ipc_seen = Some(now);
+        let Some(before) = self.ipc.seen.take() else {
+            self.ipc.seen = Some(now);
             return;
         };
         use crate::ipc::IpcEvent;
@@ -95,7 +120,7 @@ impl Smallvil {
                 });
             }
         }
-        self.ipc_seen = Some(now);
+        self.ipc.seen = Some(now);
     }
 
     fn ipc_seen_state(&self) -> IpcSeenState {
@@ -161,12 +186,12 @@ impl Smallvil {
     pub(crate) fn emit_ipc_event(&mut self, event: crate::ipc::IpcEvent) {
         // Wave `on "event"` handlers run regardless of subscribers.
         self.run_lua_handlers(&event);
-        if self.ipc_subscribers.is_empty() {
+        if self.ipc.subscribers.is_empty() {
             return;
         }
         let payload = event.to_json_line(self);
         let mut to_drop: Vec<usize> = Vec::new();
-        for (id, sub) in self.ipc_subscribers.iter_mut() {
+        for (id, sub) in self.ipc.subscribers.iter_mut() {
             if !crate::ipc::event_matches(&sub.filter, &event) {
                 continue;
             }
@@ -200,11 +225,11 @@ impl Smallvil {
     /// `emit_ipc_event` time. Also retires any subscriber flagged for removal
     /// mid-emit (peer-closed or cap-exceeded).
     pub(crate) fn flush_ipc_subscribers(&mut self) {
-        if self.ipc_subscribers.is_empty() {
+        if self.ipc.subscribers.is_empty() {
             return;
         }
         let mut to_drop: Vec<usize> = Vec::new();
-        for (id, sub) in self.ipc_subscribers.iter_mut() {
+        for (id, sub) in self.ipc.subscribers.iter_mut() {
             if !sub.try_flush() {
                 to_drop.push(*id);
                 continue;
@@ -222,9 +247,10 @@ impl Smallvil {
     /// unwritten bytes. Healthy subscribers flush inline and never reach this
     /// path, keeping the compositor event loop quiescent when IPC is idle.
     pub(crate) fn arm_ipc_flush_timer(&mut self) {
-        if self.ipc_flush_token.is_some()
+        if self.ipc.flush_token.is_some()
             || !self
-                .ipc_subscribers
+                .ipc
+                .subscribers
                 .values()
                 .any(|subscriber| !subscriber.pending.is_empty())
         {
@@ -237,23 +263,24 @@ impl Smallvil {
             |_, _, state: &mut Smallvil| {
                 state.flush_ipc_subscribers();
                 if state
-                    .ipc_subscribers
+                    .ipc
+                    .subscribers
                     .values()
                     .any(|subscriber| !subscriber.pending.is_empty())
                 {
                     TimeoutAction::ToDuration(crate::ipc::FLUSH_INTERVAL)
                 } else {
-                    state.ipc_flush_token = None;
+                    state.ipc.flush_token = None;
                     TimeoutAction::Drop
                 }
             },
         ) {
-            Ok(token) => self.ipc_flush_token = Some(token),
+            Ok(token) => self.ipc.flush_token = Some(token),
             Err(err) => tracing::warn!(%err, "Failed to arm IPC subscriber flush timer"),
         }
     }
 
-    /// Tears down a subscriber: removes its entry from `ipc_subscribers`
+    /// Tears down a subscriber: removes its entry from `ipc.subscribers`
     /// (dropping the write-side FD) and retires its read-side EOF source
     /// via `loop_handle.remove`. Safe to call from inside any calloop
     /// callback, not just the EOF source itself -- calloop's
@@ -262,7 +289,7 @@ impl Smallvil {
     /// another source's callback is the supported pattern (interior
     /// `RefCell` borrow, brief).
     fn remove_ipc_subscriber(&mut self, id: usize) {
-        if let Some(mut sub) = self.ipc_subscribers.remove(&id) {
+        if let Some(mut sub) = self.ipc.subscribers.remove(&id) {
             if let Some(token) = sub.read_token.take() {
                 self.loop_handle.remove(token);
             }

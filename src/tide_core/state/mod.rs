@@ -310,24 +310,8 @@ pub struct Smallvil {
     pub(crate) rescue_keybinds_active: bool,
     pub(crate) helper_keys_down: HashSet<Keysym>,
 
-    /// Long-lived IPC subscribe connections, keyed by a process-unique id
-    /// assigned at subscribe time. Empty in the steady state where no
-    /// widget is connected, which makes `emit_ipc_event` a cheap
-    /// early-return on every state change. See `ipc::IpcSubscriber` for
-    /// the per-connection fields and lifecycle.
-    pub(crate) ipc_subscribers: HashMap<usize, crate::ipc::IpcSubscriber>,
-    /// Last state `emit_state_change_events` reported, `None` until a
-    /// subscriber or handler first needs it.
-    ipc_seen: Option<IpcSeenState>,
-    /// One-shot retry timer for subscriber bytes that did not fit in the
-    /// kernel socket buffer. `None` during the normal fully-drained state, so
-    /// IPC adds no periodic wakeup to an idle compositor.
-    pub(crate) ipc_flush_token: Option<RegistrationToken>,
-    /// Next subscriber id. Monotonic across the process lifetime rather
-    /// than recycled, so a stale reference inside an in-flight calloop
-    /// callback can't accidentally target a fresh subscriber that reused
-    /// the same id.
-    pub(crate) next_ipc_subscriber_id: usize,
+    /// IPC event subscribers and the state they were last told about.
+    pub(crate) ipc: ipc::IpcState,
 
     pub layout: Layouts,
     pub space: crate::tide_core::window_space::WindowSpace,
