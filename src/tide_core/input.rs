@@ -16,8 +16,11 @@ use smithay::{
         winit::WinitVirtualDevice,
     },
     desktop::layer_map_for_output,
+    input::tablet::{self, TabletDescriptor, TabletSeatTrait},
     input::{
-        keyboard::{keysyms, FilterResult, Keysym, KeysymHandle, Layout, ModifiersState},
+        keyboard::{
+            keysyms, FilterResult, KeyboardSource, Keysym, KeysymHandle, Layout, ModifiersState,
+        },
         pointer::{
             AxisFrame, ButtonEvent, Focus, GestureHoldBeginEvent, GestureHoldEndEvent,
             GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
@@ -38,9 +41,8 @@ use smithay::{
         compositor::RegionAttributes,
         keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitorSeat,
         pointer_constraints::{with_pointer_constraint, PointerConstraint},
-        seat::WaylandFocus,
         shell::wlr_layer::KeyboardInteractivity,
-        tablet_manager::{TabletDescriptor, TabletSeatTrait},
+        virtual_keyboard::VirtualKeyboardDevice,
     },
 };
 
@@ -67,11 +69,26 @@ const BTN_RIGHT: u32 = 0x111;
 /// simulated output and deliberately keeps its existing behavior.
 pub(crate) trait MappedInputDevice: SmithayInputDevice {
     fn configured_output(&self, mappings: &HashMap<InputDevice, Output>) -> Option<Output>;
+
+    /// The device as a `zwp_virtual_keyboard_v1` keyboard, if it is one.
+    fn virtual_keyboard(&self) -> Option<&VirtualKeyboardDevice> {
+        None
+    }
 }
 
 impl MappedInputDevice for InputDevice {
     fn configured_output(&self, mappings: &HashMap<InputDevice, Output>) -> Option<Output> {
         mappings.get(self).cloned()
+    }
+}
+
+impl MappedInputDevice for VirtualKeyboardDevice {
+    fn configured_output(&self, _mappings: &HashMap<InputDevice, Output>) -> Option<Output> {
+        None
+    }
+
+    fn virtual_keyboard(&self) -> Option<&VirtualKeyboardDevice> {
+        Some(self)
     }
 }
 
@@ -834,7 +851,7 @@ impl Smallvil {
             count = pressed.len(),
             "Releasing keys stuck across host focus loss"
         );
-        let time = self.start_time.elapsed().as_millis() as u32;
+        let time = smithay::backend::input::InputTime::now();
         for keycode in pressed {
             keyboard.input::<(), _>(
                 self,
@@ -877,8 +894,20 @@ impl Smallvil {
 
         match event {
             InputEvent::Keyboard { event, .. } => {
+                let device = event.device();
+                let virtual_keyboard = device.virtual_keyboard();
+                // A virtual keyboard brings its own keymap; a physical key
+                // needs the configured one back first.
+                if virtual_keyboard.is_none() {
+                    self.restore_configured_keymap();
+                }
+                // Virtual keys are tracked apart from physical ones, so an
+                // input method forwarding a key that is also held on the
+                // real keyboard does not release it early.
+                let source =
+                    virtual_keyboard.map_or(KeyboardSource::MAIN, |device| device.source());
                 let serial = SERIAL_COUNTER.next_serial();
-                let time = Event::time_msec(&event);
+                let time = Event::time(&event);
                 let key_state = event.state();
                 tracing::trace!(keycode = ?event.key_code(), ?key_state, "Raw key event");
                 if key_state == KeyState::Pressed {
@@ -903,7 +932,7 @@ impl Smallvil {
                 #[cfg(feature = "accessibility")]
                 let a11y_block = {
                     let block = self.a11y_process_key(
-                        Duration::from_millis(u64::from(time)),
+                        Duration::from_micros(time.micros()),
                         event.key_code(),
                         key_state,
                     );
@@ -916,7 +945,8 @@ impl Smallvil {
                 let a11y_block = false;
 
                 let keyboard = self.seat.get_keyboard().unwrap();
-                keyboard.input::<(), _>(
+                keyboard.input_from_source::<(), _>(
+                    source,
                     self,
                     event.key_code(),
                     key_state,
@@ -1262,7 +1292,7 @@ impl Smallvil {
                         &MotionEvent {
                             location: new_loc,
                             serial: SERIAL_COUNTER.next_serial(),
-                            time: event.time_msec(),
+                            time: event.time(),
                         },
                     );
                     pointer.frame(self);
@@ -1293,7 +1323,7 @@ impl Smallvil {
                         &MotionEvent {
                             location: new_loc,
                             serial: SERIAL_COUNTER.next_serial(),
-                            time: event.time_msec(),
+                            time: event.time(),
                         },
                     );
                     pointer.frame(self);
@@ -1330,7 +1360,7 @@ impl Smallvil {
                     &RelativeMotionEvent {
                         delta: event.delta(),
                         delta_unaccel: event.delta_unaccel(),
-                        utime: event.time(),
+                        time: event.time(),
                     },
                 );
                 if let (Some(surface), Some(previous)) =
@@ -1429,7 +1459,7 @@ impl Smallvil {
                     &MotionEvent {
                         location: new_loc,
                         serial,
-                        time: event.time_msec(),
+                        time: event.time(),
                     },
                 );
                 if let (Some(surface), Some(previous)) = (focus_surface.as_ref(), previous) {
@@ -1494,7 +1524,7 @@ impl Smallvil {
                         &MotionEvent {
                             location: pos,
                             serial: SERIAL_COUNTER.next_serial(),
-                            time: event.time_msec(),
+                            time: event.time(),
                         },
                     );
                     pointer.frame(self);
@@ -1520,7 +1550,7 @@ impl Smallvil {
                     &MotionEvent {
                         location: pos,
                         serial,
-                        time: event.time_msec(),
+                        time: event.time(),
                     },
                 );
                 if let (Some(surface), Some(previous)) = (hovered.as_ref(), previous) {
@@ -1568,7 +1598,7 @@ impl Smallvil {
                             button,
                             state: button_state,
                             serial,
-                            time: event.time_msec(),
+                            time: event.time(),
                         },
                     );
                     pointer.frame(self);
@@ -1653,7 +1683,7 @@ impl Smallvil {
                                 button,
                                 state: button_state,
                                 serial,
-                                time: event.time_msec(),
+                                time: event.time(),
                             },
                         );
                         pointer.frame(self);
@@ -1671,7 +1701,7 @@ impl Smallvil {
                                 button,
                                 state: button_state,
                                 serial,
-                                time: event.time_msec(),
+                                time: event.time(),
                             },
                         );
                         pointer.frame(self);
@@ -2110,7 +2140,7 @@ impl Smallvil {
                         button,
                         state: button_state,
                         serial,
-                        time: event.time_msec(),
+                        time: event.time(),
                     },
                 );
                 pointer.frame(self);
@@ -2131,7 +2161,7 @@ impl Smallvil {
                         slot: event.slot(),
                         location,
                         serial,
-                        time: event.time_msec(),
+                        time: event.time(),
                     },
                 );
 
@@ -2174,7 +2204,7 @@ impl Smallvil {
                     &TouchMotionData {
                         slot: event.slot(),
                         location,
-                        time: event.time_msec(),
+                        time: event.time(),
                     },
                 );
             }
@@ -2188,7 +2218,7 @@ impl Smallvil {
                     &TouchUpData {
                         slot: event.slot(),
                         serial,
-                        time: event.time_msec(),
+                        time: event.time(),
                     },
                 );
             }
@@ -2219,7 +2249,6 @@ impl Smallvil {
                 };
                 let pointer = self.seat.get_pointer().unwrap();
                 let under = self.surface_under(location);
-                let tablet = tablet_seat.get_tablet(&TabletDescriptor::from(&event.device()));
                 let tool = tablet_seat.get_tool(&event.tool());
 
                 pointer.motion(
@@ -2228,36 +2257,22 @@ impl Smallvil {
                     &MotionEvent {
                         location,
                         serial: SERIAL_COUNTER.next_serial(),
-                        time: event.time_msec(),
+                        time: event.time(),
                     },
                 );
 
-                if let (Some(tablet), Some(tool)) = (tablet, tool) {
-                    if event.pressure_has_changed() {
-                        tool.pressure(event.pressure());
-                    }
-                    if event.distance_has_changed() {
-                        tool.distance(event.distance());
-                    }
-                    if event.tilt_has_changed() {
-                        tool.tilt(event.tilt());
-                    }
-                    if event.slider_has_changed() {
-                        tool.slider_position(event.slider_position());
-                    }
-                    if event.rotation_has_changed() {
-                        tool.rotation(event.rotation());
-                    }
-                    if event.wheel_has_changed() {
-                        tool.wheel(event.wheel_delta(), event.wheel_delta_discrete());
-                    }
+                if let Some(tool) = tool {
+                    tool.axis(self, tablet_axis_frame(&event));
                     tool.motion(
-                        location,
-                        under.and_then(|(f, loc)| f.wl_surface().map(|s| (s.into_owned(), loc))),
-                        &tablet,
-                        SERIAL_COUNTER.next_serial(),
-                        event.time_msec(),
+                        self,
+                        under,
+                        &tablet::tool::MotionEvent {
+                            location,
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time: event.time(),
+                        },
                     );
+                    tool.frame(self, event.time());
                 }
                 pointer.frame(self);
                 if self.udev_gpu.is_some() {
@@ -2272,12 +2287,13 @@ impl Smallvil {
                 };
                 let tool_desc = event.tool();
                 let dh = self.display_handle.clone();
-                tablet_seat.add_tool::<Smallvil>(self, &dh, &tool_desc);
+                let tool = tablet_seat
+                    .get_tool(&tool_desc)
+                    .unwrap_or_else(|| tablet_seat.add_wp_tool(self, &dh, &tool_desc));
 
                 let pointer = self.seat.get_pointer().unwrap();
                 let under = self.surface_under(location);
                 let tablet = tablet_seat.get_tablet(&TabletDescriptor::from(&event.device()));
-                let tool = tablet_seat.get_tool(&tool_desc);
 
                 pointer.motion(
                     self,
@@ -2285,26 +2301,33 @@ impl Smallvil {
                     &MotionEvent {
                         location,
                         serial: SERIAL_COUNTER.next_serial(),
-                        time: event.time_msec(),
+                        time: event.time(),
                     },
                 );
                 pointer.frame(self);
 
-                if let (Some((surface, surface_loc)), Some(tablet), Some(tool)) = (
-                    under.and_then(|(f, loc)| f.wl_surface().map(|s| (s.into_owned(), loc))),
-                    tablet,
-                    tool,
-                ) {
+                if let Some(tablet) = tablet {
                     match event.state() {
                         ProximityState::In => tool.proximity_in(
-                            location,
-                            (surface, surface_loc),
-                            &tablet,
-                            SERIAL_COUNTER.next_serial(),
-                            event.time_msec(),
+                            self,
+                            under,
+                            tablet,
+                            &tablet::tool::ProximityInEvent {
+                                location,
+                                axis: Some(tablet_axis_frame(&event)),
+                                serial: SERIAL_COUNTER.next_serial(),
+                                time: event.time(),
+                            },
                         ),
-                        ProximityState::Out => tool.proximity_out(event.time_msec()),
+                        ProximityState::Out => tool.proximity_out(
+                            self,
+                            &tablet::tool::ProximityOutEvent {
+                                serial: SERIAL_COUNTER.next_serial(),
+                                time: event.time(),
+                            },
+                        ),
                     }
+                    tool.frame(self, event.time());
                 }
                 if self.udev_gpu.is_some() {
                     self.request_redraw();
@@ -2313,10 +2336,16 @@ impl Smallvil {
             InputEvent::TabletToolTip { event, .. } => {
                 let tool = self.seat.tablet_seat().get_tool(&event.tool());
                 let Some(tool) = tool else { return };
+                let serial = SERIAL_COUNTER.next_serial();
                 match event.tip_state() {
                     TabletToolTipState::Down => {
-                        let serial = SERIAL_COUNTER.next_serial();
-                        tool.tip_down(serial, event.time_msec());
+                        tool.down(
+                            self,
+                            &tablet::tool::DownEvent {
+                                serial,
+                                time: event.time(),
+                            },
+                        );
 
                         // Tip contact is a real activation gesture, same
                         // treatment TouchDown gives WM focus above: route
@@ -2344,19 +2373,30 @@ impl Smallvil {
                         }
                     }
                     TabletToolTipState::Up => {
-                        tool.tip_up(event.time_msec());
+                        tool.up(
+                            self,
+                            &tablet::tool::UpEvent {
+                                serial,
+                                time: event.time(),
+                            },
+                        );
                     }
                 }
+                tool.frame(self, event.time());
             }
             InputEvent::TabletToolButton { event, .. } => {
                 let tool = self.seat.tablet_seat().get_tool(&event.tool());
                 if let Some(tool) = tool {
                     tool.button(
-                        event.button(),
-                        event.button_state(),
-                        SERIAL_COUNTER.next_serial(),
-                        event.time_msec(),
+                        self,
+                        &tablet::tool::ButtonEvent {
+                            serial: SERIAL_COUNTER.next_serial(),
+                            button: event.button(),
+                            state: event.button_state(),
+                            time: event.time(),
+                        },
                     );
+                    tool.frame(self, event.time());
                 }
             }
             InputEvent::DeviceAdded { device } => {
@@ -2364,7 +2404,7 @@ impl Smallvil {
                     let dh = self.display_handle.clone();
                     self.seat
                         .tablet_seat()
-                        .add_tablet::<Smallvil>(&dh, &TabletDescriptor::from(&device));
+                        .add_wp_tablet(&dh, &TabletDescriptor::from(&device));
                 }
             }
             InputEvent::DeviceRemoved { device } => {
@@ -2489,7 +2529,7 @@ impl Smallvil {
                 let horizontal_amount = horizontal_amount * scroll_factor;
                 let vertical_amount = vertical_amount * scroll_factor;
 
-                let mut frame = AxisFrame::new(event.time_msec()).source(source);
+                let mut frame = AxisFrame::new(event.time()).source(source);
                 if horizontal_amount != 0.0 {
                     frame = frame.value(Axis::Horizontal, horizontal_amount);
                     if let Some(discrete) = horizontal_amount_discrete {
@@ -2695,7 +2735,7 @@ impl Smallvil {
                     self,
                     &GestureSwipeBeginEvent {
                         serial: SERIAL_COUNTER.next_serial(),
-                        time: Event::time_msec(&event),
+                        time: Event::time(&event),
                         fingers,
                     },
                 );
@@ -2722,7 +2762,7 @@ impl Smallvil {
                         &MotionEvent {
                             location: new_location,
                             serial: SERIAL_COUNTER.next_serial(),
-                            time: Event::time_msec(&event),
+                            time: Event::time(&event),
                         },
                     );
                     pointer.frame(self);
@@ -2762,7 +2802,7 @@ impl Smallvil {
                 pointer.gesture_swipe_update(
                     self,
                     &GestureSwipeUpdateEvent {
-                        time: Event::time_msec(&event),
+                        time: Event::time(&event),
                         delta: BackendGestureSwipeUpdateEvent::delta(&event),
                     },
                 );
@@ -2790,11 +2830,7 @@ impl Smallvil {
                         completion.mark_complete();
                     }
                     let pointer = self.seat.get_pointer().unwrap();
-                    pointer.unset_grab(
-                        self,
-                        SERIAL_COUNTER.next_serial(),
-                        Event::time_msec(&event),
-                    );
+                    pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), Event::time(&event));
                     return;
                 }
                 if matches!(
@@ -2862,7 +2898,7 @@ impl Smallvil {
                     self,
                     &GestureSwipeEndEvent {
                         serial: SERIAL_COUNTER.next_serial(),
-                        time: Event::time_msec(&event),
+                        time: Event::time(&event),
                         cancelled: GestureEndEvent::cancelled(&event),
                     },
                 );
@@ -2886,7 +2922,7 @@ impl Smallvil {
                     self,
                     &GesturePinchBeginEvent {
                         serial: SERIAL_COUNTER.next_serial(),
-                        time: Event::time_msec(&event),
+                        time: Event::time(&event),
                         fingers: GestureBeginEvent::fingers(&event),
                     },
                 );
@@ -2900,7 +2936,7 @@ impl Smallvil {
                 pointer.gesture_pinch_update(
                     self,
                     &GesturePinchUpdateEvent {
-                        time: Event::time_msec(&event),
+                        time: Event::time(&event),
                         delta: BackendGesturePinchUpdateEvent::delta(&event),
                         scale: BackendGesturePinchUpdateEvent::scale(&event),
                         rotation: BackendGesturePinchUpdateEvent::rotation(&event),
@@ -2930,7 +2966,7 @@ impl Smallvil {
                     self,
                     &GesturePinchEndEvent {
                         serial: SERIAL_COUNTER.next_serial(),
-                        time: Event::time_msec(&event),
+                        time: Event::time(&event),
                         cancelled: GestureEndEvent::cancelled(&event),
                     },
                 );
@@ -2941,7 +2977,7 @@ impl Smallvil {
                     self,
                     &GestureHoldBeginEvent {
                         serial: SERIAL_COUNTER.next_serial(),
-                        time: Event::time_msec(&event),
+                        time: Event::time(&event),
                         fingers: GestureBeginEvent::fingers(&event),
                     },
                 );
@@ -2952,7 +2988,7 @@ impl Smallvil {
                     self,
                     &GestureHoldEndEvent {
                         serial: SERIAL_COUNTER.next_serial(),
-                        time: Event::time_msec(&event),
+                        time: Event::time(&event),
                         cancelled: GestureEndEvent::cancelled(&event),
                     },
                 );
@@ -3583,6 +3619,20 @@ impl Smallvil {
                 self.loop_signal.stop();
             }
         }
+    }
+}
+
+/// The axis values a tablet tool event changed, in Smithay's frame shape.
+fn tablet_axis_frame<E: TabletToolEvent<B>, B: InputBackend>(event: &E) -> tablet::tool::AxisFrame {
+    tablet::tool::AxisFrame {
+        pressure: event.pressure_has_changed().then(|| event.pressure()),
+        distance: event.distance_has_changed().then(|| event.distance()),
+        tilt: event.tilt_has_changed().then(|| event.tilt()),
+        rotation: event.rotation_has_changed().then(|| event.rotation()),
+        slider: event.slider_has_changed().then(|| event.slider_position()),
+        wheel: event
+            .wheel_has_changed()
+            .then(|| (event.wheel_delta(), event.wheel_delta_discrete())),
     }
 }
 

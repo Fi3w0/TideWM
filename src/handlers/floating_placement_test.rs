@@ -144,7 +144,7 @@ impl Fixture {
             &MotionEvent {
                 location: (x, y).into(),
                 serial: SERIAL_COUNTER.next_serial(),
-                time: 1,
+                time: smithay::backend::input::InputTime::from_millis(1),
             },
         );
         pointer.frame(&mut self.state);

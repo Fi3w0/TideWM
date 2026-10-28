@@ -6,6 +6,7 @@ mod hyprland_toplevel_export;
 mod layer_shell;
 mod screencopy;
 mod tearing_control;
+pub(crate) mod virtual_keyboard;
 pub(crate) mod wlr_foreign_toplevel;
 pub(crate) mod wlr_gamma_control;
 pub(crate) mod wlr_output_management;
@@ -66,17 +67,7 @@ use smithay::wayland::xdg_activation::{
     XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
 };
 use smithay::wayland::xdg_toplevel_icon::XdgToplevelIconHandler;
-use smithay::{
-    delegate_cursor_shape, delegate_data_control, delegate_data_device, delegate_dmabuf,
-    delegate_foreign_toplevel_list, delegate_fractional_scale, delegate_idle_inhibit,
-    delegate_idle_notify, delegate_input_method_manager, delegate_kde_decoration,
-    delegate_keyboard_shortcuts_inhibit, delegate_output, delegate_pointer_constraints,
-    delegate_pointer_gestures, delegate_presentation, delegate_primary_selection,
-    delegate_relative_pointer, delegate_seat, delegate_security_context, delegate_session_lock,
-    delegate_single_pixel_buffer, delegate_tablet_manager, delegate_text_input_manager,
-    delegate_viewporter, delegate_virtual_keyboard_manager, delegate_xdg_activation,
-    delegate_xdg_decoration, delegate_xdg_toplevel_icon,
-};
+smithay::delegate_dispatch2!(Smallvil);
 
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1;
 use smithay::reexports::wayland_protocols_misc::server_decoration::server::org_kde_kwin_server_decoration::{
@@ -110,8 +101,6 @@ impl SeatHandler for Smallvil {
     }
 }
 
-delegate_seat!(Smallvil);
-
 // `wp_cursor_shape_manager_v1`'s `Dispatch` impl requires `TabletSeatHandler`
 // alongside `SeatHandler` (a `wp_cursor_shape_device_v1` can also be created
 // for a `zwp_tablet_tool_v2`) -- this used to be an empty stub since TideWM
@@ -121,7 +110,9 @@ delegate_seat!(Smallvil);
 // the mouse pointer uses -- matches anvil's own precedent (single on-screen
 // cursor, one `TODO: tablet tools should have their own cursors` note left
 // for whenever that's worth the complexity; not scoped here).
-impl smithay::wayland::tablet_manager::TabletSeatHandler for Smallvil {
+impl smithay::input::tablet::TabletSeatHandler for Smallvil {
+    type ToolFocus = WlSurface;
+
     fn tablet_tool_image(
         &mut self,
         _tool: &smithay::backend::input::TabletToolDescriptor,
@@ -131,8 +122,6 @@ impl smithay::wayland::tablet_manager::TabletSeatHandler for Smallvil {
         self.request_redraw();
     }
 }
-delegate_cursor_shape!(Smallvil);
-delegate_tablet_manager!(Smallvil);
 
 //
 // Wl Data Device
@@ -207,8 +196,6 @@ impl DndGrabHandler for Smallvil {
     }
 }
 
-delegate_data_device!(Smallvil);
-
 //
 // wp-primary-selection-unstable-v1 (select-to-copy / middle-click paste)
 //
@@ -218,8 +205,6 @@ impl PrimarySelectionHandler for Smallvil {
         &mut self.primary_selection_state
     }
 }
-
-delegate_primary_selection!(Smallvil);
 
 //
 // wlr-data-control-unstable-v1 (clipboard-manager hooks)
@@ -238,14 +223,11 @@ impl DataControlHandler for Smallvil {
     }
 }
 
-delegate_data_control!(Smallvil);
-
 //
 // Wl Output & Xdg Output
 //
 
 impl OutputHandler for Smallvil {}
-delegate_output!(Smallvil);
 
 //
 // Linux DMA-BUF
@@ -278,8 +260,6 @@ impl DmabufHandler for Smallvil {
     }
 }
 
-delegate_dmabuf!(Smallvil);
-
 //
 // wp_viewporter
 //
@@ -288,8 +268,6 @@ delegate_dmabuf!(Smallvil);
 // present at all -- `xwayland-satellite` (src/xwayland.rs) requires it and
 // panics on startup otherwise.
 //
-
-delegate_viewporter!(Smallvil);
 
 //
 // Idle inhibit + idle notify
@@ -326,15 +304,11 @@ impl IdleInhibitHandler for Smallvil {
     }
 }
 
-delegate_idle_inhibit!(Smallvil);
-
 impl IdleNotifierHandler for Smallvil {
     fn idle_notifier_state(&mut self) -> &mut IdleNotifierState<Self> {
         &mut self.idle_notifier_state
     }
 }
-
-delegate_idle_notify!(Smallvil);
 
 //
 // ext-session-lock-v1
@@ -374,8 +348,6 @@ impl SessionLockHandler for Smallvil {
     }
 }
 
-delegate_session_lock!(Smallvil);
-
 // xdg-toplevel-icon-v1 stores the committed icon name/buffers in Smithay's
 // ToplevelIconCachedState. TideWM does not draw a dock, but publishing the
 // protocol lets launchers, overview/task-switcher work, and future internal
@@ -389,8 +361,6 @@ impl XdgToplevelIconHandler for Smallvil {
         self.request_redraw();
     }
 }
-
-delegate_xdg_toplevel_icon!(Smallvil);
 
 //
 // xdg-decoration + KDE server-decoration
@@ -477,8 +447,6 @@ impl XdgDecorationHandler for Smallvil {
     }
 }
 
-delegate_xdg_decoration!(Smallvil);
-
 #[cfg(test)]
 #[path = "kde_decoration_test.rs"]
 mod kde_decoration_test;
@@ -530,8 +498,6 @@ impl KdeDecorationHandler for Smallvil {
         let _ = mode;
     }
 }
-
-delegate_kde_decoration!(Smallvil);
 
 //
 // xdg-activation-v1
@@ -645,8 +611,6 @@ mod activation_tests {
     }
 }
 
-delegate_xdg_activation!(Smallvil);
-
 //
 // wp-single-pixel-buffer-v1
 //
@@ -654,8 +618,6 @@ delegate_xdg_activation!(Smallvil);
 // Smithay's `WaylandSurfaceRenderElement` resolves these buffers itself
 // during rendering.
 //
-
-delegate_single_pixel_buffer!(Smallvil);
 
 //
 // wp-presentation-time
@@ -665,8 +627,6 @@ delegate_single_pixel_buffer!(Smallvil);
 // presenting feedback per frame, which lives in
 // `Smallvil::take_presentation_feedback` and each backend's render loop.
 //
-
-delegate_presentation!(Smallvil);
 
 //
 // wp-fractional-scale-v1
@@ -714,8 +674,6 @@ impl FractionalScaleHandler for Smallvil {
     }
 }
 
-delegate_fractional_scale!(Smallvil);
-
 //
 // ext-foreign-toplevel-list-v1
 //
@@ -736,8 +694,6 @@ impl ForeignToplevelListHandler for Smallvil {
     }
 }
 
-delegate_foreign_toplevel_list!(Smallvil);
-
 //
 // wp-keyboard-shortcuts-inhibit + wp-pointer-gestures
 //
@@ -756,9 +712,6 @@ impl KeyboardShortcutsInhibitHandler for Smallvil {
         inhibitor.activate();
     }
 }
-
-delegate_keyboard_shortcuts_inhibit!(Smallvil);
-delegate_pointer_gestures!(Smallvil);
 
 impl SecurityContextHandler for Smallvil {
     fn context_created(&mut self, source: SecurityContextListenerSource, context: SecurityContext) {
@@ -782,17 +735,18 @@ impl SecurityContextHandler for Smallvil {
     }
 }
 
-delegate_security_context!(Smallvil);
-
 //
 // zwp_text_input_v3 + zwp_input_method_v2 + zwp_virtual_keyboard_v1
 //
-// Smithay relays text-input state and virtual-keyboard events. TideWM places
+// Smithay relays text-input state; virtual keyboards are input devices
+// (`virtual_keyboard.rs`). TideWM places
 // IME popups through the shared PopupManager; hidden-workspace parents are
 // resolved through mapped toplevel ownership, with zero geometry for a
 // non-window parent. Input-method and virtual-keyboard globals are hidden from
 // security-context listeners, while ordinary text-input remains public.
 //
+
+impl smithay::wayland::text_input::TextInputActivation for Smallvil {}
 
 impl InputMethodHandler for Smallvil {
     fn new_popup(&mut self, surface: PopupSurface) {
@@ -815,10 +769,6 @@ impl InputMethodHandler for Smallvil {
             .unwrap_or_default()
     }
 }
-
-delegate_text_input_manager!(Smallvil);
-delegate_input_method_manager!(Smallvil);
-delegate_virtual_keyboard_manager!(Smallvil);
 
 //
 // wp-pointer-constraints + wp-relative-pointer
@@ -889,12 +839,8 @@ impl PointerConstraintsHandler for Smallvil {
     }
 }
 
-delegate_pointer_constraints!(Smallvil);
-delegate_relative_pointer!(Smallvil);
-
 impl smithay::wayland::drm_syncobj::DrmSyncobjHandler for Smallvil {
     fn drm_syncobj_state(&mut self) -> Option<&mut smithay::wayland::drm_syncobj::DrmSyncobjState> {
         self.drm_syncobj_state.as_mut()
     }
 }
-smithay::delegate_drm_syncobj!(Smallvil);

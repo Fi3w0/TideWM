@@ -1,6 +1,5 @@
 use smithay::{
     backend::renderer::utils::with_renderer_surface_state,
-    delegate_layer_shell,
     desktop::{self, layer_map_for_output, PopupKind, WindowSurfaceType},
     output::Output,
     reexports::wayland_server::protocol::{wl_output::WlOutput, wl_surface::WlSurface},
@@ -223,8 +222,6 @@ impl WlrLayerShellHandler for Smallvil {
         }
     }
 }
-
-delegate_layer_shell!(Smallvil);
 
 #[cfg(test)]
 #[path = "layer_shell_test.rs"]

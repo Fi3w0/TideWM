@@ -46,8 +46,8 @@ impl XdgShellHandler for State {
     fn grab(&mut self, _: PopupSurface, _: WlSeat, _: Serial) {}
     fn reposition_request(&mut self, _: PopupSurface, _: PositionerState, _: u32) {}
 }
-smithay::delegate_compositor!(State);
-smithay::delegate_xdg_shell!(State);
+
+smithay::delegate_dispatch2!(State);
 
 pub(crate) struct ProtocolFixture {
     display: Display<State>,

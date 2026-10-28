@@ -380,7 +380,7 @@ fn run_connection(
                         smithay::backend::allocator::Modifier::Linear,
                         smithay::backend::allocator::dmabuf::DmabufFlags::empty(),
                     );
-                    if builder.add_plane(fd, 0, data.as_raw().mapoffset, stride) {
+                    if builder.add_plane(fd, data.as_raw().mapoffset, stride) {
                         if let Some(dmabuf) = builder.build() {
                             let (done_tx, done_rx) = mpsc::sync_channel(1);
                             let sent = compositor_for_process

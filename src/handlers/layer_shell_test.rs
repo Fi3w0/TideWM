@@ -848,7 +848,7 @@ fn scroll_navigation_refreshes_stationary_pointer_without_stealing_keyboard_focu
         &MotionEvent {
             location: probe,
             serial: SERIAL_COUNTER.next_serial(),
-            time: 1,
+            time: smithay::backend::input::InputTime::from_millis(1),
         },
     );
     fixture
@@ -884,7 +884,7 @@ fn scroll_navigation_refreshes_stationary_pointer_without_stealing_keyboard_focu
         &MotionEvent {
             location: pos,
             serial: SERIAL_COUNTER.next_serial(),
-            time: 1,
+            time: smithay::backend::input::InputTime::from_millis(1),
         },
     );
     pointer.frame(&mut fixture.state);
@@ -901,7 +901,8 @@ fn scroll_navigation_refreshes_stationary_pointer_without_stealing_keyboard_focu
     );
     pointer.axis(
         &mut fixture.state,
-        AxisFrame::new(2).value(smithay::backend::input::Axis::Vertical, 15.0),
+        AxisFrame::new(smithay::backend::input::InputTime::from_millis(2))
+            .value(smithay::backend::input::Axis::Vertical, 15.0),
     );
     pointer.frame(&mut fixture.state);
     let events = fixture.dispatch();

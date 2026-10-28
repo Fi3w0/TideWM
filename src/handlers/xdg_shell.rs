@@ -1,6 +1,5 @@
 use smithay::{
     backend::renderer::utils::with_renderer_surface_state,
-    delegate_xdg_shell,
     desktop::{
         find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output,
         PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab, PopupUngrabStrategy, Window,
@@ -630,7 +629,6 @@ impl Smallvil {
 }
 
 // Xdg Shell
-delegate_xdg_shell!(Smallvil);
 
 fn check_grab(
     seat: &Seat<Smallvil>,

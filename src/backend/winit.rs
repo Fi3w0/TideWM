@@ -20,7 +20,7 @@ use smithay::{
     wayland::presentation::Refresh,
 };
 
-use smithay::reexports::winit::{dpi::LogicalSize, window::Window as WinitWindow};
+use smithay::reexports::winit::{dpi::LogicalSize, window::WindowAttributes};
 
 use crate::{state::SessionLock, Smallvil};
 
@@ -31,7 +31,9 @@ fn host_refresh_millihertz(backend: &WinitGraphicsBackend<GlesRenderer>) -> Opti
         backend
             .window()
             .current_monitor()
-            .and_then(|monitor| monitor.refresh_rate_millihertz()),
+            .and_then(|monitor| monitor.current_video_mode())
+            .and_then(|mode| mode.refresh_rate_millihertz())
+            .map(std::num::NonZeroU32::get),
     )
 }
 
@@ -104,8 +106,8 @@ pub fn init_winit(
         // Same window attributes smithay's own `init()` defaults to,
         // minus its "Smithay" title -- the host shows this title bar.
         let (backend, winit_evt) = winit::init_from_attributes(
-            WinitWindow::default_attributes()
-                .with_inner_size(LogicalSize::new(1280.0, 800.0))
+            WindowAttributes::default()
+                .with_surface_size(LogicalSize::new(1280.0, 800.0))
                 .with_title("TideWM")
                 .with_visible(true),
         )?;

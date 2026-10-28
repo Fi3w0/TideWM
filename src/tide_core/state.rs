@@ -698,15 +698,17 @@ pub struct Smallvil {
     pub input_method_manager_state: InputMethodManagerState,
     /// `zwp_virtual_keyboard_v1`: lets a privileged client (an on-screen
     /// keyboard, ydotool/wtype-style tools, an IME's fallback path) inject
-    /// synthetic key events as if from real hardware. Requests deliver
-    /// straight to the wl_keyboard of whatever surface actually has
-    /// keyboard focus -- deliberately bypassing `input.rs`'s own filter
-    /// closure and any active grab, per protocol design, so an injected
-    /// `Super+<key>` is delivered as a literal keypress rather than
-    /// triggering a WM keybind. Like input-method, the global is hidden
-    /// from sandboxed security-context clients.
+    /// synthetic key events. Each one is an input device: its keys go
+    /// through `process_input_event` like real hardware, binds included
+    /// (`handlers/virtual_keyboard.rs`). Like input-method, the global is
+    /// hidden from sandboxed security-context clients.
     #[allow(dead_code)]
     pub virtual_keyboard_manager_state: VirtualKeyboardManagerState,
+    /// A virtual keyboard's keymap currently on the seat keyboard, if any.
+    pub(crate) virtual_keyboard_keymap:
+        Option<crate::handlers::virtual_keyboard::VirtualKeyboardKeymap>,
+    /// The configured keymap, saved while a virtual keyboard's replaces it.
+    pub(crate) configured_keymap: Option<smithay::input::keyboard::KeymapFile>,
     /// `ext-foreign-toplevel-list-v1`: exposes every mapped toplevel to
     /// external tooling (bars, taskbars, window switchers) as a handle
     /// carrying title/app_id. One handle per mapped toplevel, created in
@@ -4581,6 +4583,8 @@ impl Smallvil {
             text_input_manager_state,
             input_method_manager_state,
             virtual_keyboard_manager_state,
+            virtual_keyboard_keymap: None,
+            configured_keymap: None,
             popups,
             unmapped_popup_surfaces: HashSet::new(),
             popup_grab: None,
@@ -5520,7 +5524,7 @@ impl Smallvil {
         }
 
         let serial = SERIAL_COUNTER.next_serial();
-        let time = self.start_time.elapsed().as_millis() as u32;
+        let time = smithay::backend::input::InputTime::now();
         self.loop_handle.insert_idle(move |state| {
             let Some(pointer) = state.seat.get_pointer() else {
                 return;
@@ -5588,7 +5592,7 @@ impl Smallvil {
         let grab_serial = popup.grab.serial();
         let previous_serial = popup.grab.previous_serial();
         let serial = SERIAL_COUNTER.next_serial();
-        let time = self.start_time.elapsed().as_millis() as u32;
+        let time = smithay::backend::input::InputTime::now();
         if let Some(pointer) = self.seat.get_pointer() {
             let owns_grab = pointer.has_grab(grab_serial)
                 || previous_serial.is_some_and(|candidate| pointer.has_grab(candidate));
@@ -5749,7 +5753,7 @@ impl Smallvil {
             .as_ref()
             .and_then(|surface| self.apply_pointer_client_scale(surface));
         let serial = SERIAL_COUNTER.next_serial();
-        let time = self.start_time.elapsed().as_millis() as u32;
+        let time = smithay::backend::input::InputTime::now();
         pointer.motion(
             self,
             under,
@@ -6492,7 +6496,7 @@ impl Smallvil {
 
         let serial = SERIAL_COUNTER.next_serial();
         if let Some(pointer) = self.seat.get_pointer() {
-            pointer.unset_grab(self, serial, self.start_time.elapsed().as_millis() as u32);
+            pointer.unset_grab(self, serial, smithay::backend::input::InputTime::now());
         }
         self.release_popup_grab();
         // If a minimap peek is open when the lock starts, drop it rather
@@ -15861,6 +15865,8 @@ impl Smallvil {
                             layout = %new_config.input.xkb_layout,
                             "Reloaded XKB keymap failed to compile, keeping the previous one"
                         );
+                    } else {
+                        self.configured_keymap_replaced();
                     }
                 }
                 // Rebuilt on every reload: the card shows live binds and the
