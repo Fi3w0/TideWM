@@ -1320,7 +1320,11 @@ impl Smallvil {
         layers
     }
 
-    pub(super) fn retile_with_viscosity(&mut self, interactive: bool, skip_configure_for: Option<&WlSurface>) {
+    pub(super) fn retile_with_viscosity(
+        &mut self,
+        interactive: bool,
+        skip_configure_for: Option<&WlSurface>,
+    ) {
         self.retile_filtered(interactive, skip_configure_for, None);
     }
 }
