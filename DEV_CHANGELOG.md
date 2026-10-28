@@ -2,6 +2,12 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.205 — Extract focus, Scroll and session domains
+
+- Three separate mechanical commits move 102 methods from `state/mod.rs` to `focus.rs` (57), `scroll.rs` (19) and `session.rs` (26). Fields, shared types, free helpers and tests remain in the parent, which shrinks from 13,456 to 10,350 lines. Method bodies/docs and accessibility feature guards are unchanged. A separate formatting commit wraps one widened helper signature; version/changelog metadata is separate from the moves.
+- Required private-to-`pub(super)` changes preserve existing callers: focus — `release_popup_grab`, `refocus_after_hide`, `neighbor_in_direction`; Scroll — `queue_scroll_pointer_refresh`, `scroll_axis_step`, `scroll_focus_target`, `anchor_scroll_floaters`, `rescue_scroll_floaters`, `floating_bounds`, `scroll_columns_changed`; session — `lock_focus_target`, `handle_client_disconnect`, `schedule_accessibility_sync`. Existing public visibility stays unchanged; no private method becomes `pub(crate)`, and no accessors, forwarding methods, dependencies or behavior changes are added.
+- The unchanged 709-test all-feature/all-target suite and strict Clippy pass after every move. Final fmt, full suite, all-feature/default-feature strict Clippy, and all-feature release build pass. All 61 nested state/capture observations match both the post-fullscreen-fix baseline and `.204`, with all-events/engine-only subscriber checks passing. Native activation of this batch has not been run.
+
 ## 0.90.204 — Extract config reload, workspace and render domains
 
 - Three separate mechanical commits move 53 methods from `state/mod.rs` into `config_reload.rs` (9), `workspace.rs` (23) and `render.rs` (21). Method bodies, documentation and attributes remain unchanged; the struct, fields, shared types, free helpers and tests stay in the parent. `state/mod.rs` falls from 16,412 to 13,456 lines. One version/changelog commit records the batch separately from the relocations.
