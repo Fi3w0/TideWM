@@ -4221,7 +4221,6 @@ impl Smallvil {
         };
         self.apply_snap_target(&window, &target);
     }
-
 }
 
 fn monitor_resized_rect(
