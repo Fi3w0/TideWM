@@ -2,6 +2,12 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.200 — Idle texture-cache sweep on every GPU node
+
+- Smithay frees dropped GL textures, EGL images and buffers only in `GlesRenderer::cleanup`, which runs on `unbind` after each rendered frame and on no-damage/direct-scanout `render_frame` calls, and only for the renderer that drew. Two gaps followed. Anything released after an idle desktop's last frame (a hidden-workspace window closing, a backdrop or capture texture dropped outside a frame) stayed queued until the next frame. Render-only GPU nodes, which hold cross-GPU imports in `GpuManager`, were never swept, because `ImportBridge::cleanup_texture_cache` only reaches the primary renderer.
+- The udev maintenance timer (≈1 s idle period, not tied to frames or outputs) now calls `GpuManager::cleanup_texture_cache` (upstream `347b2b30`) at most every 5 s (`TEXTURE_CACHE_CLEANUP_INTERVAL`), through `UdevGpu::cleanup_texture_caches`. It is skipped while the DRM device is paused (VT switched away) and uses `try_borrow_mut`, so it can never collide with a render. Upstream `79bbed5e` makes the context current only when its destruction queue is non-empty, so an idle node is not woken from runtime suspend (Smithay #2178/#2180). This is the call site plan §3 deferred to after the migration, and the basis of Ebb's `low` level.
+- No dGPU/iGPU, vendor or output-specific logic; the winit backend is unchanged (single host-owned renderer). Native evidence owed: no unexpected GPU wake or frame stutter, and memory after closing windows on a hidden workspace.
+
 ## 0.90.199 — Monitor screencasts outlive a disconnected output
 
 - Native report on `.198`: OBS capture of HDMI-A-2 broke after the monitor was powered off. Session log: `Output disconnected` at 01:59:29; OBS's stream went `streaming` → `paused` at the same second and stayed there, and its `tidewm-screencast-HDMI-A-2` node was gone. Cause (TideWM, not the migration): the compositor-side `FrameRequested` handler called `FrameTarget::close()` when the named output was missing, so the PipeWire worker stopped and removed its node, but the portal session was never told (no `impl.portal.Session` `Closed`), leaving the consumer on a dead stream that a returning monitor could not revive.
