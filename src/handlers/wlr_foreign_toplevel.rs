@@ -392,7 +392,9 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, WlrForeignToplevelHandle> for Smallvi
                 // change anything visually while fullscreen still
                 // dominates the render -- excluding that case here would
                 // just silently drop a legitimate request.
-                if !state.maximized.contains_key(&surface) && !state.layout.contains(&surface) {
+                if !state.maximized.contains_key(&surface)
+                    && !state.spatial.workspaces.layout.contains(&surface)
+                {
                     if let Some(toplevel) = state
                         .mapped_toplevel_window(&surface)
                         .as_ref()

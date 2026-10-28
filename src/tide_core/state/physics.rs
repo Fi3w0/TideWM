@@ -311,7 +311,9 @@ impl Smallvil {
         &self,
         surface: &WlSurface,
     ) -> Option<Rectangle<i32, Logical>> {
-        self.floating_workspace
+        self.spatial
+            .workspaces
+            .floating_workspace
             .get(surface)
             .map(|tag| tag.rect)
             .or_else(|| {
@@ -350,8 +352,14 @@ impl Smallvil {
             return;
         }
 
-        let mut candidates: Vec<WlSurface> = self.floating_workspace.keys().cloned().collect();
-        candidates.extend(self.ocean.floating_surfaces().cloned());
+        let mut candidates: Vec<WlSurface> = self
+            .spatial
+            .workspaces
+            .floating_workspace
+            .keys()
+            .cloned()
+            .collect();
+        candidates.extend(self.spatial.ocean.floating_surfaces().cloned());
         for surface in candidates {
             if self.float_physics_tier_for_surface(&surface)
                 == crate::config::FloatPhysicsTier::Full
@@ -378,7 +386,9 @@ impl Smallvil {
             .as_secs_f64();
         self.physics.float_physics_last_tick = now;
 
-        if self.floating_workspace.is_empty() && self.physics.window_float_bodies.is_empty() {
+        if self.spatial.workspaces.floating_workspace.is_empty()
+            && self.physics.window_float_bodies.is_empty()
+        {
             self.physics.float_physics_accum = 0.0;
             return;
         }
@@ -434,7 +444,7 @@ impl Smallvil {
     /// redraw work proportional to what can actually be seen.
     #[allow(clippy::mutable_key_type)] // WlSurface-keyed bounded visibility set
     pub(crate) fn update_currents(&mut self) {
-        if !self.currents_enabled() || self.floating_workspace.is_empty() {
+        if !self.currents_enabled() || self.spatial.workspaces.floating_workspace.is_empty() {
             self.physics.window_currents.clear();
             return;
         }
@@ -450,7 +460,7 @@ impl Smallvil {
                 if !placement.is_floating()
                     || placement.surface().is_some_and(|surface| {
                         self.fullscreen.contains_key(surface)
-                            || self.ocean.is_screen_pinned(surface)
+                            || self.spatial.ocean.is_screen_pinned(surface)
                     })
                 {
                     continue;
@@ -507,8 +517,8 @@ impl Smallvil {
     #[allow(clippy::mutable_key_type)] // WlSurface-keyed bounded visibility set
     pub(crate) fn update_buoyancy(&mut self) {
         if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
-            let revision = self.ocean.camera_revision();
-            let moving = self.ocean.has_active_camera_motion();
+            let revision = self.spatial.ocean.camera_revision();
+            let moving = self.spatial.ocean.has_active_camera_motion();
             self.physics.buoyancy_dirty |= revision != self.physics.buoyancy_camera_revision
                 || moving
                 || moving != self.physics.buoyancy_camera_was_moving;
@@ -756,12 +766,13 @@ impl Smallvil {
             return false;
         }
         let (Some(output), Some(workspace)) = (
-            self.layout.output_of(surface),
-            self.layout.workspace_of(surface),
+            self.spatial.workspaces.layout.output_of(surface),
+            self.spatial.workspaces.layout.workspace_of(surface),
         ) else {
             return false;
         };
-        self.layout.algorithm(output, workspace) == crate::config::LayoutAlgorithm::Cascade
+        self.spatial.workspaces.layout.algorithm(output, workspace)
+            == crate::config::LayoutAlgorithm::Cascade
     }
 
     fn window_lifecycle_offset(
@@ -779,7 +790,13 @@ impl Smallvil {
                 self.rendered_rect_on_output(surface, &output)?
             } else {
                 self.tiled_rect_for_surface(surface)
-                    .or_else(|| self.floating_workspace.get(surface).map(|tag| tag.rect))
+                    .or_else(|| {
+                        self.spatial
+                            .workspaces
+                            .floating_workspace
+                            .get(surface)
+                            .map(|tag| tag.rect)
+                    })
                     .or_else(|| self.space.element_geometry(&window))?
             };
         Some(crate::window_animation::lifecycle_offset(
@@ -836,7 +853,9 @@ impl Smallvil {
         let scroll_output = (self.spatial.engine.projection()
             == Some(crate::config::WorkspaceProjection::Scroll))
         .then(|| {
-            self.layout
+            self.spatial
+                .workspaces
+                .layout
                 .output_of(surface)
                 .and_then(|name| self.output_by_name(name))
         })
@@ -1058,9 +1077,9 @@ impl Smallvil {
         }
         self.workspace_scroll_cameras
             .retain(|_, camera| !camera.at_rest());
-        let camera_was_active = self.ocean.has_active_camera_motion();
-        self.ocean.prune_completed_camera_motions();
-        if camera_was_active && !self.ocean.has_active_camera_motion() {
+        let camera_was_active = self.spatial.ocean.has_active_camera_motion();
+        self.spatial.ocean.prune_completed_camera_motions();
+        if camera_was_active && !self.spatial.ocean.has_active_camera_motion() {
             self.queue_pointer_focus_refresh();
         }
         self.closing_window_animations
@@ -1107,7 +1126,7 @@ impl Smallvil {
                 .any(crate::buoyancy::BuoyancyState::needs_frame)
             || !self.swim_cameras.is_empty()
             || !self.workspace_scroll_cameras.is_empty()
-            || self.ocean.has_active_camera_motion()
+            || self.spatial.ocean.has_active_camera_motion()
             || (self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean
                 && self.config.ocean.canvas_marker
                 && self.ocean_canvases.values().any(|canvas| {
@@ -1143,7 +1162,7 @@ impl Smallvil {
             || self.depth_transitions.contains_key(&name)
             || self.swim_cameras.contains_key(&name)
             || self.workspace_scroll_cameras.contains_key(&name)
-            || self.ocean.has_active_camera_motion_on(&name)
+            || self.spatial.ocean.has_active_camera_motion_on(&name)
             || (self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean
                 && self.config.ocean.canvas_marker
                 && self.ocean_canvases.get(&name).is_some_and(|canvas| {
@@ -1267,7 +1286,7 @@ impl Smallvil {
         // its committed size still overlaps a neighbor.
         let layout_owner = (self.spatial.engine.ownership()
             == crate::config::SpatialOwnership::Workspaces)
-            .then(|| self.layout.output_of(surface))
+            .then(|| self.spatial.workspaces.layout.output_of(surface))
             .flatten()
             .and_then(|name| self.output_by_name(name));
         let Some(output) = layout_owner
@@ -1305,14 +1324,19 @@ impl Smallvil {
         let win = if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
             self.rendered_rect_on_output(surface, &output)
         } else {
-            self.layout
+            self.spatial
+                .workspaces
+                .layout
                 .workspace_of(surface)
                 .filter(|_| {
-                    !self.fullscreen.contains_key(surface) && !self.pseudo_tiled.contains(surface)
+                    !self.fullscreen.contains_key(surface)
+                        && !self.spatial.workspaces.pseudo_tiled.contains(surface)
                 })
                 .zip(self.output_tiling_area(&output))
                 .and_then(|(workspace, area)| {
-                    self.layout
+                    self.spatial
+                        .workspaces
+                        .layout
                         .layout(
                             &output.name(),
                             workspace,
@@ -1326,7 +1350,13 @@ impl Smallvil {
                 .or_else(|| {
                     (!self.fullscreen.contains_key(surface)
                         && !self.maximized.contains_key(surface))
-                    .then(|| self.floating_workspace.get(surface).map(|tag| tag.rect))
+                    .then(|| {
+                        self.spatial
+                            .workspaces
+                            .floating_workspace
+                            .get(surface)
+                            .map(|tag| tag.rect)
+                    })
                     .flatten()
                 })
                 .or_else(|| {

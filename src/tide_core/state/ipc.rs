@@ -154,15 +154,22 @@ impl Smallvil {
                 .outputs()
                 .map(|output| {
                     let name = output.name();
-                    let workspace = self.layout.active_workspace(&name);
+                    let workspace = self.spatial.workspaces.layout.active_workspace(&name);
                     let print = fingerprint(&|h| {
                         workspace.hash(h);
-                        self.layout
+                        self.spatial
+                            .workspaces
+                            .layout
                             .scroll
-                            .offset(&name, self.layout.scroll_key(workspace))
+                            .offset(&name, self.spatial.workspaces.layout.scroll_key(workspace))
                             .to_bits()
                             .hash(h);
-                        for column in self.layout.scroll_columns(&name, workspace) {
+                        for column in self
+                            .spatial
+                            .workspaces
+                            .layout
+                            .scroll_columns(&name, workspace)
+                        {
                             column.width.to_bits().hash(h);
                             for surface in &column.windows {
                                 self.foreign_toplevel_numeric_ids.get(surface).hash(h);

@@ -360,7 +360,7 @@ rule {
     }
     let floater = f.window("floater", None, (640, 480));
     let surface = f.surface(floater);
-    let tag = &f.state.floating_workspace[&surface];
+    let tag = &f.state.spatial.workspaces.floating_workspace[&surface];
     assert_eq!(tag.output, "A");
     assert_eq!(
         tag.rect,
@@ -370,62 +370,88 @@ rule {
     assert_eq!(f.state.space.element_geometry(&tag.window), Some(tag.rect));
     let explicit = f.window("explicit", None, (700, 500));
     assert_eq!(
-        f.state.floating_workspace[&f.surface(explicit)].rect,
+        f.state.spatial.workspaces.floating_workspace[&f.surface(explicit)].rect,
         Rectangle::new((90, 110).into(), (420, 300).into())
     );
     let offscreen = f.window("offscreen", None, (640, 480));
     assert_eq!(
-        f.state.floating_workspace[&f.surface(offscreen)].rect,
+        f.state.spatial.workspaces.floating_workspace[&f.surface(offscreen)].rect,
         Rectangle::new((0, 0).into(), (1200, 900).into())
     );
     let pin = f.window("pin", None, (400, 300));
     let pin_surface = f.surface(pin);
     assert!(f.state.window_is_pinned(&pin_surface));
     assert_eq!(
-        f.state.floating_workspace[&pin_surface].rect,
+        f.state.spatial.workspaces.floating_workspace[&pin_surface].rect,
         Rectangle::new((400, 300).into(), (400, 300).into())
     );
     let edge = f.window("edge", None, (640, 480));
     assert_eq!(
-        f.state.floating_workspace[&f.surface(edge)].rect,
+        f.state.spatial.workspaces.floating_workspace[&f.surface(edge)].rect,
         Rectangle::new((0, 0).into(), (1200, 900).into())
     );
     let literal_pin = f.window("literal-pin", None, (400, 300));
     let literal_surface = f.surface(literal_pin);
-    assert_eq!(f.state.output_pins[&literal_surface], "focused");
-    assert_eq!(f.state.floating_workspace[&literal_surface].output, "B");
+    assert_eq!(
+        f.state.spatial.workspaces.output_pins[&literal_surface],
+        "focused"
+    );
+    assert_eq!(
+        f.state.spatial.workspaces.floating_workspace[&literal_surface].output,
+        "B"
+    );
     // Focus a window on B, then open a child of the old A window.
     let other = f.window("override-parent", Some(parent), (320, 240));
-    assert_eq!(f.state.floating_workspace[&f.surface(other)].output, "B");
+    assert_eq!(
+        f.state.spatial.workspaces.floating_workspace[&f.surface(other)].output,
+        "B"
+    );
     assert_eq!(f.state.focused_output(), Some(outputs[1].clone()));
     let child = f.window("dialog", Some(parent), (400, 300));
-    assert_eq!(f.state.floating_workspace[&f.surface(child)].output, "A");
     assert_eq!(
-        f.state.floating_workspace[&f.surface(child)].rect,
+        f.state.spatial.workspaces.floating_workspace[&f.surface(child)].output,
+        "A"
+    );
+    assert_eq!(
+        f.state.spatial.workspaces.floating_workspace[&f.surface(child)].rect,
         Rectangle::new((400, 300).into(), (400, 300).into())
     );
     // Interactive untile retains the tile rect instead of centering it.
     let current = f
         .state
         .space
-        .element_geometry(&f.state.layout.window_of(&parent_surface).unwrap())
+        .element_geometry(
+            &f.state
+                .spatial
+                .workspaces
+                .layout
+                .window_of(&parent_surface)
+                .unwrap(),
+        )
         .unwrap();
     f.state.toggle_floating(&parent_surface);
-    assert_eq!(f.state.floating_workspace[&parent_surface].rect, current);
+    assert_eq!(
+        f.state.spatial.workspaces.floating_workspace[&parent_surface].rect,
+        current
+    );
     f.pointer_on(900.0, 750.0);
     // layout=floating takes the same first-map placement path.
-    f.state
-        .layout
-        .set_algorithm("A", 1, crate::config::LayoutAlgorithm::Floating);
+    f.state.spatial.workspaces.layout.set_algorithm(
+        "A",
+        1,
+        crate::config::LayoutAlgorithm::Floating,
+    );
     let layout = f.window("layout-float", None, (360, 260));
     assert_eq!(
-        f.state.floating_workspace[&f.surface(layout)].rect,
+        f.state.spatial.workspaces.floating_workspace[&f.surface(layout)].rect,
         Rectangle::new((420, 320).into(), (360, 260).into())
     );
     // A hidden workspace has no Space element; its durable rect still centers.
     f.window("hidden", None, (360, 260));
     let tag = f
         .state
+        .spatial
+        .workspaces
         .floating_workspace
         .values()
         .find(|t| t.workspace == 3)
@@ -578,7 +604,7 @@ fn tiled_fullscreen_round_trip_does_not_relock_surface_state() {
     ];
     for id in ids {
         let surface = f.surface(id);
-        assert!(f.state.layout.contains(&surface));
+        assert!(f.state.spatial.workspaces.layout.contains(&surface));
         f.state
             .focus_window(Some(surface.clone()), SERIAL_COUNTER.next_serial());
         let expected = f.state.tiled_rect_for_surface(&surface).unwrap().size;
@@ -597,7 +623,7 @@ fn tiled_fullscreen_round_trip_does_not_relock_surface_state() {
             }
             let events = f.dispatch();
             assert!(!f.state.fullscreen.contains_key(&surface));
-            assert!(f.state.layout.contains(&surface));
+            assert!(f.state.spatial.workspaces.layout.contains(&surface));
             assert_eq!(f.state.focused_window_surface(), Some(surface.clone()));
             let configure = events
                 .iter()

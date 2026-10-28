@@ -2941,7 +2941,7 @@ pub struct WindowRule {
     /// workspace number already exists independently on every output).
     /// This is TideWM's own adaptation, at the window instead: takes
     /// priority over `output` for initial placement (see `map_toplevel`)
-    /// and is remembered in `Smallvil::output_pins` for the surface's
+    /// and is remembered in `WorkspaceState::output_pins` for the surface's
     /// whole lifetime, independent of whether the named output is
     /// currently connected. A disconnect still falls the window back like
     /// any other window on that output (`migrate_output_windows` can't do
@@ -4975,7 +4975,7 @@ pub struct WorkspaceRule {
     pub shader: Option<ShaderAssignment>,
     /// Command run the first time this workspace becomes active while
     /// having zero windows, once per (output, workspace) pair for the
-    /// process lifetime (`Smallvil::workspace_created_empty_fired`) --
+    /// process lifetime (`WorkspaceState::workspace_created_empty_fired`) --
     /// the closest honest analog to Hyprland's real create/destroy
     /// lifecycle event given TideWM's workspaces always exist as
     /// addressable numbers rather than being created on first reference.

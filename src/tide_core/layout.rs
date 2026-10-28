@@ -526,7 +526,7 @@ impl Layouts {
     /// monitor's screen area once the caller retiles. Doesn't touch
     /// `active`, since neither output's active workspace *number*
     /// changes, just what's in it. Floating windows aren't tracked here
-    /// at all (see `Smallvil::floating_workspace`) -- the caller
+    /// at all (see `WorkspaceState::floating_workspace`) -- the caller
     /// (`Smallvil::swap_workspaces`) retags and repositions those itself.
     pub fn swap_active(&mut self, output_a: &str, output_b: &str) {
         let ws_a = self.active_workspace(output_a);

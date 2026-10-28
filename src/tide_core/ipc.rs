@@ -1176,21 +1176,21 @@ fn outputs_json(state: &Smallvil) -> serde_json::Value {
                 "active_workspace": if ocean_engine {
                     serde_json::Value::Null
                 } else {
-                    json!(state.layout.active_workspace(&output.name()))
+                    json!(state.spatial.workspaces.layout.active_workspace(&output.name()))
                 },
             });
             if state.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Scroll) {
-                let workspace = state.layout.active_workspace(&output.name());
+                let workspace = state.spatial.workspaces.layout.active_workspace(&output.name());
                 entry["scroll"] = json!({
-                    "offset": state.layout.scroll.offset(&output.name(), state.layout.scroll_key(workspace)),
+                    "offset": state.spatial.workspaces.layout.scroll.offset(&output.name(), state.spatial.workspaces.layout.scroll_key(workspace)),
                     "orientation": match state.config.scroll.orientation { crate::scroll::Orientation::Horizontal => "horizontal", crate::scroll::Orientation::Vertical => "vertical" },
                     "workspaces": match state.config.scroll.workspaces { crate::scroll::WorkspaceMode::Separate => "separate", crate::scroll::WorkspaceMode::Sections => "sections" },
                 });
             }
             if ocean_engine {
-                let camera = state.ocean.camera(&output.name()).origin;
+                let camera = state.spatial.ocean.camera(&output.name()).origin;
                 entry["camera_origin"] = json!([camera.x, camera.y]);
-                entry["camera_zoom"] = json!(state.ocean.camera(&output.name()).zoom);
+                entry["camera_zoom"] = json!(state.spatial.ocean.camera(&output.name()).zoom);
             }
             entry
         })
@@ -1209,8 +1209,10 @@ fn output_json(state: &Smallvil, name: &str) -> Option<serde_json::Value> {
 
 /// A Scroll strip: position plus its columns as window ids and widths.
 fn scroll_json(state: &Smallvil, output: &str) -> serde_json::Value {
-    let workspace = state.layout.active_workspace(output);
+    let workspace = state.spatial.workspaces.layout.active_workspace(output);
     let columns: Vec<_> = state
+        .spatial
+        .workspaces
         .layout
         .scroll_columns(output, workspace)
         .into_iter()
@@ -1226,7 +1228,7 @@ fn scroll_json(state: &Smallvil, output: &str) -> serde_json::Value {
     json!({
         "output": output,
         "workspace": workspace,
-        "offset": state.layout.scroll.offset(output, state.layout.scroll_key(workspace)),
+        "offset": state.spatial.workspaces.layout.scroll.offset(output, state.spatial.workspaces.layout.scroll_key(workspace)),
         "columns": columns,
     })
 }
@@ -1270,8 +1272,15 @@ fn workspaces_json(state: &Smallvil) -> serde_json::Value {
                 .map(move |workspace| (name.clone(), workspace))
         })
         .map(|(output, workspace)| {
-            let tiled = state.layout.windows_in(&output, workspace).len();
+            let tiled = state
+                .spatial
+                .workspaces
+                .layout
+                .windows_in(&output, workspace)
+                .len();
             let floating = state
+                .spatial
+                .workspaces
                 .floating_workspace
                 .values()
                 .filter(|t| t.output == output && t.workspace == workspace)
@@ -1279,7 +1288,7 @@ fn workspaces_json(state: &Smallvil) -> serde_json::Value {
             let mut entry = json!({
                 "output": output,
                 "workspace": workspace,
-                "active": state.layout.active_workspace(&output) == workspace,
+                "active": state.spatial.workspaces.layout.active_workspace(&output) == workspace,
                 "window_count": tiled + floating,
             });
             // Scratchpad workspaces carry their name ("" for the unnamed
@@ -1606,19 +1615,27 @@ fn window_json(
 
     let ocean_engine = state.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean;
     let is_floating = if ocean_engine {
-        state.ocean.floating_rect(surface).is_some()
+        state.spatial.ocean.floating_rect(surface).is_some()
     } else {
-        state.floating_workspace.contains_key(surface)
+        state
+            .spatial
+            .workspaces
+            .floating_workspace
+            .contains_key(surface)
     };
     let output = if ocean_engine {
         None
     } else {
         state
+            .spatial
+            .workspaces
             .layout
             .output_of(surface)
             .map(str::to_string)
             .or_else(|| {
                 state
+                    .spatial
+                    .workspaces
                     .floating_workspace
                     .get(surface)
                     .map(|tag| tag.output.clone())
@@ -1628,9 +1645,14 @@ fn window_json(
     let workspace = if ocean_engine {
         None
     } else if is_floating {
-        state.floating_workspace.get(surface).map(|t| t.workspace)
+        state
+            .spatial
+            .workspaces
+            .floating_workspace
+            .get(surface)
+            .map(|t| t.workspace)
     } else {
-        state.layout.workspace_of(surface)
+        state.spatial.workspaces.layout.workspace_of(surface)
     };
 
     let mut entry = json!({
@@ -1641,7 +1663,7 @@ fn window_json(
         "workspace": workspace,
         "floating": is_floating,
         "pinned": state.window_is_pinned(surface),
-        "pseudo_tiled": state.pseudo_tiled.contains(surface),
+        "pseudo_tiled": state.spatial.workspaces.pseudo_tiled.contains(surface),
         "fullscreen": state.fullscreen.contains_key(surface),
         "urgent": state.urgent.contains(surface),
         // While fullscreen, `maximized` is retained internally only as the
@@ -1656,23 +1678,23 @@ fn window_json(
         })),
     });
     if state.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Scroll) {
-        if let Some((column, row)) = state.layout.scroll_position(surface) {
+        if let Some((column, row)) = state.spatial.workspaces.layout.scroll_position(surface) {
             entry["scroll"] = json!({
                 "column": column,
                 "row": row,
                 "column_width": state
-                    .layout
+                    .spatial.workspaces.layout
                     .output_of(surface)
-                    .zip(state.layout.workspace_of(surface))
+                    .zip(state.spatial.workspaces.layout.workspace_of(surface))
                     .and_then(|(output, workspace)| {
-                        state.layout.scroll_columns(output, workspace).get(column).map(|c| c.width)
+                        state.spatial.workspaces.layout.scroll_columns(output, workspace).get(column).map(|c| c.width)
                     }),
-                "row_weight": state.layout.scroll.weight(surface),
+                "row_weight": state.spatial.workspaces.layout.scroll.weight(surface),
             });
         }
     }
     if ocean_engine {
-        entry["entry_output"] = json!(state.ocean.entry_output(surface));
+        entry["entry_output"] = json!(state.spatial.ocean.entry_output(surface));
     }
     if let Some(workspace) = workspace {
         if crate::state::is_scratchpad_workspace(workspace) {
@@ -1692,14 +1714,23 @@ pub(crate) fn navigation_regression(
     state
         .foreign_toplevel_numeric_ids
         .insert(surface.clone(), 9_001);
-    state.layout.remove(&surface);
+    state.spatial.workspaces.layout.remove(&surface);
     state
+        .spatial
+        .workspaces
         .layout
         .insert(&output.name(), 7, windows[0].clone(), None);
     state.space.unmap_elem(&windows[0]);
     let response = handle_request(state, Request::FocusWindow { window_id: 9_001 });
     assert_eq!(response["ok"], true, "{response}");
-    assert_eq!(state.layout.active_workspace(&output.name()), 7);
+    assert_eq!(
+        state
+            .spatial
+            .workspaces
+            .layout
+            .active_workspace(&output.name()),
+        7
+    );
     assert_eq!(state.focused_window_surface(), Some(surface.clone()));
     let response = handle_request(
         state,
@@ -1787,7 +1818,7 @@ pub(crate) fn navigation_regression(
                         && placement.surface() == Some(&surface)
                     {
                         assert_eq!(
-                            state.layout.output_of(&surface),
+                            state.spatial.workspaces.layout.output_of(&surface),
                             Some(live_output.name().as_str())
                         );
                     }

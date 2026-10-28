@@ -354,7 +354,9 @@ impl Smallvil {
             self.pointer_output_for_surface(surface)
                 .or_else(|| self.rendered_output_for_surface(surface))
                 .or_else(|| {
-                    self.layout
+                    self.spatial
+                        .workspaces
+                        .layout
                         .output_of(surface)
                         .and_then(|name| self.output_by_name(name))
                 })
@@ -363,12 +365,15 @@ impl Smallvil {
                         .and_then(|window| self.output_for_window(&window))
                 })
                 .or_else(|| {
-                    self.floating_workspace
+                    self.spatial
+                        .workspaces
+                        .floating_workspace
                         .get(surface)
                         .and_then(|tag| self.output_by_name(&tag.output))
                 })
                 .or_else(|| {
-                    self.ocean
+                    self.spatial
+                        .ocean
                         .entry_output(surface)
                         .and_then(|name| self.output_by_name(name))
                 })
@@ -726,10 +731,10 @@ impl Smallvil {
         if self.fullscreen.contains_key(&root) || self.maximized.contains_key(&root) {
             return Some(1.0);
         }
-        if let Some(scale) = self.ocean.screen_pin_view_scale(&root) {
+        if let Some(scale) = self.spatial.ocean.screen_pin_view_scale(&root) {
             return Some(scale);
         }
-        Some(self.ocean.camera(&output.name()).zoom.max(0.05))
+        Some(self.spatial.ocean.camera(&output.name()).zoom.max(0.05))
     }
 
     fn set_pointer_client_scale(&self, surface: &WlSurface, scale: f64) -> Option<f64> {
@@ -969,10 +974,12 @@ impl Smallvil {
     /// choosing a fallback. If an Exclusive layer currently owns the seat,
     /// this still repairs the window that should be restored underneath it.
     pub(crate) fn forget_window_focus(&mut self, surface: &WlSurface) {
-        self.layout.scroll.forget(surface);
-        self.layout
+        self.spatial.workspaces.layout.scroll.forget(surface);
+        self.spatial
+            .workspaces
+            .layout
             .scroll
-            .prune(&self.layout.populated_workspaces());
+            .prune(&self.spatial.workspaces.layout.populated_workspaces());
         self.release_popup_grab_for_root(surface);
         if self.window_focus.as_ref() == Some(surface) {
             self.window_focus = None;
@@ -1167,7 +1174,12 @@ impl Smallvil {
     /// tiled layer (see the Z-order invariant `retile()` enforces); this
     /// only changes relative order *within* the floating stack.
     pub fn raise_window(&mut self, surface: &WlSurface) {
-        if !self.floating_workspace.contains_key(surface) {
+        if !self
+            .spatial
+            .workspaces
+            .floating_workspace
+            .contains_key(surface)
+        {
             return;
         }
         if let Some(window) = self.mapped_toplevel_window(surface) {
@@ -1183,7 +1195,12 @@ impl Smallvil {
     /// the floating-above-tiled invariant after a tiling pass, just with
     /// `surface` deliberately left out of the re-raise.
     pub fn lower_window(&mut self, surface: &WlSurface) {
-        if !self.floating_workspace.contains_key(surface) {
+        if !self
+            .spatial
+            .workspaces
+            .floating_workspace
+            .contains_key(surface)
+        {
             return;
         }
         let others: Vec<Window> = self
@@ -1192,7 +1209,7 @@ impl Smallvil {
             .filter(|w| {
                 w.toplevel().is_some_and(|t| {
                     let s = t.wl_surface();
-                    s != surface && self.floating_workspace.contains_key(s)
+                    s != surface && self.spatial.workspaces.floating_workspace.contains_key(s)
                 })
             })
             .cloned()
@@ -1268,9 +1285,13 @@ impl Smallvil {
             return;
         }
 
-        if let Some(entry) = self.classic_depth.remove(surface) {
-            self.layout
-                .insert(&entry.output, entry.workspace, entry.window, None);
+        if let Some(entry) = self.spatial.workspaces.classic_depth.remove(surface) {
+            self.spatial.workspaces.layout.insert(
+                &entry.output,
+                entry.workspace,
+                entry.window,
+                None,
+            );
             self.retile();
         }
 
@@ -1282,12 +1303,14 @@ impl Smallvil {
                 self.group_of(surface)
                     .map(|idx| (self.groups[idx].output.clone(), self.groups[idx].workspace))
                     .or_else(|| {
-                        let name = self.layout.output_of(surface)?;
-                        let workspace = self.layout.workspace_of(surface)?;
+                        let name = self.spatial.workspaces.layout.output_of(surface)?;
+                        let workspace = self.spatial.workspaces.layout.workspace_of(surface)?;
                         Some((name.to_string(), workspace))
                     })
                     .or_else(|| {
-                        self.floating_workspace
+                        self.spatial
+                            .workspaces
+                            .floating_workspace
                             .get(surface)
                             .map(|tag| (tag.output.clone(), tag.workspace))
                     })
@@ -1295,8 +1318,13 @@ impl Smallvil {
             .flatten();
 
         if let Some((output_name, workspace)) = ownership {
-            let hidden = self.layout.active_workspace(&output_name) != workspace
-                && !self.pinned.contains(surface);
+            let hidden = self
+                .spatial
+                .workspaces
+                .layout
+                .active_workspace(&output_name)
+                != workspace
+                && !self.spatial.workspaces.pinned.contains(surface);
             if hidden {
                 if let Some(output) = self.output_by_name(&output_name) {
                     self.switch_workspace_immediate(&output, workspace);
@@ -1321,6 +1349,7 @@ impl Smallvil {
                 .map(|member| member.surface.clone())
                 .unwrap_or_else(|| surface.clone());
             let output = self
+                .spatial
                 .ocean
                 .entry_output(&target)
                 .and_then(|name| self.output_by_name(name))
@@ -1328,11 +1357,14 @@ impl Smallvil {
             if let Some(output) = output {
                 if let (Some(viewport), Some(rect)) = (
                     self.space.output_geometry(&output).map(|geo| geo.size),
-                    self.ocean
-                        .world_rect(&target, self.config.gaps, self.config.bsp_split_bias),
+                    self.spatial.ocean.world_rect(
+                        &target,
+                        self.config.gaps,
+                        self.config.bsp_split_bias,
+                    ),
                 ) {
-                    if !self.ocean.is_screen_pinned(&target) {
-                        self.ocean.center_on_rect(
+                    if !self.spatial.ocean.is_screen_pinned(&target) {
+                        self.spatial.ocean.center_on_rect(
                             &output.name(),
                             viewport,
                             rect,
@@ -1349,7 +1381,12 @@ impl Smallvil {
         // whole tiled layer above any overlapping floating window, breaking
         // the z-order invariant -- tiled windows never overlap each other,
         // so they never need raising at all.
-        if self.floating_workspace.contains_key(surface) {
+        if self
+            .spatial
+            .workspaces
+            .floating_workspace
+            .contains_key(surface)
+        {
             if let Some(window) = self.mapped_toplevel_window(surface) {
                 self.space.raise_element(&window, false);
             }
@@ -1490,7 +1527,7 @@ impl Smallvil {
             };
 
             if !already_visible {
-                self.ocean.center_on_rect(
+                self.spatial.ocean.center_on_rect(
                     &output.name(),
                     viewport,
                     target_rect,
@@ -1507,7 +1544,7 @@ impl Smallvil {
         }
 
         if self.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Scroll)
-            && self.layout.contains(&focused)
+            && self.spatial.workspaces.layout.contains(&focused)
         {
             if let Some(next) = self.scroll_focus_target(&focused, direction) {
                 self.activate_toplevel(&next);
@@ -1546,13 +1583,21 @@ impl Smallvil {
         let Some(focused) = self.focused_window_surface() else {
             return;
         };
-        if !self.layout.contains(&focused) {
+        if !self.spatial.workspaces.layout.contains(&focused) {
             return;
         }
         if self.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Scroll) {
             let moved = match self.scroll_axis_step(direction) {
-                (true, step) => self.layout.scroll_move_column(&focused, step, false),
-                (false, step) => self.layout.scroll_move_in_column(&focused, step),
+                (true, step) => self
+                    .spatial
+                    .workspaces
+                    .layout
+                    .scroll_move_column(&focused, step, false),
+                (false, step) => self
+                    .spatial
+                    .workspaces
+                    .layout
+                    .scroll_move_in_column(&focused, step),
             };
             if moved {
                 self.scroll_columns_changed(&focused);
@@ -1573,13 +1618,16 @@ impl Smallvil {
         let Some(neighbor_surface) = neighbor.toplevel().map(|t| t.wl_surface().clone()) else {
             return;
         };
-        if !self.layout.contains(&neighbor_surface) {
+        if !self.spatial.workspaces.layout.contains(&neighbor_surface) {
             // Only swap within the tiling tree; a floating window nearest
             // in that direction isn't a valid swap target.
             return;
         }
 
-        self.layout.swap(&focused, &neighbor_surface);
+        self.spatial
+            .workspaces
+            .layout
+            .swap(&focused, &neighbor_surface);
         self.retile();
     }
 

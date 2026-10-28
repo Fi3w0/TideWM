@@ -362,7 +362,11 @@ impl Smallvil {
     /// `Space`, so disconnect must perform the cleanup first.
     pub(crate) fn remove_layer_output(&mut self, output: &Output) {
         self.native_render_stats.remove(output);
-        self.layout.scroll_section_requests.remove(&output.name());
+        self.spatial
+            .workspaces
+            .layout
+            .scroll_section_requests
+            .remove(&output.name());
         let layers: Vec<desktop::LayerSurface> =
             layer_map_for_output(output).layers().cloned().collect();
         if layers.is_empty() {
@@ -737,7 +741,11 @@ impl Smallvil {
         let locked = !matches!(self.session_lock, SessionLock::Unlocked);
         let primary = self.primary_output().map(|output| {
             let output_name = output.name();
-            let workspace = self.layout.active_workspace(&output_name);
+            let workspace = self
+                .spatial
+                .workspaces
+                .layout
+                .active_workspace(&output_name);
             (output_name, workspace)
         });
         let workspace_label = primary

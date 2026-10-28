@@ -48,8 +48,11 @@ impl PointerGrab<Smallvil> for OceanPanGrab {
         if data.output_by_name(&self.output).is_none() {
             return;
         }
-        let camera_delta = camera_delta_for_drag(delta, data.ocean.camera(&self.output).zoom);
-        data.ocean.pan(&self.output, camera_delta.x, camera_delta.y);
+        let camera_delta =
+            camera_delta_for_drag(delta, data.spatial.ocean.camera(&self.output).zoom);
+        data.spatial
+            .ocean
+            .pan(&self.output, camera_delta.x, camera_delta.y);
         data.request_redraw();
     }
 

@@ -572,25 +572,27 @@ impl Smallvil {
     fn detach_tiled_group_member(&mut self, surface: &WlSurface) -> Option<Window> {
         match self.spatial.engine.ownership() {
             crate::config::SpatialOwnership::Workspaces => {
-                let window = self.layout.window_of(surface)?;
-                self.layout.remove(surface);
+                let window = self.spatial.workspaces.layout.window_of(surface)?;
+                self.spatial.workspaces.layout.remove(surface);
                 Some(window)
             }
-            crate::config::SpatialOwnership::Ocean => self.ocean.detach_tiled_for_group(surface),
+            crate::config::SpatialOwnership::Ocean => {
+                self.spatial.ocean.detach_tiled_for_group(surface)
+            }
         }
     }
 
     fn replace_tiled_group_leaf(&mut self, old: &WlSurface, new_window: &Window) -> bool {
         match self.spatial.engine.ownership() {
             crate::config::SpatialOwnership::Workspaces => {
-                if !self.layout.contains(old) {
+                if !self.spatial.workspaces.layout.contains(old) {
                     return false;
                 }
-                self.layout.replace_leaf(old, new_window);
+                self.spatial.workspaces.layout.replace_leaf(old, new_window);
                 true
             }
             crate::config::SpatialOwnership::Ocean => {
-                self.ocean.replace_tiled_group_leaf(old, new_window)
+                self.spatial.ocean.replace_tiled_group_leaf(old, new_window)
             }
         }
     }
@@ -618,7 +620,7 @@ impl Smallvil {
         };
         if !self.spatial_is_tiled(&focused)
             || self.fullscreen.contains_key(&focused)
-            || self.pseudo_tiled.contains(&focused)
+            || self.spatial.workspaces.pseudo_tiled.contains(&focused)
         {
             return;
         }
@@ -638,7 +640,11 @@ impl Smallvil {
         };
         if !self.spatial_is_tiled(&neighbor_surface)
             || self.fullscreen.contains_key(&neighbor_surface)
-            || self.pseudo_tiled.contains(&neighbor_surface)
+            || self
+                .spatial
+                .workspaces
+                .pseudo_tiled
+                .contains(&neighbor_surface)
         {
             return;
         }
@@ -672,19 +678,26 @@ impl Smallvil {
         }
         let new_group_owner = if existing_group.is_none() {
             let owner = match self.spatial.engine.ownership() {
-                crate::config::SpatialOwnership::Workspaces => {
-                    self.layout.output_of(&anchor).map(|output| {
+                crate::config::SpatialOwnership::Workspaces => self
+                    .spatial
+                    .workspaces
+                    .layout
+                    .output_of(&anchor)
+                    .map(|output| {
                         let workspace = self
+                            .spatial
+                            .workspaces
                             .layout
                             .workspace_of(&anchor)
-                            .unwrap_or_else(|| self.layout.active_workspace(output));
+                            .unwrap_or_else(|| {
+                                self.spatial.workspaces.layout.active_workspace(output)
+                            });
                         (output.to_string(), workspace)
-                    })
-                }
+                    }),
                 crate::config::SpatialOwnership::Ocean => {
-                    self.ocean.entry_output(&anchor).map(|name| {
+                    self.spatial.ocean.entry_output(&anchor).map(|name| {
                         let output = name.to_string();
-                        let workspace = self.layout.active_workspace(&output);
+                        let workspace = self.spatial.workspaces.layout.active_workspace(&output);
                         (output, workspace)
                     })
                 }
@@ -814,12 +827,15 @@ impl Smallvil {
         };
         match self.spatial.engine.ownership() {
             crate::config::SpatialOwnership::Workspaces => {
-                self.layout.insert(&output, workspace, window, None);
+                self.spatial
+                    .workspaces
+                    .layout
+                    .insert(&output, workspace, window, None);
             }
             crate::config::SpatialOwnership::Ocean => {
                 let inserted = anchor
                     .as_ref()
-                    .is_some_and(|anchor| self.ocean.insert_tiled_next_to(anchor, window));
+                    .is_some_and(|anchor| self.spatial.ocean.insert_tiled_next_to(anchor, window));
                 if !inserted {
                     tracing::warn!("ungroup could not find the surviving Ocean reef");
                     return;
@@ -1080,12 +1096,20 @@ impl Smallvil {
                 self.ungroup(member);
             }
             let (Some(output), Some(workspace)) = (
-                self.layout.output_of(&leaf).map(str::to_owned),
-                self.layout.workspace_of(&leaf),
+                self.spatial
+                    .workspaces
+                    .layout
+                    .output_of(&leaf)
+                    .map(str::to_owned),
+                self.spatial.workspaces.layout.workspace_of(&leaf),
             ) else {
                 return;
             };
-            let mut columns = self.layout.scroll_columns(&output, workspace);
+            let mut columns = self
+                .spatial
+                .workspaces
+                .layout
+                .scroll_columns(&output, workspace);
             let Some(at) = columns.iter().position(|c| c.windows.contains(&leaf)) else {
                 return;
             };
@@ -1095,23 +1119,32 @@ impl Smallvil {
             }
             columns[at].windows = members
                 .iter()
-                .filter(|s| self.layout.contains(s))
+                .filter(|s| self.spatial.workspaces.layout.contains(s))
                 .cloned()
                 .collect();
             columns[at].width = width;
             columns.retain(|c| !c.windows.is_empty());
-            self.layout.set_scroll_columns(&output, workspace, columns);
+            self.spatial
+                .workspaces
+                .layout
+                .set_scroll_columns(&output, workspace, columns);
             self.focus_window(Some(focused.clone()), SERIAL_COUNTER.next_serial());
             self.scroll_columns_changed(focused);
             return;
         }
         let (Some(output), Some(workspace)) = (
-            self.layout.output_of(focused).map(str::to_owned),
-            self.layout.workspace_of(focused),
+            self.spatial
+                .workspaces
+                .layout
+                .output_of(focused)
+                .map(str::to_owned),
+            self.spatial.workspaces.layout.workspace_of(focused),
         ) else {
             return;
         };
         let Some(column) = self
+            .spatial
+            .workspaces
             .layout
             .scroll_columns(&output, workspace)
             .into_iter()
@@ -1224,26 +1257,32 @@ impl Smallvil {
         let Some(surface) = self.focused_window_surface() else {
             return;
         };
-        if !self.layout.contains(&surface)
+        if !self.spatial.workspaces.layout.contains(&surface)
             || self.group_of(&surface).is_some()
             || self.fullscreen.contains_key(&surface)
             || self.maximized.contains_key(&surface)
-            || self.pseudo_tiled.contains(&surface)
-            || self.pinned.contains(&surface)
+            || self.spatial.workspaces.pseudo_tiled.contains(&surface)
+            || self.spatial.workspaces.pinned.contains(&surface)
         {
             return;
         }
         let (Some(output), Some(workspace), Some(window)) = (
-            self.layout.output_of(&surface).map(str::to_string),
-            self.layout.workspace_of(&surface),
-            self.layout.window_of(&surface),
+            self.spatial
+                .workspaces
+                .layout
+                .output_of(&surface)
+                .map(str::to_string),
+            self.spatial.workspaces.layout.workspace_of(&surface),
+            self.spatial.workspaces.layout.window_of(&surface),
         ) else {
             return;
         };
 
-        self.layout.remove(&surface);
+        self.spatial.workspaces.layout.remove(&surface);
         self.space.unmap_elem(&window);
-        self.classic_depth
+        self.spatial
+            .workspaces
+            .classic_depth
             .park(crate::classic_depth::DepthDeckEntry {
                 surface: surface.clone(),
                 window,
@@ -1265,7 +1304,7 @@ impl Smallvil {
         if !self.config.classic_depth.enabled {
             return;
         }
-        if self.classic_depth.view().is_some() {
+        if self.spatial.workspaces.classic_depth.view().is_some() {
             self.close_depth_deck();
             return;
         }
@@ -1274,15 +1313,25 @@ impl Smallvil {
             return;
         };
         let output_name = output.name();
-        let workspace = self.layout.active_workspace(&output_name);
-        if self.classic_depth.open(output_name, workspace) {
+        let workspace = self
+            .spatial
+            .workspaces
+            .layout
+            .active_workspace(&output_name);
+        if self
+            .spatial
+            .workspaces
+            .classic_depth
+            .open(output_name, workspace)
+        {
             self.rebuild_depth_deck_overlay();
             self.request_redraw();
         }
     }
 
     pub fn cycle_depth_deck(&mut self, delta: isize) {
-        if !self.config.classic_depth.enabled || !self.classic_depth.cycle(delta) {
+        if !self.config.classic_depth.enabled || !self.spatial.workspaces.classic_depth.cycle(delta)
+        {
             return;
         }
         self.rebuild_depth_deck_overlay();
@@ -1290,7 +1339,8 @@ impl Smallvil {
     }
 
     pub fn close_depth_deck(&mut self) {
-        let changed = self.classic_depth.close() | self.depth_deck_overlay.take().is_some();
+        let changed = self.spatial.workspaces.classic_depth.close()
+            | self.depth_deck_overlay.take().is_some();
         if changed {
             self.request_redraw();
         }
@@ -1306,36 +1356,49 @@ impl Smallvil {
         let Some(surface) = self.focused_window_surface() else {
             return;
         };
-        if !self.layout.contains(&surface)
+        if !self.spatial.workspaces.layout.contains(&surface)
             || self.group_of(&surface).is_some()
             || self.fullscreen.contains_key(&surface)
             || self.maximized.contains_key(&surface)
-            || self.pseudo_tiled.contains(&surface)
-            || self.pinned.contains(&surface)
+            || self.spatial.workspaces.pseudo_tiled.contains(&surface)
+            || self.spatial.workspaces.pinned.contains(&surface)
         {
             return;
         }
         let (Some(output), Some(workspace), Some(old_window)) = (
-            self.layout.output_of(&surface).map(str::to_string),
-            self.layout.workspace_of(&surface),
-            self.layout.window_of(&surface),
+            self.spatial
+                .workspaces
+                .layout
+                .output_of(&surface)
+                .map(str::to_string),
+            self.spatial.workspaces.layout.workspace_of(&surface),
+            self.spatial.workspaces.layout.window_of(&surface),
         ) else {
             return;
         };
 
         if self
+            .spatial
+            .workspaces
             .classic_depth
             .entries_for(&output, workspace)
             .next()
             .is_none()
         {
-            if down && self.layout.window_count(&output, workspace) > 1 {
+            if down
+                && self
+                    .spatial
+                    .workspaces
+                    .layout
+                    .window_count(&output, workspace)
+                    > 1
+            {
                 self.sink_window();
             }
             return;
         }
 
-        let Some(selected) = self.classic_depth.rotate(
+        let Some(selected) = self.spatial.workspaces.classic_depth.rotate(
             &output,
             workspace,
             crate::classic_depth::DepthDeckEntry {
@@ -1349,7 +1412,10 @@ impl Smallvil {
             return;
         };
         self.close_depth_deck();
-        self.layout.replace_leaf(&surface, &selected.window);
+        self.spatial
+            .workspaces
+            .layout
+            .replace_leaf(&surface, &selected.window);
         self.space.unmap_elem(&old_window);
         self.retile();
         self.note_depth_attention(&selected.surface);
@@ -1367,43 +1433,45 @@ impl Smallvil {
         if !self.config.classic_depth.enabled {
             return;
         }
-        let Some(view) = self.classic_depth.view().cloned() else {
+        let Some(view) = self.spatial.workspaces.classic_depth.view().cloned() else {
             return;
         };
         let swap_surface = self.focused_window_surface().filter(|surface| {
-            self.layout.output_of(surface) == Some(view.output.as_str())
-                && self.layout.workspace_of(surface) == Some(view.workspace)
+            self.spatial.workspaces.layout.output_of(surface) == Some(view.output.as_str())
+                && self.spatial.workspaces.layout.workspace_of(surface) == Some(view.workspace)
                 && self.group_of(surface).is_none()
                 && !self.fullscreen.contains_key(surface)
                 && !self.maximized.contains_key(surface)
-                && !self.pseudo_tiled.contains(surface)
-                && !self.pinned.contains(surface)
+                && !self.spatial.workspaces.pseudo_tiled.contains(surface)
+                && !self.spatial.workspaces.pinned.contains(surface)
         });
 
         let selected = if let Some(surface) = swap_surface {
-            let Some(old_window) = self.layout.window_of(&surface) else {
+            let Some(old_window) = self.spatial.workspaces.layout.window_of(&surface) else {
                 return;
             };
-            let Some(selected) =
-                self.classic_depth
-                    .swap_selected(crate::classic_depth::DepthDeckEntry {
-                        surface: surface.clone(),
-                        window: old_window.clone(),
-                        output: view.output.clone(),
-                        workspace: view.workspace,
-                    })
-            else {
+            let Some(selected) = self.spatial.workspaces.classic_depth.swap_selected(
+                crate::classic_depth::DepthDeckEntry {
+                    surface: surface.clone(),
+                    window: old_window.clone(),
+                    output: view.output.clone(),
+                    workspace: view.workspace,
+                },
+            ) else {
                 return;
             };
-            self.layout.replace_leaf(&surface, &selected.window);
+            self.spatial
+                .workspaces
+                .layout
+                .replace_leaf(&surface, &selected.window);
             self.space.unmap_elem(&old_window);
             self.refresh_wlr_toplevel_state(&surface);
             selected
         } else {
-            let Some(selected) = self.classic_depth.take_selected() else {
+            let Some(selected) = self.spatial.workspaces.classic_depth.take_selected() else {
                 return;
             };
-            self.layout.insert(
+            self.spatial.workspaces.layout.insert(
                 &selected.output,
                 selected.workspace,
                 selected.window.clone(),
@@ -1412,7 +1480,7 @@ impl Smallvil {
             selected
         };
 
-        self.classic_depth.close();
+        self.spatial.workspaces.classic_depth.close();
         self.depth_deck_overlay = None;
         self.retile();
         self.note_depth_attention(&selected.surface);
@@ -1423,7 +1491,7 @@ impl Smallvil {
     }
 
     fn rebuild_depth_deck_overlay(&mut self) {
-        let Some(view) = self.classic_depth.view().cloned() else {
+        let Some(view) = self.spatial.workspaces.classic_depth.view().cloned() else {
             self.depth_deck_overlay = None;
             return;
         };
@@ -1436,6 +1504,8 @@ impl Smallvil {
             return;
         };
         let titles: Vec<String> = self
+            .spatial
+            .workspaces
             .classic_depth
             .entries_for(&view.output, view.workspace)
             .map(|entry| crate::tab_strip::window_title(&entry.surface))
@@ -1453,11 +1523,15 @@ impl Smallvil {
     /// structural state. Restore every parked window to its owning tree; only
     /// active workspaces are remapped by the normal `retile()` pass.
     pub(super) fn restore_all_depth_deck_windows(&mut self) {
-        let entries = self.classic_depth.drain();
+        let entries = self.spatial.workspaces.classic_depth.drain();
         self.depth_deck_overlay = None;
         for entry in entries {
-            self.layout
-                .insert(&entry.output, entry.workspace, entry.window, None);
+            self.spatial.workspaces.layout.insert(
+                &entry.output,
+                entry.workspace,
+                entry.window,
+                None,
+            );
         }
     }
 

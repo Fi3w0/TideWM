@@ -56,8 +56,8 @@ use wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_manager_v1::Z
 use crate::{config::Config, layout::Layouts};
 
 use super::{
-    ipc::IpcState, physics::FloatPhysicsState, trusted_client, ClientState, KeyboardFocusTarget,
-    SessionLock, Smallvil, SpatialState,
+    ipc::IpcState, physics::FloatPhysicsState, trusted_client, workspace::WorkspaceState,
+    ClientState, KeyboardFocusTarget, SessionLock, Smallvil, SpatialState,
 };
 
 use smithay::{
@@ -246,6 +246,27 @@ impl Smallvil {
 
             spatial: SpatialState {
                 engine: config.spatial_engine,
+                workspaces: WorkspaceState {
+                    layout: {
+                        let mut layout = Layouts::default();
+                        layout.set_default_algorithm(default_layout);
+                        layout.set_master_orientation(master_orientation);
+                        layout.set_split_bias(bsp_split_bias);
+                        layout.set_workspace_algorithm_overrides(workspace_algorithm_overrides);
+                        layout
+                    },
+                    floating_workspace: HashMap::new(),
+                    pinned: HashSet::new(),
+                    pseudo_tiled: HashSet::new(),
+                    scratchpad_previous: HashMap::new(),
+                    scratchpad_named: HashMap::new(),
+                    workspace_previous: HashMap::new(),
+                    workspace_step_output: None,
+                    workspace_created_empty_fired: HashSet::new(),
+                    output_pins: HashMap::new(),
+                    classic_depth: crate::classic_depth::ClassicDepthDeck::default(),
+                },
+                ocean,
             },
             config,
             config_watcher: None,
@@ -275,8 +296,6 @@ impl Smallvil {
             minimap_peek: None,
             minimap_trigger_down: false,
             suppressed_pointer_buttons: HashSet::new(),
-            classic_depth: crate::classic_depth::ClassicDepthDeck::default(),
-            ocean,
             depth_deck_overlay: None,
             #[cfg(feature = "screencast")]
             screencast_picker: None,
@@ -300,14 +319,6 @@ impl Smallvil {
                 next_subscriber_id: 1,
             },
 
-            layout: {
-                let mut layout = Layouts::default();
-                layout.set_default_algorithm(default_layout);
-                layout.set_master_orientation(master_orientation);
-                layout.set_split_bias(bsp_split_bias);
-                layout.set_workspace_algorithm_overrides(workspace_algorithm_overrides);
-                layout
-            },
             space,
             window_opacity: HashMap::new(),
             window_glass_modes: HashMap::new(),
@@ -460,10 +471,6 @@ impl Smallvil {
             cursor_theme: None,
             fullscreen: HashMap::new(),
             maximized: HashMap::new(),
-            floating_workspace: HashMap::new(),
-            pinned: HashSet::new(),
-            scratchpad_previous: HashMap::new(),
-            scratchpad_named: HashMap::new(),
             swallowed: HashMap::new(),
             lifecycle_flutter: HashMap::new(),
             expected_tiled_size: HashMap::new(),
@@ -471,15 +478,10 @@ impl Smallvil {
             flutter_floated: HashSet::new(),
             initial_toplevel_identity: HashMap::new(),
             remembered_floating_sizes: HashMap::new(),
-            workspace_previous: HashMap::new(),
-            workspace_step_output: None,
-            pseudo_tiled: HashSet::new(),
             urgent: HashSet::new(),
             urgent_pulse_last: HashMap::new(),
             urgent_pulse_tick: Instant::now(),
             window_tags: HashMap::new(),
-            output_pins: HashMap::new(),
-            workspace_created_empty_fired: HashSet::new(),
             focus_history: Vec::new(),
             cycling_focus: false,
             is_lid_closed: false,

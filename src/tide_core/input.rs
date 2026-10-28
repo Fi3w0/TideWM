@@ -493,7 +493,11 @@ impl Smallvil {
 
     fn run_workspace_swipe(&mut self, delta_x: f64, delta_y: f64, threshold: f64) {
         if let Some(output) = self.primary_output() {
-            let current = self.layout.active_workspace(&output.name());
+            let current = self
+                .spatial
+                .workspaces
+                .layout
+                .active_workspace(&output.name());
             if let Some(target) = workspace_swipe_target(current, delta_x, delta_y, threshold) {
                 self.switch_workspace(&output, target);
             }
@@ -526,7 +530,11 @@ impl Smallvil {
         let camera = self.swim_cameras.entry(output_name.clone()).or_default();
         let advances = camera.drag(delta_spots);
         if advances != 0 {
-            let current = self.layout.active_workspace(&output_name);
+            let current = self
+                .spatial
+                .workspaces
+                .layout
+                .active_workspace(&output_name);
             let (target, applied) = swim_advance_target(current, advances);
             if applied != advances {
                 if let Some(camera) = self.swim_cameras.get_mut(&output_name) {
@@ -636,15 +644,17 @@ impl Smallvil {
 
         if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean
             && self.config.ocean.smart_tiling
-            && self.ocean.is_tiled(&wl_surface)
+            && self.spatial.ocean.is_tiled(&wl_surface)
         {
             let output = self
                 .output_for_point(location)
                 .map(|output| output.name())?;
-            let initial_rect =
-                self.ocean
-                    .world_rect(&wl_surface, self.config.gaps, self.config.bsp_split_bias)?;
-            let view_scale = self.ocean.camera(&output).zoom;
+            let initial_rect = self.spatial.ocean.world_rect(
+                &wl_surface,
+                self.config.gaps,
+                self.config.bsp_split_bias,
+            )?;
+            let view_scale = self.spatial.ocean.camera(&output).zoom;
             let grab = OceanTileMoveGrab::start(
                 start_data,
                 window,
@@ -660,15 +670,15 @@ impl Smallvil {
 
         if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean
             && self.config.ocean.freeform_windows
-            && self.ocean.is_tiled(&wl_surface)
+            && self.spatial.ocean.is_tiled(&wl_surface)
         {
             self.toggle_floating(&wl_surface);
-            let model_rect = self.ocean.floating_rect(&wl_surface)?;
-            self.ocean.raise_floating(&wl_surface);
+            let model_rect = self.spatial.ocean.floating_rect(&wl_surface)?;
+            self.spatial.ocean.raise_floating(&wl_surface);
             self.space.raise_element(&window, false);
             let view_scale = self
                 .output_for_point(location)
-                .map(|output| self.ocean.camera(&output.name()).zoom)
+                .map(|output| self.spatial.ocean.camera(&output.name()).zoom)
                 .unwrap_or(1.0);
             let last_location = start_data.location;
             pointer.set_grab(
@@ -688,17 +698,20 @@ impl Smallvil {
             return Some(completion);
         }
 
-        if !self.layout.contains(&wl_surface) && !self.ocean.is_tiled(&wl_surface) {
-            self.ocean.raise_floating(&wl_surface);
+        if !self.spatial.workspaces.layout.contains(&wl_surface)
+            && !self.spatial.ocean.is_tiled(&wl_surface)
+        {
+            self.spatial.ocean.raise_floating(&wl_surface);
             self.space.raise_element(&window, false);
             let model_loc = self
+                .spatial
                 .ocean
                 .floating_rect(&wl_surface)
                 .map(|rect| rect.loc)
                 .unwrap_or(loc);
             let view_scale = self
                 .output_for_point(location)
-                .map(|output| self.ocean.camera(&output.name()).zoom)
+                .map(|output| self.spatial.ocean.camera(&output.name()).zoom)
                 .unwrap_or(1.0);
             let last_location = start_data.location;
             pointer.set_grab(
@@ -720,8 +733,13 @@ impl Smallvil {
             return Some(completion);
         }
 
-        let output = self.layout.output_of(&wl_surface).map(str::to_string);
-        let workspace = self.layout.workspace_of(&wl_surface);
+        let output = self
+            .spatial
+            .workspaces
+            .layout
+            .output_of(&wl_surface)
+            .map(str::to_string);
+        let workspace = self.spatial.workspaces.layout.workspace_of(&wl_surface);
         let (Some(output), Some(workspace)) = (output, workspace) else {
             return None;
         };
@@ -1654,7 +1672,7 @@ impl Smallvil {
                     } else if self.exclusive_layer().is_none() {
                         if let Some((window, _)) = self.window_under(pos) {
                             let surface = window.toplevel().unwrap().wl_surface().clone();
-                            if !self.layout.contains(&surface) {
+                            if !self.spatial.workspaces.layout.contains(&surface) {
                                 self.space.raise_element(&window, false);
                             }
                             self.focus_window_from_pointer(Some(surface), serial);
@@ -1734,7 +1752,7 @@ impl Smallvil {
                                 == crate::config::SpatialOwnership::Ocean
                                 && self.config.ocean.smart_tiling
                                 && button == BTN_LEFT
-                                && self.ocean.is_tiled(&wl_surface)
+                                && self.spatial.ocean.is_tiled(&wl_surface)
                             {
                                 let Some(output) = self
                                     .output_for_point(pointer.current_location())
@@ -1742,14 +1760,14 @@ impl Smallvil {
                                 else {
                                     return;
                                 };
-                                let Some(initial_rect) = self.ocean.world_rect(
+                                let Some(initial_rect) = self.spatial.ocean.world_rect(
                                     &wl_surface,
                                     self.config.gaps,
                                     self.config.bsp_split_bias,
                                 ) else {
                                     return;
                                 };
-                                let view_scale = self.ocean.camera(&output).zoom;
+                                let view_scale = self.spatial.ocean.camera(&output).zoom;
                                 self.focus_window_from_pointer(Some(wl_surface.clone()), serial);
                                 let start_data = PointerGrabStartData {
                                     focus: Some((wl_surface.clone(), loc.to_f64())),
@@ -1769,7 +1787,7 @@ impl Smallvil {
                             } else if self.spatial.engine.ownership()
                                 == crate::config::SpatialOwnership::Ocean
                                 && self.config.ocean.freeform_windows
-                                && self.ocean.is_tiled(&wl_surface)
+                                && self.spatial.ocean.is_tiled(&wl_surface)
                             {
                                 // In Ocean a reef is a useful local tiling
                                 // tool, not a cage. Beginning either ordinary
@@ -1777,10 +1795,12 @@ impl Smallvil {
                                 // exact world rectangle and continues as a
                                 // zoom-aware free move/resize.
                                 self.toggle_floating(&wl_surface);
-                                let Some(model_rect) = self.ocean.floating_rect(&wl_surface) else {
+                                let Some(model_rect) =
+                                    self.spatial.ocean.floating_rect(&wl_surface)
+                                else {
                                     return;
                                 };
-                                self.ocean.raise_floating(&wl_surface);
+                                self.spatial.ocean.raise_floating(&wl_surface);
                                 self.space.raise_element(&window, false);
                                 self.focus_window_from_pointer(Some(wl_surface.clone()), serial);
                                 let start_data = PointerGrabStartData {
@@ -1790,7 +1810,7 @@ impl Smallvil {
                                 };
                                 let view_scale = self
                                     .output_for_point(pointer.current_location())
-                                    .map(|output| self.ocean.camera(&output.name()).zoom)
+                                    .map(|output| self.spatial.ocean.camera(&output.name()).zoom)
                                     .unwrap_or(1.0);
                                 let last_location = start_data.location;
                                 if button == BTN_LEFT {
@@ -1823,10 +1843,10 @@ impl Smallvil {
                                     );
                                 }
                                 return;
-                            } else if !self.layout.contains(&wl_surface)
-                                && !self.ocean.is_tiled(&wl_surface)
+                            } else if !self.spatial.workspaces.layout.contains(&wl_surface)
+                                && !self.spatial.ocean.is_tiled(&wl_surface)
                             {
-                                self.ocean.raise_floating(&wl_surface);
+                                self.spatial.ocean.raise_floating(&wl_surface);
                                 self.space.raise_element(&window, false);
                                 self.focus_window_from_pointer(Some(wl_surface.clone()), serial);
 
@@ -1836,13 +1856,14 @@ impl Smallvil {
                                     location: pointer.current_location(),
                                 };
                                 let model_loc = self
+                                    .spatial
                                     .ocean
                                     .floating_rect(&wl_surface)
                                     .map(|rect| rect.loc)
                                     .unwrap_or(loc);
                                 let view_scale = self
                                     .output_for_point(pointer.current_location())
-                                    .map(|output| self.ocean.camera(&output.name()).zoom)
+                                    .map(|output| self.spatial.ocean.camera(&output.name()).zoom)
                                     .unwrap_or(1.0);
 
                                 if button == BTN_LEFT {
@@ -1873,8 +1894,14 @@ impl Smallvil {
                                 }
                                 return;
                             } else if button == BTN_LEFT {
-                                let output = self.layout.output_of(&wl_surface).map(str::to_string);
-                                let workspace = self.layout.workspace_of(&wl_surface);
+                                let output = self
+                                    .spatial
+                                    .workspaces
+                                    .layout
+                                    .output_of(&wl_surface)
+                                    .map(str::to_string);
+                                let workspace =
+                                    self.spatial.workspaces.layout.workspace_of(&wl_surface);
                                 if let (Some(output), Some(workspace)) = (output, workspace) {
                                     self.focus_window_from_pointer(
                                         Some(wl_surface.clone()),
@@ -1919,8 +1946,14 @@ impl Smallvil {
                                 let output = self.output_for_window(&window);
                                 let area = output.as_ref().and_then(|o| self.output_tiling_area(o));
                                 if let (Some(output), Some(area)) = (output, area) {
-                                    let workspace = self.layout.active_workspace(&output.name());
+                                    let workspace = self
+                                        .spatial
+                                        .workspaces
+                                        .layout
+                                        .active_workspace(&output.name());
                                     let handles: Vec<_> = self
+                                        .spatial
+                                        .workspaces
                                         .layout
                                         .resize_splits(&output.name(), workspace, area, &wl_surface)
                                         .into_iter()
@@ -1945,12 +1978,13 @@ impl Smallvil {
                                     // BSP found no adjacent split (not a
                                     // BSP-tiled window) -- try cascade's own
                                     // grid boundaries next.
-                                    let cascade_hits = self.layout.cascade_resize_splits(
-                                        &output.name(),
-                                        workspace,
-                                        area,
-                                        &wl_surface,
-                                    );
+                                    let cascade_hits =
+                                        self.spatial.workspaces.layout.cascade_resize_splits(
+                                            &output.name(),
+                                            workspace,
+                                            area,
+                                            &wl_surface,
+                                        );
                                     if !cascade_hits.is_empty() {
                                         self.focus_window_from_pointer(
                                             Some(wl_surface.clone()),
@@ -2007,14 +2041,14 @@ impl Smallvil {
                     if !modifier_drag && button == BTN_LEFT {
                         if let Some((window, loc)) = under.clone() {
                             let wl_surface = window.toplevel().unwrap().wl_surface().clone();
-                            if !self.layout.contains(&wl_surface)
-                                && !self.ocean.is_tiled(&wl_surface)
+                            if !self.spatial.workspaces.layout.contains(&wl_surface)
+                                && !self.spatial.ocean.is_tiled(&wl_surface)
                                 && !self.fullscreen.contains_key(&wl_surface)
                                 && !self.maximized.contains_key(&wl_surface)
                             {
                                 let view_scale = self
                                     .output_for_point(pointer.current_location())
-                                    .map(|output| self.ocean.camera(&output.name()).zoom)
+                                    .map(|output| self.spatial.ocean.camera(&output.name()).zoom)
                                     .unwrap_or(1.0);
                                 let rect = Rectangle::new(
                                     loc,
@@ -2035,7 +2069,7 @@ impl Smallvil {
                                     pointer.current_location(),
                                     threshold,
                                 ) {
-                                    self.ocean.raise_floating(&wl_surface);
+                                    self.spatial.ocean.raise_floating(&wl_surface);
                                     self.space.raise_element(&window, false);
                                     self.focus_window_from_pointer(
                                         Some(wl_surface.clone()),
@@ -2047,8 +2081,11 @@ impl Smallvil {
                                         button,
                                         location: pointer.current_location(),
                                     };
-                                    let model_rect =
-                                        self.ocean.floating_rect(&wl_surface).unwrap_or(rect);
+                                    let model_rect = self
+                                        .spatial
+                                        .ocean
+                                        .floating_rect(&wl_surface)
+                                        .unwrap_or(rect);
                                     let grab = ResizeSurfaceGrab::start(
                                         start_data, window, edge, model_rect, view_scale,
                                     );
@@ -2077,9 +2114,13 @@ impl Smallvil {
                                 Some((output, area))
                             });
                         if let Some((output, area)) = output_area {
-                            let workspace = self.layout.active_workspace(&output.name());
+                            let workspace = self
+                                .spatial
+                                .workspaces
+                                .layout
+                                .active_workspace(&output.name());
                             let gap = self.gaps_for(&output.name(), workspace);
-                            let hit = self.layout.hit_test_split(
+                            let hit = self.spatial.workspaces.layout.hit_test_split(
                                 &output.name(),
                                 workspace,
                                 area,
@@ -2102,7 +2143,7 @@ impl Smallvil {
 
                             // BSP found no split boundary here -- try
                             // cascade's own grid boundaries next.
-                            let cascade_hit = self.layout.cascade_hit_test(
+                            let cascade_hit = self.spatial.workspaces.layout.cascade_hit_test(
                                 &output.name(),
                                 workspace,
                                 area,
@@ -2125,8 +2166,8 @@ impl Smallvil {
                     if let Some((window, _loc)) = under {
                         let wl_surface = window.toplevel().unwrap().wl_surface().clone();
 
-                        if !self.layout.contains(&wl_surface) {
-                            self.ocean.raise_floating(&wl_surface);
+                        if !self.spatial.workspaces.layout.contains(&wl_surface) {
+                            self.spatial.ocean.raise_floating(&wl_surface);
                             self.space.raise_element(&window, false);
                         }
                         self.focus_window_from_pointer(Some(wl_surface), serial);
@@ -2181,7 +2222,7 @@ impl Smallvil {
                     } else if self.exclusive_layer().is_none() {
                         if let Some((window, _)) = self.window_under(location) {
                             let surface = window.toplevel().unwrap().wl_surface().clone();
-                            if !self.layout.contains(&surface) {
+                            if !self.spatial.workspaces.layout.contains(&surface) {
                                 self.space.raise_element(&window, false);
                             }
                             self.focus_window_from_pointer(Some(surface), serial);
@@ -2365,7 +2406,7 @@ impl Smallvil {
                             } else if self.exclusive_layer().is_none() {
                                 if let Some((window, _)) = self.window_under(location) {
                                     let surface = window.toplevel().unwrap().wl_surface().clone();
-                                    if !self.layout.contains(&surface) {
+                                    if !self.spatial.workspaces.layout.contains(&surface) {
                                         self.space.raise_element(&window, false);
                                     }
                                     self.focus_window_from_pointer(Some(surface), serial);
@@ -2451,10 +2492,10 @@ impl Smallvil {
                             let steps = vertical_amount_discrete
                                 .map(|value| value / 120.0)
                                 .unwrap_or(vertical_amount / 15.0);
-                            let current = self.ocean.camera(&output.name()).zoom;
+                            let current = self.spatial.ocean.camera(&output.name()).zoom;
                             let target = (current / self.config.ocean.zoom_step.powf(steps))
                                 .clamp(self.config.ocean.min_zoom, self.config.ocean.max_zoom);
-                            self.ocean.zoom_at(
+                            self.spatial.ocean.zoom_at(
                                 &output.name(),
                                 location - output_geo.loc.to_f64(),
                                 target,
@@ -2489,13 +2530,20 @@ impl Smallvil {
                         .or_else(|| self.focused_window_surface());
                     if let Some(surface) = surface {
                         let surface = self.surface_root(&surface).unwrap_or(surface);
-                        if self.layout.contains(&surface) {
-                            let owner = self.layout.output_of(&surface).map(str::to_owned);
+                        if self.spatial.workspaces.layout.contains(&surface) {
+                            let owner = self
+                                .spatial
+                                .workspaces
+                                .layout
+                                .output_of(&surface)
+                                .map(str::to_owned);
                             if let Some(owner) = owner {
                                 if let Some(output) = self.output_by_name(&owner) {
                                     if let Some(area) = self.output_tiling_area(&output) {
-                                        let gap = self
-                                            .gaps_for(&owner, self.layout.active_workspace(&owner));
+                                        let gap = self.gaps_for(
+                                            &owner,
+                                            self.spatial.workspaces.layout.active_workspace(&owner),
+                                        );
                                         let viewport = f64::from(area.size.h - 2 * gap).max(1.0);
                                         let delta = stack_wheel_delta(
                                             vertical_amount,
@@ -2666,11 +2714,15 @@ impl Smallvil {
                         == Some(crate::config::WorkspaceProjection::Scroll)
                 {
                     if let Some(output) = self.primary_output() {
-                        let workspace = self.layout.active_workspace(&output.name());
-                        let initial_offset = self
+                        let workspace = self
+                            .spatial
+                            .workspaces
                             .layout
-                            .scroll
-                            .offset(&output.name(), self.layout.scroll_key(workspace));
+                            .active_workspace(&output.name());
+                        let initial_offset = self.spatial.workspaces.layout.scroll.offset(
+                            &output.name(),
+                            self.spatial.workspaces.layout.scroll_key(workspace),
+                        );
                         self.compositor_gesture = Some(CompositorGesture::Scroll {
                             output: output.name(),
                             workspace,
@@ -3254,7 +3306,7 @@ impl Smallvil {
                             self.jump_to_app_slot(&output, number as usize);
                         }
                         crate::config::WorkspaceRef::Name(name) => {
-                            if self.ocean.animate_to_bookmark(
+                            if self.spatial.ocean.animate_to_bookmark(
                                 &output.name(),
                                 &name,
                                 Duration::from_millis(self.config.ocean.camera_animation_ms),
@@ -3360,7 +3412,7 @@ impl Smallvil {
                     else {
                         return;
                     };
-                    if self.ocean.sink_window(
+                    if self.spatial.ocean.sink_window(
                         &surface,
                         &output.name(),
                         viewport,
@@ -3401,7 +3453,7 @@ impl Smallvil {
                     else {
                         return;
                     };
-                    if self.ocean.navigate_depth(
+                    if self.spatial.ocean.navigate_depth(
                         &output.name(),
                         viewport,
                         true,
@@ -3428,7 +3480,7 @@ impl Smallvil {
                     else {
                         return;
                     };
-                    if self.ocean.navigate_depth(
+                    if self.spatial.ocean.navigate_depth(
                         &output.name(),
                         viewport,
                         false,
@@ -3454,9 +3506,10 @@ impl Smallvil {
                     return;
                 };
                 let reef_resized = self
+                    .spatial
                     .ocean
                     .ensure_default_reef(&output.name(), output_geo.size);
-                let camera = self.ocean.camera(&output.name());
+                let camera = self.spatial.ocean.camera(&output.name());
                 let step = self.config.ocean.camera_step as f64 / camera.zoom.max(0.05);
                 let (dx, dy) = match direction {
                     Direction::Left => (-step, 0.0),
@@ -3464,7 +3517,7 @@ impl Smallvil {
                     Direction::Up => (0.0, -step),
                     Direction::Down => (0.0, step),
                 };
-                self.ocean.animate_pan(
+                self.spatial.ocean.animate_pan(
                     &output.name(),
                     dx,
                     dy,
@@ -3489,7 +3542,7 @@ impl Smallvil {
                 let Some(viewport) = self.space.output_geometry(&output).map(|geo| geo.size) else {
                     return;
                 };
-                let current = self.ocean.camera(&output.name()).zoom;
+                let current = self.spatial.ocean.camera(&output.name()).zoom;
                 let target = match action {
                     Action::OceanZoomIn => current * self.config.ocean.zoom_step,
                     Action::OceanZoomOut => current / self.config.ocean.zoom_step,
@@ -3497,7 +3550,7 @@ impl Smallvil {
                     _ => unreachable!(),
                 }
                 .clamp(self.config.ocean.min_zoom, self.config.ocean.max_zoom);
-                self.ocean.zoom_at(
+                self.spatial.ocean.zoom_at(
                     &output.name(),
                     Point::from((viewport.w as f64 / 2.0, viewport.h as f64 / 2.0)),
                     target,
@@ -3519,13 +3572,14 @@ impl Smallvil {
                 let Some(viewport) = self.space.output_geometry(&output).map(|geo| geo.size) else {
                     return;
                 };
-                let Some(rect) =
-                    self.ocean
-                        .world_rect(&surface, self.config.gaps, self.config.bsp_split_bias)
-                else {
+                let Some(rect) = self.spatial.ocean.world_rect(
+                    &surface,
+                    self.config.gaps,
+                    self.config.bsp_split_bias,
+                ) else {
                     return;
                 };
-                self.ocean.center_on_rect(
+                self.spatial.ocean.center_on_rect(
                     &output.name(),
                     viewport,
                     rect,
@@ -3546,7 +3600,7 @@ impl Smallvil {
                 let Some(viewport) = self.space.output_geometry(&output).map(|geo| geo.size) else {
                     return;
                 };
-                if let Some(surface) = self.ocean.dredge_nearest(
+                if let Some(surface) = self.spatial.ocean.dredge_nearest(
                     &output.name(),
                     viewport,
                     self.config.gaps,
@@ -3572,13 +3626,13 @@ impl Smallvil {
                 let Some(viewport) = self.space.output_geometry(&output).map(|geo| geo.size) else {
                     return;
                 };
-                if let Some(rect) = self.ocean.surface_window(
+                if let Some(rect) = self.spatial.ocean.surface_window(
                     &surface,
                     self.config.gaps,
                     self.config.bsp_split_bias,
                 ) {
                     self.retile();
-                    self.ocean.center_on_rect(
+                    self.spatial.ocean.center_on_rect(
                         &output.name(),
                         viewport,
                         rect,
@@ -3596,7 +3650,7 @@ impl Smallvil {
                 let Some(output) = self.primary_output() else {
                     return;
                 };
-                if self.ocean.animate_to_bookmark(
+                if self.spatial.ocean.animate_to_bookmark(
                     &output.name(),
                     &name,
                     Duration::from_millis(self.config.ocean.camera_animation_ms),
@@ -3614,7 +3668,11 @@ impl Smallvil {
                 let Some(output) = self.primary_output() else {
                     return;
                 };
-                if !self.ocean.save_bookmark(&output.name(), name.clone()) {
+                if !self
+                    .spatial
+                    .ocean
+                    .save_bookmark(&output.name(), name.clone())
+                {
                     tracing::warn!(bookmark = %name, "Ocean runtime bookmark cap reached");
                 }
             }

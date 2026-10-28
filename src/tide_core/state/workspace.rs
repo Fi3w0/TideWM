@@ -1,4 +1,7 @@
-use std::time::Duration;
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use smithay::{
     desktop::Window,
@@ -7,12 +10,84 @@ use smithay::{
     utils::{Logical, Point, Rectangle},
 };
 
-use crate::config::WorkspaceRef;
+use crate::{config::WorkspaceRef, layout::Layouts};
 
 use super::{
-    clamp_rect_visible, is_scratchpad_workspace, swapped_group_owner, Smallvil,
+    clamp_rect_visible, is_scratchpad_workspace, swapped_group_owner, FloatingTag, Smallvil,
     NAMED_SCRATCHPAD_BASE, SCRATCHPAD_WORKSPACE,
 };
+
+/// Workspace-owned window placement: layout trees, floating tags, pins,
+/// scratchpads and the Classic Depth Deck (plan step 8c). Lives in
+/// `SpatialState::workspaces`.
+pub struct WorkspaceState {
+    pub layout: Layouts,
+    /// (output, workspace) tag for every *floating* window. Tiled windows
+    /// don't need one -- their workspace is implicit in which `Layouts` tree
+    /// holds them -- but a floating window isn't tracked in `Layouts` at
+    /// all, so `switch_workspace` needs this to know which floating windows
+    /// belong to the workspace it's hiding or showing.
+    pub floating_workspace: HashMap<WlSurface, FloatingTag>,
+    /// Windows exempt from `switch_workspace`'s hide/show cycle -- stay
+    /// mapped and visible no matter which workspace is active on their
+    /// output. Always floating (`toggle_pin` un-tiles first if needed; a
+    /// tiled pinned window has no coherent meaning when only one
+    /// workspace's tree is ever rendered per output at a time).
+    pub pinned: HashSet<WlSurface>,
+    /// Tiled windows that keep `config.pseudo_tile_scale` of their tile's
+    /// size instead of filling it -- a rect override `retile()` applies,
+    /// same shape as the fullscreen override. Stays in its `Layouts` slot
+    /// throughout, unlike floating: only the rendered rect changes.
+    pub pseudo_tiled: HashSet<WlSurface>,
+    /// Per-output "workspace to return to" for `toggle_scratchpad`, so
+    /// toggling the scratchpad off doesn't strand you on some fixed
+    /// fallback workspace regardless of where you actually were.
+    pub(super) scratchpad_previous: HashMap<String, u32>,
+    /// Named scratchpads (Hyprland's named "special workspaces"):
+    /// each name is lazily assigned its own reserved workspace number from
+    /// `NAMED_SCRATCHPAD_BASE` upward on first use, then behaves exactly
+    /// like the unnamed scratchpad does -- same `switch_workspace` hide/show
+    /// machinery, no parallel data structure. Session-scoped: numbers are
+    /// allocated in first-use order, which only matters to IPC consumers,
+    /// and those should key on the `scratchpad` name field instead.
+    pub(super) scratchpad_named: HashMap<String, u32>,
+    /// Per-output previously-active workspace, updated on every real
+    /// `switch_workspace` call -- drives `config.workspace_auto_back_and_forth`
+    /// (niri's own feature of the same name). Separate from
+    /// `scratchpad_previous` above: that one only tracks the scratchpad's
+    /// own toggle, this tracks every ordinary workspace switch.
+    pub(super) workspace_previous: HashMap<String, u32>,
+    /// Output that received the last `workspace-up`/`workspace-down` step.
+    /// Used only while no visible window holds focus (an empty workspace):
+    /// `primary_output` then falls back to the pointer, which may be on the
+    /// other monitor and would step the wrong screen on the way back.
+    pub(super) workspace_step_output: Option<String>,
+    /// (output, workspace) pairs that have already fired their
+    /// `workspace_rule { on_created_empty }` command (see
+    /// `apply_workspace_switch`). TideWM's numbered workspaces always
+    /// exist as addressable slots -- there is no real create/destroy
+    /// lifecycle to hook a one-shot event on the way Hyprland can -- so
+    /// this set is what makes the closest honest analog to that a
+    /// once-per-process-lifetime event instead of firing on every later
+    /// visit to an empty workspace. Pruned per-output in
+    /// `remove_workspace_transition_output` on disconnect, same
+    /// "connector name might mean something else on replug" reasoning as
+    /// that function's other entries.
+    pub(super) workspace_created_empty_fired: HashSet<(String, u32)>,
+    /// Output-pin bindings (`rule { pin_output }`, `toggle-output-pin`),
+    /// keyed by surface, valued by connector name. No entry means "not
+    /// pinned" -- the common case costs nothing. Kept independent of
+    /// whether the named output is currently connected: a disconnect
+    /// leaves the entry alone (the window falls back like any other, but
+    /// still remembers where it belongs), and reconnecting that output
+    /// recalls the window via `recall_pinned_windows_to`. Cleared
+    /// per-surface in `detach_mapped_toplevel`, same lifecycle as
+    /// `window_tags`.
+    pub output_pins: HashMap<WlSurface, String>,
+    /// Structural parked-window state for Classic workspaces. This remains
+    /// empty unless the opt-in `classic_depth` feature is used.
+    pub classic_depth: crate::classic_depth::ClassicDepthDeck,
+}
 
 impl Smallvil {
     /// Prospective placement must evaluate live workspace matches at its
@@ -66,11 +141,17 @@ impl Smallvil {
     /// window not currently tracked by either. Feeds `workspace_rule { }`
     /// decoration-base resolution below.
     pub(super) fn workspace_of_surface(&self, surface: &WlSurface) -> Option<u32> {
-        self.layout.workspace_of(surface).or_else(|| {
-            self.floating_workspace
-                .get(surface)
-                .map(|tag| tag.workspace)
-        })
+        self.spatial
+            .workspaces
+            .layout
+            .workspace_of(surface)
+            .or_else(|| {
+                self.spatial
+                    .workspaces
+                    .floating_workspace
+                    .get(surface)
+                    .map(|tag| tag.workspace)
+            })
     }
 
     /// Resolves a `"workspace:N"`/`"move-to-workspace:N"` target to a real
@@ -95,14 +176,20 @@ impl Smallvil {
     /// entries plus the optional configured `1..=N` range.
     pub(crate) fn advertised_workspaces(&self, output: &str) -> Vec<u32> {
         let mut numbers: Vec<u32> = self
+            .spatial
+            .workspaces
             .layout
             .populated_workspaces()
             .into_iter()
             .filter(|(o, _)| o == output)
             .map(|(_, w)| w)
-            .chain(std::iter::once(self.layout.active_workspace(output)))
+            .chain(std::iter::once(
+                self.spatial.workspaces.layout.active_workspace(output),
+            ))
             .chain(
-                self.floating_workspace
+                self.spatial
+                    .workspaces
+                    .floating_workspace
                     .values()
                     .filter(|tag| tag.output == output)
                     .map(|tag| tag.workspace),
@@ -135,7 +222,9 @@ impl Smallvil {
         let output = if self.focused_window_surface().is_some() {
             self.primary_output()
         } else {
-            self.workspace_step_output
+            self.spatial
+                .workspaces
+                .workspace_step_output
                 .as_deref()
                 .and_then(|name| self.output_by_name(name))
                 .or_else(|| self.primary_output())
@@ -144,8 +233,12 @@ impl Smallvil {
             return;
         };
         let output_name = output.name();
-        self.workspace_step_output = Some(output_name.clone());
-        let current = self.layout.active_workspace(&output_name);
+        self.spatial.workspaces.workspace_step_output = Some(output_name.clone());
+        let current = self
+            .spatial
+            .workspaces
+            .layout
+            .active_workspace(&output_name);
         if is_scratchpad_workspace(current) {
             return;
         }
@@ -165,7 +258,13 @@ impl Smallvil {
         }
 
         self.switch_workspace_immediate(&output, target);
-        if self.layout.active_workspace(&output_name) != target {
+        if self
+            .spatial
+            .workspaces
+            .layout
+            .active_workspace(&output_name)
+            != target
+        {
             return;
         }
         let from = if step > 0 { -1.0 } else { 1.0 };
@@ -183,7 +282,11 @@ impl Smallvil {
             return;
         }
         let output_name = output.name();
-        let current = self.layout.active_workspace(&output_name);
+        let current = self
+            .spatial
+            .workspaces
+            .layout
+            .active_workspace(&output_name);
         // Scroll sections slide the shared strip to the section instead of
         // capturing a transition. Separate strips switch like Classic, with
         // the configured workspace animation.
@@ -191,7 +294,9 @@ impl Smallvil {
             && self.config.scroll.workspaces == crate::scroll::WorkspaceMode::Sections
         {
             let target = if current == workspace && self.config.workspace_auto_back_and_forth {
-                self.workspace_previous
+                self.spatial
+                    .workspaces
+                    .workspace_previous
                     .get(&output_name)
                     .copied()
                     .unwrap_or(workspace)
@@ -220,7 +325,7 @@ impl Smallvil {
             // niri's `workspace-auto-back-and-forth`: re-selecting the
             // already-active workspace jumps back to whichever one was
             // active immediately before it, instead of no-opping.
-            match self.workspace_previous.get(&output_name) {
+            match self.spatial.workspaces.workspace_previous.get(&output_name) {
                 Some(&previous) if previous != current => previous,
                 _ => return,
             }
@@ -257,7 +362,11 @@ impl Smallvil {
             return;
         }
         let output_name = output.name();
-        let current = self.layout.active_workspace(&output_name);
+        let current = self
+            .spatial
+            .workspaces
+            .layout
+            .active_workspace(&output_name);
         if current == workspace {
             return;
         }
@@ -273,24 +382,34 @@ impl Smallvil {
         // Any switch supersedes an in-flight vertical workspace slide. The
         // step action re-inserts its camera after this call returns.
         self.workspace_scroll_cameras.remove(&output_name);
-        self.workspace_previous.insert(output_name.clone(), current);
+        self.spatial
+            .workspaces
+            .workspace_previous
+            .insert(output_name.clone(), current);
 
         // Hide everything on the outgoing workspace. Tiled windows come
         // from the tree; floating ones from the tag, snapshotting each
         // one's latest position first so it comes back exactly where it was.
-        for window in self.layout.windows_in(&output_name, current) {
+        for window in self
+            .spatial
+            .workspaces
+            .layout
+            .windows_in(&output_name, current)
+        {
             self.space.unmap_elem(&window);
         }
         // Pinned windows are exempt from this whole hide/show cycle -- they
         // stay mapped and visible regardless of which workspace tag they
         // happen to carry, so both loops below skip them entirely.
         let outgoing_floating: Vec<WlSurface> = self
+            .spatial
+            .workspaces
             .floating_workspace
             .iter()
             .filter(|(surface, tag)| {
                 tag.output == output_name
                     && tag.workspace == current
-                    && !self.pinned.contains(*surface)
+                    && !self.spatial.workspaces.pinned.contains(*surface)
             })
             .map(|(surface, _)| surface.clone())
             .collect();
@@ -303,7 +422,7 @@ impl Smallvil {
             let Some(window) = window else { continue };
             if !self.fullscreen.contains_key(surface) && !self.maximized.contains_key(surface) {
                 if let Some(rect) = self.space.element_geometry(&window) {
-                    if let Some(tag) = self.floating_workspace.get_mut(surface) {
+                    if let Some(tag) = self.spatial.workspaces.floating_workspace.get_mut(surface) {
                         tag.rect = rect;
                     }
                 }
@@ -311,7 +430,10 @@ impl Smallvil {
             self.space.unmap_elem(&window);
         }
 
-        self.layout.set_active_workspace(&output_name, workspace);
+        self.spatial
+            .workspaces
+            .layout
+            .set_active_workspace(&output_name, workspace);
 
         // Show everything belonging to the new workspace. Tiled windows
         // come back through retile() below (it only ever walks the
@@ -322,12 +444,14 @@ impl Smallvil {
         // `space.elements()` to look up anymore, unlike a tiled one (whose
         // `Window` always lives on in its `Layouts` tree regardless).
         let incoming_floating: Vec<(Window, Point<i32, Logical>)> = self
+            .spatial
+            .workspaces
             .floating_workspace
             .iter()
             .filter(|(surface, tag)| {
                 tag.output == output_name
                     && tag.workspace == workspace
-                    && !self.pinned.contains(*surface)
+                    && !self.spatial.workspaces.pinned.contains(*surface)
             })
             .map(|(_, tag)| (tag.window.clone(), tag.rect.loc))
             .collect();
@@ -361,7 +485,12 @@ impl Smallvil {
     /// chance on the next one.
     fn check_workspace_created_empty(&mut self, output_name: &str, workspace: u32) {
         let key = (output_name.to_string(), workspace);
-        if self.workspace_created_empty_fired.contains(&key) {
+        if self
+            .spatial
+            .workspaces
+            .workspace_created_empty_fired
+            .contains(&key)
+        {
             return;
         }
         let Some(cmd) = self
@@ -371,15 +500,25 @@ impl Smallvil {
         else {
             return;
         };
-        let has_tiled = !self.layout.windows_in(output_name, workspace).is_empty();
+        let has_tiled = !self
+            .spatial
+            .workspaces
+            .layout
+            .windows_in(output_name, workspace)
+            .is_empty();
         let has_floating = self
+            .spatial
+            .workspaces
             .floating_workspace
             .values()
             .any(|tag| tag.output == output_name && tag.workspace == workspace);
         if has_tiled || has_floating {
             return;
         }
-        self.workspace_created_empty_fired.insert(key);
+        self.spatial
+            .workspaces
+            .workspace_created_empty_fired
+            .insert(key);
         if let Err(err) = crate::spawn(&cmd) {
             tracing::warn!(
                 %err,
@@ -395,9 +534,15 @@ impl Smallvil {
     /// default `Mod+Shift+N` behavior) -- the simpler of the two common
     /// conventions, easy to flip later if it feels wrong in practice.
     pub fn move_to_workspace(&mut self, surface: &WlSurface, workspace: u32) {
-        let Some(output) = self.layout.output_of(surface).map(str::to_string) else {
+        let Some(output) = self
+            .spatial
+            .workspaces
+            .layout
+            .output_of(surface)
+            .map(str::to_string)
+        else {
             // Not tiled -- must be floating, or not tracked at all.
-            let Some(tag) = self.floating_workspace.get(surface) else {
+            let Some(tag) = self.spatial.workspaces.floating_workspace.get(surface) else {
                 return;
             };
             let output = tag.output.clone();
@@ -409,8 +554,8 @@ impl Smallvil {
             if workspace == current {
                 return;
             }
-            let active = self.layout.active_workspace(&output);
-            if let Some(tag) = self.floating_workspace.get_mut(surface) {
+            let active = self.spatial.workspaces.layout.active_workspace(&output);
+            if let Some(tag) = self.spatial.workspaces.floating_workspace.get_mut(surface) {
                 tag.workspace = workspace;
             }
             // The workspace number just changed, and `rule { on_workspace }`
@@ -422,7 +567,7 @@ impl Smallvil {
             // Pinned windows stay mapped and visible regardless of which
             // workspace they're nominally tagged with -- same exemption
             // `switch_workspace` applies, nothing to show or hide here.
-            if self.pinned.contains(surface) {
+            if self.spatial.workspaces.pinned.contains(surface) {
                 return;
             }
 
@@ -438,7 +583,9 @@ impl Smallvil {
                         && !self.maximized.contains_key(surface)
                     {
                         if let Some(rect) = self.space.element_geometry(&window) {
-                            if let Some(tag) = self.floating_workspace.get_mut(surface) {
+                            if let Some(tag) =
+                                self.spatial.workspaces.floating_workspace.get_mut(surface)
+                            {
                                 tag.rect = rect;
                             }
                         }
@@ -451,7 +598,7 @@ impl Smallvil {
                 // (`current != active` is what tells this case apart from
                 // "already visible, just retagging its number" -- comparing
                 // only `workspace == active` would wrongly skip this too.)
-                if let Some(tag) = self.floating_workspace.get(surface) {
+                if let Some(tag) = self.spatial.workspaces.floating_workspace.get(surface) {
                     self.space
                         .map_element(tag.window.clone(), tag.rect.loc, false);
                 }
@@ -473,19 +620,24 @@ impl Smallvil {
         // already be hidden on some other workspace than whichever is
         // active right now.
         let current = self
+            .spatial
+            .workspaces
             .layout
             .workspace_of(surface)
-            .unwrap_or_else(|| self.layout.active_workspace(&output));
+            .unwrap_or_else(|| self.spatial.workspaces.layout.active_workspace(&output));
         if workspace == current {
             return;
         }
-        let active = self.layout.active_workspace(&output);
+        let active = self.spatial.workspaces.layout.active_workspace(&output);
         // Hidden tiled windows remain in the tree but not in Space.
-        let Some(window) = self.layout.window_of(surface) else {
+        let Some(window) = self.spatial.workspaces.layout.window_of(surface) else {
             return;
         };
-        self.layout.remove(surface);
-        self.layout.insert(&output, workspace, window.clone(), None);
+        self.spatial.workspaces.layout.remove(surface);
+        self.spatial
+            .workspaces
+            .layout
+            .insert(&output, workspace, window.clone(), None);
         // See the floating branch above: `on_workspace` is a live match
         // criterion feeding cached opacity/glass.
         self.refresh_window_opacity_and_glass_for(surface);
@@ -509,9 +661,15 @@ impl Smallvil {
             return;
         };
         let output_name = output.name();
-        let current = self.layout.active_workspace(&output_name);
+        let current = self
+            .spatial
+            .workspaces
+            .layout
+            .active_workspace(&output_name);
         if current == target {
             let previous = self
+                .spatial
+                .workspaces
                 .scratchpad_previous
                 .get(&output_name)
                 .copied()
@@ -519,7 +677,10 @@ impl Smallvil {
             self.switch_workspace(output, previous);
         } else {
             if !is_scratchpad_workspace(current) {
-                self.scratchpad_previous.insert(output_name, current);
+                self.spatial
+                    .workspaces
+                    .scratchpad_previous
+                    .insert(output_name, current);
             }
             self.switch_workspace(output, target);
         }
@@ -572,11 +733,15 @@ impl Smallvil {
         let Some(name) = name else {
             return Some(SCRATCHPAD_WORKSPACE);
         };
-        if let Some(&workspace) = self.scratchpad_named.get(name) {
+        if let Some(&workspace) = self.spatial.workspaces.scratchpad_named.get(name) {
             return Some(workspace);
         }
-        let next = NAMED_SCRATCHPAD_BASE.checked_add(self.scratchpad_named.len() as u32)?;
-        self.scratchpad_named.insert(name.to_string(), next);
+        let next = NAMED_SCRATCHPAD_BASE
+            .checked_add(self.spatial.workspaces.scratchpad_named.len() as u32)?;
+        self.spatial
+            .workspaces
+            .scratchpad_named
+            .insert(name.to_string(), next);
         Some(next)
     }
 
@@ -584,7 +749,9 @@ impl Smallvil {
     /// Used by the IPC `workspaces` query so bars can label (or hide)
     /// scratchpad entries instead of showing a raw reserved number.
     pub(crate) fn scratchpad_name_of(&self, workspace: u32) -> Option<&str> {
-        self.scratchpad_named
+        self.spatial
+            .workspaces
+            .scratchpad_named
             .iter()
             .find(|(_, &ws)| ws == workspace)
             .map(|(name, _)| name.as_str())
@@ -606,7 +773,9 @@ impl Smallvil {
             // authoritative at once.
             let wants_pinned = !was_pinned;
             if wants_pinned {
-                if self.layout.contains(surface) || self.ocean.is_tiled(surface) {
+                if self.spatial.workspaces.layout.contains(surface)
+                    || self.spatial.ocean.is_tiled(surface)
+                {
                     self.toggle_floating(surface);
                     if let Some(entry) = self.fullscreen.get_mut(surface) {
                         entry.pin_floated_it = true;
@@ -650,14 +819,15 @@ impl Smallvil {
             // Ocean's viewport anchor is the only pin authority. Drop any
             // stale Classic marker left by an interrupted migration before
             // deciding whether this is a pin or unpin operation.
-            self.pinned.remove(surface);
-            if self.ocean.is_screen_pinned(surface) {
-                self.ocean.unpin_from_screen(surface);
+            self.spatial.workspaces.pinned.remove(surface);
+            if self.spatial.ocean.is_screen_pinned(surface) {
+                self.spatial.ocean.unpin_from_screen(surface);
             } else {
-                if self.ocean.is_tiled(surface) {
+                if self.spatial.ocean.is_tiled(surface) {
                     self.toggle_floating(surface);
                 }
                 let output = self
+                    .spatial
                     .ocean
                     .entry_output(surface)
                     .and_then(|name| self.output_by_name(name))
@@ -665,7 +835,7 @@ impl Smallvil {
                 let Some(output) = output else {
                     return;
                 };
-                if !self.ocean.pin_to_screen(surface, &output.name()) {
+                if !self.spatial.ocean.pin_to_screen(surface, &output.name()) {
                     return;
                 }
             }
@@ -675,7 +845,7 @@ impl Smallvil {
             self.request_redraw();
             return;
         }
-        if self.pinned.remove(surface) {
+        if self.spatial.workspaces.pinned.remove(surface) {
             // While pinned, this window stayed mapped regardless of which
             // workspace was actually active -- so its FloatingTag may still
             // say whatever workspace was active back when it got pinned,
@@ -690,8 +860,12 @@ impl Smallvil {
                 .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface))
                 .cloned();
             if let Some(output) = window.as_ref().and_then(|w| self.output_for_window(w)) {
-                let active = self.layout.active_workspace(&output.name());
-                if let Some(tag) = self.floating_workspace.get_mut(surface) {
+                let active = self
+                    .spatial
+                    .workspaces
+                    .layout
+                    .active_workspace(&output.name());
+                if let Some(tag) = self.spatial.workspaces.floating_workspace.get_mut(surface) {
                     tag.output = output.name();
                     tag.workspace = active;
                 }
@@ -702,10 +876,10 @@ impl Smallvil {
             self.request_redraw();
             return;
         }
-        if self.layout.contains(surface) {
+        if self.spatial.workspaces.layout.contains(surface) {
             self.toggle_floating(surface);
         }
-        self.pinned.insert(surface.clone());
+        self.spatial.workspaces.pinned.insert(surface.clone());
         self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
             surface: surface.clone(),
         });
@@ -720,7 +894,13 @@ impl Smallvil {
     /// status. No-op if the window isn't currently rendered anywhere (not
     /// mapped, or its output vanished).
     pub fn toggle_output_pin(&mut self, surface: &WlSurface) {
-        if self.output_pins.remove(surface).is_some() {
+        if self
+            .spatial
+            .workspaces
+            .output_pins
+            .remove(surface)
+            .is_some()
+        {
             self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
                 surface: surface.clone(),
             });
@@ -730,7 +910,10 @@ impl Smallvil {
         let Some(output) = self.rendered_output_for_surface(surface) else {
             return;
         };
-        self.output_pins.insert(surface.clone(), output.name());
+        self.spatial
+            .workspaces
+            .output_pins
+            .insert(surface.clone(), output.name());
         self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
             surface: surface.clone(),
         });
@@ -758,16 +941,22 @@ impl Smallvil {
             return;
         };
         let displaced: Vec<WlSurface> = self
+            .spatial
+            .workspaces
             .output_pins
             .iter()
             .filter(|(surface, pinned)| {
                 pinned.as_str() == to_output_name
                     && self
+                        .spatial
+                        .workspaces
                         .layout
                         .output_of(surface)
                         .map(|current| current != to_output_name)
                         .unwrap_or_else(|| {
-                            self.floating_workspace
+                            self.spatial
+                                .workspaces
+                                .floating_workspace
                                 .get(*surface)
                                 .is_some_and(|tag| tag.output != to_output_name)
                         })
@@ -790,8 +979,10 @@ impl Smallvil {
     /// leaving two disagreeing sources of truth.
     pub(crate) fn window_is_pinned(&self, surface: &WlSurface) -> bool {
         match self.spatial.engine.ownership() {
-            crate::config::SpatialOwnership::Workspaces => self.pinned.contains(surface),
-            crate::config::SpatialOwnership::Ocean => self.ocean.is_screen_pinned(surface),
+            crate::config::SpatialOwnership::Workspaces => {
+                self.spatial.workspaces.pinned.contains(surface)
+            }
+            crate::config::SpatialOwnership::Ocean => self.spatial.ocean.is_screen_pinned(surface),
         }
     }
 
@@ -817,8 +1008,8 @@ impl Smallvil {
         if name_a == name_b {
             return;
         }
-        let ws_a = self.layout.active_workspace(&name_a);
-        let ws_b = self.layout.active_workspace(&name_b);
+        let ws_a = self.spatial.workspaces.layout.active_workspace(&name_a);
+        let ws_b = self.spatial.workspaces.layout.active_workspace(&name_b);
 
         // Every window whose workspace *number* is about to change (tiled
         // content at ws_a/ws_b is renumbered to the other output's active
@@ -828,13 +1019,17 @@ impl Smallvil {
         // needs a re-resolve once the swap actually lands -- see the loop
         // at the end of this function.
         let on_workspace_changed: Vec<WlSurface> = self
+            .spatial
+            .workspaces
             .layout
             .windows_in(&name_a, ws_a)
             .into_iter()
-            .chain(self.layout.windows_in(&name_b, ws_b))
+            .chain(self.spatial.workspaces.layout.windows_in(&name_b, ws_b))
             .filter_map(|window| window.toplevel().map(|t| t.wl_surface().clone()))
             .chain(
-                self.floating_workspace
+                self.spatial
+                    .workspaces
+                    .floating_workspace
                     .iter()
                     .filter(|(_, tag)| {
                         (tag.output == name_a && tag.workspace == ws_a)
@@ -848,6 +1043,8 @@ impl Smallvil {
         // an override keyed outside `Layouts`, so moving a tree does not move
         // its FullscreenEntry automatically.
         let fullscreen_tiled_a: Vec<WlSurface> = self
+            .spatial
+            .workspaces
             .layout
             .windows_in(&name_a, ws_a)
             .into_iter()
@@ -855,6 +1052,8 @@ impl Smallvil {
             .filter(|surface| self.fullscreen.contains_key(surface))
             .collect();
         let fullscreen_tiled_b: Vec<WlSurface> = self
+            .spatial
+            .workspaces
             .layout
             .windows_in(&name_b, ws_b)
             .into_iter()
@@ -863,23 +1062,27 @@ impl Smallvil {
             .collect();
 
         let fullscreen_floating_a: Vec<WlSurface> = self
+            .spatial
+            .workspaces
             .floating_workspace
             .iter()
             .filter(|(surface, tag)| {
                 tag.output == name_a
                     && tag.workspace == ws_a
-                    && !self.pinned.contains(*surface)
+                    && !self.spatial.workspaces.pinned.contains(*surface)
                     && self.fullscreen.contains_key(*surface)
             })
             .map(|(surface, _)| surface.clone())
             .collect();
         let fullscreen_floating_b: Vec<WlSurface> = self
+            .spatial
+            .workspaces
             .floating_workspace
             .iter()
             .filter(|(surface, tag)| {
                 tag.output == name_b
                     && tag.workspace == ws_b
-                    && !self.pinned.contains(*surface)
+                    && !self.spatial.workspaces.pinned.contains(*surface)
                     && self.fullscreen.contains_key(*surface)
             })
             .map(|(surface, _)| surface.clone())
@@ -936,7 +1139,7 @@ impl Smallvil {
             }
         }
 
-        self.layout.swap_active(&name_a, &name_b);
+        self.spatial.workspaces.layout.swap_active(&name_a, &name_b);
 
         // Groups key their owner off the tree their leaf lives in, which
         // `swap_active` just moved to the other output. Retag the two
@@ -1020,11 +1223,11 @@ impl Smallvil {
         // two outputs' origins, preserving relative on-screen placement --
         // they were never unmapped, so nothing else will move them).
         let mut moved: Vec<(Window, Point<i32, Logical>)> = Vec::new();
-        for (surface, tag) in &mut self.floating_workspace {
+        for (surface, tag) in &mut self.spatial.workspaces.floating_workspace {
             // Pinning exempts a window from workspace membership; including
             // it only when its intentionally stale nominal workspace happened
             // to be active made cross-output behavior nondeterministic.
-            if self.pinned.contains(surface) {
+            if self.spatial.workspaces.pinned.contains(surface) {
                 continue;
             }
             if tag.output == name_a && tag.workspace == ws_a {
@@ -1121,12 +1324,18 @@ impl Smallvil {
             return;
         };
         let output_name = output.name();
-        let active_workspace = self.layout.active_workspace(&output_name);
+        let active_workspace = self
+            .spatial
+            .workspaces
+            .layout
+            .active_workspace(&output_name);
 
         // Every workspace this output has ever populated, plus the active
         // one even if it's currently empty, so there's always at least one
         // cell to show.
         let mut workspaces: Vec<u32> = self
+            .spatial
+            .workspaces
             .layout
             .populated_workspaces()
             .into_iter()
@@ -1156,6 +1365,8 @@ impl Smallvil {
                 // needed, `Layouts::layout` already produces proportional
                 // rects for whatever area it's given.
                 let windows = self
+                    .spatial
+                    .workspaces
                     .layout
                     .layout(&output_name, workspace, area, 4)
                     .into_iter()

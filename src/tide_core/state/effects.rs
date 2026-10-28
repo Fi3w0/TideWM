@@ -531,7 +531,7 @@ impl Smallvil {
         let focused = matches!(
             &self.keyboard_focus,
             KeyboardFocusTarget::Window(focused) if focused == surface
-        ) || self.ocean.drag_hint() == Some(surface);
+        ) || self.spatial.ocean.drag_hint() == Some(surface);
         let urgent = self.urgent.contains(surface);
         if !border.enabled
             || border.width <= 0.0

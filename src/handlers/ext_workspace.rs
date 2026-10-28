@@ -303,7 +303,7 @@ impl Smallvil {
             .outputs()
             .map(|output| output.name())
             .map(|name| {
-                let active = self.layout.active_workspace(&name);
+                let active = self.spatial.workspaces.layout.active_workspace(&name);
                 let workspaces = self
                     .advertised_workspaces(&name)
                     .into_iter()

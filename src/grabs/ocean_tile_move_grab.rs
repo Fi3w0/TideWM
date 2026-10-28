@@ -72,7 +72,7 @@ impl OceanTileMoveGrab {
     /// clears the visual drag and snaps back without changing reef state.
     fn commit(&self, data: &mut Smallvil) {
         if !data.window_is_visible(&self.surface)
-            || !data.ocean.is_tiled(&self.surface)
+            || !data.spatial.ocean.is_tiled(&self.surface)
             || data.fullscreen.contains_key(&self.surface)
         {
             return;
@@ -81,7 +81,7 @@ impl OceanTileMoveGrab {
             return;
         };
         let pointer_view = self.last_location - output_geo.loc.to_f64();
-        let target = data.ocean.tiled_target_at_view(
+        let target = data.spatial.ocean.tiled_target_at_view(
             &self.surface,
             &output,
             pointer_view,
@@ -96,16 +96,18 @@ impl OceanTileMoveGrab {
         }
         match target {
             Some(target) => {
-                data.ocean.swap_tiled(&self.surface, &target);
+                data.spatial.ocean.swap_tiled(&self.surface, &target);
             }
             None => {
                 let world_rect = self.current_world_rect(data);
-                data.ocean.make_floating(
+                data.spatial.ocean.make_floating(
                     &self.surface,
                     data.config.gaps,
                     data.config.bsp_split_bias,
                 );
-                data.ocean.set_floating_rect(&self.surface, world_rect);
+                data.spatial
+                    .ocean
+                    .set_floating_rect(&self.surface, world_rect);
             }
         }
     }
@@ -127,6 +129,7 @@ impl OceanTileMoveGrab {
             });
         let new_location = (self.initial_location.to_f64() + delta).to_i32_round();
         let size = data
+            .spatial
             .ocean
             .world_rect(&self.surface, data.config.gaps, data.config.bsp_split_bias)
             .map(|rect| rect.size)
@@ -156,7 +159,7 @@ impl OceanTileMoveGrab {
     ) -> Option<Point<f64, Logical>> {
         let output = data.output_by_name(output)?;
         let geometry = data.space.output_geometry(&output)?;
-        let camera = data.ocean.camera(&output.name());
+        let camera = data.spatial.ocean.camera(&output.name());
         let local = location - geometry.loc.to_f64();
         let zoom = camera.zoom.max(0.05);
         Some(Point::from((
@@ -187,7 +190,7 @@ impl PointerGrab<Smallvil> for OceanTileMoveGrab {
         self.last_location = event.location;
         if !self.window.alive()
             || !data.window_is_visible(&self.surface)
-            || !data.ocean.is_tiled(&self.surface)
+            || !data.spatial.ocean.is_tiled(&self.surface)
             || data.fullscreen.contains_key(&self.surface)
         {
             return;
@@ -203,7 +206,7 @@ impl PointerGrab<Smallvil> for OceanTileMoveGrab {
             .output_at(data, self.last_location)
             .and_then(|(output, output_geo)| {
                 let pointer_view = self.last_location - output_geo.loc.to_f64();
-                data.ocean.tiled_target_at_view(
+                data.spatial.ocean.tiled_target_at_view(
                     &self.surface,
                     &output,
                     pointer_view,
@@ -212,7 +215,8 @@ impl PointerGrab<Smallvil> for OceanTileMoveGrab {
                 )
             });
         if let Some((output, _)) = self.output_at(data, self.last_location) {
-            data.ocean
+            data.spatial
+                .ocean
                 .set_tile_drag(self.surface.clone(), world_rect, hint, output);
         }
         data.space
@@ -336,7 +340,7 @@ impl PointerGrab<Smallvil> for OceanTileMoveGrab {
         if self.completion.take_complete() {
             self.commit(data);
         }
-        data.ocean.clear_tile_drag();
+        data.spatial.ocean.clear_tile_drag();
         data.retile_viscous();
     }
 }

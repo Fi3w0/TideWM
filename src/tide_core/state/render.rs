@@ -194,9 +194,12 @@ impl Smallvil {
             .filter_map(|window| {
                 let location = self.space.element_location(window)?;
                 let surface = window.toplevel().map(|toplevel| toplevel.wl_surface());
-                let kind = if surface
-                    .is_some_and(|surface| self.floating_workspace.contains_key(surface))
-                {
+                let kind = if surface.is_some_and(|surface| {
+                    self.spatial
+                        .workspaces
+                        .floating_workspace
+                        .contains_key(surface)
+                }) {
                     crate::placement::PlacementKind::Floating
                 } else {
                     crate::placement::PlacementKind::Tiled
@@ -208,7 +211,7 @@ impl Smallvil {
                 if kind == crate::placement::PlacementKind::Tiled
                     && surface != self.classic_tile_drag.as_ref()
                     && surface
-                        .and_then(|surface| self.layout.output_of(surface))
+                        .and_then(|surface| self.spatial.workspaces.layout.output_of(surface))
                         .is_some_and(|owner| owner != output_name)
                 {
                     return None;
@@ -222,6 +225,8 @@ impl Smallvil {
                         !self.floating_dragging.contains(surface)
                             && self.scroll_strip_floater(surface)
                             && self
+                                .spatial
+                                .workspaces
                                 .floating_workspace
                                 .get(surface)
                                 .is_some_and(|tag| tag.output != output_name)
@@ -239,7 +244,9 @@ impl Smallvil {
                 // change, so a vertical workspace slide must not carry them
                 // out of view. (Horizontal swim offset is left untouched,
                 // matching its existing behavior.)
-                let view_offset = if surface.is_some_and(|surface| self.pinned.contains(surface)) {
+                let view_offset = if surface
+                    .is_some_and(|surface| self.spatial.workspaces.pinned.contains(surface))
+                {
                     Point::from((active_view_offset.x, 0.0))
                 } else {
                     active_view_offset
@@ -270,7 +277,10 @@ impl Smallvil {
         };
         if self.swim_enabled() {
             let neighbors = crate::swim::visible_neighbors(
-                self.layout.active_workspace(&output_name),
+                self.spatial
+                    .workspaces
+                    .layout
+                    .active_workspace(&output_name),
                 camera_offset,
                 self.config.swim.neighbors,
             );
@@ -291,7 +301,11 @@ impl Smallvil {
         }
         if let Some(camera) = vertical_camera {
             if let Some(previous) = camera.neighbor() {
-                let active = self.layout.active_workspace(&output_name);
+                let active = self
+                    .spatial
+                    .workspaces
+                    .layout
+                    .active_workspace(&output_name);
                 let delta = i64::from(previous) - i64::from(active);
                 if delta != 0 {
                     let view_offset = Point::from((
@@ -329,12 +343,14 @@ impl Smallvil {
         // workspace-switch map pass reads this same bounded tag map),
         // so using its iteration order matches the existing model.
         result.extend(
-            self.floating_workspace
+            self.spatial
+                .workspaces
+                .floating_workspace
                 .iter()
                 .filter(|(surface, tag)| {
                     tag.output == output_name
                         && tag.workspace == workspace
-                        && !self.pinned.contains(*surface)
+                        && !self.spatial.workspaces.pinned.contains(*surface)
                 })
                 .map(|(surface, tag)| {
                     let mut rect = tag.rect;
@@ -367,7 +383,7 @@ impl Smallvil {
                 }),
         );
 
-        let mut tiled = self.layout.layout(
+        let mut tiled = self.spatial.workspaces.layout.layout(
             output_name,
             workspace,
             area,
@@ -386,7 +402,7 @@ impl Smallvil {
                 {
                     rect = output_geo;
                     stack = crate::placement::PlacementStack::Fullscreen;
-                } else if self.pseudo_tiled.contains(surface) {
+                } else if self.spatial.workspaces.pseudo_tiled.contains(surface) {
                     rect = crate::layout::scale_centered(rect, self.config.pseudo_tile_scale);
                 }
             }
@@ -406,7 +422,7 @@ impl Smallvil {
             crate::config::SpatialOwnership::Workspaces => self.classic_render_placements(output),
             crate::config::SpatialOwnership::Ocean => {
                 let output_geo = self.space.output_geometry(output)?;
-                let mut placements = self.ocean.placements(
+                let mut placements = self.spatial.ocean.placements(
                     &output.name(),
                     output_geo,
                     self.config.gaps,
@@ -983,7 +999,11 @@ impl Smallvil {
         let Some(target) = self.pending_workspace_transitions.remove(&output_name) else {
             return;
         };
-        let current = self.layout.active_workspace(&output_name);
+        let current = self
+            .spatial
+            .workspaces
+            .layout
+            .active_workspace(&output_name);
         if current == target {
             return;
         }
@@ -1163,8 +1183,8 @@ impl Smallvil {
         self.compasses.remove(output_name);
         self.swim_cameras.remove(output_name);
         self.workspace_scroll_cameras.remove(output_name);
-        if self.workspace_step_output.as_deref() == Some(output_name) {
-            self.workspace_step_output = None;
+        if self.spatial.workspaces.workspace_step_output.as_deref() == Some(output_name) {
+            self.spatial.workspaces.workspace_step_output = None;
         }
         self.caustics.remove(output_name);
         // Same "connector name might mean something else entirely on
@@ -1172,7 +1192,9 @@ impl Smallvil {
         // on_created_empty for this output's workspace numbers shouldn't
         // silently suppress the command if a different monitor is later
         // plugged into the same port and gets the same connector name.
-        self.workspace_created_empty_fired
+        self.spatial
+            .workspaces
+            .workspace_created_empty_fired
             .retain(|(o, _)| o != output_name);
         if self
             .minimap_peek

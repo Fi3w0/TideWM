@@ -57,7 +57,9 @@ impl PointerGrab<Smallvil> for ScrollResizeGrab {
     ) {
         // While the grab is active, no client has pointer focus.
         handle.motion(data, None, event);
-        if !data.layout.contains(&self.surface) || !data.layout.contains(&self.start.head) {
+        if !data.spatial.workspaces.layout.contains(&self.surface)
+            || !data.spatial.workspaces.layout.contains(&self.start.head)
+        {
             return;
         }
         let delta = event.location - self.start_data.location;
@@ -66,13 +68,15 @@ impl PointerGrab<Smallvil> for ScrollResizeGrab {
         } else {
             (delta.y, delta.x)
         };
-        data.layout.scroll.resize(
+        data.spatial.workspaces.layout.scroll.resize(
             self.start.head.clone(),
             self.start.width + along / self.start.viewport.max(1.0),
         );
         if let Some((weight, cross)) = self.start.row {
             let cross = cross.max(1.0);
-            data.layout
+            data.spatial
+                .workspaces
+                .layout
                 .scroll
                 .set_weight(&self.surface, weight * (cross + across).max(1.0) / cross);
         }

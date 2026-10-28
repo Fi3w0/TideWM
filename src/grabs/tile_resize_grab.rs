@@ -52,7 +52,7 @@ impl PointerGrab<Smallvil> for TileResizeGrab {
         if self
             .handles
             .iter()
-            .any(|handle| !data.layout.split_is_current(&handle.hit))
+            .any(|handle| !data.spatial.workspaces.layout.split_is_current(&handle.hit))
         {
             return;
         }
@@ -69,7 +69,7 @@ impl PointerGrab<Smallvil> for TileResizeGrab {
             let Some(new_ratio) = handle.ratio_for_delta(delta_pixels) else {
                 continue;
             };
-            data.layout.set_ratio(
+            data.spatial.workspaces.layout.set_ratio(
                 &handle.hit.output,
                 handle.hit.workspace,
                 &handle.hit.path,

@@ -175,7 +175,7 @@ impl Smallvil {
             .collect();
         let first_workspace = self.space.outputs().next().map(|output| {
             let name = output.name().to_string();
-            self.layout.active_workspace(&name)
+            self.spatial.workspaces.layout.active_workspace(&name)
         });
         self.tide.workspace = tide_workspace_value(self.spatial.engine, first_workspace);
         if let Ok(tide_table) = crate::wave::build_tide_table(&self.config_lua, &self.tide) {
@@ -375,10 +375,11 @@ impl Smallvil {
                 self.refresh_ext_workspaces();
                 if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
                     if self.config.ocean.zoom_enabled {
-                        self.ocean
+                        self.spatial
+                            .ocean
                             .clamp_zooms(self.config.ocean.min_zoom, self.config.ocean.max_zoom);
                     } else {
-                        self.ocean.clamp_zooms(1.0, 1.0);
+                        self.spatial.ocean.clamp_zooms(1.0, 1.0);
                     }
                 }
                 if !self.config.classic_depth.enabled {
@@ -546,12 +547,21 @@ impl Smallvil {
                         self.active_mode = None;
                     }
                 }
-                self.layout
+                self.spatial
+                    .workspaces
+                    .layout
                     .set_default_algorithm(self.config.default_layout);
-                self.layout
+                self.spatial
+                    .workspaces
+                    .layout
                     .set_master_orientation(self.config.master_orientation);
-                self.layout.set_split_bias(self.config.bsp_split_bias);
-                self.layout
+                self.spatial
+                    .workspaces
+                    .layout
+                    .set_split_bias(self.config.bsp_split_bias);
+                self.spatial
+                    .workspaces
+                    .layout
                     .set_workspace_algorithm_overrides(self.config.workspace_algorithm_overrides());
                 // DeviceAdded is the only other configuration point for
                 // libinput hardware. Re-apply every live handle so touchpad,

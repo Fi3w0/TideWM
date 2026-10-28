@@ -92,7 +92,6 @@ use crate::{
     capture::PendingCapture,
     config::{Config, Direction},
     grabs::GrabCompletion,
-    layout::Layouts,
     toast::Toast,
 };
 
@@ -109,18 +108,22 @@ smithay::backend::renderer::element::render_elements! {
     Surface = WaylandSurfaceRenderElement<R>,
 }
 
-/// The live spatial model. Step 8 of the architecture plan moves the
-/// workspace and Ocean ownership state in here.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct SpatialState {
+/// The live spatial model: the running engine plus the workspace and Ocean
+/// ownership state it selects between (plan steps 7 and 8c).
+pub struct SpatialState {
     /// The running engine. Only `migrate_spatial_engine` changes it.
     pub(crate) engine: crate::config::SpatialEngine,
+    /// Workspace-owned window placement for Classic and Scroll.
+    pub workspaces: workspace::WorkspaceState,
+    /// Continuous world ownership, cameras, reefs, and bookmarks for the
+    /// Ocean engine. Dormant while Classic is selected.
+    pub ocean: crate::ocean::OceanSpace,
 }
 
 impl SpatialState {
     /// Classic finds windows under the pointer through `Space`; Scroll and
     /// Ocean through `render_placements`, which carry their view offsets.
-    pub(crate) fn hit_tests_through_space(self) -> bool {
+    pub(crate) fn hit_tests_through_space(&self) -> bool {
         self.engine.projection() == Some(crate::config::WorkspaceProjection::Classic)
     }
 }
@@ -243,15 +246,9 @@ pub struct Smallvil {
     /// specific assumptions; a fresh press clears a stale entry if a
     /// release was lost across a backend/session transition.
     pub(crate) suppressed_pointer_buttons: HashSet<u32>,
-    /// Structural parked-window state for Classic workspaces. This remains
-    /// empty unless the opt-in `classic_depth` feature is used.
-    pub classic_depth: crate::classic_depth::ClassicDepthDeck,
     /// Live spatial model. `config.spatial_engine` is only what the config
     /// file asks for; this is what is running.
-    pub(crate) spatial: SpatialState,
-    /// Continuous world ownership, cameras, reefs, and bookmarks for the
-    /// Ocean engine. Dormant while Classic is selected.
-    pub ocean: crate::ocean::OceanSpace,
+    pub spatial: SpatialState,
     /// Static title-card overlay for the currently open Classic deck.
     pub depth_deck_overlay: Option<crate::depth_deck::DepthDeckOverlay>,
     #[cfg(feature = "screencast")]
@@ -313,7 +310,6 @@ pub struct Smallvil {
     /// IPC event subscribers and the state they were last told about.
     pub(crate) ipc: ipc::IpcState,
 
-    pub layout: Layouts,
     pub space: crate::tide_core::window_space::WindowSpace,
     /// Per-mapped-window base/active/inactive/fullscreen alpha multipliers
     /// resolved from window rules. Missing entries preserve client alpha.
@@ -868,25 +864,6 @@ pub struct Smallvil {
     /// original normal floating rectangle.
     pub maximized: HashMap<WlSurface, MaximizedEntry>,
 
-    /// (output, workspace) tag for every *floating* window. Tiled windows
-    /// don't need one -- their workspace is implicit in which `Layouts` tree
-    /// holds them -- but a floating window isn't tracked in `Layouts` at
-    /// all, so `switch_workspace` needs this to know which floating windows
-    /// belong to the workspace it's hiding or showing.
-    pub floating_workspace: HashMap<WlSurface, FloatingTag>,
-
-    /// Windows exempt from `switch_workspace`'s hide/show cycle -- stay
-    /// mapped and visible no matter which workspace is active on their
-    /// output. Always floating (`toggle_pin` un-tiles first if needed; a
-    /// tiled pinned window has no coherent meaning when only one
-    /// workspace's tree is ever rendered per output at a time).
-    pub pinned: HashSet<WlSurface>,
-
-    /// Per-output "workspace to return to" for `toggle_scratchpad`, so
-    /// toggling the scratchpad off doesn't strand you on some fixed
-    /// fallback workspace regardless of where you actually were.
-    scratchpad_previous: HashMap<String, u32>,
-
     /// Windows hidden by swallowing (`WindowRule::swallow`), keyed by the
     /// *child* surface that took over their tile. Holds the actual
     /// `Window` handle, not just the surface -- a hidden window isn't in
@@ -944,33 +921,6 @@ pub struct Smallvil {
     /// own lifetime.
     pub remembered_floating_sizes: HashMap<String, (i32, i32)>,
 
-    /// Named scratchpads (Hyprland's named "special workspaces"):
-    /// each name is lazily assigned its own reserved workspace number from
-    /// `NAMED_SCRATCHPAD_BASE` upward on first use, then behaves exactly
-    /// like the unnamed scratchpad does -- same `switch_workspace` hide/show
-    /// machinery, no parallel data structure. Session-scoped: numbers are
-    /// allocated in first-use order, which only matters to IPC consumers,
-    /// and those should key on the `scratchpad` name field instead.
-    scratchpad_named: HashMap<String, u32>,
-
-    /// Per-output previously-active workspace, updated on every real
-    /// `switch_workspace` call -- drives `config.workspace_auto_back_and_forth`
-    /// (niri's own feature of the same name). Separate from
-    /// `scratchpad_previous` above: that one only tracks the scratchpad's
-    /// own toggle, this tracks every ordinary workspace switch.
-    workspace_previous: HashMap<String, u32>,
-    /// Output that received the last `workspace-up`/`workspace-down` step.
-    /// Used only while no visible window holds focus (an empty workspace):
-    /// `primary_output` then falls back to the pointer, which may be on the
-    /// other monitor and would step the wrong screen on the way back.
-    workspace_step_output: Option<String>,
-
-    /// Tiled windows that keep `config.pseudo_tile_scale` of their tile's
-    /// size instead of filling it -- a rect override `retile()` applies,
-    /// same shape as the fullscreen override. Stays in its `Layouts` slot
-    /// throughout, unlike floating: only the rendered rect changes.
-    pub pseudo_tiled: HashSet<WlSurface>,
-
     /// Windows asking for attention while they didn't have a fresh enough
     /// claim to steal focus outright -- set from a stale-serial
     /// xdg-activation request (see `Smallvil::mark_urgent`,
@@ -1000,30 +950,6 @@ pub struct Smallvil {
     /// for the `rule { tag = [...] }` match criterion. Cleared per-surface
     /// in `detach_mapped_toplevel`, same lifecycle as `urgent`/`pinned`.
     pub window_tags: HashMap<WlSurface, HashSet<String>>,
-
-    /// Output-pin bindings (`rule { pin_output }`, `toggle-output-pin`),
-    /// keyed by surface, valued by connector name. No entry means "not
-    /// pinned" -- the common case costs nothing. Kept independent of
-    /// whether the named output is currently connected: a disconnect
-    /// leaves the entry alone (the window falls back like any other, but
-    /// still remembers where it belongs), and reconnecting that output
-    /// recalls the window via `recall_pinned_windows_to`. Cleared
-    /// per-surface in `detach_mapped_toplevel`, same lifecycle as
-    /// `window_tags`.
-    pub output_pins: HashMap<WlSurface, String>,
-
-    /// (output, workspace) pairs that have already fired their
-    /// `workspace_rule { on_created_empty }` command (see
-    /// `apply_workspace_switch`). TideWM's numbered workspaces always
-    /// exist as addressable slots -- there is no real create/destroy
-    /// lifecycle to hook a one-shot event on the way Hyprland can -- so
-    /// this set is what makes the closest honest analog to that a
-    /// once-per-process-lifetime event instead of firing on every later
-    /// visit to an empty workspace. Pruned per-output in
-    /// `remove_workspace_transition_output` on disconnect, same
-    /// "connector name might mean something else on replug" reasoning as
-    /// that function's other entries.
-    workspace_created_empty_fired: HashSet<(String, u32)>,
 
     /// Most-recently-focused-first order of every window that has ever
     /// held keyboard focus, updated from `reconcile_keyboard_focus`'s own
