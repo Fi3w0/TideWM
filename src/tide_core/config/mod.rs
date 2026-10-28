@@ -19,10 +19,22 @@ use crate::wave;
 use crate::waves;
 
 mod spatial;
+use spatial::{
+    apply_buoyancy_block, apply_classic_depth_block, apply_compass_block,
+    apply_connected_vessels_block, apply_currents_block, apply_depth_block,
+    apply_float_physics_block, apply_minimap_block, apply_ocean_block, apply_scroll_block,
+    apply_snap_block, apply_sway_block, apply_swim_block, parse_layout_algorithm,
+    parse_master_orientation, parse_split_bias, parse_viscosity, parse_workspace_gaps,
+    parse_workspace_names,
+};
+pub use spatial::{
+    BuoyancyConfig, ClassicDepthConfig, CompassConfig, CurrentsConfig, DepthBackgroundFit,
+    DepthConfig, FloatPhysicsConfig, FloatPhysicsTier, LayoutAlgorithm, MasterOrientation,
+    MinimapConfig, OceanConfig, SnapConfig, SpatialEngine, SpatialOwnership, SplitBias, SwayConfig,
+    SwimConfig, VesselsConfig, WorkspaceProjection,
+};
 #[cfg(test)]
 pub use spatial::{OceanBookmarkConfig, OceanPanButton, OceanReefConfig};
-pub use spatial::{BuoyancyConfig, ClassicDepthConfig, CompassConfig, CurrentsConfig, DepthBackgroundFit, DepthConfig, FloatPhysicsConfig, FloatPhysicsTier, LayoutAlgorithm, MasterOrientation, MinimapConfig, OceanConfig, SnapConfig, SpatialEngine, SpatialOwnership, SplitBias, SwayConfig, SwimConfig, VesselsConfig, WorkspaceProjection};
-use spatial::{apply_buoyancy_block, apply_classic_depth_block, apply_compass_block, apply_connected_vessels_block, apply_currents_block, apply_depth_block, apply_float_physics_block, apply_minimap_block, apply_ocean_block, apply_scroll_block, apply_snap_block, apply_sway_block, apply_swim_block, parse_layout_algorithm, parse_master_orientation, parse_split_bias, parse_viscosity, parse_workspace_gaps, parse_workspace_names};
 
 mod animation;
 use animation::{

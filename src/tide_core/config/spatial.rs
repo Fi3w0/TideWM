@@ -1689,7 +1689,10 @@ pub(super) fn parse_split_bias(s: &str) -> Option<SplitBias> {
 /// `workspace number -> gap` map. A name resolves through the already-parsed
 /// `workspace_name` aliases; malformed entries warn and are skipped, same
 /// convention as `parse_workspace_names`.
-pub(super) fn parse_workspace_gaps(raw: &[String], names: &HashMap<String, u32>) -> HashMap<u32, i32> {
+pub(super) fn parse_workspace_gaps(
+    raw: &[String],
+    names: &HashMap<String, u32>,
+) -> HashMap<u32, i32> {
     let mut gaps = HashMap::new();
     for entry in raw {
         let Some((workspace, pixels)) = entry.split_once(char::is_whitespace) else {
