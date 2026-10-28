@@ -2,6 +2,12 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.204 — Extract config reload, workspace and render domains
+
+- Three separate mechanical commits move 53 methods from `state/mod.rs` into `config_reload.rs` (9), `workspace.rs` (23) and `render.rs` (21). Method bodies, documentation and attributes remain unchanged; the struct, fields, shared types, free helpers and tests stay in the parent. `state/mod.rs` falls from 16,412 to 13,456 lines. One version/changelog commit records the batch separately from the relocations.
+- Required private-to-`pub(super)` visibility changes preserve the existing call graph: `has_lua_handler`; `resolve_window_rules_on_workspace`, `workspace_of_surface`, `apply_workspace_switch`; `placement_visual_sample`, `rendered_rect_on_output`, `request_surface_redraws`, `placement_physical_rect`. Existing public visibility is retained; no private method becomes `pub(crate)`. No accessors, forwarding API, duplicated authority, dependencies or behavior changes.
+- Each move passes the unchanged 709-test all-feature/all-target suite, fmt and strict Clippy. Final batch fmt, full suite, strict Clippy and all-feature release build pass. All 61 nested state/capture observations match both the post-fullscreen-fix baseline and `.203`; all-events and engine-only subscriber checks pass in Classic, Scroll and Ocean. Native activation of this batch has not been run.
+
 ## 0.90.203 — Extract state IPC event and subscriber coordination
 
 - Move the six approved methods `emit_state_change_events`, `ipc_seen_state`, `emit_ipc_event`, `flush_ipc_subscribers`, `arm_ipc_flush_timer` and `remove_ipc_subscriber` verbatim into `state/ipc.rs`. IPC fields, shared types and tests remain in `state/mod.rs`; `has_lua_handler` stays with configuration coordination.
