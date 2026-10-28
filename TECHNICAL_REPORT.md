@@ -165,8 +165,10 @@ heap trimming, per-app `rule { ebb = ... }`, generated `ebb.wave` with
 `tidectl ebb init`, manual `tidectl ebb run [--deep]` passes, and optional kernel
 PSI pressure triggers. It adds no dependency or telemetry thread. Per-app
 ownership reports, a shell-facing pressure event and multi-day soak evidence
-remain planned; Phase 2 has local gates and fixture tests but no real-session
-verification yet. See [the Ebb reference](DOCUMENTATION.md#ebb) for settings,
+remain planned; Phase 2 passes were exercised on a native session (manual
+light/deep runs), while real eviction of a surviving cache, PSI firing and
+screens-off passes remain unverified. See
+[the Ebb reference](DOCUMENTATION.md#ebb) for settings,
 scopes and limitations. No memory-saving or cross-compositor performance claim
 follows from the implementation.
 
