@@ -19,9 +19,9 @@ use crate::wave;
 use crate::waves;
 
 mod rules;
-pub use rules::{GlassMode, LayerRule, WindowOpacity, WindowRule, WorkspaceRule};
-pub(crate) use rules::{WindowMatchFacts};
+pub(crate) use rules::WindowMatchFacts;
 use rules::{lower_layer_rule_block, lower_window_rule_block, lower_workspace_rule_block};
+pub use rules::{GlassMode, LayerRule, WindowOpacity, WindowRule, WorkspaceRule};
 
 mod devices;
 #[cfg(test)]
