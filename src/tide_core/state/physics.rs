@@ -1,4 +1,16 @@
-use super::*;
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
+
+use smithay::{
+    backend::renderer::gles::GlesRenderer,
+    output::Output,
+    reexports::wayland_server::protocol::wl_surface::WlSurface,
+    utils::{Logical, Point, Rectangle, Scale},
+};
+
+use super::{FloatBodyContext, FocusOrigin, RippleLayers, SessionLock, Smallvil};
 
 impl Smallvil {
     /// Whether continuous lateral swim is active: the master water toggle

@@ -1,4 +1,21 @@
-use super::*;
+use std::collections::HashMap;
+
+use smithay::{
+    backend::renderer::{
+        element::{
+            memory::MemoryRenderBufferRenderElement, solid::SolidColorRenderElement,
+            surface::WaylandSurfaceRenderElement, AsRenderElements, Kind,
+        },
+        gles::{GlesPixelProgram, GlesRenderer, GlesTexture},
+    },
+    desktop::layer_map_for_output,
+    output::Output,
+    reexports::wayland_server::protocol::wl_surface::WlSurface,
+    utils::{Physical, Point, Rectangle, Scale},
+    wayland::shell::wlr_layer::Layer as WlrLayer,
+};
+
+use super::{selected_glass_mode, surface_shader, KeyboardFocusTarget, SessionLock, Smallvil};
 
 impl Smallvil {
     pub(crate) fn screencast_picker_element(

@@ -1,4 +1,22 @@
-use super::*;
+use std::collections::{HashMap, HashSet};
+
+use smithay::{
+    backend::renderer::{
+        element::{
+            solid::{SolidColorBuffer, SolidColorRenderElement},
+            surface::WaylandSurfaceRenderElement,
+            AsRenderElements, Kind,
+        },
+        gles::{GlesPixelProgram, GlesRenderer, GlesTexProgram, GlesTexture},
+    },
+    desktop::{layer_map_for_output, space::SpaceRenderElements, WindowSurfaceType},
+    output::Output,
+    reexports::wayland_server::protocol::wl_surface::WlSurface,
+    utils::{Logical, Physical, Point, Rectangle, Scale, Size},
+    wayland::shell::wlr_layer::Layer as WlrLayer,
+};
+
+use super::{SessionLock, Smallvil};
 
 impl Smallvil {
     fn base_window_visual_sample(

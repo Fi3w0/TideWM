@@ -17,8 +17,7 @@ mod workspace;
 use std::{
     collections::{HashMap, HashSet},
     ffi::OsString,
-    sync::Arc,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use smithay::{
@@ -26,52 +25,34 @@ use smithay::{
         renderer::{
             element::{
                 default_primary_scanout_output_compare,
-                memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
+                memory::MemoryRenderBuffer,
                 solid::{SolidColorBuffer, SolidColorRenderElement},
-                surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
-                utils::RescaleRenderElement,
-                AsRenderElements, Id, Kind, RenderElementState, RenderElementStates,
+                surface::WaylandSurfaceRenderElement,
+                RenderElementState,
             },
-            gles::{GlesPixelProgram, GlesRenderer, GlesTexProgram, GlesTexture},
+            gles::{GlesPixelProgram, GlesTexProgram},
             ImportAll, ImportMem,
         },
         session::libseat::LibSeatSession,
     },
-    desktop::{
-        self, layer_map_for_output,
-        space::SpaceRenderElements,
-        utils::{
-            send_frames_surface_tree, surface_presentation_feedback_flags_from_states,
-            surface_primary_scanout_output, under_from_surface_tree,
-            update_surface_primary_scanout_output, OutputPresentationFeedback,
-        },
-        PopupGrab, PopupManager, PopupUngrabStrategy, Window, WindowSurfaceType,
-    },
-    input::{
-        keyboard::Keysym,
-        pointer::{CursorImageStatus, MotionEvent, PointerHandle},
-        Seat, SeatState,
-    },
+    desktop::{PopupGrab, PopupManager, Window},
+    input::{keyboard::Keysym, pointer::CursorImageStatus, Seat, SeatState},
     output::Output,
     reexports::{
-        calloop::{
-            timer::{TimeoutAction, Timer},
-            LoopHandle, LoopSignal, RegistrationToken,
-        },
-        wayland_protocols::xdg::shell::server::xdg_toplevel,
+        calloop::{LoopHandle, LoopSignal, RegistrationToken},
         wayland_server::{
             backend::{ClientData, ClientId, DisconnectReason},
             protocol::wl_surface::WlSurface,
-            Client, DisplayHandle, Resource,
+            Client, DisplayHandle,
         },
     },
-    utils::{Clock, Logical, Monotonic, Physical, Point, Rectangle, Scale, Size, SERIAL_COUNTER},
+    utils::{Clock, Logical, Monotonic, Point, Rectangle, Size},
     wayland::{
-        compositor::{get_parent, with_states, CompositorClientState, CompositorState},
+        compositor::{CompositorClientState, CompositorState},
         cursor_shape::CursorShapeManagerState,
         dmabuf::{DmabufGlobal, DmabufState},
         foreign_toplevel_list::{ForeignToplevelHandle, ForeignToplevelListState},
-        fractional_scale::{with_fractional_scale, FractionalScaleManagerState},
+        fractional_scale::FractionalScaleManagerState,
         idle_inhibit::IdleInhibitManagerState,
         idle_notify::IdleNotifierState,
         image_capture_source::{
@@ -81,13 +62,11 @@ use smithay::{
         input_method::InputMethodManagerState,
         keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitState,
         output::OutputManagerState,
-        pointer_constraints::{
-            with_pointer_constraint, PointerConstraint, PointerConstraintsState,
-        },
+        pointer_constraints::PointerConstraintsState,
         pointer_gestures::PointerGesturesState,
         presentation::PresentationState,
         relative_pointer::RelativePointerManagerState,
-        security_context::{SecurityContext, SecurityContextState},
+        security_context::SecurityContext,
         selection::{
             data_device::DataDeviceState, primary_selection::PrimarySelectionState,
             wlr_data_control::DataControlState,
@@ -95,7 +74,7 @@ use smithay::{
         session_lock::{LockSurface, SessionLockManagerState, SessionLocker},
         shell::{
             kde::decoration::KdeDecorationState,
-            wlr_layer::{KeyboardInteractivity, Layer as WlrLayer, WlrLayerShellState},
+            wlr_layer::WlrLayerShellState,
             xdg::{decoration::XdgDecorationState, XdgShellState},
         },
         shm::ShmState,
@@ -109,15 +88,12 @@ use smithay::{
     },
 };
 
-use smithay::reexports::wayland_protocols::wp::tearing_control::v1::server::wp_tearing_control_manager_v1::WpTearingControlManagerV1;
-use wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
-
 use crate::{
     capture::PendingCapture,
-    config::{Config, Direction, WorkspaceRef},
+    config::{Config, Direction},
     grabs::GrabCompletion,
     layout::Layouts,
-    toast::{Toast, ToastKind},
+    toast::Toast,
 };
 
 // Render elements for whatever should be visible on an output while
@@ -1901,6 +1877,7 @@ fn tide_workspace_value(engine: crate::config::SpatialEngine, first_workspace: O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smithay::backend::renderer::element::RenderElementStates;
     use smithay::output::{PhysicalProperties, Subpixel};
 
     #[test]

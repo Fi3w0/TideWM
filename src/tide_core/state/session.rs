@@ -1,4 +1,45 @@
-use super::*;
+use std::{collections::HashSet, time::Duration};
+
+use smithay::{
+    backend::renderer::{
+        element::{
+            default_primary_scanout_output_compare,
+            solid::{SolidColorBuffer, SolidColorRenderElement},
+            surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
+            Id, Kind, RenderElementStates,
+        },
+        gles::GlesRenderer,
+    },
+    desktop::{
+        self, layer_map_for_output,
+        utils::{
+            send_frames_surface_tree, surface_presentation_feedback_flags_from_states,
+            surface_primary_scanout_output, update_surface_primary_scanout_output,
+            OutputPresentationFeedback,
+        },
+    },
+    input::pointer::CursorImageStatus,
+    output::Output,
+    reexports::{
+        calloop::RegistrationToken,
+        wayland_server::{backend::ClientId, protocol::wl_surface::WlSurface, Resource},
+    },
+    utils::SERIAL_COUNTER,
+    wayland::{
+        compositor::with_states,
+        fractional_scale::with_fractional_scale,
+        pointer_constraints::{with_pointer_constraint, PointerConstraint},
+        session_lock::{LockSurface, SessionLocker},
+    },
+};
+
+#[cfg(feature = "accessibility")]
+use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
+
+#[cfg(feature = "accessibility")]
+use crate::toast::ToastKind;
+
+use super::{prefer_presentation_output, ClientState, LockRenderElement, SessionLock, Smallvil};
 
 impl Smallvil {
     /// Whether the pointer sits under an active `wp-pointer-constraints-v1`

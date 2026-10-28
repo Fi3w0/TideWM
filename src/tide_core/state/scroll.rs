@@ -1,4 +1,11 @@
-use super::*;
+use smithay::{
+    reexports::wayland_server::protocol::wl_surface::WlSurface,
+    utils::{Logical, Point, Rectangle},
+};
+
+use crate::config::Direction;
+
+use super::{is_scratchpad_workspace, Smallvil};
 
 impl Smallvil {
     /// The tile under `point` on a Scroll strip and where a drop there

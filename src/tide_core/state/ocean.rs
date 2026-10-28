@@ -1,4 +1,19 @@
-use super::*;
+use std::time::Duration;
+
+use smithay::{
+    backend::renderer::{element::memory::MemoryRenderBufferRenderElement, gles::GlesRenderer},
+    desktop::Window,
+    output::Output,
+    reexports::wayland_server::protocol::wl_surface::WlSurface,
+    utils::{Logical, Point, Rectangle, Size},
+};
+
+use crate::config::Direction;
+
+use super::{
+    classic_rect_to_ocean, directional_score, ocean_classic_slot, ocean_island_origins,
+    ocean_rect_to_classic, ocean_reef_x, FloatingTag, SessionLock, Smallvil,
+};
 
 impl Smallvil {
     /// Reattaches an Ocean floater when its final world rectangle is close to

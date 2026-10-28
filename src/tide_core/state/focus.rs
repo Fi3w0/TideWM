@@ -1,4 +1,34 @@
-use super::*;
+use std::time::{Duration, Instant};
+
+use smithay::{
+    desktop::{
+        self, layer_map_for_output, utils::under_from_surface_tree, PopupUngrabStrategy, Window,
+        WindowSurfaceType,
+    },
+    input::{
+        pointer::{MotionEvent, PointerHandle},
+        Seat,
+    },
+    output::Output,
+    reexports::{
+        calloop::timer::{TimeoutAction, Timer},
+        wayland_server::{protocol::wl_surface::WlSurface, Resource},
+    },
+    utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
+    wayland::{
+        compositor::get_parent,
+        fractional_scale::with_fractional_scale,
+        pointer_constraints::with_pointer_constraint,
+        shell::wlr_layer::{KeyboardInteractivity, Layer as WlrLayer},
+    },
+};
+
+use crate::config::Direction;
+
+use super::{
+    client_scale_for_view_scale, directional_score, is_window, surface_origin,
+    surface_origin_for_view, ClientState, FocusOrigin, KeyboardFocusTarget, SessionLock, Smallvil,
+};
 
 impl Smallvil {
     /// Finds the topmost surface under `pos`, checking the same manually

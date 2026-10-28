@@ -1,4 +1,28 @@
-use super::*;
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant},
+};
+
+use smithay::{
+    backend::renderer::{
+        element::{memory::MemoryRenderBufferRenderElement, solid::SolidColorRenderElement, Kind},
+        gles::{GlesRenderer, GlesTexture},
+    },
+    desktop::Window,
+    output::Output,
+    reexports::{
+        calloop::timer::{TimeoutAction, Timer},
+        wayland_server::protocol::wl_surface::WlSurface,
+    },
+    utils::{Logical, Physical, Point, Rectangle, SERIAL_COUNTER},
+};
+
+use crate::config::Direction;
+
+use super::{
+    group_removal_outcome, is_window, surface_shader, GroupMember, SessionLock, Smallvil,
+    WindowGroup,
+};
 
 impl Smallvil {
     /// `true` when this window's resolved rule pins it buoyant (`depth =

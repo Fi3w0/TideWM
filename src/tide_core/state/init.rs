@@ -1,4 +1,61 @@
-use super::*;
+use std::{
+    collections::{HashMap, HashSet},
+    ffi::OsString,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use smithay::{
+    desktop::PopupManager,
+    input::{pointer::CursorImageStatus, Seat, SeatState},
+    utils::{Clock, Monotonic},
+    wayland::{
+        compositor::{CompositorClientState, CompositorState},
+        cursor_shape::CursorShapeManagerState,
+        dmabuf::DmabufState,
+        foreign_toplevel_list::ForeignToplevelListState,
+        fractional_scale::FractionalScaleManagerState,
+        idle_inhibit::IdleInhibitManagerState,
+        idle_notify::IdleNotifierState,
+        image_capture_source::{
+            ImageCaptureSourceState, OutputCaptureSourceState, ToplevelCaptureSourceState,
+        },
+        image_copy_capture::ImageCopyCaptureState,
+        input_method::InputMethodManagerState,
+        keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitState,
+        output::OutputManagerState,
+        pointer_constraints::PointerConstraintsState,
+        pointer_gestures::PointerGesturesState,
+        presentation::PresentationState,
+        relative_pointer::RelativePointerManagerState,
+        security_context::SecurityContextState,
+        selection::{
+            data_device::DataDeviceState, primary_selection::PrimarySelectionState,
+            wlr_data_control::DataControlState,
+        },
+        session_lock::SessionLockManagerState,
+        shell::{
+            kde::decoration::KdeDecorationState,
+            wlr_layer::WlrLayerShellState,
+            xdg::{decoration::XdgDecorationState, XdgShellState},
+        },
+        shm::ShmState,
+        single_pixel_buffer::SinglePixelBufferState,
+        tablet_manager::TabletManagerState,
+        text_input::TextInputManagerState,
+        viewporter::ViewporterState,
+        virtual_keyboard::VirtualKeyboardManagerState,
+        xdg_activation::XdgActivationState,
+        xdg_toplevel_icon::XdgToplevelIconManager,
+    },
+};
+
+use smithay::reexports::wayland_protocols::wp::tearing_control::v1::server::wp_tearing_control_manager_v1::WpTearingControlManagerV1;
+use wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
+
+use crate::{config::Config, layout::Layouts};
+
+use super::{trusted_client, ClientState, KeyboardFocusTarget, SessionLock, Smallvil};
 
 use smithay::{
     input::keyboard::XkbConfig,

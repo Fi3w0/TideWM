@@ -1,4 +1,8 @@
-use super::*;
+use std::collections::HashMap;
+
+use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
+
+use super::{engine_name, IpcSeenState, Smallvil};
 
 impl Smallvil {
     /// Broadcasts one state-change event to every matching IPC subscriber.

@@ -1,4 +1,18 @@
-use super::*;
+use std::time::Duration;
+
+use smithay::{
+    desktop::Window,
+    output::Output,
+    reexports::wayland_server::protocol::wl_surface::WlSurface,
+    utils::{Logical, Point, Rectangle},
+};
+
+use crate::config::WorkspaceRef;
+
+use super::{
+    clamp_rect_visible, is_scratchpad_workspace, swapped_group_owner, Smallvil,
+    NAMED_SCRATCHPAD_BASE, SCRATCHPAD_WORKSPACE,
+};
 
 impl Smallvil {
     /// Prospective placement must evaluate live workspace matches at its

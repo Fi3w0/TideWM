@@ -1,4 +1,33 @@
-use super::*;
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant},
+};
+
+use smithay::{
+    backend::renderer::{
+        element::{
+            solid::SolidColorBuffer, surface::render_elements_from_surface_tree,
+            utils::RescaleRenderElement, Kind,
+        },
+        gles::{GlesRenderer, GlesTexProgram},
+    },
+    desktop::{space::SpaceRenderElements, PopupManager, Window},
+    output::Output,
+    reexports::{
+        wayland_protocols::xdg::shell::server::xdg_toplevel,
+        wayland_server::protocol::wl_surface::WlSurface,
+    },
+    utils::{Logical, Point, Rectangle, Scale, Size, SERIAL_COUNTER},
+};
+
+use crate::config::Direction;
+
+use super::{
+    clamp_rect_visible, direction_delta, fit_floating_rect_visible, initial_floating_rect,
+    is_window, keyboard_resized_size, monitor_resized_rect, nearest_point_in_output_rects,
+    saturating_translate, stable_output_by_name, CompositorGesture, FloatBodyContext, FloatingTag,
+    SessionLock, Smallvil, SnapPreview,
+};
 
 impl Smallvil {
     /// Gathers every fact `WindowRule::matches`/`matches_initial` need for
