@@ -2369,3 +2369,7 @@ mod tests {
 #[cfg(test)]
 #[path = "floating_placement_test.rs"]
 mod floating_placement_test;
+
+#[cfg(test)]
+#[path = "engine_transition_test.rs"]
+mod engine_transition_test;

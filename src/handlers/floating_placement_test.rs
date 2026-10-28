@@ -17,7 +17,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-fn string(value: &str) -> Vec<u8> {
+pub(super) fn string(value: &str) -> Vec<u8> {
     let mut bytes = ((value.len() + 1) as u32).to_ne_bytes().to_vec();
     bytes.extend_from_slice(value.as_bytes());
     bytes.push(0);
@@ -27,14 +27,14 @@ fn string(value: &str) -> Vec<u8> {
     bytes
 }
 
-struct Fixture {
-    event_loop: EventLoop<'static, Smallvil>,
-    state: Smallvil,
-    peer: UnixStream,
-    next_id: u32,
+pub(super) struct Fixture {
+    pub(super) event_loop: EventLoop<'static, Smallvil>,
+    pub(super) state: Smallvil,
+    pub(super) peer: UnixStream,
+    pub(super) next_id: u32,
 }
 impl Fixture {
-    fn request(&mut self, object: u32, opcode: u16, words: &[u32], tail: &[u8]) {
+    pub(super) fn request(&mut self, object: u32, opcode: u16, words: &[u32], tail: &[u8]) {
         let size = 8 + words.len() * 4 + tail.len();
         let mut bytes = object.to_ne_bytes().to_vec();
         bytes.extend_from_slice(&(((size as u32) << 16) | u32::from(opcode)).to_ne_bytes());
@@ -44,7 +44,7 @@ impl Fixture {
         bytes.extend_from_slice(tail);
         self.peer.write_all(&bytes).unwrap();
     }
-    fn dispatch(&mut self) -> Vec<(u32, u16, Vec<u8>)> {
+    pub(super) fn dispatch(&mut self) -> Vec<(u32, u16, Vec<u8>)> {
         self.event_loop
             .dispatch(Some(Duration::ZERO), &mut self.state)
             .unwrap();
@@ -72,7 +72,7 @@ impl Fixture {
         }
         events
     }
-    fn window(&mut self, app: &str, parent: Option<u32>, natural: (i32, i32)) -> u32 {
+    pub(super) fn window(&mut self, app: &str, parent: Option<u32>, natural: (i32, i32)) -> u32 {
         let id = self.next_id;
         self.next_id += 5;
         self.request(3, 0, &[id], &[]); // wl_surface
@@ -121,7 +121,7 @@ impl Fixture {
         }
         id
     }
-    fn surface(
+    pub(super) fn surface(
         &self,
         id: u32,
     ) -> smithay::reexports::wayland_server::protocol::wl_surface::WlSurface {
@@ -136,7 +136,7 @@ impl Fixture {
             })
             .unwrap()
     }
-    fn pointer_on(&mut self, x: f64, y: f64) {
+    pub(super) fn pointer_on(&mut self, x: f64, y: f64) {
         let pointer = self.state.seat.get_pointer().unwrap();
         pointer.motion(
             &mut self.state,
