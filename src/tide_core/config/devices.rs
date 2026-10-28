@@ -609,7 +609,10 @@ pub(super) fn apply_xwayland_block(xwayland: &mut XwaylandConfig, body: &[waves:
     }
 }
 
-pub(super) fn apply_switch_events_block(switch_events: &mut SwitchEventsRaw, body: &[waves::Entry]) {
+pub(super) fn apply_switch_events_block(
+    switch_events: &mut SwitchEventsRaw,
+    body: &[waves::Entry],
+) {
     for entry in body {
         let waves::Entry::Assign(key, value) = entry else {
             tracing::warn!("Unexpected entry in `switch_events` block, ignoring");

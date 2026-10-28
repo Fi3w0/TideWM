@@ -20,9 +20,15 @@ use crate::waves;
 
 mod devices;
 #[cfg(test)]
-use devices::{apply_touchpad_block};
-pub use devices::{AdaptiveSync, GpuConfig, GpuSelector, GpuVendor, InputConfig, InputDeviceConfig, OutputConfig, SwitchEventsConfig, TouchpadConfig, XwaylandConfig, parse_mode_str};
-use devices::{GpuConfigRaw, SwitchEventsRaw, apply_gpu_block, apply_input_block, apply_switch_events_block, apply_xwayland_block, lower_output_block, parse_adaptive_sync, parse_position};
+use devices::apply_touchpad_block;
+use devices::{
+    apply_gpu_block, apply_input_block, apply_switch_events_block, apply_xwayland_block,
+    lower_output_block, parse_adaptive_sync, parse_position, GpuConfigRaw, SwitchEventsRaw,
+};
+pub use devices::{
+    parse_mode_str, AdaptiveSync, GpuConfig, GpuSelector, GpuVendor, InputConfig,
+    InputDeviceConfig, OutputConfig, SwitchEventsConfig, TouchpadConfig, XwaylandConfig,
+};
 
 mod shaders;
 pub(crate) use shaders::expand_shader_sources;
