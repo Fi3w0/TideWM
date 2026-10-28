@@ -2,6 +2,12 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.207 — Explicit imports in the state child modules
+
+- `d0ea005` replaces `use super::*` in all 13 `state/` child modules with explicit imports: the external paths each module uses plus `use super::{...}` for parent types and free helpers. Two accessibility-only imports in `session.rs` are feature-gated. `state/mod.rs` drops imports only its children used; its tests module keeps `use super::*` and imports `RenderElementStates`, which only tests use.
+- Everything after each import block is byte-identical to `ba8b06a`. No visibility, ownership or behavior changes.
+- fmt, 709 all-feature/all-target tests, strict Clippy (all and default features), all-feature release build pass; screencast-only and accessibility-only checks are clean. Nested matrix with subscribers: 61 observations, 0 differences vs `.206` and the fixed baseline. Native activation of `.203`–`.207` has not been run.
+
 ## 0.90.206 — Complete the mechanical state domain moves
 
 - Five separate mechanical commits move the remaining 188 methods into `effects.rs` (40), `physics.rs` (34), `ocean.rs` (18), `groups_depth.rs` (36), and `spatial.rs` (60). Spatial explicitly includes `refresh_space` and `space_output_owner`, which were missing from the older split inventory. The parent retains fields, shared types, free helpers and tests; its now-empty `impl Smallvil` is removed. All 351 original state methods now live in 13 domain modules.

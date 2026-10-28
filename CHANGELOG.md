@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.207 · 2026-10-28 — Explicit state imports
+
+- Each state module now lists exactly what it uses instead of importing everything from the shared parent. Nothing changes for users.
+
 ## 0.90.206 · 2026-10-28 — Complete state method extraction
 
 - Moved the remaining effects, physics, Ocean, groups/depth and spatial methods into dedicated state modules. Shared state stays centralized; window behavior, rendering and configuration stay the same.
