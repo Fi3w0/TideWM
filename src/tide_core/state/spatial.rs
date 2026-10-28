@@ -165,7 +165,7 @@ impl Smallvil {
         );
         const MIN_MASS: f64 = 1.0;
         let mass = (anchor.2 * anchor.3).max(MIN_MASS);
-        let output_bounds = match self.config.spatial_engine.ownership() {
+        let output_bounds = match self.spatial.engine.ownership() {
             crate::config::SpatialOwnership::Workspaces => {
                 self.mapped_toplevel_window(surface).and_then(|window| {
                     let output = self.output_for_window(&window)?;
@@ -210,7 +210,7 @@ impl Smallvil {
     }
 
     fn snap_eligible_surface(&self, surface: &WlSurface) -> bool {
-        if self.config.spatial_engine.ownership() != crate::config::SpatialOwnership::Workspaces
+        if self.spatial.engine.ownership() != crate::config::SpatialOwnership::Workspaces
             || !self.config.snap.enabled
             || !matches!(self.session_lock, SessionLock::Unlocked)
             || self.layout.contains(surface)
@@ -400,9 +400,7 @@ impl Smallvil {
         &self,
         placement: &crate::placement::PlacedWindow,
     ) -> Rectangle<i32, Logical> {
-        if self.config.spatial_engine.projection()
-            == Some(crate::config::WorkspaceProjection::Scroll)
-        {
+        if self.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Scroll) {
             let visual = self.placement_visual_sample(placement);
             Rectangle::new(
                 placement.rect.loc
@@ -440,9 +438,7 @@ impl Smallvil {
     /// output's strip: off-screen parts can overlap a neighbouring output's
     /// rectangle without ever being drawn there.
     fn space_output_owner(&self, window: &Window) -> Option<Output> {
-        if self.config.spatial_engine.projection()
-            != Some(crate::config::WorkspaceProjection::Scroll)
-        {
+        if self.spatial.engine.projection() != Some(crate::config::WorkspaceProjection::Scroll) {
             return None;
         }
         let surface = window.toplevel()?.wl_surface();
@@ -462,9 +458,7 @@ impl Smallvil {
     /// entry made straddling-window ownership nondeterministic across runs.
     /// Ties use the stable output name. `None` if the window is not visible.
     pub(crate) fn output_for_window(&self, window: &Window) -> Option<Output> {
-        if self.config.spatial_engine.projection()
-            == Some(crate::config::WorkspaceProjection::Scroll)
-        {
+        if self.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Scroll) {
             if let Some(output) = window
                 .toplevel()
                 .and_then(|t| self.layout.output_of(t.wl_surface()))
@@ -473,7 +467,7 @@ impl Smallvil {
                 return Some(output);
             }
         }
-        if self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean {
+        if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
             let surface = window.toplevel()?.wl_surface();
             let owner = || {
                 self.ocean
@@ -552,7 +546,7 @@ impl Smallvil {
         else {
             return;
         };
-        if self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean {
+        if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
             if self.fullscreen.contains_key(&surface)
                 || self.maximized.contains_key(&surface)
                 || self.ocean.floating_rect(&surface).is_none()
@@ -645,7 +639,7 @@ impl Smallvil {
     /// gaps and live floating limits, preserving its world-space center.
     /// This action deliberately keeps its existing zoom-independent sizing.
     pub(crate) fn resize_to_monitor(&mut self) {
-        if self.config.spatial_engine.ownership() != crate::config::SpatialOwnership::Ocean {
+        if self.spatial.engine.ownership() != crate::config::SpatialOwnership::Ocean {
             return;
         }
         let Some(surface) = self.focused_window_surface() else {
@@ -807,7 +801,7 @@ impl Smallvil {
     }
 
     pub(super) fn window_at_layout_position(&self, pos: Point<f64, Logical>) -> Option<WlSurface> {
-        if self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean {
+        if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
             return self.window_under(pos).and_then(|(window, _)| {
                 window
                     .toplevel()
@@ -1076,10 +1070,10 @@ impl Smallvil {
         skip_configure_for: Option<&WlSurface>,
         scoped_output: Option<&str>,
     ) {
-        self.layout.scroll.config = (self.config.spatial_engine.projection()
+        self.layout.scroll.config = (self.spatial.engine.projection()
             == Some(crate::config::WorkspaceProjection::Scroll))
         .then_some(self.config.scroll);
-        self.layout.scroll.fullscreen_extents = if self.config.spatial_engine.projection()
+        self.layout.scroll.fullscreen_extents = if self.spatial.engine.projection()
             == Some(crate::config::WorkspaceProjection::Scroll)
         {
             self.fullscreen
@@ -1101,7 +1095,7 @@ impl Smallvil {
             HashMap::new()
         };
         self.buoyancy_dirty = true;
-        if self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean {
+        if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
             self.retile_ocean(skip_configure_for);
             return;
         }
@@ -1137,7 +1131,7 @@ impl Smallvil {
                         (self.fullscreen.get(&surface), full_output_geo)
                     {
                         if entry.output == output.name() {
-                            if self.config.spatial_engine.projection()
+                            if self.spatial.engine.projection()
                                 == Some(crate::config::WorkspaceProjection::Scroll)
                             {
                                 let gap = gaps
@@ -1451,7 +1445,7 @@ impl Smallvil {
     /// snaps it into whatever slot the layout gives it, same as any other
     /// tiled window.
     pub fn toggle_floating(&mut self, surface: &WlSurface) {
-        if self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean {
+        if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
             let was_tiled = self.ocean.is_tiled(surface);
             let changed = if was_tiled {
                 self.ocean
@@ -1877,8 +1871,7 @@ impl Smallvil {
             }
         }
         if let Some(area) = to_bounds {
-            let gaps = if self.config.spatial_engine.ownership()
-                == crate::config::SpatialOwnership::Ocean
+            let gaps = if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean
             {
                 self.config.gaps
             } else {
@@ -1925,7 +1918,7 @@ impl Smallvil {
         };
         let name = to.name();
         let workspace = self.layout.active_workspace(&name);
-        let window = match self.config.spatial_engine.ownership() {
+        let window = match self.spatial.engine.ownership() {
             crate::config::SpatialOwnership::Workspaces => {
                 let Some(window) = self.layout.window_of(surface) else {
                     return false;
@@ -1966,7 +1959,7 @@ impl Smallvil {
             if let Some(pin) = self.output_pins.get_mut(&member) {
                 *pin = name.clone();
             }
-            if self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean {
+            if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
                 self.ocean.set_entry_output(&member, name.clone());
             }
             if let Some(parked) = parked {
@@ -2146,7 +2139,7 @@ impl Smallvil {
     /// Shared window/protocol tags survive; pins change representation. State
     /// with no counterpart is dropped after restoring any parked windows.
     pub(crate) fn migrate_spatial_engine(&mut self, target: crate::config::SpatialEngine) -> bool {
-        if target == self.config.spatial_engine {
+        if target == self.spatial.engine {
             return true;
         }
         if self.activation_blocked()
@@ -2175,7 +2168,7 @@ impl Smallvil {
             return false;
         }
         tracing::info!(
-            from = ?self.config.spatial_engine,
+            from = ?self.spatial.engine,
             to = ?target,
             "migrating spatial engine"
         );
@@ -2187,7 +2180,7 @@ impl Smallvil {
         // Floating stacking order, topmost first. Classic keeps it only in
         // `Space` (bottom to top), which the unmap below throws away.
         let float_stack: Vec<WlSurface> =
-            if self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean {
+            if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
                 self.ocean.floating_front_to_back().to_vec()
             } else {
                 mapped
@@ -2210,14 +2203,14 @@ impl Smallvil {
             self.space.unmap_elem(&window);
         }
         self.refresh_space();
-        match (self.config.spatial_engine.ownership(), target.ownership()) {
+        match (self.spatial.engine.ownership(), target.ownership()) {
             (crate::config::SpatialOwnership::Ocean, _) => self.migrate_ocean_to_classic(),
             (_, crate::config::SpatialOwnership::Ocean) => {
                 self.migrate_classic_to_ocean(&float_stack)
             }
             _ => {} // Classic and Scroll share durable workspace membership.
         }
-        self.config.spatial_engine = target;
+        self.spatial.engine = target;
         self.pending_workspace_transitions.clear();
         self.workspace_transitions.clear();
         self.workspace_glides.clear();
@@ -2269,7 +2262,7 @@ impl Smallvil {
     /// Tiling work area expressed in the active engine's placement coordinates.
     fn floating_placement_area(&self, output: &Output) -> Option<Rectangle<i32, Logical>> {
         let area = self.output_tiling_area(output)?;
-        if self.config.spatial_engine.ownership() != crate::config::SpatialOwnership::Ocean {
+        if self.spatial.engine.ownership() != crate::config::SpatialOwnership::Ocean {
             return Some(area);
         }
         let geometry = self.space.output_geometry(output)?;
@@ -2377,7 +2370,7 @@ impl Smallvil {
         let Some(window) = self.mapped_toplevel_window(surface) else {
             return;
         };
-        if self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean {
+        if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
             let Some(current) = self.ocean.floating_rect(surface) else {
                 return;
             };
@@ -2445,21 +2438,21 @@ impl Smallvil {
     }
 
     pub(super) fn spatial_is_tiled(&self, surface: &WlSurface) -> bool {
-        match self.config.spatial_engine.ownership() {
+        match self.spatial.engine.ownership() {
             crate::config::SpatialOwnership::Workspaces => self.layout.contains(surface),
             crate::config::SpatialOwnership::Ocean => self.ocean.is_tiled(surface),
         }
     }
 
     pub(super) fn spatial_tiled_window(&self, surface: &WlSurface) -> Option<Window> {
-        match self.config.spatial_engine.ownership() {
+        match self.spatial.engine.ownership() {
             crate::config::SpatialOwnership::Workspaces => self.layout.window_of(surface),
             crate::config::SpatialOwnership::Ocean => self.ocean.window(surface),
         }
     }
 
     pub(super) fn spatial_tiles_share_owner(&self, first: &WlSurface, second: &WlSurface) -> bool {
-        match self.config.spatial_engine.ownership() {
+        match self.spatial.engine.ownership() {
             crate::config::SpatialOwnership::Workspaces => {
                 self.layout.output_of(first) == self.layout.output_of(second)
                     && self.layout.workspace_of(first) == self.layout.workspace_of(second)
@@ -2553,8 +2546,7 @@ impl Smallvil {
             return;
         }
 
-        if self.config.spatial_engine.projection()
-            == Some(crate::config::WorkspaceProjection::Scroll)
+        if self.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Scroll)
             && self.layout.contains(&surface)
         {
             let Some(owner) = self.layout.output_of(&surface).map(str::to_owned) else {
@@ -2619,7 +2611,7 @@ impl Smallvil {
             return;
         }
 
-        if self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean {
+        if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
             if let Some(mut rect) = self.ocean.floating_rect(&surface) {
                 rect.size = keyboard_resized_size(
                     rect.size,
@@ -2742,7 +2734,7 @@ impl Smallvil {
             return;
         };
 
-        if self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean {
+        if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
             let Some(mut rect) = self.ocean.floating_rect(&surface) else {
                 return;
             };

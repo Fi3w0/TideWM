@@ -85,7 +85,7 @@ fn snapshot(state: &Smallvil, windows: &[(&str, WlSurface)]) -> BTreeMap<String,
                 found.len(),
                 1,
                 "{name} must have exactly one spatial owner under {:?}: {found:?}",
-                state.config.spatial_engine
+                state.spatial.engine
             );
             let group = state.group_of(surface).map(|g| {
                 let mut members: Vec<String> = state.groups[g]
@@ -384,7 +384,7 @@ fn engine_round_trip_keeps_membership_focus_and_floating_geometry() {
             "{current:?} -> {target:?}"
         );
         f.dispatch();
-        assert_eq!(f.state.config.spatial_engine, target);
+        assert_eq!(f.state.spatial.engine, target);
         let now = snapshot(&f.state, &windows);
         let step = format!("{current:?} -> {target:?}");
         assert_eq!(
@@ -547,4 +547,53 @@ fn scratchpads_and_floating_stacking_survive_engine_changes() {
         checked += 1;
     }
     println!("scratchpad transitions checked: {checked}");
+}
+
+#[test]
+fn refused_engine_switch_keeps_the_request_and_retries_on_reload() {
+    if run_isolated(
+        "refused_engine_switch_keeps_the_request_and_retries_on_reload",
+        "engine = classic\nwelcome_hint = false\nwater_effects = false\n",
+        "refused switch retried",
+    ) {
+        return;
+    }
+    let mut event_loop: EventLoop<'static, Smallvil> = EventLoop::try_new().unwrap();
+    let mut state = Smallvil::new(&mut event_loop, Display::new().unwrap());
+    let config = std::path::PathBuf::from(std::env::var_os("XDG_CONFIG_HOME").unwrap())
+        .join("tidewm/config.wave");
+    std::fs::write(
+        &config,
+        "engine = ocean\nwelcome_hint = false\nwater_effects = false\n",
+    )
+    .unwrap();
+    // No output is mapped, so the migration is refused.
+    state.reload_config();
+    assert_eq!(state.spatial.engine, SpatialEngine::Classic);
+    assert_eq!(state.config.spatial_engine, SpatialEngine::Ocean);
+    let output = Output::new(
+        "A".into(),
+        PhysicalProperties {
+            size: (0, 0).into(),
+            subpixel: Subpixel::Unknown,
+            make: "test".into(),
+            model: "test".into(),
+            serial_number: "test".into(),
+        },
+    );
+    output.change_current_state(
+        Some(Mode {
+            size: (1200, 900).into(),
+            refresh: 60_000,
+        }),
+        None,
+        Some(Scale::Integer(1)),
+        None,
+    );
+    state.space.map_output(&output, (0, 0));
+    // Same file: the request still differs from what runs, so it retries.
+    state.reload_config();
+    assert_eq!(state.spatial.engine, SpatialEngine::Ocean);
+    assert_eq!(state.config.spatial_engine, SpatialEngine::Ocean);
+    println!("refused switch retried");
 }

@@ -156,7 +156,7 @@ impl XdgShellHandler for Smallvil {
                 window,
                 initial_window_location,
                 view_scale,
-                smart_attach_ocean: self.config.spatial_engine.ownership()
+                smart_attach_ocean: self.spatial.engine.ownership()
                     == crate::config::SpatialOwnership::Ocean
                     && self.config.ocean.smart_tiling,
                 last_location,
@@ -449,7 +449,7 @@ impl Smallvil {
                 }
             });
 
-        let active_pin = match self.config.spatial_engine.ownership() {
+        let active_pin = match self.spatial.engine.ownership() {
             crate::config::SpatialOwnership::Workspaces => self.pinned.remove(&wl_surface),
             crate::config::SpatialOwnership::Ocean => {
                 self.pinned.remove(&wl_surface);
@@ -1206,7 +1206,7 @@ impl Smallvil {
             .insert(surface.clone(), crate::depth::WindowDepth::new());
         let focused = self.intended_window_surface();
         let ocean_engine =
-            self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean;
+            self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean;
         let workspace = rule
             .workspace
             .unwrap_or_else(|| self.layout.active_workspace(&output.name()));
@@ -1948,7 +1948,7 @@ impl Smallvil {
                 self.space.map_element(window, rect.loc, false);
             }
             if entry.was_pinned {
-                match self.config.spatial_engine.ownership() {
+                match self.spatial.engine.ownership() {
                     crate::config::SpatialOwnership::Workspaces => {
                         self.pinned.insert(wl_surface.clone());
                     }

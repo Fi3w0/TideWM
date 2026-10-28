@@ -109,6 +109,14 @@ smithay::backend::renderer::element::render_elements! {
     Surface = WaylandSurfaceRenderElement<R>,
 }
 
+/// The live spatial model. Step 8 of the architecture plan moves the
+/// workspace and Ocean ownership state in here.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SpatialState {
+    /// The running engine. Only `migrate_spatial_engine` changes it.
+    pub(crate) engine: crate::config::SpatialEngine,
+}
+
 /// The per-frame ripple elements grouped by their configured
 /// `RippleLayer`. Each backend's element-chain builder splices these
 /// four groups into the right positions in its front-to-back list --
@@ -230,6 +238,9 @@ pub struct Smallvil {
     /// Structural parked-window state for Classic workspaces. This remains
     /// empty unless the opt-in `classic_depth` feature is used.
     pub classic_depth: crate::classic_depth::ClassicDepthDeck,
+    /// Live spatial model. `config.spatial_engine` is only what the config
+    /// file asks for; this is what is running.
+    pub(crate) spatial: SpatialState,
     /// Continuous world ownership, cameras, reefs, and bookmarks for the
     /// Ocean engine. Dormant while Classic is selected.
     pub ocean: crate::ocean::OceanSpace,

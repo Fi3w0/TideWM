@@ -108,7 +108,7 @@ impl Smallvil {
                 )
             })
             .or_else(|| {
-                if self.config.spatial_engine.projection()
+                if self.spatial.engine.projection()
                     != Some(crate::config::WorkspaceProjection::Classic)
                 {
                     self.render_placements(&output).and_then(|placements| {
@@ -187,9 +187,7 @@ impl Smallvil {
         &self,
         pos: Point<f64, Logical>,
     ) -> Option<(Window, Point<i32, Logical>)> {
-        if self.config.spatial_engine.projection()
-            == Some(crate::config::WorkspaceProjection::Classic)
-        {
+        if self.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Classic) {
             return self
                 .space
                 .element_under(pos)
@@ -219,9 +217,7 @@ impl Smallvil {
         output: &Output,
         pos: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
-        if self.config.spatial_engine.projection()
-            != Some(crate::config::WorkspaceProjection::Classic)
-        {
+        if self.spatial.engine.projection() != Some(crate::config::WorkspaceProjection::Classic) {
             return self.render_placements(output).and_then(|placements| {
                 placements
                     .into_iter()
@@ -724,7 +720,7 @@ impl Smallvil {
     /// run after this event handler returns, so the scale cannot leak into
     /// rendering or damage bookkeeping.
     fn pointer_client_scale_for_surface(&self, surface: &WlSurface) -> Option<f64> {
-        if self.config.spatial_engine.ownership() != crate::config::SpatialOwnership::Ocean {
+        if self.spatial.engine.ownership() != crate::config::SpatialOwnership::Ocean {
             return None;
         }
         let root = self.surface_root(surface)?;
@@ -920,7 +916,7 @@ impl Smallvil {
         }
 
         if self.window_focus.is_none() {
-            if self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean {
+            if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
                 self.window_focus = self.topmost_ocean_surface(preferred_output);
             } else {
                 self.refresh_space();
@@ -960,7 +956,7 @@ impl Smallvil {
         preferred_output: Option<&str>,
         serial: smithay::utils::Serial,
     ) {
-        if self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean
+        if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean
             && self
                 .window_focus
                 .as_ref()
@@ -1282,7 +1278,7 @@ impl Smallvil {
 
         // Where does the window live? A parked group member isn't in any
         // tree under its own surface -- the group owns its slot.
-        let ownership = (self.config.spatial_engine.ownership()
+        let ownership = (self.spatial.engine.ownership()
             == crate::config::SpatialOwnership::Workspaces)
             .then(|| {
                 self.group_of(surface)
@@ -1320,7 +1316,7 @@ impl Smallvil {
             }
         }
 
-        if self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean {
+        if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
             let target = self
                 .group_of(surface)
                 .and_then(|idx| self.groups[idx].members.get(self.groups[idx].active))
@@ -1479,7 +1475,7 @@ impl Smallvil {
             return;
         };
 
-        if self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean {
+        if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
             let Some(output) = self.primary_output() else {
                 return;
             };
@@ -1512,8 +1508,7 @@ impl Smallvil {
             return;
         }
 
-        if self.config.spatial_engine.projection()
-            == Some(crate::config::WorkspaceProjection::Scroll)
+        if self.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Scroll)
             && self.layout.contains(&focused)
         {
             if let Some(next) = self.scroll_focus_target(&focused, direction) {
@@ -1556,9 +1551,7 @@ impl Smallvil {
         if !self.layout.contains(&focused) {
             return;
         }
-        if self.config.spatial_engine.projection()
-            == Some(crate::config::WorkspaceProjection::Scroll)
-        {
+        if self.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Scroll) {
             let moved = match self.scroll_axis_step(direction) {
                 (true, step) => self.layout.scroll_move_column(&focused, step, false),
                 (false, step) => self.layout.scroll_move_in_column(&focused, step),

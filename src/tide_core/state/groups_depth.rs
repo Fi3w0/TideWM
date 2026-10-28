@@ -570,7 +570,7 @@ impl Smallvil {
     }
 
     fn detach_tiled_group_member(&mut self, surface: &WlSurface) -> Option<Window> {
-        match self.config.spatial_engine.ownership() {
+        match self.spatial.engine.ownership() {
             crate::config::SpatialOwnership::Workspaces => {
                 let window = self.layout.window_of(surface)?;
                 self.layout.remove(surface);
@@ -581,7 +581,7 @@ impl Smallvil {
     }
 
     fn replace_tiled_group_leaf(&mut self, old: &WlSurface, new_window: &Window) -> bool {
-        match self.config.spatial_engine.ownership() {
+        match self.spatial.engine.ownership() {
             crate::config::SpatialOwnership::Workspaces => {
                 if !self.layout.contains(old) {
                     return false;
@@ -671,7 +671,7 @@ impl Smallvil {
             return;
         }
         let new_group_owner = if existing_group.is_none() {
-            let owner = match self.config.spatial_engine.ownership() {
+            let owner = match self.spatial.engine.ownership() {
                 crate::config::SpatialOwnership::Workspaces => {
                     self.layout.output_of(&anchor).map(|output| {
                         let workspace = self
@@ -812,7 +812,7 @@ impl Smallvil {
         let Some(window) = self.leave_group(idx, surface) else {
             return;
         };
-        match self.config.spatial_engine.ownership() {
+        match self.spatial.engine.ownership() {
             crate::config::SpatialOwnership::Workspaces => {
                 self.layout.insert(&output, workspace, window, None);
             }
@@ -1172,7 +1172,7 @@ impl Smallvil {
         let scale = output.current_scale().fractional_scale();
         let mut elements = Vec::new();
         for group in &mut self.groups {
-            if self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Workspaces
+            if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Workspaces
                 && group.output != output_name
             {
                 continue;

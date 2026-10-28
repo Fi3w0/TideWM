@@ -55,7 +55,9 @@ use wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_manager_v1::Z
 
 use crate::{config::Config, layout::Layouts};
 
-use super::{trusted_client, ClientState, KeyboardFocusTarget, SessionLock, Smallvil};
+use super::{
+    trusted_client, ClientState, KeyboardFocusTarget, SessionLock, Smallvil, SpatialState,
+};
 
 use smithay::{
     input::keyboard::XkbConfig,
@@ -241,6 +243,9 @@ impl Smallvil {
             handler_depth: 0,
             config_warnings: startup_config_warnings.clone(),
 
+            spatial: SpatialState {
+                engine: config.spatial_engine,
+            },
             config,
             config_watcher: None,
             known_input_devices: Vec::new(),

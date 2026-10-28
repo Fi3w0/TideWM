@@ -17,7 +17,7 @@ impl Smallvil {
     /// and the swim toggle both on. Off falls back to the ordinary discrete
     /// workspace switch, and the camera offset collapses to zero.
     pub(crate) fn swim_enabled(&self) -> bool {
-        self.config.spatial_engine.projection() == Some(crate::config::WorkspaceProjection::Classic)
+        self.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Classic)
             && self.config.water_effects
             && self.config.swim.enabled
     }
@@ -361,7 +361,7 @@ impl Smallvil {
 
     pub(super) fn currents_enabled(&self) -> bool {
         self.config.water_effects
-            && self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean
+            && self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean
             && self.config.currents.enabled
             && self.config.currents.strength > f32::EPSILON
     }
@@ -441,7 +441,7 @@ impl Smallvil {
     /// frames on idle maintenance ticks.
     #[allow(clippy::mutable_key_type)] // WlSurface-keyed bounded visibility set
     pub(crate) fn update_buoyancy(&mut self) {
-        if self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean {
+        if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
             let revision = self.ocean.camera_revision();
             let moving = self.ocean.has_active_camera_motion();
             self.buoyancy_dirty |= revision != self.buoyancy_camera_revision
@@ -676,7 +676,7 @@ impl Smallvil {
 
     pub(super) fn cascade_liquid_applies(&self, surface: &WlSurface) -> bool {
         if !self.config.water_effects
-            || self.config.spatial_engine.ownership() != crate::config::SpatialOwnership::Workspaces
+            || self.spatial.engine.ownership() != crate::config::SpatialOwnership::Workspaces
         {
             return false;
         }
@@ -700,7 +700,7 @@ impl Smallvil {
             .or_else(|| self.output_for_window(&window))?;
         let output_rect = self.space.output_geometry(&output)?;
         let window_rect =
-            if self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean {
+            if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
                 self.rendered_rect_on_output(surface, &output)?
             } else {
                 self.tiled_rect_for_surface(surface)
@@ -758,7 +758,7 @@ impl Smallvil {
                 new_rect.size.to_f64(),
             ),
         );
-        let scroll_output = (self.config.spatial_engine.projection()
+        let scroll_output = (self.spatial.engine.projection()
             == Some(crate::config::WorkspaceProjection::Scroll))
         .then(|| {
             self.layout
@@ -943,7 +943,7 @@ impl Smallvil {
             .retain(|_, animation| !animation.finished());
         self.cascade_window_animations
             .retain(|_, animation| !animation.finished());
-        let scroll_was_moving = self.config.spatial_engine.projection()
+        let scroll_was_moving = self.spatial.engine.projection()
             == Some(crate::config::WorkspaceProjection::Scroll)
             && !self.window_move_animations.is_empty();
         self.window_move_animations
@@ -1029,7 +1029,7 @@ impl Smallvil {
             || !self.swim_cameras.is_empty()
             || !self.workspace_scroll_cameras.is_empty()
             || self.ocean.has_active_camera_motion()
-            || (self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean
+            || (self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean
                 && self.config.ocean.canvas_marker
                 && self.ocean_canvases.values().any(|canvas| {
                     canvas.marker_active(Duration::from_millis(
@@ -1065,7 +1065,7 @@ impl Smallvil {
             || self.swim_cameras.contains_key(&name)
             || self.workspace_scroll_cameras.contains_key(&name)
             || self.ocean.has_active_camera_motion_on(&name)
-            || (self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean
+            || (self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean
                 && self.config.ocean.canvas_marker
                 && self.ocean_canvases.get(&name).is_some_and(|canvas| {
                     canvas.marker_active(Duration::from_millis(
@@ -1184,7 +1184,7 @@ impl Smallvil {
         };
         // A Classic tiled window belongs to its layout's output even while
         // its committed size still overlaps a neighbor.
-        let layout_owner = (self.config.spatial_engine.ownership()
+        let layout_owner = (self.spatial.engine.ownership()
             == crate::config::SpatialOwnership::Workspaces)
             .then(|| self.layout.output_of(surface))
             .flatten()
@@ -1221,9 +1221,7 @@ impl Smallvil {
         // `retile()` overrides after reading it from `layout()` -- rarer,
         // and reusing the plain path here is a no-op change for them, not
         // a regression.
-        let win = if self.config.spatial_engine.ownership()
-            == crate::config::SpatialOwnership::Ocean
-        {
+        let win = if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
             self.rendered_rect_on_output(surface, &output)
         } else {
             self.layout

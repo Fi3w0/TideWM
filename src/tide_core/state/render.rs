@@ -35,13 +35,12 @@ impl Smallvil {
                 .unwrap_or((0.0, 1.0));
             // Weight changes flow only in Ocean. Classic deliberately keeps
             // its existing physics feel and receives just the visual sink.
-            let flow_scale = if self.config.spatial_engine.ownership()
-                == crate::config::SpatialOwnership::Ocean
-            {
-                buoyancy_flow_scale
-            } else {
-                1.0
-            };
+            let flow_scale =
+                if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
+                    buoyancy_flow_scale
+                } else {
+                    1.0
+                };
             if let Some(open) = self.window_open_animations.get(surface) {
                 let current = open.sample();
                 sample.offset += current.offset;
@@ -95,7 +94,7 @@ impl Smallvil {
                 }
             }
             if self.config.water_effects
-                && self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean
+                && self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean
                 && self.config.currents.enabled
             {
                 if let Some(current) = self.window_currents.get(surface) {
@@ -127,7 +126,7 @@ impl Smallvil {
         // the same transform to the temporary viscosity correction or a
         // zoomed-out drag makes the window grow and a zoomed-in drag makes it
         // shrink for the duration of the grab.
-        if self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean {
+        if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
             if let Some(surface) = placement.surface() {
                 if let Some(viscosity) = self.window_viscosity.get(surface) {
                     if let Some(window) = self.mapped_toplevel_window(surface) {
@@ -183,8 +182,8 @@ impl Smallvil {
             -(camera_offset as f64) * output_width,
             -(vertical_offset as f64) * output_height,
         ));
-        let scrolling = self.config.spatial_engine.projection()
-            == Some(crate::config::WorkspaceProjection::Scroll);
+        let scrolling =
+            self.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Scroll);
         let mut result: Vec<crate::placement::PlacedWindow> = self
             .space
             .elements_for_output(output)
@@ -402,7 +401,7 @@ impl Smallvil {
         &self,
         output: &Output,
     ) -> Option<Vec<crate::placement::PlacedWindow>> {
-        match self.config.spatial_engine.ownership() {
+        match self.spatial.engine.ownership() {
             crate::config::SpatialOwnership::Workspaces => self.classic_render_placements(output),
             crate::config::SpatialOwnership::Ocean => {
                 let output_geo = self.space.output_geometry(output)?;
@@ -724,7 +723,7 @@ impl Smallvil {
     /// must resolve through camera placements because world coordinates and
     /// physical output coordinates intentionally do not share an origin.
     pub(crate) fn rendered_output_for_surface(&self, surface: &WlSurface) -> Option<Output> {
-        if self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Workspaces {
+        if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Workspaces {
             let window = self.mapped_toplevel_window(surface)?;
             return self.output_for_window(&window);
         }

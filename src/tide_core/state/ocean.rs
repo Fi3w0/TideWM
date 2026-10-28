@@ -25,7 +25,7 @@ impl Smallvil {
         surface: &WlSurface,
         pointer_location: Point<f64, Logical>,
     ) -> bool {
-        if self.config.spatial_engine.ownership() != crate::config::SpatialOwnership::Ocean
+        if self.spatial.engine.ownership() != crate::config::SpatialOwnership::Ocean
             || !self.config.ocean.smart_tiling
             || !self.ocean.floating_rect(surface).is_some()
         {
@@ -93,7 +93,7 @@ impl Smallvil {
         output: &Output,
     ) -> Option<crate::backend::udev::OutputRenderElements> {
         if !matches!(self.session_lock, SessionLock::Unlocked)
-            || self.config.spatial_engine.ownership() != crate::config::SpatialOwnership::Ocean
+            || self.spatial.engine.ownership() != crate::config::SpatialOwnership::Ocean
         {
             return None;
         }
@@ -263,7 +263,7 @@ impl Smallvil {
         output: &Output,
     ) -> Vec<crate::backend::udev::OutputRenderElements> {
         if !matches!(self.session_lock, SessionLock::Unlocked)
-            || self.config.spatial_engine.ownership() != crate::config::SpatialOwnership::Ocean
+            || self.spatial.engine.ownership() != crate::config::SpatialOwnership::Ocean
             || !self.config.water_effects
             || !self.config.compass.enabled
         {
@@ -337,7 +337,7 @@ impl Smallvil {
     /// intercept the trigger if this method actually opens the peek.
     pub(crate) fn open_minimap_peek(&mut self, output: &Output) {
         if self.minimap_peek.is_some()
-            || self.config.spatial_engine.ownership() != crate::config::SpatialOwnership::Ocean
+            || self.spatial.engine.ownership() != crate::config::SpatialOwnership::Ocean
             || !self.config.minimap.enabled
             || !matches!(self.session_lock, SessionLock::Unlocked)
             || (self.popup_grab.is_none()

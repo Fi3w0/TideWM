@@ -1159,8 +1159,7 @@ fn resolve_window_response(
 }
 
 fn outputs_json(state: &Smallvil) -> serde_json::Value {
-    let ocean_engine =
-        state.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean;
+    let ocean_engine = state.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean;
     let outputs: Vec<_> = state
         .space
         .outputs()
@@ -1180,7 +1179,7 @@ fn outputs_json(state: &Smallvil) -> serde_json::Value {
                     json!(state.layout.active_workspace(&output.name()))
                 },
             });
-            if state.config.spatial_engine.projection() == Some(crate::config::WorkspaceProjection::Scroll) {
+            if state.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Scroll) {
                 let workspace = state.layout.active_workspace(&output.name());
                 entry["scroll"] = json!({
                     "offset": state.layout.scroll.offset(&output.name(), state.layout.scroll_key(workspace)),
@@ -1253,7 +1252,7 @@ fn layers_json(state: &Smallvil) -> serde_json::Value {
 }
 
 fn workspaces_json(state: &Smallvil) -> serde_json::Value {
-    if state.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean {
+    if state.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
         return json!([]);
     }
     // `advertised_workspaces` is the shared populated-or-active(-or-`workspace_count`)
@@ -1371,14 +1370,14 @@ fn diagnostics_json(state: &Smallvil) -> serde_json::Value {
         || state.config.depth.enabled
         || state.config.classic_depth.enabled
         || state.config.animations.enabled;
-    let memory_tier =
-        if state.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean {
-            "ocean/full-rice"
-        } else if decorated {
-            "decorated"
-        } else {
-            "basic"
-        };
+    let memory_tier = if state.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean
+    {
+        "ocean/full-rice"
+    } else if decorated {
+        "decorated"
+    } else {
+        "basic"
+    };
     json!({
         "version": env!("CARGO_PKG_VERSION"),
         "commit": option_env!("TIDEWM_GIT_COMMIT"),
@@ -1387,7 +1386,7 @@ fn diagnostics_json(state: &Smallvil) -> serde_json::Value {
         "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
         "backend": state.backend_name,
         "uptime_secs": state.start_time.elapsed().as_secs(),
-        "spatial_engine": match state.config.spatial_engine {
+        "spatial_engine": match state.spatial.engine {
             crate::config::SpatialEngine::Classic => "classic",
             crate::config::SpatialEngine::Scroll => "scroll",
             crate::config::SpatialEngine::Ocean => "ocean",
@@ -1509,7 +1508,7 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
         "backend": state.backend_name,
         "uptime_secs": state.start_time.elapsed().as_secs(),
         "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
-        "spatial_engine": match state.config.spatial_engine {
+        "spatial_engine": match state.spatial.engine {
             crate::config::SpatialEngine::Classic => "classic",
             crate::config::SpatialEngine::Scroll => "scroll",
             crate::config::SpatialEngine::Ocean => "ocean",
@@ -1605,8 +1604,7 @@ fn window_json(
     let surface = toplevel.wl_surface();
     let (app_id, title) = state.toplevel_identity(surface);
 
-    let ocean_engine =
-        state.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean;
+    let ocean_engine = state.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean;
     let is_floating = if ocean_engine {
         state.ocean.floating_rect(surface).is_some()
     } else {
@@ -1657,8 +1655,7 @@ fn window_json(
             "x": g.loc.x, "y": g.loc.y, "width": g.size.w, "height": g.size.h,
         })),
     });
-    if state.config.spatial_engine.projection() == Some(crate::config::WorkspaceProjection::Scroll)
-    {
+    if state.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Scroll) {
         if let Some((column, row)) = state.layout.scroll_position(surface) {
             entry["scroll"] = json!({
                 "column": column,

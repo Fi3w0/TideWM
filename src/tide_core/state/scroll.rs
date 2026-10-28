@@ -17,9 +17,7 @@ impl Smallvil {
         workspace: u32,
         point: Point<f64, Logical>,
     ) -> Option<(WlSurface, crate::scroll::DropZone, Rectangle<i32, Logical>)> {
-        if self.config.spatial_engine.projection()
-            != Some(crate::config::WorkspaceProjection::Scroll)
-        {
+        if self.spatial.engine.projection() != Some(crate::config::WorkspaceProjection::Scroll) {
             return None;
         }
         let area = self.output_tiling_area(&self.output_by_name(output)?)?;
@@ -39,8 +37,7 @@ impl Smallvil {
     }
 
     pub(super) fn queue_scroll_pointer_refresh(&mut self) {
-        if self.config.spatial_engine.projection()
-            != Some(crate::config::WorkspaceProjection::Scroll)
+        if self.spatial.engine.projection() != Some(crate::config::WorkspaceProjection::Scroll)
             || self.scroll_pointer_refresh_pending
         {
             return;
@@ -58,8 +55,7 @@ impl Smallvil {
     /// a stationary mouse. Keep keyboard focus selected by navigation; only
     /// refresh pointer routing.
     pub(crate) fn refresh_scroll_pointer_focus(&mut self) {
-        if self.config.spatial_engine.projection()
-            == Some(crate::config::WorkspaceProjection::Classic)
+        if self.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Classic)
             || self.activation_blocked()
             || self
                 .seat
@@ -72,9 +68,7 @@ impl Smallvil {
     }
 
     pub(crate) fn reveal_scroll_window(&mut self, surface: &WlSurface) {
-        if self.config.spatial_engine.projection()
-            != Some(crate::config::WorkspaceProjection::Scroll)
-        {
+        if self.spatial.engine.projection() != Some(crate::config::WorkspaceProjection::Scroll) {
             return;
         }
         if self.scroll_strip_floater(surface) {
@@ -223,8 +217,7 @@ impl Smallvil {
         &self,
         surface: &WlSurface,
     ) -> Option<crate::grabs::ScrollResizeStart> {
-        if self.config.spatial_engine.projection()
-            != Some(crate::config::WorkspaceProjection::Scroll)
+        if self.spatial.engine.projection() != Some(crate::config::WorkspaceProjection::Scroll)
             || !self.layout.contains(surface)
             || self.fullscreen.contains_key(surface)
         {
@@ -379,7 +372,7 @@ impl Smallvil {
     /// A floating window that `scroll.float_anchor = strip` keeps on the
     /// strip: it may sit off-screen and belongs only to its own output.
     pub(crate) fn scroll_strip_floater(&self, surface: &WlSurface) -> bool {
-        self.config.spatial_engine.projection() == Some(crate::config::WorkspaceProjection::Scroll)
+        self.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Scroll)
             && self.config.scroll.float_anchor == crate::scroll::FloatAnchor::Strip
             && !self.pinned.contains(surface)
             && self
@@ -429,9 +422,7 @@ impl Smallvil {
 
     /// Runs one Scroll column action on the focused tiled window.
     pub(crate) fn column_action(&mut self, action: crate::config::ColumnAction) {
-        if self.config.spatial_engine.projection()
-            != Some(crate::config::WorkspaceProjection::Scroll)
-        {
+        if self.spatial.engine.projection() != Some(crate::config::WorkspaceProjection::Scroll) {
             return;
         }
         let Some(focused) = self.focused_window_surface() else {
@@ -574,8 +565,7 @@ impl Smallvil {
     }
 
     pub(crate) fn scroll_view(&mut self, direction: Direction) {
-        if self.config.spatial_engine.projection()
-            != Some(crate::config::WorkspaceProjection::Scroll)
+        if self.spatial.engine.projection() != Some(crate::config::WorkspaceProjection::Scroll)
             || self.activation_blocked()
         {
             return;
@@ -662,8 +652,7 @@ impl Smallvil {
         delta_x: f64,
         delta_y: f64,
     ) {
-        if self.config.spatial_engine.projection()
-            != Some(crate::config::WorkspaceProjection::Scroll)
+        if self.spatial.engine.projection() != Some(crate::config::WorkspaceProjection::Scroll)
             || self.activation_blocked()
         {
             return;
@@ -695,9 +684,7 @@ impl Smallvil {
         initial_offset: f64,
         cancelled: bool,
     ) {
-        if self.config.spatial_engine.projection()
-            != Some(crate::config::WorkspaceProjection::Scroll)
-        {
+        if self.spatial.engine.projection() != Some(crate::config::WorkspaceProjection::Scroll) {
             return;
         }
         let Some(output) = self.output_by_name(output_name) else {

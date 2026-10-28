@@ -122,8 +122,8 @@ impl Smallvil {
                 (output.name(), print)
             })
             .collect();
-        let scrolling = self.config.spatial_engine.projection()
-            == Some(crate::config::WorkspaceProjection::Scroll);
+        let scrolling =
+            self.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Scroll);
         let scroll = if scrolling {
             self.space
                 .outputs()
@@ -153,7 +153,7 @@ impl Smallvil {
         IpcSeenState {
             outputs,
             mode: self.active_mode.clone(),
-            engine: engine_name(self.config.spatial_engine),
+            engine: engine_name(self.spatial.engine),
             scroll,
         }
     }

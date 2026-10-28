@@ -574,7 +574,7 @@ impl Smallvil {
                             current_state,
                             next,
                             next_state,
-                            self.config.spatial_engine.ownership()
+                            self.spatial.engine.ownership()
                                 == crate::config::SpatialOwnership::Workspaces
                                 && overlaps.contains(current),
                         )

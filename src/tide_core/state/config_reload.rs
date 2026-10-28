@@ -177,7 +177,7 @@ impl Smallvil {
             let name = output.name().to_string();
             self.layout.active_workspace(&name)
         });
-        self.tide.workspace = tide_workspace_value(self.config.spatial_engine, first_workspace);
+        self.tide.workspace = tide_workspace_value(self.spatial.engine, first_workspace);
         if let Ok(tide_table) = crate::wave::build_tide_table(&self.config_lua, &self.tide) {
             let _ = self.config_lua.globals().set("tide", tide_table);
         }
@@ -283,23 +283,20 @@ impl Smallvil {
                     &new_config.loaded_entries,
                 );
                 let mut migrated_engine = false;
-                if new_config.spatial_engine != self.config.spatial_engine {
-                    // S6: instead of refusing, translate every live window
-                    // to the new engine in place. `migrate_spatial_engine`
-                    // sets `self.config.spatial_engine` itself (before its
-                    // own retile), and `new_config` carries the same target
-                    // value, so the `self.config = new_config` below stays
-                    // consistent with the migrated spatial state. The
-                    // notice goes to a toast, not the persistent warning
-                    // panel -- this is the user's intent, not a config
-                    // problem.
+                // The file's engine is a request; `self.spatial.engine` is
+                // what runs. Whenever they differ, translate every live
+                // window to the requested engine in place (S6). A refused
+                // migration keeps the running engine and leaves the request
+                // in `config`, so the next reload tries again. The notice
+                // goes to a toast, not the persistent warning panel -- this
+                // is the user's intent, not a config problem.
+                if new_config.spatial_engine != self.spatial.engine {
                     migrated_engine = self.migrate_spatial_engine(new_config.spatial_engine);
                     if !migrated_engine {
                         warnings.push(
                             "Spatial-engine migration needs a live output; keeping the current engine"
                                 .to_string(),
                         );
-                        new_config.spatial_engine = self.config.spatial_engine;
                     }
                 }
                 if new_config.ocean.reefs != self.config.ocean.reefs
@@ -376,8 +373,7 @@ impl Smallvil {
                 // as everything else hot-reloadable. Cheap no-op diff when
                 // nothing actually changed.
                 self.refresh_ext_workspaces();
-                if self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean
-                {
+                if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
                     if self.config.ocean.zoom_enabled {
                         self.ocean
                             .clamp_zooms(self.config.ocean.min_zoom, self.config.ocean.max_zoom);
@@ -504,7 +500,7 @@ impl Smallvil {
                             camera.snap_to_rest();
                         }
                     }
-                    if self.config.spatial_engine.projection()
+                    if self.spatial.engine.projection()
                         != Some(crate::config::WorkspaceProjection::Scroll)
                         || !self.config.scroll.workspace_scroll
                         || self.config.scroll.workspaces != crate::scroll::WorkspaceMode::Separate
@@ -583,7 +579,7 @@ impl Smallvil {
                 let migration_toast = if migrated_engine {
                     let message = format!(
                         "Migrated live windows to the {} engine",
-                        match self.config.spatial_engine {
+                        match self.spatial.engine {
                             crate::config::SpatialEngine::Classic => "classic",
                             crate::config::SpatialEngine::Scroll => "scroll",
                             crate::config::SpatialEngine::Ocean => "ocean",
