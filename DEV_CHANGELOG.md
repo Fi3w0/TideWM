@@ -2,6 +2,12 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.206 — Complete the mechanical state domain moves
+
+- Five separate mechanical commits move the remaining 188 methods into `effects.rs` (40), `physics.rs` (34), `ocean.rs` (18), `groups_depth.rs` (36), and `spatial.rs` (60). Spatial explicitly includes `refresh_space` and `space_output_owner`, which were missing from the older split inventory. The parent retains fields, shared types, free helpers and tests; its now-empty `impl Smallvil` is removed. All 351 original state methods now live in 13 domain modules.
+- Bodies, documentation and attributes remain unchanged. Required private helpers become only `pub(super)` for existing cross-module callers, enumerated in each move commit. Formatting of widened signatures/module boundaries is isolated in separate commits. No accessors, new forwarding methods, dependencies, ownership changes, spatial-model redesign or configuration changes. Version/changelog metadata is separate from relocations.
+- Each move passes 709 all-feature/all-target tests and strict Clippy. Final fmt, full suite, all-feature/default-feature strict Clippy and all-feature release build pass. All 61 nested state/capture observations match the fixed baseline and `.205`, with subscriber checks passing. A whole-split check proves all 351 method bodies and the Smallvil fields byte-identical to the pre-split source. Native activation of the accumulated moves has not been run; explicit-import cleanup remains a separate next step.
+
 ## 0.90.205 — Extract focus, Scroll and session domains
 
 - Three separate mechanical commits move 102 methods from `state/mod.rs` to `focus.rs` (57), `scroll.rs` (19) and `session.rs` (26). Fields, shared types, free helpers and tests remain in the parent, which shrinks from 13,456 to 10,350 lines. Method bodies/docs and accessibility feature guards are unchanged. A separate formatting commit wraps one widened helper signature; version/changelog metadata is separate from the moves.

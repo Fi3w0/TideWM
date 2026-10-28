@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.206 · 2026-10-28 — Complete state method extraction
+
+- Moved the remaining effects, physics, Ocean, groups/depth and spatial methods into dedicated state modules. Shared state stays centralized; window behavior, rendering and configuration stay the same.
+
 ## 0.90.205 · 2026-10-28 — Focus, Scroll and session organization
 
 - Separated focus/input routing, Scroll coordination and session lifecycle into dedicated state modules. Window behavior, input handling, protocol handling and configuration stay the same.
