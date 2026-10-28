@@ -56,7 +56,10 @@ impl Smallvil {
         true
     }
 
-    pub(super) fn topmost_ocean_surface(&self, preferred_output: Option<&str>) -> Option<WlSurface> {
+    pub(super) fn topmost_ocean_surface(
+        &self,
+        preferred_output: Option<&str>,
+    ) -> Option<WlSurface> {
         let mut outputs: Vec<Output> = self.space.outputs().cloned().collect();
         outputs.sort_by_key(Output::name);
         if let Some(preferred) = preferred_output {

@@ -5674,7 +5674,6 @@ impl Smallvil {
             ),
         );
     }
-
 }
 
 fn monitor_resized_rect(
