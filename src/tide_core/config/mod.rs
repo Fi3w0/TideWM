@@ -19,8 +19,17 @@ use crate::wave;
 use crate::waves;
 
 mod decoration;
-pub use decoration::{BorderConfig, BorderOverrides, BorderPlacement, CausticsConfig, FrostConfig, FrostOverrides, GlassAnimation, PopupAnimation, PopupConfig, RoundingConfig, RoundingOverrides, ShadowConfig, ShadowOverrides, ToastStyle, WaterGlassConfig};
-use decoration::{apply_border_block, apply_border_override_block, apply_caustics_block, apply_frost_block, apply_frost_override_block, apply_popup_block, apply_rounding_block, apply_rounding_override_block, apply_shadow_block, apply_shadow_override_block, apply_water_glass_block, parse_corner_radii};
+use decoration::{
+    apply_border_block, apply_border_override_block, apply_caustics_block, apply_frost_block,
+    apply_frost_override_block, apply_popup_block, apply_rounding_block,
+    apply_rounding_override_block, apply_shadow_block, apply_shadow_override_block,
+    apply_water_glass_block, parse_corner_radii,
+};
+pub use decoration::{
+    BorderConfig, BorderOverrides, BorderPlacement, CausticsConfig, FrostConfig, FrostOverrides,
+    GlassAnimation, PopupAnimation, PopupConfig, RoundingConfig, RoundingOverrides, ShadowConfig,
+    ShadowOverrides, ToastStyle, WaterGlassConfig,
+};
 
 mod rules;
 pub(crate) use rules::WindowMatchFacts;
