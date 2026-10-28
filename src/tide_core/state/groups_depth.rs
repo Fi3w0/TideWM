@@ -36,7 +36,9 @@ impl Smallvil {
         if !self.config.water_effects || !self.config.depth.enabled {
             return 1.0;
         }
-        self.window_depths
+        self.render
+            .windows
+            .window_depths
             .get(surface)
             .filter(|depth| depth.tier() == 1)
             .map(|_| self.config.depth.tier_one_alpha)
@@ -46,7 +48,7 @@ impl Smallvil {
     /// Records direct attention for a mapped window. The next frame renders
     /// it at the surface immediately; its inactivity clock restarts from now.
     pub(crate) fn note_depth_attention(&mut self, surface: &WlSurface) {
-        let Some(depth) = self.window_depths.get_mut(surface) else {
+        let Some(depth) = self.render.windows.window_depths.get_mut(surface) else {
             return;
         };
         if depth.note_attention() {
@@ -68,10 +70,10 @@ impl Smallvil {
     /// backends call this from their already-bounded frame timer, so no
     /// per-window calloop source or unbounded timer registry is needed.
     pub(crate) fn update_window_depths(&mut self) {
-        if self.depth_last_tick.elapsed() < Duration::from_millis(100) {
+        if self.render.windows.depth_last_tick.elapsed() < Duration::from_millis(100) {
             return;
         }
-        self.depth_last_tick = Instant::now();
+        self.render.windows.depth_last_tick = Instant::now();
         let enabled = self.config.water_effects && self.config.depth.enabled;
         // Resolved separately, before the mutable loop below: `depth_exempt`
         // needs `&self` (it reads surface identity + config), which can't
@@ -83,7 +85,9 @@ impl Smallvil {
         // at 10 Hz and the old Vec made the two full window walks quadratic.
         #[allow(clippy::mutable_key_type)]
         let exempt: HashSet<WlSurface> = if enabled {
-            self.window_depths
+            self.render
+                .windows
+                .window_depths
                 .keys()
                 .filter(|surface| self.depth_exempt(surface))
                 .cloned()
@@ -97,7 +101,7 @@ impl Smallvil {
         // mutable borrow on `window_depths`, then emit after the loop --
         // `emit_ipc_event` needs `&mut self` and can't run mid-iteration.
         let mut tier_changes: Vec<(WlSurface, u8)> = Vec::new();
-        for (surface, depth) in self.window_depths.iter_mut() {
+        for (surface, depth) in self.render.windows.window_depths.iter_mut() {
             let old_tier = depth.tier();
             let focused_now = focused.as_ref() == Some(surface);
             let local_changed = if focused_now {
@@ -190,16 +194,16 @@ impl Smallvil {
     ) {
         if reload_background || next.background != self.config.depth.background {
             self.depth_background.reset();
-            for depth in self.window_depths.values_mut() {
+            for depth in self.render.windows.window_depths.values_mut() {
                 depth.artwork_id = smithay::backend::renderer::element::Id::new();
             }
         }
         self.config.depth = next;
         self.render.gpu.depth_schematics.clear();
-        for depth in self.window_depths.values_mut() {
+        for depth in self.render.windows.window_depths.values_mut() {
             depth.visual_changed();
         }
-        self.depth_last_tick = Instant::now() - Duration::from_millis(100);
+        self.render.windows.depth_last_tick = Instant::now() - Duration::from_millis(100);
         self.update_window_depths();
         self.request_redraw();
     }
@@ -225,7 +229,7 @@ impl Smallvil {
                         p.replacement_eligible()
                             && p.rect.overlaps(view)
                             && p.surface()
-                                .and_then(|s| self.window_depths.get(s))
+                                .and_then(|s| self.render.windows.window_depths.get(s))
                                 .is_some_and(|depth| depth.tier() >= 2)
                     })
                 })
@@ -311,7 +315,7 @@ impl Smallvil {
 
         for (surface, area) in visible {
             let mut elements = Vec::new();
-            let Some(depth) = self.window_depths.get(&surface) else {
+            let Some(depth) = self.render.windows.window_depths.get(&surface) else {
                 continue;
             };
             let tier = depth.tier();
@@ -453,8 +457,8 @@ impl Smallvil {
         let workspace = self.workspace_of_surface(surface);
         let (name, definition) = surface_shader(
             &self.config,
-            &self.layer_shader_assignments,
-            &self.window_shader_assignments,
+            &self.render.windows.layer_shader_assignments,
+            &self.render.windows.window_shader_assignments,
             surface,
             workspace,
         )?;
@@ -965,7 +969,7 @@ impl Smallvil {
             return;
         }
         self.urgent.insert(surface.clone());
-        if let Some(depth) = self.window_depths.get_mut(surface) {
+        if let Some(depth) = self.render.windows.window_depths.get_mut(surface) {
             depth.visual_changed();
         }
         // `rule { urgent = ... }` is the one match criterion that can flip

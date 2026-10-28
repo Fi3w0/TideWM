@@ -478,10 +478,11 @@ impl Smallvil {
                     }
                     self.render.gpu.depth_schematics.clear();
                     self.depth_background.reset();
-                    for depth in self.window_depths.values_mut() {
+                    for depth in self.render.windows.window_depths.values_mut() {
                         depth.artwork_id = smithay::backend::renderer::element::Id::new();
                     }
-                    self.depth_last_tick = Instant::now() - Duration::from_millis(100);
+                    self.render.windows.depth_last_tick =
+                        Instant::now() - Duration::from_millis(100);
                     self.update_window_depths();
                     let any_workspace_animation = (self.config.water_effects
                         && self.config.workspace_transition.enabled)
@@ -514,10 +515,10 @@ impl Smallvil {
                     {
                         self.workspace_scroll_cameras.clear();
                     }
-                    self.window_opacity.clear();
-                    self.window_glass_modes.clear();
-                    self.window_shader_assignments.clear();
-                    self.layer_shader_assignments.clear();
+                    self.render.windows.window_opacity.clear();
+                    self.render.windows.window_glass_modes.clear();
+                    self.render.windows.window_shader_assignments.clear();
+                    self.render.windows.layer_shader_assignments.clear();
                     let surfaces: Vec<WlSurface> = self.foreign_toplevels.keys().cloned().collect();
                     for surface in surfaces {
                         self.refresh_window_opacity_and_glass_for(&surface);

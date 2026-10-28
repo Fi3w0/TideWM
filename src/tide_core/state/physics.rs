@@ -1212,7 +1212,9 @@ impl Smallvil {
     /// water) so a window hot-reloaded to frost or plain glass can't keep
     /// the compositor ticking through its leftover entry.
     fn glass_animation_active(&self) -> bool {
-        self.glass_anim
+        self.render
+            .windows
+            .glass_anim
             .keys()
             .any(|surface| self.surface_has_glass_animation(surface))
     }
@@ -1221,13 +1223,13 @@ impl Smallvil {
         if !self.config.water_effects
             || !self.render.gpu.backdrop_textures.contains_key(surface)
             || matches!(
-                self.window_glass_modes.get(surface),
+                self.render.windows.window_glass_modes.get(surface),
                 Some(crate::config::GlassMode::Frost) | Some(crate::config::GlassMode::Plain)
             )
         {
             return false;
         }
-        let Some(anim) = self.glass_anim.get(surface) else {
+        let Some(anim) = self.render.windows.glass_anim.get(surface) else {
             return false;
         };
         match self.config.water_glass.animation {

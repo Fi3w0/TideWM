@@ -198,7 +198,10 @@ impl WlrLayerShellHandler for Smallvil {
             .gpu
             .layer_alpha_masks
             .remove(surface.wl_surface());
-        self.layer_shader_assignments.remove(surface.wl_surface());
+        self.render
+            .windows
+            .layer_shader_assignments
+            .remove(surface.wl_surface());
         self.render
             .gpu
             .custom_shader_instances

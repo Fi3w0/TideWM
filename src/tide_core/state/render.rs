@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Instant,
+};
 
 use smithay::{
     backend::renderer::{
@@ -23,6 +26,7 @@ use super::{SessionLock, Smallvil};
 /// step 8d).
 pub(crate) struct RenderState {
     pub(crate) gpu: RenderGpuState,
+    pub(crate) windows: RenderWindowsState,
 }
 
 /// GPU programs, the custom-shader cache and per-surface GPU textures:
@@ -88,6 +92,39 @@ pub(crate) struct RenderGpuState {
     /// With artwork these buffers contain only the optional title strip.
     /// Returning to live content or unmapping evicts a window's buffer.
     pub(crate) depth_schematics: HashMap<WlSurface, crate::depth::DepthSchematic>,
+}
+
+/// Rule-resolved per-surface render properties and visual attention depth
+/// (plan step 8d).
+pub(crate) struct RenderWindowsState {
+    /// Per-mapped-window base/active/inactive/fullscreen alpha multipliers
+    /// resolved from window rules. Missing entries preserve client alpha.
+    pub(crate) window_opacity: HashMap<WlSurface, crate::config::WindowOpacity>,
+    /// Explicit captured-backdrop mode resolved from window rules. Missing
+    /// entries preserve the original behavior: translucent floating windows
+    /// use water refraction.
+    pub(crate) window_glass_modes: HashMap<WlSurface, crate::config::GlassMode>,
+    /// The last matching `rule { shader = ... }`, including an explicit
+    /// `none` that opts out of the workspace default. Resolved per frame by
+    /// `resolved_shader_assignment`, so toggling `shaders { enabled }`, a
+    /// definition or a workspace default needs no per-window re-resolve.
+    pub(crate) window_shader_assignments: HashMap<WlSurface, crate::config::ShaderAssignment>,
+    /// Assignments from `layer_rule { shader }`, refreshed for each output's
+    /// mapped layers during its capture pass and cleared on reload.
+    pub(crate) layer_shader_assignments: HashMap<WlSurface, crate::config::ShaderAssignment>,
+    /// Per-window water-glass animation state (`water_glass::GlassAnim`):
+    /// when the distortion was last disturbed and what frame state that
+    /// disturbance was derived from. Only populated for windows taking the
+    /// water branch of `glass_frame_elements` while the resolved
+    /// `water_glass.animation` isn't `static`; evicted in
+    /// `detach_mapped_toplevel` alongside `backdrop_textures`.
+    pub(crate) glass_anim: HashMap<WlSurface, crate::water_glass::GlassAnim>,
+    /// Per-mapped-window automatic attention depth. Entries are created on
+    /// map and removed on unmap/destroy, so time-based sinking cannot grow
+    /// state beyond the current mapped toplevel count.
+    pub(crate) window_depths: HashMap<WlSurface, crate::depth::WindowDepth>,
+    /// Throttles inactivity scans to 10Hz even when a backend ticks faster.
+    pub(super) depth_last_tick: Instant,
 }
 
 impl Smallvil {

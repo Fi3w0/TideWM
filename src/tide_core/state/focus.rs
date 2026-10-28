@@ -680,7 +680,7 @@ impl Smallvil {
                 self.refresh_wlr_toplevel_state(&surface);
                 self.note_depth_attention(&surface);
                 if self.urgent.remove(&surface) {
-                    if let Some(depth) = self.window_depths.get_mut(&surface) {
+                    if let Some(depth) = self.render.windows.window_depths.get_mut(&surface) {
                         depth.visual_changed();
                     }
                     // Mirrors `mark_urgent`'s own refresh on the way in --

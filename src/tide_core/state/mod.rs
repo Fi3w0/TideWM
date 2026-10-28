@@ -248,28 +248,6 @@ pub struct Smallvil {
     pub(crate) render: render::RenderState,
 
     pub space: crate::tide_core::window_space::WindowSpace,
-    /// Per-mapped-window base/active/inactive/fullscreen alpha multipliers
-    /// resolved from window rules. Missing entries preserve client alpha.
-    pub(crate) window_opacity: HashMap<WlSurface, crate::config::WindowOpacity>,
-    /// Explicit captured-backdrop mode resolved from window rules. Missing
-    /// entries preserve the original behavior: translucent floating windows
-    /// use water refraction.
-    pub(crate) window_glass_modes: HashMap<WlSurface, crate::config::GlassMode>,
-    /// The last matching `rule { shader = ... }`, including an explicit
-    /// `none` that opts out of the workspace default. Resolved per frame by
-    /// `resolved_shader_assignment`, so toggling `shaders { enabled }`, a
-    /// definition or a workspace default needs no per-window re-resolve.
-    pub(crate) window_shader_assignments: HashMap<WlSurface, crate::config::ShaderAssignment>,
-    /// Assignments from `layer_rule { shader }`, refreshed for each output's
-    /// mapped layers during its capture pass and cleared on reload.
-    pub(crate) layer_shader_assignments: HashMap<WlSurface, crate::config::ShaderAssignment>,
-    /// Per-window water-glass animation state (`water_glass::GlassAnim`):
-    /// when the distortion was last disturbed and what frame state that
-    /// disturbance was derived from. Only populated for windows taking the
-    /// water branch of `glass_frame_elements` while the resolved
-    /// `water_glass.animation` isn't `static`; evicted in
-    /// `detach_mapped_toplevel` alongside `backdrop_textures`.
-    pub(crate) glass_anim: HashMap<WlSurface, crate::water_glass::GlassAnim>,
     /// Active impulse ripples (Phase R1, see `ripple.rs`). Each one lives
     /// on a specific output, decays over its own `duration`, and is
     /// `retain`-pruned once `finished()` inside `ripple_frame_elements`
@@ -307,16 +285,10 @@ pub struct Smallvil {
     /// Detached windows retaining their last drawable GPU snapshot until
     /// the configured close animation finishes.
     pub(crate) closing_window_animations: Vec<crate::window_animation::ClosingWindowAnimation>,
-    /// Per-mapped-window automatic attention depth. Entries are created on
-    /// map and removed on unmap/destroy, so time-based sinking cannot grow
-    /// state beyond the current mapped toplevel count.
-    pub(crate) window_depths: HashMap<WlSurface, crate::depth::WindowDepth>,
     /// Shared artwork source, CPU frame and per-renderer texture imports.
     pub(crate) depth_background: crate::depth_background::DepthBackground,
     depth_background_timer: Option<RegistrationToken>,
     depth_background_deadline: Option<Instant>,
-    /// Throttles inactivity scans to 10Hz even when a backend ticks faster.
-    depth_last_tick: Instant,
     /// Requested workspace target awaiting an outgoing-frame capture,
     /// keyed by output name. A HashMap deliberately makes this one slot
     /// per output: repeated switches replace the target instead of

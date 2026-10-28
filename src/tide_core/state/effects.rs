@@ -53,32 +53,43 @@ impl Smallvil {
         self.physics.buoyancy_dirty = true;
         match crate::config::WindowOpacity::from_rule(&rule) {
             Some(opacity) => {
-                self.window_opacity.insert(surface.clone(), opacity);
+                self.render
+                    .windows
+                    .window_opacity
+                    .insert(surface.clone(), opacity);
             }
             None => {
-                self.window_opacity.remove(surface);
+                self.render.windows.window_opacity.remove(surface);
             }
         }
         match rule.glass {
             Some(mode) => {
-                self.window_glass_modes.insert(surface.clone(), mode);
+                self.render
+                    .windows
+                    .window_glass_modes
+                    .insert(surface.clone(), mode);
             }
             None => {
-                self.window_glass_modes.remove(surface);
+                self.render.windows.window_glass_modes.remove(surface);
             }
         }
         match rule.shader {
             Some(assignment) => {
-                self.window_shader_assignments
+                self.render
+                    .windows
+                    .window_shader_assignments
                     .insert(surface.clone(), assignment);
             }
             None => {
-                self.window_shader_assignments.remove(surface);
+                self.render
+                    .windows
+                    .window_shader_assignments
+                    .remove(surface);
             }
         }
         if !self.backdrop_effect_for_surface(surface, self.fullscreen.contains_key(surface)) {
             self.render.gpu.backdrop_textures.remove(surface);
-            self.glass_anim.remove(surface);
+            self.render.windows.glass_anim.remove(surface);
         }
     }
 
@@ -211,8 +222,8 @@ impl Smallvil {
     ) -> Option<(&str, &crate::config::ShaderDefinition)> {
         surface_shader(
             &self.config,
-            &self.layer_shader_assignments,
-            &self.window_shader_assignments,
+            &self.render.windows.layer_shader_assignments,
+            &self.render.windows.window_shader_assignments,
             surface,
             self.workspace_of_surface(surface),
         )
@@ -382,7 +393,7 @@ impl Smallvil {
         let frost = self.frost_config_for_surface(surface);
         let opacity = self.window_render_alpha_for(surface, fullscreen);
         selected_glass_mode(
-            self.window_glass_modes.get(surface).copied(),
+            self.render.windows.window_glass_modes.get(surface).copied(),
             (opacity < 1.0).then_some(opacity),
             frost.enabled,
         )
@@ -394,7 +405,9 @@ impl Smallvil {
 
     pub(super) fn window_render_alpha_for(&self, surface: &WlSurface, fullscreen: bool) -> f32 {
         let focused = matches!(&self.input.keyboard_focus, KeyboardFocusTarget::Window(focused) if focused == surface);
-        self.window_opacity
+        self.render
+            .windows
+            .window_opacity
             .get(surface)
             .copied()
             .map(|opacity| opacity.alpha(focused, fullscreen))
@@ -719,6 +732,8 @@ impl Smallvil {
             .filter_map(|placement| {
                 let surface = placement.surface()?;
                 (self
+                    .render
+                    .windows
                     .window_depths
                     .get(surface)
                     .is_none_or(|depth| depth.tier() < 2)
@@ -955,10 +970,10 @@ impl Smallvil {
                 let surface = layer.wl_surface();
                 match self.config.layer_shader(layer.namespace()) {
                     Some(name) => {
-                        let current = self.layer_shader_assignments.get(surface);
+                        let current = self.render.windows.layer_shader_assignments.get(surface);
                         if !matches!(current, Some(crate::config::ShaderAssignment::Named(existing)) if existing == name)
                         {
-                            self.layer_shader_assignments.insert(
+                            self.render.windows.layer_shader_assignments.insert(
                                 surface.clone(),
                                 crate::config::ShaderAssignment::Named(name.to_string()),
                             );
@@ -971,7 +986,7 @@ impl Smallvil {
                         }
                     }
                     None => {
-                        self.layer_shader_assignments.remove(surface);
+                        self.render.windows.layer_shader_assignments.remove(surface);
                     }
                 }
             }
@@ -1178,6 +1193,8 @@ impl Smallvil {
             .filter_map(|placement| {
                 let surface = placement.surface()?;
                 (self
+                    .render
+                    .windows
                     .window_depths
                     .get(surface)
                     .is_none_or(|depth| depth.tier() < 2)
@@ -1205,13 +1222,16 @@ impl Smallvil {
         }
         let needs_water = self.config.water_effects
             && surfaces.iter().any(|surface| {
-                self.window_glass_modes
+                self.render
+                    .windows
+                    .window_glass_modes
                     .get(surface)
                     .is_none_or(|mode| *mode == crate::config::GlassMode::Water)
             });
         let needs_frost = self.config.water_effects
             && surfaces.iter().any(|surface| {
-                self.window_glass_modes.get(surface) == Some(&crate::config::GlassMode::Frost)
+                self.render.windows.window_glass_modes.get(surface)
+                    == Some(&crate::config::GlassMode::Frost)
             });
         let water_program = needs_water
             .then(|| {
@@ -1266,7 +1286,7 @@ impl Smallvil {
                 )),
                 None,
             ) {
-                self.glass_anim.remove(surface);
+                self.render.windows.glass_anim.remove(surface);
                 layers.entry(surface.clone()).or_default().push(
                     crate::backend::udev::OutputRenderElements::CustomShader(element),
                 );
@@ -1279,7 +1299,7 @@ impl Smallvil {
             {
                 continue;
             }
-            match self.window_glass_modes.get(surface).copied() {
+            match self.render.windows.window_glass_modes.get(surface).copied() {
                 Some(crate::config::GlassMode::Frost) => {
                     if let Some(program) = &frost_program {
                         let mut frost = self.frost_config_for_surface(surface);
@@ -1349,8 +1369,12 @@ impl Smallvil {
                                         && ripple.output == output_name
                                         && ripple.element_rect().overlaps(local_rect)
                                 });
-                                let anim =
-                                    self.glass_anim.entry(surface.clone()).or_insert_with(|| {
+                                let anim = self
+                                    .render
+                                    .windows
+                                    .glass_anim
+                                    .entry(surface.clone())
+                                    .or_insert_with(|| {
                                         crate::water_glass::GlassAnim::new(physical_rect)
                                     });
                                 anim.observe(physical_rect, ripple_passed);

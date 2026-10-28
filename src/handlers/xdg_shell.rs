@@ -1170,20 +1170,31 @@ impl Smallvil {
             self.resolve_window_rules_for(surface)
         };
         if let Some(opacity) = crate::config::WindowOpacity::from_rule(&rule) {
-            self.window_opacity.insert(surface.clone(), opacity);
+            self.render
+                .windows
+                .window_opacity
+                .insert(surface.clone(), opacity);
         } else {
-            self.window_opacity.remove(surface);
+            self.render.windows.window_opacity.remove(surface);
         }
         if let Some(mode) = rule.glass {
-            self.window_glass_modes.insert(surface.clone(), mode);
+            self.render
+                .windows
+                .window_glass_modes
+                .insert(surface.clone(), mode);
         } else {
-            self.window_glass_modes.remove(surface);
+            self.render.windows.window_glass_modes.remove(surface);
         }
         if let Some(assignment) = &rule.shader {
-            self.window_shader_assignments
+            self.render
+                .windows
+                .window_shader_assignments
                 .insert(surface.clone(), assignment.clone());
         } else {
-            self.window_shader_assignments.remove(surface);
+            self.render
+                .windows
+                .window_shader_assignments
+                .remove(surface);
         }
 
         let output = self
@@ -1250,7 +1261,9 @@ impl Smallvil {
         let Some(window) = self.unmapped_toplevels.remove(surface) else {
             return;
         };
-        self.window_depths
+        self.render
+            .windows
+            .window_depths
             .insert(surface.clone(), crate::depth::WindowDepth::new());
         let focused = self.intended_window_surface();
         let ocean_engine =
@@ -1675,9 +1688,12 @@ impl Smallvil {
         self.urgent.remove(surface);
         self.window_tags.remove(surface);
         self.spatial.workspaces.output_pins.remove(surface);
-        self.window_opacity.remove(surface);
-        self.window_glass_modes.remove(surface);
-        self.window_shader_assignments.remove(surface);
+        self.render.windows.window_opacity.remove(surface);
+        self.render.windows.window_glass_modes.remove(surface);
+        self.render
+            .windows
+            .window_shader_assignments
+            .remove(surface);
         self.render.gpu.custom_shader_instances.remove(surface);
         self.render.gpu.custom_shader_bypassed.remove(surface);
         self.window_open_animations.remove(surface);
@@ -1694,8 +1710,8 @@ impl Smallvil {
         self.physics.buoyancy_dirty = true;
         self.render.gpu.window_frame_snapshots.remove(surface);
         self.render.gpu.backdrop_textures.remove(surface);
-        self.glass_anim.remove(surface);
-        self.window_depths.remove(surface);
+        self.render.windows.glass_anim.remove(surface);
+        self.render.windows.window_depths.remove(surface);
         self.render.gpu.depth_schematics.remove(surface);
         self.expected_tiled_size.remove(surface);
         self.tiled_size_refusals.remove(surface);
@@ -1762,16 +1778,26 @@ impl Smallvil {
         // `detach_mapped_toplevel` cleared both when the window was hidden.
         let rule = self.resolve_window_rules_for(&entry.surface);
         if let Some(opacity) = crate::config::WindowOpacity::from_rule(&rule) {
-            self.window_opacity.insert(entry.surface.clone(), opacity);
+            self.render
+                .windows
+                .window_opacity
+                .insert(entry.surface.clone(), opacity);
         }
         if let Some(mode) = rule.glass {
-            self.window_glass_modes.insert(entry.surface.clone(), mode);
+            self.render
+                .windows
+                .window_glass_modes
+                .insert(entry.surface.clone(), mode);
         }
         if let Some(assignment) = &rule.shader {
-            self.window_shader_assignments
+            self.render
+                .windows
+                .window_shader_assignments
                 .insert(entry.surface.clone(), assignment.clone());
         }
-        self.window_depths
+        self.render
+            .windows
+            .window_depths
             .insert(entry.surface.clone(), crate::depth::WindowDepth::new());
         self.announce_foreign_toplevel(&entry.surface);
         // Hand focus back to the restored window if the closing child had
