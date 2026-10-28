@@ -117,6 +117,14 @@ pub(crate) struct SpatialState {
     pub(crate) engine: crate::config::SpatialEngine,
 }
 
+impl SpatialState {
+    /// Classic finds windows under the pointer through `Space`; Scroll and
+    /// Ocean through `render_placements`, which carry their view offsets.
+    pub(crate) fn hit_tests_through_space(self) -> bool {
+        self.engine.projection() == Some(crate::config::WorkspaceProjection::Classic)
+    }
+}
+
 /// The per-frame ripple elements grouped by their configured
 /// `RippleLayer`. Each backend's element-chain builder splices these
 /// four groups into the right positions in its front-to-back list --

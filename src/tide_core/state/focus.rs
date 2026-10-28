@@ -108,9 +108,7 @@ impl Smallvil {
                 )
             })
             .or_else(|| {
-                if self.spatial.engine.projection()
-                    != Some(crate::config::WorkspaceProjection::Classic)
-                {
+                if !self.spatial.hit_tests_through_space() {
                     self.render_placements(&output).and_then(|placements| {
                         placements.into_iter().find_map(|placement| {
                             let rect = self.placement_input_rect(&placement);
@@ -187,7 +185,7 @@ impl Smallvil {
         &self,
         pos: Point<f64, Logical>,
     ) -> Option<(Window, Point<i32, Logical>)> {
-        if self.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Classic) {
+        if self.spatial.hit_tests_through_space() {
             return self
                 .space
                 .element_under(pos)
@@ -217,7 +215,7 @@ impl Smallvil {
         output: &Output,
         pos: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
-        if self.spatial.engine.projection() != Some(crate::config::WorkspaceProjection::Classic) {
+        if !self.spatial.hit_tests_through_space() {
             return self.render_placements(output).and_then(|placements| {
                 placements
                     .into_iter()
