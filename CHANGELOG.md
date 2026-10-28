@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.210 · 2026-10-28 — Grouped compositor state
+
+- Internal cleanup: IPC subscribers, floating-window motion, and the workspace and Ocean window data now each live in their own named group inside the compositor state. Nothing changes for users.
+
 ## 0.90.209 · 2026-10-28 — Spatial engine bookkeeping
 
 - Internal cleanup of how TideWM tracks the running engine versus the one your config asks for. Engine switches, reloads and window behavior stay the same.

@@ -2,6 +2,14 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.210 — Substates (plan step 8a–8c)
+
+- `7fec946` (8a): `IpcState` in `state/ipc.rs`, reached as `self.ipc`: `subscribers`, `seen`, `flush_token`, `next_subscriber_id` (the `ipc_` prefixes dropped inside the group).
+- `8c04c3f` (8b): `FloatPhysicsState` in `state/physics.rs`, reached as `self.physics`: the 13 viscosity, sway, float-physics, currents and buoyancy fields, names unchanged. `floating_dragging` stays on `Smallvil` (grab state).
+- `9282d85` (8c): `WorkspaceState` in `state/workspace.rs`, reached as `self.spatial.workspaces`: `layout`, `floating_workspace`, `pinned`, `pseudo_tiled`, `scratchpad_previous`, `scratchpad_named`, `workspace_previous`, `workspace_step_output`, `workspace_created_empty_fired`, `output_pins`, `classic_depth`. `ocean` moves to `self.spatial.ocean`. `SpatialState` drops its `Copy`/`Clone`/`Debug` derive and `hit_tests_through_space` takes `&self`. 594 + 194 use sites gain the path step only; rewrites were limited to `self`/`state`/`data` receivers, and the three XKB `state.layout` sites in `virtual_keyboard.rs` were restored by hand. A whitespace- and rustfmt-brace-normalized comparison shows no other change outside `mod.rs`, `init.rs` and `workspace.rs`. `SpatialState`, `WorkspaceState` and the moved fields stay `pub` like `layout`/`ocean` were: narrowing them exposes test-only `Layouts::ratio_at`, `OceanSpace::{jump_to_bookmark, smart_tiling_target, view_delta_to_world}` and `rectangle_gap_distance` to the dead-code lint (left for a separate cleanup).
+- Pure path moves: no accessors, no forwarding, no behavior change. Mover and site receipts: `.hermes/worklogs/substates-2026-10-28/`. Kept out on purpose: Scroll/swim cameras (render), `fullscreen`/`maximized`/`groups` (engine-neutral overlays).
+- 712 tests, fmt, strict Clippy (all and default features) after each step; all-feature release build; nested matrix with subscribers 61/0 vs `.209` (`state-7c`). Not run natively yet.
+
 ## 0.90.209 — `SpatialState` boundary (plan step 7)
 
 - `0f96644`: `SpatialOwnership { Workspaces, Ocean }` and `WorkspaceProjection { Classic, Scroll }` with `SpatialEngine::ownership()`/`projection()`. Every runtime engine check now names the axis it tests; `uses_workspaces()` is gone. Equivalent case by case; site receipt in `.hermes/worklogs/spatial-state-2026-10-28/`.
