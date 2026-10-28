@@ -1128,8 +1128,16 @@ pub fn init_udev(
                 let device = device_for_timer.borrow();
                 if device.drm.is_active() {
                     device.gpu.cleanup_texture_caches();
+                    drop(device);
+                    state.ebb_after_texture_cleanup();
                 }
             }
+            let screens_off = {
+                let device = device_for_timer.borrow();
+                device.surfaces.values().all(|surface| surface.powered_off)
+            };
+            state.ebb_tick(screens_off);
+            state.ebb_maintain(screens_off);
             state.update_window_depths();
             state.update_urgent_pulses();
             state.update_float_physics_full();

@@ -2,6 +2,27 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.4 · 2026-10-29 — Ebb frees hidden caches
+
+- Ebb now frees only TideWM's rebuildable caches (window and layer backdrops, layer dimming, depth schematics, unused custom-shader stages, dead-output buffers) after their window has been off screen for a while. Visible windows, layers, pinned and fullscreen windows are never touched.
+- `ebb { mode = ... }` selects how long hidden caches wait (`off`, `low`, `balanced`, `aggressive`); the existing caps gate every trim, and `balanced`/`aggressive` also react to kernel memory pressure without a daemon.
+- `tidectl ebb run [--deep]` queues a pass, `tidectl ebb init` creates `ebb.wave` and adds its include safely, and `rule { ebb = ... }` exempts or adjusts one app.
+
+## 0.91.3 · 2026-10-28 — NVIDIA memory profile
+
+- Packages now provide a TideWM-only NVIDIA OpenGL profile that reduces the driver’s pool of freed video memory. Other drivers ignore it.
+- `tidectl doctor` checks the optional profile when the selected compositor uses NVIDIA OpenGL. Custom profiles and explicit disabling are respected. See the packaging guide for setup and rollback.
+
+## 0.91.2 · 2026-10-28 — Ebb watches resource use
+
+- `tidectl ebb stats` shows TideWM’s memory, open files, texture estimates and bounded session history. Ebb reports sustained growth, growth while away and references retained for destroyed resources.
+- Configure checks with `ebb { check_every = 60s }` (10s–10m). Rare findings appear in stats, the log, an `ebb-warning` event and an optional daily toast.
+- On glibc, native idle maintenance can return already-free heap pages, respecting `off` and optional caps. Hidden-cache trimming remains the next Ebb phase.
+
+## 0.91.1 · 2026-10-28 — Wave memory sizes
+
+- Wave understands memory sizes such as `400MB` and `1GiB`, including arithmetic, variables and `tidectl eval`. This prepares the size values for Ebb caps.
+
 ## 0.91.0 · 2026-10-28 — Configuration code split by area
 
 - Internal cleanup that completes the architecture refactor: the configuration code is now split into one file per area (decoration, animation, spatial, rules, devices, actions, shaders and so on). Config files, keys and behavior stay exactly the same.

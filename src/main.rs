@@ -18,7 +18,7 @@ mod visual;
 mod xwayland;
 
 pub(crate) use tide_core::{
-    classic_depth, config, ipc, layout, ocean, output_layout, placement, redraw, scroll, snap,
+    classic_depth, config, ebb, ipc, layout, ocean, output_layout, placement, redraw, scroll, snap,
     state, wave, waves, window_size,
 };
 #[cfg(feature = "screencast")]

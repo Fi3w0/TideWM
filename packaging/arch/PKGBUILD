@@ -31,6 +31,7 @@ optdepends=(
 provides=('tidewm')
 conflicts=('tidewm')
 options=('!lto' '!debug')
+backup=('etc/nvidia/nvidia-application-profiles-rc.d/50-tidewm.json')
 source=("tidewm::git+${TIDEWM_REPO:-https://github.com/Fi3w0/TideWM.git}")
 sha256sums=('SKIP')
 
@@ -71,6 +72,8 @@ package() {
   install -Dm644 share/xdg-desktop-portal/tidewm-portals.conf "$pkgdir/usr/share/xdg-desktop-portal/tidewm-portals.conf"
 
   install -Dm644 README.md CHANGELOG.md DOCUMENTATION.md WAVE.md LICENSING.md -t "$pkgdir/usr/share/doc/$pkgname/"
+  install -Dm644 share/nvidia/50-tidewm.json "$pkgdir/usr/share/tidewm/nvidia/50-tidewm.json"
+  install -Dm644 share/nvidia/50-tidewm.json "$pkgdir/etc/nvidia/nvidia-application-profiles-rc.d/50-tidewm.json"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 share/icons/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LOGO-NOTICE"
   install -Dm644 LICENSES/CC-BY-NC-SA-4.0.txt "$pkgdir/usr/share/licenses/$pkgname/CC-BY-NC-SA-4.0.txt"

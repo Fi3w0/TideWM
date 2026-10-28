@@ -14,6 +14,12 @@ in
   options.programs.tidewm = {
     enable = lib.mkEnableOption "the TideWM Wayland compositor";
 
+    nvidiaProfile.enable = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Install TideWM's NVIDIA OpenGL memory-reuse profile. Ignored by other drivers.";
+    };
+
     package = lib.mkOption {
       type = lib.types.package;
       description = "The TideWM package to use. The flake sets this to its own build.";
@@ -24,6 +30,11 @@ in
     environment.systemPackages = [ cfg.package ];
 
     services.displayManager.sessionPackages = [ cfg.package ];
+
+    environment.etc = lib.mkIf cfg.nvidiaProfile.enable {
+      "nvidia/nvidia-application-profiles-rc.d/50-tidewm.json".source =
+        "${cfg.package}/share/tidewm/nvidia/50-tidewm.json";
+    };
 
     # TideWM implements the ScreenCast portal itself and routes the rest to
     # the GTK backend (share/xdg-desktop-portal/tidewm-portals.conf).

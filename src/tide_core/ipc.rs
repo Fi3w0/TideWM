@@ -102,6 +102,11 @@ enum Request {
     /// water/wallpaper toggles that drive most of the cost. The CLI takes
     /// two snapshots across a window and derives CPU% from the delta.
     Perf,
+    EbbStats,
+    EbbRun {
+        #[serde(default)]
+        deep: bool,
+    },
     Action {
         action: String,
     },
@@ -214,10 +219,11 @@ pub(crate) enum EventKind {
     Engine,
     /// `scroll-changed`: a Scroll strip's position or columns changed.
     Scroll,
+    Ebb,
 }
 
 impl EventKind {
-    const ALL: [EventKind; 11] = [
+    const ALL: [EventKind; 12] = [
         EventKind::Window,
         EventKind::Workspace,
         EventKind::Focus,
@@ -229,6 +235,7 @@ impl EventKind {
         EventKind::Mode,
         EventKind::Engine,
         EventKind::Scroll,
+        EventKind::Ebb,
     ];
 
     /// Lowercase kebab string used in the ack and in the `events` array of
@@ -248,6 +255,7 @@ impl EventKind {
             EventKind::Mode => "mode",
             EventKind::Engine => "engine",
             EventKind::Scroll => "scroll",
+            EventKind::Ebb => "ebb",
         }
     }
 }
@@ -305,6 +313,9 @@ pub(crate) enum IpcEvent {
         surface: WlSurface,
         tier: u8,
     },
+    EbbWarning {
+        warning: crate::ebb::Warning,
+    },
     DepthSettingsChanged,
     DepthBackgroundChanged,
     ConfigReloaded,
@@ -348,6 +359,7 @@ impl IpcEvent {
             IpcEvent::DepthChanged { .. }
             | IpcEvent::DepthSettingsChanged
             | IpcEvent::DepthBackgroundChanged => EventKind::Depth,
+            IpcEvent::EbbWarning { .. } => EventKind::Ebb,
             IpcEvent::ConfigReloaded => EventKind::Config,
             IpcEvent::LayoutChanged { .. } => EventKind::Layout,
             IpcEvent::OutputChanged { .. } => EventKind::Output,
@@ -372,6 +384,7 @@ impl IpcEvent {
             IpcEvent::DepthChanged { .. } => "depth-changed",
             IpcEvent::DepthSettingsChanged => "depth-settings-changed",
             IpcEvent::DepthBackgroundChanged => "depth-background-changed",
+            IpcEvent::EbbWarning { .. } => "ebb-warning",
             IpcEvent::ConfigReloaded => "config-reloaded",
             IpcEvent::LayoutChanged { .. } => "layout-changed",
             IpcEvent::OutputChanged { .. } => "output-changed",
@@ -446,6 +459,7 @@ impl IpcEvent {
             IpcEvent::EngineChanged { from, to } => json!({ "from": from, "to": to }),
             IpcEvent::ScrollChanged { output } => scroll_json(state, output),
             IpcEvent::DepthSettingsChanged | IpcEvent::DepthBackgroundChanged => depth_json(state),
+            IpcEvent::EbbWarning { warning } => json!(warning),
             IpcEvent::ConfigReloaded => serde_json::Value::Null,
         };
         let mut line = serde_json::to_vec(&json!({ "event": self.event_name(), "data": data }))
@@ -1011,6 +1025,11 @@ fn handle_request(state: &mut Smallvil, request: Request) -> serde_json::Value {
             }
         }
         Request::Diagnostics => json!({ "ok": true, "data": diagnostics_json(state) }),
+        Request::EbbRun { deep } => match state.queue_ebb_pass(deep) {
+            Ok(()) => json!({"ok":true,"data":{"queued":true,"deep":deep}}),
+            Err(error) => json!({"ok":false,"error":error}),
+        },
+        Request::EbbStats => json!({ "ok": true, "data": state.ebb.stats(&state.config.ebb) }),
         Request::Perf => json!({ "ok": true, "data": perf_snapshot_json(state) }),
         // Subscribe is intercepted upstream in `register_connection` before
         // `response_payload` ever runs, since handling it requires the
@@ -1414,37 +1433,19 @@ fn diagnostics_json(state: &Smallvil) -> serde_json::Value {
     })
 }
 
-/// Point-in-time performance snapshot for `tidectl perf`. Combines
-/// process-level resource use read from the compositor's own `/proc/self`
-/// and `getrusage` (always about the right process) with the
-/// render/runtime self-statistics only a running compositor knows. The
-/// CLI samples this twice across a window and derives CPU% from the
-/// `cpu_user_us`/`cpu_system_us` delta; a single snapshot is enough for
-/// everything else. No GPU-busy%: that needs a vendor-specific source
-/// this process can't read portably (see AGENT.md's perf notes), so the
-/// compositor's own animation/output state is the proxy for render load.
-fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
-    let outputs: Vec<serde_json::Value> = state
-        .space
-        .outputs()
-        .map(|output| {
-            let mode = output.current_mode();
-            let refresh_mhz = mode.map(|m| m.refresh).unwrap_or(0);
-            let logical = state.space.output_geometry(output);
-            json!({
-                "name": output.name(),
-                "logical_width": logical.map(|g| g.size.w).unwrap_or(0),
-                "logical_height": logical.map(|g| g.size.h).unwrap_or(0),
-                "mode_width": mode.map(|m| m.size.w).unwrap_or(0),
-                "mode_height": mode.map(|m| m.size.h).unwrap_or(0),
-                "refresh_hz": if refresh_mhz > 0 { refresh_mhz as f64 / 1000.0 } else { 0.0 },
-                "scale": output.current_scale().fractional_scale(),
-                "transform": format!("{:?}", output.current_transform()),
-                "native_render": state.render.motion.native_render_stats.get(output),
-            })
-        })
-        .collect();
-    let visible_windows = state.space.elements().count();
+/// Same payload estimate for perf and Ebb; no client buffers or driver pools.
+pub(crate) struct TextureEstimate {
+    pub backdrop_texture_bytes: u64,
+    pub layer_alpha_mask_bytes: u64,
+    pub wallpaper_texture_bytes: u64,
+    pub depth_texture_bytes: u64,
+    pub caustics_texture_bytes: u64,
+    pub transition_texture_bytes: u64,
+    pub shader_stage_bytes: u64,
+    pub tide_texture_estimate_bytes: u64,
+}
+
+pub(crate) fn tide_texture_estimate(state: &Smallvil) -> TextureEstimate {
     let backdrop_texture_bytes = state
         .render
         .gpu
@@ -1493,6 +1494,74 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
                     total.saturating_add(transition.estimated_texture_bytes())
                 }),
         );
+    let shader_stage_bytes = state
+        .render
+        .gpu
+        .custom_shader_instances
+        .values()
+        .fold(0_u64, |total, instance| {
+            total.saturating_add(instance.target_bytes())
+        });
+    let tide_texture_estimate_bytes = backdrop_texture_bytes
+        .saturating_add(shader_stage_bytes)
+        .saturating_add(layer_alpha_mask_bytes)
+        .saturating_add(wallpaper_texture_bytes)
+        .saturating_add(depth_texture_bytes)
+        .saturating_add(caustics_texture_bytes)
+        .saturating_add(transition_texture_bytes);
+    TextureEstimate {
+        backdrop_texture_bytes,
+        layer_alpha_mask_bytes,
+        wallpaper_texture_bytes,
+        depth_texture_bytes,
+        caustics_texture_bytes,
+        transition_texture_bytes,
+        shader_stage_bytes,
+        tide_texture_estimate_bytes,
+    }
+}
+
+/// Point-in-time performance snapshot for `tidectl perf`. Combines
+/// process-level resource use read from the compositor's own `/proc/self`
+/// and `getrusage` (always about the right process) with the
+/// render/runtime self-statistics only a running compositor knows. The
+/// CLI samples this twice across a window and derives CPU% from the
+/// `cpu_user_us`/`cpu_system_us` delta; a single snapshot is enough for
+/// everything else. No GPU-busy%: that needs a vendor-specific source
+/// this process can't read portably (see AGENT.md's perf notes), so the
+/// compositor's own animation/output state is the proxy for render load.
+fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
+    let outputs: Vec<serde_json::Value> = state
+        .space
+        .outputs()
+        .map(|output| {
+            let mode = output.current_mode();
+            let refresh_mhz = mode.map(|m| m.refresh).unwrap_or(0);
+            let logical = state.space.output_geometry(output);
+            json!({
+                "name": output.name(),
+                "logical_width": logical.map(|g| g.size.w).unwrap_or(0),
+                "logical_height": logical.map(|g| g.size.h).unwrap_or(0),
+                "mode_width": mode.map(|m| m.size.w).unwrap_or(0),
+                "mode_height": mode.map(|m| m.size.h).unwrap_or(0),
+                "refresh_hz": if refresh_mhz > 0 { refresh_mhz as f64 / 1000.0 } else { 0.0 },
+                "scale": output.current_scale().fractional_scale(),
+                "transform": format!("{:?}", output.current_transform()),
+                "native_render": state.render.motion.native_render_stats.get(output),
+            })
+        })
+        .collect();
+    let visible_windows = state.space.elements().count();
+    let TextureEstimate {
+        backdrop_texture_bytes,
+        layer_alpha_mask_bytes,
+        wallpaper_texture_bytes,
+        depth_texture_bytes,
+        caustics_texture_bytes,
+        transition_texture_bytes,
+        shader_stage_bytes,
+        tide_texture_estimate_bytes,
+    } = tide_texture_estimate(state);
     let shader_capture_bytes = state
         .render
         .gpu
@@ -1508,14 +1577,6 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
         .fold(0_u64, |total, (_, capture)| {
             total.saturating_add(capture.estimated_texture_bytes())
         });
-    let shader_stage_bytes = state
-        .render
-        .gpu
-        .custom_shader_instances
-        .values()
-        .fold(0_u64, |total, instance| {
-            total.saturating_add(instance.target_bytes())
-        });
     let (shader_programs, shader_compiles, shader_compile_failures) =
         state.render.gpu.custom_shader_programs.stats();
     let shader_updates = state
@@ -1526,13 +1587,6 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
         .fold(0_u64, |total, instance| {
             total.saturating_add(instance.updates())
         });
-    let tide_texture_estimate_bytes = backdrop_texture_bytes
-        .saturating_add(shader_stage_bytes)
-        .saturating_add(layer_alpha_mask_bytes)
-        .saturating_add(wallpaper_texture_bytes)
-        .saturating_add(depth_texture_bytes)
-        .saturating_add(caustics_texture_bytes)
-        .saturating_add(transition_texture_bytes);
     #[cfg(feature = "screencast")]
     let screencast_feature = state.screencast.is_some();
     #[cfg(not(feature = "screencast"))]
@@ -1599,7 +1653,7 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
 /// thread count from `/proc/self/status`. All best-effort: a read failure
 /// (very locked-down container without proc) zeroes every field rather
 /// than failing the whole snapshot.
-fn read_self_proc() -> Option<(u64, u64, u64)> {
+pub(crate) fn read_self_proc() -> Option<(u64, u64, u64)> {
     let rollup = std::fs::read_to_string("/proc/self/smaps_rollup").ok()?;
     let pss = first_kb_field(&rollup, "Pss:")?;
     let rss = first_kb_field(&rollup, "Rss:")?;

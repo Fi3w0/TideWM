@@ -5,7 +5,7 @@ use std::{
 
 use smithay::{
     backend::{
-        renderer::{damage::OutputDamageTracker, gles::GlesRenderer},
+        renderer::{damage::OutputDamageTracker, gles::GlesRenderer, Renderer},
         winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend},
     },
     output::{Mode, Output, PhysicalProperties, Subpixel},
@@ -185,6 +185,16 @@ pub fn init_winit(
     event_loop
         .handle()
         .insert_source(timer, move |_, _, state| {
+            state.ebb_tick(false);
+            state.ebb_maintain(false);
+            if state.ebb.trim.cleanup_pending && !state.ebb_trim_busy() {
+                for entry in &mut outputs {
+                    if let Err(error) = entry.backend.renderer().cleanup_texture_cache() {
+                        tracing::debug!(%error,"Ebb nested texture cleanup unavailable");
+                    }
+                }
+                state.ebb_after_texture_cleanup();
+            }
             state.update_window_depths();
             state.update_urgent_pulses();
             state.update_float_physics_full();

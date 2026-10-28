@@ -28,6 +28,14 @@ pub struct ClassicDepthDeck {
 }
 
 impl ClassicDepthDeck {
+    pub(crate) fn dead_window_references(&self) -> usize {
+        use smithay::utils::IsAlive;
+        self.entries
+            .iter()
+            .filter(|entry| !entry.window.alive())
+            .count()
+    }
+
     pub fn entry(&self, surface: &WlSurface) -> Option<&DepthDeckEntry> {
         self.entries.iter().find(|entry| &entry.surface == surface)
     }

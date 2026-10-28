@@ -87,3 +87,63 @@ To change the build options, override the package: `tidewm.packages.x86_64-linux
 ## After installing
 
 Log out and pick **TideWM** in your display manager. The first launch writes `~/.config/tidewm/config.wave` and `keybinds.wave`. `Super+Return` opens a terminal, and the empty desktop shows your current binds and the config path.
+
+## NVIDIA profile
+
+The packages provide `50-tidewm.json`, a small NVIDIA OpenGL application profile
+matching only the `TideWM` process. It sets `GLVidHeapReuseRatio = 0` to limit the
+driver's pool of freed video memory. It adds no NVIDIA driver dependency; other
+drivers ignore it. Ebb and TideWM work without it.
+
+One native comparison on NVIDIA 595.104.02 found process GPU memory settled at
+109 MiB without the profile and 49 MiB with it after the same screenshot
+workload. RAM growth was unchanged. This supports the setting on that machine,
+not a guarantee for every GPU, driver, workload or long session.
+
+- **Arch/Gentoo:** packages install the active profile at
+  `/etc/nvidia/nvidia-application-profiles-rc.d/50-tidewm.json`, plus a copy under
+  `/usr/share/tidewm/nvidia/`. Arch tracks it as a backup file; Gentoo uses normal
+  `/etc` configuration protection. Administrator edits are preserved on upgrades.
+- **Source installer:** `install.sh` supplies a copy under
+  `/usr/local/share/tidewm/nvidia/` and installs the `/etc` file only when there
+  is no existing file or symlink at that path.
+- **NixOS module:** installs the `/etc` profile declaratively. Set
+  `programs.tidewm.nvidiaProfile.enable = false;` to opt out or manage your own
+  profile. It does not enable or install NVIDIA drivers.
+- **Nix package without the module:** supplies the data under
+  `$out/share/tidewm/nvidia/`; installing the package alone does not activate it.
+  A user-level profile works without root. For example, after building the
+  package as `result`, run:
+
+  ```bash
+  install -Dm644 result/share/tidewm/nvidia/50-tidewm.json \
+    "$HOME/.nv/nvidia-application-profiles-rc.d/50-tidewm.json"
+  ```
+
+The NVIDIA driver reads application profiles when it loads into a process, so
+log out/back into TideWM after adding or changing the profile. No reboot is
+needed. Existing sessions keep their startup settings.
+
+To disable just the packaged TideWM rule on Arch/Gentoo/source installs, replace
+the contents of its `/etc` file with this valid empty configuration (preserve
+any custom settings elsewhere):
+
+```json
+{"rules": [], "profiles": []}
+```
+
+Do not just rename a file within `nvidia-application-profiles-rc.d`: NVIDIA reads
+regular files there regardless of extension. An empty configuration also leaves
+an administrator edit for normal package configuration protection. For a
+user-level installation, remove its user-level file and ensure there is no
+system-level TideWM rule. On NixOS, use the module option above. Relog after
+rollback too. The source installer will preserve a customized empty file.
+
+`tidectl doctor` inspects the selected compositor's mapped OpenGL libraries.
+On proprietary NVIDIA OpenGL it checks the standard system/user `50-tidewm.json`
+locations for the bundled data. It skips explicit application-profile disabling
+or customized/unreadable files. A missing profile is an optional recommendation,
+not a compositor failure. Profiles under other names, NVIDIA's extended JSON and
+rule precedence are not evaluated; a PASS means the file is present, not proof
+of the driver's effective setting. User profiles and driver-global options may
+override the packaged file.

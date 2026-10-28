@@ -155,11 +155,35 @@ pub enum ScreencastEvent {
 /// Screencast subsystem handle.
 pub struct ScreencastState {
     sender: channel::Sender<ScreencastEvent>,
+    active_targets: std::cell::RefCell<Vec<std::sync::Weak<AtomicBool>>>,
     outputs: Arc<Mutex<Vec<OutputSnapshot>>>,
     windows: Arc<Mutex<HashMap<u64, WindowSnapshot>>>,
 }
 
 impl ScreencastState {
+    /// Weak liveness flags protect cache consumers between PipeWire requests,
+    /// without retaining stream frames or client resources in the compositor.
+    pub(crate) fn observe_target(&self, target: &FrameTarget) {
+        let mut targets = self.active_targets.borrow_mut();
+        targets.retain(|weak| {
+            weak.upgrade()
+                .is_some_and(|closed| !closed.load(Ordering::Acquire))
+        });
+        let weak = Arc::downgrade(&target.closed);
+        if !targets.iter().any(|candidate| candidate.ptr_eq(&weak)) {
+            targets.push(weak);
+        }
+    }
+
+    pub(crate) fn has_live_targets(&self) -> bool {
+        let mut targets = self.active_targets.borrow_mut();
+        targets.retain(|weak| {
+            weak.upgrade()
+                .is_some_and(|closed| !closed.load(Ordering::Acquire))
+        });
+        !targets.is_empty()
+    }
+
     /// Rebuilds the output snapshot the DBus thread validates
     /// `RecordMonitor` connector names against. Call this whenever the
     /// output list changes (hotplug add/remove) -- see the two call
@@ -350,6 +374,7 @@ pub fn init<'a>(
 
     let state = ScreencastState {
         sender,
+        active_targets: Default::default(),
         outputs: Arc::new(Mutex::new(Vec::new())),
         windows: Arc::new(Mutex::new(HashMap::new())),
     };
@@ -365,6 +390,28 @@ pub fn init<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_protection_uses_weak_liveness_not_frame_ownership() {
+        let (sender, _) = channel::channel();
+        let state = ScreencastState {
+            sender,
+            outputs: Default::default(),
+            windows: Default::default(),
+            active_targets: Default::default(),
+        };
+        let target = FrameTarget::new(false);
+        state.observe_target(&target);
+        state.observe_target(&target);
+        assert!(state.has_live_targets());
+        assert_eq!(state.active_targets.borrow().len(), 1);
+        target.close();
+        assert!(!state.has_live_targets());
+        let target = FrameTarget::new(false);
+        state.observe_target(&target);
+        drop(target);
+        assert!(!state.has_live_targets());
+    }
 
     #[test]
     fn failed_frame_clears_stale_pixels_and_close_is_terminal() {

@@ -2,6 +2,37 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.4 — Ebb Phase 2: trim out-of-view caches
+
+- Added `ebb/trim.rs` (pass timing, weak hidden clocks, bounded reports), `ebb/pressure.rs` (optional PSI), `state/ebb_trim.rs` (visibility, pass execution, PSI registration), `share/defaults/ebb.wave`, `tidectl ebb init/run`, and per-app `rule { ebb }`. No new dependency, thread or service.
+- Eligibility: only `render.gpu` rebuildable caches (backdrop textures, layer alpha masks, depth schematics, custom-shader stage targets) and dead-output solid buffers. Protected: every current render placement on every output, all mapped layer surfaces, pinned and fullscreen windows; unknown placements protect everything. Caches are trimmed only after a per-mode hidden delay (low 30m, balanced 10m, aggressive 2m); deep passes skip the delay and additionally shrink maps at least 4× oversized. Close snapshots, client buffers and live frames are never evicted.
+- Passes run from the existing backend maintenance tick under a 1–10 ms `pass_budget`, never during a frame, IPC reply, grab, structural animation, camera movement or capture consumer. Manual requests coalesce; a cooldown of `check_every` prevents hammering. Visibility is rechecked against fresh placements inside the pass (`refresh_space` first, covering Classic cached output membership for a just-mapped window), not trusted from the hidden clock.
+- `ebb_after_texture_cleanup` now performs the heap trim only when a pass queued both cleanup and heap work; nested cleanup sweeps its renderer first. Caps gate cache and heap trimming together, with the existing 90 % hysteresis and blocked-retry finding.
+- Pressure uses the kernel PSI interface only: `MEMORY_PRESSURE_WATCH`/`WRITE` when systemd provides it, else the unified cgroup’s `memory.pressure`, else `/proc/pressure/memory`; the fd is validated by `statfs`/path before a trigger is written, and a private epoll wrapper translates `POLLPRI` to calloop READ. Unavailable PSI falls back to sampled system availability (10 % balanced, 15 % aggressive).
+- `ebb.wave` is generated with `include "ebb.wave"` on first run; `tidectl ebb init` backs up the main file, preserves symlinks/permissions, refuses to shadow inline `ebb { }`, and never overwrites an existing file. IPC gains `ebb-run` (`deep` flag).
+- Verification: 738 tests (706 compositor + 23 tidectl + 9 wavefmt), fmt, both strict Clippy variants, debug build. Isolated fixtured tests cover visibility/protection, caps, per-app off, budget exhaustion, dead handles, init idempotence/symlinks/inline refusal, PSI payload bounds, and shader-stage trimming retaining clocks. **Not run in a real session**: live cache trimming, PSI firing, screens-off passes, `tidectl ebb init` against the maintainer’s config and long-run behavior remain for Fiw. Phase 3 (per-app reports, shell pressure event, 24 h/8 h-away soak) is not implemented. CHANGELOG/TODO/worklog updated; no native claim.
+
+## 0.91.3 — Package the measured NVIDIA memory-reuse profile
+
+- Added `share/nvidia/50-tidewm.json`, matching the native-tested profile (`GLVidHeapReuseRatio = 0`, process `TideWM` only). Arch/Gentoo install data plus the standard `/etc` profile, with normal configuration protection; the source installer preserves an existing profile. Nix packages include the data and the NixOS module wires `/etc` through a default-on `programs.tidewm.nvidiaProfile.enable` option. No driver dependency is added.
+- Host-side doctor checks mapped proprietary NVIDIA OpenGL libraries in the selected compositor, rather than inferring use from globally loaded GPU modules. It reports the bundled profile’s presence, skips customized/unreadable files or explicit profile disabling, and warns that a missing profile is optional. It does not claim to evaluate NVIDIA’s complete precedence/parser or the live effective setting.
+- Native A/B on one machine, driver 595.104.02, same output modes/scales and five screenshots per output: process GPU 71→109 MiB without vs 41→49 MiB with the profile; four repeated rounds stayed flat. PSS grew 24.035 MiB in both runs, with zero Ebb heap trims. This is one live-desktop comparison, not a universal hardware or long-run guarantee. No RAM/leak-fix claim.
+- No compositor renderer or Ebb behavior changes. Documented package paths, standalone user setup, relog requirement, customization and rollback.
+
+## 0.91.2 — Ebb Phase 1: watch and tell
+
+- Added `config/ebb.rs`, a bounded telemetry coordinator, maintenance integration for native and nested backends, `ebb-stats` IPC / `tidectl ebb stats`, and the `ebb` subscription channel with `ebb-warning`. No new dependencies or threads.
+- Samples reuse perf’s PSS reader and texture estimate; missing kernel signals remain null. Recent history has 1,440 slots, with 168 older hourly aggregates. Owner detail is kept for the latest sample only. No persistent telemetry files.
+- Reports sustained PSS/texture/fd growth and continuous away-period growth; growth requires enough evidence and is described as observed, without claiming attribution or a leak fix. Retained-reference audits include hidden owners (workspace/Ocean trees, parked group members, swallowed windows and Depth Deck), GPU/per-window maps and disconnected-output caches. Audits do not delete owner state.
+- `check_every` clamps to 10s–10m with diagnostics. Animation deferral is capped at one check interval so continuous borders cannot starve telemetry; grabs always postpone sampling. Warn when a sample exceeds 2 ms.
+- After native Smithay cleanup, glibc `malloc_trim(0)` is gated by idle time, animation/grab checks, mode and optional caps. Caps use 90% hysteresis; an unsuccessful over-cap trim blocks retries until the gate clears or changes. No cache eviction in Phase 1; caps are soft gates, not enforced memory limits. musl skips heap trimming.
+- Size lowering uses exact decimal parsing before Lua conversion; serialization falls back to bytes when preserving a larger unit would lose precision.
+- Full hidden-cache trimming, pressure-triggered passes, per-app accounting and `ebb init/run` remain later phases. NVIDIA driver-profile packaging remains gated on native A/B evidence; no profile is installed by this release.
+
+## 0.91.1 — Wave memory size literals
+
+- Added typed whole-byte sizes to Wave: decimal `B`/`KB`/`MB`/`GB`, binary `KiB`/`MiB`/`GiB`. Arithmetic retains the left operand’s unit; results must be finite nonnegative whole bytes within Lua’s exact integer range. Variables, lists, lowering and eval preserve size values. Parser/evaluation regression coverage includes mixed units and invalid arithmetic.
+
 ## 0.91.0 — `config.rs` split (plan step 9)
 
 - Layout approved by Fiw 2026-10-28: by domain (each file holds a domain's config types, their `Default`/`impl`s and the `apply_*`/`lower_*` functions that fill them), caller paths kept through explicit re-exports from `config/mod.rs`, tests moved verbatim.

@@ -154,6 +154,28 @@ For tools: each `tidectl outputs` entry has a `scroll` object (`offset`, `orient
 | Multi-GPU client offload | Done; not yet tested on a hybrid laptop |
 | AUR package | Not yet |
 
+## Ebb resource monitoring (0.91.2–0.91.4)
+
+Ebb adds bounded in-memory PSS/fd/texture-estimate history, growth and
+retained-reference findings, `tidectl ebb stats`, and a generic `ebb-warning`
+IPC event. Native idle maintenance can return free glibc heap pages; musl skips
+that operation. Phase 2 adds out-of-view eviction of rebuildable `render.gpu`
+caches, map shrinking, per-mode hidden delays, caps that gate both cache and
+heap trimming, per-app `rule { ebb = ... }`, generated `ebb.wave` with
+`tidectl ebb init`, manual `tidectl ebb run [--deep]` passes, and optional kernel
+PSI pressure triggers. It adds no dependency or telemetry thread. Per-app
+ownership reports, a shell-facing pressure event and multi-day soak evidence
+remain planned; Phase 2 has local gates and fixture tests but no real-session
+verification yet. See [the Ebb reference](DOCUMENTATION.md#ebb) for settings,
+scopes and limitations. No memory-saving or cross-compositor performance claim
+follows from the implementation.
+
+The optional NVIDIA driver profile is now packaged (0.91.3), with a host-side
+`tidectl doctor` installation check. One live-desktop screenshot comparison
+settled at 109 MiB without versus 49 MiB with it in driver-reported process GPU
+memory; RAM growth was unchanged. That is scoped hardware evidence, not a
+universal or long-session guarantee. See [profile setup and rollback](packaging/README.md#nvidia-profile).
+
 ## Hardware
 
 | Hardware | Status |

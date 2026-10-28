@@ -1046,6 +1046,14 @@ impl ShaderInstance {
         &self.targets
     }
 
+    /// Drop only rebuildable stage targets; keep animation epoch and clocks.
+    pub(crate) fn trim_targets(&mut self) -> u64 {
+        let bytes = self.target_bytes();
+        self.targets = Vec::new();
+        self.chain_version = None;
+        bytes
+    }
+
     /// RGBA payload of the stage targets.
     pub fn target_bytes(&self) -> u64 {
         self.targets.iter().fold(0, |total, target| {
@@ -1521,6 +1529,21 @@ mod tests {
     use super::*;
 
     const PASSTHROUGH: &str = "vec4 tide_effect(vec2 uv) {\n    return texture2D(tex, uv);\n}\n";
+
+    #[test]
+    fn trimming_stage_targets_preserves_shader_time_and_forces_rebuild() {
+        let mut instance = ShaderInstance::new();
+        instance.sample(CommitCounter::from(1usize));
+        let epoch = instance.epoch;
+        let timing = instance.timing();
+        let updates = instance.updates();
+        instance.chain_version = Some(7);
+        assert_eq!(instance.trim_targets(), 0);
+        assert_eq!(instance.epoch, epoch);
+        assert_eq!(instance.timing(), timing);
+        assert_eq!(instance.updates(), updates);
+        assert_eq!(instance.chain_version(), None);
+    }
 
     #[test]
     fn passthrough_satisfies_the_contract() {

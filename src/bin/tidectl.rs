@@ -26,6 +26,7 @@
 //! of polling the one-shot queries -- instant updates, no busy loop.
 
 mod tidectl_diagnostics;
+mod tidectl_ebb;
 
 use std::env;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -97,6 +98,47 @@ fn main() {
         _ => {}
     }
 
+    if args.first().is_some_and(|arg| arg == "ebb") && args.get(1).is_some_and(|arg| arg == "init")
+    {
+        let mut path = None;
+        let mut index = 2;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--json" | "-j" => json_output = true,
+                "--config" => {
+                    index += 1;
+                    path = Some(PathBuf::from(
+                        args.get(index)
+                            .unwrap_or_else(|| fail("--config requires a path")),
+                    ));
+                }
+                _ => fail("usage: tidectl ebb init [--config <path>] [--json]"),
+            }
+            index += 1;
+        }
+        let path = path.unwrap_or_else(|| {
+            let selected = socket_override.clone().or_else(|| find_socket().ok());
+            if let Some(socket) = selected {
+                let response = send_request(&socket, &json!({"request":"diagnostics"}))
+                    .unwrap_or_else(|error| fail(&error.to_string()));
+                return PathBuf::from(response["data"]["config_path"].as_str().unwrap_or_else(
+                    || fail("selected compositor did not supply its config path"),
+                ));
+            }
+            tidectl_ebb::default_config_path().unwrap_or_else(|error| fail(&error.to_string()))
+        });
+        let data = tidectl_ebb::init(&path).unwrap_or_else(|error| fail(&error.to_string()));
+        if json_output {
+            println!("{}", json!({"ok":true,"data":data}));
+        } else {
+            println!("Ebb config: {}", data["file"].as_str().unwrap_or("?"));
+            if let Some(backup) = data["backup"].as_str() {
+                println!("Main config backup: {backup}");
+            }
+        }
+        return;
+    }
+
     let socket = socket_override
         .clone()
         .map(Ok)
@@ -115,6 +157,10 @@ fn main() {
         cmd_subscribe(&socket, socket_override.is_none(), &args[1..]);
     }
 
+    if args[0] == "ebb" {
+        json_output |= args[1..].iter().any(|arg| arg == "--json" || arg == "-j");
+        args.retain(|arg| arg != "--json" && arg != "-j");
+    }
     let request = build_request(&args).unwrap_or_else(|msg| fail(&msg));
     let response = match send_request(&socket, &request) {
         Ok(r) => r,
@@ -709,6 +755,17 @@ fn depth_request(args: &[String]) -> Result<Value, String> {
 fn build_request(args: &[String]) -> Result<Value, String> {
     let rest = &args[1..];
     match args[0].as_str() {
+        "ebb" => {
+            if rest == ["stats"] {
+                Ok(json!({ "request": "ebb-stats" }))
+            } else if rest == ["run"] {
+                Ok(json!({"request":"ebb-run","deep":false}))
+            } else if rest == ["run", "--deep"] {
+                Ok(json!({"request":"ebb-run","deep":true}))
+            } else {
+                Err("usage: tidectl ebb stats | run [--deep] | init [--config <path>]".into())
+            }
+        }
         "focus-window" if rest.len() == 1 => {
             let id = rest[0]
                 .parse::<u64>()
@@ -901,6 +958,56 @@ fn send_request(socket_path: &Path, request: &Value) -> std::io::Result<Value> {
     serde_json::from_slice(line).map_err(std::io::Error::other)
 }
 
+fn print_ebb_stats(data: &Value) {
+    if data["queued"] == true {
+        println!(
+            "Ebb {} pass queued; use tidectl ebb stats for the result",
+            if data["deep"] == true {
+                "deep"
+            } else {
+                "light"
+            }
+        );
+        return;
+    }
+    println!("Ebb resource use");
+    println!("Samples: {}", data["sample_count"]);
+    let latest = &data["latest"];
+    if latest.is_null() {
+        println!("Waiting for the first quiet sample.");
+    } else {
+        let memory = latest["pss_bytes"]
+            .as_u64()
+            .map(|v| format!("{:.1} MiB", v as f64 / 1_048_576.0))
+            .unwrap_or_else(|| "unknown".into());
+        println!("TideWM PSS: {memory}");
+        println!(
+            "TideWM texture estimate: {:.1} MiB",
+            latest["texture_bytes"].as_u64().unwrap_or(0) as f64 / 1_048_576.0
+        );
+        println!(
+            "Open files: {}; away: {}",
+            latest["fd_count"], latest["away"]
+        );
+        println!("Sample cost: {} µs", latest["cost_us"]);
+    }
+    println!("VRAM: unknown (texture estimate excludes client buffers and driver pools)");
+    println!(
+        "Heap trims: {}; cache passes: {}; cache entries evicted: {}",
+        data["heap_trim"]["calls"],
+        data["cache_passes"]["passes"],
+        data["cache_passes"]["entries_evicted"]
+    );
+    if let Some(warnings) = data["warnings"].as_array() {
+        for warning in warnings.iter().filter(|w| w["active"] == true) {
+            println!(
+                "Warning: {}",
+                warning["message"].as_str().unwrap_or("unknown")
+            );
+        }
+    }
+}
+
 fn print_response(command: &str, data: &Value) {
     match command {
         "outputs" => print_outputs(data),
@@ -920,6 +1027,7 @@ fn print_response(command: &str, data: &Value) {
         }
         "layers" => print_layers(data),
         "keyboard-layouts" | "layout" => print_keyboard_layouts(data),
+        "ebb" => print_ebb_stats(data),
         "eval" | "depth" => println!("{}", serde_json::to_string_pretty(data).unwrap_or_default()),
         _ => println!("ok"),
     }
@@ -1113,6 +1221,9 @@ STREAMING:
 DIAGNOSTICS:
     doctor              run quick health checks (PASS/WARN/FAIL/SKIP)
     doctor --json       same checks as machine-readable JSON
+    ebb stats [--json]     show Ebb resource history and warnings
+    ebb run [--deep]       queue a safe cache pass
+    ebb init [--config <path>] create ebb.wave and add its include
     perf [--window <s>] sample the compositor's RAM/CPU and render state
                         over a window (default 3s); --json for raw output.
                         No GPU-busy% (not portable); use a vendor tool.
@@ -1166,6 +1277,24 @@ tidewm-*.sock under $XDG_RUNTIME_DIR."#
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ebb_stats_uses_a_query_and_rejects_unknown_commands() {
+        assert_eq!(
+            build_request(&["ebb".into(), "stats".into()]).unwrap(),
+            json!({"request":"ebb-stats"})
+        );
+        assert_eq!(
+            build_request(&["ebb".into(), "run".into()]).unwrap(),
+            json!({"request":"ebb-run","deep":false})
+        );
+        assert_eq!(
+            build_request(&["ebb".into(), "run".into(), "--deep".into()]).unwrap(),
+            json!({"request":"ebb-run","deep":true})
+        );
+        assert!(build_request(&["ebb".into(), "run".into(), "--force".into()]).is_err());
+        assert!(build_request(&["ebb".into()]).is_err());
+    }
 
     #[test]
     fn depth_commands_preserve_paths_and_validate_whole_updates() {

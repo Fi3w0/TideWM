@@ -93,6 +93,7 @@ rustPlatform.buildRustPackage {
     substituteInPlace $out/share/wayland-sessions/tidewm.desktop \
       --replace-fail "Exec=TideWM" "Exec=$out/bin/TideWM"
     install -Dm644 share/icons/TideWM-logo-faithful-4k.png $out/share/pixmaps/tidewm.png
+    install -Dm644 share/nvidia/50-tidewm.json $out/share/tidewm/nvidia/50-tidewm.json
     install -Dm644 LICENSE $out/share/licenses/tidewm/LICENSE
     install -Dm644 share/icons/LICENSE $out/share/licenses/tidewm/LOGO-NOTICE
     install -Dm644 LICENSES/CC-BY-NC-SA-4.0.txt $out/share/licenses/tidewm/CC-BY-NC-SA-4.0.txt

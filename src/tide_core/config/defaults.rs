@@ -1,3 +1,5 @@
+pub(super) const DEFAULT_EBB_WAVE: &str = include_str!("../../../share/defaults/ebb.wave");
+
 pub(super) const DEFAULT_CONFIG_WAVE: &str = r#"# TideWM configuration.
 # Full reference, every action string, and the whole protocol matrix:
 # DOCUMENTATION.md in the TideWM repo.
@@ -9,6 +11,7 @@ pub(super) const DEFAULT_CONFIG_WAVE: &str = r#"# TideWM configuration.
 # ~~~~~~~~~~~~~~~~~ the core ~~~~~~~~~~~~~~~~~
 
 include "keybinds.wave"
+include "ebb.wave"
 
 @mod = SUPER                    # one modifier, everything hangs off it
 

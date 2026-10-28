@@ -28,4 +28,11 @@ sudo install -Dm644 LICENSING.md /usr/local/share/doc/tidewm/LICENSING.md
 sudo install -Dm644 share/xdg-desktop-portal/tidewm.portal /usr/share/xdg-desktop-portal/portals/tidewm.portal
 sudo install -Dm644 share/xdg-desktop-portal/tidewm-portals.conf /usr/share/xdg-desktop-portal/tidewm-portals.conf
 
+# Always supply the data, but preserve an existing administrator profile.
+sudo install -Dm644 share/nvidia/50-tidewm.json /usr/local/share/tidewm/nvidia/50-tidewm.json
+nvidia_profile=/etc/nvidia/nvidia-application-profiles-rc.d/50-tidewm.json
+if [[ ! -e "$nvidia_profile" && ! -L "$nvidia_profile" ]]; then
+    sudo install -Dm644 share/nvidia/50-tidewm.json "$nvidia_profile"
+fi
+
 echo "Installed. Log out and pick TideWM in your display manager to use this build."

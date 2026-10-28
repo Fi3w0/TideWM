@@ -202,6 +202,60 @@ fn split_duration(word: &str) -> Option<(&str, &str)> {
     None
 }
 
+/// SI sizes use decimal bytes; IEC sizes use powers of 1024.
+pub(crate) fn size_scale(unit: &str) -> Option<f64> {
+    Some(match unit {
+        "B" => 1.0,
+        "KB" => 1_000.0,
+        "MB" => 1_000_000.0,
+        "GB" => 1_000_000_000.0,
+        "KiB" => 1_024.0,
+        "MiB" => 1_048_576.0,
+        "GiB" => 1_073_741_824.0,
+        _ => return None,
+    })
+}
+
+pub(crate) fn split_size(word: &str) -> Option<(&str, &str)> {
+    for unit in ["KiB", "MiB", "GiB", "KB", "MB", "GB", "B"] {
+        if let Some(num) = word.strip_suffix(unit) {
+            if !num.is_empty()
+                && num
+                    .strip_prefix('-')
+                    .unwrap_or(num)
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '.')
+                && num.parse::<f64>().is_ok()
+            {
+                return Some((num, unit));
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn parse_size_bytes(value: &str) -> Option<u64> {
+    let (number, unit) = split_size(value)?;
+    let scale = size_scale(unit)? as u128;
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+    let divisor = 10_u128.checked_pow(fraction.len().try_into().ok()?)?;
+    let numerator = whole
+        .parse::<u128>()
+        .ok()?
+        .checked_mul(divisor)?
+        .checked_add(if fraction.is_empty() {
+            0
+        } else {
+            fraction.parse::<u128>().ok()?
+        })?;
+    let scaled = numerator.checked_mul(scale)?;
+    if scaled % divisor != 0 {
+        return None;
+    }
+    let bytes = scaled / divisor;
+    (bytes <= 9_007_199_254_740_991).then_some(bytes as u64)
+}
+
 fn is_duration(word: &str) -> bool {
     split_duration(word).is_some()
 }
@@ -367,6 +421,9 @@ impl<'a> Rewriter<'a> {
         if is_color(word) {
             let hex = word.strip_prefix('#').unwrap();
             return Ok(format!("_color({})", lua_quote(&hex[..6.min(hex.len())])));
+        }
+        if let Some((num, unit)) = split_size(word) {
+            return Ok(format!("_size({}, {})", lua_quote(num), lua_quote(unit)));
         }
         if is_duration(word) {
             let (num, unit) = split_duration(word).unwrap();
@@ -613,6 +670,8 @@ fn classify_literal(text: &str) -> String {
     } else if is_color(text) {
         let hex = text.strip_prefix('#').unwrap();
         format!("_color({})", lua_quote(&hex[..6.min(hex.len())]))
+    } else if let Some((num, unit)) = split_size(text) {
+        format!("_size({}, {})", lua_quote(num), lua_quote(unit))
     } else if is_duration(text) {
         let (num, unit) = split_duration(text).unwrap();
         format!("_dur({}, {})", num, lua_quote(unit))
@@ -1039,6 +1098,9 @@ fn rewrite_value(value: &str, sym: &Symbols) -> Result<String, String> {
             let hex = value.strip_prefix('#').unwrap();
             return Ok(format!("_color({})", lua_quote(&hex[..6.min(hex.len())])));
         }
+        if let Some((num, unit)) = split_size(value) {
+            return Ok(format!("_size({}, {})", lua_quote(num), lua_quote(unit)));
+        }
         if is_duration(value) {
             let (num, unit) = split_duration(value).unwrap();
             return Ok(format!("_dur({}, {})", num, lua_quote(unit)));
@@ -1375,6 +1437,9 @@ fn serialize_value(value: Value) -> Result<String, String> {
             if let Ok(d) = ud.borrow::<DurationValue>() {
                 return Ok(d.serialize());
             }
+            if let Ok(size) = ud.borrow::<SizeValue>() {
+                return Ok(size.serialize());
+            }
             if let Ok(c) = ud.borrow::<ColorValue>() {
                 return Ok(c.serialize());
             }
@@ -1491,6 +1556,80 @@ impl mlua::UserData for DurationValue {
         methods.add_meta_method(mlua::MetaMethod::Eq, |_, a, b: DurationValue| {
             Ok(a.ms == b.ms)
         });
+    }
+}
+
+/// Memory size in whole bytes. Bound to Lua's exact integer range so
+/// arithmetic never silently rounds a cap. Keep the left operand's unit.
+#[derive(Clone, Debug)]
+struct SizeValue {
+    bytes: f64,
+    unit: String,
+}
+
+impl SizeValue {
+    fn new(bytes: f64, unit: String) -> mlua::Result<Self> {
+        if !bytes.is_finite()
+            || !(0.0..=9_007_199_254_740_991.0).contains(&bytes)
+            || bytes.fract() != 0.0
+        {
+            return Err(mlua::Error::external(
+                "size must be a nonnegative whole number of bytes, at most 9007199254740991B",
+            ));
+        }
+        Ok(Self { bytes, unit })
+    }
+
+    fn serialize(&self) -> String {
+        let formatted = format!(
+            "{}{}",
+            self.bytes / size_scale(&self.unit).unwrap(),
+            self.unit
+        );
+        if parse_size_bytes(&formatted) == Some(self.bytes as u64) {
+            formatted
+        } else {
+            format!("{}B", self.bytes as u64)
+        }
+    }
+}
+
+impl mlua::FromLua for SizeValue {
+    fn from_lua(value: Value, _lua: &Lua) -> mlua::Result<Self> {
+        match value {
+            Value::UserData(ud) => ud.borrow::<Self>().map(|s| s.clone()),
+            other => Err(mlua::Error::FromLuaConversionError {
+                from: other.type_name(),
+                to: "SizeValue".into(),
+                message: Some("expected a size literal such as `400MB`".into()),
+            }),
+        }
+    }
+}
+
+impl mlua::UserData for SizeValue {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_method(mlua::MetaMethod::Add, |_, a, b: Self| {
+            Self::new(a.bytes + b.bytes, a.unit.clone())
+        });
+        methods.add_meta_method(mlua::MetaMethod::Sub, |_, a, b: Self| {
+            Self::new(a.bytes - b.bytes, a.unit.clone())
+        });
+        methods.add_meta_function(mlua::MetaMethod::Mul, |lua, (a, b): (Value, Value)| {
+            let (size, number) = if let Ok(size) = Self::from_lua(a.clone(), lua) {
+                (size, f64::from_lua(b, lua)?)
+            } else {
+                (Self::from_lua(b, lua)?, f64::from_lua(a, lua)?)
+            };
+            Self::new(size.bytes * number, size.unit)
+        });
+        methods.add_meta_method(mlua::MetaMethod::Div, |_, a, b: f64| {
+            Self::new(a.bytes / b, a.unit.clone())
+        });
+        methods.add_meta_method(mlua::MetaMethod::Unm, |_, a, ()| {
+            Self::new(-a.bytes, a.unit.clone())
+        });
+        methods.add_meta_method(mlua::MetaMethod::Eq, |_, a, b: Self| Ok(a.bytes == b.bytes));
     }
 }
 
@@ -1868,6 +2007,21 @@ fn install_env(
 
     lua.globals()
         .set(
+            "_size",
+            lua.create_function(|_, (number, unit): (String, String)| {
+                let bytes = parse_size_bytes(&format!("{number}{unit}")).ok_or_else(|| {
+                    mlua::Error::external(
+                        "size must be exact whole bytes, at most 9007199254740991B",
+                    )
+                })?;
+                SizeValue::new(bytes as f64, unit)
+            })
+            .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+
+    lua.globals()
+        .set(
             "_dur",
             lua.create_function(|_, (n, unit): (f64, String)| {
                 let (scale, unit): (f64, &'static str) = match unit.as_str() {
@@ -2086,6 +2240,8 @@ pub(crate) fn lua_value_to_json(value: Value) -> Result<serde_json::Value, Strin
             Value::UserData(ud) => {
                 let serialized = if let Ok(d) = ud.borrow::<DurationValue>() {
                     d.serialize()
+                } else if let Ok(size) = ud.borrow::<SizeValue>() {
+                    size.serialize()
                 } else if let Ok(c) = ud.borrow::<ColorValue>() {
                     c.serialize()
                 } else {
@@ -2924,6 +3080,90 @@ mod tests {
         assert_eq!(entries[1], Entry::Assign("duration".into(), "600ms".into()));
         // "sh" always exists, "no-such-binary-xyz" never does: wave() picks sh
         assert_eq!(entries[2], Entry::Assign("terminal".into(), "sh".into()));
+    }
+
+    #[test]
+    fn size_literals_math_variables_lists_and_eval() {
+        let entries = evaluate(
+            "@cap = 400MB\na = cap * 2\nb = 1GB + 500MB\nc = 2 * 512KiB\nd = 1.5MB / 2\ne = [1B, 1KB, 1MiB]\nf = 1GB == 1000MB\ng = 1GiB == 1024MiB\nh = 1MB - 500KB\n",
+            Path::new("test.wave"),
+        ).unwrap();
+        let values: Vec<_> = entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Assign(_, v) => Some(v.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            values,
+            [
+                "800MB",
+                "1.5GB",
+                "1024KiB",
+                "0.75MB",
+                "[1B, 1KB, 1MiB]",
+                "true",
+                "true",
+                "0.5MB"
+            ]
+        );
+        let lua = Lua::new();
+        install_env(
+            &lua,
+            &Rc::new(RefCell::new(vec![Rc::new(RefCell::new(Vec::new()))])),
+            Rc::new(Cell::new(false)),
+            Rc::new(RefCell::new(std::collections::HashMap::new())),
+            Rc::new(RefCell::new(Vec::new())),
+            &TideInfo::default(),
+        )
+        .unwrap();
+        let expression = compile_eval_expression("1GB + 500MB").unwrap();
+        let result: Value = lua.load(format!("return {expression}")).eval().unwrap();
+        assert_eq!(
+            lua_value_to_json(result).unwrap(),
+            serde_json::json!("1.5GB")
+        );
+    }
+
+    #[test]
+    fn sizes_keep_exact_bytes_at_the_lua_integer_boundary() {
+        let entries = evaluate(
+            "a = 9007199254.740991MB\nb = 9007199254740991B\n",
+            Path::new("sizes.wave"),
+        )
+        .unwrap();
+        for entry in entries {
+            if let Entry::Assign(_, value) = entry {
+                assert_eq!(parse_size_bytes(&value), Some(9_007_199_254_740_991));
+            }
+        }
+        assert!(evaluate("a = 9007199254740991.1B\n", Path::new("sizes.wave")).is_err());
+    }
+
+    #[test]
+    fn size_literals_reject_invalid_arithmetic_and_preserve_strings() {
+        for value in [
+            "1B / 0",
+            "1B / 2",
+            "1MB - 2MB",
+            "-1MB",
+            "9007199254740992B",
+            "1MB + 1s",
+        ] {
+            assert!(
+                evaluate(&format!("a = {value}\n"), Path::new("test.wave")).is_err(),
+                "{value}"
+            );
+        }
+        let entries = evaluate("a = \"400MB\"\nb = appMB\n", Path::new("test.wave")).unwrap();
+        assert_eq!(
+            entries,
+            [
+                Entry::Assign("a".into(), "400MB".into()),
+                Entry::Assign("b".into(), "appMB".into())
+            ]
+        );
     }
 
     #[test]

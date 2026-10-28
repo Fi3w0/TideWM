@@ -224,6 +224,8 @@ Single token: a number, `true`/`false`, a color (`#RRGGBB` or `#RRGGBBAA`, seria
 
 **Colors are values.** `#8EDDFF` carries real channels, so `primary.darken(0.35)`, `primary.lighten(0.15)`, and `alpha(a)` (accepted, currently dropped) work in expressions.
 
+**Memory sizes are values.** `400MB * 2` is `800MB`; `1GB + 500MB` is `1.5GB`. `B`, `KB`, `MB`, and `GB` use decimal bytes (1 MB = 1,000,000 B); `KiB`, `MiB`, and `GiB` use powers of 1024. Size arithmetic keeps the left operand’s unit and requires nonnegative whole bytes, at most 9,007,199,254,740,991 B. Variables, lists and `tidectl eval` support sizes. Quoted sizes remain strings. Sizes do not add size support to unrelated numeric configuration keys.
+
 **Durations are values.** `600ms * 2` is `1200ms`, `1.5s * 2` is `3s`, `90m / 2` is `45m`, `1s + 500ms` keeps the first operand's unit. A bare `600` still parses as milliseconds.
 
 **Section globals.** A `name { }` block exposes its body as a Lua table under `name`, so `theme.primary` reads as an expression outside the block, and sibling fields resolve inside the block: `deep = primary.darken(0.35)` reads the `primary` leaf defined above it. A block never clobbers an existing global (the `math` library, the registration functions).

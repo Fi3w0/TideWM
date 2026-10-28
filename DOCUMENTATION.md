@@ -48,6 +48,8 @@ bind $mod+D      { "spawn:rofi -show drun" }
 
 Binds are node form: `bind <combo> { <action> }`, one action per line (or comma-separated on one line). `terminal` is a top-level key, not a `@name` variable — reference it as `$terminal` only after defining `@terminal = ...`.
 
+**Memory sizes are values.** `400MB * 2` is `800MB`; `1GB + 500MB` is `1.5GB`. `B`, `KB`, `MB`, and `GB` use decimal bytes (1 MB = 1,000,000 B); `KiB`, `MiB`, and `GiB` use powers of 1024. Size arithmetic keeps the left operand’s unit and requires nonnegative whole bytes, at most 9,007,199,254,740,991 B. Variables, lists and `tidectl eval` support sizes. Quoted sizes remain strings. Sizes do not add size support to unrelated numeric configuration keys.
+
 **Typed values.** Durations and colors are real values with math: `600ms * 2` is `1200ms`, `1.5s * 2` is `3s`, `2 * 300ms` is `600ms`; `primary.darken(0.35)` and `primary.lighten(0.15)` derive real palette colors. `alpha(a)` is accepted in the same expressions but currently a no-op — it returns the color unchanged rather than adjusting its alpha, matching the config surface's own "alpha in the color form is ignored" behavior (see the `ripple { }` `color` field below). Every duration key accepts a unit (`cursor_hide_after = 2s`) or a bare millisecond number.
 
 **Reactive config.** `on "event" { ... }` registers a handler body that runs when the event fires, with the live `tide` table (`tide.backend`, `tide.gpu.vendor`, `tide.outputs`, `tide.workspace`) refreshed first:
@@ -1629,6 +1631,7 @@ New windows floated by `float`, `pin`, parent/dialog size hints, or `layout = fl
 | `sway` | bool | Per-app opt-in/out for floating sway. Last matching rule wins; unset falls back to `sway.enabled`. |
 | `weight` | float, `0`–`1` | Per-app apparent weight for `buoyancy { }`. Last matching rule wins; unset falls back to `buoyancy.default_weight`; `0` opts the matched floater out. |
 | `depth` | bool | Per-app buoyancy override for the automatic depth/attention system. `false` pins the window at tier 0 forever (never dims/sinks); `true` affirms the normal automatic behavior. Last matching rule wins; unset falls back to `depth.enabled`. |
+| `ebb` | `off`, `low`, `balanced`, `aggressive` | Per-app cache-maintenance mode for this window’s rebuildable caches. `off` keeps them out of every Ebb pass; the other values change when its hidden caches become eligible. Last matching rule wins; unset falls back to `ebb.mode`. |
 | `frost { }` | sub-block | Per-app overrides for every global frost field. Unspecified fields inherit the global block; multiple matching rules merge field by field. |
 | `shadow` | bool / `on`, `off`, `none` | Shorthand to enable or disable compositor shadows for matching windows. |
 | `shadow { }` | sub-block | Per-app overrides for every global shadow field. Unspecified fields inherit the global block; multiple matching rules merge field by field. |
@@ -2134,3 +2137,125 @@ With `workspace_scroll`, `workspace-down`/`workspace-up` slide vertically to the
 Spacing follows `gaps`. A column holds one window or several stacked ones. Along the strip, `focus-*` moves between columns (landing on the window last focused there), `swap-*` moves the whole column and `resize-*` changes the column width; across the strip, they move focus, reorder and resize inside the column. `consume-or-expel-left/right`, `consume-into-column` and `expel-from-column` edit columns (see [Action strings](#action-strings)). New windows open as a column after the focused column. Modifier+right-drag on a Scroll tile resizes its column along the strip and, in a shared column, the window across it. A modifier+left-drag drop lands by zone of the tile under the pointer: the outer quarters along the strip insert a new column before/after it, the outer quarters across it insert into its column above/below it, and the middle swaps. While dragging, a bar (or the whole tile, for a swap) previews the landing spot in the `snap` preview color and opacity. `scroll-left/right` slides the strip half a viewport; `scroll-up/down` pans the vertical stack half a viewport in horizontal Scroll (a no-op with `stack = fit`). No binds are added automatically. Pointer focus (hover, click, touch, tablet) never moves the strip; keyboard focus, `focus-window`/`focus-app` and notification activation reveal the target.
 
 In Scroll mode each `outputs` entry has a `scroll` object with `offset`, `orientation` and `workspaces`; with centering on, `offset` can be negative.
+
+
+## Ebb
+
+Ebb watches TideWM’s resource use, reports suspicious growth and frees only
+rebuildable caches that are out of view. It never closes apps and never evicts
+live client buffers, close snapshots or anything you can see. Resource owners
+still clean up on destruction; Ebb is the safety net for caches that outlive
+their usefulness.
+
+```wave
+# New configs get this as an included ebb.wave; existing ones can add it with
+# `tidectl ebb init`.
+ebb {
+    mode = low                 # off | low | balanced | aggressive
+    check_every = 60s           # clamped to 10s–10m, with a warning
+    # ram_cap = 400MB
+    # cache_cap = 256MiB
+    # vram_cap = 512MiB
+}
+ebb_advanced {
+    light_after = 5m
+    away_after = 15m
+    leak_window = 60m
+    toast = true
+    # pass_budget = 1ms         # clamped to 1–10ms
+}
+```
+
+`mode` sets how eager maintenance is. `off` keeps monitoring and reporting but
+disables every trim. `low` (default) waits 30 minutes hidden before a light pass
+and uses a three-hour deep interval while away; `balanced` uses 10 minutes and
+one hour; `aggressive` uses two minutes and 30 minutes. `light_after` is the
+idle delay before a light pass may run at all, `away_after` defines “away” when
+nothing else does, and `pass_budget` bounds a cache pass. Passes run from the
+backend’s maintenance tick, never inside a frame, IPC reply, grab, structural
+animation, camera movement or active capture consumer.
+
+Passes evict only TideWM-owned, rebuildable captures: window and layer backdrop
+textures, layer dim buffers, cached depth schematics, unused custom-shader stage
+targets and blank buffers for outputs that no longer exist. Windows currently
+rendered on any output, every mapped layer surface, pinned windows and
+fullscreen windows are protected; when visibility cannot be determined, every
+cache is protected. Light passes respect a hidden delay per `mode`; deep passes
+also shrink maps that are at least four times larger than needed. Close
+snapshots, client buffers and live frames are never touched. An evicted cache
+rebuilds on the next frame that needs it.
+
+`tidectl ebb init` creates `ebb.wave` next to the main config and adds
+`include "ebb.wave"`, backing up the main file first. It preserves symlinks and
+permissions, never overwrites an existing `ebb.wave`, and refuses to add the
+include when the main file already has inline `ebb { }` settings that the
+included defaults could shadow. `tidectl ebb run [--deep]` queues a pass; the
+backend runs it on its next maintenance tick, and `tidectl ebb stats` shows the
+result. Manual passes share the same cooldown as automatic ones, so a burst of
+requests coalesces into one pass.
+
+`tidectl ebb stats` prints a short summary. `tidectl ebb stats --json` includes
+the latest sample, history, findings, effective settings, cache-pass counters
+and the pressure source. The IPC requests are `{"request":"ebb-stats"}` and
+`{"request":"ebb-run","deep":false}`. Subscribe to channel `ebb` for
+`ebb-warning`; Wave handlers may use `on "ebb-warning"`. Notifications are
+limited to once per day per finding; an existing error panel or toast takes
+precedence. No history is written to disk. History keeps 1,440 recent samples
+(24 hours at the default interval, four hours at 10 seconds), plus up to 168
+older hourly aggregates. A relog clears it.
+
+Samples contain PSS, open files, TideWM’s texture estimate, system available
+memory and system PSI `some avg10` when readable. Missing signals are `null`.
+The estimate shares `tidectl perf`’s accounting: client buffers, driver pools
+and some decoration/capture allocations are outside its scope. Per-process
+VRAM remains unknown; `vram_cap` uses this texture estimate, explicitly reported
+in stats. Neither the estimate nor PSS is a hard process-memory limit.
+
+Checks prefer quiet moments. Continuous decorative animation may defer one
+check interval, then sampling proceeds outside rendering. An active grab still
+postpones it. A sample taking over 2 ms is reported for investigation. No
+telemetry thread or systemd service is required.
+
+Steady-growth findings need at least six samples across `leak_window`, at least
+80% nondecreasing steps and an hourly increase of at least 8 MiB (PSS/textures)
+or 16 file descriptors. Away-growth checks cover at least 10 minutes of the same
+away period (locked, all outputs off, or idle past `away_after`), or the configured
+window if shorter. Gaps over 20 minutes, changed window counts and missing data
+invalidate a trend. These are investigation signals, not proof of a leak or
+attribution to a client. Very long configured windows need enough recent history.
+
+On glibc, after native renderer-cache maintenance and at least `light_after`
+without input, Ebb can call `malloc_trim(0)` to release already-free allocator
+pages. It skips animation and grabs, and runs at most once per larger of
+`light_after` and `check_every`. `off` disables Ebb trimming but keeps monitoring.
+musl skips this operation. Stats record calls, calls that released pages and the
+last duration; they do not claim a number of bytes saved. The libc call is
+synchronous and cannot be interrupted at `pass_budget`.
+
+On Linux, `balanced` and `aggressive` also watch the kernel’s memory-pressure
+interface (`/proc/pressure/memory`, or this cgroup’s `memory.pressure`) and queue
+a light pass when the kernel reports pressure. No polling thread, systemd
+service or vendor tool is involved. When PSI is unavailable, Ebb falls back to
+the sampled system-availability check.
+
+With any cap configured, heap and cache trimming wait until a measured cap is
+crossed. The gate stays active until that signal reaches 90% of the cap. If a
+pass finds nothing releasable while over a cap, Ebb stops retrying until caps
+clear or change and reports that finding. Caps never permit freeing visible or
+client resources, and they are soft gates rather than enforced memory limits.
+Per-app ownership reports and a shell-facing pressure event remain later phases.
+
+## NVIDIA memory profile
+
+TideWM packages include a process-specific NVIDIA OpenGL profile setting
+`GLVidHeapReuseRatio = 0`, which limits the driver's pool of freed video memory.
+It is optional, ignored by other drivers, and independent of Ebb. It does not
+free live client buffers, enforce Ebb caps or fix RAM growth.
+
+`tidectl doctor` checks its installation when the selected compositor has
+proprietary NVIDIA OpenGL libraries mapped. It does not infer driver use from
+other GPUs on a hybrid machine. A missing profile produces an advisory warning;
+customized files and explicit application-profile disabling are skipped.
+The check verifies the bundled data, not effective driver settings or arbitrary
+custom NVIDIA profiles. See [packaging setup and rollback](packaging/README.md#nvidia-profile).
+Changes take effect after logging out/back into TideWM.

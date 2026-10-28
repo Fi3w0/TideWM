@@ -1,141 +1,239 @@
 <div align="center">
 
-<img src="share/icons/TideWM-logo-faithful-4k.png" width="180" alt="TideWM logo">
+<img src="share/media/readme/header.svg" width="960" alt="TideWM: modular by design, fast by default, yours to shape">
 
-# TideWM
+### A modular Wayland window manager that stays out of your way.
 
-**A Wayland desktop that feels like water.**
+[![License](https://img.shields.io/badge/license-GPL--3.0-5685bd?style=flat-square)](LICENSE)
+![Status](https://img.shields.io/badge/status-beta-607cbb?style=flat-square)
+![Rust](https://img.shields.io/badge/built%20with-Rust%20%2B%20Smithay-3a5ca9?style=flat-square)
+[![Stars](https://img.shields.io/github/stars/Fi3w0/TideWM?style=flat-square&logo=github&label=stars&color=8EDDFF)](https://github.com/Fi3w0/TideWM/stargazers)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/ZhkxA83cKk)
 
-[![Code license](https://img.shields.io/badge/code-GPL--3.0-blue?style=for-the-badge)](LICENSE)
-![Status](https://img.shields.io/badge/status-beta-orange?style=for-the-badge)
-[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/ZhkxA83cKk)
-
-**[<kbd> <br> Try&nbsp;it <br> </kbd>](#try-it)**
-**[<kbd> <br> Docs <br> </kbd>](DOCUMENTATION.md)**
-**[<kbd> <br> Technical&nbsp;report <br> </kbd>](TECHNICAL_REPORT.md)**
-**[<kbd> <br> Config <br> </kbd>](#configuration)**
-**[<kbd> <br> Changelog <br> </kbd>](CHANGELOG.md)**
+[**Install**](#install) · [**Three ways to work**](#three-ways-to-work) · [**Wave config**](#wave-your-best-config) · [**Docs**](DOCUMENTATION.md) · [**Changelog**](CHANGELOG.md)
 
 </div>
 
-Open a window and it ripples outward like a drop landing on a pond. Drag one and it sways. Switch workspaces and a wave sweeps the whole screen. It's not a screensaver sitting on top of your desktop, it's your desktop, and it runs fine on a laptop from 2015.
+Pick how your windows behave: tiled workspaces, scrolling columns or an endless canvas. Switch between them live without closing a single app. Everything else is yours too: your bar, your launcher, your look, one readable config file that reloads on save.
 
-Underneath the water is a real tiling window manager: fast keyboard-driven layouts, multi-monitor, your older X11 apps still work, and a config file you edit and reload without restarting anything.
+<img src="share/media/demo-clasic.gif" width="100%" alt="TideWM demo: tiling, floating glass windows and a wave workspace transition">
 
-## See it
+<p align="center"><sub><a href="share/media/demo-clasic.mp4">Watch in full quality (mp4)</a></sub></p>
 
-<img src="share/media/demo-clasic.gif" width="960" alt="TideWM demo: ripples on open, wave workspace transitions, glass and shadows">
+## Three ways to work
 
-[Full-quality video (mp4)](share/media/demo-clasic.mp4) if the GIF is too compressed for your taste.
+<table>
+<tr>
+<th width="33%">Classic</th>
+<th width="33%">Scroll</th>
+<th width="33%">Ocean</th>
+</tr>
+<tr>
+<td><img src="share/media/readme/classic.svg" width="100%" alt="Classic: tiles fill the screen, numbered workspaces below"></td>
+<td><img src="share/media/readme/scroll.svg" width="100%" alt="Scroll: a strip of columns longer than the screen"></td>
+<td><img src="share/media/readme/ocean.svg" width="100%" alt="Ocean: a camera frame over a larger canvas of windows"></td>
+</tr>
+<tr>
+<td valign="top"><b>Tiles and workspaces.</b> BSP, master/stack or cascade, numbered workspaces per monitor, floating when you want it.</td>
+<td valign="top"><b>An endless strip of columns.</b> New windows open beside you instead of squeezing the rest. Stack or tab a column, cycle preset widths.</td>
+<td valign="top"><b>An infinite canvas.</b> Group windows into reefs or drop them anywhere, then pan and zoom. One camera per monitor, or one shared view.</td>
+</tr>
+</table>
 
-| Classic workspaces | The Ocean canvas |
+```sh
+tidectl engine scroll   # every open window comes along
+```
+
+<details>
+<summary><b>Coming from another window manager?</b></summary>
+
+<br>
+
+| You use… | Start with | What carries over |
+| --- | --- | --- |
+| Hyprland, Sway, i3 | **Classic** | Dwindle-style tiling, per-monitor workspaces, scratchpads, submaps (`mode`), window rules, gaps, a JSON IPC socket |
+| niri, PaperWM | **Scroll** | Scrolling columns, consume/expel, stacked and tabbed columns, preset widths, center-focused column |
+| driftwm, a canvas desktop | **Ocean** | Pan/zoom camera, bookmarks, free placement, a whole-world minimap |
+
+These describe the workflow, not drop-in config compatibility. TideWM's own guide: [Spatial model](SPATIAL_MODEL.md).
+
+</details>
+
+## What you get
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+**🧩 Built from parts you choose**<br>
+Waybar, Quickshell, eww, rofi, hyprlock, swww: standard Wayland protocols mean your tools just work. TideWM manages windows and leaves the desktop to you.
+
+</td>
+<td width="50%" valign="top">
+
+**⚡ Light, and measured**<br>
+About 50 MB for plain tiling and 60–70 MB with every effect on (AMD, PSS). With the defaults, an idle desktop renders nothing. `tidectl perf` and `tidectl doctor` show what your setup costs.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**🎨 Your look, down to the shader**<br>
+Rounding, gradient borders, shadows, frost and water glass, open/close/move animations, custom GLSL. The water effects are a toggle each, or all off.
+
+</td>
+<td valign="top">
+
+**🖥️ Real-desktop ready**<br>
+Mixed-scale monitors, hotplug, X11 apps via xwayland-satellite, screenshots, OBS and Discord screen sharing, session lock, tablets and touch.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**🔌 Scriptable to the core**<br>
+`tidectl` drives every action. `tidectl subscribe` streams window, workspace and focus events, so your bar never polls.
+
+</td>
+<td valign="top">
+
+**🌊 A little water, if you want it**<br>
+Ripples on open, wave workspace transitions, windows that sway when dragged. Personality, not a requirement.
+
+</td>
+</tr>
+</table>
+
+<details>
+<summary><b>Real screenshots</b></summary>
+
+<br>
+
+| Classic | Ocean |
 | --- | --- |
-| ![Classic mode: tiled terminals and a frosted-glass floating window](share/media/showcase-classic.png) | ![Ocean mode: a water-glass window refracting the wallpaper on the zoomed-out canvas](share/media/showcase-ocean.png) |
+| ![Classic: tiled terminals and a frosted-glass floating window](share/media/showcase-classic.png) | ![Ocean: a water-glass window over the zoomed-out canvas](share/media/showcase-ocean.png) |
 
-## Why people are trying it
+</details>
 
-- **It actually looks like something.** Ripples on open, wave transitions between workspaces, glass and shadow on your windows, floating windows that drift like they're sitting on water. Every bit of it is a config toggle, and none of it costs you performance you'll notice.
-- **Three ways to organize windows**, switchable live without a restart (more below).
-- **Runs on what you already own.** About 60–70 MB of memory with the full water stack on AMD, roughly half of Hyprland on the same machine. On an RTX 3060 it idles under 0.5% of one CPU core with 69 MB of VRAM, and stays flat with ten blurred windows open.
-- **Genuinely yours.** Every ripple, wave, border and shadow is a value in a config file, hot-reloaded on save. Nothing about how it looks is hardcoded. If that's not enough, write your own GLSL effect for a window and chain up to four passes of it ([Custom shaders](DOCUMENTATION.md#custom-shaders)).
-- **Made to be scripted.** `tidectl` can query and control everything, and `tidectl subscribe` streams windows, workspaces, focus, monitors, keybind modes and Scroll changes, so a bar or widget never has to poll.
+## Wave your best config!
 
-## Three ways to organize windows
+**Wave reads like a settings file and grows into a programming language only if you ask it to.** Start with `key = value` and a few braces. It's as friendly as YAML, with no indentation traps and no quoting rules to memorize.
 
-- **Classic:** numbered workspaces per monitor with BSP, master/stack or cascade tiling. The Depth Deck lets you park a tile out of the way and swap it back in.
-- **Ocean:** one zoomable 2D canvas with a camera per monitor. Group windows into reefs, or drag them anywhere.
-- **Scroll:** a niri-style strip of apps per monitor. Stack apps in a column or turn a column into tabs, cycle preset widths, Mod-drag to resize one column without touching the rest, and drop a dragged tile exactly where the highlight shows. See the [Scroll guide](TECHNICAL_REPORT.md#scroll-engine).
+```text
+# ~/.config/tidewm/config.wave (created with working defaults on first launch)
+engine = scroll
+gaps   = 10
 
-`tidectl engine classic|ocean|scroll` switches between them and carries every open window across. How they fit together: [SPATIAL_MODEL.md](SPATIAL_MODEL.md).
-
-## Try it
-
-**Fully supported:** Arch and Gentoo, the distros TideWM is built and tested on daily. Everything else should work, and reports are welcome.
-
-**Fastest:** one command per distro installs TideWM as a real package (Gentoo overlay, Arch `PKGBUILD`, NixOS flake + module). See [packaging/README.md](packaging/README.md):
-
-```bash
-packaging/gentoo/install.sh     # Gentoo
-packaging/arch/install.sh       # Arch and derivatives
-NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:Fi3w0/TideWM  # Nix; bundled logo is noncommercial
-```
-
-**From source** on anything else: Rust stable plus a handful of Wayland/GPU dev libraries, then `./install.sh`:
-
-```bash
-# Arch
-sudo pacman -S pkg-config wayland systemd-libs libinput libxkbcommon mesa libdrm seatd
-
-# Fedora
-sudo dnf install pkgconf-pkg-config wayland-devel systemd-devel libinput-devel libxkbcommon-devel mesa-libEGL-devel mesa-libgbm-devel libdrm-devel libseat-devel
-
-# Debian / Ubuntu
-sudo apt install pkg-config libwayland-dev libudev-dev libinput-dev libxkbcommon-dev libegl1-mesa-dev libgbm-dev libdrm-dev libseat-dev
-
-# Gentoo (systemd or OpenRC -- TideWM only needs libseat/libudev, not systemd itself)
-sudo emerge --ask dev-util/pkgconf dev-libs/wayland dev-libs/libinput x11-libs/libxkbcommon media-libs/mesa x11-libs/libdrm sys-auth/seatd sys-fs/eudev
-```
-
-```bash
-git clone https://github.com/Fi3w0/TideWM.git
-cd TideWM
-# `screencast` adds screen sharing for OBS, Discord and browsers
-# (it needs clang/libclang to build).
-cargo build --release --locked --features screencast
-cargo run --locked --features screencast   # opens nested inside your current session, safe to try
-```
-
-openSUSE and everything else, plus setting it up as a real login session: see [TECHNICAL_REPORT.md](TECHNICAL_REPORT.md#building).
-
-**Gentoo note:** if GL clients (kitty, OBS) crawl while TideWM stays smooth, your user lacks access to `/dev/dri/renderD*` (compositors use `card0`, clients need the render node) -- add the `uaccess` tag or `video` group.
-
-## A taste of the defaults
-
-| Shortcut               | Action                      |
-| ---------------------- | --------------------------- |
-| `Super+Enter`          | Open a terminal              |
-| `Super+Q`              | Close the window             |
-| `Super+H/J/K/L`        | Focus a direction            |
-| `Super+Shift+H/J/K/L`  | Move the window that way     |
-| `Super+V`              | Float a window               |
-| `Super+F`              | Fullscreen                   |
-| `Super+1`..`Super+0`   | Switch workspace             |
-| `Super+O`              | Workspace overview           |
-| `Super+Shift+Q`        | Quit TideWM                  |
-
-Everything here is rebindable, and this is a small slice of what's available. The full action/keybind/IPC catalog lives in [DOCUMENTATION.md](DOCUMENTATION.md).
-
-## Configuration
-
-`~/.config/tidewm/config.wave`, generated with working defaults the first time you run it, already split into `config.wave` and `keybinds.wave` the way most people end up organizing it anyway. Save either one and TideWM picks up the change immediately, no restart.
-
-```
-# config.wave
-include "keybinds.wave"
+border {
+    width = 2
+}
 
 @mod = SUPER
-terminal = wave(kitty, alacritty, foot, xterm)
-```
-
-```
-# keybinds.wave
 bind $mod+Return { spawn:kitty }
 bind $mod+Q      { close-window }
 ```
 
-`@` defines a variable, `$` references it in a bind, and everything hangs off that one `@mod`, so rebinding your primary modifier is a one-line change. Config is data on the surface and Lua underneath: colors and durations are real values (`600ms * 2` is `1200ms`, `primary.darken(0.35)` derives a palette), hardware conditionals read the `tide` table, `on "event"` blocks react to the session, and `tidectl eval` queries it all live. Full key-by-key reference: [DOCUMENTATION.md](DOCUMENTATION.md), and the format's design and rough edges: [WAVE.md](WAVE.md).
+Save, and it's live. A typo shows you the file and line on screen while your last good config keeps running.
 
-## About this project
+**Underneath, it is Lua.** The same file takes loops, functions, typed colors and durations, hardware checks and event handlers, so one config can follow you across every machine:
 
-I'm building TideWM solo, and it's beta -- I haven't hit 1.0 yet. I use AI coding agents to move fast, then verify everything myself on real hardware before I trust it. If something breaks on your setup, that's genuinely useful, not an inconvenience, [open an issue](https://github.com/Fi3w0/TideWM/issues/new/choose) or drop into [Discord](https://discord.gg/ZhkxA83cKk).
+```text
+for i = 1, 9 do                         # nine workspace binds, one loop
+    bind $mod+Num$i { workspace:$i }
+end
 
-For what's actually implemented, what's verified on real hardware, and what's still in progress: [TECHNICAL_REPORT.md](TECHNICAL_REPORT.md).
+theme {
+    primary = #8EDDFF
+    deep    = primary.darken(0.35)      # colors are real values
+}
 
-## Contributing
+if tide.gpu.vendor == "nvidia" then     # per-machine settings, same file
+    gaps = 6
+end
 
-The gates are open: issues, forks, and pull requests are all genuinely welcome. Testing reports matter most right now, especially on other GPUs and distros, but code contributions have a place too. See [CONTRIBUTING.md](CONTRIBUTING.md).
+on "workspace-changed" {                # react to your session
+    if tide.workspace == 3 then spawn("kitty --class notes") end
+}
+```
 
-## License
+Split it with `include`, format it with `wavefmt`, ask the running session anything with `tidectl eval`. → [The Wave guide](WAVE.md) · [Every key and action](DOCUMENTATION.md)
+
+## Install
+
+> [!NOTE]
+> TideWM is in **beta** and built by one person. It is a daily driver on Arch and Gentoo (AMD and NVIDIA); other distros should work, and reports are very welcome.
+
+| Distro | Command |
+| --- | --- |
+| Arch and derivatives | `packaging/arch/install.sh` |
+| Gentoo | `packaging/gentoo/install.sh` |
+| NixOS / Nix | `NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:Fi3w0/TideWM` <sub>(the logo is non-commercial)</sub> |
+| Anything else | `./install.sh` after the [build dependencies](TECHNICAL_REPORT.md#building) |
+
+Then pick **TideWM** in your display manager. Details: [packaging guide](packaging/README.md).
+
+> [!TIP]
+> **Just looking?** Run it in a window inside your current desktop. Nothing on your system changes:
+> ```sh
+> git clone https://github.com/Fi3w0/TideWM && cd TideWM
+> cargo run --locked --release
+> ```
+
+<details>
+<summary><b>Build dependencies per distro</b></summary>
+
+```sh
+# Arch
+sudo pacman -S pkg-config wayland systemd-libs libinput libxkbcommon mesa libdrm seatd
+# Fedora
+sudo dnf install pkgconf-pkg-config wayland-devel systemd-devel libinput-devel libxkbcommon-devel mesa-libEGL-devel mesa-libgbm-devel libdrm-devel libseat-devel
+# Debian / Ubuntu
+sudo apt install pkg-config libwayland-dev libudev-dev libinput-dev libxkbcommon-dev libegl1-mesa-dev libgbm-dev libdrm-dev libseat-dev
+# Gentoo (systemd or OpenRC)
+sudo emerge --ask dev-util/pkgconf dev-libs/wayland dev-libs/libinput x11-libs/libxkbcommon media-libs/mesa x11-libs/libdrm sys-auth/seatd sys-fs/eudev
+```
+
+Screen sharing (OBS, Discord, browsers) needs `--features screencast` and clang/libclang at build time.
+
+**GL apps slow but TideWM smooth?** Your user can't reach `/dev/dri/renderD*`; add the `video` group or a `uaccess` rule.
+
+</details>
+
+<details>
+<summary><b>Default shortcuts</b></summary>
+
+<br>
+
+| Keys | Action | Keys | Action |
+| --- | --- | --- | --- |
+| <kbd>Super</kbd> <kbd>Enter</kbd> | Terminal | <kbd>Super</kbd> <kbd>1</kbd>…<kbd>0</kbd> | Workspace |
+| <kbd>Super</kbd> <kbd>Q</kbd> | Close window | <kbd>Super</kbd> <kbd>Shift</kbd> <kbd>1</kbd>…<kbd>0</kbd> | Move to workspace |
+| <kbd>Super</kbd> <kbd>H</kbd><kbd>J</kbd><kbd>K</kbd><kbd>L</kbd> | Focus | <kbd>Super</kbd> <kbd>O</kbd> | Overview |
+| <kbd>Super</kbd> <kbd>Shift</kbd> <kbd>H</kbd><kbd>J</kbd><kbd>K</kbd><kbd>L</kbd> | Swap window | <kbd>Super</kbd> <kbd>Tab</kbd> | Cycle focus |
+| <kbd>Super</kbd> <kbd>V</kbd> | Float | <kbd>Super</kbd> <kbd>-</kbd> | Scratchpad |
+| <kbd>Super</kbd> <kbd>F</kbd> | Fullscreen | <kbd>Super</kbd> <kbd>Shift</kbd> <kbd>Q</kbd> | Quit TideWM |
+
+Every bind lives in your `keybinds.wave`; nothing is hidden or hardcoded.
+
+</details>
+
+## Join in
+
+<div align="center">
+
+**Like where TideWM is heading? [⭐ Give it a star](https://github.com/Fi3w0/TideWM)**<br>
+<sub>It takes one click and helps a one-person project reach people who would enjoy it.</sub>
+
+</div>
+
+Bug reports from new hardware are the most useful thing you can send right now. I build TideWM with help from AI coding agents and check every change on real hardware before trusting it.
+
+[**Discord**](https://discord.gg/ZhkxA83cKk) · [**Open an issue**](https://github.com/Fi3w0/TideWM/issues/new/choose) · [**Contribute**](CONTRIBUTING.md) · [**What's verified where**](TECHNICAL_REPORT.md)
+
+<details>
+<summary><b>License</b></summary>
 
 - **TideWM code, including its bundled Wave configuration engine:** GPL-3.0-or-later, see [LICENSE](LICENSE).
 - **TideWM logo:** [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International](LICENSES/CC-BY-NC-SA-4.0.txt), see the [logo notice](share/icons/LICENSE).
@@ -144,7 +242,9 @@ The gates are open: issues, forks, and pull requests are all genuinely welcome. 
 
 Copyright (C) 2026 Fi3w0 and contributors. See [LICENSING.md](LICENSING.md) for scope, attribution and packaging details.
 
-&nbsp;
+</details>
+
+<br>
 
 <div align="center">
 <sub>Built on <a href="https://github.com/Smithay/smithay">Smithay</a>. Inspired by and borrows implementation patterns from <a href="https://github.com/YaLTeR/niri">niri</a>, <a href="https://github.com/malbiruk/driftwm">driftwm</a>, <a href="https://github.com/hyprwm/Hyprland">Hyprland</a>, and <a href="https://github.com/swaywm/sway">sway</a>.</sub>
