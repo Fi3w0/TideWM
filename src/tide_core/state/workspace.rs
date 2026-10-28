@@ -124,7 +124,9 @@ impl Smallvil {
     /// other engine and configuration uses the ordinary switch. Scratchpad
     /// workspaces are reserved and never participate.
     pub(crate) fn workspace_step(&mut self, step: i32) {
-        if step == 0 || self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+        if step == 0
+            || self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean
+        {
             return;
         }
         // With a visible focused window, follow it. On an empty workspace
@@ -154,7 +156,8 @@ impl Smallvil {
             return;
         }
 
-        let animate = self.config.spatial_engine == crate::config::SpatialEngine::Scroll
+        let animate = self.config.spatial_engine.projection()
+            == Some(crate::config::WorkspaceProjection::Scroll)
             && self.config.scroll.workspace_scroll
             && self.config.scroll.workspaces == crate::scroll::WorkspaceMode::Separate;
         self.workspace_scroll_cameras.remove(&output_name);
@@ -186,7 +189,8 @@ impl Smallvil {
         // Scroll sections slide the shared strip to the section instead of
         // capturing a transition. Separate strips switch like Classic, with
         // the configured workspace animation.
-        if self.config.spatial_engine == crate::config::SpatialEngine::Scroll
+        if self.config.spatial_engine.projection()
+            == Some(crate::config::WorkspaceProjection::Scroll)
             && self.config.scroll.workspaces == crate::scroll::WorkspaceMode::Sections
         {
             let target = if current == workspace && self.config.workspace_auto_back_and_forth {
@@ -645,7 +649,7 @@ impl Smallvil {
             self.request_redraw();
             return;
         }
-        if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+        if self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean {
             // Ocean's viewport anchor is the only pin authority. Drop any
             // stale Classic marker left by an interrupted migration before
             // deciding whether this is a pin or unpin operation.
@@ -788,11 +792,9 @@ impl Smallvil {
     /// `screen_pins`. Keeping this query centralized prevents migration from
     /// leaving two disagreeing sources of truth.
     pub(crate) fn window_is_pinned(&self, surface: &WlSurface) -> bool {
-        match self.config.spatial_engine {
-            crate::config::SpatialEngine::Classic | crate::config::SpatialEngine::Scroll => {
-                self.pinned.contains(surface)
-            }
-            crate::config::SpatialEngine::Ocean => self.ocean.is_screen_pinned(surface),
+        match self.config.spatial_engine.ownership() {
+            crate::config::SpatialOwnership::Workspaces => self.pinned.contains(surface),
+            crate::config::SpatialOwnership::Ocean => self.ocean.is_screen_pinned(surface),
         }
     }
 
@@ -946,7 +948,7 @@ impl Smallvil {
         // resolving the pre-swap output/workspace. Classic-only: under
         // Ocean no tree moved, and the fields are migration cache, not
         // ownership.
-        if self.config.spatial_engine.uses_workspaces() {
+        if self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Workspaces {
             for group in &mut self.groups {
                 if let Some((output, workspace)) = swapped_group_owner(
                     &group.output,

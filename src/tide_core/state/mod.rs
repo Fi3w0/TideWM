@@ -1865,11 +1865,8 @@ fn stable_output_by_name<'a>(outputs: impl Iterator<Item = &'a Output>) -> Optio
 }
 
 fn tide_workspace_value(engine: crate::config::SpatialEngine, first_workspace: Option<u32>) -> i64 {
-    match (engine, first_workspace) {
-        (
-            crate::config::SpatialEngine::Classic | crate::config::SpatialEngine::Scroll,
-            Some(workspace),
-        ) => i64::from(workspace),
+    match (engine.ownership(), first_workspace) {
+        (crate::config::SpatialOwnership::Workspaces, Some(workspace)) => i64::from(workspace),
         _ => 0,
     }
 }

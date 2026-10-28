@@ -684,9 +684,36 @@ pub enum SpatialEngine {
     Scroll,
 }
 
+/// Who owns window placement: numbered per-output workspaces (Classic and
+/// Scroll), or one continuous Ocean world.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpatialOwnership {
+    Workspaces,
+    Ocean,
+}
+
+/// How a workspace shows its tiles: the Classic layout algorithms, or the
+/// Scroll strip. Ocean has no workspaces, so no projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceProjection {
+    Classic,
+    Scroll,
+}
+
 impl SpatialEngine {
-    pub fn uses_workspaces(self) -> bool {
-        self != Self::Ocean
+    pub fn ownership(self) -> SpatialOwnership {
+        match self {
+            Self::Classic | Self::Scroll => SpatialOwnership::Workspaces,
+            Self::Ocean => SpatialOwnership::Ocean,
+        }
+    }
+
+    pub fn projection(self) -> Option<WorkspaceProjection> {
+        match self {
+            Self::Classic => Some(WorkspaceProjection::Classic),
+            Self::Scroll => Some(WorkspaceProjection::Scroll),
+            Self::Ocean => None,
+        }
     }
 }
 

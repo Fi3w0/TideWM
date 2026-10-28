@@ -85,7 +85,7 @@ impl Smallvil {
         let bsp_split_bias = config.bsp_split_bias;
         let workspace_algorithm_overrides = config.workspace_algorithm_overrides();
         let ui_theme = crate::ui_theme::UiTheme::from_config(&config);
-        let ocean = if config.spatial_engine == crate::config::SpatialEngine::Ocean {
+        let ocean = if config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean {
             crate::ocean::OceanSpace::from_config(&config.ocean)
         } else {
             crate::ocean::OceanSpace::default()

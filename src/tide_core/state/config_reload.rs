@@ -376,7 +376,8 @@ impl Smallvil {
                 // as everything else hot-reloadable. Cheap no-op diff when
                 // nothing actually changed.
                 self.refresh_ext_workspaces();
-                if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+                if self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Ocean
+                {
                     if self.config.ocean.zoom_enabled {
                         self.ocean
                             .clamp_zooms(self.config.ocean.min_zoom, self.config.ocean.max_zoom);
@@ -503,7 +504,8 @@ impl Smallvil {
                             camera.snap_to_rest();
                         }
                     }
-                    if self.config.spatial_engine != crate::config::SpatialEngine::Scroll
+                    if self.config.spatial_engine.projection()
+                        != Some(crate::config::WorkspaceProjection::Scroll)
                         || !self.config.scroll.workspace_scroll
                         || self.config.scroll.workspaces != crate::scroll::WorkspaceMode::Separate
                     {

@@ -570,26 +570,26 @@ impl Smallvil {
     }
 
     fn detach_tiled_group_member(&mut self, surface: &WlSurface) -> Option<Window> {
-        match self.config.spatial_engine {
-            crate::config::SpatialEngine::Classic | crate::config::SpatialEngine::Scroll => {
+        match self.config.spatial_engine.ownership() {
+            crate::config::SpatialOwnership::Workspaces => {
                 let window = self.layout.window_of(surface)?;
                 self.layout.remove(surface);
                 Some(window)
             }
-            crate::config::SpatialEngine::Ocean => self.ocean.detach_tiled_for_group(surface),
+            crate::config::SpatialOwnership::Ocean => self.ocean.detach_tiled_for_group(surface),
         }
     }
 
     fn replace_tiled_group_leaf(&mut self, old: &WlSurface, new_window: &Window) -> bool {
-        match self.config.spatial_engine {
-            crate::config::SpatialEngine::Classic | crate::config::SpatialEngine::Scroll => {
+        match self.config.spatial_engine.ownership() {
+            crate::config::SpatialOwnership::Workspaces => {
                 if !self.layout.contains(old) {
                     return false;
                 }
                 self.layout.replace_leaf(old, new_window);
                 true
             }
-            crate::config::SpatialEngine::Ocean => {
+            crate::config::SpatialOwnership::Ocean => {
                 self.ocean.replace_tiled_group_leaf(old, new_window)
             }
         }
@@ -671,8 +671,8 @@ impl Smallvil {
             return;
         }
         let new_group_owner = if existing_group.is_none() {
-            let owner = match self.config.spatial_engine {
-                crate::config::SpatialEngine::Classic | crate::config::SpatialEngine::Scroll => {
+            let owner = match self.config.spatial_engine.ownership() {
+                crate::config::SpatialOwnership::Workspaces => {
                     self.layout.output_of(&anchor).map(|output| {
                         let workspace = self
                             .layout
@@ -681,7 +681,7 @@ impl Smallvil {
                         (output.to_string(), workspace)
                     })
                 }
-                crate::config::SpatialEngine::Ocean => {
+                crate::config::SpatialOwnership::Ocean => {
                     self.ocean.entry_output(&anchor).map(|name| {
                         let output = name.to_string();
                         let workspace = self.layout.active_workspace(&output);
@@ -812,11 +812,11 @@ impl Smallvil {
         let Some(window) = self.leave_group(idx, surface) else {
             return;
         };
-        match self.config.spatial_engine {
-            crate::config::SpatialEngine::Classic | crate::config::SpatialEngine::Scroll => {
+        match self.config.spatial_engine.ownership() {
+            crate::config::SpatialOwnership::Workspaces => {
                 self.layout.insert(&output, workspace, window, None);
             }
-            crate::config::SpatialEngine::Ocean => {
+            crate::config::SpatialOwnership::Ocean => {
                 let inserted = anchor
                     .as_ref()
                     .is_some_and(|anchor| self.ocean.insert_tiled_next_to(anchor, window));
@@ -1172,7 +1172,9 @@ impl Smallvil {
         let scale = output.current_scale().fractional_scale();
         let mut elements = Vec::new();
         for group in &mut self.groups {
-            if self.config.spatial_engine.uses_workspaces() && group.output != output_name {
+            if self.config.spatial_engine.ownership() == crate::config::SpatialOwnership::Workspaces
+                && group.output != output_name
+            {
                 continue;
             }
             let active_surface = &group.members[group.active].surface;
