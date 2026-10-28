@@ -19,10 +19,22 @@ use crate::wave;
 use crate::waves;
 
 mod animation;
+use animation::{
+    apply_animations_block, apply_cascade_liquid_block, apply_ripple_block,
+    apply_workspace_transition_block, parse_ripple_color, valid_ripple_preset_name,
+};
 #[cfg(test)]
-use animation::{RippleSizeMode, parse_ripple_preset_selection, parse_window_animation_curve, spring_curve_rejection};
-pub use animation::{CascadeLiquidConfig, CascadeLiquidPreset, RippleAnchor, RippleConfig, RippleEase, RippleLayer, RipplePreset, RipplePresetSelection, RippleShape, RippleTrigger, WindowAnimationConfig, WindowAnimationCurve, WindowAnimationEffect, WindowAnimationOrigin, WindowAnimationsConfig, WorkspaceAnimationConfig, WorkspaceAnimationStyle, WorkspaceTransitionConfig, WorkspaceTransitionDirectionMode, WorkspaceTransitionStyle};
-use animation::{apply_animations_block, apply_cascade_liquid_block, apply_ripple_block, apply_workspace_transition_block, parse_ripple_color, valid_ripple_preset_name};
+use animation::{
+    parse_ripple_preset_selection, parse_window_animation_curve, spring_curve_rejection,
+    RippleSizeMode,
+};
+pub use animation::{
+    CascadeLiquidConfig, CascadeLiquidPreset, RippleAnchor, RippleConfig, RippleEase, RippleLayer,
+    RipplePreset, RipplePresetSelection, RippleShape, RippleTrigger, WindowAnimationConfig,
+    WindowAnimationCurve, WindowAnimationEffect, WindowAnimationOrigin, WindowAnimationsConfig,
+    WorkspaceAnimationConfig, WorkspaceAnimationStyle, WorkspaceTransitionConfig,
+    WorkspaceTransitionDirectionMode, WorkspaceTransitionStyle,
+};
 
 mod decoration;
 use decoration::{

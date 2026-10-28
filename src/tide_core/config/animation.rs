@@ -1308,7 +1308,10 @@ pub(super) fn apply_cascade_liquid_block(cfg: &mut CascadeLiquidConfig, body: &[
     }
 }
 
-pub(super) fn apply_workspace_transition_block(cfg: &mut WorkspaceTransitionConfig, body: &[waves::Entry]) {
+pub(super) fn apply_workspace_transition_block(
+    cfg: &mut WorkspaceTransitionConfig,
+    body: &[waves::Entry],
+) {
     for entry in body {
         let waves::Entry::Assign(key, value) = entry else {
             tracing::warn!("Unexpected entry in `workspace_transition` block, ignoring");
