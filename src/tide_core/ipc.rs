@@ -103,6 +103,10 @@ enum Request {
     /// two snapshots across a window and derives CPU% from the delta.
     Perf,
     EbbStats,
+    EbbRun {
+        #[serde(default)]
+        deep: bool,
+    },
     Action {
         action: String,
     },
@@ -1021,6 +1025,10 @@ fn handle_request(state: &mut Smallvil, request: Request) -> serde_json::Value {
             }
         }
         Request::Diagnostics => json!({ "ok": true, "data": diagnostics_json(state) }),
+        Request::EbbRun { deep } => match state.queue_ebb_pass(deep) {
+            Ok(()) => json!({"ok":true,"data":{"queued":true,"deep":deep}}),
+            Err(error) => json!({"ok":false,"error":error}),
+        },
         Request::EbbStats => json!({ "ok": true, "data": state.ebb.stats(&state.config.ebb) }),
         Request::Perf => json!({ "ok": true, "data": perf_snapshot_json(state) }),
         // Subscribe is intercepted upstream in `register_connection` before

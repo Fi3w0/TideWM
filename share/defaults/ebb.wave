@@ -1,0 +1,24 @@
+# Ebb — TideWM's cache maintenance and resource monitor.
+# Read DOCUMENTATION.md, section "Ebb", before changing these settings.
+# Ebb frees only rebuildable caches that are out of view. It never kills apps.
+ebb {
+    mode = low                 # off | low | balanced | aggressive
+    check_every = 60s           # clamped to 10s–10m
+
+    # Optional soft caps: no cache trimming until one is reached.
+    # ram_cap = 400MB
+    # cache_cap = 256MiB
+    # vram_cap = 512MiB         # falls back to the TideWM texture estimate
+}
+
+# ============================================================
+# !!! ADVANCED — read the Ebb documentation first.
+# !!! Short thresholds can force unnecessary cache rebuilds.
+# ============================================================
+# ebb_advanced {
+#     light_after = 5m
+#     away_after = 15m
+#     pass_budget = 1ms
+#     leak_window = 60m
+#     toast = true
+# }

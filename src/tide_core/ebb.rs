@@ -1,4 +1,6 @@
 //! Bounded, report-only resource monitoring. Owners still clean up on destruction.
+pub(crate) mod pressure;
+pub(crate) mod trim;
 use serde::Serialize;
 use std::collections::VecDeque;
 
@@ -51,6 +53,8 @@ pub(crate) struct Warning {
 
 #[derive(Default)]
 pub(crate) struct Ebb {
+    pub trim: trim::TrimState,
+    pub pressure: pressure::PressureState,
     pub recent: VecDeque<Sample>,
     hourly: VecDeque<Hour>,
     warnings: Vec<Warning>,
@@ -150,7 +154,7 @@ impl Ebb {
         let sample = self.recent.back().unwrap();
         let mut findings = Vec::new();
         if self.trim_blocked {
-            findings.push(("cap-unreclaimable", "Ebb reached a cap but libc could release no free heap pages; no repeated trim attempts until the cap clears or changes".into()));
+            findings.push(("cap-unreclaimable", "Ebb reached a cap with no more safely reclaimable caches or free heap pages; automatic retries stop until the cap clears, changes, or a manual pass is requested".into()));
         }
         if !sample.leftovers.is_empty() {
             findings.push(("leftovers", format!(
@@ -283,7 +287,7 @@ impl Ebb {
 
     pub fn stats(&self, config: &crate::config::EbbConfig) -> serde_json::Value {
         serde_json::json!({
-            "phase": 1,
+            "phase": 2,
             "config": config,
             "sample_count": self.recent.len(),
             "latest": self.recent.back(),
@@ -294,7 +298,12 @@ impl Ebb {
             "vram_bytes": null,
             "vram_scope": "unknown: no portable per-process GPU-memory reader; vram_cap uses the TideWM texture estimate",
             "texture_scope": "estimate of TideWM-owned textures; excludes client buffers and driver allocations",
-            "cache_eviction_available": false,
+            "cache_eviction_available": true,
+            "cache_passes": { "passes": self.trim.passes, "entries_evicted": self.trim.entries_evicted,
+                "released_texture_estimate_bytes": self.trim.released_texture_estimate_bytes,
+                "tracked_hidden": self.trim.hidden_since.len(), "last": self.trim.last_pass,
+                "queued": self.trim.requested, "deferred_reason": self.trim.deferred_reason },
+            "pressure": { "source": self.pressure.source, "pending": self.trim.pressure_pending },
             "heap_trim": { "supported": cfg!(target_env = "gnu"), "calls": self.trim_calls,
                 "released_calls": self.trim_released, "last_cost_us": self.last_trim_cost_us,
                 "blocked": self.trim_blocked },

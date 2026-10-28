@@ -2,6 +2,12 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.4 · 2026-10-29 — Ebb frees hidden caches
+
+- Ebb now frees only TideWM's rebuildable caches (window and layer backdrops, layer dimming, depth schematics, unused custom-shader stages, dead-output buffers) after their window has been off screen for a while. Visible windows, layers, pinned and fullscreen windows are never touched.
+- `ebb { mode = ... }` selects how long hidden caches wait (`off`, `low`, `balanced`, `aggressive`); the existing caps gate every trim, and `balanced`/`aggressive` also react to kernel memory pressure without a daemon.
+- `tidectl ebb run [--deep]` queues a pass, `tidectl ebb init` creates `ebb.wave` and adds its include safely, and `rule { ebb = ... }` exempts or adjusts one app.
+
 ## 0.91.3 · 2026-10-28 — NVIDIA memory profile
 
 - Packages now provide a TideWM-only NVIDIA OpenGL profile that reduces the driver’s pool of freed video memory. Other drivers ignore it.

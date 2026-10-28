@@ -120,7 +120,7 @@ mod diff;
 pub(crate) use diff::diff_entries;
 
 mod defaults;
-use defaults::{DEFAULT_CONFIG_WAVE, DEFAULT_KEYBINDS_WAVE};
+use defaults::{DEFAULT_CONFIG_WAVE, DEFAULT_EBB_WAVE, DEFAULT_KEYBINDS_WAVE};
 
 pub struct Config {
     /// The merged entry list this config was lowered from (both formats
@@ -422,6 +422,24 @@ impl Config {
         } else {
             if let Some(parent) = path.parent() {
                 let _ = fs::create_dir_all(parent);
+            }
+            let ebb_path = path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("ebb.wave");
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&ebb_path)
+            {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    if let Err(error) = file.write_all(DEFAULT_EBB_WAVE.as_bytes()) {
+                        tracing::warn!(%error,"Failed to write default Ebb config");
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => tracing::warn!(%error,"Failed to create default Ebb config"),
             }
             if let Err(err) = fs::write(&path, DEFAULT_CONFIG_WAVE) {
                 tracing::warn!(%err, path = %path.display(), "Failed to write default config");
@@ -921,6 +939,9 @@ impl Config {
             }
             if rule.weight.is_some() {
                 effective.weight = rule.weight;
+            }
+            if rule.ebb.is_some() {
+                effective.ebb = rule.ebb;
             }
             if rule.depth.is_some() {
                 effective.depth = rule.depth;

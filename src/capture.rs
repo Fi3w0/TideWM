@@ -295,6 +295,9 @@ impl Smallvil {
         output: Output,
         target: crate::screencast::FrameTarget,
     ) {
+        if let Some(cast) = &self.screencast {
+            cast.observe_target(&target);
+        }
         self.queue_capture(PendingCapture {
             client_id: None,
             output,
@@ -312,6 +315,9 @@ impl Smallvil {
         surface: WlSurface,
         target: crate::screencast::FrameTarget,
     ) {
+        if let Some(cast) = &self.screencast {
+            cast.observe_target(&target);
+        }
         self.queue_capture(PendingCapture {
             client_id: None,
             output,

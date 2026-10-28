@@ -1631,6 +1631,7 @@ New windows floated by `float`, `pin`, parent/dialog size hints, or `layout = fl
 | `sway` | bool | Per-app opt-in/out for floating sway. Last matching rule wins; unset falls back to `sway.enabled`. |
 | `weight` | float, `0`–`1` | Per-app apparent weight for `buoyancy { }`. Last matching rule wins; unset falls back to `buoyancy.default_weight`; `0` opts the matched floater out. |
 | `depth` | bool | Per-app buoyancy override for the automatic depth/attention system. `false` pins the window at tier 0 forever (never dims/sinks); `true` affirms the normal automatic behavior. Last matching rule wins; unset falls back to `depth.enabled`. |
+| `ebb` | `off`, `low`, `balanced`, `aggressive` | Per-app cache-maintenance mode for this window’s rebuildable caches. `off` keeps them out of every Ebb pass; the other values change when its hidden caches become eligible. Last matching rule wins; unset falls back to `ebb.mode`. |
 | `frost { }` | sub-block | Per-app overrides for every global frost field. Unspecified fields inherit the global block; multiple matching rules merge field by field. |
 | `shadow` | bool / `on`, `off`, `none` | Shorthand to enable or disable compositor shadows for matching windows. |
 | `shadow { }` | sub-block | Per-app overrides for every global shadow field. Unspecified fields inherit the global block; multiple matching rules merge field by field. |
@@ -2140,13 +2141,15 @@ In Scroll mode each `outputs` entry has a `scroll` object with `offset`, `orient
 
 ## Ebb
 
-Ebb watches TideWM’s resource use and reports suspicious growth. Its first phase
-is monitoring and reporting, plus returning already-free glibc heap pages during
-native idle maintenance. It does not yet evict hidden-window caches. Cleanup on
-window destruction remains the owner’s job.
+Ebb watches TideWM’s resource use, reports suspicious growth and frees only
+rebuildable caches that are out of view. It never closes apps and never evicts
+live client buffers, close snapshots or anything you can see. Resource owners
+still clean up on destruction; Ebb is the safety net for caches that outlive
+their usefulness.
 
 ```wave
-# Can live in config.wave or an ordinary included ebb.wave.
+# New configs get this as an included ebb.wave; existing ones can add it with
+# `tidectl ebb init`.
 ebb {
     mode = low                 # off | low | balanced | aggressive
     check_every = 60s           # clamped to 10s–10m, with a warning
@@ -2159,18 +2162,47 @@ ebb_advanced {
     away_after = 15m
     leak_window = 60m
     toast = true
-    # pass_budget = 1ms         # reserved for Phase 2 cache passes
+    # pass_budget = 1ms         # clamped to 1–10ms
 }
 ```
 
+`mode` sets how eager maintenance is. `off` keeps monitoring and reporting but
+disables every trim. `low` (default) waits 30 minutes hidden before a light pass
+and uses a three-hour deep interval while away; `balanced` uses 10 minutes and
+one hour; `aggressive` uses two minutes and 30 minutes. `light_after` is the
+idle delay before a light pass may run at all, `away_after` defines “away” when
+nothing else does, and `pass_budget` bounds a cache pass. Passes run from the
+backend’s maintenance tick, never inside a frame, IPC reply, grab, structural
+animation, camera movement or active capture consumer.
+
+Passes evict only TideWM-owned, rebuildable captures: window and layer backdrop
+textures, layer dim buffers, cached depth schematics, unused custom-shader stage
+targets and blank buffers for outputs that no longer exist. Windows currently
+rendered on any output, every mapped layer surface, pinned windows and
+fullscreen windows are protected; when visibility cannot be determined, every
+cache is protected. Light passes respect a hidden delay per `mode`; deep passes
+also shrink maps that are at least four times larger than needed. Close
+snapshots, client buffers and live frames are never touched. An evicted cache
+rebuilds on the next frame that needs it.
+
+`tidectl ebb init` creates `ebb.wave` next to the main config and adds
+`include "ebb.wave"`, backing up the main file first. It preserves symlinks and
+permissions, never overwrites an existing `ebb.wave`, and refuses to add the
+include when the main file already has inline `ebb { }` settings that the
+included defaults could shadow. `tidectl ebb run [--deep]` queues a pass; the
+backend runs it on its next maintenance tick, and `tidectl ebb stats` shows the
+result. Manual passes share the same cooldown as automatic ones, so a burst of
+requests coalesces into one pass.
+
 `tidectl ebb stats` prints a short summary. `tidectl ebb stats --json` includes
-the latest sample, history, findings and effective settings. The IPC request is
-`{"request":"ebb-stats"}`. Subscribe to channel `ebb` for `ebb-warning`; Wave
-handlers may use `on "ebb-warning"`. Notifications are limited to once per day
-per finding; an existing error panel or toast takes precedence. No history is
-written to disk. History keeps 1,440 recent samples (24 hours at the default
-interval, four hours at 10 seconds), plus up to 168 older hourly aggregates.
-A relog clears it.
+the latest sample, history, findings, effective settings, cache-pass counters
+and the pressure source. The IPC requests are `{"request":"ebb-stats"}` and
+`{"request":"ebb-run","deep":false}`. Subscribe to channel `ebb` for
+`ebb-warning`; Wave handlers may use `on "ebb-warning"`. Notifications are
+limited to once per day per finding; an existing error panel or toast takes
+precedence. No history is written to disk. History keeps 1,440 recent samples
+(24 hours at the default interval, four hours at 10 seconds), plus up to 168
+older hourly aggregates. A relog clears it.
 
 Samples contain PSS, open files, TideWM’s texture estimate, system available
 memory and system PSI `some avg10` when readable. Missing signals are `null`.
@@ -2196,17 +2228,22 @@ On glibc, after native renderer-cache maintenance and at least `light_after`
 without input, Ebb can call `malloc_trim(0)` to release already-free allocator
 pages. It skips animation and grabs, and runs at most once per larger of
 `light_after` and `check_every`. `off` disables Ebb trimming but keeps monitoring.
-The other modes behave alike until Phase 2 adds cache passes. musl skips this
-operation. Stats record calls, calls that released pages and the last duration;
-they do not claim a number of bytes saved. The libc call is synchronous and cannot
-be interrupted at `pass_budget`.
+musl skips this operation. Stats record calls, calls that released pages and the
+last duration; they do not claim a number of bytes saved. The libc call is
+synchronous and cannot be interrupted at `pass_budget`.
 
-With any cap configured, heap trimming waits until a measured cap is crossed.
-The gate stays active until that signal reaches 90% of the cap. If libc reports
-nothing releasable while over a cap, Ebb stops retrying until caps clear or change
-and reports that finding. Caps never permit freeing visible or client resources.
-`ebb run`, `ebb init`, generated `ebb.wave`, hidden-cache eviction, pressure
-notifications to shells and per-app reports arrive in later phases.
+On Linux, `balanced` and `aggressive` also watch the kernel’s memory-pressure
+interface (`/proc/pressure/memory`, or this cgroup’s `memory.pressure`) and queue
+a light pass when the kernel reports pressure. No polling thread, systemd
+service or vendor tool is involved. When PSI is unavailable, Ebb falls back to
+the sampled system-availability check.
+
+With any cap configured, heap and cache trimming wait until a measured cap is
+crossed. The gate stays active until that signal reaches 90% of the cap. If a
+pass finds nothing releasable while over a cap, Ebb stops retrying until caps
+clear or change and reports that finding. Caps never permit freeing visible or
+client resources, and they are soft gates rather than enforced memory limits.
+Per-app ownership reports and a shell-facing pressure event remain later phases.
 
 ## NVIDIA memory profile
 

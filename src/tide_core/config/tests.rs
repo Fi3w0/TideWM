@@ -1879,6 +1879,7 @@ fn parse_default_config() -> Config {
     // threads that actually race on it.
     let dir = TestDir::new(&format!("default-config-{:?}", std::thread::current().id()));
     dir.write("keybinds.wave", DEFAULT_KEYBINDS_WAVE);
+    dir.write("ebb.wave", DEFAULT_EBB_WAVE);
     let main = dir.write("config.wave", DEFAULT_CONFIG_WAVE);
     let (raw, _, _, _) =
         load_raw_config(&main).expect("the shipped default must parse and resolve");
@@ -3927,6 +3928,7 @@ fn shipped_default_config_files_never_trip_the_footgun_lint() {
         std::thread::current().id()
     ));
     dir.write("keybinds.wave", DEFAULT_KEYBINDS_WAVE);
+    dir.write("ebb.wave", DEFAULT_EBB_WAVE);
     let main = dir.write("config.wave", DEFAULT_CONFIG_WAVE);
     let (raw, include_warnings, _, _) =
         load_raw_config(&main).expect("the shipped default must parse and resolve");

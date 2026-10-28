@@ -9,6 +9,7 @@ use std::time::Instant;
 
 impl Smallvil {
     pub(crate) fn ebb_tick(&mut self, screens_off: bool) {
+        self.ebb_refresh_pressure();
         let now = self.start_time.elapsed().as_secs();
         let away = screens_off
             || !matches!(self.session_lock, SessionLock::Unlocked)
@@ -53,6 +54,35 @@ impl Smallvil {
             .ok()
             .and_then(|text| crate::ebb::pressure_avg10(&text));
         let leftovers = self.ebb_leftovers();
+        if leftovers
+            .iter()
+            .any(|entry| entry.owner.starts_with("render.gpu") || entry.owner == "lock_blank")
+        {
+            self.ebb.trim.audit_pending = true;
+        }
+        self.ebb_observe_hidden(screens_off);
+        if matches!(
+            self.config.ebb.mode,
+            crate::config::EbbMode::Balanced | crate::config::EbbMode::Aggressive
+        ) && self.ebb.pressure.source.is_none()
+        {
+            let total = meminfo
+                .as_deref()
+                .and_then(|text| crate::ebb::kb_field(text, "MemTotal:"));
+            let threshold = if self.config.ebb.mode == crate::config::EbbMode::Aggressive {
+                15
+            } else {
+                10
+            };
+            if total
+                .zip(system_available_bytes)
+                .is_some_and(|(total, available)| {
+                    total > 0 && u128::from(available) * 100 < u128::from(total) * threshold
+                })
+            {
+                self.ebb.trim.pressure_pending = true;
+            }
+        }
         let cost_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
         let sample = Sample {
             uptime_secs: now,
@@ -94,49 +124,38 @@ impl Smallvil {
         }
     }
 
-    /// This does not evict caches. It only returns already-free allocator
-    /// pages after Smithay's existing release queue has been swept.
+    /// Called by backends after draining Smithay's existing texture release queue.
     pub(crate) fn ebb_after_texture_cleanup(&mut self) {
-        let config = self.config.ebb.clone();
-        if config.mode == crate::config::EbbMode::Off
-            || self.input.last_activity.elapsed().as_millis() < u128::from(config.light_after_ms)
-            || self.has_active_animation()
-            || self.seat.get_pointer().is_some_and(|p| p.is_grabbed())
-        {
+        if self.ebb_trim_busy() {
+            return;
+        }
+        if !self.ebb.trim.cleanup_pending {
+            return;
+        }
+        self.ebb.trim.cleanup_pending = false;
+        if !std::mem::take(&mut self.ebb.trim.heap_pending) {
+            return;
+        }
+        if self.config.ebb.mode == crate::config::EbbMode::Off {
             return;
         }
         let now = self.start_time.elapsed().as_secs();
-        let interval =
-            u64::from(self.config.ebb.light_after_ms.max(config.check_every_ms)).div_ceil(1000);
-        if self
-            .ebb
-            .last_trim_secs
-            .is_some_and(|last| now.saturating_sub(last) < interval)
-        {
-            return;
-        }
-        let Some(sample) = self.ebb.recent.back() else {
-            return;
-        };
-        if now.saturating_sub(sample.uptime_secs) > u64::from(config.check_every_ms).div_ceil(1000)
-        {
-            return;
-        }
-        let (pss, textures) = (sample.pss_bytes, sample.texture_bytes);
-        if !self.ebb.caps_allow_trim(&config, pss, textures) {
-            return;
-        }
-        if !cfg!(target_env = "gnu") {
-            return;
-        }
         self.ebb.last_trim_secs = Some(now);
         let started = Instant::now();
-        let released = crate::ebb::trim_heap();
+        let released = cfg!(target_env = "gnu") && crate::ebb::trim_heap();
         self.ebb.last_trim_cost_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-        self.ebb.trim_calls += 1;
-        self.ebb.trim_released += u64::from(released);
-        if !released
-            && (config.ram_cap.is_some() || config.cache_cap.is_some() || config.vram_cap.is_some())
+        if cfg!(target_env = "gnu") {
+            self.ebb.trim_calls += 1;
+            self.ebb.trim_released += u64::from(released);
+        }
+        let exhausted = self.ebb.trim.last_pass.as_ref().is_some_and(|pass| {
+            pass.entries_evicted == 0 && pass.maps_shrunk == 0 && !pass.budget_exhausted
+        });
+        if exhausted
+            && !released
+            && (self.config.ebb.ram_cap.is_some()
+                || self.config.ebb.cache_cap.is_some()
+                || self.config.ebb.vram_cap.is_some())
         {
             self.ebb.trim_blocked = true;
         }

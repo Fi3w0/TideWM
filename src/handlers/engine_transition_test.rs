@@ -673,3 +673,94 @@ fn ebb_reports_dead_handles_but_accepts_hidden_live_windows() {
     assert!(f.state.spatial.workspaces.layout.contains(&hidden));
     println!("ebb ownership audit checked");
 }
+
+#[test]
+fn ebb_trims_only_hidden_caches_and_obeys_caps_rules_off_and_budget() {
+    let config=format!("{ROUND_TRIP_CONFIG}\nebb_advanced {{\n pass_budget = 10ms\n toast = false\n}}\nrule {{\n app_id = exempt\n workspace = 2\n output = A\n ebb = off\n}}\n");
+    if run_isolated(
+        "ebb_trims_only_hidden_caches_and_obeys_caps_rules_off_and_budget",
+        &config,
+        "ebb cache safety checked",
+    ) {
+        return;
+    }
+    let Some(mut renderer) = crate::shader_effect::software_renderer() else {
+        println!("ebb cache safety checked (software GLES unavailable)");
+        return;
+    };
+    let mut f = two_output_fixture();
+    let visible = map(&mut f, "a");
+    let neighbor = map(&mut f, "b");
+    let hidden = map(&mut f, "deep");
+    let exempt = map(&mut f, "exempt");
+    for surface in [&visible, &neighbor, &hidden, &exempt] {
+        let capture =
+            crate::backdrop::BackdropCapture::new(&mut renderer, (64, 48).into(), 1, 1.0).unwrap();
+        f.state
+            .render
+            .gpu
+            .backdrop_textures
+            .insert(surface.clone(), capture);
+    }
+    f.state.queue_ebb_pass(true).unwrap();
+    f.state.ebb_maintain(false);
+    assert!(!f.state.render.gpu.backdrop_textures.contains_key(&hidden));
+    for surface in [&visible, &neighbor, &exempt] {
+        assert!(
+            f.state.render.gpu.backdrop_textures.contains_key(surface),
+            "protected surface {} was trimmed",
+            surface.id().protocol_id()
+        );
+    }
+    assert_eq!(
+        f.state.ebb.trim.last_pass.as_ref().unwrap().entries_evicted,
+        1
+    );
+    assert!(
+        f.state
+            .ebb
+            .trim
+            .last_pass
+            .as_ref()
+            .unwrap()
+            .released_texture_estimate_bytes
+            > 0
+    );
+    // A cap below which no trimming is requested preserves the same hidden cache.
+    f.state.render.gpu.backdrop_textures.insert(
+        hidden.clone(),
+        crate::backdrop::BackdropCapture::new(&mut renderer, (64, 48).into(), 1, 1.0).unwrap(),
+    );
+    f.state.config.ebb.ram_cap = Some(u64::MAX);
+    f.state.ebb.trim.last_light = None;
+    f.state.queue_ebb_pass(true).unwrap();
+    f.state.ebb_maintain(false);
+    assert!(f.state.render.gpu.backdrop_textures.contains_key(&hidden));
+    f.state.config.ebb.ram_cap = None;
+    f.state.config.ebb.pass_budget_ms = 0;
+    f.state.ebb.trim.last_light = None;
+    f.state.queue_ebb_pass(true).unwrap();
+    f.state.ebb_maintain(false);
+    assert!(f.state.render.gpu.backdrop_textures.contains_key(&hidden));
+    assert!(
+        f.state
+            .ebb
+            .trim
+            .last_pass
+            .as_ref()
+            .unwrap()
+            .budget_exhausted
+    );
+    f.state.config.ebb.mode = crate::config::EbbMode::Off;
+    assert!(f.state.queue_ebb_pass(true).is_err());
+    f.state.ebb_maintain(false);
+    assert!(f.state.render.gpu.backdrop_textures.contains_key(&hidden));
+    // Manual requests only queue: they never trim inline in the IPC callback.
+    f.state.config.ebb.mode = crate::config::EbbMode::Low;
+    f.state.config.ebb.pass_budget_ms = 10;
+    f.state.ebb.trim.last_light = None;
+    let before = f.state.render.gpu.backdrop_textures.len();
+    f.state.queue_ebb_pass(true).unwrap();
+    assert_eq!(f.state.render.gpu.backdrop_textures.len(), before); // queued, never inline
+    println!("ebb cache safety checked");
+}

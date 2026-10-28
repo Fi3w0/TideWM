@@ -2,6 +2,7 @@
 
 mod config_reload;
 mod ebb;
+mod ebb_trim;
 mod effects;
 mod focus;
 mod groups_depth;

@@ -217,6 +217,7 @@ pub struct WindowRule {
     /// earlier matching rule's `false`). Unset inherits the global
     /// `depth { enabled }` behavior. Last matching rule wins.
     pub depth: Option<bool>,
+    pub ebb: Option<super::EbbMode>,
     /// Per-app frost overrides. Unset fields inherit the global
     /// `frost { }` block, and multiple matching rules merge field by field.
     pub frost: Option<FrostOverrides>,
@@ -736,6 +737,13 @@ pub(super) fn lower_window_rule_block(body: &[waves::Entry]) -> WindowRule {
                 "weight" => match value.parse::<f32>() {
                     Ok(value) if value.is_finite() => rule.weight = Some(value.clamp(0.0, 1.0)),
                     _ => tracing::warn!(value, "Expected rule weight from 0 to 1, ignoring"),
+                },
+                "ebb" => match value.as_str() {
+                    "off" => rule.ebb = Some(super::EbbMode::Off),
+                    "low" => rule.ebb = Some(super::EbbMode::Low),
+                    "balanced" => rule.ebb = Some(super::EbbMode::Balanced),
+                    "aggressive" => rule.ebb = Some(super::EbbMode::Aggressive),
+                    _ => tracing::warn!(value, "Unknown Ebb rule mode, ignoring"),
                 },
                 "depth" => set_opt_bool(&mut rule.depth, key, value),
                 "shadow" => match value.as_str() {
