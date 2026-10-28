@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
 
@@ -11,6 +11,65 @@ use smithay::{
 };
 
 use super::{FloatBodyContext, FocusOrigin, RippleLayers, SessionLock, Smallvil};
+
+/// Render-only floating-window motion: physics, buoyancy, currents, sway and viscosity (plan step 8b).
+pub(crate) struct FloatPhysicsState {
+    /// Short-lived render-only followers for interactive move/resize.
+    /// Logical geometry stays at the pointer target; one entry per active
+    /// mapped window bounds this state without retaining motion history.
+    pub(crate) window_viscosity: HashMap<WlSurface, crate::viscosity::ViscousMotion>,
+    /// Lateral damped oscillation for dragged floating windows. One small
+    /// closed-form record per mapped window; a settled entry finishes and
+    /// is pruned, so idle windows never keep the frame pump alive.
+    pub(crate) window_sway: HashMap<WlSurface, crate::sway::FloatingSway>,
+    /// Cosmetic 2D bob-and-drift for floating windows (F1 `light`). One
+    /// small closed-form record per disturbed window; a settled entry
+    /// finishes and is pruned, so idle windows never keep the frame pump
+    /// alive. When a window resolves float-physics-enabled it is tracked
+    /// here instead of in `window_sway` -- the two never stack.
+    pub(crate) window_float_physics: HashMap<WlSurface, crate::float_physics::FloatPhysics>,
+    /// Windows with ambient "sitting on water" sway toggled on
+    /// (`toggle-float-ambient`), keyed to the `Instant` it was toggled on --
+    /// the time origin `float_physics::ambient_sample`'s `elapsed` measures
+    /// from, sampled fresh in `base_window_visual_sample`. Unlike
+    /// `window_float_physics`, entries here don't finish on their own --
+    /// they persist until explicitly toggled off, deliberately keeping the
+    /// frame pump alive the whole time. Independent of `window_float_physics`
+    /// entirely: the two offsets simply add when both are active.
+    pub(crate) window_float_ambient: HashMap<WlSurface, Instant>,
+    /// One mass-spring-damper body per floating window using full physics.
+    /// Continuous wave forcing and collisions require persistent velocity;
+    /// `sync_float_physics_bodies` keeps membership aligned with live rules.
+    pub(crate) window_float_bodies: HashMap<WlSurface, crate::float_physics::FloatBody>,
+    /// Fixed-timestep accumulator for `update_float_physics_full`'s
+    /// integrator, carried across ticks so a variable frame interval still
+    /// advances the simulation in fixed, numerically stable steps. Clamped
+    /// to a small multiple of the fixed step so a long stall (a hung
+    /// nested host, a VT switch) can't dump a huge catch-up burst of
+    /// substeps into a single tick.
+    pub(crate) float_physics_accum: f64,
+    /// Wall-clock timestamp of the previous `update_float_physics_full`
+    /// call, used to derive the elapsed real time fed into the accumulator
+    /// above.
+    pub(crate) float_physics_last_tick: Instant,
+    /// Fixed time origin the traveling wave field's phase is measured from
+    /// (`float_physics::wave_target`'s `elapsed`). A single shared clock
+    /// (not one per window, unlike `window_float_ambient`) because the
+    /// wave is one continuous field every full-tier window samples by its
+    /// own position, not N independent oscillators.
+    pub(crate) float_physics_wave_clock: Instant,
+    /// Ocean-only cosmetic current, one small phase clock per visible
+    /// floating window. Records are paused (not reset) while focused or
+    /// directly dragged, and cleared outside Ocean or when disabled.
+    pub(crate) window_currents: HashMap<WlSurface, crate::currents::CurrentDrift>,
+    /// Render-only apparent weight, retained only for visible eligible
+    /// floaters. Stable entries request no frames; `buoyancy_dirty` avoids
+    /// rebuilding placements on idle backend maintenance ticks.
+    pub(crate) window_buoyancy: HashMap<WlSurface, crate::buoyancy::BuoyancyState>,
+    pub(crate) buoyancy_dirty: bool,
+    pub(crate) buoyancy_camera_revision: u64,
+    pub(crate) buoyancy_camera_was_moving: bool,
+}
 
 impl Smallvil {
     /// Whether continuous lateral swim is active: the master water toggle
@@ -54,7 +113,7 @@ impl Smallvil {
         // viscosity is disabled and the pointer path becomes immediate.
         self.window_move_animations.remove(surface);
         if half_life.is_zero() {
-            self.window_viscosity.remove(surface);
+            self.physics.window_viscosity.remove(surface);
             return false;
         }
         let Some(window) = self.mapped_toplevel_window(surface) else {
@@ -65,10 +124,10 @@ impl Smallvil {
         };
         let live = Rectangle::new(location, window.geometry().size).to_f64();
         let target = target.to_f64();
-        if let Some(motion) = self.window_viscosity.get_mut(surface) {
+        if let Some(motion) = self.physics.window_viscosity.get_mut(surface) {
             motion.retarget(target, half_life);
         } else {
-            self.window_viscosity.insert(
+            self.physics.window_viscosity.insert(
                 surface.clone(),
                 crate::viscosity::ViscousMotion::new(live, target, half_life),
             );
@@ -100,10 +159,10 @@ impl Smallvil {
         let config = self.config.sway;
         let response = config.response as f64;
         let max_offset = config.max_offset as f64;
-        match self.window_sway.get_mut(surface) {
+        match self.physics.window_sway.get_mut(surface) {
             Some(sway) => sway.kick(delta_x, response, max_offset),
             None => {
-                self.window_sway.insert(
+                self.physics.window_sway.insert(
                     surface.clone(),
                     crate::sway::FloatingSway::kicked(
                         (delta_x * response).clamp(-max_offset, max_offset),
@@ -148,10 +207,10 @@ impl Smallvil {
                 let response = config.response as f64;
                 let max_offset = config.max_offset as f64;
                 let bob_ratio = config.bob_ratio as f64;
-                match self.window_float_physics.get_mut(surface) {
+                match self.physics.window_float_physics.get_mut(surface) {
                     Some(physics) => physics.kick(impulse, response, max_offset, bob_ratio),
                     None => {
-                        self.window_float_physics.insert(
+                        self.physics.window_float_physics.insert(
                             surface.clone(),
                             crate::float_physics::FloatPhysics::kicked(
                                 impulse,
@@ -166,7 +225,8 @@ impl Smallvil {
                 }
             }
             crate::config::FloatPhysicsTier::Full => {
-                self.window_float_bodies
+                self.physics
+                    .window_float_bodies
                     .entry(surface.clone())
                     .or_insert_with(crate::float_physics::FloatBody::at_rest)
                     .kick(impulse, config.response as f64);
@@ -266,10 +326,11 @@ impl Smallvil {
     /// simulation is active, and prunes the set completely once idle.
     pub(super) fn sync_float_physics_bodies(&mut self) {
         if !self.config.water_effects {
-            self.window_float_bodies.clear();
+            self.physics.window_float_bodies.clear();
             return;
         }
         let stale: Vec<WlSurface> = self
+            .physics
             .window_float_bodies
             .keys()
             .filter(|surface| {
@@ -280,11 +341,11 @@ impl Smallvil {
             .cloned()
             .collect();
         for surface in stale {
-            self.window_float_bodies.remove(&surface);
+            self.physics.window_float_bodies.remove(&surface);
         }
         if !crate::float_physics::bodies_need_simulation(
             self.config.float_physics.wave.enabled,
-            self.window_float_bodies.values(),
+            self.physics.window_float_bodies.values(),
         ) {
             return;
         }
@@ -295,7 +356,8 @@ impl Smallvil {
             if self.float_physics_tier_for_surface(&surface)
                 == crate::config::FloatPhysicsTier::Full
             {
-                self.window_float_bodies
+                self.physics
+                    .window_float_bodies
                     .entry(surface)
                     .or_insert_with(crate::float_physics::FloatBody::at_rest);
             }
@@ -312,32 +374,33 @@ impl Smallvil {
 
         let now = Instant::now();
         let elapsed = now
-            .saturating_duration_since(self.float_physics_last_tick)
+            .saturating_duration_since(self.physics.float_physics_last_tick)
             .as_secs_f64();
-        self.float_physics_last_tick = now;
+        self.physics.float_physics_last_tick = now;
 
-        if self.floating_workspace.is_empty() && self.window_float_bodies.is_empty() {
-            self.float_physics_accum = 0.0;
+        if self.floating_workspace.is_empty() && self.physics.window_float_bodies.is_empty() {
+            self.physics.float_physics_accum = 0.0;
             return;
         }
         self.sync_float_physics_bodies();
-        if self.window_float_bodies.is_empty() {
-            self.float_physics_accum = 0.0;
+        if self.physics.window_float_bodies.is_empty() {
+            self.physics.float_physics_accum = 0.0;
             return;
         }
 
-        self.float_physics_accum =
-            (self.float_physics_accum + elapsed).min(FIXED_DT * MAX_SUBSTEPS as f64);
+        self.physics.float_physics_accum =
+            (self.physics.float_physics_accum + elapsed).min(FIXED_DT * MAX_SUBSTEPS as f64);
 
         let contexts: Vec<FloatBodyContext> = self
+            .physics
             .window_float_bodies
             .keys()
             .filter_map(|surface| self.float_body_context(surface))
             .collect();
 
         let mut steps = 0;
-        while self.float_physics_accum >= FIXED_DT && steps < MAX_SUBSTEPS {
-            self.float_physics_accum -= FIXED_DT;
+        while self.physics.float_physics_accum >= FIXED_DT && steps < MAX_SUBSTEPS {
+            self.physics.float_physics_accum -= FIXED_DT;
             steps += 1;
             self.step_float_physics_full(&contexts, FIXED_DT);
         }
@@ -353,9 +416,9 @@ impl Smallvil {
         // source of the permanent idle redraw loop.
         if !crate::float_physics::bodies_need_simulation(
             self.config.float_physics.wave.enabled,
-            self.window_float_bodies.values(),
+            self.physics.window_float_bodies.values(),
         ) {
-            self.window_float_bodies.clear();
+            self.physics.window_float_bodies.clear();
         }
     }
 
@@ -372,7 +435,7 @@ impl Smallvil {
     #[allow(clippy::mutable_key_type)] // WlSurface-keyed bounded visibility set
     pub(crate) fn update_currents(&mut self) {
         if !self.currents_enabled() || self.floating_workspace.is_empty() {
-            self.window_currents.clear();
+            self.physics.window_currents.clear();
             return;
         }
 
@@ -411,7 +474,8 @@ impl Smallvil {
             }
         }
 
-        self.window_currents
+        self.physics
+            .window_currents
             .retain(|surface, _| seen.contains(surface));
         let focused = self.focused_window_surface();
         let now = Instant::now();
@@ -420,6 +484,7 @@ impl Smallvil {
             let paused =
                 focused.as_ref() == Some(&surface) || self.floating_dragging.contains(&surface);
             let drift = self
+                .physics
                 .window_currents
                 .entry(surface.clone())
                 .or_insert_with(|| crate::currents::CurrentDrift::new(now, phase, paused));
@@ -444,27 +509,28 @@ impl Smallvil {
         if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
             let revision = self.ocean.camera_revision();
             let moving = self.ocean.has_active_camera_motion();
-            self.buoyancy_dirty |= revision != self.buoyancy_camera_revision
+            self.physics.buoyancy_dirty |= revision != self.physics.buoyancy_camera_revision
                 || moving
-                || moving != self.buoyancy_camera_was_moving;
-            self.buoyancy_camera_revision = revision;
-            self.buoyancy_camera_was_moving = moving;
+                || moving != self.physics.buoyancy_camera_was_moving;
+            self.physics.buoyancy_camera_revision = revision;
+            self.physics.buoyancy_camera_was_moving = moving;
         }
         if !self.buoyancy_enabled() {
-            self.window_buoyancy.clear();
-            self.buoyancy_dirty = false;
+            self.physics.window_buoyancy.clear();
+            self.physics.buoyancy_dirty = false;
             return;
         }
 
         let transitioning = self
+            .physics
             .window_buoyancy
             .values()
             .any(crate::buoyancy::BuoyancyState::needs_frame);
-        if !self.buoyancy_dirty && !transitioning {
+        if !self.physics.buoyancy_dirty && !transitioning {
             return;
         }
 
-        if self.buoyancy_dirty {
+        if self.physics.buoyancy_dirty {
             let outputs: Vec<Output> = self.space.outputs().cloned().collect();
             let mut candidates = HashSet::new();
             for output in outputs {
@@ -497,21 +563,23 @@ impl Smallvil {
                     continue;
                 }
                 eligible.insert(surface.clone());
-                self.window_buoyancy
+                self.physics
+                    .window_buoyancy
                     .entry(surface)
                     .and_modify(|state| state.set_configured_weight(weight))
                     .or_insert_with(|| crate::buoyancy::BuoyancyState::new(now, weight));
             }
-            self.window_buoyancy
+            self.physics
+                .window_buoyancy
                 .retain(|surface, _| eligible.contains(surface));
-            self.buoyancy_dirty = false;
+            self.physics.buoyancy_dirty = false;
         }
 
         let focused = self.focused_window_surface();
         let now = Instant::now();
         let settle = self.config.buoyancy.settle_ms as f64 / 1000.0;
         let mut changed = HashSet::new();
-        for (surface, state) in &mut self.window_buoyancy {
+        for (surface, state) in &mut self.physics.window_buoyancy {
             let paused =
                 focused.as_ref() == Some(surface) || self.floating_dragging.contains(surface);
             let target = if paused {
@@ -545,12 +613,17 @@ impl Smallvil {
         // comments.
         let stiffness = (std::f64::consts::TAU * cfg.frequency as f64).powi(2);
         let drag = 2.0 * cfg.damping as f64;
-        let elapsed = self.float_physics_wave_clock.elapsed().as_secs_f64();
+        let elapsed = self
+            .physics
+            .float_physics_wave_clock
+            .elapsed()
+            .as_secs_f64();
 
         let mut bodies: Vec<crate::float_physics::FloatBody> = contexts
             .iter()
             .map(|ctx| {
-                self.window_float_bodies
+                self.physics
+                    .window_float_bodies
                     .get(&ctx.surface)
                     .copied()
                     .unwrap_or_default()
@@ -626,7 +699,9 @@ impl Smallvil {
         }
 
         for (ctx, body) in contexts.iter().zip(bodies) {
-            self.window_float_bodies.insert(ctx.surface.clone(), body);
+            self.physics
+                .window_float_bodies
+                .insert(ctx.surface.clone(), body);
         }
     }
 
@@ -804,7 +879,7 @@ impl Smallvil {
         self.window_open_animations.remove(surface);
         self.cascade_window_animations.remove(surface);
         self.window_move_animations.remove(surface);
-        self.window_viscosity.remove(surface);
+        self.physics.window_viscosity.remove(surface);
         self.closing_window_animations
             .retain(|closing| closing.surface != *surface && !closing.finished());
         let retained_pixels: Vec<u64> = self
@@ -951,18 +1026,22 @@ impl Smallvil {
         if scroll_was_moving {
             self.queue_scroll_pointer_refresh();
         }
-        self.window_viscosity.retain(|_, motion| !motion.finished());
-        self.window_sway.retain(|_, sway| !sway.finished());
-        self.window_float_physics
+        self.physics
+            .window_viscosity
+            .retain(|_, motion| !motion.finished());
+        self.physics.window_sway.retain(|_, sway| !sway.finished());
+        self.physics
+            .window_float_physics
             .retain(|_, physics| !physics.finished());
         let stale_ambient: Vec<WlSurface> = self
+            .physics
             .window_float_ambient
             .keys()
             .filter(|surface| !self.is_floating(surface))
             .cloned()
             .collect();
         for surface in stale_ambient {
-            self.window_float_ambient.remove(&surface);
+            self.physics.window_float_ambient.remove(&surface);
         }
         self.swim_cameras.retain(|_, camera| !camera.at_rest());
         if self
@@ -1005,25 +1084,25 @@ impl Smallvil {
             || !self.window_open_animations.is_empty()
             || !self.cascade_window_animations.is_empty()
             || !self.window_move_animations.is_empty()
-            || !self.window_viscosity.is_empty()
-            || !self.window_sway.is_empty()
-            || !self.window_float_physics.is_empty()
+            || !self.physics.window_viscosity.is_empty()
+            || !self.physics.window_sway.is_empty()
+            || !self.physics.window_float_physics.is_empty()
             // Deliberately not pruned by a `finished()` check like the
             // physics map above -- ambient entries persist until
             // `toggle_float_ambient` removes them, so their mere presence
             // (not decay state) is what should keep the pump alive.
-            || !self.window_float_ambient.is_empty()
+            || !self.physics.window_float_ambient.is_empty()
             // Pruned inside `update_float_physics_full` itself (which also
             // needs to know whether the wave field is still forcing a
             // given body, not just whether it's numerically settled), not
             // here -- see that function's own retain call.
-            || !self.window_float_bodies.is_empty()
+            || !self.physics.window_float_bodies.is_empty()
             || self
-                .window_currents
+                .physics.window_currents
                 .values()
                 .any(crate::currents::CurrentDrift::needs_frame)
             || self
-                .window_buoyancy
+                .physics.window_buoyancy
                 .values()
                 .any(crate::buoyancy::BuoyancyState::needs_frame)
             || !self.swim_cameras.is_empty()
@@ -1083,16 +1162,18 @@ impl Smallvil {
                     self.window_open_animations.contains_key(surface)
                         || self.cascade_window_animations.contains_key(surface)
                         || self.window_move_animations.contains_key(surface)
-                        || self.window_viscosity.contains_key(surface)
-                        || self.window_sway.contains_key(surface)
-                        || self.window_float_physics.contains_key(surface)
-                        || self.window_float_ambient.contains_key(surface)
-                        || self.window_float_bodies.contains_key(surface)
+                        || self.physics.window_viscosity.contains_key(surface)
+                        || self.physics.window_sway.contains_key(surface)
+                        || self.physics.window_float_physics.contains_key(surface)
+                        || self.physics.window_float_ambient.contains_key(surface)
+                        || self.physics.window_float_bodies.contains_key(surface)
                         || self
+                            .physics
                             .window_currents
                             .get(surface)
                             .is_some_and(crate::currents::CurrentDrift::needs_frame)
                         || self
+                            .physics
                             .window_buoyancy
                             .get(surface)
                             .is_some_and(crate::buoyancy::BuoyancyState::needs_frame)

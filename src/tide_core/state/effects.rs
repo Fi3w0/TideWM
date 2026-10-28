@@ -50,7 +50,7 @@ impl Smallvil {
         // Identity and urgency participate in rule matching, including the
         // per-app weight. Re-resolve on the next sync; the retained record
         // lets a changed weight settle smoothly rather than snapping.
-        self.buoyancy_dirty = true;
+        self.physics.buoyancy_dirty = true;
         match crate::config::WindowOpacity::from_rule(&rule) {
             Some(opacity) => {
                 self.window_opacity.insert(surface.clone(), opacity);

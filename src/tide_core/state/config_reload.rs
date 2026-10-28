@@ -407,24 +407,27 @@ impl Smallvil {
                 // for nothing.
                 if !diff.is_empty() {
                     let disabled_viscosity: Vec<WlSurface> = self
+                        .physics
                         .window_viscosity
                         .keys()
                         .filter(|surface| self.interactive_motion_half_life(surface).is_zero())
                         .cloned()
                         .collect();
                     for surface in disabled_viscosity {
-                        self.window_viscosity.remove(&surface);
+                        self.physics.window_viscosity.remove(&surface);
                     }
                     let disabled_sway: Vec<WlSurface> = self
+                        .physics
                         .window_sway
                         .keys()
                         .filter(|surface| !self.sway_enabled_for_surface(surface))
                         .cloned()
                         .collect();
                     for surface in disabled_sway {
-                        self.window_sway.remove(&surface);
+                        self.physics.window_sway.remove(&surface);
                     }
                     let disabled_float_physics: Vec<WlSurface> = self
+                        .physics
                         .window_float_physics
                         .keys()
                         .filter(|surface| {
@@ -434,22 +437,23 @@ impl Smallvil {
                         .cloned()
                         .collect();
                     for surface in disabled_float_physics {
-                        self.window_float_physics.remove(&surface);
+                        self.physics.window_float_physics.remove(&surface);
                     }
                     let disabled_float_ambient: Vec<WlSurface> = self
+                        .physics
                         .window_float_ambient
                         .keys()
                         .filter(|surface| !self.float_physics_enabled_for_surface(surface))
                         .cloned()
                         .collect();
                     for surface in disabled_float_ambient {
-                        self.window_float_ambient.remove(&surface);
+                        self.physics.window_float_ambient.remove(&surface);
                     }
                     self.sync_float_physics_bodies();
                     if !self.currents_enabled() {
-                        self.window_currents.clear();
+                        self.physics.window_currents.clear();
                     }
-                    self.buoyancy_dirty = true;
+                    self.physics.buoyancy_dirty = true;
                     let ordinary_close =
                         self.config.animations.enabled && self.config.animations.close.enabled;
                     let cascade_close = self.config.water_effects

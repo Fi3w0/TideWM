@@ -26,6 +26,7 @@ impl Smallvil {
         let mut sample = crate::window_animation::VisualSample::default();
         if let Some(surface) = surface {
             let (buoyancy_sink, buoyancy_flow_scale) = self
+                .physics
                 .window_buoyancy
                 .get(surface)
                 .map(|state| {
@@ -46,7 +47,7 @@ impl Smallvil {
                 sample.offset += current.offset;
                 sample.opacity *= current.opacity;
             }
-            if let Some(viscosity) = self.window_viscosity.get(surface) {
+            if let Some(viscosity) = self.physics.window_viscosity.get(surface) {
                 if let Some(window) = self.mapped_toplevel_window(surface) {
                     if let Some(location) = self.space.element_location(&window) {
                         let current = viscosity.sample();
@@ -63,15 +64,15 @@ impl Smallvil {
                 sample.size = current.size;
                 sample.opacity *= current.opacity;
             }
-            if let Some(sway) = self.window_sway.get(surface) {
+            if let Some(sway) = self.physics.window_sway.get(surface) {
                 sample.offset.x += sway.sample();
             }
-            if let Some(physics) = self.window_float_physics.get(surface) {
+            if let Some(physics) = self.physics.window_float_physics.get(surface) {
                 let (ox, oy) = physics.sample();
                 sample.offset.x += ox * flow_scale;
                 sample.offset.y += oy * flow_scale;
             }
-            if let Some(body) = self.window_float_bodies.get(surface) {
+            if let Some(body) = self.physics.window_float_bodies.get(surface) {
                 sample.offset.x += body.offset.0 * flow_scale;
                 sample.offset.y += body.offset.1 * flow_scale;
             }
@@ -81,7 +82,7 @@ impl Smallvil {
             // needed to drive it. `is_floating` re-checked here (not just
             // at toggle time) so a window that stops floating after being
             // toggled on doesn't keep swaying off its tile.
-            if let Some(start) = self.window_float_ambient.get(surface) {
+            if let Some(start) = self.physics.window_float_ambient.get(surface) {
                 if self.is_floating(surface) {
                     let config = self.config.float_physics;
                     let (ax, ay) = crate::float_physics::ambient_sample(
@@ -97,7 +98,7 @@ impl Smallvil {
                 && self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean
                 && self.config.currents.enabled
             {
-                if let Some(current) = self.window_currents.get(surface) {
+                if let Some(current) = self.physics.window_currents.get(surface) {
                     let config = self.config.currents;
                     let (cx, cy) = current.sample(
                         config.direction_degrees as f64,
@@ -128,7 +129,7 @@ impl Smallvil {
         // shrink for the duration of the grab.
         if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
             if let Some(surface) = placement.surface() {
-                if let Some(viscosity) = self.window_viscosity.get(surface) {
+                if let Some(viscosity) = self.physics.window_viscosity.get(surface) {
                     if let Some(window) = self.mapped_toplevel_window(surface) {
                         if let Some(location) = self.space.element_location(&window) {
                             let current = viscosity.sample();

@@ -1385,7 +1385,7 @@ impl Smallvil {
             }
         }
 
-        self.buoyancy_dirty = true;
+        self.physics.buoyancy_dirty = true;
 
         // The opacity/glass resolve above (right after `resolve_window_rules_for`)
         // ran before this window had a workspace: `rule { on_workspace }` needs
@@ -1602,15 +1602,15 @@ impl Smallvil {
         self.window_open_animations.remove(surface);
         self.cascade_window_animations.remove(surface);
         self.window_move_animations.remove(surface);
-        self.window_viscosity.remove(surface);
-        self.window_sway.remove(surface);
-        self.window_float_physics.remove(surface);
-        self.window_float_ambient.remove(surface);
-        self.window_float_bodies.remove(surface);
-        self.window_currents.remove(surface);
+        self.physics.window_viscosity.remove(surface);
+        self.physics.window_sway.remove(surface);
+        self.physics.window_float_physics.remove(surface);
+        self.physics.window_float_ambient.remove(surface);
+        self.physics.window_float_bodies.remove(surface);
+        self.physics.window_currents.remove(surface);
         self.floating_dragging.remove(surface);
-        self.window_buoyancy.remove(surface);
-        self.buoyancy_dirty = true;
+        self.physics.window_buoyancy.remove(surface);
+        self.physics.buoyancy_dirty = true;
         self.window_frame_snapshots.remove(surface);
         self.backdrop_textures.remove(surface);
         self.glass_anim.remove(surface);

@@ -142,13 +142,14 @@ impl Smallvil {
         if !self.is_floating(surface) {
             return;
         }
-        if self.window_float_ambient.remove(surface).is_some() {
+        if self.physics.window_float_ambient.remove(surface).is_some() {
             self.request_redraw();
             return;
         }
         // The value is the time origin `ambient_sample`'s `elapsed` measures
         // from, not a due time -- there's nothing to schedule.
-        self.window_float_ambient
+        self.physics
+            .window_float_ambient
             .insert(surface.clone(), Instant::now());
         self.request_redraw();
     }
@@ -205,7 +206,7 @@ impl Smallvil {
         } else {
             self.floating_dragging.remove(surface);
         }
-        self.buoyancy_dirty = true;
+        self.physics.buoyancy_dirty = true;
         self.request_redraw();
     }
 
@@ -1094,7 +1095,7 @@ impl Smallvil {
         } else {
             HashMap::new()
         };
-        self.buoyancy_dirty = true;
+        self.physics.buoyancy_dirty = true;
         if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
             self.retile_ocean(skip_configure_for);
             return;
@@ -1196,7 +1197,7 @@ impl Smallvil {
                         let old_rect = Rectangle::new(old_location, window.geometry().size);
                         if old_rect != rect {
                             let viscous = (interactive
-                                || self.window_viscosity.contains_key(&surface))
+                                || self.physics.window_viscosity.contains_key(&surface))
                                 && self.retarget_window_viscosity(&surface, rect);
                             if matches!(
                                 self.compositor_gesture,
@@ -1468,12 +1469,12 @@ impl Smallvil {
                 )
             };
             if changed {
-                self.buoyancy_dirty = true;
+                self.physics.buoyancy_dirty = true;
                 if !was_tiled {
-                    self.window_float_ambient.remove(surface);
-                    self.window_currents.remove(surface);
+                    self.physics.window_float_ambient.remove(surface);
+                    self.physics.window_currents.remove(surface);
                     self.floating_dragging.remove(surface);
-                    self.window_buoyancy.remove(surface);
+                    self.physics.window_buoyancy.remove(surface);
                 }
                 self.retile();
                 if was_tiled {
@@ -1597,14 +1598,14 @@ impl Smallvil {
                 .insert(&output.name(), workspace, window, focused.as_ref());
             // No longer floating, so no longer needs its own workspace tag.
             self.floating_workspace.remove(surface);
-            self.window_float_ambient.remove(surface);
-            self.window_currents.remove(surface);
+            self.physics.window_float_ambient.remove(surface);
+            self.physics.window_currents.remove(surface);
             self.floating_dragging.remove(surface);
-            self.window_buoyancy.remove(surface);
-            self.buoyancy_dirty = true;
+            self.physics.window_buoyancy.remove(surface);
+            self.physics.buoyancy_dirty = true;
         }
 
-        self.buoyancy_dirty = true;
+        self.physics.buoyancy_dirty = true;
         self.retile();
         if was_tiled {
             self.enforce_floating_size_constraints(surface);
@@ -1659,7 +1660,7 @@ impl Smallvil {
                 rect,
             },
         );
-        self.buoyancy_dirty = true;
+        self.physics.buoyancy_dirty = true;
         self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
             surface: surface.clone(),
         });

@@ -401,54 +401,8 @@ pub struct Smallvil {
     scroll_pointer_refresh_pending: bool,
     pub(crate) window_move_animations:
         HashMap<WlSurface, crate::window_animation::WindowVisualAnimation>,
-    /// Short-lived render-only followers for interactive move/resize.
-    /// Logical geometry stays at the pointer target; one entry per active
-    /// mapped window bounds this state without retaining motion history.
-    pub(crate) window_viscosity: HashMap<WlSurface, crate::viscosity::ViscousMotion>,
-    /// Lateral damped oscillation for dragged floating windows. One small
-    /// closed-form record per mapped window; a settled entry finishes and
-    /// is pruned, so idle windows never keep the frame pump alive.
-    pub(crate) window_sway: HashMap<WlSurface, crate::sway::FloatingSway>,
-    /// Cosmetic 2D bob-and-drift for floating windows (F1 `light`). One
-    /// small closed-form record per disturbed window; a settled entry
-    /// finishes and is pruned, so idle windows never keep the frame pump
-    /// alive. When a window resolves float-physics-enabled it is tracked
-    /// here instead of in `window_sway` -- the two never stack.
-    pub(crate) window_float_physics: HashMap<WlSurface, crate::float_physics::FloatPhysics>,
-    /// Windows with ambient "sitting on water" sway toggled on
-    /// (`toggle-float-ambient`), keyed to the `Instant` it was toggled on --
-    /// the time origin `float_physics::ambient_sample`'s `elapsed` measures
-    /// from, sampled fresh in `base_window_visual_sample`. Unlike
-    /// `window_float_physics`, entries here don't finish on their own --
-    /// they persist until explicitly toggled off, deliberately keeping the
-    /// frame pump alive the whole time. Independent of `window_float_physics`
-    /// entirely: the two offsets simply add when both are active.
-    pub(crate) window_float_ambient: HashMap<WlSurface, Instant>,
-    /// One mass-spring-damper body per floating window using full physics.
-    /// Continuous wave forcing and collisions require persistent velocity;
-    /// `sync_float_physics_bodies` keeps membership aligned with live rules.
-    pub(crate) window_float_bodies: HashMap<WlSurface, crate::float_physics::FloatBody>,
-    /// Fixed-timestep accumulator for `update_float_physics_full`'s
-    /// integrator, carried across ticks so a variable frame interval still
-    /// advances the simulation in fixed, numerically stable steps. Clamped
-    /// to a small multiple of the fixed step so a long stall (a hung
-    /// nested host, a VT switch) can't dump a huge catch-up burst of
-    /// substeps into a single tick.
-    pub(crate) float_physics_accum: f64,
-    /// Wall-clock timestamp of the previous `update_float_physics_full`
-    /// call, used to derive the elapsed real time fed into the accumulator
-    /// above.
-    pub(crate) float_physics_last_tick: Instant,
-    /// Fixed time origin the traveling wave field's phase is measured from
-    /// (`float_physics::wave_target`'s `elapsed`). A single shared clock
-    /// (not one per window, unlike `window_float_ambient`) because the
-    /// wave is one continuous field every full-tier window samples by its
-    /// own position, not N independent oscillators.
-    pub(crate) float_physics_wave_clock: Instant,
-    /// Ocean-only cosmetic current, one small phase clock per visible
-    /// floating window. Records are paused (not reset) while focused or
-    /// directly dragged, and cleared outside Ocean or when disabled.
-    pub(crate) window_currents: HashMap<WlSurface, crate::currents::CurrentDrift>,
+    /// Render-only floating-window motion: physics, buoyancy, currents, sway and viscosity (plan step 8b).
+    pub(crate) physics: physics::FloatPhysicsState,
     /// Floating move grabs currently under direct manipulation. Kept
     /// separately from viscosity because viscosity may be disabled or may
     /// keep settling briefly after the physical grab ends.
@@ -456,13 +410,6 @@ pub struct Smallvil {
     /// One bounded analytical fill while a Classic floating drag is inside
     /// a configured edge/corner snap zone. Dropped on every grab teardown.
     pub(crate) snap_preview: Option<SnapPreview>,
-    /// Render-only apparent weight, retained only for visible eligible
-    /// floaters. Stable entries request no frames; `buoyancy_dirty` avoids
-    /// rebuilding placements on idle backend maintenance ticks.
-    pub(crate) window_buoyancy: HashMap<WlSurface, crate::buoyancy::BuoyancyState>,
-    pub(crate) buoyancy_dirty: bool,
-    pub(crate) buoyancy_camera_revision: u64,
-    pub(crate) buoyancy_camera_was_moving: bool,
     /// Continuous lateral swim camera, one entry per output that has ever
     /// swum. The offset is purely visual (the logical workspace identity is
     /// still `Layouts::active`'s `u32`); at rest it is zero and the entry

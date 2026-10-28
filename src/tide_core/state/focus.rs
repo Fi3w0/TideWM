@@ -539,7 +539,7 @@ impl Smallvil {
             self.emit_ipc_event(crate::ipc::IpcEvent::FocusChanged {
                 surface: new_window_for_event,
             });
-            self.buoyancy_dirty = true;
+            self.physics.buoyancy_dirty = true;
         }
 
         if let Some(keyboard) = self.seat.get_keyboard() {

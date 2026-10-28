@@ -599,7 +599,7 @@ impl Smallvil {
     /// Unpinning doesn't re-tile it back; it just stays floating in place,
     /// matching Hyprland's own pin behavior.
     pub fn toggle_pin(&mut self, surface: &WlSurface) {
-        self.buoyancy_dirty = true;
+        self.physics.buoyancy_dirty = true;
         if let Some(was_pinned) = self.fullscreen.get(surface).map(|entry| entry.was_pinned) {
             // Fullscreen temporarily suspends pinning. A toggle changes the
             // mode to restore on exit without making two placement owners

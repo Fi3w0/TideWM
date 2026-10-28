@@ -56,8 +56,8 @@ use wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_manager_v1::Z
 use crate::{config::Config, layout::Layouts};
 
 use super::{
-    ipc::IpcState, trusted_client, ClientState, KeyboardFocusTarget, SessionLock, Smallvil,
-    SpatialState,
+    ipc::IpcState, physics::FloatPhysicsState, trusted_client, ClientState, KeyboardFocusTarget,
+    SessionLock, Smallvil, SpatialState,
 };
 
 use smithay::{
@@ -333,21 +333,23 @@ impl Smallvil {
             cascade_window_animations: HashMap::new(),
             scroll_pointer_refresh_pending: false,
             window_move_animations: HashMap::new(),
-            window_viscosity: HashMap::new(),
-            window_sway: HashMap::new(),
-            window_float_physics: HashMap::new(),
-            window_float_ambient: HashMap::new(),
-            window_float_bodies: HashMap::new(),
-            float_physics_accum: 0.0,
-            float_physics_last_tick: Instant::now(),
-            float_physics_wave_clock: Instant::now(),
-            window_currents: HashMap::new(),
+            physics: FloatPhysicsState {
+                window_viscosity: HashMap::new(),
+                window_sway: HashMap::new(),
+                window_float_physics: HashMap::new(),
+                window_float_ambient: HashMap::new(),
+                window_float_bodies: HashMap::new(),
+                float_physics_accum: 0.0,
+                float_physics_last_tick: Instant::now(),
+                float_physics_wave_clock: Instant::now(),
+                window_currents: HashMap::new(),
+                window_buoyancy: HashMap::new(),
+                buoyancy_dirty: true,
+                buoyancy_camera_revision: 0,
+                buoyancy_camera_was_moving: false,
+            },
             floating_dragging: HashSet::new(),
             snap_preview: None,
-            window_buoyancy: HashMap::new(),
-            buoyancy_dirty: true,
-            buoyancy_camera_revision: 0,
-            buoyancy_camera_was_moving: false,
             swim_cameras: HashMap::new(),
             workspace_scroll_cameras: HashMap::new(),
             window_frame_snapshots: HashMap::new(),
