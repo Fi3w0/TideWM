@@ -1557,7 +1557,11 @@ impl Smallvil {
     /// direction's axis, with a penalty for how far off-axis they sit, so a
     /// neighbor roughly level with `from` wins over one that's technically
     /// closer in raw distance but well off to the side.
-    pub(super) fn neighbor_in_direction(&self, from: &Window, direction: Direction) -> Option<Window> {
+    pub(super) fn neighbor_in_direction(
+        &self,
+        from: &Window,
+        direction: Direction,
+    ) -> Option<Window> {
         let from_rect = self.space.element_geometry(from)?;
 
         self.space
