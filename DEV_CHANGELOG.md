@@ -2,6 +2,10 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.1 — Wave memory size literals
+
+- Added typed whole-byte sizes to Wave: decimal `B`/`KB`/`MB`/`GB`, binary `KiB`/`MiB`/`GiB`. Arithmetic retains the left operand’s unit; results must be finite nonnegative whole bytes within Lua’s exact integer range. Variables, lists, lowering and eval preserve size values. Parser/evaluation regression coverage includes mixed units and invalid arithmetic.
+
 ## 0.91.0 — `config.rs` split (plan step 9)
 
 - Layout approved by Fiw 2026-10-28: by domain (each file holds a domain's config types, their `Default`/`impl`s and the `apply_*`/`lower_*` functions that fill them), caller paths kept through explicit re-exports from `config/mod.rs`, tests moved verbatim.

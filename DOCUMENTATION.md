@@ -48,6 +48,8 @@ bind $mod+D      { "spawn:rofi -show drun" }
 
 Binds are node form: `bind <combo> { <action> }`, one action per line (or comma-separated on one line). `terminal` is a top-level key, not a `@name` variable — reference it as `$terminal` only after defining `@terminal = ...`.
 
+**Memory sizes are values.** `400MB * 2` is `800MB`; `1GB + 500MB` is `1.5GB`. `B`, `KB`, `MB`, and `GB` use decimal bytes (1 MB = 1,000,000 B); `KiB`, `MiB`, and `GiB` use powers of 1024. Size arithmetic keeps the left operand’s unit and requires nonnegative whole bytes, at most 9,007,199,254,740,991 B. Variables, lists and `tidectl eval` support sizes. Quoted sizes remain strings. Sizes do not add size support to unrelated numeric configuration keys.
+
 **Typed values.** Durations and colors are real values with math: `600ms * 2` is `1200ms`, `1.5s * 2` is `3s`, `2 * 300ms` is `600ms`; `primary.darken(0.35)` and `primary.lighten(0.15)` derive real palette colors. `alpha(a)` is accepted in the same expressions but currently a no-op — it returns the color unchanged rather than adjusting its alpha, matching the config surface's own "alpha in the color form is ignored" behavior (see the `ripple { }` `color` field below). Every duration key accepts a unit (`cursor_hide_after = 2s`) or a bare millisecond number.
 
 **Reactive config.** `on "event" { ... }` registers a handler body that runs when the event fires, with the live `tide` table (`tide.backend`, `tide.gpu.vendor`, `tide.outputs`, `tide.workspace`) refreshed first:

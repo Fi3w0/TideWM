@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.1 · 2026-10-28 — Wave memory sizes
+
+- Wave understands memory sizes such as `400MB` and `1GiB`, including arithmetic, variables and `tidectl eval`. This prepares the size values for Ebb caps.
+
 ## 0.91.0 · 2026-10-28 — Configuration code split by area
 
 - Internal cleanup that completes the architecture refactor: the configuration code is now split into one file per area (decoration, animation, spatial, rules, devices, actions, shaders and so on). Config files, keys and behavior stay exactly the same.
