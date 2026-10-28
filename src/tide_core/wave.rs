@@ -203,7 +203,7 @@ fn split_duration(word: &str) -> Option<(&str, &str)> {
 }
 
 /// SI sizes use decimal bytes; IEC sizes use powers of 1024.
-fn size_scale(unit: &str) -> Option<f64> {
+pub(crate) fn size_scale(unit: &str) -> Option<f64> {
     Some(match unit {
         "B" => 1.0,
         "KB" => 1_000.0,
@@ -216,7 +216,7 @@ fn size_scale(unit: &str) -> Option<f64> {
     })
 }
 
-fn split_size(word: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_size(word: &str) -> Option<(&str, &str)> {
     for unit in ["KiB", "MiB", "GiB", "KB", "MB", "GB", "B"] {
         if let Some(num) = word.strip_suffix(unit) {
             if !num.is_empty()
@@ -232,6 +232,28 @@ fn split_size(word: &str) -> Option<(&str, &str)> {
         }
     }
     None
+}
+
+pub(crate) fn parse_size_bytes(value: &str) -> Option<u64> {
+    let (number, unit) = split_size(value)?;
+    let scale = size_scale(unit)? as u128;
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+    let divisor = 10_u128.checked_pow(fraction.len().try_into().ok()?)?;
+    let numerator = whole
+        .parse::<u128>()
+        .ok()?
+        .checked_mul(divisor)?
+        .checked_add(if fraction.is_empty() {
+            0
+        } else {
+            fraction.parse::<u128>().ok()?
+        })?;
+    let scaled = numerator.checked_mul(scale)?;
+    if scaled % divisor != 0 {
+        return None;
+    }
+    let bytes = scaled / divisor;
+    (bytes <= 9_007_199_254_740_991).then_some(bytes as u64)
 }
 
 fn is_duration(word: &str) -> bool {
@@ -401,7 +423,7 @@ impl<'a> Rewriter<'a> {
             return Ok(format!("_color({})", lua_quote(&hex[..6.min(hex.len())])));
         }
         if let Some((num, unit)) = split_size(word) {
-            return Ok(format!("_size({}, {})", num, lua_quote(unit)));
+            return Ok(format!("_size({}, {})", lua_quote(num), lua_quote(unit)));
         }
         if is_duration(word) {
             let (num, unit) = split_duration(word).unwrap();
@@ -649,7 +671,7 @@ fn classify_literal(text: &str) -> String {
         let hex = text.strip_prefix('#').unwrap();
         format!("_color({})", lua_quote(&hex[..6.min(hex.len())]))
     } else if let Some((num, unit)) = split_size(text) {
-        format!("_size({}, {})", num, lua_quote(unit))
+        format!("_size({}, {})", lua_quote(num), lua_quote(unit))
     } else if is_duration(text) {
         let (num, unit) = split_duration(text).unwrap();
         format!("_dur({}, {})", num, lua_quote(unit))
@@ -1077,7 +1099,7 @@ fn rewrite_value(value: &str, sym: &Symbols) -> Result<String, String> {
             return Ok(format!("_color({})", lua_quote(&hex[..6.min(hex.len())])));
         }
         if let Some((num, unit)) = split_size(value) {
-            return Ok(format!("_size({}, {})", num, lua_quote(unit)));
+            return Ok(format!("_size({}, {})", lua_quote(num), lua_quote(unit)));
         }
         if is_duration(value) {
             let (num, unit) = split_duration(value).unwrap();
@@ -1559,11 +1581,16 @@ impl SizeValue {
     }
 
     fn serialize(&self) -> String {
-        format!(
+        let formatted = format!(
             "{}{}",
             self.bytes / size_scale(&self.unit).unwrap(),
             self.unit
-        )
+        );
+        if parse_size_bytes(&formatted) == Some(self.bytes as u64) {
+            formatted
+        } else {
+            format!("{}B", self.bytes as u64)
+        }
     }
 }
 
@@ -1981,10 +2008,13 @@ fn install_env(
     lua.globals()
         .set(
             "_size",
-            lua.create_function(|_, (n, unit): (f64, String)| {
-                let scale =
-                    size_scale(&unit).ok_or_else(|| mlua::Error::external("unknown size unit"))?;
-                SizeValue::new(n * scale, unit)
+            lua.create_function(|_, (number, unit): (String, String)| {
+                let bytes = parse_size_bytes(&format!("{number}{unit}")).ok_or_else(|| {
+                    mlua::Error::external(
+                        "size must be exact whole bytes, at most 9007199254740991B",
+                    )
+                })?;
+                SizeValue::new(bytes as f64, unit)
             })
             .map_err(|e| e.to_string())?,
         )
@@ -3094,6 +3124,21 @@ mod tests {
             lua_value_to_json(result).unwrap(),
             serde_json::json!("1.5GB")
         );
+    }
+
+    #[test]
+    fn sizes_keep_exact_bytes_at_the_lua_integer_boundary() {
+        let entries = evaluate(
+            "a = 9007199254.740991MB\nb = 9007199254740991B\n",
+            Path::new("sizes.wave"),
+        )
+        .unwrap();
+        for entry in entries {
+            if let Entry::Assign(_, value) = entry {
+                assert_eq!(parse_size_bytes(&value), Some(9_007_199_254_740_991));
+            }
+        }
+        assert!(evaluate("a = 9007199254740991.1B\n", Path::new("sizes.wave")).is_err());
     }
 
     #[test]

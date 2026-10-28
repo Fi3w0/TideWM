@@ -18,6 +18,10 @@ use smithay::reexports::calloop::channel::{self, Channel};
 use crate::wave;
 use crate::waves;
 
+mod ebb;
+use ebb::apply_ebb_block;
+pub use ebb::{EbbConfig, EbbMode};
+
 mod spatial;
 use spatial::{
     apply_buoyancy_block, apply_classic_depth_block, apply_compass_block,
@@ -136,6 +140,7 @@ pub struct Config {
     pub spatial_engine: SpatialEngine,
     pub ocean: OceanConfig,
     pub scroll: crate::scroll::ScrollConfig,
+    pub ebb: EbbConfig,
     /// Physically-held modifier required for compositor mouse move/resize.
     /// This is separate from keybinds because `$mod` is only a Waves
     /// variable, not global compositor state; the shipped config points
@@ -672,6 +677,7 @@ impl Config {
             .filter(|bind| !matches!(bind.action, Action::EnterMode(_)))
             .collect();
         warnings.append(&mut raw.shader_warnings);
+        warnings.append(&mut raw.ebb_warnings);
         let env = raw
             .env
             .into_iter()
@@ -691,6 +697,7 @@ impl Config {
             spatial_engine,
             ocean: raw.ocean,
             scroll: raw.scroll,
+            ebb: raw.ebb,
             pointer_modifier,
             show_welcome_hint: raw.show_welcome_hint,
             show_config_reload_toast: raw.show_config_reload_toast,
@@ -1148,6 +1155,8 @@ struct RawConfig {
     spatial_engine: String,
     ocean: OceanConfig,
     scroll: crate::scroll::ScrollConfig,
+    ebb: EbbConfig,
+    ebb_warnings: Vec<String>,
     /// `super`, `alt`, `ctrl`, `shift`, or a `+`-joined combination.
     /// Resolved after Waves variable substitution in `Config::from_raw`.
     pointer_modifier: String,
@@ -1325,6 +1334,8 @@ impl Default for RawConfig {
             spatial_engine: "classic".to_string(),
             ocean: OceanConfig::default(),
             scroll: crate::scroll::ScrollConfig::default(),
+            ebb: EbbConfig::default(),
+            ebb_warnings: Vec::new(),
             pointer_modifier: "super".to_string(),
             backdrop_capture_scale: 1,
             // Deliberately false, not true: a real config.wave always ships
@@ -1515,6 +1526,8 @@ fn apply_top_level_assign(raw: &mut RawConfig, key: &str, value: &str) {
 
 fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body: &[waves::Entry]) {
     match keyword {
+        "ebb" => apply_ebb_block(raw, body, false),
+        "ebb_advanced" => apply_ebb_block(raw, body, true),
         "input" => apply_input_block(&mut raw.input, body),
         "xwayland" => apply_xwayland_block(&mut raw.xwayland, body),
         "transition" => apply_workspace_transition_block(&mut raw.workspace_transition, body),

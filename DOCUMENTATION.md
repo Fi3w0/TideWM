@@ -2136,3 +2136,74 @@ With `workspace_scroll`, `workspace-down`/`workspace-up` slide vertically to the
 Spacing follows `gaps`. A column holds one window or several stacked ones. Along the strip, `focus-*` moves between columns (landing on the window last focused there), `swap-*` moves the whole column and `resize-*` changes the column width; across the strip, they move focus, reorder and resize inside the column. `consume-or-expel-left/right`, `consume-into-column` and `expel-from-column` edit columns (see [Action strings](#action-strings)). New windows open as a column after the focused column. Modifier+right-drag on a Scroll tile resizes its column along the strip and, in a shared column, the window across it. A modifier+left-drag drop lands by zone of the tile under the pointer: the outer quarters along the strip insert a new column before/after it, the outer quarters across it insert into its column above/below it, and the middle swaps. While dragging, a bar (or the whole tile, for a swap) previews the landing spot in the `snap` preview color and opacity. `scroll-left/right` slides the strip half a viewport; `scroll-up/down` pans the vertical stack half a viewport in horizontal Scroll (a no-op with `stack = fit`). No binds are added automatically. Pointer focus (hover, click, touch, tablet) never moves the strip; keyboard focus, `focus-window`/`focus-app` and notification activation reveal the target.
 
 In Scroll mode each `outputs` entry has a `scroll` object with `offset`, `orientation` and `workspaces`; with centering on, `offset` can be negative.
+
+
+## Ebb
+
+Ebb watches TideWM’s resource use and reports suspicious growth. Its first phase
+is monitoring and reporting, plus returning already-free glibc heap pages during
+native idle maintenance. It does not yet evict hidden-window caches. Cleanup on
+window destruction remains the owner’s job.
+
+```wave
+# Can live in config.wave or an ordinary included ebb.wave.
+ebb {
+    mode = low                 # off | low | balanced | aggressive
+    check_every = 60s           # clamped to 10s–10m, with a warning
+    # ram_cap = 400MB
+    # cache_cap = 256MiB
+    # vram_cap = 512MiB
+}
+ebb_advanced {
+    light_after = 5m
+    away_after = 15m
+    leak_window = 60m
+    toast = true
+    # pass_budget = 1ms         # reserved for Phase 2 cache passes
+}
+```
+
+`tidectl ebb stats` prints a short summary. `tidectl ebb stats --json` includes
+the latest sample, history, findings and effective settings. The IPC request is
+`{"request":"ebb-stats"}`. Subscribe to channel `ebb` for `ebb-warning`; Wave
+handlers may use `on "ebb-warning"`. Notifications are limited to once per day
+per finding; an existing error panel or toast takes precedence. No history is
+written to disk. History keeps 1,440 recent samples (24 hours at the default
+interval, four hours at 10 seconds), plus up to 168 older hourly aggregates.
+A relog clears it.
+
+Samples contain PSS, open files, TideWM’s texture estimate, system available
+memory and system PSI `some avg10` when readable. Missing signals are `null`.
+The estimate shares `tidectl perf`’s accounting: client buffers, driver pools
+and some decoration/capture allocations are outside its scope. Per-process
+VRAM remains unknown; `vram_cap` uses this texture estimate, explicitly reported
+in stats. Neither the estimate nor PSS is a hard process-memory limit.
+
+Checks prefer quiet moments. Continuous decorative animation may defer one
+check interval, then sampling proceeds outside rendering. An active grab still
+postpones it. A sample taking over 2 ms is reported for investigation. No
+telemetry thread or systemd service is required.
+
+Steady-growth findings need at least six samples across `leak_window`, at least
+80% nondecreasing steps and an hourly increase of at least 8 MiB (PSS/textures)
+or 16 file descriptors. Away-growth checks cover at least 10 minutes of the same
+away period (locked, all outputs off, or idle past `away_after`), or the configured
+window if shorter. Gaps over 20 minutes, changed window counts and missing data
+invalidate a trend. These are investigation signals, not proof of a leak or
+attribution to a client. Very long configured windows need enough recent history.
+
+On glibc, after native renderer-cache maintenance and at least `light_after`
+without input, Ebb can call `malloc_trim(0)` to release already-free allocator
+pages. It skips animation and grabs, and runs at most once per larger of
+`light_after` and `check_every`. `off` disables Ebb trimming but keeps monitoring.
+The other modes behave alike until Phase 2 adds cache passes. musl skips this
+operation. Stats record calls, calls that released pages and the last duration;
+they do not claim a number of bytes saved. The libc call is synchronous and cannot
+be interrupted at `pass_budget`.
+
+With any cap configured, heap trimming waits until a measured cap is crossed.
+The gate stays active until that signal reaches 90% of the cap. If libc reports
+nothing releasable while over a cap, Ebb stops retrying until caps clear or change
+and reports that finding. Caps never permit freeing visible or client resources.
+`ebb run`, `ebb init`, generated `ebb.wave`, hidden-cache eviction, pressure
+notifications to shells and per-app reports arrive in later phases.

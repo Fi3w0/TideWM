@@ -273,6 +273,7 @@ impl Smallvil {
                 is_tablet_mode: false,
             },
             config_lua,
+            ebb: crate::ebb::Ebb::default(),
             tide,
             handler_depth: 0,
             config_warnings: startup_config_warnings.clone(),

@@ -154,6 +154,17 @@ For tools: each `tidectl outputs` entry has a `scroll` object (`offset`, `orient
 | Multi-GPU client offload | Done; not yet tested on a hybrid laptop |
 | AUR package | Not yet |
 
+## Ebb resource monitoring (0.91.2)
+
+Ebb Phase 1 adds bounded in-memory PSS/fd/texture-estimate history, growth and
+retained-reference findings, `tidectl ebb stats`, and a generic `ebb-warning`
+IPC event. Native idle maintenance can return free glibc heap pages; musl skips
+that operation. It adds no dependency or telemetry thread. Hidden-cache eviction,
+pressure-driven passes and per-app attribution remain planned. See
+[the Ebb reference](DOCUMENTATION.md#ebb) for settings, scopes and limitations.
+Native performance and multi-day soak evidence remain pending; no memory-saving
+or cross-compositor performance claim follows from the implementation.
+
 ## Hardware
 
 | Hardware | Status |

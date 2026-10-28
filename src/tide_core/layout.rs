@@ -408,6 +408,16 @@ pub struct Layouts {
 }
 
 impl Layouts {
+    /// Diagnostic only: count retained handles after their Wayland role died.
+    pub(crate) fn dead_window_references(&self) -> usize {
+        use smithay::utils::IsAlive;
+        self.trees
+            .values()
+            .flat_map(BspLayout::windows)
+            .filter(|window| !window.alive())
+            .count()
+    }
+
     /// Whether `surface` is tiled on any (output, workspace) tree, visible
     /// or not.
     pub fn contains(&self, surface: &WlSurface) -> bool {

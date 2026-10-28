@@ -1,6 +1,7 @@
 //! Central compositor state and cross-subsystem coordination.
 
 mod config_reload;
+mod ebb;
 mod effects;
 mod focus;
 mod groups_depth;
@@ -188,6 +189,7 @@ pub struct Smallvil {
     /// section tables persist here after a load, which is what makes
     /// `tidectl eval` and `on "event"` handlers work.
     pub(crate) config_lua: mlua::Lua,
+    pub(crate) ebb: crate::ebb::Ebb,
     /// Live-compositor facts exposed to config as the `tide` table.
     pub(crate) tide: crate::wave::TideInfo,
     /// Nesting guard for `on "event"` handlers (an action queued by a

@@ -1077,6 +1077,7 @@ fn resolve_window_rules_folds_last_scalar_wins_bools_accumulate() {
         spatial_engine: SpatialEngine::Classic,
         ocean: OceanConfig::default(),
         scroll: crate::scroll::ScrollConfig::default(),
+        ebb: EbbConfig::default(),
         pointer_modifier: Mods {
             logo: true,
             ..Default::default()

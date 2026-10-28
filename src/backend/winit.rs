@@ -185,6 +185,7 @@ pub fn init_winit(
     event_loop
         .handle()
         .insert_source(timer, move |_, _, state| {
+            state.ebb_tick(false);
             state.update_window_depths();
             state.update_urgent_pulses();
             state.update_float_physics_full();

@@ -2,6 +2,12 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.2 · 2026-10-28 — Ebb watches resource use
+
+- `tidectl ebb stats` shows TideWM’s memory, open files, texture estimates and bounded session history. Ebb reports sustained growth, growth while away and references retained for destroyed resources.
+- Configure checks with `ebb { check_every = 60s }` (10s–10m). Rare findings appear in stats, the log, an `ebb-warning` event and an optional daily toast.
+- On glibc, native idle maintenance can return already-free heap pages, respecting `off` and optional caps. Hidden-cache trimming remains the next Ebb phase.
+
 ## 0.91.1 · 2026-10-28 — Wave memory sizes
 
 - Wave understands memory sizes such as `400MB` and `1GiB`, including arithmetic, variables and `tidectl eval`. This prepares the size values for Ebb caps.

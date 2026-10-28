@@ -2,6 +2,16 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.2 — Ebb Phase 1: watch and tell
+
+- Added `config/ebb.rs`, a bounded telemetry coordinator, maintenance integration for native and nested backends, `ebb-stats` IPC / `tidectl ebb stats`, and the `ebb` subscription channel with `ebb-warning`. No new dependencies or threads.
+- Samples reuse perf’s PSS reader and texture estimate; missing kernel signals remain null. Recent history has 1,440 slots, with 168 older hourly aggregates. Owner detail is kept for the latest sample only. No persistent telemetry files.
+- Reports sustained PSS/texture/fd growth and continuous away-period growth; growth requires enough evidence and is described as observed, without claiming attribution or a leak fix. Retained-reference audits include hidden owners (workspace/Ocean trees, parked group members, swallowed windows and Depth Deck), GPU/per-window maps and disconnected-output caches. Audits do not delete owner state.
+- `check_every` clamps to 10s–10m with diagnostics. Animation deferral is capped at one check interval so continuous borders cannot starve telemetry; grabs always postpone sampling. Warn when a sample exceeds 2 ms.
+- After native Smithay cleanup, glibc `malloc_trim(0)` is gated by idle time, animation/grab checks, mode and optional caps. Caps use 90% hysteresis; an unsuccessful over-cap trim blocks retries until the gate clears or changes. No cache eviction in Phase 1; caps are soft gates, not enforced memory limits. musl skips heap trimming.
+- Size lowering uses exact decimal parsing before Lua conversion; serialization falls back to bytes when preserving a larger unit would lose precision.
+- Full hidden-cache trimming, pressure-triggered passes, per-app accounting and `ebb init/run` remain later phases. NVIDIA driver-profile packaging remains gated on native A/B evidence; no profile is installed by this release.
+
 ## 0.91.1 — Wave memory size literals
 
 - Added typed whole-byte sizes to Wave: decimal `B`/`KB`/`MB`/`GB`, binary `KiB`/`MiB`/`GiB`. Arithmetic retains the left operand’s unit; results must be finite nonnegative whole bytes within Lua’s exact integer range. Variables, lists, lowering and eval preserve size values. Parser/evaluation regression coverage includes mixed units and invalid arithmetic.

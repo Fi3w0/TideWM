@@ -608,3 +608,68 @@ fn refused_engine_switch_keeps_the_request_and_retries_on_reload() {
     assert_eq!(state.config.spatial_engine, SpatialEngine::Ocean);
     println!("refused switch retried");
 }
+
+#[test]
+fn ebb_reports_dead_handles_but_accepts_hidden_live_windows() {
+    if run_isolated(
+        "ebb_reports_dead_handles_but_accepts_hidden_live_windows",
+        ROUND_TRIP_CONFIG,
+        "ebb ownership audit checked",
+    ) {
+        return;
+    }
+    let mut f = two_output_fixture();
+    let live = map(&mut f, "a");
+    let hidden = map(&mut f, "deep");
+    assert!(!f
+        .state
+        .space
+        .elements()
+        .any(|w| w.toplevel().is_some_and(|t| t.wl_surface() == &hidden)));
+    f.state.ebb_tick(false);
+    assert!(f.state.ebb.recent.back().unwrap().leftovers.is_empty());
+    let retained = f
+        .state
+        .space
+        .elements()
+        .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == &live))
+        .unwrap()
+        .clone();
+    let id = live.id().protocol_id();
+    f.request(id + 3, 0, &[], &[]); // viewport
+    f.request(id + 2, 0, &[], &[]); // toplevel
+    f.request(id + 1, 0, &[], &[]); // xdg_surface
+    f.request(id, 0, &[], &[]); // wl_surface
+    f.dispatch();
+    assert!(!live.is_alive());
+    // Simulate the exact retained-Window class of bug; Ebb must report it,
+    // without deleting the owner's data or misclassifying the live hidden window.
+    f.state.unmapped_toplevels.insert(live.clone(), retained);
+    f.state.ebb.last_sample_secs = None;
+    f.state.ebb_tick(false);
+    let latest = f.state.ebb.recent.back().unwrap();
+    assert!(latest
+        .leftovers
+        .iter()
+        .any(|entry| entry.owner == "unmapped_toplevels" && entry.count == 1));
+    let warning = crate::ebb::Ebb::default()
+        .record(latest.clone(), 3600)
+        .into_iter()
+        .find(|warning| warning.code == "leftovers")
+        .unwrap();
+    let event = crate::ipc::IpcEvent::EbbWarning { warning };
+    let wire: serde_json::Value = serde_json::from_slice(&event.to_json_line(&f.state)).unwrap();
+    assert_eq!(wire["event"], "ebb-warning");
+    assert_eq!(wire["data"]["code"], "leftovers");
+    assert!(crate::ipc::event_matches(
+        &std::collections::HashSet::from([crate::ipc::EventKind::Ebb]),
+        &event
+    ));
+    assert!(!crate::ipc::event_matches(
+        &std::collections::HashSet::from([crate::ipc::EventKind::Window]),
+        &event
+    ));
+    assert!(f.state.unmapped_toplevels.contains_key(&live));
+    assert!(f.state.spatial.workspaces.layout.contains(&hidden));
+    println!("ebb ownership audit checked");
+}

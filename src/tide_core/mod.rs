@@ -6,6 +6,7 @@
 
 pub(crate) mod classic_depth;
 pub(crate) mod config;
+pub(crate) mod ebb;
 pub(crate) mod input;
 pub(crate) mod ipc;
 pub(crate) mod layout;

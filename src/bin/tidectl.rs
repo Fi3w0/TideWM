@@ -115,6 +115,10 @@ fn main() {
         cmd_subscribe(&socket, socket_override.is_none(), &args[1..]);
     }
 
+    if args[0] == "ebb" {
+        json_output |= args[1..].iter().any(|arg| arg == "--json" || arg == "-j");
+        args.retain(|arg| arg != "--json" && arg != "-j");
+    }
     let request = build_request(&args).unwrap_or_else(|msg| fail(&msg));
     let response = match send_request(&socket, &request) {
         Ok(r) => r,
@@ -709,6 +713,13 @@ fn depth_request(args: &[String]) -> Result<Value, String> {
 fn build_request(args: &[String]) -> Result<Value, String> {
     let rest = &args[1..];
     match args[0].as_str() {
+        "ebb" => {
+            if rest == ["stats"] {
+                Ok(json!({ "request": "ebb-stats" }))
+            } else {
+                Err("usage: tidectl ebb stats [--json]".into())
+            }
+        }
         "focus-window" if rest.len() == 1 => {
             let id = rest[0]
                 .parse::<u64>()
@@ -901,6 +912,43 @@ fn send_request(socket_path: &Path, request: &Value) -> std::io::Result<Value> {
     serde_json::from_slice(line).map_err(std::io::Error::other)
 }
 
+fn print_ebb_stats(data: &Value) {
+    println!("Ebb — watch and tell (Phase 1)");
+    println!("Samples: {}", data["sample_count"]);
+    let latest = &data["latest"];
+    if latest.is_null() {
+        println!("Waiting for the first quiet sample.");
+    } else {
+        let memory = latest["pss_bytes"]
+            .as_u64()
+            .map(|v| format!("{:.1} MiB", v as f64 / 1_048_576.0))
+            .unwrap_or_else(|| "unknown".into());
+        println!("TideWM PSS: {memory}");
+        println!(
+            "TideWM texture estimate: {:.1} MiB",
+            latest["texture_bytes"].as_u64().unwrap_or(0) as f64 / 1_048_576.0
+        );
+        println!(
+            "Open files: {}; away: {}",
+            latest["fd_count"], latest["away"]
+        );
+        println!("Sample cost: {} µs", latest["cost_us"]);
+    }
+    println!("VRAM: unknown (texture estimate excludes client buffers and driver pools)");
+    println!(
+        "Heap trims: {}; hidden-cache trimming arrives in Phase 2",
+        data["heap_trim"]["calls"]
+    );
+    if let Some(warnings) = data["warnings"].as_array() {
+        for warning in warnings.iter().filter(|w| w["active"] == true) {
+            println!(
+                "Warning: {}",
+                warning["message"].as_str().unwrap_or("unknown")
+            );
+        }
+    }
+}
+
 fn print_response(command: &str, data: &Value) {
     match command {
         "outputs" => print_outputs(data),
@@ -920,6 +968,7 @@ fn print_response(command: &str, data: &Value) {
         }
         "layers" => print_layers(data),
         "keyboard-layouts" | "layout" => print_keyboard_layouts(data),
+        "ebb" => print_ebb_stats(data),
         "eval" | "depth" => println!("{}", serde_json::to_string_pretty(data).unwrap_or_default()),
         _ => println!("ok"),
     }
@@ -1113,6 +1162,7 @@ STREAMING:
 DIAGNOSTICS:
     doctor              run quick health checks (PASS/WARN/FAIL/SKIP)
     doctor --json       same checks as machine-readable JSON
+    ebb stats [--json]     show Ebb resource history and warnings
     perf [--window <s>] sample the compositor's RAM/CPU and render state
                         over a window (default 3s); --json for raw output.
                         No GPU-busy% (not portable); use a vendor tool.
@@ -1166,6 +1216,16 @@ tidewm-*.sock under $XDG_RUNTIME_DIR."#
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ebb_stats_uses_a_query_and_rejects_unknown_commands() {
+        assert_eq!(
+            build_request(&["ebb".into(), "stats".into()]).unwrap(),
+            json!({"request":"ebb-stats"})
+        );
+        assert!(build_request(&["ebb".into(), "run".into()]).is_err());
+        assert!(build_request(&["ebb".into()]).is_err());
+    }
 
     #[test]
     fn depth_commands_preserve_paths_and_validate_whole_updates() {

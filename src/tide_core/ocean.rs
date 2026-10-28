@@ -243,6 +243,21 @@ pub struct OceanSpace {
 }
 
 impl OceanSpace {
+    /// Report-only audit; hidden live windows are valid owners.
+    pub(crate) fn dead_window_references(&self) -> usize {
+        use smithay::utils::IsAlive;
+        self.reefs
+            .iter()
+            .flat_map(|reef| reef.layout.windows())
+            .filter(|window| !window.alive())
+            .count()
+            + self
+                .floating
+                .values()
+                .filter(|(window, _)| !window.alive())
+                .count()
+    }
+
     pub fn from_config(config: &OceanConfig) -> Self {
         let reefs = config
             .reefs
