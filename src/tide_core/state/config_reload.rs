@@ -388,18 +388,18 @@ impl Smallvil {
                     self.restore_all_depth_deck_windows();
                 }
                 if !self.config.classic_depth.enabled || !self.config.classic_depth.animation {
-                    self.depth_transitions.clear();
+                    self.render.motion.depth_transitions.clear();
                 }
                 if !self.config.animations.enabled || !self.config.animations.open.enabled {
-                    self.window_open_animations.clear();
+                    self.render.motion.window_open_animations.clear();
                 }
                 if !self.config.water_effects
                     || self.config.cascade.pour == crate::config::CascadeLiquidPreset::None
                 {
-                    self.cascade_window_animations.clear();
+                    self.render.motion.cascade_window_animations.clear();
                 }
                 if !self.config.animations.enabled || !self.config.animations.movement.enabled {
-                    self.window_move_animations.clear();
+                    self.render.motion.window_move_animations.clear();
                 }
                 // W3: the window-affecting battery below re-derives
                 // per-window state from the config. On a reload where
@@ -462,22 +462,24 @@ impl Smallvil {
                     let cascade_close = self.config.water_effects
                         && self.config.cascade.drain != crate::config::CascadeLiquidPreset::None;
                     if !ordinary_close {
-                        for closing in &mut self.closing_window_animations {
+                        for closing in &mut self.render.motion.closing_window_animations {
                             closing.animation = None;
                         }
                     }
                     if !cascade_close {
-                        for closing in &mut self.closing_window_animations {
+                        for closing in &mut self.render.motion.closing_window_animations {
                             closing.cascade = None;
                         }
                     }
-                    self.closing_window_animations
+                    self.render
+                        .motion
+                        .closing_window_animations
                         .retain(|closing| !closing.finished());
                     if !ordinary_close && !cascade_close {
                         self.render.gpu.window_frame_snapshots.clear();
                     }
                     self.render.gpu.depth_schematics.clear();
-                    self.depth_background.reset();
+                    self.render.motion.depth_background.reset();
                     for depth in self.render.windows.window_depths.values_mut() {
                         depth.artwork_id = smithay::backend::renderer::element::Id::new();
                     }
@@ -489,14 +491,15 @@ impl Smallvil {
                         || (self.config.animations.enabled
                             && self.config.animations.workspace.enabled);
                     if !self.config.water_effects || !self.config.workspace_transition.enabled {
-                        self.workspace_transitions.clear();
+                        self.render.motion.workspace_transitions.clear();
                     }
                     if !self.config.animations.enabled || !self.config.animations.workspace.enabled
                     {
-                        self.workspace_glides.clear();
+                        self.render.motion.workspace_glides.clear();
                     }
                     if !any_workspace_animation {
-                        let pending = std::mem::take(&mut self.pending_workspace_transitions);
+                        let pending =
+                            std::mem::take(&mut self.render.motion.pending_workspace_transitions);
                         for (output_name, workspace) in pending {
                             if let Some(output) = self.output_by_name(&output_name) {
                                 self.switch_workspace_immediate(&output, workspace);
@@ -504,7 +507,7 @@ impl Smallvil {
                         }
                     }
                     if !self.swim_enabled() {
-                        for camera in self.swim_cameras.values_mut() {
+                        for camera in self.render.motion.swim_cameras.values_mut() {
                             camera.snap_to_rest();
                         }
                     }
@@ -513,7 +516,7 @@ impl Smallvil {
                         || !self.config.scroll.workspace_scroll
                         || self.config.scroll.workspaces != crate::scroll::WorkspaceMode::Separate
                     {
-                        self.workspace_scroll_cameras.clear();
+                        self.render.motion.workspace_scroll_cameras.clear();
                     }
                     self.render.windows.window_opacity.clear();
                     self.render.windows.window_glass_modes.clear();

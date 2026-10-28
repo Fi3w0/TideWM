@@ -304,13 +304,13 @@ impl Smallvil {
 
     pub(crate) fn set_snap_preview(&mut self, target: Option<&crate::snap::SnapTarget>) {
         if !self.config.snap.preview {
-            if self.snap_preview.take().is_some() {
+            if self.render.motion.snap_preview.take().is_some() {
                 self.request_redraw();
             }
             return;
         }
         let Some(target) = target else {
-            if self.snap_preview.take().is_some() {
+            if self.render.motion.snap_preview.take().is_some() {
                 self.request_redraw();
             }
             return;
@@ -321,14 +321,14 @@ impl Smallvil {
             self.config.snap.preview_color[2],
             1.0,
         ];
-        match &mut self.snap_preview {
+        match &mut self.render.motion.snap_preview {
             Some(preview) => {
                 preview.output.clone_from(&target.output);
                 preview.rect = target.rect;
                 preview.buffer.update(target.rect.size, color);
             }
             None => {
-                self.snap_preview = Some(SnapPreview {
+                self.render.motion.snap_preview = Some(SnapPreview {
                     output: target.output.clone(),
                     rect: target.rect,
                     buffer: SolidColorBuffer::new(target.rect.size, color),
@@ -342,7 +342,7 @@ impl Smallvil {
     /// snap-preview element, in the snap preview's color and opacity.
     pub(crate) fn set_drag_preview(&mut self, preview: Option<(String, Rectangle<i32, Logical>)>) {
         let Some((output, rect)) = preview else {
-            if self.snap_preview.take().is_some() {
+            if self.render.motion.snap_preview.take().is_some() {
                 self.request_redraw();
             }
             return;
@@ -354,20 +354,22 @@ impl Smallvil {
             1.0,
         ];
         let unchanged = self
+            .render
+            .motion
             .snap_preview
             .as_ref()
             .is_some_and(|p| p.output == output && p.rect == rect);
         if unchanged {
             return;
         }
-        match &mut self.snap_preview {
+        match &mut self.render.motion.snap_preview {
             Some(preview) => {
                 preview.output = output;
                 preview.rect = rect;
                 preview.buffer.update(rect.size, color);
             }
             None => {
-                self.snap_preview = Some(SnapPreview {
+                self.render.motion.snap_preview = Some(SnapPreview {
                     output,
                     rect,
                     buffer: SolidColorBuffer::new(rect.size, color),
@@ -963,6 +965,8 @@ impl Smallvil {
             Kind::Unspecified,
         );
         let cascade = self
+            .render
+            .motion
             .cascade_window_animations
             .get(surface)
             .map(crate::cascade_transition::CascadeTransition::sample);
@@ -1275,7 +1279,7 @@ impl Smallvil {
                                 self.input.compositor_gesture,
                                 Some(CompositorGesture::Scroll { .. })
                             ) {
-                                self.window_move_animations.remove(&surface);
+                                self.render.motion.window_move_animations.remove(&surface);
                             } else if !viscous {
                                 self.start_window_move_animation(&surface, old_rect, rect);
                             }
@@ -2405,10 +2409,10 @@ impl Smallvil {
             _ => {} // Classic and Scroll share durable workspace membership.
         }
         self.spatial.engine = target;
-        self.pending_workspace_transitions.clear();
-        self.workspace_transitions.clear();
-        self.workspace_glides.clear();
-        self.swim_cameras.clear();
+        self.render.motion.pending_workspace_transitions.clear();
+        self.render.motion.workspace_transitions.clear();
+        self.render.motion.workspace_glides.clear();
+        self.render.motion.swim_cameras.clear();
         // Rebuild Space as the new engine's render/input cache.
         self.retile_with_viscosity(false, None);
         // Classic retile maps trees only; restore visible migrated floaters.

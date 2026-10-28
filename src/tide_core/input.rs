@@ -529,7 +529,12 @@ impl Smallvil {
             .unwrap_or(200.0)
             .max(1.0);
         let delta_spots = (-delta_x / distance) as f32 * self.config.swim.response;
-        let camera = self.swim_cameras.entry(output_name.clone()).or_default();
+        let camera = self
+            .render
+            .motion
+            .swim_cameras
+            .entry(output_name.clone())
+            .or_default();
         let advances = camera.drag(delta_spots);
         if advances != 0 {
             let current = self
@@ -539,7 +544,7 @@ impl Smallvil {
                 .active_workspace(&output_name);
             let (target, applied) = swim_advance_target(current, advances);
             if applied != advances {
-                if let Some(camera) = self.swim_cameras.get_mut(&output_name) {
+                if let Some(camera) = self.render.motion.swim_cameras.get_mut(&output_name) {
                     camera.cancel_advance(advances - applied);
                 }
             }
@@ -561,7 +566,7 @@ impl Smallvil {
         let Some(output) = self.primary_output() else {
             return;
         };
-        if let Some(camera) = self.swim_cameras.get_mut(&output.name()) {
+        if let Some(camera) = self.render.motion.swim_cameras.get_mut(&output.name()) {
             if cancelled {
                 camera.snap_to_rest();
             } else {

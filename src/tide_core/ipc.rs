@@ -1349,7 +1349,7 @@ pub(crate) fn depth_json(state: &Smallvil) -> serde_json::Value {
         "background": cfg.background, "background_fit": cfg.background_fit,
         "show_title": cfg.show_title, "sink_after_ms": cfg.sink_after_ms,
         "tier_interval_ms": cfg.tier_interval_ms, "max_tier": cfg.max_tier,
-        "artwork": state.depth_background.diagnostics(),
+        "artwork": state.render.motion.depth_background.diagnostics(),
         "persistence": "live overrides last until config reload; edit depth {} to persist"
     })
 }
@@ -1440,7 +1440,7 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
                 "refresh_hz": if refresh_mhz > 0 { refresh_mhz as f64 / 1000.0 } else { 0.0 },
                 "scale": output.current_scale().fractional_scale(),
                 "transform": format!("{:?}", output.current_transform()),
-                "native_render": state.native_render_stats.get(output),
+                "native_render": state.render.motion.native_render_stats.get(output),
             })
         })
         .collect();
@@ -1462,11 +1462,22 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
             total.saturating_add(capture.estimated_texture_bytes())
         });
     let wallpaper_texture_bytes = state.builtin_wallpaper.estimated_texture_bytes();
-    let depth_texture_bytes = state.depth_background.estimated_texture_bytes();
-    let caustics_texture_bytes = state.caustics.values().fold(0_u64, |total, caustics| {
-        total.saturating_add(caustics.estimated_texture_bytes())
-    });
+    let depth_texture_bytes = state
+        .render
+        .motion
+        .depth_background
+        .estimated_texture_bytes();
+    let caustics_texture_bytes = state
+        .render
+        .motion
+        .caustics
+        .values()
+        .fold(0_u64, |total, caustics| {
+            total.saturating_add(caustics.estimated_texture_bytes())
+        });
     let transition_texture_bytes = state
+        .render
+        .motion
         .workspace_transitions
         .values()
         .fold(0_u64, |total, transition| {
@@ -1474,6 +1485,8 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
         })
         .saturating_add(
             state
+                .render
+                .motion
                 .workspace_glides
                 .values()
                 .fold(0_u64, |total, transition| {
@@ -1543,7 +1556,7 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
         "cpu_user_us": cpu_user_us,
         "cpu_system_us": cpu_system_us,
         "threads": threads,
-        "animation_active": state.has_active_animation() || state.depth_background.animating(),
+        "animation_active": state.has_active_animation() || state.render.motion.depth_background.animating(),
         "depth": depth_json(state),
         "water_effects": state.config.water_effects,
         "builtin_wallpaper": state.config.builtin_wallpaper,

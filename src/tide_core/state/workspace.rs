@@ -251,7 +251,10 @@ impl Smallvil {
             == Some(crate::config::WorkspaceProjection::Scroll)
             && self.config.scroll.workspace_scroll
             && self.config.scroll.workspaces == crate::scroll::WorkspaceMode::Separate;
-        self.workspace_scroll_cameras.remove(&output_name);
+        self.render
+            .motion
+            .workspace_scroll_cameras
+            .remove(&output_name);
         if !animate {
             self.switch_workspace(&output, target);
             return;
@@ -270,7 +273,7 @@ impl Smallvil {
         let from = if step > 0 { -1.0 } else { 1.0 };
         let duration =
             Duration::from_millis(u64::from(self.config.scroll.workspace_scroll_duration_ms));
-        self.workspace_scroll_cameras.insert(
+        self.render.motion.workspace_scroll_cameras.insert(
             output_name,
             crate::swim::WorkspaceScrollCamera::start(from, current, duration),
         );
@@ -311,11 +314,16 @@ impl Smallvil {
         // this as auto-back-and-forth would instead jump somewhere the
         // user did not ask to see.
         if self
+            .render
+            .motion
             .pending_workspace_transitions
             .contains_key(&output_name)
             && current == workspace
         {
-            self.pending_workspace_transitions.remove(&output_name);
+            self.render
+                .motion
+                .pending_workspace_transitions
+                .remove(&output_name);
             self.request_redraw();
             return;
         }
@@ -339,9 +347,14 @@ impl Smallvil {
             // A new switch supersedes any wipe already running on this
             // output. That keeps both latency and texture memory bounded:
             // never a queue, never more than one full-output capture.
-            self.workspace_transitions.remove(&output_name);
-            self.workspace_glides.remove(&output_name);
-            self.pending_workspace_transitions
+            self.render
+                .motion
+                .workspace_transitions
+                .remove(&output_name);
+            self.render.motion.workspace_glides.remove(&output_name);
+            self.render
+                .motion
+                .pending_workspace_transitions
                 .insert(output_name, workspace);
             self.request_redraw();
             return;
@@ -370,9 +383,15 @@ impl Smallvil {
         if current == workspace {
             return;
         }
-        self.pending_workspace_transitions.remove(&output_name);
-        self.workspace_transitions.remove(&output_name);
-        self.workspace_glides.remove(&output_name);
+        self.render
+            .motion
+            .pending_workspace_transitions
+            .remove(&output_name);
+        self.render
+            .motion
+            .workspace_transitions
+            .remove(&output_name);
+        self.render.motion.workspace_glides.remove(&output_name);
         self.apply_workspace_switch(output, current, workspace);
     }
 
@@ -381,7 +400,10 @@ impl Smallvil {
         let output_name = output.name();
         // Any switch supersedes an in-flight vertical workspace slide. The
         // step action re-inserts its camera after this call returns.
-        self.workspace_scroll_cameras.remove(&output_name);
+        self.render
+            .motion
+            .workspace_scroll_cameras
+            .remove(&output_name);
         self.spatial
             .workspaces
             .workspace_previous

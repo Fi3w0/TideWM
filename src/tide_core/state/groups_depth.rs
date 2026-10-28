@@ -193,7 +193,7 @@ impl Smallvil {
         reload_background: bool,
     ) {
         if reload_background || next.background != self.config.depth.background {
-            self.depth_background.reset();
+            self.render.motion.depth_background.reset();
             for depth in self.render.windows.window_depths.values_mut() {
                 depth.artwork_id = smithay::backend::renderer::element::Id::new();
             }
@@ -215,7 +215,7 @@ impl Smallvil {
             .then(|| self.config.depth.background.clone())
             .flatten();
         let visible = path.is_some()
-            && self.depth_background.can_present()
+            && self.render.motion.depth_background.can_present()
             && matches!(self.session_lock, SessionLock::Unlocked)
             && self.space.outputs().any(|output| {
                 if !self.wlr_output_power_management_state.is_on(output) {
@@ -235,27 +235,29 @@ impl Smallvil {
                 })
             });
         let now = Instant::now();
-        let old_status = self.depth_background.status();
-        self.depth_background
+        let old_status = self.render.motion.depth_background.status();
+        self.render
+            .motion
+            .depth_background
             .configure(path.as_deref(), visible, now);
-        if self.depth_background.poll(now) {
+        if self.render.motion.depth_background.poll(now) {
             self.request_redraw();
         }
-        if self.depth_background.status() != old_status {
+        if self.render.motion.depth_background.status() != old_status {
             self.emit_ipc_event(crate::ipc::IpcEvent::DepthBackgroundChanged);
         }
-        let deadline = self.depth_background.deadline();
-        if deadline != self.depth_background_deadline {
-            if let Some(token) = self.depth_background_timer.take() {
+        let deadline = self.render.motion.depth_background.deadline();
+        if deadline != self.render.motion.depth_background_deadline {
+            if let Some(token) = self.render.motion.depth_background_timer.take() {
                 self.loop_handle.remove(token);
             }
-            self.depth_background_deadline = deadline;
+            self.render.motion.depth_background_deadline = deadline;
             if let Some(deadline) = deadline {
-                self.depth_background_timer = self
+                self.render.motion.depth_background_timer = self
                     .loop_handle
                     .insert_source(Timer::from_deadline(deadline), |_, _, state| {
-                        state.depth_background_timer = None;
-                        state.depth_background_deadline = None;
+                        state.render.motion.depth_background_timer = None;
+                        state.render.motion.depth_background_deadline = None;
                         state.poll_depth_background();
                         TimeoutAction::Drop
                     })
@@ -322,7 +324,7 @@ impl Smallvil {
             let urgent = self.urgent.contains(&surface);
 
             let artwork = if tier >= 2 {
-                self.depth_background.render_element(
+                self.render.motion.depth_background.render_element(
                     renderer,
                     area,
                     self.config.depth.background_fit,
@@ -567,11 +569,13 @@ impl Smallvil {
         }
         let output_name = output.name();
         if self
+            .render
+            .motion
             .depth_transitions
             .get(&output_name)
             .is_some_and(|transition| transition.finished())
         {
-            self.depth_transitions.remove(&output_name);
+            self.render.motion.depth_transitions.remove(&output_name);
             return None;
         }
         let area = Rectangle::from_size(self.space.output_geometry(output)?.size);
@@ -579,7 +583,9 @@ impl Smallvil {
             &mut self.render.gpu.depth_transition_program,
             renderer,
         )?;
-        self.depth_transitions
+        self.render
+            .motion
+            .depth_transitions
             .get_mut(&output_name)
             .map(|transition| {
                 crate::backend::udev::OutputRenderElements::DepthTransition(
@@ -1560,7 +1566,7 @@ impl Smallvil {
         if !config.enabled || !config.animation || config.animation_duration_ms == 0 {
             return;
         }
-        self.depth_transitions.insert(
+        self.render.motion.depth_transitions.insert(
             output.to_string(),
             crate::depth_transition::DepthTransition::new(
                 if down {

@@ -184,7 +184,6 @@ pub struct Smallvil {
     pub(crate) backend_name: &'static str,
     /// Focus authority, key and bind state, pointer grabs and gestures, cursor and input devices (plan step 8e).
     pub(crate) input: focus::InputState,
-    pub(crate) native_render_stats: HashMap<Output, crate::backend::perf::OutputRenderStats>,
     /// The session Lua state config evaluates into: config globals and
     /// section tables persist here after a load, which is what makes
     /// `tidectl eval` and `on "event"` handlers work.
@@ -235,11 +234,6 @@ pub struct Smallvil {
     pub welcome_hint: Option<crate::welcome::WelcomeHint>,
     last_config_event: Instant,
     config_reload_timer_armed: bool,
-    redraw_requests: crate::redraw::RedrawRequests,
-    /// Optional backend wake-up used by native DRM to propagate damage as
-    /// an event instead of waiting for a fixed polling interval. The winit
-    /// backend keeps its host-refresh timer and leaves this unset.
-    redraw_wakeup: Option<smithay::reexports::calloop::ping::Ping>,
 
     /// IPC event subscribers and the state they were last told about.
     pub(crate) ipc: ipc::IpcState,
@@ -248,74 +242,8 @@ pub struct Smallvil {
     pub(crate) render: render::RenderState,
 
     pub space: crate::tide_core::window_space::WindowSpace,
-    /// Active impulse ripples (Phase R1, see `ripple.rs`). Each one lives
-    /// on a specific output, decays over its own `duration`, and is
-    /// `retain`-pruned once `finished()` inside `ripple_frame_elements`
-    /// so this Vec never grows past the in-flight count. Capped at a
-    /// small constant by `spawn_ripple` to bound the worst case (rapid
-    /// window mapping shouldn't stack unboundedly), matching the same
-    /// no-unbounded-growth steady-state discipline every other animation
-    /// field in this struct obeys.
-    pub(crate) ripples: Vec<crate::ripple::Ripple>,
-    /// Short-lived visual state for mapped windows. Logical geometry and
-    /// input move immediately; these maps only interpolate what is drawn.
-    pub(crate) window_open_animations:
-        HashMap<WlSurface, crate::window_animation::WindowVisualAnimation>,
-    /// Cascade-only mapped-window pour clocks. Closing clocks move into the
-    /// bounded snapshot records below so unmapping never retains a client.
-    pub(crate) cascade_window_animations:
-        HashMap<WlSurface, crate::cascade_transition::CascadeTransition>,
-    pub(crate) window_move_animations:
-        HashMap<WlSurface, crate::window_animation::WindowVisualAnimation>,
     /// Render-only floating-window motion: physics, buoyancy, currents, sway and viscosity (plan step 8b).
     pub(crate) physics: physics::FloatPhysicsState,
-    /// One bounded analytical fill while a Classic floating drag is inside
-    /// a configured edge/corner snap zone. Dropped on every grab teardown.
-    pub(crate) snap_preview: Option<SnapPreview>,
-    /// Continuous lateral swim camera, one entry per output that has ever
-    /// swum. The offset is purely visual (the logical workspace identity is
-    /// still `Layouts::active`'s `u32`); at rest it is zero and the entry
-    /// asks for no frames.
-    pub(crate) swim_cameras: HashMap<String, crate::swim::SwimCamera>,
-    /// Vertical workspace-slide camera, one entry per output while a
-    /// `workspace-up`/`workspace-down` step settles. At rest the entry is
-    /// removed; the logical workspace changes immediately, the camera only
-    /// animates the already-applied switch.
-    pub(crate) workspace_scroll_cameras: HashMap<String, crate::swim::WorkspaceScrollCamera>,
-    /// Detached windows retaining their last drawable GPU snapshot until
-    /// the configured close animation finishes.
-    pub(crate) closing_window_animations: Vec<crate::window_animation::ClosingWindowAnimation>,
-    /// Shared artwork source, CPU frame and per-renderer texture imports.
-    pub(crate) depth_background: crate::depth_background::DepthBackground,
-    depth_background_timer: Option<RegistrationToken>,
-    depth_background_deadline: Option<Instant>,
-    /// Requested workspace target awaiting an outgoing-frame capture,
-    /// keyed by output name. A HashMap deliberately makes this one slot
-    /// per output: repeated switches replace the target instead of
-    /// accumulating full-output work.
-    pub(crate) pending_workspace_transitions: HashMap<String, u32>,
-    /// At most one captured outgoing texture per output, dropped as soon
-    /// as its wipe completes (see `workspace_transition.rs`).
-    pub(crate) workspace_transitions:
-        HashMap<String, crate::workspace_transition::WorkspaceTransition>,
-    /// At most one non-water outgoing workspace snapshot per output.
-    pub(crate) workspace_glides: HashMap<String, crate::workspace_transition::WorkspaceGlide>,
-    /// At most one analytical Classic depth switch per output.
-    pub(crate) depth_transitions: HashMap<String, crate::depth_transition::DepthTransition>,
-    /// One stable analytical canvas element per live Ocean output. No
-    /// texture/framebuffer; the record only preserves damage identity.
-    pub(crate) ocean_canvases: HashMap<String, crate::ocean_canvas::OceanCanvas>,
-    /// Per-output ambient caustics state and one shared compiled shader.
-    /// Engine-agnostic (works under both Classic and Ocean); gated by
-    /// `water_effects` plus `caustics.enabled`. The phase only advances
-    /// inside `caustics_frame_element`, so damage-driven idle desktops
-    /// freeze the pattern at zero extra frames; `caustics.fps > 0` opts
-    /// into deadline-driven constant motion.
-    pub(crate) caustics: HashMap<String, crate::caustics::Caustics>,
-    /// Per-output compass state and one shared compiled shader (spatial
-    /// roadmap S5). Ocean-only and gated by `water_effects`; no element is
-    /// produced when nothing sits off-screen.
-    pub(crate) compasses: HashMap<String, crate::compass::Compass>,
     pub loop_handle: LoopHandle<'static, Smallvil>,
     pub loop_signal: LoopSignal,
 

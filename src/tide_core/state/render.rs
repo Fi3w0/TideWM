@@ -14,12 +14,12 @@ use smithay::{
     },
     desktop::{layer_map_for_output, space::SpaceRenderElements, WindowSurfaceType},
     output::Output,
-    reexports::wayland_server::protocol::wl_surface::WlSurface,
+    reexports::{calloop::RegistrationToken, wayland_server::protocol::wl_surface::WlSurface},
     utils::{Logical, Physical, Point, Rectangle, Scale, Size},
     wayland::shell::wlr_layer::Layer as WlrLayer,
 };
 
-use super::{SessionLock, Smallvil};
+use super::{SessionLock, Smallvil, SnapPreview};
 
 /// Render-side state, grouped so GPU resources, per-window render
 /// properties and animation/redraw state each have one owner (plan
@@ -27,6 +27,7 @@ use super::{SessionLock, Smallvil};
 pub(crate) struct RenderState {
     pub(crate) gpu: RenderGpuState,
     pub(crate) windows: RenderWindowsState,
+    pub(crate) motion: RenderMotionState,
 }
 
 /// GPU programs, the custom-shader cache and per-surface GPU textures:
@@ -127,6 +128,83 @@ pub(crate) struct RenderWindowsState {
     pub(super) depth_last_tick: Instant,
 }
 
+/// Animations, workspace and depth transitions, per-output visuals, view
+/// cameras and redraw scheduling (plan step 8d).
+pub(crate) struct RenderMotionState {
+    /// Active impulse ripples (Phase R1, see `ripple.rs`). Each one lives
+    /// on a specific output, decays over its own `duration`, and is
+    /// `retain`-pruned once `finished()` inside `ripple_frame_elements`
+    /// so this Vec never grows past the in-flight count. Capped at a
+    /// small constant by `spawn_ripple` to bound the worst case (rapid
+    /// window mapping shouldn't stack unboundedly), matching the same
+    /// no-unbounded-growth steady-state discipline every other animation
+    /// field in this struct obeys.
+    pub(crate) ripples: Vec<crate::ripple::Ripple>,
+    /// Short-lived visual state for mapped windows. Logical geometry and
+    /// input move immediately; these maps only interpolate what is drawn.
+    pub(crate) window_open_animations:
+        HashMap<WlSurface, crate::window_animation::WindowVisualAnimation>,
+    /// Cascade-only mapped-window pour clocks. Closing clocks move into the
+    /// bounded snapshot records below so unmapping never retains a client.
+    pub(crate) cascade_window_animations:
+        HashMap<WlSurface, crate::cascade_transition::CascadeTransition>,
+    pub(crate) window_move_animations:
+        HashMap<WlSurface, crate::window_animation::WindowVisualAnimation>,
+    /// Detached windows retaining their last drawable GPU snapshot until
+    /// the configured close animation finishes.
+    pub(crate) closing_window_animations: Vec<crate::window_animation::ClosingWindowAnimation>,
+    /// Requested workspace target awaiting an outgoing-frame capture,
+    /// keyed by output name. A HashMap deliberately makes this one slot
+    /// per output: repeated switches replace the target instead of
+    /// accumulating full-output work.
+    pub(crate) pending_workspace_transitions: HashMap<String, u32>,
+    /// At most one captured outgoing texture per output, dropped as soon
+    /// as its wipe completes (see `workspace_transition.rs`).
+    pub(crate) workspace_transitions:
+        HashMap<String, crate::workspace_transition::WorkspaceTransition>,
+    /// At most one non-water outgoing workspace snapshot per output.
+    pub(crate) workspace_glides: HashMap<String, crate::workspace_transition::WorkspaceGlide>,
+    /// At most one analytical Classic depth switch per output.
+    pub(crate) depth_transitions: HashMap<String, crate::depth_transition::DepthTransition>,
+    /// Continuous lateral swim camera, one entry per output that has ever
+    /// swum. The offset is purely visual (the logical workspace identity is
+    /// still `Layouts::active`'s `u32`); at rest it is zero and the entry
+    /// asks for no frames.
+    pub(crate) swim_cameras: HashMap<String, crate::swim::SwimCamera>,
+    /// Vertical workspace-slide camera, one entry per output while a
+    /// `workspace-up`/`workspace-down` step settles. At rest the entry is
+    /// removed; the logical workspace changes immediately, the camera only
+    /// animates the already-applied switch.
+    pub(crate) workspace_scroll_cameras: HashMap<String, crate::swim::WorkspaceScrollCamera>,
+    /// One stable analytical canvas element per live Ocean output. No
+    /// texture/framebuffer; the record only preserves damage identity.
+    pub(crate) ocean_canvases: HashMap<String, crate::ocean_canvas::OceanCanvas>,
+    /// Per-output ambient caustics state and one shared compiled shader.
+    /// Engine-agnostic (works under both Classic and Ocean); gated by
+    /// `water_effects` plus `caustics.enabled`. The phase only advances
+    /// inside `caustics_frame_element`, so damage-driven idle desktops
+    /// freeze the pattern at zero extra frames; `caustics.fps > 0` opts
+    /// into deadline-driven constant motion.
+    pub(crate) caustics: HashMap<String, crate::caustics::Caustics>,
+    /// Per-output compass state and one shared compiled shader (spatial
+    /// roadmap S5). Ocean-only and gated by `water_effects`; no element is
+    /// produced when nothing sits off-screen.
+    pub(crate) compasses: HashMap<String, crate::compass::Compass>,
+    /// Shared artwork source, CPU frame and per-renderer texture imports.
+    pub(crate) depth_background: crate::depth_background::DepthBackground,
+    pub(super) depth_background_timer: Option<RegistrationToken>,
+    pub(super) depth_background_deadline: Option<Instant>,
+    /// One bounded analytical fill while a Classic floating drag is inside
+    /// a configured edge/corner snap zone. Dropped on every grab teardown.
+    pub(crate) snap_preview: Option<SnapPreview>,
+    pub(super) redraw_requests: crate::redraw::RedrawRequests,
+    /// Optional backend wake-up used by native DRM to propagate damage as
+    /// an event instead of waiting for a fixed polling interval. The winit
+    /// backend keeps its host-refresh timer and leaves this unset.
+    pub(super) redraw_wakeup: Option<smithay::reexports::calloop::ping::Ping>,
+    pub(crate) native_render_stats: HashMap<Output, crate::backend::perf::OutputRenderStats>,
+}
+
 impl Smallvil {
     fn base_window_visual_sample(
         &self,
@@ -151,7 +229,7 @@ impl Smallvil {
                 } else {
                     1.0
                 };
-            if let Some(open) = self.window_open_animations.get(surface) {
+            if let Some(open) = self.render.motion.window_open_animations.get(surface) {
                 let current = open.sample();
                 sample.offset += current.offset;
                 sample.opacity *= current.opacity;
@@ -167,7 +245,7 @@ impl Smallvil {
                         sample.size = Some(current.size);
                     }
                 }
-            } else if let Some(movement) = self.window_move_animations.get(surface) {
+            } else if let Some(movement) = self.render.motion.window_move_animations.get(surface) {
                 let current = movement.sample();
                 sample.offset += current.offset;
                 sample.size = current.size;
@@ -276,6 +354,8 @@ impl Smallvil {
         let output_name = output.name();
         let output_geo = self.space.output_geometry(output)?;
         let camera_offset = self
+            .render
+            .motion
             .swim_cameras
             .get(&output_name)
             .filter(|_| self.swim_enabled())
@@ -284,6 +364,8 @@ impl Smallvil {
         let output_width = output_geo.size.w as f64;
         let output_height = output_geo.size.h as f64;
         let vertical_offset = self
+            .render
+            .motion
             .workspace_scroll_cameras
             .get(&output_name)
             .map(|camera| camera.current_offset())
@@ -377,7 +459,11 @@ impl Smallvil {
             })
             .collect();
 
-        let vertical_camera = self.workspace_scroll_cameras.get(&output_name);
+        let vertical_camera = self
+            .render
+            .motion
+            .workspace_scroll_cameras
+            .get(&output_name);
         if !self.swim_enabled() && vertical_camera.is_none() {
             return Some(result);
         }
@@ -908,8 +994,8 @@ impl Smallvil {
     /// Backends should render only when this is true (or a toast is active)
     /// rather than redrawing every frame regardless of damage.
     pub fn request_redraw(&mut self) {
-        self.redraw_requests.request_all();
-        if let Some(wakeup) = &self.redraw_wakeup {
+        self.render.motion.redraw_requests.request_all();
+        if let Some(wakeup) = &self.render.motion.redraw_wakeup {
             wakeup.ping();
         }
         #[cfg(feature = "accessibility")]
@@ -923,8 +1009,8 @@ impl Smallvil {
         if !self.space.outputs().any(|mapped| mapped == output) {
             return;
         }
-        self.redraw_requests.request_output(output);
-        if let Some(wakeup) = &self.redraw_wakeup {
+        self.render.motion.redraw_requests.request_output(output);
+        if let Some(wakeup) = &self.render.motion.redraw_wakeup {
             wakeup.ping();
         }
     }
@@ -963,7 +1049,7 @@ impl Smallvil {
     #[allow(clippy::mutable_key_type)] // Bounded set of stable Wayland protocol identities.
     pub(super) fn request_surface_redraws(&mut self, surfaces: &HashSet<WlSurface>) {
         if surfaces.is_empty()
-            || self.redraw_requests.is_global()
+            || self.render.motion.redraw_requests.is_global()
             || !matches!(self.session_lock, SessionLock::Unlocked)
         {
             return;
@@ -977,12 +1063,14 @@ impl Smallvil {
             let Some(placements) = self.render_placements(&output) else {
                 continue;
             };
-            requested |=
-                self.redraw_requests
-                    .request_surface_changes(&output, &placements, surfaces);
+            requested |= self.render.motion.redraw_requests.request_surface_changes(
+                &output,
+                &placements,
+                surfaces,
+            );
         }
         if requested {
-            if let Some(wakeup) = &self.redraw_wakeup {
+            if let Some(wakeup) = &self.render.motion.redraw_wakeup {
                 wakeup.ping();
             }
         }
@@ -992,7 +1080,7 @@ impl Smallvil {
         &mut self,
         wakeup: smithay::reexports::calloop::ping::Ping,
     ) {
-        self.redraw_wakeup = Some(wakeup);
+        self.render.motion.redraw_wakeup = Some(wakeup);
     }
 
     /// Whether a frame was explicitly marked dirty. Timed toasts request
@@ -1001,7 +1089,7 @@ impl Smallvil {
     /// persistent error toast redraw forever at the timer's full rate.
     /// Clears the flag as a side effect, since the caller is about to render.
     pub(crate) fn take_redraw_requests(&mut self) -> crate::redraw::RedrawRequests {
-        self.redraw_requests.take()
+        self.render.motion.redraw_requests.take()
     }
 
     /// The area tiled windows lay out into on `output`: the output's own
@@ -1109,7 +1197,12 @@ impl Smallvil {
         output: &Output,
     ) {
         let output_name = output.name();
-        let Some(target) = self.pending_workspace_transitions.remove(&output_name) else {
+        let Some(target) = self
+            .render
+            .motion
+            .pending_workspace_transitions
+            .remove(&output_name)
+        else {
             return;
         };
         let current = self
@@ -1167,7 +1260,7 @@ impl Smallvil {
 
         if let (Some(outgoing_texture), Some(geometry)) = (outgoing_texture, geometry) {
             if water_transition {
-                self.workspace_transitions.insert(
+                self.render.motion.workspace_transitions.insert(
                     output_name,
                     crate::workspace_transition::WorkspaceTransition::new(
                         outgoing_texture,
@@ -1178,7 +1271,7 @@ impl Smallvil {
                     ),
                 );
             } else {
-                self.workspace_glides.insert(
+                self.render.motion.workspace_glides.insert(
                     output_name,
                     crate::workspace_transition::WorkspaceGlide::new(
                         outgoing_texture,
@@ -1230,21 +1323,33 @@ impl Smallvil {
         }
         let output_name = output.name();
         if self
+            .render
+            .motion
             .workspace_transitions
             .get(&output_name)
             .is_some_and(|transition| transition.finished())
         {
-            self.workspace_transitions.remove(&output_name);
+            self.render
+                .motion
+                .workspace_transitions
+                .remove(&output_name);
             return None;
         }
-        if !self.workspace_transitions.contains_key(&output_name) {
+        if !self
+            .render
+            .motion
+            .workspace_transitions
+            .contains_key(&output_name)
+        {
             return None;
         }
         let program = crate::workspace_transition::workspace_transition_program(
             &mut self.render.gpu.workspace_transition_program,
             renderer,
         )?;
-        self.workspace_transitions
+        self.render
+            .motion
+            .workspace_transitions
             .get_mut(&output_name)
             .map(|transition| {
                 crate::backend::udev::OutputRenderElements::WorkspaceTransition(
@@ -1265,14 +1370,18 @@ impl Smallvil {
         }
         let output_name = output.name();
         if self
+            .render
+            .motion
             .workspace_glides
             .get(&output_name)
             .is_some_and(|transition| transition.finished())
         {
-            self.workspace_glides.remove(&output_name);
+            self.render.motion.workspace_glides.remove(&output_name);
             return None;
         }
-        self.workspace_glides
+        self.render
+            .motion
+            .workspace_glides
             .get_mut(&output_name)
             .map(|transition| {
                 crate::backend::udev::OutputRenderElements::WorkspaceGlide(
@@ -1288,18 +1397,24 @@ impl Smallvil {
     /// connector name that will never come back (or means something else
     /// entirely if a differently-wired connector reuses the same name).
     pub(crate) fn remove_workspace_transition_output(&mut self, output_name: &str) {
-        self.pending_workspace_transitions.remove(output_name);
-        self.workspace_transitions.remove(output_name);
-        self.workspace_glides.remove(output_name);
-        self.depth_transitions.remove(output_name);
-        self.ocean_canvases.remove(output_name);
-        self.compasses.remove(output_name);
-        self.swim_cameras.remove(output_name);
-        self.workspace_scroll_cameras.remove(output_name);
+        self.render
+            .motion
+            .pending_workspace_transitions
+            .remove(output_name);
+        self.render.motion.workspace_transitions.remove(output_name);
+        self.render.motion.workspace_glides.remove(output_name);
+        self.render.motion.depth_transitions.remove(output_name);
+        self.render.motion.ocean_canvases.remove(output_name);
+        self.render.motion.compasses.remove(output_name);
+        self.render.motion.swim_cameras.remove(output_name);
+        self.render
+            .motion
+            .workspace_scroll_cameras
+            .remove(output_name);
         if self.spatial.workspaces.workspace_step_output.as_deref() == Some(output_name) {
             self.spatial.workspaces.workspace_step_output = None;
         }
-        self.caustics.remove(output_name);
+        self.render.motion.caustics.remove(output_name);
         // Same "connector name might mean something else entirely on
         // replug" reasoning as the rest of this function: a fired
         // on_created_empty for this output's workspace numbers shouldn't

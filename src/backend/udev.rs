@@ -2397,6 +2397,8 @@ fn render_surface(
 
     sample.total = frame_start.elapsed();
     state
+        .render
+        .motion
         .native_render_stats
         .entry(output.clone())
         .or_default()

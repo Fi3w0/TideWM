@@ -110,6 +110,8 @@ impl Smallvil {
         };
         let marker_fade = Duration::from_millis(self.config.ocean.canvas_marker_fade_ms);
         let marker_alpha = self
+            .render
+            .motion
             .ocean_canvases
             .entry(output_name.clone())
             .or_default()
@@ -122,6 +124,8 @@ impl Smallvil {
             renderer,
         )?;
         let element = self
+            .render
+            .motion
             .ocean_canvases
             .entry(output_name)
             .or_default()
@@ -175,12 +179,16 @@ impl Smallvil {
         } else if effective_fps == 0 {
             false
         } else {
-            self.caustics
+            self.render
+                .motion
+                .caustics
                 .get(&output_name)
                 .and_then(|caustics| caustics.next_frame_in(effective_fps))
                 .is_none_or(|delay| delay.is_zero())
         };
         let element = self
+            .render
+            .motion
             .caustics
             .entry(output_name)
             .or_default()
@@ -247,7 +255,9 @@ impl Smallvil {
         let period = Duration::from_secs_f64(1.0 / f64::from(fps));
         let program_retry = self.render.gpu.caustics_program.retry_in(period);
         Some(
-            self.caustics
+            self.render
+                .motion
+                .caustics
                 .get(&output.name())
                 .and_then(|caustics| caustics.next_frame_in(fps))
                 .unwrap_or(period)
@@ -330,7 +340,7 @@ impl Smallvil {
         else {
             return Vec::new();
         };
-        let compass = self.compasses.entry(output_name).or_default();
+        let compass = self.render.motion.compasses.entry(output_name).or_default();
         compass
             .frame_elements(program, cues)
             .into_iter()

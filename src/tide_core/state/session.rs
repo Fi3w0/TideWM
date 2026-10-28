@@ -180,11 +180,11 @@ impl Smallvil {
 
         // A transition texture contains the unlocked desktop. Release it
         // before the fail-closed lock render path can begin.
-        self.pending_workspace_transitions.clear();
-        self.workspace_transitions.clear();
-        self.workspace_glides.clear();
-        self.workspace_scroll_cameras.clear();
-        self.depth_transitions.clear();
+        self.render.motion.pending_workspace_transitions.clear();
+        self.render.motion.workspace_transitions.clear();
+        self.render.motion.workspace_glides.clear();
+        self.render.motion.workspace_scroll_cameras.clear();
+        self.render.motion.depth_transitions.clear();
         // Backdrop textures also contain unlocked client pixels. Unlock
         // recaptures visible glass before composing its first desktop frame.
         self.render.gpu.backdrop_textures.clear();
@@ -194,7 +194,7 @@ impl Smallvil {
         // Closing snapshots contain client pixels and normally render above
         // the desktop. They are irrelevant once the security boundary is
         // active and must never survive into a locked composition.
-        self.closing_window_animations.clear();
+        self.render.motion.closing_window_animations.clear();
         self.locked_outputs.clear();
 
         let serial = SERIAL_COUNTER.next_serial();
@@ -363,7 +363,7 @@ impl Smallvil {
     /// Destroy callbacks cannot find these surfaces after the output leaves
     /// `Space`, so disconnect must perform the cleanup first.
     pub(crate) fn remove_layer_output(&mut self, output: &Output) {
-        self.native_render_stats.remove(output);
+        self.render.motion.native_render_stats.remove(output);
         self.spatial
             .workspaces
             .layout

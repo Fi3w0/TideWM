@@ -1594,7 +1594,9 @@ impl Smallvil {
         resize_grab::cancel(surface);
         let preferred_output = self.preferred_output_for_toplevel(surface);
         let Some(window) = self.detach_mapped_toplevel(surface) else {
-            self.closing_window_animations
+            self.render
+                .motion
+                .closing_window_animations
                 .retain(|closing| closing.surface != *surface);
             return;
         };
@@ -1696,9 +1698,9 @@ impl Smallvil {
             .remove(surface);
         self.render.gpu.custom_shader_instances.remove(surface);
         self.render.gpu.custom_shader_bypassed.remove(surface);
-        self.window_open_animations.remove(surface);
-        self.cascade_window_animations.remove(surface);
-        self.window_move_animations.remove(surface);
+        self.render.motion.window_open_animations.remove(surface);
+        self.render.motion.cascade_window_animations.remove(surface);
+        self.render.motion.window_move_animations.remove(surface);
         self.physics.window_viscosity.remove(surface);
         self.physics.window_sway.remove(surface);
         self.physics.window_float_physics.remove(surface);

@@ -111,7 +111,7 @@ impl Smallvil {
         // Interactive input owns the visual geometry from this point. The
         // generic movement tween must not remain underneath it even when
         // viscosity is disabled and the pointer path becomes immediate.
-        self.window_move_animations.remove(surface);
+        self.render.motion.window_move_animations.remove(surface);
         if half_life.is_zero() {
             self.physics.window_viscosity.remove(surface);
             return false;
@@ -716,26 +716,39 @@ impl Smallvil {
     }
 
     pub(crate) fn start_window_open_animation(&mut self, surface: &WlSurface) {
-        self.closing_window_animations
+        self.render
+            .motion
+            .closing_window_animations
             .retain(|closing| closing.surface != *surface);
         let cascade = self
             .cascade_liquid_applies(surface)
             .then(|| crate::cascade_transition::CascadeTransition::pour(&self.config.cascade))
             .flatten();
         if let Some(cascade) = cascade {
-            self.cascade_window_animations
+            self.render
+                .motion
+                .cascade_window_animations
                 .insert(surface.clone(), cascade);
         } else {
-            self.cascade_window_animations.remove(surface);
+            self.render.motion.cascade_window_animations.remove(surface);
         }
         let animations = self.config.animations.clone();
         let ordinary = animations.enabled
             && animations.open.enabled
-            && !(self.cascade_window_animations.contains_key(surface)
+            && !(self
+                .render
+                .motion
+                .cascade_window_animations
+                .contains_key(surface)
                 && self.config.cascade.replace_motion);
         if !ordinary {
-            self.window_open_animations.remove(surface);
-            if self.cascade_window_animations.contains_key(surface) {
+            self.render.motion.window_open_animations.remove(surface);
+            if self
+                .render
+                .motion
+                .cascade_window_animations
+                .contains_key(surface)
+            {
                 self.request_redraw();
             }
             return;
@@ -748,7 +761,7 @@ impl Smallvil {
                     animations.open.offset.1 as f64,
                 ))
             });
-        self.window_open_animations.insert(
+        self.render.motion.window_open_animations.insert(
             surface.clone(),
             crate::window_animation::WindowVisualAnimation::open(
                 &animations.open,
@@ -816,10 +829,12 @@ impl Smallvil {
     ) {
         let animations = &self.config.animations;
         if !animations.enabled || !animations.movement.enabled {
-            self.window_move_animations.remove(surface);
+            self.render.motion.window_move_animations.remove(surface);
             return;
         }
         let current = self
+            .render
+            .motion
             .window_move_animations
             .get(surface)
             .filter(|animation| !animation.finished())
@@ -840,7 +855,7 @@ impl Smallvil {
         if from_offset.x.abs() < 0.01 && from_offset.y.abs() < 0.01 && !size_changed {
             return;
         }
-        self.window_move_animations.insert(
+        self.render.motion.window_move_animations.insert(
             surface.clone(),
             crate::window_animation::WindowVisualAnimation::movement(
                 &animations.movement,
@@ -895,13 +910,17 @@ impl Smallvil {
         let pixel_budget = self.close_snapshot_pixel_budget();
         let snapshot_pixels = snapshot.estimated_pixels();
         let count_budget = animations.max_closing_snapshots;
-        self.window_open_animations.remove(surface);
-        self.cascade_window_animations.remove(surface);
-        self.window_move_animations.remove(surface);
+        self.render.motion.window_open_animations.remove(surface);
+        self.render.motion.cascade_window_animations.remove(surface);
+        self.render.motion.window_move_animations.remove(surface);
         self.physics.window_viscosity.remove(surface);
-        self.closing_window_animations
+        self.render
+            .motion
+            .closing_window_animations
             .retain(|closing| closing.surface != *surface && !closing.finished());
         let retained_pixels: Vec<u64> = self
+            .render
+            .motion
             .closing_window_animations
             .iter()
             .map(|closing| closing.snapshot.estimated_pixels())
@@ -914,9 +933,12 @@ impl Smallvil {
         ) else {
             return;
         };
-        self.closing_window_animations.drain(..evictions);
-        self.closing_window_animations
-            .push(crate::window_animation::ClosingWindowAnimation::new(
+        self.render
+            .motion
+            .closing_window_animations
+            .drain(..evictions);
+        self.render.motion.closing_window_animations.push(
+            crate::window_animation::ClosingWindowAnimation::new(
                 surface.clone(),
                 snapshot,
                 ordinary_enabled.then(|| {
@@ -927,7 +949,8 @@ impl Smallvil {
                     )
                 }),
                 cascade,
-            ));
+            ),
+        );
         self.request_redraw();
     }
 
@@ -958,6 +981,8 @@ impl Smallvil {
         let output_scale = output.current_scale().fractional_scale();
         let scale = Scale::from(output_scale);
         let needs_cascade = self
+            .render
+            .motion
             .closing_window_animations
             .iter()
             .any(|closing| closing.snapshot.output == output.name() && closing.cascade.is_some());
@@ -971,6 +996,8 @@ impl Smallvil {
             .flatten();
         let mut result = Vec::new();
         for closing in self
+            .render
+            .motion
             .closing_window_animations
             .iter_mut()
             .filter(|closing| closing.snapshot.output == output.name())
@@ -1027,20 +1054,32 @@ impl Smallvil {
         // rendered. A DPMS-off/minimized output can skip its frame path;
         // pruning here still releases the full-output transition texture
         // on the event-loop tick that notices the animation ended.
-        self.workspace_transitions
+        self.render
+            .motion
+            .workspace_transitions
             .retain(|_, transition| !transition.finished());
-        self.workspace_glides
+        self.render
+            .motion
+            .workspace_glides
             .retain(|_, transition| !transition.finished());
-        self.depth_transitions
+        self.render
+            .motion
+            .depth_transitions
             .retain(|_, transition| !transition.finished());
-        self.window_open_animations
+        self.render
+            .motion
+            .window_open_animations
             .retain(|_, animation| !animation.finished());
-        self.cascade_window_animations
+        self.render
+            .motion
+            .cascade_window_animations
             .retain(|_, animation| !animation.finished());
         let scroll_was_moving = self.spatial.engine.projection()
             == Some(crate::config::WorkspaceProjection::Scroll)
-            && !self.window_move_animations.is_empty();
-        self.window_move_animations
+            && !self.render.motion.window_move_animations.is_empty();
+        self.render
+            .motion
+            .window_move_animations
             .retain(|_, animation| !animation.finished());
         if scroll_was_moving {
             self.queue_scroll_pointer_refresh();
@@ -1062,8 +1101,13 @@ impl Smallvil {
         for surface in stale_ambient {
             self.physics.window_float_ambient.remove(&surface);
         }
-        self.swim_cameras.retain(|_, camera| !camera.at_rest());
+        self.render
+            .motion
+            .swim_cameras
+            .retain(|_, camera| !camera.at_rest());
         if self
+            .render
+            .motion
             .workspace_scroll_cameras
             .values()
             .any(crate::swim::WorkspaceScrollCamera::at_rest)
@@ -1075,16 +1119,23 @@ impl Smallvil {
             // workspace off.
             self.request_redraw();
         }
-        self.workspace_scroll_cameras
+        self.render
+            .motion
+            .workspace_scroll_cameras
             .retain(|_, camera| !camera.at_rest());
         let camera_was_active = self.spatial.ocean.has_active_camera_motion();
         self.spatial.ocean.prune_completed_camera_motions();
         if camera_was_active && !self.spatial.ocean.has_active_camera_motion() {
             self.queue_pointer_focus_refresh();
         }
-        self.closing_window_animations
+        self.render
+            .motion
+            .closing_window_animations
             .retain(|closing| !closing.finished());
-        self.ripples.retain(|ripple| !ripple.finished());
+        self.render
+            .motion
+            .ripples
+            .retain(|ripple| !ripple.finished());
         // Desktop content is invisible behind a session lock. Suppress the
         // animation predicate so the fast timer, per-CRTC dirty re-arm, and
         // global redraw request all stand down; lock surfaces render through
@@ -1096,13 +1147,13 @@ impl Smallvil {
         self.toast
             .as_ref()
             .is_some_and(|toast| toast.needs_continued_redraw())
-            || !self.ripples.is_empty()
-            || !self.workspace_transitions.is_empty()
-            || !self.workspace_glides.is_empty()
-            || !self.depth_transitions.is_empty()
-            || !self.window_open_animations.is_empty()
-            || !self.cascade_window_animations.is_empty()
-            || !self.window_move_animations.is_empty()
+            || !self.render.motion.ripples.is_empty()
+            || !self.render.motion.workspace_transitions.is_empty()
+            || !self.render.motion.workspace_glides.is_empty()
+            || !self.render.motion.depth_transitions.is_empty()
+            || !self.render.motion.window_open_animations.is_empty()
+            || !self.render.motion.cascade_window_animations.is_empty()
+            || !self.render.motion.window_move_animations.is_empty()
             || !self.physics.window_viscosity.is_empty()
             || !self.physics.window_sway.is_empty()
             || !self.physics.window_float_physics.is_empty()
@@ -1124,17 +1175,17 @@ impl Smallvil {
                 .physics.window_buoyancy
                 .values()
                 .any(crate::buoyancy::BuoyancyState::needs_frame)
-            || !self.swim_cameras.is_empty()
-            || !self.workspace_scroll_cameras.is_empty()
+            || !self.render.motion.swim_cameras.is_empty()
+            || !self.render.motion.workspace_scroll_cameras.is_empty()
             || self.spatial.ocean.has_active_camera_motion()
             || (self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean
                 && self.config.ocean.canvas_marker
-                && self.ocean_canvases.values().any(|canvas| {
+                && self.render.motion.ocean_canvases.values().any(|canvas| {
                     canvas.marker_active(Duration::from_millis(
                         self.config.ocean.canvas_marker_fade_ms,
                     ))
                 }))
-            || !self.closing_window_animations.is_empty()
+            || !self.render.motion.closing_window_animations.is_empty()
             || self.animated_borders_possible()
             || self.glass_animation_active()
             || self.caustics_active()
@@ -1156,21 +1207,37 @@ impl Smallvil {
         self.toast
             .as_ref()
             .is_some_and(|toast| toast.needs_continued_redraw())
-            || self.ripples.iter().any(|ripple| ripple.output == name)
-            || self.workspace_transitions.contains_key(&name)
-            || self.workspace_glides.contains_key(&name)
-            || self.depth_transitions.contains_key(&name)
-            || self.swim_cameras.contains_key(&name)
-            || self.workspace_scroll_cameras.contains_key(&name)
+            || self
+                .render
+                .motion
+                .ripples
+                .iter()
+                .any(|ripple| ripple.output == name)
+            || self.render.motion.workspace_transitions.contains_key(&name)
+            || self.render.motion.workspace_glides.contains_key(&name)
+            || self.render.motion.depth_transitions.contains_key(&name)
+            || self.render.motion.swim_cameras.contains_key(&name)
+            || self
+                .render
+                .motion
+                .workspace_scroll_cameras
+                .contains_key(&name)
             || self.spatial.ocean.has_active_camera_motion_on(&name)
             || (self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean
                 && self.config.ocean.canvas_marker
-                && self.ocean_canvases.get(&name).is_some_and(|canvas| {
-                    canvas.marker_active(Duration::from_millis(
-                        self.config.ocean.canvas_marker_fade_ms,
-                    ))
-                }))
+                && self
+                    .render
+                    .motion
+                    .ocean_canvases
+                    .get(&name)
+                    .is_some_and(|canvas| {
+                        canvas.marker_active(Duration::from_millis(
+                            self.config.ocean.canvas_marker_fade_ms,
+                        ))
+                    }))
             || self
+                .render
+                .motion
                 .closing_window_animations
                 .iter()
                 .any(|closing| closing.snapshot.output == name)
@@ -1178,9 +1245,20 @@ impl Smallvil {
                 .iter()
                 .filter_map(|placed| placed.surface())
                 .any(|surface| {
-                    self.window_open_animations.contains_key(surface)
-                        || self.cascade_window_animations.contains_key(surface)
-                        || self.window_move_animations.contains_key(surface)
+                    self.render
+                        .motion
+                        .window_open_animations
+                        .contains_key(surface)
+                        || self
+                            .render
+                            .motion
+                            .cascade_window_animations
+                            .contains_key(surface)
+                        || self
+                            .render
+                            .motion
+                            .window_move_animations
+                            .contains_key(surface)
                         || self.physics.window_viscosity.contains_key(surface)
                         || self.physics.window_sway.contains_key(surface)
                         || self.physics.window_float_physics.contains_key(surface)
@@ -1254,7 +1332,7 @@ impl Smallvil {
     /// - the window has no current position (not yet mapped, on an
     ///   inactive workspace),
     /// - the ripple cap is reached (bounding the worst-case cost of
-    ///   rapid window mapping so `self.ripples` can't grow unboundedly).
+    ///   rapid window mapping so `self.render.motion.ripples` can't grow unboundedly).
     pub(crate) fn spawn_ripple(
         &mut self,
         surface: &WlSurface,
@@ -1265,7 +1343,15 @@ impl Smallvil {
             return;
         }
         const MAX_ACTIVE_RIPPLES: usize = 16;
-        if self.ripples.iter().filter(|r| !r.finished()).count() >= MAX_ACTIVE_RIPPLES {
+        if self
+            .render
+            .motion
+            .ripples
+            .iter()
+            .filter(|r| !r.finished())
+            .count()
+            >= MAX_ACTIVE_RIPPLES
+        {
             return;
         }
         // Resolve the per-window-rule ripple override and merge over the
@@ -1399,7 +1485,9 @@ impl Smallvil {
             layer = ?cfg.layer,
             "spawning ripple"
         );
-        self.ripples
+        self.render
+            .motion
+            .ripples
             .push(crate::ripple::Ripple::new(output.name(), center, cfg));
         self.request_redraw();
     }
@@ -1428,11 +1516,11 @@ impl Smallvil {
         output: &Output,
     ) -> RippleLayers {
         let mut layers = RippleLayers::default();
-        if !self.config.water_effects || self.ripples.is_empty() {
+        if !self.config.water_effects || self.render.motion.ripples.is_empty() {
             return layers;
         }
-        self.ripples.retain(|r| !r.finished());
-        if self.ripples.is_empty() {
+        self.render.motion.ripples.retain(|r| !r.finished());
+        if self.render.motion.ripples.is_empty() {
             return layers;
         }
         let Some(program) =
@@ -1441,7 +1529,7 @@ impl Smallvil {
             return layers;
         };
         let output_name = output.name();
-        for ripple in self.ripples.iter_mut() {
+        for ripple in self.render.motion.ripples.iter_mut() {
             if ripple.output != output_name {
                 continue;
             }

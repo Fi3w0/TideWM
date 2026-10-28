@@ -151,7 +151,7 @@ impl Smallvil {
         &mut self,
         output: &Output,
     ) -> Option<SolidColorRenderElement> {
-        let preview = self.snap_preview.as_ref()?;
+        let preview = self.render.motion.snap_preview.as_ref()?;
         if preview.output != output.name() || self.config.snap.preview_opacity <= 0.0 {
             return None;
         }
@@ -488,8 +488,10 @@ impl Smallvil {
 
     pub(super) fn rounding_or_cascade_shader_possible(&self) -> bool {
         self.rounding_possible()
-            || !self.cascade_window_animations.is_empty()
+            || !self.render.motion.cascade_window_animations.is_empty()
             || self
+                .render
+                .motion
                 .closing_window_animations
                 .iter()
                 .any(|closing| closing.cascade.is_some())
@@ -869,7 +871,9 @@ impl Smallvil {
             "Window backdrop captures"
         );
         if self.backend_name == "udev" {
-            self.native_render_stats
+            self.render
+                .motion
+                .native_render_stats
                 .entry(output.clone())
                 .or_default()
                 .record_backdrops(rendered, skipped);
@@ -931,7 +935,9 @@ impl Smallvil {
             deferred |= outcome.deferred;
         }
         if self.backend_name == "udev" {
-            self.native_render_stats
+            self.render
+                .motion
+                .native_render_stats
                 .entry(output.clone())
                 .or_default()
                 .record_shader_updates(updates);
@@ -1164,7 +1170,9 @@ impl Smallvil {
             "Layer backdrop captures"
         );
         if self.backend_name == "udev" {
-            self.native_render_stats
+            self.render
+                .motion
+                .native_render_stats
                 .entry(output.clone())
                 .or_default()
                 .record_backdrops(rendered, skipped);
@@ -1364,11 +1372,12 @@ impl Smallvil {
                                 let local_rect =
                                     Rectangle::new(location - output_geo.loc, placement.rect.size);
                                 let output_name = output.name();
-                                let ripple_passed = self.ripples.iter().any(|ripple| {
-                                    !ripple.finished()
-                                        && ripple.output == output_name
-                                        && ripple.element_rect().overlaps(local_rect)
-                                });
+                                let ripple_passed =
+                                    self.render.motion.ripples.iter().any(|ripple| {
+                                        !ripple.finished()
+                                            && ripple.output == output_name
+                                            && ripple.element_rect().overlaps(local_rect)
+                                    });
                                 let anim = self
                                     .render
                                     .windows
