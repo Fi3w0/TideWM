@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.209 · 2026-10-28 — Spatial engine bookkeeping
+
+- Internal cleanup of how TideWM tracks the running engine versus the one your config asks for. Engine switches, reloads and window behavior stay the same.
+
 ## 0.90.208 · 2026-10-28 — Engine switches keep scratchpads and window stacking
 
 - Switching to Ocean and back no longer turns scratchpads into normal workspaces or reshuffles workspace numbers. Scratchpad windows stay hidden in Ocean and come back where they were.

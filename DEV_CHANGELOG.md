@@ -2,6 +2,13 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.209 — `SpatialState` boundary (plan step 7)
+
+- `0f96644`: `SpatialOwnership { Workspaces, Ocean }` and `WorkspaceProjection { Classic, Scroll }` with `SpatialEngine::ownership()`/`projection()`. Every runtime engine check now names the axis it tests; `uses_workspaces()` is gone. Equivalent case by case; site receipt in `.hermes/worklogs/spatial-state-2026-10-28/`.
+- `c782b28`: `Smallvil::spatial: SpatialState { engine }` is the only running-engine value (132 reads); only `migrate_spatial_engine` changes it. `config.spatial_engine` is just the file's request: reload migrates whenever request and running engine differ, and a refused migration no longer patches the config. Observable behavior is unchanged (a refused switch retries on the next reload; after a live `engine:` action a reload returns to the file's engine). New real-protocol test for the refused path.
+- `4b2bd74`: `SpatialState::hit_tests_through_space()` names the real hit-testing axis (Space for Classic, render placements for Scroll and Ocean). The planned per-operation dispatch was shrunk with Fiw's approval: focus targeting already dispatches once, `map_toplevel`'s Ocean checks are interleaved with shared logic, and output removal is engine-neutral.
+- Each commit: 712 tests, fmt, strict Clippy (all and default features); nested matrix with subscribers 61/0 vs `.208`. Design: `.hermes/worklogs/spatial-state-design.md`. Not run natively.
+
 ## 0.90.208 — Scratchpads and floating order across engine changes
 
 - `92b549f`: Classic→Ocean used to turn scratchpad workspace 0 into a reef exactly over workspace 1, and a named scratchpad into a reef at `x = i32::MAX`. Ocean→Classic then renumbered the overlapping reefs nondeterministically (a normal tile could come back on workspace 2), and scratchpad windows came back as visible ordinary workspaces. Scratchpad trees and unpinned scratchpad floaters now stay in `layout`/`floating_workspace` for the duration of Ocean (it renders neither) and return untouched. A shown scratchpad points the camera at its origin workspace; pinned floaters still migrate. `Layouts::drain_for_migration` takes a keep predicate.
