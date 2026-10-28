@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.197 · 2026-10-27 — Fewer GPU sync objects per frame
+
+- On the standalone session, TideWM no longer creates a GPU sync object every time it draws or uploads a texture. Its rendering contexts are never shared, so those objects ordered nothing, and some drivers (NVIDIA in particular) keep memory for each one even after it is deleted. Frame-level sync for the display and for copies between GPUs is unchanged.
+
 ## 0.90.196 · 2026-10-27 — KDE decoration requests stop looping
 
 - Apps using KDE's older server-decoration protocol no longer get a fresh answer to every decoration request. TideWM announces server-side once when the decoration object is created and ignores repeat requests, so clients that re-request client-side decoration on every event can no longer keep a CPU core busy.

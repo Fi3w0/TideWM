@@ -7,10 +7,16 @@ use smithay::{
     backend::{
         allocator::{dmabuf::Dmabuf, Format, Fourcc},
         drm::DrmDeviceFd,
-        egl::{display::EGLBufferReader, Error as EglError},
+        egl::{
+            context::ContextPriority, display::EGLBufferReader, EGLContext, EGLDisplay,
+            Error as EglError,
+        },
         renderer::{
-            gles::{GlesError, GlesRenderer, GlesTexture},
-            multigpu::{gbm::GbmGlesBackend, MultiRenderer},
+            gles::{Capability, GlesError, GlesRenderer, GlesTexture},
+            multigpu::{
+                gbm::{Error as GbmGlesError, GbmGlesBackend},
+                MultiRenderer,
+            },
             sync::SyncPoint,
             ContextId, DebugFlags, ImportDma, ImportDmaWl, ImportEgl, ImportMem, ImportMemWl,
             Renderer, RendererSuper, TextureFilter,
@@ -26,6 +32,46 @@ use smithay::{
 
 pub(crate) type GbmGlesApi = GbmGlesBackend<GlesRenderer, DrmDeviceFd>;
 pub(crate) type TideMultiRenderer<'a> = MultiRenderer<'a, 'a, GbmGlesApi, GbmGlesApi>;
+
+/// The GBM/GLES graphics API every udev GPU node is rendered through.
+pub(crate) fn gbm_gles_api() -> GbmGlesApi {
+    GbmGlesBackend::with_factory(new_renderer)
+}
+
+/// Creates one high-priority renderer per GPU node, without per-texture
+/// fencing when its context is unshared.
+///
+/// With `Capability::Fencing`, Smithay creates a `glFenceSync` every time a
+/// texture is sampled or uploaded, so that another context sharing the
+/// texture can wait for it. Some drivers retain memory per fence even after
+/// `glDeleteSync` (NVIDIA: niri #4729, Smithay #2239). TideWM never shares a
+/// context: GL commands on one context execute in order, so these fences
+/// order nothing, and Smithay itself skips them on an unshared context
+/// without the capability. Frame-level `ExportFence` sync points (KMS
+/// in-fences, cross-GPU copies) are kept.
+fn new_renderer(display: &EGLDisplay) -> Result<GlesRenderer, GbmGlesError> {
+    let context = EGLContext::new_with_priority(display, ContextPriority::High)?;
+    // SAFETY: the context was created above on this thread and is not
+    // current on any other thread.
+    let supported = unsafe { GlesRenderer::supported_capabilities(&context) }?;
+    let capabilities = renderer_capabilities(supported, context.is_shared());
+    // SAFETY: as above; the context moves into the renderer it creates.
+    Ok(unsafe { GlesRenderer::with_capabilities(context, capabilities) }?)
+}
+
+/// Every supported capability, minus per-texture fencing on an unshared
+/// context. A shared context keeps it: there, the fences order work between
+/// contexts.
+fn renderer_capabilities(supported: Vec<Capability>, shared: bool) -> Vec<Capability> {
+    if shared {
+        tracing::warn!("GPU renderer context is shared; keeping per-texture fencing");
+        return supported;
+    }
+    supported
+        .into_iter()
+        .filter(|capability| *capability != Capability::Fencing)
+        .collect()
+}
 
 /// Presents the selected node's concrete GLES identity while using
 /// `MultiRenderer` for DMA-BUF imports. This causes Smithay to perform any
@@ -200,3 +246,51 @@ impl ImportDma for ImportBridge<'_> {
 }
 
 impl ImportDmaWl for ImportBridge<'_> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL: [Capability; 7] = [
+        Capability::Instancing,
+        Capability::Blit,
+        Capability::_10Bit,
+        Capability::Renderbuffer,
+        Capability::Fencing,
+        Capability::ExportFence,
+        Capability::Debug,
+    ];
+
+    #[test]
+    fn unshared_context_drops_only_texture_fencing() {
+        let capabilities = renderer_capabilities(ALL.to_vec(), false);
+        let expected: Vec<_> = ALL
+            .into_iter()
+            .filter(|capability| *capability != Capability::Fencing)
+            .collect();
+        assert_eq!(capabilities, expected);
+        assert!(capabilities.contains(&Capability::ExportFence));
+    }
+
+    #[test]
+    fn shared_context_keeps_texture_fencing() {
+        assert_eq!(renderer_capabilities(ALL.to_vec(), true), ALL.to_vec());
+    }
+
+    #[test]
+    fn software_renderer_is_built_without_texture_fencing() {
+        use smithay::backend::egl::EGLDevice;
+        let Some(device) = EGLDevice::enumerate()
+            .ok()
+            .and_then(|mut devices| devices.find(|device| device.is_software()))
+        else {
+            return;
+        };
+        // SAFETY: the display owns the device handle for the renderer's life.
+        let Ok(display) = (unsafe { EGLDisplay::new(device) }) else {
+            return;
+        };
+        let renderer = new_renderer(&display).expect("software renderer");
+        assert!(!renderer.capabilities().contains(&Capability::Fencing));
+    }
+}
