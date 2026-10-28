@@ -2,6 +2,12 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.199 — Monitor screencasts outlive a disconnected output
+
+- Native report on `.198`: OBS capture of HDMI-A-2 broke after the monitor was powered off. Session log: `Output disconnected` at 01:59:29; OBS's stream went `streaming` → `paused` at the same second and stayed there, and its `tidewm-screencast-HDMI-A-2` node was gone. Cause (TideWM, not the migration): the compositor-side `FrameRequested` handler called `FrameTarget::close()` when the named output was missing, so the PipeWire worker stopped and removed its node, but the portal session was never told (no `impl.portal.Session` `Closed`), leaving the consumer on a dead stream that a returning monitor could not revive.
+- Fiw chose keep-and-resume over a clean `Closed`: a missing output now calls `FrameTarget::skip()`, which clears the pending flag and keeps the last frame. The node stays, the SHM path keeps publishing the held frame, and each process cycle re-requests by connector name, so capture resumes on its own when an output with that name returns. A returning output at a different mode still hits the existing size check and ends the stream. The DMA-BUF path already returned an empty chunk for a missing output. Window casts are unchanged (their window migrates to a surviving output).
+- Test: `skipped_frame_keeps_last_picture_and_allows_a_new_request`. Native power-off/on retest owed.
+
 ## 0.90.198 — Vanilla Smithay migration
 
 - `smithay` and `smithay-drm-extras` move from `ff5fa7d` (2026-04-24) to upstream master `6b37edc` (229 commits). The range includes the layer-shell null-buffer reset `0565e70a` the pin comment requires, and Smithay #2080's leak fixes: per-surface multi-GPU texture cache cleanup on destroy, PBO free on `ExportMem` error paths, EGLImage destroy on failed import, the thread-safe Dmabuf/GBM export cache, and the SHM damage clamp. No fork: TideWM depends on vanilla upstream.

@@ -112,6 +112,12 @@ impl FrameTarget {
         self.pending.store(false, Ordering::Release);
     }
 
+    /// Ends a request that produced no new frame while keeping the last one,
+    /// so the stream holds its picture and the next request tries again.
+    pub(crate) fn skip(&self) {
+        self.pending.store(false, Ordering::Release);
+    }
+
     pub(crate) fn close(&self) {
         self.closed.store(true, Ordering::Release);
         self.complete(None);
@@ -267,7 +273,11 @@ pub fn init<'a>(
                     if let Some(output) = output {
                         state.queue_screencast_frame(output, target);
                     } else {
-                        target.close();
+                        // The monitor is off or unplugged. Keep the stream and
+                        // its last frame; capture resumes when a connector with
+                        // this name returns (a different mode still ends the
+                        // stream in the PipeWire thread).
+                        target.skip();
                     }
                 }
                 ScreencastSource::Window(id) => {
@@ -373,5 +383,34 @@ mod tests {
         target.close();
         assert!(target.is_closed());
         assert!(target.frame.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn skipped_frame_keeps_last_picture_and_allows_a_new_request() {
+        let (sender, channel) = channel::channel();
+        let target = FrameTarget::new(false);
+        target.complete(Some(Arc::new(ScreencastFrame {
+            pixels: vec![9, 9, 9, 9],
+            width: 1,
+            height: 1,
+            stride: 4,
+        })));
+        let source = ScreencastSource::Output("HDMI-A-2".into());
+
+        target.request(&sender, &source);
+        target.skip();
+        assert!(!target.is_closed());
+        assert_eq!(
+            target.frame.lock().unwrap().as_ref().unwrap().pixels,
+            [9, 9, 9, 9]
+        );
+
+        // A skipped request does not block the next one.
+        target.request(&sender, &source);
+        drop(sender);
+        let requests = std::iter::from_fn(|| channel.recv().ok())
+            .filter(|event| matches!(event, ScreencastEvent::FrameRequested { .. }))
+            .count();
+        assert_eq!(requests, 2);
     }
 }
