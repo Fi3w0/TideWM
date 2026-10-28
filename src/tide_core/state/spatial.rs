@@ -729,7 +729,11 @@ impl Smallvil {
 
     /// Moves one floating window by `delta`, live position if visible,
     /// remembered one if hidden; see `translate_floating_windows_on_output`.
-    pub(super) fn translate_floating_window(&mut self, surface: &WlSurface, delta: Point<i32, Logical>) {
+    pub(super) fn translate_floating_window(
+        &mut self,
+        surface: &WlSurface,
+        delta: Point<i32, Logical>,
+    ) {
         let surface = surface.clone();
         let output_override =
             self.fullscreen.contains_key(&surface) || self.maximized.contains_key(&surface);
