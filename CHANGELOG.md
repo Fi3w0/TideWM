@@ -2,6 +2,11 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.208 · 2026-10-28 — Engine switches keep scratchpads and window stacking
+
+- Switching to Ocean and back no longer turns scratchpads into normal workspaces or reshuffles workspace numbers. Scratchpad windows stay hidden in Ocean and come back where they were.
+- Floating windows keep their stacking order when you switch engines.
+
 ## 0.90.207 · 2026-10-28 — Explicit state imports
 
 - Each state module now lists exactly what it uses instead of importing everything from the shared parent. Nothing changes for users.

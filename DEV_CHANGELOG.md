@@ -2,6 +2,13 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.208 — Scratchpads and floating order across engine changes
+
+- `92b549f`: Classic→Ocean used to turn scratchpad workspace 0 into a reef exactly over workspace 1, and a named scratchpad into a reef at `x = i32::MAX`. Ocean→Classic then renumbered the overlapping reefs nondeterministically (a normal tile could come back on workspace 2), and scratchpad windows came back as visible ordinary workspaces. Scratchpad trees and unpinned scratchpad floaters now stay in `layout`/`floating_workspace` for the duration of Ocean (it renders neither) and return untouched. A shown scratchpad points the camera at its origin workspace; pinned floaters still migrate. `Layouts::drain_for_migration` takes a keep predicate.
+- Every engine change also moved floating windows in `HashMap` order. `migrate_spatial_engine` now records the stacking order before unmapping (Space bottom-to-top, or Ocean's `floating_stack`); `drain_for_classic` returns floaters front-to-back, and Classic→Ocean and the final remap keep that order.
+- `407645c`: real-protocol test on two outputs taking tiled windows on two workspaces and both outputs, a floater, a pin, a tab group and a fullscreen window through Classic→Ocean→Scroll→Classic→Scroll→Ocean→Classic. One owner per window at every step; focus, pin, fullscreen, group and floating state unchanged; exact membership on every return. The new scratchpad/stacking test fails on the old code and passes three runs in a row.
+- 711 tests, fmt, strict Clippy (all and default features); nested matrix with subscribers 61/0. Invariants table: `.hermes/worklogs/spatial-invariants.md` (plan step 6). Not run natively yet.
+
 ## 0.90.207 — Explicit imports in the state child modules
 
 - `d0ea005` replaces `use super::*` in all 13 `state/` child modules with explicit imports: the external paths each module uses plus `use super::{...}` for parent types and free helpers. Two accessibility-only imports in `session.rs` are feature-gated. `state/mod.rs` drops imports only its children used; its tests module keeps `use super::*` and imports `RenderElementStates`, which only tests use.
