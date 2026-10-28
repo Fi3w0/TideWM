@@ -7,7 +7,7 @@
 
 use std::hash::{Hash, Hasher};
 
-use cgmath::{Matrix3, Vector2};
+use glam::{Mat3, Vec2};
 use smithay::{
     backend::renderer::{
         buffer_y_inverted,
@@ -342,15 +342,11 @@ pub fn border_program(
     }
 }
 
-pub(crate) fn matrix_uniform(name: &'static str, matrix: Matrix3<f32>) -> Uniform<'static> {
-    let columns = [
-        matrix.x.x, matrix.x.y, matrix.x.z, matrix.y.x, matrix.y.y, matrix.y.z, matrix.z.x,
-        matrix.z.y, matrix.z.z,
-    ];
+pub(crate) fn matrix_uniform(name: &'static str, matrix: Mat3) -> Uniform<'static> {
     Uniform::new(
         name,
         UniformValue::Matrix3x3 {
-            matrices: vec![columns],
+            matrices: vec![matrix.to_cols_array()],
             transpose: false,
         },
     )
@@ -364,44 +360,41 @@ pub(crate) fn surface_input_to_geometry(
     inner: &smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<GlesRenderer>,
     geometry: Rectangle<i32, Physical>,
     scale: Scale<f64>,
-) -> Matrix3<f32> {
+) -> Mat3 {
     let elem = inner.geometry(scale);
-    let elem_size = [elem.size.w.max(1) as f32, elem.size.h.max(1) as f32];
-    let geo_size = [geometry.size.w.max(1) as f32, geometry.size.h.max(1) as f32];
+    let elem_size = Vec2::new(elem.size.w.max(1) as f32, elem.size.h.max(1) as f32);
+    let geo_size = Vec2::new(geometry.size.w.max(1) as f32, geometry.size.h.max(1) as f32);
     let buffer_size = inner.buffer_size();
+    let buffer_size = Vec2::new(buffer_size.w.max(1) as f32, buffer_size.h.max(1) as f32);
     let view = inner.view();
-    let src_size = [
+    let src_size = Vec2::new(
         view.src.size.w.max(f64::EPSILON) as f32,
         view.src.size.h.max(f64::EPSILON) as f32,
-    ];
+    );
+    let src_loc = Vec2::new(view.src.loc.x as f32, view.src.loc.y as f32);
     let mut transform = inner.transform();
     if transform == Transform::_90 {
         transform = Transform::_270;
     } else if transform == Transform::_270 {
         transform = Transform::_90;
     }
-    let transform_matrix = Matrix3::from_translation(Vector2::new(0.5, 0.5))
-        * transform.matrix()
-        * Matrix3::from_translation(Vector2::new(-0.5, -0.5));
+    let transform_matrix = Mat3::from_translation(Vec2::splat(0.5))
+        * Mat3::from(transform.matrix())
+        * Mat3::from_translation(Vec2::splat(-0.5));
     let y_invert = if buffer_y_inverted(inner.buffer()).unwrap_or(false) {
-        Matrix3::from_nonuniform_scale(1.0, -1.0)
+        Mat3::from_scale(Vec2::new(1.0, -1.0))
     } else {
-        Matrix3::from_scale(1.0)
+        Mat3::IDENTITY
     };
+    let elem_offset = Vec2::new(
+        (elem.loc.x - geometry.loc.x) as f32,
+        (elem.loc.y - geometry.loc.y) as f32,
+    );
     transform_matrix
-        * Matrix3::from_nonuniform_scale(elem_size[0] / geo_size[0], elem_size[1] / geo_size[1])
-        * Matrix3::from_translation(Vector2::new(
-            (elem.loc.x - geometry.loc.x) as f32 / elem_size[0],
-            (elem.loc.y - geometry.loc.y) as f32 / elem_size[1],
-        ))
-        * Matrix3::from_nonuniform_scale(
-            buffer_size.w.max(1) as f32 / src_size[0],
-            buffer_size.h.max(1) as f32 / src_size[1],
-        )
-        * Matrix3::from_translation(Vector2::new(
-            -(view.src.loc.x as f32) / buffer_size.w.max(1) as f32,
-            -(view.src.loc.y as f32) / buffer_size.h.max(1) as f32,
-        ))
+        * Mat3::from_scale(elem_size / geo_size)
+        * Mat3::from_translation(elem_offset / elem_size)
+        * Mat3::from_scale(buffer_size / src_size)
+        * Mat3::from_translation(-src_loc / buffer_size)
         * y_invert
 }
 
@@ -410,7 +403,7 @@ pub(crate) fn window_surface_uniforms(
     radii: [f32; 4],
     power: f32,
     antialias: f32,
-    input_to_geometry: Matrix3<f32>,
+    input_to_geometry: Mat3,
     cascade: Option<CascadeSample>,
 ) -> Vec<Uniform<'static>> {
     let geo_size = [geometry_size.w.max(1) as f32, geometry_size.h.max(1) as f32];

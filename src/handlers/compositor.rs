@@ -3,7 +3,6 @@ use std::{cell::Cell, rc::Rc};
 use crate::{grabs::resize_grab, state::ClientState, Smallvil};
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_shm,
     reexports::{
         calloop::{EventSource, Interest},
         wayland_server::{
@@ -260,9 +259,6 @@ impl ShmHandler for Smallvil {
         &self.shm_state
     }
 }
-
-delegate_compositor!(Smallvil);
-delegate_shm!(Smallvil);
 
 #[cfg(test)]
 mod tests {

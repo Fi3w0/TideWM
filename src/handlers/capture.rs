@@ -41,7 +41,6 @@ impl ImageCaptureSourceHandler for Smallvil {
         // in `cleanup_capture`.
     }
 }
-smithay::delegate_image_capture_source!(Smallvil);
 
 impl OutputCaptureSourceHandler for Smallvil {
     fn output_capture_source_state(&mut self) -> &mut OutputCaptureSourceState {
@@ -52,7 +51,6 @@ impl OutputCaptureSourceHandler for Smallvil {
         source.user_data().insert_if_missing(|| output.downgrade());
     }
 }
-smithay::delegate_output_capture_source!(Smallvil);
 
 impl ToplevelCaptureSourceHandler for Smallvil {
     fn toplevel_capture_source_state(&mut self) -> &mut ToplevelCaptureSourceState {
@@ -72,7 +70,6 @@ impl ToplevelCaptureSourceHandler for Smallvil {
         }
     }
 }
-smithay::delegate_toplevel_capture_source!(Smallvil);
 
 impl ImageCopyCaptureHandler for Smallvil {
     fn image_copy_capture_state(&mut self) -> &mut ImageCopyCaptureState {
@@ -159,7 +156,6 @@ impl ImageCopyCaptureHandler for Smallvil {
         }
     }
 }
-smithay::delegate_image_copy_capture!(Smallvil);
 
 impl Smallvil {
     pub(crate) fn capture_output_for_screencast(

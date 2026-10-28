@@ -10,7 +10,7 @@
 
 use std::time::{Duration, Instant};
 
-use cgmath::Matrix3;
+use glam::Mat3;
 use smithay::{
     backend::renderer::{
         element::{
@@ -271,7 +271,7 @@ struct SnapshotPart {
     alpha: f32,
     kind: Kind,
     content: SnapshotContent,
-    input_to_geometry: Matrix3<f32>,
+    input_to_geometry: Mat3,
 }
 
 /// Last drawable surface tree for one mapped window. This is refreshed from
@@ -393,7 +393,7 @@ pub struct WindowSnapshotElement {
     kind: Kind,
     content: SnapshotContent,
     geometry_size: Size<i32, Physical>,
-    input_to_geometry: Matrix3<f32>,
+    input_to_geometry: Mat3,
     cascade: Option<(GlesTexProgram, CascadeSample)>,
 }
 

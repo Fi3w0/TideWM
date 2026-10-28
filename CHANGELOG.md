@@ -2,6 +2,11 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.198 · 2026-10-28 — Current Smithay
+
+- TideWM now builds on current upstream Smithay instead of a revision from April. That brings upstream's memory-leak fixes for multi-GPU texture caches, failed imports and screen-capture error paths.
+- Virtual keyboards (wtype, on-screen keyboards, input methods) now act like a real keyboard: their keys can trigger your binds, wake the idle timer and move focus. Each one's own keyboard layout is used while it types, and yours comes back as soon as you touch the real keyboard.
+
 ## 0.90.197 · 2026-10-27 — Fewer GPU sync objects per frame
 
 - On the standalone session, TideWM no longer creates a GPU sync object every time it draws or uploads a texture. Its rendering contexts are never shared, so those objects ordered nothing, and some drivers (NVIDIA in particular) keep memory for each one even after it is deleted. Frame-level sync for the display and for copies between GPUs is unchanged.

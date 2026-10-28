@@ -503,7 +503,12 @@ pub fn init_udev(
                 .single_renderer(&gpu.render_node)?
                 .dmabuf_formats();
             feedback_formats.push((gpu.render_node, formats.clone()));
-            builder = builder.add_preference_tranche(gpu.render_node.dev_id(), None, formats);
+            builder = builder.add_preference_tranche(
+                gpu.render_node.dev_id(),
+                TrancheFlags::empty(),
+                formats,
+                4..=6,
+            );
         }
         match builder.build() {
             Ok(default_feedback) => {
@@ -1268,7 +1273,12 @@ fn refresh_dmabuf_feedback<'a>(
         };
         let device_formats = renderer.dmabuf_formats();
         formats.push((device.render_node, device_formats.clone()));
-        builder = builder.add_preference_tranche(device.render_node.dev_id(), None, device_formats);
+        builder = builder.add_preference_tranche(
+            device.render_node.dev_id(),
+            TrancheFlags::empty(),
+            device_formats,
+            4..=6,
+        );
     }
     match builder.build() {
         Ok(feedback) => {
@@ -2264,13 +2274,18 @@ fn render_surface(
                     if let Ok(device) = surface.compositor.surface().device_fd().dev_id() {
                         builder = builder.add_preference_tranche(
                             device,
-                            Some(TrancheFlags::Scanout),
+                            TrancheFlags::Scanout,
                             scanout_formats,
+                            4..=6,
                         );
                     }
                     for (node, formats) in default.formats.iter().skip(1) {
-                        builder =
-                            builder.add_preference_tranche(node.dev_id(), None, formats.clone());
+                        builder = builder.add_preference_tranche(
+                            node.dev_id(),
+                            TrancheFlags::empty(),
+                            formats.clone(),
+                            4..=6,
+                        );
                     }
                     match builder.build() {
                         Ok(scanout) => {
