@@ -30,7 +30,6 @@ use smithay::{
                 surface::WaylandSurfaceRenderElement,
                 RenderElementState,
             },
-            gles::{GlesPixelProgram, GlesTexProgram},
             ImportAll, ImportMem,
         },
         session::libseat::LibSeatSession,
@@ -244,6 +243,9 @@ pub struct Smallvil {
 
     /// IPC event subscribers and the state they were last told about.
     pub(crate) ipc: ipc::IpcState,
+    /// GPU resources, per-window render properties and animation/redraw
+    /// state (plan step 8d).
+    pub(crate) render: render::RenderState,
 
     pub space: crate::tide_core::window_space::WindowSpace,
     /// Per-mapped-window base/active/inactive/fullscreen alpha multipliers
@@ -261,34 +263,6 @@ pub struct Smallvil {
     /// Assignments from `layer_rule { shader }`, refreshed for each output's
     /// mapped layers during its capture pass and cleared on reload.
     pub(crate) layer_shader_assignments: HashMap<WlSurface, crate::config::ShaderAssignment>,
-    /// New custom programs still allowed to compile in this output's frame,
-    /// shared by the chain passes, the glass slots and any capture served
-    /// before the next frame.
-    pub(crate) custom_shader_compile_budget: usize,
-    /// Last-good compiled program per custom effect definition.
-    pub(crate) custom_shader_programs: crate::shader_effect::CustomShaderPrograms,
-    /// `u_time`/`u_delta` clocks for windows currently drawing an effect.
-    /// Evicted in `detach_mapped_toplevel`, pruned on reload, cleared on lock.
-    pub(crate) custom_shader_instances: HashMap<WlSurface, crate::shader_effect::ShaderInstance>,
-    /// Windows refused a custom effect by the instance or payload cap. They
-    /// take their normal path until a later capture pass admits them.
-    pub(crate) custom_shader_bypassed: HashSet<WlSurface>,
-    pub(crate) custom_shader_bypasses: u64,
-    /// Captured immediately before a visible frame and sampled by
-    /// water/frost glass while building that same frame's elements. The
-    /// window-sized texture is reused until its dimensions change. Evicted in
-    /// `detach_mapped_toplevel` alongside `window_opacity`; render passes also
-    /// drop it after its last output stops presenting the surface.
-    pub(crate) backdrop_textures: HashMap<WlSurface, crate::backdrop::BackdropCapture>,
-    /// Native alpha captures for blurred layer surfaces whose rule sets
-    /// `ignore_alpha`. Kept separate from the backdrop so both textures can
-    /// be sampled by the frost shader in one pass.
-    pub(crate) layer_alpha_masks: HashMap<WlSurface, crate::backdrop::BackdropCapture>,
-    /// Cached full-output solid fill for `layer_rule { dim_around = true }`,
-    /// one per output -- same "own buffer per output, dedup only bumps its
-    /// commit on real size/color change" shape as `lock_blank`. Pruned on
-    /// output disconnect alongside it.
-    pub(crate) layer_dim_buffers: HashMap<Output, SolidColorBuffer>,
     /// Per-window water-glass animation state (`water_glass::GlassAnim`):
     /// when the distortion was last disturbed and what frame state that
     /// disturbance was derived from. Only populated for windows taking the
@@ -296,19 +270,6 @@ pub struct Smallvil {
     /// `water_glass.animation` isn't `static`; evicted in
     /// `detach_mapped_toplevel` alongside `backdrop_textures`.
     pub(crate) glass_anim: HashMap<WlSurface, crate::water_glass::GlassAnim>,
-    /// Compiled lazily on first use (needs a live renderer, unlike
-    /// `toast::font()`'s process-global `OnceLock`); see
-    /// `water_glass::water_glass_program`.
-    pub(crate) water_glass_program: Option<GlesTexProgram>,
-    /// Frost is a separate program over the same capture texture; compiled
-    /// lazily only when a rule actually selects `glass = frost`.
-    pub(crate) frost_glass_program: Option<GlesTexProgram>,
-    /// Analytical window-shadow shader, compiled once on first use.
-    pub(crate) shadow_program: Option<GlesPixelProgram>,
-    /// Texture override used to clip main toplevel surface trees.
-    pub(crate) rounded_surface_program: Option<GlesTexProgram>,
-    /// Analytical solid/gradient window-border shader.
-    pub(crate) border_program: Option<GlesPixelProgram>,
     /// Active impulse ripples (Phase R1, see `ripple.rs`). Each one lives
     /// on a specific output, decays over its own `duration`, and is
     /// `retain`-pruned once `finished()` inside `ripple_frame_elements`
@@ -318,8 +279,6 @@ pub struct Smallvil {
     /// no-unbounded-growth steady-state discipline every other animation
     /// field in this struct obeys.
     pub(crate) ripples: Vec<crate::ripple::Ripple>,
-    /// Compiled lazily on first use; see `ripple::ripple_program`.
-    pub(crate) ripple_program: Option<GlesPixelProgram>,
     /// Short-lived visual state for mapped windows. Logical geometry and
     /// input move immediately; these maps only interpolate what is drawn.
     pub(crate) window_open_animations:
@@ -345,11 +304,6 @@ pub struct Smallvil {
     /// removed; the logical workspace changes immediately, the camera only
     /// animates the already-applied switch.
     pub(crate) workspace_scroll_cameras: HashMap<String, crate::swim::WorkspaceScrollCamera>,
-    /// Last already-imported surface tree for each visible mapped window.
-    /// Texture handles are cloned, not framebuffer contents; the entry is
-    /// transferred to the bounded close list on unmap.
-    pub(crate) window_frame_snapshots:
-        HashMap<WlSurface, crate::window_animation::WindowFrameSnapshot>,
     /// Detached windows retaining their last drawable GPU snapshot until
     /// the configured close animation finishes.
     pub(crate) closing_window_animations: Vec<crate::window_animation::ClosingWindowAnimation>,
@@ -361,11 +315,6 @@ pub struct Smallvil {
     pub(crate) depth_background: crate::depth_background::DepthBackground,
     depth_background_timer: Option<RegistrationToken>,
     depth_background_deadline: Option<Instant>,
-    /// With artwork these buffers contain only the optional title strip.
-    /// Returning to live content or unmapping evicts a window's buffer.
-    pub(crate) depth_schematics: HashMap<WlSurface, crate::depth::DepthSchematic>,
-    /// Shared analytical cool-wash/urgent-border shader.
-    pub(crate) depth_overlay_program: Option<GlesPixelProgram>,
     /// Throttles inactivity scans to 10Hz even when a backend ticks faster.
     depth_last_tick: Instant,
     /// Requested workspace target awaiting an outgoing-frame capture,
@@ -379,16 +328,11 @@ pub struct Smallvil {
         HashMap<String, crate::workspace_transition::WorkspaceTransition>,
     /// At most one non-water outgoing workspace snapshot per output.
     pub(crate) workspace_glides: HashMap<String, crate::workspace_transition::WorkspaceGlide>,
-    /// Lazily compiled custom texture shader shared by every output's
-    /// transition element.
-    pub(crate) workspace_transition_program: Option<GlesTexProgram>,
     /// At most one analytical Classic depth switch per output.
     pub(crate) depth_transitions: HashMap<String, crate::depth_transition::DepthTransition>,
-    pub(crate) depth_transition_program: Option<GlesPixelProgram>,
     /// One stable analytical canvas element per live Ocean output. No
     /// texture/framebuffer; the record only preserves damage identity.
     pub(crate) ocean_canvases: HashMap<String, crate::ocean_canvas::OceanCanvas>,
-    pub(crate) ocean_canvas_program: Option<GlesPixelProgram>,
     /// Per-output ambient caustics state and one shared compiled shader.
     /// Engine-agnostic (works under both Classic and Ocean); gated by
     /// `water_effects` plus `caustics.enabled`. The phase only advances
@@ -396,12 +340,10 @@ pub struct Smallvil {
     /// freeze the pattern at zero extra frames; `caustics.fps > 0` opts
     /// into deadline-driven constant motion.
     pub(crate) caustics: HashMap<String, crate::caustics::Caustics>,
-    pub(crate) caustics_program: crate::caustics::CausticsProgramCache,
     /// Per-output compass state and one shared compiled shader (spatial
     /// roadmap S5). Ocean-only and gated by `water_effects`; no element is
     /// produced when nothing sits off-screen.
     pub(crate) compasses: HashMap<String, crate::compass::Compass>,
-    pub(crate) compass_program: Option<GlesPixelProgram>,
     pub loop_handle: LoopHandle<'static, Smallvil>,
     pub loop_signal: LoopSignal,
 

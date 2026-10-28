@@ -95,6 +95,8 @@ impl Smallvil {
         render_states: &RenderElementStates,
     ) {
         let backdrop_visible = self
+            .render
+            .gpu
             .backdrop_textures
             .values()
             .any(|capture| render_states.element_was_presented(capture.id.clone()));
@@ -185,10 +187,10 @@ impl Smallvil {
         self.depth_transitions.clear();
         // Backdrop textures also contain unlocked client pixels. Unlock
         // recaptures visible glass before composing its first desktop frame.
-        self.backdrop_textures.clear();
-        self.layer_alpha_masks.clear();
-        self.custom_shader_instances.clear();
-        self.custom_shader_bypassed.clear();
+        self.render.gpu.backdrop_textures.clear();
+        self.render.gpu.layer_alpha_masks.clear();
+        self.render.gpu.custom_shader_instances.clear();
+        self.render.gpu.custom_shader_bypassed.clear();
         // Closing snapshots contain client pixels and normally render above
         // the desktop. They are irrelevant once the security boundary is
         // active and must never survive into a locked composition.
@@ -378,8 +380,8 @@ impl Smallvil {
             layer.layer_surface().send_close();
             map.unmap_layer(&layer);
             self.unmapped_layer_surfaces.remove(&surface);
-            self.backdrop_textures.remove(&surface);
-            self.layer_alpha_masks.remove(&surface);
+            self.render.gpu.backdrop_textures.remove(&surface);
+            self.render.gpu.layer_alpha_masks.remove(&surface);
             self.forget_layer_focus(&surface);
         }
     }

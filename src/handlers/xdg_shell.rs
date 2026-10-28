@@ -1678,8 +1678,8 @@ impl Smallvil {
         self.window_opacity.remove(surface);
         self.window_glass_modes.remove(surface);
         self.window_shader_assignments.remove(surface);
-        self.custom_shader_instances.remove(surface);
-        self.custom_shader_bypassed.remove(surface);
+        self.render.gpu.custom_shader_instances.remove(surface);
+        self.render.gpu.custom_shader_bypassed.remove(surface);
         self.window_open_animations.remove(surface);
         self.cascade_window_animations.remove(surface);
         self.window_move_animations.remove(surface);
@@ -1692,11 +1692,11 @@ impl Smallvil {
         self.input.floating_dragging.remove(surface);
         self.physics.window_buoyancy.remove(surface);
         self.physics.buoyancy_dirty = true;
-        self.window_frame_snapshots.remove(surface);
-        self.backdrop_textures.remove(surface);
+        self.render.gpu.window_frame_snapshots.remove(surface);
+        self.render.gpu.backdrop_textures.remove(surface);
         self.glass_anim.remove(surface);
         self.window_depths.remove(surface);
-        self.depth_schematics.remove(surface);
+        self.render.gpu.depth_schematics.remove(surface);
         self.expected_tiled_size.remove(surface);
         self.tiled_size_refusals.remove(surface);
         self.input.focus_history.retain(|s| s != surface);

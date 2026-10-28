@@ -979,7 +979,9 @@ impl Smallvil {
                 resize_scale,
                 &raw_main,
             ) {
-                self.window_frame_snapshots
+                self.render
+                    .gpu
+                    .window_frame_snapshots
                     .insert(surface.clone(), snapshot);
             }
         }
@@ -2695,7 +2697,7 @@ impl Smallvil {
     /// toplevel's title. Called only when the authoritative xdg-shell title
     /// differs from the value already announced to foreign-toplevel clients.
     pub(crate) fn invalidate_window_title_ui(&mut self, surface: &WlSurface) {
-        self.depth_schematics.remove(surface);
+        self.render.gpu.depth_schematics.remove(surface);
         for group in &mut self.groups {
             if group
                 .members

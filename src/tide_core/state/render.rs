@@ -18,6 +18,78 @@ use smithay::{
 
 use super::{SessionLock, Smallvil};
 
+/// Render-side state, grouped so GPU resources, per-window render
+/// properties and animation/redraw state each have one owner (plan
+/// step 8d).
+pub(crate) struct RenderState {
+    pub(crate) gpu: RenderGpuState,
+}
+
+/// GPU programs, the custom-shader cache and per-surface GPU textures:
+/// what Ebb accounts for (plan step 8d).
+pub(crate) struct RenderGpuState {
+    /// Compiled lazily on first use (needs a live renderer, unlike
+    /// `toast::font()`'s process-global `OnceLock`); see
+    /// `water_glass::water_glass_program`.
+    pub(crate) water_glass_program: Option<GlesTexProgram>,
+    /// Frost is a separate program over the same capture texture; compiled
+    /// lazily only when a rule actually selects `glass = frost`.
+    pub(crate) frost_glass_program: Option<GlesTexProgram>,
+    /// Analytical window-shadow shader, compiled once on first use.
+    pub(crate) shadow_program: Option<GlesPixelProgram>,
+    /// Texture override used to clip main toplevel surface trees.
+    pub(crate) rounded_surface_program: Option<GlesTexProgram>,
+    /// Analytical solid/gradient window-border shader.
+    pub(crate) border_program: Option<GlesPixelProgram>,
+    /// Compiled lazily on first use; see `ripple::ripple_program`.
+    pub(crate) ripple_program: Option<GlesPixelProgram>,
+    /// Shared analytical cool-wash/urgent-border shader.
+    pub(crate) depth_overlay_program: Option<GlesPixelProgram>,
+    /// Lazily compiled custom texture shader shared by every output's
+    /// transition element.
+    pub(crate) workspace_transition_program: Option<GlesTexProgram>,
+    pub(crate) depth_transition_program: Option<GlesPixelProgram>,
+    pub(crate) ocean_canvas_program: Option<GlesPixelProgram>,
+    pub(crate) caustics_program: crate::caustics::CausticsProgramCache,
+    pub(crate) compass_program: Option<GlesPixelProgram>,
+    /// Last-good compiled program per custom effect definition.
+    pub(crate) custom_shader_programs: crate::shader_effect::CustomShaderPrograms,
+    /// New custom programs still allowed to compile in this output's frame,
+    /// shared by the chain passes, the glass slots and any capture served
+    /// before the next frame.
+    pub(crate) custom_shader_compile_budget: usize,
+    /// `u_time`/`u_delta` clocks for windows currently drawing an effect.
+    /// Evicted in `detach_mapped_toplevel`, pruned on reload, cleared on lock.
+    pub(crate) custom_shader_instances: HashMap<WlSurface, crate::shader_effect::ShaderInstance>,
+    /// Windows refused a custom effect by the instance or payload cap. They
+    /// take their normal path until a later capture pass admits them.
+    pub(crate) custom_shader_bypassed: HashSet<WlSurface>,
+    pub(crate) custom_shader_bypasses: u64,
+    /// Captured immediately before a visible frame and sampled by
+    /// water/frost glass while building that same frame's elements. The
+    /// window-sized texture is reused until its dimensions change. Evicted in
+    /// `detach_mapped_toplevel` alongside `window_opacity`; render passes also
+    /// drop it after its last output stops presenting the surface.
+    pub(crate) backdrop_textures: HashMap<WlSurface, crate::backdrop::BackdropCapture>,
+    /// Native alpha captures for blurred layer surfaces whose rule sets
+    /// `ignore_alpha`. Kept separate from the backdrop so both textures can
+    /// be sampled by the frost shader in one pass.
+    pub(crate) layer_alpha_masks: HashMap<WlSurface, crate::backdrop::BackdropCapture>,
+    /// Cached full-output solid fill for `layer_rule { dim_around = true }`,
+    /// one per output -- same "own buffer per output, dedup only bumps its
+    /// commit on real size/color change" shape as `lock_blank`. Pruned on
+    /// output disconnect alongside it.
+    pub(crate) layer_dim_buffers: HashMap<Output, SolidColorBuffer>,
+    /// Last already-imported surface tree for each visible mapped window.
+    /// Texture handles are cloned, not framebuffer contents; the entry is
+    /// transferred to the bounded close list on unmap.
+    pub(crate) window_frame_snapshots:
+        HashMap<WlSurface, crate::window_animation::WindowFrameSnapshot>,
+    /// With artwork these buffers contain only the optional title strip.
+    /// Returning to live content or unmapping evicts a window's buffer.
+    pub(crate) depth_schematics: HashMap<WlSurface, crate::depth::DepthSchematic>,
+}
+
 impl Smallvil {
     fn base_window_visual_sample(
         &self,
@@ -477,20 +549,22 @@ impl Smallvil {
         let mut result = Vec::new();
         let shadow_program = self
             .shadows_possible()
-            .then(|| crate::shadow::shadow_program(&mut self.shadow_program, renderer))
+            .then(|| crate::shadow::shadow_program(&mut self.render.gpu.shadow_program, renderer))
             .flatten();
         let rounded_program = self
             .rounding_or_cascade_shader_possible()
             .then(|| {
                 crate::decoration::rounded_surface_program(
-                    &mut self.rounded_surface_program,
+                    &mut self.render.gpu.rounded_surface_program,
                     renderer,
                 )
             })
             .flatten();
         let border_program = self
             .borders_possible()
-            .then(|| crate::decoration::border_program(&mut self.border_program, renderer))
+            .then(|| {
+                crate::decoration::border_program(&mut self.render.gpu.border_program, renderer)
+            })
             .flatten();
         #[allow(clippy::too_many_arguments, clippy::mutable_key_type)]
         fn append_windows(
@@ -687,6 +761,8 @@ impl Smallvil {
             if let Some(size) = self.space.output_geometry(output).map(|geo| geo.size) {
                 let scale = output.current_scale().fractional_scale();
                 let buffer = self
+                    .render
+                    .gpu
                     .layer_dim_buffers
                     .entry(output.clone())
                     .or_insert_with(|| SolidColorBuffer::new((0, 0), [0.0, 0.0, 0.0, 1.0]));
@@ -1128,7 +1204,7 @@ impl Smallvil {
             return None;
         }
         let program = crate::workspace_transition::workspace_transition_program(
-            &mut self.workspace_transition_program,
+            &mut self.render.gpu.workspace_transition_program,
             renderer,
         )?;
         self.workspace_transitions

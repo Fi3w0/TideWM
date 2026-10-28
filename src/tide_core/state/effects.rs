@@ -77,7 +77,7 @@ impl Smallvil {
             }
         }
         if !self.backdrop_effect_for_surface(surface, self.fullscreen.contains_key(surface)) {
-            self.backdrop_textures.remove(surface);
+            self.render.gpu.backdrop_textures.remove(surface);
             self.glass_anim.remove(surface);
         }
     }
@@ -249,14 +249,17 @@ impl Smallvil {
     /// Whether a custom effect can draw for this window this frame: assigned
     /// with the master on, and a last-good program or an untried source.
     fn custom_shader_drawable(&self, surface: &WlSurface) -> bool {
-        !self.custom_shader_bypassed.contains(surface) && self.custom_shader_wanted(surface)
+        !self.render.gpu.custom_shader_bypassed.contains(surface)
+            && self.custom_shader_wanted(surface)
     }
 
     /// `custom_shader_drawable` before the budget: what admission judges.
     fn custom_shader_wanted(&self, surface: &WlSurface) -> bool {
         self.resolved_shader_assignment(surface)
             .is_some_and(|(name, definition)| {
-                self.custom_shader_programs
+                self.render
+                    .gpu
+                    .custom_shader_programs
                     .can_draw(name, &definition.stages)
             })
     }
@@ -272,15 +275,17 @@ impl Smallvil {
         // Windows admitted earlier in this pass count at their wanted size
         // even though nothing is allocated for them yet.
         let mut admitted_now: Vec<(WlSurface, u64)> = Vec::new();
-        if !self.custom_shader_bypassed.is_empty() {
+        if !self.render.gpu.custom_shader_bypassed.is_empty() {
             let unwanted: Vec<WlSurface> = self
+                .render
+                .gpu
                 .custom_shader_bypassed
                 .iter()
                 .filter(|surface| !self.custom_shader_wanted(surface))
                 .cloned()
                 .collect();
             for surface in unwanted {
-                self.custom_shader_bypassed.remove(&surface);
+                self.render.gpu.custom_shader_bypassed.remove(&surface);
             }
         }
         for (surface, physical_rect) in candidates {
@@ -308,16 +313,20 @@ impl Smallvil {
             .saturating_mul(stage_count as u64);
             let counted = |other: &WlSurface| {
                 other != surface
-                    && !self.custom_shader_bypassed.contains(other)
+                    && !self.render.gpu.custom_shader_bypassed.contains(other)
                     && !admitted_now.iter().any(|(admitted, _)| admitted == other)
             };
             let existing = self
+                .render
+                .gpu
                 .custom_shader_instances
                 .iter()
                 .filter(|(other, _)| counted(other));
             let (existing_count, existing_bytes) =
                 existing.fold((0usize, 0_u64), |(count, bytes), (other, instance)| {
                     let capture = self
+                        .render
+                        .gpu
                         .backdrop_textures
                         .get(other)
                         .map_or(0, |capture| capture.estimated_texture_bytes());
@@ -338,11 +347,16 @@ impl Smallvil {
             if instances <= crate::shader_effect::MAX_ACTIVE_INSTANCES
                 && bytes <= crate::shader_effect::MAX_PAYLOAD_BYTES
             {
-                self.custom_shader_bypassed.remove(surface);
+                self.render.gpu.custom_shader_bypassed.remove(surface);
                 admitted_now.push((surface.clone(), wanted));
-            } else if self.custom_shader_bypassed.insert(surface.clone()) {
-                self.custom_shader_instances.remove(surface);
-                self.custom_shader_bypasses += 1;
+            } else if self
+                .render
+                .gpu
+                .custom_shader_bypassed
+                .insert(surface.clone())
+            {
+                self.render.gpu.custom_shader_instances.remove(surface);
+                self.render.gpu.custom_shader_bypasses += 1;
                 self.queue_shader_failure(format!(
                     "Shader {name:?} skipped on a window: custom effects are capped at {} windows and {} MiB of captures",
                     crate::shader_effect::MAX_ACTIVE_INSTANCES,
@@ -648,19 +662,24 @@ impl Smallvil {
         windows: bool,
     ) {
         let foreign_toplevels = &self.foreign_toplevels;
-        self.backdrop_textures.retain(|surface, capture| {
-            if foreign_toplevels.contains_key(surface) != windows {
-                return true;
-            }
-            let visible = visible.iter().any(|candidate| candidate == surface);
-            capture.set_output_visible(output_name, visible)
-        });
+        self.render
+            .gpu
+            .backdrop_textures
+            .retain(|surface, capture| {
+                if foreign_toplevels.contains_key(surface) != windows {
+                    return true;
+                }
+                let visible = visible.iter().any(|candidate| candidate == surface);
+                capture.set_output_visible(output_name, visible)
+            });
     }
 
     /// Drops a disconnected or powered-off output's claims on captures.
     /// Textures still presented through another Ocean camera remain alive.
     pub(crate) fn remove_backdrop_output(&mut self, output_name: &str) {
-        self.backdrop_textures
+        self.render
+            .gpu
+            .backdrop_textures
             .retain(|_, capture| capture.set_output_visible(output_name, false));
     }
 
@@ -678,7 +697,7 @@ impl Smallvil {
         output: &Output,
         placements: &[crate::placement::PlacedWindow],
     ) {
-        self.custom_shader_compile_budget = 1;
+        self.render.gpu.custom_shader_compile_budget = 1;
         if self.config.shaders_enabled {
             let candidates: Vec<(WlSurface, Rectangle<i32, Physical>)> = placements
                 .iter()
@@ -712,16 +731,18 @@ impl Smallvil {
         // A window whose capture was released (hidden, off every output) or
         // that no longer has an effect drops its stage textures.
         let unshaded: Vec<WlSurface> = self
+            .render
+            .gpu
             .custom_shader_instances
             .keys()
             .filter(|surface| {
-                !self.backdrop_textures.contains_key(*surface)
+                !self.render.gpu.backdrop_textures.contains_key(*surface)
                     || self.resolved_shader_assignment(surface).is_none()
             })
             .cloned()
             .collect();
         for surface in unshaded {
-            self.custom_shader_instances.remove(&surface);
+            self.render.gpu.custom_shader_instances.remove(&surface);
         }
         if surfaces.is_empty() {
             return;
@@ -792,7 +813,7 @@ impl Smallvil {
                 .flatten()
                 .map(|(_, definition)| definition.render_scale)
                 .unwrap_or(self.config.backdrop_capture_scale);
-            let first_capture = !self.backdrop_textures.contains_key(&surface);
+            let first_capture = !self.render.gpu.backdrop_textures.contains_key(&surface);
             if first_capture {
                 let Some(mut capture) = crate::backdrop::BackdropCapture::new(
                     renderer,
@@ -803,9 +824,12 @@ impl Smallvil {
                     continue;
                 };
                 capture.set_output_visible(&output_name, true);
-                self.backdrop_textures.insert(surface.clone(), capture);
+                self.render
+                    .gpu
+                    .backdrop_textures
+                    .insert(surface.clone(), capture);
             }
-            let Some(capture) = self.backdrop_textures.get_mut(&surface) else {
+            let Some(capture) = self.render.gpu.backdrop_textures.get_mut(&surface) else {
                 continue;
             };
             match capture.capture(
@@ -866,24 +890,26 @@ impl Smallvil {
         for (surface, name) in &work {
             let (Some(definition), Some(capture)) = (
                 self.config.shader_definitions.get(name),
-                self.backdrop_textures.get(surface),
+                self.render.gpu.backdrop_textures.get(surface),
             ) else {
                 continue;
             };
             let instance = self
+                .render
+                .gpu
                 .custom_shader_instances
                 .entry(surface.clone())
                 .or_insert_with(crate::shader_effect::ShaderInstance::new);
             let before = instance.updates();
             let outcome = crate::shader_effect::run_chain(
                 renderer,
-                &mut self.custom_shader_programs,
+                &mut self.render.gpu.custom_shader_programs,
                 instance,
                 name,
                 definition,
                 &capture.texture,
                 (&capture.id, capture.version),
-                &mut self.custom_shader_compile_budget,
+                &mut self.render.gpu.custom_shader_compile_budget,
             );
             updates = updates.saturating_add(instance.updates().saturating_sub(before));
             failures.extend(outcome.failures);
@@ -915,7 +941,7 @@ impl Smallvil {
     ) {
         let frost_enabled = self.config.frost.enabled;
         if !frost_enabled && !self.config.shaders_enabled {
-            self.layer_alpha_masks.clear();
+            self.render.gpu.layer_alpha_masks.clear();
             return;
         }
         let output_scale = output.current_scale().fractional_scale();
@@ -997,7 +1023,7 @@ impl Smallvil {
             .iter()
             .map(|(surface, _, _, _)| surface.clone())
             .collect();
-        self.layer_alpha_masks.retain(|surface, _| {
+        self.render.gpu.layer_alpha_masks.retain(|surface, _| {
             !current_output_layers.contains(surface) || alpha_eligible.contains(surface)
         });
         if surfaces.is_empty() {
@@ -1012,7 +1038,7 @@ impl Smallvil {
             let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                 layer.render_elements(renderer, physical_rect.loc, scale, 1.0);
             let capture_scale = self.config.backdrop_capture_scale;
-            if !self.layer_alpha_masks.contains_key(surface) {
+            if !self.render.gpu.layer_alpha_masks.contains_key(surface) {
                 let Some(capture) = crate::backdrop::BackdropCapture::new(
                     renderer,
                     physical_rect.size,
@@ -1021,9 +1047,12 @@ impl Smallvil {
                 ) else {
                     continue;
                 };
-                self.layer_alpha_masks.insert(surface.clone(), capture);
+                self.render
+                    .gpu
+                    .layer_alpha_masks
+                    .insert(surface.clone(), capture);
             }
-            if let Some(capture) = self.layer_alpha_masks.get_mut(surface) {
+            if let Some(capture) = self.render.gpu.layer_alpha_masks.get_mut(surface) {
                 let _ = capture.capture(
                     renderer,
                     *physical_rect,
@@ -1079,7 +1108,7 @@ impl Smallvil {
                 .flatten()
                 .map(|(_, definition)| definition.render_scale)
                 .unwrap_or(self.config.backdrop_capture_scale);
-            let first_capture = !self.backdrop_textures.contains_key(&surface);
+            let first_capture = !self.render.gpu.backdrop_textures.contains_key(&surface);
             if first_capture {
                 let Some(mut capture) = crate::backdrop::BackdropCapture::new(
                     renderer,
@@ -1090,9 +1119,12 @@ impl Smallvil {
                     continue;
                 };
                 capture.set_output_visible(&output_name, true);
-                self.backdrop_textures.insert(surface.clone(), capture);
+                self.render
+                    .gpu
+                    .backdrop_textures
+                    .insert(surface.clone(), capture);
             }
-            let Some(capture) = self.backdrop_textures.get_mut(&surface) else {
+            let Some(capture) = self.render.gpu.backdrop_textures.get_mut(&surface) else {
                 continue;
             };
             match capture.capture(
@@ -1150,7 +1182,7 @@ impl Smallvil {
                     .get(surface)
                     .is_none_or(|depth| depth.tier() < 2)
                     && self.backdrop_effect_for_surface(surface, placement.is_fullscreen())
-                    && self.backdrop_textures.contains_key(surface))
+                    && self.render.gpu.backdrop_textures.contains_key(surface))
                 .then(|| surface.clone())
             })
             .collect()
@@ -1183,12 +1215,18 @@ impl Smallvil {
             });
         let water_program = needs_water
             .then(|| {
-                crate::water_glass::water_glass_program(&mut self.water_glass_program, renderer)
+                crate::water_glass::water_glass_program(
+                    &mut self.render.gpu.water_glass_program,
+                    renderer,
+                )
             })
             .flatten();
         let frost_program = needs_frost
             .then(|| {
-                crate::frost_glass::frost_glass_program(&mut self.frost_glass_program, renderer)
+                crate::frost_glass::frost_glass_program(
+                    &mut self.render.gpu.frost_glass_program,
+                    renderer,
+                )
             })
             .flatten();
         let Some(output_geo) = self.space.output_geometry(output) else {
@@ -1196,6 +1234,8 @@ impl Smallvil {
         };
         for surface in surfaces {
             let Some((capture_id, capture_version, capture_texture)) = self
+                .render
+                .gpu
                 .backdrop_textures
                 .get(surface)
                 .map(|capture| (capture.id.clone(), capture.version, capture.texture.clone()))
@@ -1401,7 +1441,10 @@ impl Smallvil {
             .iter()
             .any(|(_, _, _, blur)| *blur)
             .then(|| {
-                crate::frost_glass::frost_glass_program(&mut self.frost_glass_program, renderer)
+                crate::frost_glass::frost_glass_program(
+                    &mut self.render.gpu.frost_glass_program,
+                    renderer,
+                )
             })
             .flatten();
         let frost = self.config.frost.clone();
@@ -1410,13 +1453,15 @@ impl Smallvil {
         let rounding_power = 2.0;
         let corner_softness = frost.corner_softness * scale;
         for (surface, physical_rect, ignore_alpha, blur) in eligible {
-            let Some(capture) = self.backdrop_textures.get(&surface) else {
+            let Some(capture) = self.render.gpu.backdrop_textures.get(&surface) else {
                 continue;
             };
             let (id, version, texture) =
                 (capture.id.clone(), capture.version, capture.texture.clone());
             let alpha_mask = ignore_alpha.and_then(|threshold| {
-                self.layer_alpha_masks
+                self.render
+                    .gpu
+                    .layer_alpha_masks
                     .get(&surface)
                     .map(|mask| (mask.texture.clone(), mask.version, threshold))
             });

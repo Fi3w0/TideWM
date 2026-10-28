@@ -1664,7 +1664,7 @@ fn handle_connector_change(
                         });
                     }
                     state.remove_lock_output(&surface.output);
-                    state.layer_dim_buffers.remove(&surface.output);
+                    state.render.gpu.layer_dim_buffers.remove(&surface.output);
                     #[cfg(feature = "screencast")]
                     if let Some(screencast) = &state.screencast {
                         screencast.refresh_outputs(state.space.outputs());

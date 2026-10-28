@@ -363,7 +363,9 @@ impl Smallvil {
                     warnings.extend(self.apply_output_blocks_live());
                 }
                 warnings.extend(
-                    self.custom_shader_programs
+                    self.render
+                        .gpu
+                        .custom_shader_programs
                         .retain_definitions(&self.config.shader_definitions),
                 );
                 self.input.rescue_keybinds_active = false;
@@ -472,9 +474,9 @@ impl Smallvil {
                     self.closing_window_animations
                         .retain(|closing| !closing.finished());
                     if !ordinary_close && !cascade_close {
-                        self.window_frame_snapshots.clear();
+                        self.render.gpu.window_frame_snapshots.clear();
                     }
-                    self.depth_schematics.clear();
+                    self.render.gpu.depth_schematics.clear();
                     self.depth_background.reset();
                     for depth in self.window_depths.values_mut() {
                         depth.artwork_id = smithay::backend::renderer::element::Id::new();
@@ -521,20 +523,22 @@ impl Smallvil {
                         self.refresh_window_opacity_and_glass_for(&surface);
                     }
                     let unshaded: Vec<WlSurface> = self
+                        .render
+                        .gpu
                         .custom_shader_instances
                         .keys()
                         .filter(|surface| self.resolved_shader_assignment(surface).is_none())
                         .cloned()
                         .collect();
                     for surface in unshaded {
-                        self.custom_shader_instances.remove(&surface);
+                        self.render.gpu.custom_shader_instances.remove(&surface);
                     }
-                    self.custom_shader_bypassed.clear();
+                    self.render.gpu.custom_shader_bypassed.clear();
                     // The mode or frost tuning may have changed. Force the
                     // shared pre-frame pipeline to rebuild against the current
                     // window geometry instead of briefly showing stale content.
-                    self.backdrop_textures.clear();
-                    self.layer_alpha_masks.clear();
+                    self.render.gpu.backdrop_textures.clear();
+                    self.render.gpu.layer_alpha_masks.clear();
                 }
                 // A reload that dropped or renamed the currently-active
                 // mode would otherwise leave every key silently

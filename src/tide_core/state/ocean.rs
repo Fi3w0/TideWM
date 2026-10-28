@@ -117,8 +117,10 @@ impl Smallvil {
         if opacity <= 0.0 && marker_alpha <= 0.0 {
             return None;
         }
-        let program =
-            crate::ocean_canvas::ocean_canvas_program(&mut self.ocean_canvas_program, renderer)?;
+        let program = crate::ocean_canvas::ocean_canvas_program(
+            &mut self.render.gpu.ocean_canvas_program,
+            renderer,
+        )?;
         let element = self
             .ocean_canvases
             .entry(output_name)
@@ -162,8 +164,11 @@ impl Smallvil {
         } else {
             Duration::from_secs_f64(1.0 / f64::from(effective_fps))
         };
-        let program =
-            crate::caustics::caustics_program(&mut self.caustics_program, renderer, retry_cadence)?;
+        let program = crate::caustics::caustics_program(
+            &mut self.render.gpu.caustics_program,
+            renderer,
+            retry_cadence,
+        )?;
         let output_name = output.name();
         let advance = if self.config.caustics.fps == 0 {
             true
@@ -240,7 +245,7 @@ impl Smallvil {
             return None;
         }
         let period = Duration::from_secs_f64(1.0 / f64::from(fps));
-        let program_retry = self.caustics_program.retry_in(period);
+        let program_retry = self.render.gpu.caustics_program.retry_in(period);
         Some(
             self.caustics
                 .get(&output.name())
@@ -320,7 +325,8 @@ impl Smallvil {
                 shape: cfg.shape,
             },
         );
-        let Some(program) = crate::compass::compass_program(&mut self.compass_program, renderer)
+        let Some(program) =
+            crate::compass::compass_program(&mut self.render.gpu.compass_program, renderer)
         else {
             return Vec::new();
         };

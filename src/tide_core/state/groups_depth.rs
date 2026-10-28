@@ -50,7 +50,7 @@ impl Smallvil {
             return;
         };
         if depth.note_attention() {
-            self.depth_schematics.remove(surface);
+            self.render.gpu.depth_schematics.remove(surface);
             self.request_redraw();
             // The periodic `update_window_depths` tick is the only other
             // place tier changes, and it emits this same event -- without
@@ -115,7 +115,7 @@ impl Smallvil {
             }
         }
         if !enabled {
-            self.depth_schematics.clear();
+            self.render.gpu.depth_schematics.clear();
         }
         self.poll_depth_background();
         if changed {
@@ -195,7 +195,7 @@ impl Smallvil {
             }
         }
         self.config.depth = next;
-        self.depth_schematics.clear();
+        self.render.gpu.depth_schematics.clear();
         for depth in self.window_depths.values_mut() {
             depth.visual_changed();
         }
@@ -301,8 +301,10 @@ impl Smallvil {
                 ))
             })
             .collect();
-        let program =
-            crate::depth::depth_overlay_program(&mut self.depth_overlay_program, renderer);
+        let program = crate::depth::depth_overlay_program(
+            &mut self.render.gpu.depth_overlay_program,
+            renderer,
+        );
         #[allow(clippy::mutable_key_type)]
         let mut layers = HashMap::new();
         let mut replaced = Vec::new();
@@ -344,7 +346,7 @@ impl Smallvil {
             }
 
             if tier < 2 {
-                self.depth_schematics.remove(&surface);
+                self.render.gpu.depth_schematics.remove(&surface);
                 if !elements.is_empty() {
                     layers.insert(surface, elements);
                 }
@@ -354,9 +356,14 @@ impl Smallvil {
             let size = (area.size.w.max(1), area.size.h.max(1));
             // Artwork only needs a short title strip, never a window-sized CPU copy.
             if !has_artwork || self.config.depth.show_title {
-                let rebuild = self.depth_schematics.get(&surface).is_none_or(|schematic| {
-                    !schematic.matches(size, tier, &self.config.depth, has_artwork)
-                });
+                let rebuild =
+                    self.render
+                        .gpu
+                        .depth_schematics
+                        .get(&surface)
+                        .is_none_or(|schematic| {
+                            !schematic.matches(size, tier, &self.config.depth, has_artwork)
+                        });
                 if rebuild {
                     // Identity-change callbacks invalidate this cache; avoid
                     // cloning/rasterizing a title on every GIF frame.
@@ -365,7 +372,7 @@ impl Smallvil {
                     } else {
                         String::new()
                     };
-                    self.depth_schematics.insert(
+                    self.render.gpu.depth_schematics.insert(
                         surface.clone(),
                         crate::depth::DepthSchematic::build(
                             size,
@@ -376,22 +383,28 @@ impl Smallvil {
                         ),
                     );
                 }
-                let Some(element) = self.depth_schematics.get(&surface).and_then(|schematic| {
-                    schematic.render_element(
-                        renderer,
-                        (
-                            area.loc.x as f64 * output.current_scale().fractional_scale(),
-                            area.loc.y as f64 * output.current_scale().fractional_scale(),
-                        ),
-                    )
-                }) else {
+                let Some(element) =
+                    self.render
+                        .gpu
+                        .depth_schematics
+                        .get(&surface)
+                        .and_then(|schematic| {
+                            schematic.render_element(
+                                renderer,
+                                (
+                                    area.loc.x as f64 * output.current_scale().fractional_scale(),
+                                    area.loc.y as f64 * output.current_scale().fractional_scale(),
+                                ),
+                            )
+                        })
+                else {
                     continue;
                 };
                 elements.push(crate::backend::udev::OutputRenderElements::Composited(
                     element,
                 ));
             } else {
-                self.depth_schematics.remove(&surface);
+                self.render.gpu.depth_schematics.remove(&surface);
             }
             if let Some(artwork) = artwork {
                 elements.push(crate::backend::udev::OutputRenderElements::DepthImage(
@@ -434,7 +447,7 @@ impl Smallvil {
         window: Option<(f32, f32)>,
         alpha_mask: Option<&(GlesTexture, usize, f32)>,
     ) -> Option<crate::shader_effect::CustomShaderElement> {
-        if self.custom_shader_bypassed.contains(surface) {
+        if self.render.gpu.custom_shader_bypassed.contains(surface) {
             return None;
         }
         let workspace = self.workspace_of_surface(surface);
@@ -447,17 +460,17 @@ impl Smallvil {
         )?;
         let stages = &definition.stages;
         let index = stages.len().checked_sub(1)?;
-        let lookup = self.custom_shader_programs.lookup(
+        let lookup = self.render.gpu.custom_shader_programs.lookup(
             renderer,
             name,
             index,
             stages.len(),
             &stages[index],
-            &mut self.custom_shader_compile_budget,
+            &mut self.render.gpu.custom_shader_compile_budget,
         );
         // The last stage reads the backdrop or the chain's outputs; a chain
         // that hasn't rendered can't draw yet.
-        let instance = self.custom_shader_instances.get(surface);
+        let instance = self.render.gpu.custom_shader_instances.get(surface);
         let targets = instance.map(|instance| instance.targets()).unwrap_or(&[]);
         let chain_version = instance.and_then(|instance| instance.chain_version());
         let resolved = lookup.program.as_ref().and_then(|program| {
@@ -510,6 +523,8 @@ impl Smallvil {
             opacity,
         );
         let instance = self
+            .render
+            .gpu
             .custom_shader_instances
             .entry(surface.clone())
             .or_insert_with(crate::shader_effect::ShaderInstance::new);
@@ -557,7 +572,7 @@ impl Smallvil {
         }
         let area = Rectangle::from_size(self.space.output_geometry(output)?.size);
         let program = crate::depth_transition::depth_transition_program(
-            &mut self.depth_transition_program,
+            &mut self.render.gpu.depth_transition_program,
             renderer,
         )?;
         self.depth_transitions

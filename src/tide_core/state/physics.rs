@@ -889,7 +889,7 @@ impl Smallvil {
                     animations.close.offset.1 as f64,
                 ))
             });
-        let Some(snapshot) = self.window_frame_snapshots.remove(surface) else {
+        let Some(snapshot) = self.render.gpu.window_frame_snapshots.remove(surface) else {
             return;
         };
         let pixel_budget = self.close_snapshot_pixel_budget();
@@ -964,7 +964,7 @@ impl Smallvil {
         let cascade_program = needs_cascade
             .then(|| {
                 crate::decoration::rounded_surface_program(
-                    &mut self.rounded_surface_program,
+                    &mut self.render.gpu.rounded_surface_program,
                     renderer,
                 )
             })
@@ -1219,7 +1219,7 @@ impl Smallvil {
 
     fn surface_has_glass_animation(&self, surface: &WlSurface) -> bool {
         if !self.config.water_effects
-            || !self.backdrop_textures.contains_key(surface)
+            || !self.render.gpu.backdrop_textures.contains_key(surface)
             || matches!(
                 self.window_glass_modes.get(surface),
                 Some(crate::config::GlassMode::Frost) | Some(crate::config::GlassMode::Plain)
@@ -1433,7 +1433,8 @@ impl Smallvil {
         if self.ripples.is_empty() {
             return layers;
         }
-        let Some(program) = crate::ripple::ripple_program(&mut self.ripple_program, renderer)
+        let Some(program) =
+            crate::ripple::ripple_program(&mut self.render.gpu.ripple_program, renderer)
         else {
             return layers;
         };

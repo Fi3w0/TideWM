@@ -1446,12 +1446,16 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
         .collect();
     let visible_windows = state.space.elements().count();
     let backdrop_texture_bytes = state
+        .render
+        .gpu
         .backdrop_textures
         .values()
         .fold(0_u64, |total, capture| {
             total.saturating_add(capture.estimated_texture_bytes())
         });
     let layer_alpha_mask_bytes = state
+        .render
+        .gpu
         .layer_alpha_masks
         .values()
         .fold(0_u64, |total, capture| {
@@ -1477,21 +1481,33 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
                 }),
         );
     let shader_capture_bytes = state
+        .render
+        .gpu
         .backdrop_textures
         .iter()
-        .filter(|(surface, _)| state.custom_shader_instances.contains_key(*surface))
+        .filter(|(surface, _)| {
+            state
+                .render
+                .gpu
+                .custom_shader_instances
+                .contains_key(*surface)
+        })
         .fold(0_u64, |total, (_, capture)| {
             total.saturating_add(capture.estimated_texture_bytes())
         });
     let shader_stage_bytes = state
+        .render
+        .gpu
         .custom_shader_instances
         .values()
         .fold(0_u64, |total, instance| {
             total.saturating_add(instance.target_bytes())
         });
     let (shader_programs, shader_compiles, shader_compile_failures) =
-        state.custom_shader_programs.stats();
+        state.render.gpu.custom_shader_programs.stats();
     let shader_updates = state
+        .render
+        .gpu
         .custom_shader_instances
         .values()
         .fold(0_u64, |total, instance| {
@@ -1537,9 +1553,9 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
         "tide_texture_estimate": {
             "bytes": tide_texture_estimate_bytes,
             "backdrop_bytes": backdrop_texture_bytes,
-            "backdrop_count": state.backdrop_textures.len(),
+            "backdrop_count": state.render.gpu.backdrop_textures.len(),
             "layer_alpha_mask_bytes": layer_alpha_mask_bytes,
-            "layer_alpha_mask_count": state.layer_alpha_masks.len(),
+            "layer_alpha_mask_count": state.render.gpu.layer_alpha_masks.len(),
             "wallpaper_bytes": wallpaper_texture_bytes,
             "depth_background_bytes": depth_texture_bytes,
             "caustics_bytes": caustics_texture_bytes,
@@ -1552,11 +1568,11 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
             "programs": shader_programs,
             "compiles": shader_compiles,
             "compile_failures": shader_compile_failures,
-            "instances": state.custom_shader_instances.len(),
+            "instances": state.render.gpu.custom_shader_instances.len(),
             "capture_bytes": shader_capture_bytes,
             "stage_bytes": shader_stage_bytes,
-            "bypassed": state.custom_shader_bypassed.len(),
-            "bypasses": state.custom_shader_bypasses,
+            "bypassed": state.render.gpu.custom_shader_bypassed.len(),
+            "bypasses": state.render.gpu.custom_shader_bypasses,
             "updates": shader_updates,
             "scope": "capture_bytes is the share of backdrop_bytes feeding custom effects; stage_bytes are chained effects' offscreen stage outputs, included in the total; updates count redraws with new content by live instances",
         },
