@@ -391,7 +391,10 @@ impl Smallvil {
             .unwrap_or(base)
     }
 
-    pub(super) fn rounding_config_for_surface(&self, surface: &WlSurface) -> crate::config::RoundingConfig {
+    pub(super) fn rounding_config_for_surface(
+        &self,
+        surface: &WlSurface,
+    ) -> crate::config::RoundingConfig {
         let rule = self.resolve_window_rules_for(surface);
         let base = self
             .workspace_of_surface(surface)
