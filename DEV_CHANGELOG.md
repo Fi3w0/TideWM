@@ -6,7 +6,7 @@ Every TideWM release in full technical detail, newest first. For a short summary
 
 - Rename `src/tide_core/state.rs` to `state/mod.rs` and move only the approved `Smallvil::new` and `init_wayland_listener` methods verbatim to `state/init.rs`. The struct, fields, shared types, free helpers, remaining methods and tests stay in the parent module. The child uses `use super::*` plus initialization-only imports moved out of the parent.
 - No method or field visibility changes, forwarding methods, dependencies or behavior changes. The relocation is a separate commit from this version/changelog update; method text is checked byte for byte against the preceding source.
-- Validation: 709 locked all-feature/all-target tests, fmt, strict Clippy, all-feature release build, and all 61 nested runtime observations/capture hashes identical to the post-fullscreen-fix baseline. Native startup after this move has not been run.
+- Validation: 709 locked all-feature/all-target tests, fmt, strict Clippy, all-feature release build, and all 61 nested runtime observations/capture hashes identical to the post-fullscreen-fix baseline. Native startup after a maintainer relog also verifies both outputs, a fresh Wayland connection, roleless surface create/commit/destroy and continued IPC response.
 
 ## 0.90.201 — Avoid a recursive surface lock on tiled unfullscreen
 
