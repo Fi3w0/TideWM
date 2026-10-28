@@ -2207,3 +2207,18 @@ nothing releasable while over a cap, Ebb stops retrying until caps clear or chan
 and reports that finding. Caps never permit freeing visible or client resources.
 `ebb run`, `ebb init`, generated `ebb.wave`, hidden-cache eviction, pressure
 notifications to shells and per-app reports arrive in later phases.
+
+## NVIDIA memory profile
+
+TideWM packages include a process-specific NVIDIA OpenGL profile setting
+`GLVidHeapReuseRatio = 0`, which limits the driver's pool of freed video memory.
+It is optional, ignored by other drivers, and independent of Ebb. It does not
+free live client buffers, enforce Ebb caps or fix RAM growth.
+
+`tidectl doctor` checks its installation when the selected compositor has
+proprietary NVIDIA OpenGL libraries mapped. It does not infer driver use from
+other GPUs on a hybrid machine. A missing profile produces an advisory warning;
+customized files and explicit application-profile disabling are skipped.
+The check verifies the bundled data, not effective driver settings or arbitrary
+custom NVIDIA profiles. See [packaging setup and rollback](packaging/README.md#nvidia-profile).
+Changes take effect after logging out/back into TideWM.

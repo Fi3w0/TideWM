@@ -165,6 +165,12 @@ pressure-driven passes and per-app attribution remain planned. See
 Native performance and multi-day soak evidence remain pending; no memory-saving
 or cross-compositor performance claim follows from the implementation.
 
+The optional NVIDIA driver profile is now packaged (0.91.3), with a host-side
+`tidectl doctor` installation check. One live-desktop screenshot comparison
+settled at 109 MiB without versus 49 MiB with it in driver-reported process GPU
+memory; RAM growth was unchanged. That is scoped hardware evidence, not a
+universal or long-session guarantee. See [profile setup and rollback](packaging/README.md#nvidia-profile).
+
 ## Hardware
 
 | Hardware | Status |

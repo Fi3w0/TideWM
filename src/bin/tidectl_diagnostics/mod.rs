@@ -24,6 +24,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+mod nvidia_profile;
+
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_COMMAND_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 
@@ -425,6 +427,8 @@ pub fn run_checks(socket_override: Option<&Path>) -> (Vec<Check>, Option<Diagnos
         verdict,
         format!("{dri_detail}; {gpu_detail}"),
     ));
+
+    checks.push(nvidia_profile::check(diagnostics.as_ref()));
 
     // --- XWayland ----------------------------------------------------------------------
     let xwayland_enabled = diagnostics

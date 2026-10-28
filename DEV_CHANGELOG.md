@@ -2,6 +2,13 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.3 — Package the measured NVIDIA memory-reuse profile
+
+- Added `share/nvidia/50-tidewm.json`, matching the native-tested profile (`GLVidHeapReuseRatio = 0`, process `TideWM` only). Arch/Gentoo install data plus the standard `/etc` profile, with normal configuration protection; the source installer preserves an existing profile. Nix packages include the data and the NixOS module wires `/etc` through a default-on `programs.tidewm.nvidiaProfile.enable` option. No driver dependency is added.
+- Host-side doctor checks mapped proprietary NVIDIA OpenGL libraries in the selected compositor, rather than inferring use from globally loaded GPU modules. It reports the bundled profile’s presence, skips customized/unreadable files or explicit profile disabling, and warns that a missing profile is optional. It does not claim to evaluate NVIDIA’s complete precedence/parser or the live effective setting.
+- Native A/B on one machine, driver 595.104.02, same output modes/scales and five screenshots per output: process GPU 71→109 MiB without vs 41→49 MiB with the profile; four repeated rounds stayed flat. PSS grew 24.035 MiB in both runs, with zero Ebb heap trims. This is one live-desktop comparison, not a universal hardware or long-run guarantee. No RAM/leak-fix claim.
+- No compositor renderer or Ebb behavior changes. Documented package paths, standalone user setup, relog requirement, customization and rollback.
+
 ## 0.91.2 — Ebb Phase 1: watch and tell
 
 - Added `config/ebb.rs`, a bounded telemetry coordinator, maintenance integration for native and nested backends, `ebb-stats` IPC / `tidectl ebb stats`, and the `ebb` subscription channel with `ebb-warning`. No new dependencies or threads.

@@ -1,0 +1,14 @@
+{
+  "rules": [
+    {
+      "pattern": { "feature": "procname", "matches": "TideWM" },
+      "profile": "TideWM no video-memory reuse"
+    }
+  ],
+  "profiles": [
+    {
+      "name": "TideWM no video-memory reuse",
+      "settings": [ { "key": "GLVidHeapReuseRatio", "value": 0 } ]
+    }
+  ]
+}

@@ -81,6 +81,12 @@ src_install() {
 		doins share/xdg-desktop-portal/tidewm-portals.conf
 	fi
 
+	insinto /usr/share/tidewm/nvidia
+	doins share/nvidia/50-tidewm.json
+	# Portage's normal /etc CONFIG_PROTECT preserves administrator changes.
+	insinto /etc/nvidia/nvidia-application-profiles-rc.d
+	doins share/nvidia/50-tidewm.json
+
 	dodoc README.md CHANGELOG.md DOCUMENTATION.md WAVE.md LICENSING.md
 	insinto /usr/share/licenses/tidewm
 	doins LICENSE LICENSES/CC-BY-NC-SA-4.0.txt assets/fonts/OFL-LICENSE.txt
