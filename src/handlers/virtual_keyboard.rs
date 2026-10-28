@@ -83,6 +83,7 @@ impl VirtualKeyboardHandler for Smallvil {
                 // its keymap after it was activated. Smithay has already
                 // released the device's held keys.
                 let active = self
+                    .input
                     .virtual_keyboard_keymap
                     .as_ref()
                     .is_some_and(|active| active.device == device);
@@ -130,7 +131,7 @@ impl Smallvil {
             return;
         };
 
-        if let Some(active) = &mut self.virtual_keyboard_keymap {
+        if let Some(active) = &mut self.input.virtual_keyboard_keymap {
             if active.keymap.id() == keymap.id() {
                 // Another device may have installed an identical keymap. Take
                 // it over, so removing that device leaves this one working.
@@ -142,26 +143,28 @@ impl Smallvil {
         let keyboard = self.seat.get_keyboard().unwrap();
         // An identical keymap (an input method forwarding keys with the one
         // it got from us) needs no swap, which would reset keyboard state.
-        if self.virtual_keyboard_keymap.is_none() && keyboard.keymap_file().id() == keymap.id() {
+        if self.input.virtual_keyboard_keymap.is_none()
+            && keyboard.keymap_file().id() == keymap.id()
+        {
             return;
         }
 
         // Saved from before the first swap, so chained virtual keymaps still
         // restore the user's own state.
-        let saved = match &self.virtual_keyboard_keymap {
+        let saved = match &self.input.virtual_keyboard_keymap {
             Some(active) => active.saved,
             None => self.current_keyboard_state(),
         };
-        let configured = match self.configured_keymap.take() {
+        let configured = match self.input.configured_keymap.take() {
             Some(configured) => configured,
             None => keyboard.keymap_file(),
         };
-        self.configured_keymap = Some(configured);
+        self.input.configured_keymap = Some(configured);
         if let Err(err) = keyboard.set_keymap_from_keymap_file(self, keymap.clone()) {
             tracing::warn!(?err, "Failed to apply virtual keyboard keymap");
             return;
         }
-        self.virtual_keyboard_keymap = Some(VirtualKeyboardKeymap {
+        self.input.virtual_keyboard_keymap = Some(VirtualKeyboardKeymap {
             device: device.clone(),
             keymap,
             saved,
@@ -171,11 +174,11 @@ impl Smallvil {
     /// Switches the seat back to the configured keymap, if a virtual
     /// keyboard's replaced it. A no-op otherwise.
     pub(crate) fn restore_configured_keymap(&mut self) {
-        let Some(active) = self.virtual_keyboard_keymap.take() else {
+        let Some(active) = self.input.virtual_keyboard_keymap.take() else {
             return;
         };
         let keyboard = self.seat.get_keyboard().unwrap();
-        let restored = self.configured_keymap.take().is_some_and(|keymap| {
+        let restored = self.input.configured_keymap.take().is_some_and(|keymap| {
             keyboard
                 .set_keymap_from_keymap_file(self, keymap)
                 .inspect_err(|err| tracing::warn!(?err, "Failed to restore configured keymap"))
@@ -194,8 +197,8 @@ impl Smallvil {
     /// Forgets any active virtual keymap after the configured keymap was
     /// replaced on the seat (config reload), keeping the user's lock state.
     pub(crate) fn configured_keymap_replaced(&mut self) {
-        self.configured_keymap = None;
-        if let Some(active) = self.virtual_keyboard_keymap.take() {
+        self.input.configured_keymap = None;
+        if let Some(active) = self.input.virtual_keyboard_keymap.take() {
             self.restore_keyboard_state(active.saved);
         }
     }

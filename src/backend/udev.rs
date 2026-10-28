@@ -316,7 +316,7 @@ pub fn init_udev(
     // change_vt() on; None under winit, where a host compositor already
     // owns VT switching.
     state.session = Some(session.clone());
-    state.cursor_theme = cursor::Theme::load();
+    state.input.cursor_theme = cursor::Theme::load();
 
     let udev_backend = UdevBackend::new(&seat_name)?;
     let primary_gpu_path = udev::primary_gpu(&seat_name).ok().flatten();
@@ -1642,6 +1642,7 @@ fn handle_connector_change(
                         .find(|o| o.name() != disconnected_name)
                         .map(|o| o.name());
                     state
+                        .spatial
                         .ocean
                         .remove_output(&disconnected_name, fallback.as_deref());
                     if let Some(fallback) = fallback.as_deref() {
@@ -1655,7 +1656,7 @@ fn handle_connector_change(
                     state.refresh_space();
                     state.refresh_input_device_outputs();
                     let space = &state.space;
-                    if let Some(theme) = state.cursor_theme.as_mut() {
+                    if let Some(theme) = state.input.cursor_theme.as_mut() {
                         theme.retain_scales(|scale| {
                             space
                                 .outputs()
@@ -1663,7 +1664,7 @@ fn handle_connector_change(
                         });
                     }
                     state.remove_lock_output(&surface.output);
-                    state.layer_dim_buffers.remove(&surface.output);
+                    state.render.gpu.layer_dim_buffers.remove(&surface.output);
                     #[cfg(feature = "screencast")]
                     if let Some(screencast) = &state.screencast {
                         screencast.refresh_outputs(state.space.outputs());
@@ -1937,7 +1938,7 @@ fn render_surface(
     // independent of `cursor_always_visible`, which only concerns a
     // *client's* own hide request, not this compositor-driven timer.
     let idle_hidden = state.config.cursor_hide_after_ms > 0
-        && state.last_pointer_motion.elapsed()
+        && state.input.last_pointer_motion.elapsed()
             >= Duration::from_millis(state.config.cursor_hide_after_ms as u64);
     // A locked pointer (`wp-pointer-constraints-v1`, e.g. Minecraft's mouse
     // look) never receives absolute motion, so its last on-screen position
@@ -1959,12 +1960,12 @@ fn render_surface(
         &forced_visible_status
     } else if idle_hidden || pointer_locked {
         &hidden_status
-    } else if matches!(state.cursor_status, CursorImageStatus::Hidden)
+    } else if matches!(state.input.cursor_status, CursorImageStatus::Hidden)
         && state.config.cursor_always_visible
     {
         &forced_visible_status
     } else {
-        &state.cursor_status
+        &state.input.cursor_status
     };
 
     let (cursor_surface_element, cursor_glyph_element) = match effective_cursor_status {
@@ -2005,6 +2006,7 @@ fn render_surface(
             let local = (pointer_loc - output_loc.to_f64()).to_physical(scale);
             let elapsed = state.start_time.elapsed();
             let glyph = state
+                .input
                 .cursor_theme
                 .as_mut()
                 .and_then(|theme| {
@@ -2019,7 +2021,7 @@ fn render_surface(
     // elements. Never over the lock screen, same as client cursor surfaces.
     let mut cursor_surface_element = cursor_surface_element;
     if !locked {
-        if let Some(icon) = state.dnd_icon.as_ref().filter(|icon| icon.is_alive()) {
+        if let Some(icon) = state.input.dnd_icon.as_ref().filter(|icon| icon.is_alive()) {
             let pointer_loc = state
                 .seat
                 .get_pointer()
@@ -2395,6 +2397,8 @@ fn render_surface(
 
     sample.total = frame_start.elapsed();
     state
+        .render
+        .motion
         .native_render_stats
         .entry(output.clone())
         .or_default()

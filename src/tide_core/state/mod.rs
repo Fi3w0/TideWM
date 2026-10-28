@@ -30,13 +30,12 @@ use smithay::{
                 surface::WaylandSurfaceRenderElement,
                 RenderElementState,
             },
-            gles::{GlesPixelProgram, GlesTexProgram},
             ImportAll, ImportMem,
         },
         session::libseat::LibSeatSession,
     },
     desktop::{PopupGrab, PopupManager, Window},
-    input::{keyboard::Keysym, pointer::CursorImageStatus, Seat, SeatState},
+    input::{Seat, SeatState},
     output::Output,
     reexports::{
         calloop::{LoopHandle, LoopSignal, RegistrationToken},
@@ -92,7 +91,6 @@ use crate::{
     capture::PendingCapture,
     config::{Config, Direction},
     grabs::GrabCompletion,
-    layout::Layouts,
     toast::Toast,
 };
 
@@ -109,18 +107,22 @@ smithay::backend::renderer::element::render_elements! {
     Surface = WaylandSurfaceRenderElement<R>,
 }
 
-/// The live spatial model. Step 8 of the architecture plan moves the
-/// workspace and Ocean ownership state in here.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct SpatialState {
+/// The live spatial model: the running engine plus the workspace and Ocean
+/// ownership state it selects between (plan steps 7 and 8c).
+pub struct SpatialState {
     /// The running engine. Only `migrate_spatial_engine` changes it.
     pub(crate) engine: crate::config::SpatialEngine,
+    /// Workspace-owned window placement for Classic and Scroll.
+    pub workspaces: workspace::WorkspaceState,
+    /// Continuous world ownership, cameras, reefs, and bookmarks for the
+    /// Ocean engine. Dormant while Classic is selected.
+    pub ocean: crate::ocean::OceanSpace,
 }
 
 impl SpatialState {
     /// Classic finds windows under the pointer through `Space`; Scroll and
     /// Ocean through `render_placements`, which carry their view offsets.
-    pub(crate) fn hit_tests_through_space(self) -> bool {
+    pub(crate) fn hit_tests_through_space(&self) -> bool {
         self.engine.projection() == Some(crate::config::WorkspaceProjection::Classic)
     }
 }
@@ -180,8 +182,8 @@ pub struct Smallvil {
     /// surfaced through the IPC `diagnostics` request so `tidectl report`
     /// can say which code path a bug ran on without guessing from env.
     pub(crate) backend_name: &'static str,
-    pub(crate) classic_tile_drag: Option<WlSurface>,
-    pub(crate) native_render_stats: HashMap<Output, crate::backend::perf::OutputRenderStats>,
+    /// Focus authority, key and bind state, pointer grabs and gestures, cursor and input devices (plan step 8e).
+    pub(crate) input: focus::InputState,
     /// The session Lua state config evaluates into: config globals and
     /// section tables persist here after a load, which is what makes
     /// `tidectl eval` and `on "event"` handlers work.
@@ -201,20 +203,6 @@ pub struct Smallvil {
     /// graph. Installed by `main` after backend initialization and updated
     /// transactionally after each successful reload.
     pub(crate) config_watcher: Option<crate::config::ConfigWatcher>,
-    /// Every libinput device currently attached to the udev seat. Keeping
-    /// the ref-counted handles lets config reload re-apply touchpad and
-    /// per-device calibration settings without waiting for another hotplug.
-    /// Always empty under winit.
-    pub known_input_devices: Vec<smithay::reexports::input::Device>,
-    /// Resolved libinput-device to live-output bindings. Rebuilt on device
-    /// topology, output topology, and config changes so input events only do
-    /// a hash lookup and clone an `Output` handle, with no per-event strings
-    /// or geometry search.
-    pub(crate) input_device_outputs:
-        HashMap<smithay::reexports::input::Device, smithay::output::Output>,
-    /// Active compositor-consumed touchpad gesture. `None` means gesture
-    /// events continue through the ordinary client protocol path.
-    pub(crate) compositor_gesture: Option<CompositorGesture>,
     pub toast: Option<Toast>,
     /// Persistent config diagnostic rendered as a reserved top panel.  It
     /// is independent of `toast`: reload confirmations and short debug
@@ -232,26 +220,9 @@ pub struct Smallvil {
     /// open on the output that triggered it. Built once at peek-open, not
     /// rebuilt per frame -- see `open_minimap_peek`/`close_minimap_peek`.
     pub(crate) minimap_peek: Option<crate::minimap::MinimapPeek>,
-    /// Whether `config.minimap`'s trigger keysym is currently physically
-    /// held down. Tracked separately from XKB modifier state because the
-    /// trigger is an ordinary key, not a modifier -- mirrors
-    /// `helper_keys_down`'s own press/release bookkeeping shape.
-    pub(crate) minimap_trigger_down: bool,
-    /// Mouse presses consumed by compositor-owned modal UI whose matching
-    /// release must not be delivered to a client after that UI closes and
-    /// pointer focus is restored. Entries are button codes, not device-
-    /// specific assumptions; a fresh press clears a stale entry if a
-    /// release was lost across a backend/session transition.
-    pub(crate) suppressed_pointer_buttons: HashSet<u32>,
-    /// Structural parked-window state for Classic workspaces. This remains
-    /// empty unless the opt-in `classic_depth` feature is used.
-    pub classic_depth: crate::classic_depth::ClassicDepthDeck,
     /// Live spatial model. `config.spatial_engine` is only what the config
     /// file asks for; this is what is running.
-    pub(crate) spatial: SpatialState,
-    /// Continuous world ownership, cameras, reefs, and bookmarks for the
-    /// Ocean engine. Dormant while Classic is selected.
-    pub ocean: crate::ocean::OceanSpace,
+    pub spatial: SpatialState,
     /// Static title-card overlay for the currently open Classic deck.
     pub depth_deck_overlay: Option<crate::depth_deck::DepthDeckOverlay>,
     #[cfg(feature = "screencast")]
@@ -263,289 +234,16 @@ pub struct Smallvil {
     pub welcome_hint: Option<crate::welcome::WelcomeHint>,
     last_config_event: Instant,
     config_reload_timer_armed: bool,
-    redraw_requests: crate::redraw::RedrawRequests,
-    /// Optional backend wake-up used by native DRM to propagate damage as
-    /// an event instead of waiting for a fixed polling interval. The winit
-    /// backend keeps its host-refresh timer and leaves this unset.
-    redraw_wakeup: Option<smithay::reexports::calloop::ping::Ping>,
-    /// Timestamp of the last real pointer motion (absolute or relative),
-    /// updated from `Smallvil::note_pointer_motion`. Drives
-    /// `config.cursor_hide_after_ms`'s auto-hide check at render time
-    /// (`backend/udev.rs`) -- authoritative regardless of why a given
-    /// render happened to run.
-    pub(crate) last_pointer_motion: Instant,
-    /// Timestamp of the last real input activity (any keyboard/pointer/
-    /// touch event reaching `process_input_event`). Drives the caustics
-    /// idle-decay tiers: after `caustics.idle_after_ms[i]` of no input, the
-    /// effective frame rate drops to `caustics.idle_fps[i]`, so an idle
-    /// desktop's always-on overlay winds down over minutes instead of
-    /// burning frames at full rate forever. Pointer motion alone is not
-    /// enough -- keys and touch must reset it too.
-    pub(crate) last_activity: Instant,
-    /// Last XKB layout group + layout names announced over IPC, so
-    /// `layout-changed` fires only on an actual change (the `grp:` xkb
-    /// option changes the group inside `keyboard.input`, where no action
-    /// runs). `None` until the first check.
-    pub(crate) keyboard_layout_state: Option<(u32, Vec<String>)>,
-    /// Whether a `cursor_hide_after_ms` wake-up timer is currently pending.
-    /// `note_pointer_motion` only arms a new timer when this is `false`,
-    /// rather than spawning a fresh calloop source on every single motion
-    /// event (a real mouse can fire hundreds of those a second) -- the one
-    /// live timer re-reads `last_pointer_motion` when it fires and
-    /// reschedules itself further out if motion happened more recently
-    /// than expected, the same self-extending `TimeoutAction::ToDuration`
-    /// idiom `winit.rs`'s own redraw timer already uses.
-    cursor_idle_timer_armed: bool,
-    /// `Some(name)` while a `mode <name> { }` keybind table is active
-    /// (`Action::EnterMode`/`ExitMode`, `input.rs`'s keybind-matching
-    /// closure). `None` means the base top-level bind table is in effect.
-    /// Not tied to focus or any other implicit event -- only an explicit
-    /// `exit-mode` bind clears it, matching sway/Hyprland's own "mode"
-    /// behavior.
-    pub active_mode: Option<String>,
-    /// Emergency table is separate from Waves and starts only after the
-    /// deliberate Ctrl+Alt+Escape rescue chord. A successful config reload
-    /// clears it. Ordinary non-XKB helper keys held for arbitrary chords are
-    /// tracked here so their press/release never leaks into clients.
-    pub(crate) rescue_keybinds_active: bool,
-    pub(crate) helper_keys_down: HashSet<Keysym>,
 
-    /// Long-lived IPC subscribe connections, keyed by a process-unique id
-    /// assigned at subscribe time. Empty in the steady state where no
-    /// widget is connected, which makes `emit_ipc_event` a cheap
-    /// early-return on every state change. See `ipc::IpcSubscriber` for
-    /// the per-connection fields and lifecycle.
-    pub(crate) ipc_subscribers: HashMap<usize, crate::ipc::IpcSubscriber>,
-    /// Last state `emit_state_change_events` reported, `None` until a
-    /// subscriber or handler first needs it.
-    ipc_seen: Option<IpcSeenState>,
-    /// One-shot retry timer for subscriber bytes that did not fit in the
-    /// kernel socket buffer. `None` during the normal fully-drained state, so
-    /// IPC adds no periodic wakeup to an idle compositor.
-    pub(crate) ipc_flush_token: Option<RegistrationToken>,
-    /// Next subscriber id. Monotonic across the process lifetime rather
-    /// than recycled, so a stale reference inside an in-flight calloop
-    /// callback can't accidentally target a fresh subscriber that reused
-    /// the same id.
-    pub(crate) next_ipc_subscriber_id: usize,
+    /// IPC event subscribers and the state they were last told about.
+    pub(crate) ipc: ipc::IpcState,
+    /// GPU resources, per-window render properties and animation/redraw
+    /// state (plan step 8d).
+    pub(crate) render: render::RenderState,
 
-    pub layout: Layouts,
     pub space: crate::tide_core::window_space::WindowSpace,
-    /// Per-mapped-window base/active/inactive/fullscreen alpha multipliers
-    /// resolved from window rules. Missing entries preserve client alpha.
-    pub(crate) window_opacity: HashMap<WlSurface, crate::config::WindowOpacity>,
-    /// Explicit captured-backdrop mode resolved from window rules. Missing
-    /// entries preserve the original behavior: translucent floating windows
-    /// use water refraction.
-    pub(crate) window_glass_modes: HashMap<WlSurface, crate::config::GlassMode>,
-    /// The last matching `rule { shader = ... }`, including an explicit
-    /// `none` that opts out of the workspace default. Resolved per frame by
-    /// `resolved_shader_assignment`, so toggling `shaders { enabled }`, a
-    /// definition or a workspace default needs no per-window re-resolve.
-    pub(crate) window_shader_assignments: HashMap<WlSurface, crate::config::ShaderAssignment>,
-    /// Assignments from `layer_rule { shader }`, refreshed for each output's
-    /// mapped layers during its capture pass and cleared on reload.
-    pub(crate) layer_shader_assignments: HashMap<WlSurface, crate::config::ShaderAssignment>,
-    /// New custom programs still allowed to compile in this output's frame,
-    /// shared by the chain passes, the glass slots and any capture served
-    /// before the next frame.
-    pub(crate) custom_shader_compile_budget: usize,
-    /// Last-good compiled program per custom effect definition.
-    pub(crate) custom_shader_programs: crate::shader_effect::CustomShaderPrograms,
-    /// `u_time`/`u_delta` clocks for windows currently drawing an effect.
-    /// Evicted in `detach_mapped_toplevel`, pruned on reload, cleared on lock.
-    pub(crate) custom_shader_instances: HashMap<WlSurface, crate::shader_effect::ShaderInstance>,
-    /// Windows refused a custom effect by the instance or payload cap. They
-    /// take their normal path until a later capture pass admits them.
-    pub(crate) custom_shader_bypassed: HashSet<WlSurface>,
-    pub(crate) custom_shader_bypasses: u64,
-    /// Captured immediately before a visible frame and sampled by
-    /// water/frost glass while building that same frame's elements. The
-    /// window-sized texture is reused until its dimensions change. Evicted in
-    /// `detach_mapped_toplevel` alongside `window_opacity`; render passes also
-    /// drop it after its last output stops presenting the surface.
-    pub(crate) backdrop_textures: HashMap<WlSurface, crate::backdrop::BackdropCapture>,
-    /// Native alpha captures for blurred layer surfaces whose rule sets
-    /// `ignore_alpha`. Kept separate from the backdrop so both textures can
-    /// be sampled by the frost shader in one pass.
-    pub(crate) layer_alpha_masks: HashMap<WlSurface, crate::backdrop::BackdropCapture>,
-    /// Cached full-output solid fill for `layer_rule { dim_around = true }`,
-    /// one per output -- same "own buffer per output, dedup only bumps its
-    /// commit on real size/color change" shape as `lock_blank`. Pruned on
-    /// output disconnect alongside it.
-    pub(crate) layer_dim_buffers: HashMap<Output, SolidColorBuffer>,
-    /// Per-window water-glass animation state (`water_glass::GlassAnim`):
-    /// when the distortion was last disturbed and what frame state that
-    /// disturbance was derived from. Only populated for windows taking the
-    /// water branch of `glass_frame_elements` while the resolved
-    /// `water_glass.animation` isn't `static`; evicted in
-    /// `detach_mapped_toplevel` alongside `backdrop_textures`.
-    pub(crate) glass_anim: HashMap<WlSurface, crate::water_glass::GlassAnim>,
-    /// Compiled lazily on first use (needs a live renderer, unlike
-    /// `toast::font()`'s process-global `OnceLock`); see
-    /// `water_glass::water_glass_program`.
-    pub(crate) water_glass_program: Option<GlesTexProgram>,
-    /// Frost is a separate program over the same capture texture; compiled
-    /// lazily only when a rule actually selects `glass = frost`.
-    pub(crate) frost_glass_program: Option<GlesTexProgram>,
-    /// Analytical window-shadow shader, compiled once on first use.
-    pub(crate) shadow_program: Option<GlesPixelProgram>,
-    /// Texture override used to clip main toplevel surface trees.
-    pub(crate) rounded_surface_program: Option<GlesTexProgram>,
-    /// Analytical solid/gradient window-border shader.
-    pub(crate) border_program: Option<GlesPixelProgram>,
-    /// Active impulse ripples (Phase R1, see `ripple.rs`). Each one lives
-    /// on a specific output, decays over its own `duration`, and is
-    /// `retain`-pruned once `finished()` inside `ripple_frame_elements`
-    /// so this Vec never grows past the in-flight count. Capped at a
-    /// small constant by `spawn_ripple` to bound the worst case (rapid
-    /// window mapping shouldn't stack unboundedly), matching the same
-    /// no-unbounded-growth steady-state discipline every other animation
-    /// field in this struct obeys.
-    pub(crate) ripples: Vec<crate::ripple::Ripple>,
-    /// Compiled lazily on first use; see `ripple::ripple_program`.
-    pub(crate) ripple_program: Option<GlesPixelProgram>,
-    /// Short-lived visual state for mapped windows. Logical geometry and
-    /// input move immediately; these maps only interpolate what is drawn.
-    pub(crate) window_open_animations:
-        HashMap<WlSurface, crate::window_animation::WindowVisualAnimation>,
-    /// Cascade-only mapped-window pour clocks. Closing clocks move into the
-    /// bounded snapshot records below so unmapping never retains a client.
-    pub(crate) cascade_window_animations:
-        HashMap<WlSurface, crate::cascade_transition::CascadeTransition>,
-    /// Coalesces strip hit-test refreshes outside pointer-grab callbacks.
-    scroll_pointer_refresh_pending: bool,
-    pub(crate) window_move_animations:
-        HashMap<WlSurface, crate::window_animation::WindowVisualAnimation>,
-    /// Short-lived render-only followers for interactive move/resize.
-    /// Logical geometry stays at the pointer target; one entry per active
-    /// mapped window bounds this state without retaining motion history.
-    pub(crate) window_viscosity: HashMap<WlSurface, crate::viscosity::ViscousMotion>,
-    /// Lateral damped oscillation for dragged floating windows. One small
-    /// closed-form record per mapped window; a settled entry finishes and
-    /// is pruned, so idle windows never keep the frame pump alive.
-    pub(crate) window_sway: HashMap<WlSurface, crate::sway::FloatingSway>,
-    /// Cosmetic 2D bob-and-drift for floating windows (F1 `light`). One
-    /// small closed-form record per disturbed window; a settled entry
-    /// finishes and is pruned, so idle windows never keep the frame pump
-    /// alive. When a window resolves float-physics-enabled it is tracked
-    /// here instead of in `window_sway` -- the two never stack.
-    pub(crate) window_float_physics: HashMap<WlSurface, crate::float_physics::FloatPhysics>,
-    /// Windows with ambient "sitting on water" sway toggled on
-    /// (`toggle-float-ambient`), keyed to the `Instant` it was toggled on --
-    /// the time origin `float_physics::ambient_sample`'s `elapsed` measures
-    /// from, sampled fresh in `base_window_visual_sample`. Unlike
-    /// `window_float_physics`, entries here don't finish on their own --
-    /// they persist until explicitly toggled off, deliberately keeping the
-    /// frame pump alive the whole time. Independent of `window_float_physics`
-    /// entirely: the two offsets simply add when both are active.
-    pub(crate) window_float_ambient: HashMap<WlSurface, Instant>,
-    /// One mass-spring-damper body per floating window using full physics.
-    /// Continuous wave forcing and collisions require persistent velocity;
-    /// `sync_float_physics_bodies` keeps membership aligned with live rules.
-    pub(crate) window_float_bodies: HashMap<WlSurface, crate::float_physics::FloatBody>,
-    /// Fixed-timestep accumulator for `update_float_physics_full`'s
-    /// integrator, carried across ticks so a variable frame interval still
-    /// advances the simulation in fixed, numerically stable steps. Clamped
-    /// to a small multiple of the fixed step so a long stall (a hung
-    /// nested host, a VT switch) can't dump a huge catch-up burst of
-    /// substeps into a single tick.
-    pub(crate) float_physics_accum: f64,
-    /// Wall-clock timestamp of the previous `update_float_physics_full`
-    /// call, used to derive the elapsed real time fed into the accumulator
-    /// above.
-    pub(crate) float_physics_last_tick: Instant,
-    /// Fixed time origin the traveling wave field's phase is measured from
-    /// (`float_physics::wave_target`'s `elapsed`). A single shared clock
-    /// (not one per window, unlike `window_float_ambient`) because the
-    /// wave is one continuous field every full-tier window samples by its
-    /// own position, not N independent oscillators.
-    pub(crate) float_physics_wave_clock: Instant,
-    /// Ocean-only cosmetic current, one small phase clock per visible
-    /// floating window. Records are paused (not reset) while focused or
-    /// directly dragged, and cleared outside Ocean or when disabled.
-    pub(crate) window_currents: HashMap<WlSurface, crate::currents::CurrentDrift>,
-    /// Floating move grabs currently under direct manipulation. Kept
-    /// separately from viscosity because viscosity may be disabled or may
-    /// keep settling briefly after the physical grab ends.
-    pub(crate) floating_dragging: HashSet<WlSurface>,
-    /// One bounded analytical fill while a Classic floating drag is inside
-    /// a configured edge/corner snap zone. Dropped on every grab teardown.
-    pub(crate) snap_preview: Option<SnapPreview>,
-    /// Render-only apparent weight, retained only for visible eligible
-    /// floaters. Stable entries request no frames; `buoyancy_dirty` avoids
-    /// rebuilding placements on idle backend maintenance ticks.
-    pub(crate) window_buoyancy: HashMap<WlSurface, crate::buoyancy::BuoyancyState>,
-    pub(crate) buoyancy_dirty: bool,
-    pub(crate) buoyancy_camera_revision: u64,
-    pub(crate) buoyancy_camera_was_moving: bool,
-    /// Continuous lateral swim camera, one entry per output that has ever
-    /// swum. The offset is purely visual (the logical workspace identity is
-    /// still `Layouts::active`'s `u32`); at rest it is zero and the entry
-    /// asks for no frames.
-    pub(crate) swim_cameras: HashMap<String, crate::swim::SwimCamera>,
-    /// Vertical workspace-slide camera, one entry per output while a
-    /// `workspace-up`/`workspace-down` step settles. At rest the entry is
-    /// removed; the logical workspace changes immediately, the camera only
-    /// animates the already-applied switch.
-    pub(crate) workspace_scroll_cameras: HashMap<String, crate::swim::WorkspaceScrollCamera>,
-    /// Last already-imported surface tree for each visible mapped window.
-    /// Texture handles are cloned, not framebuffer contents; the entry is
-    /// transferred to the bounded close list on unmap.
-    pub(crate) window_frame_snapshots:
-        HashMap<WlSurface, crate::window_animation::WindowFrameSnapshot>,
-    /// Detached windows retaining their last drawable GPU snapshot until
-    /// the configured close animation finishes.
-    pub(crate) closing_window_animations: Vec<crate::window_animation::ClosingWindowAnimation>,
-    /// Per-mapped-window automatic attention depth. Entries are created on
-    /// map and removed on unmap/destroy, so time-based sinking cannot grow
-    /// state beyond the current mapped toplevel count.
-    pub(crate) window_depths: HashMap<WlSurface, crate::depth::WindowDepth>,
-    /// Shared artwork source, CPU frame and per-renderer texture imports.
-    pub(crate) depth_background: crate::depth_background::DepthBackground,
-    depth_background_timer: Option<RegistrationToken>,
-    depth_background_deadline: Option<Instant>,
-    /// With artwork these buffers contain only the optional title strip.
-    /// Returning to live content or unmapping evicts a window's buffer.
-    pub(crate) depth_schematics: HashMap<WlSurface, crate::depth::DepthSchematic>,
-    /// Shared analytical cool-wash/urgent-border shader.
-    pub(crate) depth_overlay_program: Option<GlesPixelProgram>,
-    /// Throttles inactivity scans to 10Hz even when a backend ticks faster.
-    depth_last_tick: Instant,
-    /// Requested workspace target awaiting an outgoing-frame capture,
-    /// keyed by output name. A HashMap deliberately makes this one slot
-    /// per output: repeated switches replace the target instead of
-    /// accumulating full-output work.
-    pub(crate) pending_workspace_transitions: HashMap<String, u32>,
-    /// At most one captured outgoing texture per output, dropped as soon
-    /// as its wipe completes (see `workspace_transition.rs`).
-    pub(crate) workspace_transitions:
-        HashMap<String, crate::workspace_transition::WorkspaceTransition>,
-    /// At most one non-water outgoing workspace snapshot per output.
-    pub(crate) workspace_glides: HashMap<String, crate::workspace_transition::WorkspaceGlide>,
-    /// Lazily compiled custom texture shader shared by every output's
-    /// transition element.
-    pub(crate) workspace_transition_program: Option<GlesTexProgram>,
-    /// At most one analytical Classic depth switch per output.
-    pub(crate) depth_transitions: HashMap<String, crate::depth_transition::DepthTransition>,
-    pub(crate) depth_transition_program: Option<GlesPixelProgram>,
-    /// One stable analytical canvas element per live Ocean output. No
-    /// texture/framebuffer; the record only preserves damage identity.
-    pub(crate) ocean_canvases: HashMap<String, crate::ocean_canvas::OceanCanvas>,
-    pub(crate) ocean_canvas_program: Option<GlesPixelProgram>,
-    /// Per-output ambient caustics state and one shared compiled shader.
-    /// Engine-agnostic (works under both Classic and Ocean); gated by
-    /// `water_effects` plus `caustics.enabled`. The phase only advances
-    /// inside `caustics_frame_element`, so damage-driven idle desktops
-    /// freeze the pattern at zero extra frames; `caustics.fps > 0` opts
-    /// into deadline-driven constant motion.
-    pub(crate) caustics: HashMap<String, crate::caustics::Caustics>,
-    pub(crate) caustics_program: crate::caustics::CausticsProgramCache,
-    /// Per-output compass state and one shared compiled shader (spatial
-    /// roadmap S5). Ocean-only and gated by `water_effects`; no element is
-    /// produced when nothing sits off-screen.
-    pub(crate) compasses: HashMap<String, crate::compass::Compass>,
-    pub(crate) compass_program: Option<GlesPixelProgram>,
+    /// Render-only floating-window motion: physics, buoyancy, currents, sway and viscosity (plan step 8b).
+    pub(crate) physics: physics::FloatPhysicsState,
     pub loop_handle: LoopHandle<'static, Smallvil>,
     pub loop_signal: LoopSignal,
 
@@ -711,11 +409,6 @@ pub struct Smallvil {
     /// hidden from sandboxed security-context clients.
     #[allow(dead_code)]
     pub virtual_keyboard_manager_state: VirtualKeyboardManagerState,
-    /// A virtual keyboard's keymap currently on the seat keyboard, if any.
-    pub(crate) virtual_keyboard_keymap:
-        Option<crate::handlers::virtual_keyboard::VirtualKeyboardKeymap>,
-    /// The configured keymap, saved while a virtual keyboard's replaces it.
-    pub(crate) configured_keymap: Option<smithay::input::keyboard::KeymapFile>,
     /// `ext-foreign-toplevel-list-v1`: exposes every mapped toplevel to
     /// external tooling (bars, taskbars, window switchers) as a handle
     /// carrying title/app_id. One handle per mapped toplevel, created in
@@ -797,11 +490,6 @@ pub struct Smallvil {
     /// persistent popup role needs this separate signal across null-buffer
     /// unmap and later remap just like `unmapped_toplevels` below.
     pub(crate) unmapped_popup_surfaces: HashSet<WlSurface>,
-    /// Active xdg-popup pointer/keyboard grab and the root shell surface it
-    /// belongs to. The focus authority treats a live popup keyboard grab as
-    /// the root retaining logical focus even while wl_keyboard targets a
-    /// descendant popup surface.
-    pub(crate) popup_grab: Option<PopupGrabState>,
     /// XDG toplevel roles that exist but do not currently have a committed
     /// buffer. Protocol mapping is deliberately tracked separately from
     /// `Space`: switching workspaces also removes windows from `Space`, but
@@ -880,16 +568,6 @@ pub struct Smallvil {
     pub idle_inhibitors: HashMap<WlSurface, usize>,
 
     pub seat: Seat<Self>,
-    /// The window Tide intends to focus when no higher-priority layer owns
-    /// the keyboard. Kept separately from actual seat focus so an Exclusive
-    /// layer can preempt temporarily and then restore the exact window.
-    window_focus: Option<WlSurface>,
-    /// Explicit/first-map OnDemand layer focus. Unlike Exclusive layers it
-    /// is not globally preemptive; a later window/empty click clears it.
-    on_demand_layer_focus: Option<WlSurface>,
-    /// Last target applied to both wl_keyboard focus and XDG Activated.
-    /// Every mutation goes through `reconcile_keyboard_focus`.
-    keyboard_focus: KeyboardFocusTarget,
 
     /// Only populated by the udev backend, which is also the only place
     /// the `zwp_linux_dmabuf_v1` global actually gets created (see
@@ -909,20 +587,6 @@ pub struct Smallvil {
     /// detection calls `change_vt` on this when it's `Some`.
     pub session: Option<LibSeatSession>,
 
-    /// Only read by the udev backend (see `cursor.rs`, `backend/udev.rs`).
-    /// Under winit the host compositor draws the real cursor, so this is
-    /// tracked but never rendered from.
-    pub cursor_status: CursorImageStatus,
-    /// Icon surface of the active client drag'n'drop, drawn at the pointer.
-    pub dnd_icon: Option<WlSurface>,
-
-    /// Loaded xcursor theme for `CursorImageStatus::Named`, only populated
-    /// by the udev backend (`backend/udev.rs`, same pattern as `session`/
-    /// `udev_gpu` above). `None` under winit, and also under udev if no
-    /// theme could be loaded -- `cursor::fallback_glyph_element` covers that
-    /// case, see `cursor.rs`.
-    pub cursor_theme: Option<crate::cursor::Theme>,
-
     /// Windows currently fullscreen, keyed by surface. This is the
     /// authoritative "is this fullscreen right now" source `retile()` reads
     /// -- `ToplevelSurface::current_state()` only reflects the last surface
@@ -936,25 +600,6 @@ pub struct Smallvil {
     /// protocol Maximized state and restore it on exit without losing the
     /// original normal floating rectangle.
     pub maximized: HashMap<WlSurface, MaximizedEntry>,
-
-    /// (output, workspace) tag for every *floating* window. Tiled windows
-    /// don't need one -- their workspace is implicit in which `Layouts` tree
-    /// holds them -- but a floating window isn't tracked in `Layouts` at
-    /// all, so `switch_workspace` needs this to know which floating windows
-    /// belong to the workspace it's hiding or showing.
-    pub floating_workspace: HashMap<WlSurface, FloatingTag>,
-
-    /// Windows exempt from `switch_workspace`'s hide/show cycle -- stay
-    /// mapped and visible no matter which workspace is active on their
-    /// output. Always floating (`toggle_pin` un-tiles first if needed; a
-    /// tiled pinned window has no coherent meaning when only one
-    /// workspace's tree is ever rendered per output at a time).
-    pub pinned: HashSet<WlSurface>,
-
-    /// Per-output "workspace to return to" for `toggle_scratchpad`, so
-    /// toggling the scratchpad off doesn't strand you on some fixed
-    /// fallback workspace regardless of where you actually were.
-    scratchpad_previous: HashMap<String, u32>,
 
     /// Windows hidden by swallowing (`WindowRule::swallow`), keyed by the
     /// *child* surface that took over their tile. Holds the actual
@@ -1013,33 +658,6 @@ pub struct Smallvil {
     /// own lifetime.
     pub remembered_floating_sizes: HashMap<String, (i32, i32)>,
 
-    /// Named scratchpads (Hyprland's named "special workspaces"):
-    /// each name is lazily assigned its own reserved workspace number from
-    /// `NAMED_SCRATCHPAD_BASE` upward on first use, then behaves exactly
-    /// like the unnamed scratchpad does -- same `switch_workspace` hide/show
-    /// machinery, no parallel data structure. Session-scoped: numbers are
-    /// allocated in first-use order, which only matters to IPC consumers,
-    /// and those should key on the `scratchpad` name field instead.
-    scratchpad_named: HashMap<String, u32>,
-
-    /// Per-output previously-active workspace, updated on every real
-    /// `switch_workspace` call -- drives `config.workspace_auto_back_and_forth`
-    /// (niri's own feature of the same name). Separate from
-    /// `scratchpad_previous` above: that one only tracks the scratchpad's
-    /// own toggle, this tracks every ordinary workspace switch.
-    workspace_previous: HashMap<String, u32>,
-    /// Output that received the last `workspace-up`/`workspace-down` step.
-    /// Used only while no visible window holds focus (an empty workspace):
-    /// `primary_output` then falls back to the pointer, which may be on the
-    /// other monitor and would step the wrong screen on the way back.
-    workspace_step_output: Option<String>,
-
-    /// Tiled windows that keep `config.pseudo_tile_scale` of their tile's
-    /// size instead of filling it -- a rect override `retile()` applies,
-    /// same shape as the fullscreen override. Stays in its `Layouts` slot
-    /// throughout, unlike floating: only the rendered rect changes.
-    pub pseudo_tiled: HashSet<WlSurface>,
-
     /// Windows asking for attention while they didn't have a fresh enough
     /// claim to steal focus outright -- set from a stale-serial
     /// xdg-activation request (see `Smallvil::mark_urgent`,
@@ -1069,66 +687,6 @@ pub struct Smallvil {
     /// for the `rule { tag = [...] }` match criterion. Cleared per-surface
     /// in `detach_mapped_toplevel`, same lifecycle as `urgent`/`pinned`.
     pub window_tags: HashMap<WlSurface, HashSet<String>>,
-
-    /// Output-pin bindings (`rule { pin_output }`, `toggle-output-pin`),
-    /// keyed by surface, valued by connector name. No entry means "not
-    /// pinned" -- the common case costs nothing. Kept independent of
-    /// whether the named output is currently connected: a disconnect
-    /// leaves the entry alone (the window falls back like any other, but
-    /// still remembers where it belongs), and reconnecting that output
-    /// recalls the window via `recall_pinned_windows_to`. Cleared
-    /// per-surface in `detach_mapped_toplevel`, same lifecycle as
-    /// `window_tags`.
-    pub output_pins: HashMap<WlSurface, String>,
-
-    /// (output, workspace) pairs that have already fired their
-    /// `workspace_rule { on_created_empty }` command (see
-    /// `apply_workspace_switch`). TideWM's numbered workspaces always
-    /// exist as addressable slots -- there is no real create/destroy
-    /// lifecycle to hook a one-shot event on the way Hyprland can -- so
-    /// this set is what makes the closest honest analog to that a
-    /// once-per-process-lifetime event instead of firing on every later
-    /// visit to an empty workspace. Pruned per-output in
-    /// `remove_workspace_transition_output` on disconnect, same
-    /// "connector name might mean something else on replug" reasoning as
-    /// that function's other entries.
-    workspace_created_empty_fired: HashSet<(String, u32)>,
-
-    /// Most-recently-focused-first order of every window that has ever
-    /// held keyboard focus, updated from `reconcile_keyboard_focus`'s own
-    /// activation-change block (except while `cycling_focus` is set, see
-    /// that field) and pruned in `detach_mapped_toplevel`. Drives
-    /// `cycle_focus`'s Alt-Tab ordering; a window not yet in this list
-    /// (freshly mapped but never focused) falls back to `Space`'s own
-    /// order, appended after every known entry.
-    pub(crate) focus_history: Vec<WlSurface>,
-    /// Set for the duration of `cycle_focus`'s own `focus_window` call, so
-    /// `reconcile_keyboard_focus` skips its normal `focus_history` reorder.
-    /// Without this, cycling itself would move whatever it just focused to
-    /// the front of the MRU list, which the *next* press then reads back as
-    /// "current" -- degenerating into an A/B two-window oscillation instead
-    /// of a real cycle, since the third-oldest window's position keeps
-    /// getting pushed out from under the walk before it's ever reached.
-    /// Found by manual trace, not observed live -- `cargo test` cannot
-    /// catch this class of bug (needs a real multi-press keybind sequence).
-    cycling_focus: bool,
-
-    /// Laptop lid closed right now, per libinput's `Switch::Lid`
-    /// (`SwitchState::On` = closed). Tracked separately from the
-    /// configured `lid_close`/`lid_open` actions so an event whose state
-    /// matches what we already have is a no-op -- libinput sometimes
-    /// re-emits the current state after a suspend/resume cycle, and
-    /// without this dedup that would re-fire the action every wake.
-    /// Defaults to `false` (open); libinput does not report initial switch
-    /// state at seat-assign time, so a lid already closed when TideWM
-    /// starts won't be reflected here until the first real toggle. Same
-    /// shape as `is_tablet_mode` below.
-    pub is_lid_closed: bool,
-
-    /// Device is in tablet mode right now, per libinput's
-    /// `Switch::TabletMode` (`SwitchState::On` = tablet mode). Same
-    /// dedup-vs-libinput-resume rationale as `is_lid_closed`.
-    pub is_tablet_mode: bool,
 
     /// Windows sharing one `Layouts` leaf, tab-strip style: only the
     /// `active` member actually occupies the leaf (and so is mapped/

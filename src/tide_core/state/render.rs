@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Instant,
+};
 
 use smithay::{
     backend::renderer::{
@@ -11,12 +14,196 @@ use smithay::{
     },
     desktop::{layer_map_for_output, space::SpaceRenderElements, WindowSurfaceType},
     output::Output,
-    reexports::wayland_server::protocol::wl_surface::WlSurface,
+    reexports::{calloop::RegistrationToken, wayland_server::protocol::wl_surface::WlSurface},
     utils::{Logical, Physical, Point, Rectangle, Scale, Size},
     wayland::shell::wlr_layer::Layer as WlrLayer,
 };
 
-use super::{SessionLock, Smallvil};
+use super::{SessionLock, Smallvil, SnapPreview};
+
+/// Render-side state, grouped so GPU resources, per-window render
+/// properties and animation/redraw state each have one owner (plan
+/// step 8d).
+pub(crate) struct RenderState {
+    pub(crate) gpu: RenderGpuState,
+    pub(crate) windows: RenderWindowsState,
+    pub(crate) motion: RenderMotionState,
+}
+
+/// GPU programs, the custom-shader cache and per-surface GPU textures:
+/// what Ebb accounts for (plan step 8d).
+pub(crate) struct RenderGpuState {
+    /// Compiled lazily on first use (needs a live renderer, unlike
+    /// `toast::font()`'s process-global `OnceLock`); see
+    /// `water_glass::water_glass_program`.
+    pub(crate) water_glass_program: Option<GlesTexProgram>,
+    /// Frost is a separate program over the same capture texture; compiled
+    /// lazily only when a rule actually selects `glass = frost`.
+    pub(crate) frost_glass_program: Option<GlesTexProgram>,
+    /// Analytical window-shadow shader, compiled once on first use.
+    pub(crate) shadow_program: Option<GlesPixelProgram>,
+    /// Texture override used to clip main toplevel surface trees.
+    pub(crate) rounded_surface_program: Option<GlesTexProgram>,
+    /// Analytical solid/gradient window-border shader.
+    pub(crate) border_program: Option<GlesPixelProgram>,
+    /// Compiled lazily on first use; see `ripple::ripple_program`.
+    pub(crate) ripple_program: Option<GlesPixelProgram>,
+    /// Shared analytical cool-wash/urgent-border shader.
+    pub(crate) depth_overlay_program: Option<GlesPixelProgram>,
+    /// Lazily compiled custom texture shader shared by every output's
+    /// transition element.
+    pub(crate) workspace_transition_program: Option<GlesTexProgram>,
+    pub(crate) depth_transition_program: Option<GlesPixelProgram>,
+    pub(crate) ocean_canvas_program: Option<GlesPixelProgram>,
+    pub(crate) caustics_program: crate::caustics::CausticsProgramCache,
+    pub(crate) compass_program: Option<GlesPixelProgram>,
+    /// Last-good compiled program per custom effect definition.
+    pub(crate) custom_shader_programs: crate::shader_effect::CustomShaderPrograms,
+    /// New custom programs still allowed to compile in this output's frame,
+    /// shared by the chain passes, the glass slots and any capture served
+    /// before the next frame.
+    pub(crate) custom_shader_compile_budget: usize,
+    /// `u_time`/`u_delta` clocks for windows currently drawing an effect.
+    /// Evicted in `detach_mapped_toplevel`, pruned on reload, cleared on lock.
+    pub(crate) custom_shader_instances: HashMap<WlSurface, crate::shader_effect::ShaderInstance>,
+    /// Windows refused a custom effect by the instance or payload cap. They
+    /// take their normal path until a later capture pass admits them.
+    pub(crate) custom_shader_bypassed: HashSet<WlSurface>,
+    pub(crate) custom_shader_bypasses: u64,
+    /// Captured immediately before a visible frame and sampled by
+    /// water/frost glass while building that same frame's elements. The
+    /// window-sized texture is reused until its dimensions change. Evicted in
+    /// `detach_mapped_toplevel` alongside `window_opacity`; render passes also
+    /// drop it after its last output stops presenting the surface.
+    pub(crate) backdrop_textures: HashMap<WlSurface, crate::backdrop::BackdropCapture>,
+    /// Native alpha captures for blurred layer surfaces whose rule sets
+    /// `ignore_alpha`. Kept separate from the backdrop so both textures can
+    /// be sampled by the frost shader in one pass.
+    pub(crate) layer_alpha_masks: HashMap<WlSurface, crate::backdrop::BackdropCapture>,
+    /// Cached full-output solid fill for `layer_rule { dim_around = true }`,
+    /// one per output -- same "own buffer per output, dedup only bumps its
+    /// commit on real size/color change" shape as `lock_blank`. Pruned on
+    /// output disconnect alongside it.
+    pub(crate) layer_dim_buffers: HashMap<Output, SolidColorBuffer>,
+    /// Last already-imported surface tree for each visible mapped window.
+    /// Texture handles are cloned, not framebuffer contents; the entry is
+    /// transferred to the bounded close list on unmap.
+    pub(crate) window_frame_snapshots:
+        HashMap<WlSurface, crate::window_animation::WindowFrameSnapshot>,
+    /// With artwork these buffers contain only the optional title strip.
+    /// Returning to live content or unmapping evicts a window's buffer.
+    pub(crate) depth_schematics: HashMap<WlSurface, crate::depth::DepthSchematic>,
+}
+
+/// Rule-resolved per-surface render properties and visual attention depth
+/// (plan step 8d).
+pub(crate) struct RenderWindowsState {
+    /// Per-mapped-window base/active/inactive/fullscreen alpha multipliers
+    /// resolved from window rules. Missing entries preserve client alpha.
+    pub(crate) window_opacity: HashMap<WlSurface, crate::config::WindowOpacity>,
+    /// Explicit captured-backdrop mode resolved from window rules. Missing
+    /// entries preserve the original behavior: translucent floating windows
+    /// use water refraction.
+    pub(crate) window_glass_modes: HashMap<WlSurface, crate::config::GlassMode>,
+    /// The last matching `rule { shader = ... }`, including an explicit
+    /// `none` that opts out of the workspace default. Resolved per frame by
+    /// `resolved_shader_assignment`, so toggling `shaders { enabled }`, a
+    /// definition or a workspace default needs no per-window re-resolve.
+    pub(crate) window_shader_assignments: HashMap<WlSurface, crate::config::ShaderAssignment>,
+    /// Assignments from `layer_rule { shader }`, refreshed for each output's
+    /// mapped layers during its capture pass and cleared on reload.
+    pub(crate) layer_shader_assignments: HashMap<WlSurface, crate::config::ShaderAssignment>,
+    /// Per-window water-glass animation state (`water_glass::GlassAnim`):
+    /// when the distortion was last disturbed and what frame state that
+    /// disturbance was derived from. Only populated for windows taking the
+    /// water branch of `glass_frame_elements` while the resolved
+    /// `water_glass.animation` isn't `static`; evicted in
+    /// `detach_mapped_toplevel` alongside `backdrop_textures`.
+    pub(crate) glass_anim: HashMap<WlSurface, crate::water_glass::GlassAnim>,
+    /// Per-mapped-window automatic attention depth. Entries are created on
+    /// map and removed on unmap/destroy, so time-based sinking cannot grow
+    /// state beyond the current mapped toplevel count.
+    pub(crate) window_depths: HashMap<WlSurface, crate::depth::WindowDepth>,
+    /// Throttles inactivity scans to 10Hz even when a backend ticks faster.
+    pub(super) depth_last_tick: Instant,
+}
+
+/// Animations, workspace and depth transitions, per-output visuals, view
+/// cameras and redraw scheduling (plan step 8d).
+pub(crate) struct RenderMotionState {
+    /// Active impulse ripples (Phase R1, see `ripple.rs`). Each one lives
+    /// on a specific output, decays over its own `duration`, and is
+    /// `retain`-pruned once `finished()` inside `ripple_frame_elements`
+    /// so this Vec never grows past the in-flight count. Capped at a
+    /// small constant by `spawn_ripple` to bound the worst case (rapid
+    /// window mapping shouldn't stack unboundedly), matching the same
+    /// no-unbounded-growth steady-state discipline every other animation
+    /// field in this struct obeys.
+    pub(crate) ripples: Vec<crate::ripple::Ripple>,
+    /// Short-lived visual state for mapped windows. Logical geometry and
+    /// input move immediately; these maps only interpolate what is drawn.
+    pub(crate) window_open_animations:
+        HashMap<WlSurface, crate::window_animation::WindowVisualAnimation>,
+    /// Cascade-only mapped-window pour clocks. Closing clocks move into the
+    /// bounded snapshot records below so unmapping never retains a client.
+    pub(crate) cascade_window_animations:
+        HashMap<WlSurface, crate::cascade_transition::CascadeTransition>,
+    pub(crate) window_move_animations:
+        HashMap<WlSurface, crate::window_animation::WindowVisualAnimation>,
+    /// Detached windows retaining their last drawable GPU snapshot until
+    /// the configured close animation finishes.
+    pub(crate) closing_window_animations: Vec<crate::window_animation::ClosingWindowAnimation>,
+    /// Requested workspace target awaiting an outgoing-frame capture,
+    /// keyed by output name. A HashMap deliberately makes this one slot
+    /// per output: repeated switches replace the target instead of
+    /// accumulating full-output work.
+    pub(crate) pending_workspace_transitions: HashMap<String, u32>,
+    /// At most one captured outgoing texture per output, dropped as soon
+    /// as its wipe completes (see `workspace_transition.rs`).
+    pub(crate) workspace_transitions:
+        HashMap<String, crate::workspace_transition::WorkspaceTransition>,
+    /// At most one non-water outgoing workspace snapshot per output.
+    pub(crate) workspace_glides: HashMap<String, crate::workspace_transition::WorkspaceGlide>,
+    /// At most one analytical Classic depth switch per output.
+    pub(crate) depth_transitions: HashMap<String, crate::depth_transition::DepthTransition>,
+    /// Continuous lateral swim camera, one entry per output that has ever
+    /// swum. The offset is purely visual (the logical workspace identity is
+    /// still `Layouts::active`'s `u32`); at rest it is zero and the entry
+    /// asks for no frames.
+    pub(crate) swim_cameras: HashMap<String, crate::swim::SwimCamera>,
+    /// Vertical workspace-slide camera, one entry per output while a
+    /// `workspace-up`/`workspace-down` step settles. At rest the entry is
+    /// removed; the logical workspace changes immediately, the camera only
+    /// animates the already-applied switch.
+    pub(crate) workspace_scroll_cameras: HashMap<String, crate::swim::WorkspaceScrollCamera>,
+    /// One stable analytical canvas element per live Ocean output. No
+    /// texture/framebuffer; the record only preserves damage identity.
+    pub(crate) ocean_canvases: HashMap<String, crate::ocean_canvas::OceanCanvas>,
+    /// Per-output ambient caustics state and one shared compiled shader.
+    /// Engine-agnostic (works under both Classic and Ocean); gated by
+    /// `water_effects` plus `caustics.enabled`. The phase only advances
+    /// inside `caustics_frame_element`, so damage-driven idle desktops
+    /// freeze the pattern at zero extra frames; `caustics.fps > 0` opts
+    /// into deadline-driven constant motion.
+    pub(crate) caustics: HashMap<String, crate::caustics::Caustics>,
+    /// Per-output compass state and one shared compiled shader (spatial
+    /// roadmap S5). Ocean-only and gated by `water_effects`; no element is
+    /// produced when nothing sits off-screen.
+    pub(crate) compasses: HashMap<String, crate::compass::Compass>,
+    /// Shared artwork source, CPU frame and per-renderer texture imports.
+    pub(crate) depth_background: crate::depth_background::DepthBackground,
+    pub(super) depth_background_timer: Option<RegistrationToken>,
+    pub(super) depth_background_deadline: Option<Instant>,
+    /// One bounded analytical fill while a Classic floating drag is inside
+    /// a configured edge/corner snap zone. Dropped on every grab teardown.
+    pub(crate) snap_preview: Option<SnapPreview>,
+    pub(super) redraw_requests: crate::redraw::RedrawRequests,
+    /// Optional backend wake-up used by native DRM to propagate damage as
+    /// an event instead of waiting for a fixed polling interval. The winit
+    /// backend keeps its host-refresh timer and leaves this unset.
+    pub(super) redraw_wakeup: Option<smithay::reexports::calloop::ping::Ping>,
+    pub(crate) native_render_stats: HashMap<Output, crate::backend::perf::OutputRenderStats>,
+}
 
 impl Smallvil {
     fn base_window_visual_sample(
@@ -26,6 +213,7 @@ impl Smallvil {
         let mut sample = crate::window_animation::VisualSample::default();
         if let Some(surface) = surface {
             let (buoyancy_sink, buoyancy_flow_scale) = self
+                .physics
                 .window_buoyancy
                 .get(surface)
                 .map(|state| {
@@ -41,12 +229,12 @@ impl Smallvil {
                 } else {
                     1.0
                 };
-            if let Some(open) = self.window_open_animations.get(surface) {
+            if let Some(open) = self.render.motion.window_open_animations.get(surface) {
                 let current = open.sample();
                 sample.offset += current.offset;
                 sample.opacity *= current.opacity;
             }
-            if let Some(viscosity) = self.window_viscosity.get(surface) {
+            if let Some(viscosity) = self.physics.window_viscosity.get(surface) {
                 if let Some(window) = self.mapped_toplevel_window(surface) {
                     if let Some(location) = self.space.element_location(&window) {
                         let current = viscosity.sample();
@@ -57,21 +245,21 @@ impl Smallvil {
                         sample.size = Some(current.size);
                     }
                 }
-            } else if let Some(movement) = self.window_move_animations.get(surface) {
+            } else if let Some(movement) = self.render.motion.window_move_animations.get(surface) {
                 let current = movement.sample();
                 sample.offset += current.offset;
                 sample.size = current.size;
                 sample.opacity *= current.opacity;
             }
-            if let Some(sway) = self.window_sway.get(surface) {
+            if let Some(sway) = self.physics.window_sway.get(surface) {
                 sample.offset.x += sway.sample();
             }
-            if let Some(physics) = self.window_float_physics.get(surface) {
+            if let Some(physics) = self.physics.window_float_physics.get(surface) {
                 let (ox, oy) = physics.sample();
                 sample.offset.x += ox * flow_scale;
                 sample.offset.y += oy * flow_scale;
             }
-            if let Some(body) = self.window_float_bodies.get(surface) {
+            if let Some(body) = self.physics.window_float_bodies.get(surface) {
                 sample.offset.x += body.offset.0 * flow_scale;
                 sample.offset.y += body.offset.1 * flow_scale;
             }
@@ -81,7 +269,7 @@ impl Smallvil {
             // needed to drive it. `is_floating` re-checked here (not just
             // at toggle time) so a window that stops floating after being
             // toggled on doesn't keep swaying off its tile.
-            if let Some(start) = self.window_float_ambient.get(surface) {
+            if let Some(start) = self.physics.window_float_ambient.get(surface) {
                 if self.is_floating(surface) {
                     let config = self.config.float_physics;
                     let (ax, ay) = crate::float_physics::ambient_sample(
@@ -97,7 +285,7 @@ impl Smallvil {
                 && self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean
                 && self.config.currents.enabled
             {
-                if let Some(current) = self.window_currents.get(surface) {
+                if let Some(current) = self.physics.window_currents.get(surface) {
                     let config = self.config.currents;
                     let (cx, cy) = current.sample(
                         config.direction_degrees as f64,
@@ -128,7 +316,7 @@ impl Smallvil {
         // shrink for the duration of the grab.
         if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
             if let Some(surface) = placement.surface() {
-                if let Some(viscosity) = self.window_viscosity.get(surface) {
+                if let Some(viscosity) = self.physics.window_viscosity.get(surface) {
                     if let Some(window) = self.mapped_toplevel_window(surface) {
                         if let Some(location) = self.space.element_location(&window) {
                             let current = viscosity.sample();
@@ -166,6 +354,8 @@ impl Smallvil {
         let output_name = output.name();
         let output_geo = self.space.output_geometry(output)?;
         let camera_offset = self
+            .render
+            .motion
             .swim_cameras
             .get(&output_name)
             .filter(|_| self.swim_enabled())
@@ -174,6 +364,8 @@ impl Smallvil {
         let output_width = output_geo.size.w as f64;
         let output_height = output_geo.size.h as f64;
         let vertical_offset = self
+            .render
+            .motion
             .workspace_scroll_cameras
             .get(&output_name)
             .map(|camera| camera.current_offset())
@@ -193,9 +385,12 @@ impl Smallvil {
             .filter_map(|window| {
                 let location = self.space.element_location(window)?;
                 let surface = window.toplevel().map(|toplevel| toplevel.wl_surface());
-                let kind = if surface
-                    .is_some_and(|surface| self.floating_workspace.contains_key(surface))
-                {
+                let kind = if surface.is_some_and(|surface| {
+                    self.spatial
+                        .workspaces
+                        .floating_workspace
+                        .contains_key(surface)
+                }) {
                     crate::placement::PlacementKind::Floating
                 } else {
                     crate::placement::PlacementKind::Tiled
@@ -205,9 +400,9 @@ impl Smallvil {
                 // until it commits the tile size a large first buffer near
                 // an edge overlaps the neighbor output and would flash there.
                 if kind == crate::placement::PlacementKind::Tiled
-                    && surface != self.classic_tile_drag.as_ref()
+                    && surface != self.input.classic_tile_drag.as_ref()
                     && surface
-                        .and_then(|surface| self.layout.output_of(surface))
+                        .and_then(|surface| self.spatial.workspaces.layout.output_of(surface))
                         .is_some_and(|owner| owner != output_name)
                 {
                     return None;
@@ -218,9 +413,11 @@ impl Smallvil {
                 if kind == crate::placement::PlacementKind::Floating
                     && scrolling
                     && surface.is_some_and(|surface| {
-                        !self.floating_dragging.contains(surface)
+                        !self.input.floating_dragging.contains(surface)
                             && self.scroll_strip_floater(surface)
                             && self
+                                .spatial
+                                .workspaces
                                 .floating_workspace
                                 .get(surface)
                                 .is_some_and(|tag| tag.output != output_name)
@@ -238,7 +435,9 @@ impl Smallvil {
                 // change, so a vertical workspace slide must not carry them
                 // out of view. (Horizontal swim offset is left untouched,
                 // matching its existing behavior.)
-                let view_offset = if surface.is_some_and(|surface| self.pinned.contains(surface)) {
+                let view_offset = if surface
+                    .is_some_and(|surface| self.spatial.workspaces.pinned.contains(surface))
+                {
                     Point::from((active_view_offset.x, 0.0))
                 } else {
                     active_view_offset
@@ -260,7 +459,11 @@ impl Smallvil {
             })
             .collect();
 
-        let vertical_camera = self.workspace_scroll_cameras.get(&output_name);
+        let vertical_camera = self
+            .render
+            .motion
+            .workspace_scroll_cameras
+            .get(&output_name);
         if !self.swim_enabled() && vertical_camera.is_none() {
             return Some(result);
         }
@@ -269,7 +472,10 @@ impl Smallvil {
         };
         if self.swim_enabled() {
             let neighbors = crate::swim::visible_neighbors(
-                self.layout.active_workspace(&output_name),
+                self.spatial
+                    .workspaces
+                    .layout
+                    .active_workspace(&output_name),
                 camera_offset,
                 self.config.swim.neighbors,
             );
@@ -290,7 +496,11 @@ impl Smallvil {
         }
         if let Some(camera) = vertical_camera {
             if let Some(previous) = camera.neighbor() {
-                let active = self.layout.active_workspace(&output_name);
+                let active = self
+                    .spatial
+                    .workspaces
+                    .layout
+                    .active_workspace(&output_name);
                 let delta = i64::from(previous) - i64::from(active);
                 if delta != 0 {
                     let view_offset = Point::from((
@@ -328,12 +538,14 @@ impl Smallvil {
         // workspace-switch map pass reads this same bounded tag map),
         // so using its iteration order matches the existing model.
         result.extend(
-            self.floating_workspace
+            self.spatial
+                .workspaces
+                .floating_workspace
                 .iter()
                 .filter(|(surface, tag)| {
                     tag.output == output_name
                         && tag.workspace == workspace
-                        && !self.pinned.contains(*surface)
+                        && !self.spatial.workspaces.pinned.contains(*surface)
                 })
                 .map(|(surface, tag)| {
                     let mut rect = tag.rect;
@@ -366,7 +578,7 @@ impl Smallvil {
                 }),
         );
 
-        let mut tiled = self.layout.layout(
+        let mut tiled = self.spatial.workspaces.layout.layout(
             output_name,
             workspace,
             area,
@@ -385,7 +597,7 @@ impl Smallvil {
                 {
                     rect = output_geo;
                     stack = crate::placement::PlacementStack::Fullscreen;
-                } else if self.pseudo_tiled.contains(surface) {
+                } else if self.spatial.workspaces.pseudo_tiled.contains(surface) {
                     rect = crate::layout::scale_centered(rect, self.config.pseudo_tile_scale);
                 }
             }
@@ -405,7 +617,7 @@ impl Smallvil {
             crate::config::SpatialOwnership::Workspaces => self.classic_render_placements(output),
             crate::config::SpatialOwnership::Ocean => {
                 let output_geo = self.space.output_geometry(output)?;
-                let mut placements = self.ocean.placements(
+                let mut placements = self.spatial.ocean.placements(
                     &output.name(),
                     output_geo,
                     self.config.gaps,
@@ -460,20 +672,22 @@ impl Smallvil {
         let mut result = Vec::new();
         let shadow_program = self
             .shadows_possible()
-            .then(|| crate::shadow::shadow_program(&mut self.shadow_program, renderer))
+            .then(|| crate::shadow::shadow_program(&mut self.render.gpu.shadow_program, renderer))
             .flatten();
         let rounded_program = self
             .rounding_or_cascade_shader_possible()
             .then(|| {
                 crate::decoration::rounded_surface_program(
-                    &mut self.rounded_surface_program,
+                    &mut self.render.gpu.rounded_surface_program,
                     renderer,
                 )
             })
             .flatten();
         let border_program = self
             .borders_possible()
-            .then(|| crate::decoration::border_program(&mut self.border_program, renderer))
+            .then(|| {
+                crate::decoration::border_program(&mut self.render.gpu.border_program, renderer)
+            })
             .flatten();
         #[allow(clippy::too_many_arguments, clippy::mutable_key_type)]
         fn append_windows(
@@ -670,6 +884,8 @@ impl Smallvil {
             if let Some(size) = self.space.output_geometry(output).map(|geo| geo.size) {
                 let scale = output.current_scale().fractional_scale();
                 let buffer = self
+                    .render
+                    .gpu
                     .layer_dim_buffers
                     .entry(output.clone())
                     .or_insert_with(|| SolidColorBuffer::new((0, 0), [0.0, 0.0, 0.0, 1.0]));
@@ -778,8 +994,8 @@ impl Smallvil {
     /// Backends should render only when this is true (or a toast is active)
     /// rather than redrawing every frame regardless of damage.
     pub fn request_redraw(&mut self) {
-        self.redraw_requests.request_all();
-        if let Some(wakeup) = &self.redraw_wakeup {
+        self.render.motion.redraw_requests.request_all();
+        if let Some(wakeup) = &self.render.motion.redraw_wakeup {
             wakeup.ping();
         }
         #[cfg(feature = "accessibility")]
@@ -793,8 +1009,8 @@ impl Smallvil {
         if !self.space.outputs().any(|mapped| mapped == output) {
             return;
         }
-        self.redraw_requests.request_output(output);
-        if let Some(wakeup) = &self.redraw_wakeup {
+        self.render.motion.redraw_requests.request_output(output);
+        if let Some(wakeup) = &self.render.motion.redraw_wakeup {
             wakeup.ping();
         }
     }
@@ -833,7 +1049,7 @@ impl Smallvil {
     #[allow(clippy::mutable_key_type)] // Bounded set of stable Wayland protocol identities.
     pub(super) fn request_surface_redraws(&mut self, surfaces: &HashSet<WlSurface>) {
         if surfaces.is_empty()
-            || self.redraw_requests.is_global()
+            || self.render.motion.redraw_requests.is_global()
             || !matches!(self.session_lock, SessionLock::Unlocked)
         {
             return;
@@ -847,12 +1063,14 @@ impl Smallvil {
             let Some(placements) = self.render_placements(&output) else {
                 continue;
             };
-            requested |=
-                self.redraw_requests
-                    .request_surface_changes(&output, &placements, surfaces);
+            requested |= self.render.motion.redraw_requests.request_surface_changes(
+                &output,
+                &placements,
+                surfaces,
+            );
         }
         if requested {
-            if let Some(wakeup) = &self.redraw_wakeup {
+            if let Some(wakeup) = &self.render.motion.redraw_wakeup {
                 wakeup.ping();
             }
         }
@@ -862,7 +1080,7 @@ impl Smallvil {
         &mut self,
         wakeup: smithay::reexports::calloop::ping::Ping,
     ) {
-        self.redraw_wakeup = Some(wakeup);
+        self.render.motion.redraw_wakeup = Some(wakeup);
     }
 
     /// Whether a frame was explicitly marked dirty. Timed toasts request
@@ -871,7 +1089,7 @@ impl Smallvil {
     /// persistent error toast redraw forever at the timer's full rate.
     /// Clears the flag as a side effect, since the caller is about to render.
     pub(crate) fn take_redraw_requests(&mut self) -> crate::redraw::RedrawRequests {
-        self.redraw_requests.take()
+        self.render.motion.redraw_requests.take()
     }
 
     /// The area tiled windows lay out into on `output`: the output's own
@@ -979,10 +1197,19 @@ impl Smallvil {
         output: &Output,
     ) {
         let output_name = output.name();
-        let Some(target) = self.pending_workspace_transitions.remove(&output_name) else {
+        let Some(target) = self
+            .render
+            .motion
+            .pending_workspace_transitions
+            .remove(&output_name)
+        else {
             return;
         };
-        let current = self.layout.active_workspace(&output_name);
+        let current = self
+            .spatial
+            .workspaces
+            .layout
+            .active_workspace(&output_name);
         if current == target {
             return;
         }
@@ -1033,7 +1260,7 @@ impl Smallvil {
 
         if let (Some(outgoing_texture), Some(geometry)) = (outgoing_texture, geometry) {
             if water_transition {
-                self.workspace_transitions.insert(
+                self.render.motion.workspace_transitions.insert(
                     output_name,
                     crate::workspace_transition::WorkspaceTransition::new(
                         outgoing_texture,
@@ -1044,7 +1271,7 @@ impl Smallvil {
                     ),
                 );
             } else {
-                self.workspace_glides.insert(
+                self.render.motion.workspace_glides.insert(
                     output_name,
                     crate::workspace_transition::WorkspaceGlide::new(
                         outgoing_texture,
@@ -1096,21 +1323,33 @@ impl Smallvil {
         }
         let output_name = output.name();
         if self
+            .render
+            .motion
             .workspace_transitions
             .get(&output_name)
             .is_some_and(|transition| transition.finished())
         {
-            self.workspace_transitions.remove(&output_name);
+            self.render
+                .motion
+                .workspace_transitions
+                .remove(&output_name);
             return None;
         }
-        if !self.workspace_transitions.contains_key(&output_name) {
+        if !self
+            .render
+            .motion
+            .workspace_transitions
+            .contains_key(&output_name)
+        {
             return None;
         }
         let program = crate::workspace_transition::workspace_transition_program(
-            &mut self.workspace_transition_program,
+            &mut self.render.gpu.workspace_transition_program,
             renderer,
         )?;
-        self.workspace_transitions
+        self.render
+            .motion
+            .workspace_transitions
             .get_mut(&output_name)
             .map(|transition| {
                 crate::backend::udev::OutputRenderElements::WorkspaceTransition(
@@ -1131,14 +1370,18 @@ impl Smallvil {
         }
         let output_name = output.name();
         if self
+            .render
+            .motion
             .workspace_glides
             .get(&output_name)
             .is_some_and(|transition| transition.finished())
         {
-            self.workspace_glides.remove(&output_name);
+            self.render.motion.workspace_glides.remove(&output_name);
             return None;
         }
-        self.workspace_glides
+        self.render
+            .motion
+            .workspace_glides
             .get_mut(&output_name)
             .map(|transition| {
                 crate::backend::udev::OutputRenderElements::WorkspaceGlide(
@@ -1154,24 +1397,32 @@ impl Smallvil {
     /// connector name that will never come back (or means something else
     /// entirely if a differently-wired connector reuses the same name).
     pub(crate) fn remove_workspace_transition_output(&mut self, output_name: &str) {
-        self.pending_workspace_transitions.remove(output_name);
-        self.workspace_transitions.remove(output_name);
-        self.workspace_glides.remove(output_name);
-        self.depth_transitions.remove(output_name);
-        self.ocean_canvases.remove(output_name);
-        self.compasses.remove(output_name);
-        self.swim_cameras.remove(output_name);
-        self.workspace_scroll_cameras.remove(output_name);
-        if self.workspace_step_output.as_deref() == Some(output_name) {
-            self.workspace_step_output = None;
+        self.render
+            .motion
+            .pending_workspace_transitions
+            .remove(output_name);
+        self.render.motion.workspace_transitions.remove(output_name);
+        self.render.motion.workspace_glides.remove(output_name);
+        self.render.motion.depth_transitions.remove(output_name);
+        self.render.motion.ocean_canvases.remove(output_name);
+        self.render.motion.compasses.remove(output_name);
+        self.render.motion.swim_cameras.remove(output_name);
+        self.render
+            .motion
+            .workspace_scroll_cameras
+            .remove(output_name);
+        if self.spatial.workspaces.workspace_step_output.as_deref() == Some(output_name) {
+            self.spatial.workspaces.workspace_step_output = None;
         }
-        self.caustics.remove(output_name);
+        self.render.motion.caustics.remove(output_name);
         // Same "connector name might mean something else entirely on
         // replug" reasoning as the rest of this function: a fired
         // on_created_empty for this output's workspace numbers shouldn't
         // silently suppress the command if a different monitor is later
         // plugged into the same port and gets the same connector name.
-        self.workspace_created_empty_fired
+        self.spatial
+            .workspaces
+            .workspace_created_empty_fired
             .retain(|(o, _)| o != output_name);
         if self
             .minimap_peek

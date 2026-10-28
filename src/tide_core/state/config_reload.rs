@@ -175,7 +175,7 @@ impl Smallvil {
             .collect();
         let first_workspace = self.space.outputs().next().map(|output| {
             let name = output.name().to_string();
-            self.layout.active_workspace(&name)
+            self.spatial.workspaces.layout.active_workspace(&name)
         });
         self.tide.workspace = tide_workspace_value(self.spatial.engine, first_workspace);
         if let Ok(tide_table) = crate::wave::build_tide_table(&self.config_lua, &self.tide) {
@@ -342,8 +342,8 @@ impl Smallvil {
                 if self.backend_name == "udev"
                     && (env_change.touches("XCURSOR_THEME") || env_change.touches("XCURSOR_SIZE"))
                 {
-                    self.cursor_theme = crate::cursor::Theme::load();
-                    if self.cursor_theme.is_none() {
+                    self.input.cursor_theme = crate::cursor::Theme::load();
+                    if self.input.cursor_theme.is_none() {
                         warnings.push(
                             "Cursor theme from XCURSOR_THEME has no default cursor; using the fallback dot"
                                 .to_string(),
@@ -363,11 +363,13 @@ impl Smallvil {
                     warnings.extend(self.apply_output_blocks_live());
                 }
                 warnings.extend(
-                    self.custom_shader_programs
+                    self.render
+                        .gpu
+                        .custom_shader_programs
                         .retain_definitions(&self.config.shader_definitions),
                 );
-                self.rescue_keybinds_active = false;
-                self.helper_keys_down.clear();
+                self.input.rescue_keybinds_active = false;
+                self.input.helper_keys_down.clear();
                 // A live `workspace_count` change should show up in the
                 // ext-workspace-v1/IPC workspace listing immediately, same
                 // as everything else hot-reloadable. Cheap no-op diff when
@@ -375,28 +377,29 @@ impl Smallvil {
                 self.refresh_ext_workspaces();
                 if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
                     if self.config.ocean.zoom_enabled {
-                        self.ocean
+                        self.spatial
+                            .ocean
                             .clamp_zooms(self.config.ocean.min_zoom, self.config.ocean.max_zoom);
                     } else {
-                        self.ocean.clamp_zooms(1.0, 1.0);
+                        self.spatial.ocean.clamp_zooms(1.0, 1.0);
                     }
                 }
                 if !self.config.classic_depth.enabled {
                     self.restore_all_depth_deck_windows();
                 }
                 if !self.config.classic_depth.enabled || !self.config.classic_depth.animation {
-                    self.depth_transitions.clear();
+                    self.render.motion.depth_transitions.clear();
                 }
                 if !self.config.animations.enabled || !self.config.animations.open.enabled {
-                    self.window_open_animations.clear();
+                    self.render.motion.window_open_animations.clear();
                 }
                 if !self.config.water_effects
                     || self.config.cascade.pour == crate::config::CascadeLiquidPreset::None
                 {
-                    self.cascade_window_animations.clear();
+                    self.render.motion.cascade_window_animations.clear();
                 }
                 if !self.config.animations.enabled || !self.config.animations.movement.enabled {
-                    self.window_move_animations.clear();
+                    self.render.motion.window_move_animations.clear();
                 }
                 // W3: the window-affecting battery below re-derives
                 // per-window state from the config. On a reload where
@@ -407,24 +410,27 @@ impl Smallvil {
                 // for nothing.
                 if !diff.is_empty() {
                     let disabled_viscosity: Vec<WlSurface> = self
+                        .physics
                         .window_viscosity
                         .keys()
                         .filter(|surface| self.interactive_motion_half_life(surface).is_zero())
                         .cloned()
                         .collect();
                     for surface in disabled_viscosity {
-                        self.window_viscosity.remove(&surface);
+                        self.physics.window_viscosity.remove(&surface);
                     }
                     let disabled_sway: Vec<WlSurface> = self
+                        .physics
                         .window_sway
                         .keys()
                         .filter(|surface| !self.sway_enabled_for_surface(surface))
                         .cloned()
                         .collect();
                     for surface in disabled_sway {
-                        self.window_sway.remove(&surface);
+                        self.physics.window_sway.remove(&surface);
                     }
                     let disabled_float_physics: Vec<WlSurface> = self
+                        .physics
                         .window_float_physics
                         .keys()
                         .filter(|surface| {
@@ -434,61 +440,66 @@ impl Smallvil {
                         .cloned()
                         .collect();
                     for surface in disabled_float_physics {
-                        self.window_float_physics.remove(&surface);
+                        self.physics.window_float_physics.remove(&surface);
                     }
                     let disabled_float_ambient: Vec<WlSurface> = self
+                        .physics
                         .window_float_ambient
                         .keys()
                         .filter(|surface| !self.float_physics_enabled_for_surface(surface))
                         .cloned()
                         .collect();
                     for surface in disabled_float_ambient {
-                        self.window_float_ambient.remove(&surface);
+                        self.physics.window_float_ambient.remove(&surface);
                     }
                     self.sync_float_physics_bodies();
                     if !self.currents_enabled() {
-                        self.window_currents.clear();
+                        self.physics.window_currents.clear();
                     }
-                    self.buoyancy_dirty = true;
+                    self.physics.buoyancy_dirty = true;
                     let ordinary_close =
                         self.config.animations.enabled && self.config.animations.close.enabled;
                     let cascade_close = self.config.water_effects
                         && self.config.cascade.drain != crate::config::CascadeLiquidPreset::None;
                     if !ordinary_close {
-                        for closing in &mut self.closing_window_animations {
+                        for closing in &mut self.render.motion.closing_window_animations {
                             closing.animation = None;
                         }
                     }
                     if !cascade_close {
-                        for closing in &mut self.closing_window_animations {
+                        for closing in &mut self.render.motion.closing_window_animations {
                             closing.cascade = None;
                         }
                     }
-                    self.closing_window_animations
+                    self.render
+                        .motion
+                        .closing_window_animations
                         .retain(|closing| !closing.finished());
                     if !ordinary_close && !cascade_close {
-                        self.window_frame_snapshots.clear();
+                        self.render.gpu.window_frame_snapshots.clear();
                     }
-                    self.depth_schematics.clear();
-                    self.depth_background.reset();
-                    for depth in self.window_depths.values_mut() {
+                    self.render.gpu.depth_schematics.clear();
+                    self.render.motion.depth_background.reset();
+                    for depth in self.render.windows.window_depths.values_mut() {
                         depth.artwork_id = smithay::backend::renderer::element::Id::new();
                     }
-                    self.depth_last_tick = Instant::now() - Duration::from_millis(100);
+                    self.render.windows.depth_last_tick =
+                        Instant::now() - Duration::from_millis(100);
                     self.update_window_depths();
                     let any_workspace_animation = (self.config.water_effects
                         && self.config.workspace_transition.enabled)
                         || (self.config.animations.enabled
                             && self.config.animations.workspace.enabled);
                     if !self.config.water_effects || !self.config.workspace_transition.enabled {
-                        self.workspace_transitions.clear();
+                        self.render.motion.workspace_transitions.clear();
                     }
                     if !self.config.animations.enabled || !self.config.animations.workspace.enabled
                     {
-                        self.workspace_glides.clear();
+                        self.render.motion.workspace_glides.clear();
                     }
                     if !any_workspace_animation {
-                        let pending = std::mem::take(&mut self.pending_workspace_transitions);
+                        let pending =
+                            std::mem::take(&mut self.render.motion.pending_workspace_transitions);
                         for (output_name, workspace) in pending {
                             if let Some(output) = self.output_by_name(&output_name) {
                                 self.switch_workspace_immediate(&output, workspace);
@@ -496,7 +507,7 @@ impl Smallvil {
                         }
                     }
                     if !self.swim_enabled() {
-                        for camera in self.swim_cameras.values_mut() {
+                        for camera in self.render.motion.swim_cameras.values_mut() {
                             camera.snap_to_rest();
                         }
                     }
@@ -505,31 +516,33 @@ impl Smallvil {
                         || !self.config.scroll.workspace_scroll
                         || self.config.scroll.workspaces != crate::scroll::WorkspaceMode::Separate
                     {
-                        self.workspace_scroll_cameras.clear();
+                        self.render.motion.workspace_scroll_cameras.clear();
                     }
-                    self.window_opacity.clear();
-                    self.window_glass_modes.clear();
-                    self.window_shader_assignments.clear();
-                    self.layer_shader_assignments.clear();
+                    self.render.windows.window_opacity.clear();
+                    self.render.windows.window_glass_modes.clear();
+                    self.render.windows.window_shader_assignments.clear();
+                    self.render.windows.layer_shader_assignments.clear();
                     let surfaces: Vec<WlSurface> = self.foreign_toplevels.keys().cloned().collect();
                     for surface in surfaces {
                         self.refresh_window_opacity_and_glass_for(&surface);
                     }
                     let unshaded: Vec<WlSurface> = self
+                        .render
+                        .gpu
                         .custom_shader_instances
                         .keys()
                         .filter(|surface| self.resolved_shader_assignment(surface).is_none())
                         .cloned()
                         .collect();
                     for surface in unshaded {
-                        self.custom_shader_instances.remove(&surface);
+                        self.render.gpu.custom_shader_instances.remove(&surface);
                     }
-                    self.custom_shader_bypassed.clear();
+                    self.render.gpu.custom_shader_bypassed.clear();
                     // The mode or frost tuning may have changed. Force the
                     // shared pre-frame pipeline to rebuild against the current
                     // window geometry instead of briefly showing stale content.
-                    self.backdrop_textures.clear();
-                    self.layer_alpha_masks.clear();
+                    self.render.gpu.backdrop_textures.clear();
+                    self.render.gpu.layer_alpha_masks.clear();
                 }
                 // A reload that dropped or renamed the currently-active
                 // mode would otherwise leave every key silently
@@ -537,17 +550,26 @@ impl Smallvil {
                 // indication why -- exit back to the base keybinds
                 // instead, the same table a name that never existed at
                 // all would resolve to.
-                if let Some(name) = &self.active_mode {
+                if let Some(name) = &self.input.active_mode {
                     if !self.config.modes.contains_key(name) {
-                        self.active_mode = None;
+                        self.input.active_mode = None;
                     }
                 }
-                self.layout
+                self.spatial
+                    .workspaces
+                    .layout
                     .set_default_algorithm(self.config.default_layout);
-                self.layout
+                self.spatial
+                    .workspaces
+                    .layout
                     .set_master_orientation(self.config.master_orientation);
-                self.layout.set_split_bias(self.config.bsp_split_bias);
-                self.layout
+                self.spatial
+                    .workspaces
+                    .layout
+                    .set_split_bias(self.config.bsp_split_bias);
+                self.spatial
+                    .workspaces
+                    .layout
                     .set_workspace_algorithm_overrides(self.config.workspace_algorithm_overrides());
                 // DeviceAdded is the only other configuration point for
                 // libinput hardware. Re-apply every live handle so touchpad,
@@ -608,7 +630,7 @@ impl Smallvil {
                         ));
                 }
                 self.retile();
-                if let Some(focus) = self.window_focus.clone() {
+                if let Some(focus) = self.input.window_focus.clone() {
                     self.reveal_scroll_window(&focus);
                 }
                 if !diff.is_empty() || had_error_overlay || !warnings.is_empty() {

@@ -218,6 +218,8 @@ fn wallpaper_frames_preserve_drag_and_exclusive_zone_changes_retile() {
     for window in &windows {
         fixture
             .state
+            .spatial
+            .workspaces
             .layout
             .insert(&outputs[1].name(), 1, window.clone(), None);
     }
@@ -347,14 +349,14 @@ fn wallpaper_frames_preserve_drag_and_exclusive_zone_changes_retile() {
         .space
         .map_element(dragged.clone(), destination_geo.loc, false);
     fixture.state.refresh_space();
-    fixture.state.classic_tile_drag = Some(surface.clone());
+    fixture.state.input.classic_tile_drag = Some(surface.clone());
     assert!(fixture
         .state
         .render_placements(destination)
         .unwrap()
         .iter()
         .any(|p| p.surface() == Some(&surface)));
-    fixture.state.classic_tile_drag = None;
+    fixture.state.input.classic_tile_drag = None;
     assert!(!fixture
         .state
         .render_placements(destination)
@@ -367,12 +369,24 @@ fn wallpaper_frames_preserve_drag_and_exclusive_zone_changes_retile() {
         .move_tiled_window_to_output(&surface, destination, None));
     fixture.state.retile();
     assert_eq!(
-        fixture.state.layout.output_of(&surface),
+        fixture.state.spatial.workspaces.layout.output_of(&surface),
         Some(destination.name().as_str())
     );
     assert_eq!(
-        fixture.state.layout.workspace_of(&surface),
-        Some(fixture.state.layout.active_workspace(&destination.name()))
+        fixture
+            .state
+            .spatial
+            .workspaces
+            .layout
+            .workspace_of(&surface),
+        Some(
+            fixture
+                .state
+                .spatial
+                .workspaces
+                .layout
+                .active_workspace(&destination.name())
+        )
     );
     assert!(!fixture
         .state
@@ -390,10 +404,14 @@ fn wallpaper_frames_preserve_drag_and_exclusive_zone_changes_retile() {
     assert_eq!(fixture.state.groups[index].members.len(), 2);
     fixture
         .state
+        .spatial
+        .workspaces
         .layout
         .set_active_workspace(&outputs[1].name(), 2);
     fixture
         .state
+        .spatial
+        .workspaces
         .output_pins
         .insert(other.clone(), destination.name());
     assert!(fixture
@@ -404,19 +422,22 @@ fn wallpaper_frames_preserve_drag_and_exclusive_zone_changes_retile() {
     assert_eq!(fixture.state.groups[index].output, outputs[1].name());
     assert_eq!(fixture.state.groups[index].workspace, 2);
     assert_eq!(
-        fixture.state.output_pins.get(&other),
+        fixture.state.spatial.workspaces.output_pins.get(&other),
         Some(&outputs[1].name())
     );
     assert!(
-        !fixture.state.layout.contains(&other),
+        !fixture.state.spatial.workspaces.layout.contains(&other),
         "parked tabs must stay outside the tree"
     );
     fixture.state.ungroup(&other);
     assert_eq!(
-        fixture.state.layout.output_of(&other),
+        fixture.state.spatial.workspaces.layout.output_of(&other),
         Some(outputs[1].name().as_str())
     );
-    assert_eq!(fixture.state.layout.workspace_of(&other), Some(2));
+    assert_eq!(
+        fixture.state.spatial.workspaces.layout.workspace_of(&other),
+        Some(2)
+    );
     crate::ipc::navigation_regression(&mut fixture.state, &windows, &outputs[1]);
     if let Some(node) = std::env::var_os("TIDEWM_SYNC_TEST_NODE") {
         native_syncobj_commit_lifecycle(&mut fixture, &surface, &node);
@@ -527,6 +548,8 @@ fn native_syncobj_commit_lifecycle(
     };
     let serial = fixture
         .state
+        .spatial
+        .workspaces
         .layout
         .window_of(surface)
         .unwrap()
@@ -938,7 +961,14 @@ fn scroll_navigation_refreshes_stationary_pointer_without_stealing_keyboard_focu
     // touch, tablet) must leave the viewport alone: crossing to another
     // monitor focuses the window under the cursor, and recentering it there
     // would drag the strip out from under the pointer that just arrived.
-    let strip_offset = |state: &Smallvil| state.layout.scroll.offset("pointer-output", 1);
+    let strip_offset = |state: &Smallvil| {
+        state
+            .spatial
+            .workspaces
+            .layout
+            .scroll
+            .offset("pointer-output", 1)
+    };
     assert_eq!(strip_offset(&fixture.state), 0.0);
     fixture
         .state

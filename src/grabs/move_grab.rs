@@ -47,8 +47,12 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
         // only checks the resource, so mapping here without this ownership
         // guard would resurrect a hidden/unmapped window into Space.
         if !data.window_is_visible(surface)
-            || (!data.floating_workspace.contains_key(surface)
-                && data.ocean.floating_rect(surface).is_none())
+            || (!data
+                .spatial
+                .workspaces
+                .floating_workspace
+                .contains_key(surface)
+                && data.spatial.ocean.floating_rect(surface).is_none())
             || data.fullscreen.contains_key(surface)
             || data.maximized.contains_key(surface)
         {
@@ -71,12 +75,12 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
         );
         data.space
             .map_element(self.window.clone(), new_location, false);
-        if let Some(mut rect) = data.ocean.floating_rect(surface) {
+        if let Some(mut rect) = data.spatial.ocean.floating_rect(surface) {
             rect.loc = new_location;
-            data.ocean.set_floating_rect(surface, rect);
-            if data.ocean.is_screen_pinned(surface) {
-                if let Some(output) = data.ocean.entry_output(surface).map(str::to_string) {
-                    data.ocean.refresh_screen_pin(surface, &output);
+            data.spatial.ocean.set_floating_rect(surface, rect);
+            if data.spatial.ocean.is_screen_pinned(surface) {
+                if let Some(output) = data.spatial.ocean.entry_output(surface).map(str::to_string) {
+                    data.spatial.ocean.refresh_screen_pin(surface, &output);
                 }
             }
             // Live feedback for a floating Ocean drag, mirroring
@@ -100,7 +104,7 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
                     })
                     .and_then(|(output, output_geo)| {
                         let pointer_view = self.last_location - output_geo.loc.to_f64();
-                        data.ocean.tiled_target_at_view(
+                        data.spatial.ocean.tiled_target_at_view(
                             surface,
                             &output,
                             pointer_view,
@@ -108,8 +112,9 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
                             data.config.bsp_split_bias,
                         )
                     });
-                if let Some(output) = data.ocean.entry_output(surface).map(str::to_string) {
-                    data.ocean
+                if let Some(output) = data.spatial.ocean.entry_output(surface).map(str::to_string) {
+                    data.spatial
+                        .ocean
                         .set_tile_drag(surface.clone(), rect, hint, output);
                 }
             }
@@ -271,7 +276,7 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
         } else {
             false
         };
-        data.ocean.clear_tile_drag();
+        data.spatial.ocean.clear_tile_drag();
         if !snapped {
             data.sync_visible_floating_window(&self.window, true);
         }

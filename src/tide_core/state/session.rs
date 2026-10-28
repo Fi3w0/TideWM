@@ -95,6 +95,8 @@ impl Smallvil {
         render_states: &RenderElementStates,
     ) {
         let backdrop_visible = self
+            .render
+            .gpu
             .backdrop_textures
             .values()
             .any(|capture| render_states.element_was_presented(capture.id.clone()));
@@ -143,7 +145,7 @@ impl Smallvil {
     /// like the lock surface above. Without them a client that animates its
     /// drag image (Firefox tab previews) would freeze after the first commit.
     pub fn send_dnd_icon_frames(&self, output: &Output, time: Duration) {
-        if let Some(icon) = self.dnd_icon.as_ref() {
+        if let Some(icon) = self.input.dnd_icon.as_ref() {
             send_frames_surface_tree(icon, output, time, Some(Duration::ZERO), |_, _| {
                 Some(output.clone())
             });
@@ -178,21 +180,21 @@ impl Smallvil {
 
         // A transition texture contains the unlocked desktop. Release it
         // before the fail-closed lock render path can begin.
-        self.pending_workspace_transitions.clear();
-        self.workspace_transitions.clear();
-        self.workspace_glides.clear();
-        self.workspace_scroll_cameras.clear();
-        self.depth_transitions.clear();
+        self.render.motion.pending_workspace_transitions.clear();
+        self.render.motion.workspace_transitions.clear();
+        self.render.motion.workspace_glides.clear();
+        self.render.motion.workspace_scroll_cameras.clear();
+        self.render.motion.depth_transitions.clear();
         // Backdrop textures also contain unlocked client pixels. Unlock
         // recaptures visible glass before composing its first desktop frame.
-        self.backdrop_textures.clear();
-        self.layer_alpha_masks.clear();
-        self.custom_shader_instances.clear();
-        self.custom_shader_bypassed.clear();
+        self.render.gpu.backdrop_textures.clear();
+        self.render.gpu.layer_alpha_masks.clear();
+        self.render.gpu.custom_shader_instances.clear();
+        self.render.gpu.custom_shader_bypassed.clear();
         // Closing snapshots contain client pixels and normally render above
         // the desktop. They are irrelevant once the security boundary is
         // active and must never survive into a locked composition.
-        self.closing_window_animations.clear();
+        self.render.motion.closing_window_animations.clear();
         self.locked_outputs.clear();
 
         let serial = SERIAL_COUNTER.next_serial();
@@ -361,8 +363,12 @@ impl Smallvil {
     /// Destroy callbacks cannot find these surfaces after the output leaves
     /// `Space`, so disconnect must perform the cleanup first.
     pub(crate) fn remove_layer_output(&mut self, output: &Output) {
-        self.native_render_stats.remove(output);
-        self.layout.scroll_section_requests.remove(&output.name());
+        self.render.motion.native_render_stats.remove(output);
+        self.spatial
+            .workspaces
+            .layout
+            .scroll_section_requests
+            .remove(&output.name());
         let layers: Vec<desktop::LayerSurface> =
             layer_map_for_output(output).layers().cloned().collect();
         if layers.is_empty() {
@@ -374,8 +380,8 @@ impl Smallvil {
             layer.layer_surface().send_close();
             map.unmap_layer(&layer);
             self.unmapped_layer_surfaces.remove(&surface);
-            self.backdrop_textures.remove(&surface);
-            self.layer_alpha_masks.remove(&surface);
+            self.render.gpu.backdrop_textures.remove(&surface);
+            self.render.gpu.layer_alpha_masks.remove(&surface);
             self.forget_layer_focus(&surface);
         }
     }
@@ -665,7 +671,7 @@ impl Smallvil {
                 select,
             );
         }
-        let cursor = match &self.cursor_status {
+        let cursor = match &self.input.cursor_status {
             CursorImageStatus::Surface(surface)
                 if matches!(self.session_lock, SessionLock::Unlocked) =>
             {
@@ -674,7 +680,8 @@ impl Smallvil {
             _ => None,
         };
         for surface in cursor.into_iter().chain(
-            self.dnd_icon
+            self.input
+                .dnd_icon
                 .as_ref()
                 .filter(|_| matches!(self.session_lock, SessionLock::Unlocked)),
         ) {
@@ -737,7 +744,11 @@ impl Smallvil {
         let locked = !matches!(self.session_lock, SessionLock::Unlocked);
         let primary = self.primary_output().map(|output| {
             let output_name = output.name();
-            let workspace = self.layout.active_workspace(&output_name);
+            let workspace = self
+                .spatial
+                .workspaces
+                .layout
+                .active_workspace(&output_name);
             (output_name, workspace)
         });
         let workspace_label = primary

@@ -27,7 +27,7 @@ impl Smallvil {
     ) -> bool {
         if self.spatial.engine.ownership() != crate::config::SpatialOwnership::Ocean
             || !self.config.ocean.smart_tiling
-            || !self.ocean.floating_rect(surface).is_some()
+            || !self.spatial.ocean.floating_rect(surface).is_some()
         {
             return false;
         }
@@ -41,7 +41,7 @@ impl Smallvil {
         let pointer_view = pointer_location - output_geo.loc.to_f64();
         // Require pointer containment; a radius scaled by the moving window
         // would make large floaters attach on nearly every overlap.
-        let Some(target) = self.ocean.tiled_target_at_view(
+        let Some(target) = self.spatial.ocean.tiled_target_at_view(
             surface,
             &output_name,
             pointer_view,
@@ -53,7 +53,7 @@ impl Smallvil {
         let Some(viewport) = self.space.output_geometry(&output).map(|geo| geo.size) else {
             return false;
         };
-        if !self.ocean.make_tiled_with_size(
+        if !self.spatial.ocean.make_tiled_with_size(
             surface,
             &output_name,
             viewport,
@@ -99,7 +99,7 @@ impl Smallvil {
         }
         let output_name = output.name();
         let area = Rectangle::from_size(self.space.output_geometry(output)?.size);
-        let camera = self.ocean.camera(&output_name);
+        let camera = self.spatial.ocean.camera(&output_name);
         let origin = [camera.origin.x as f32, camera.origin.y as f32];
         let zoom = camera.zoom as f32;
         let grid_size = self.config.ocean.canvas_grid_size as f32;
@@ -110,6 +110,8 @@ impl Smallvil {
         };
         let marker_fade = Duration::from_millis(self.config.ocean.canvas_marker_fade_ms);
         let marker_alpha = self
+            .render
+            .motion
             .ocean_canvases
             .entry(output_name.clone())
             .or_default()
@@ -117,9 +119,13 @@ impl Smallvil {
         if opacity <= 0.0 && marker_alpha <= 0.0 {
             return None;
         }
-        let program =
-            crate::ocean_canvas::ocean_canvas_program(&mut self.ocean_canvas_program, renderer)?;
+        let program = crate::ocean_canvas::ocean_canvas_program(
+            &mut self.render.gpu.ocean_canvas_program,
+            renderer,
+        )?;
         let element = self
+            .render
+            .motion
             .ocean_canvases
             .entry(output_name)
             .or_default()
@@ -162,20 +168,27 @@ impl Smallvil {
         } else {
             Duration::from_secs_f64(1.0 / f64::from(effective_fps))
         };
-        let program =
-            crate::caustics::caustics_program(&mut self.caustics_program, renderer, retry_cadence)?;
+        let program = crate::caustics::caustics_program(
+            &mut self.render.gpu.caustics_program,
+            renderer,
+            retry_cadence,
+        )?;
         let output_name = output.name();
         let advance = if self.config.caustics.fps == 0 {
             true
         } else if effective_fps == 0 {
             false
         } else {
-            self.caustics
+            self.render
+                .motion
+                .caustics
                 .get(&output_name)
                 .and_then(|caustics| caustics.next_frame_in(effective_fps))
                 .is_none_or(|delay| delay.is_zero())
         };
         let element = self
+            .render
+            .motion
             .caustics
             .entry(output_name)
             .or_default()
@@ -208,7 +221,7 @@ impl Smallvil {
         if cfg.idle_fps.is_empty() || cfg.idle_after_ms.is_empty() {
             return fps;
         }
-        let idle_ms = self.last_activity.elapsed().as_millis() as u64;
+        let idle_ms = self.input.last_activity.elapsed().as_millis() as u64;
         for (after_ms, tier_fps) in cfg.idle_after_ms.iter().zip(&cfg.idle_fps) {
             if idle_ms >= *after_ms {
                 fps = (*tier_fps).min(fps);
@@ -240,9 +253,11 @@ impl Smallvil {
             return None;
         }
         let period = Duration::from_secs_f64(1.0 / f64::from(fps));
-        let program_retry = self.caustics_program.retry_in(period);
+        let program_retry = self.render.gpu.caustics_program.retry_in(period);
         Some(
-            self.caustics
+            self.render
+                .motion
+                .caustics
                 .get(&output.name())
                 .and_then(|caustics| caustics.next_frame_in(fps))
                 .unwrap_or(period)
@@ -273,7 +288,7 @@ impl Smallvil {
             return Vec::new();
         };
         let output_name = output.name();
-        let camera = self.ocean.camera(&output_name);
+        let camera = self.spatial.ocean.camera(&output_name);
         let zoom = camera.zoom.max(0.05);
         let viewport = Rectangle::new(
             Point::from((camera.origin.x, camera.origin.y)),
@@ -284,12 +299,13 @@ impl Smallvil {
         );
         let cfg = self.config.compass;
         let windows: Vec<(Point<f64, Logical>, crate::compass::CueKind)> = self
+            .spatial
             .ocean
             .world_layouts(self.config.gaps, self.config.bsp_split_bias)
             .into_iter()
             .filter_map(|(window, rect, _)| {
                 let surface = window.toplevel()?.wl_surface().clone();
-                if !self.ocean.visible_on_output(&surface, &output_name) {
+                if !self.spatial.ocean.visible_on_output(&surface, &output_name) {
                     return None;
                 }
                 let kind = if self.urgent.contains(&surface) {
@@ -319,11 +335,12 @@ impl Smallvil {
                 shape: cfg.shape,
             },
         );
-        let Some(program) = crate::compass::compass_program(&mut self.compass_program, renderer)
+        let Some(program) =
+            crate::compass::compass_program(&mut self.render.gpu.compass_program, renderer)
         else {
             return Vec::new();
         };
-        let compass = self.compasses.entry(output_name).or_default();
+        let compass = self.render.motion.compasses.entry(output_name).or_default();
         compass
             .frame_elements(program, cues)
             .into_iter()
@@ -340,7 +357,7 @@ impl Smallvil {
             || self.spatial.engine.ownership() != crate::config::SpatialOwnership::Ocean
             || !self.config.minimap.enabled
             || !matches!(self.session_lock, SessionLock::Unlocked)
-            || (self.popup_grab.is_none()
+            || (self.input.popup_grab.is_none()
                 && self
                     .seat
                     .get_pointer()
@@ -359,19 +376,20 @@ impl Smallvil {
             .unwrap_or_default();
 
         let windows: Vec<(Rectangle<i32, Logical>, String, bool)> = self
+            .spatial
             .ocean
             .world_layouts(self.config.gaps, self.config.bsp_split_bias)
             .into_iter()
             .filter_map(|(window, rect, _kind)| {
                 let surface = window.toplevel()?.wl_surface().clone();
-                if !self.ocean.visible_on_output(&surface, &output_name) {
+                if !self.spatial.ocean.visible_on_output(&surface, &output_name) {
                     return None;
                 }
                 let urgent = self.urgent.contains(&surface);
                 Some((rect, crate::tab_strip::window_title(&surface), urgent))
             })
             .collect();
-        let reef_rects = self.ocean.reef_rects_on_output(&output_name);
+        let reef_rects = self.spatial.ocean.reef_rects_on_output(&output_name);
         let viewports: Vec<(String, Rectangle<i32, Logical>)> = self
             .space
             .outputs()
@@ -380,7 +398,7 @@ impl Smallvil {
                     return None;
                 }
                 let geo = self.space.output_geometry(candidate)?;
-                let camera = self.ocean.camera(&candidate.name());
+                let camera = self.spatial.ocean.camera(&candidate.name());
                 let zoom = camera.zoom.max(0.05);
                 let size = Size::from((
                     (geo.size.w as f64 / zoom).round() as i32,
@@ -457,7 +475,7 @@ impl Smallvil {
             Point::from((world.x.round() as i32, world.y.round() as i32)),
             Size::from((0, 0)),
         );
-        self.ocean.center_on_rect(
+        self.spatial.ocean.center_on_rect(
             &output_name,
             viewport,
             target,
@@ -507,7 +525,8 @@ impl Smallvil {
     }
 
     pub(super) fn retile_ocean(&mut self, skip_configure_for: Option<&WlSurface>) {
-        self.ocean
+        self.spatial
+            .ocean
             .set_shared_canvas(self.config.ocean.shared_canvas);
         let outputs: Vec<Output> = self.space.outputs().cloned().collect();
         let Some(seed_output) = outputs.first() else {
@@ -516,19 +535,25 @@ impl Smallvil {
         let Some(seed_geo) = self.space.output_geometry(seed_output) else {
             return;
         };
-        self.ocean
+        self.spatial
+            .ocean
             .ensure_default_reef(&seed_output.name(), seed_geo.size);
-        self.ocean
+        self.spatial
+            .ocean
             .clamp_screen_pins(&seed_output.name(), seed_geo.size);
         for output in outputs.iter().skip(1) {
             if let Some(geometry) = self.space.output_geometry(output) {
-                self.ocean
+                self.spatial
+                    .ocean
                     .ensure_default_reef(&output.name(), geometry.size);
-                self.ocean.clamp_screen_pins(&output.name(), geometry.size);
+                self.spatial
+                    .ocean
+                    .clamp_screen_pins(&output.name(), geometry.size);
             }
         }
 
         let tiled = self
+            .spatial
             .ocean
             .tiled_layouts(self.config.gaps, self.config.bsp_split_bias);
         for (window, rect) in &tiled {
@@ -547,7 +572,7 @@ impl Smallvil {
             }
         }
 
-        for (window, rect, _) in self.ocean.world_layouts_from_tiled(tiled) {
+        for (window, rect, _) in self.spatial.ocean.world_layouts_from_tiled(tiled) {
             let output = self
                 .output_for_window(&window)
                 .unwrap_or_else(|| seed_output.clone());
@@ -574,12 +599,16 @@ impl Smallvil {
         // Depth-deck windows have no Ocean counterpart: recall them to
         // their workspace tiles first so the tree move carries them. The
         // deck picker overlay is Classic UI and must not linger.
-        for entry in self.classic_depth.drain() {
-            self.layout
-                .insert(&entry.output, entry.workspace, entry.window.clone(), None);
+        for entry in self.spatial.workspaces.classic_depth.drain() {
+            self.spatial.workspaces.layout.insert(
+                &entry.output,
+                entry.workspace,
+                entry.window.clone(),
+                None,
+            );
         }
         self.depth_deck_overlay = None;
-        self.classic_depth.close();
+        self.spatial.workspaces.classic_depth.close();
 
         let output_viewports: Vec<(String, Rectangle<i32, Logical>)> = self
             .space
@@ -592,29 +621,46 @@ impl Smallvil {
         let active: std::collections::HashMap<String, u32> = output_viewports
             .iter()
             .map(|(name, _)| {
-                let mut workspace = self.layout.active_workspace(name);
+                let mut workspace = self.spatial.workspaces.layout.active_workspace(name);
                 if is_scratchpad_workspace(workspace) {
-                    workspace = self.scratchpad_previous.get(name).copied().unwrap_or(1);
+                    workspace = self
+                        .spatial
+                        .workspaces
+                        .scratchpad_previous
+                        .get(name)
+                        .copied()
+                        .unwrap_or(1);
                 }
                 (name.clone(), workspace)
             })
             .collect();
 
         // Drain the trees first (each is unique per (output, workspace)).
-        let mut trees = self.layout.drain_for_migration(is_scratchpad_workspace);
+        let mut trees = self
+            .spatial
+            .workspaces
+            .layout
+            .drain_for_migration(is_scratchpad_workspace);
         // Pinned floaters show on every workspace, so they always migrate.
         let moving: Vec<WlSurface> = self
+            .spatial
+            .workspaces
             .floating_workspace
             .iter()
             .filter(|(surface, tag)| {
-                !is_scratchpad_workspace(tag.workspace) || self.pinned.contains(*surface)
+                !is_scratchpad_workspace(tag.workspace)
+                    || self.spatial.workspaces.pinned.contains(*surface)
             })
             .map(|(surface, _)| surface.clone())
             .collect();
         let mut floating: Vec<(WlSurface, FloatingTag)> = moving
             .into_iter()
             .filter_map(|surface| {
-                let mut tag = self.floating_workspace.remove(&surface)?;
+                let mut tag = self
+                    .spatial
+                    .workspaces
+                    .floating_workspace
+                    .remove(&surface)?;
                 if is_scratchpad_workspace(tag.workspace) {
                     tag.workspace = active.get(&tag.output).copied().unwrap_or(1);
                 }
@@ -652,7 +698,7 @@ impl Smallvil {
         let island_x = ocean_island_origins(&output_viewports, &max_workspaces, reef_gap);
 
         // Clear Classic-only pseudo-tile state; groups and pin semantics migrate.
-        self.pseudo_tiled.clear();
+        self.spatial.workspaces.pseudo_tiled.clear();
 
         for (output_name, geometry) in &output_viewports {
             let base_x = island_x.get(output_name).copied().unwrap_or(0);
@@ -674,14 +720,16 @@ impl Smallvil {
                     .iter()
                     .find_map(|(name, number)| (*number == workspace).then(|| name.clone()))
                     .unwrap_or_else(|| format!("ws-{workspace}"));
-                self.ocean
+                self.spatial
+                    .ocean
                     .push_migrated_reef(reef_name, reef_rect, tree, output_name);
             }
             // Point the camera at the previously-active workspace's reef.
             let active_ws = active.get(output_name).copied().unwrap_or(1);
             let cam_x = f64::from(base_x)
                 + (active_ws as f64 - 1.0) * (viewport.w as f64 + f64::from(reef_gap));
-            self.ocean
+            self.spatial
+                .ocean
                 .set_camera_origin(output_name, crate::ocean::OceanPoint { x: cam_x, y: 0.0 });
         }
 
@@ -697,30 +745,38 @@ impl Smallvil {
             let Some((output_name, output_geometry)) = output else {
                 // Preserve real geometry instead of guessing another
                 // output's dimensions if this output disappeared.
-                self.ocean
-                    .push_migrated_floating(surface, tag.window, tag.rect, &tag.output);
+                self.spatial.ocean.push_migrated_floating(
+                    surface,
+                    tag.window,
+                    tag.rect,
+                    &tag.output,
+                );
                 continue;
             };
             let base_x = island_x.get(output_name).copied().unwrap_or(0);
             let reef_x = ocean_reef_x(base_x, tag.workspace, output_geometry.size.w, reef_gap);
             let reef_rect = Rectangle::new((reef_x, 0).into(), output_geometry.size);
             let world_rect = classic_rect_to_ocean(tag.rect, *output_geometry, reef_rect);
-            let was_pinned = self.pinned.contains(&surface);
-            self.ocean
-                .push_migrated_floating(surface.clone(), tag.window, world_rect, output_name);
+            let was_pinned = self.spatial.workspaces.pinned.contains(&surface);
+            self.spatial.ocean.push_migrated_floating(
+                surface.clone(),
+                tag.window,
+                world_rect,
+                output_name,
+            );
             if was_pinned {
-                self.ocean.pin_to_screen(&surface, output_name);
+                self.spatial.ocean.pin_to_screen(&surface, output_name);
             }
         }
         // `pinned` is a Classic-only set; Ocean represents pin status via
         // screen pins. Every pinned floater migrated above, so clearing it
         // keeps the debug-build invariant (pinned windows stay in
         // `floating_workspace`) true for the parked scratchpad floaters.
-        self.pinned.clear();
+        self.spatial.workspaces.pinned.clear();
 
         // Workspace-switch bookkeeping is Classic-only.
-        self.scratchpad_previous.clear();
-        self.workspace_previous.clear();
+        self.spatial.workspaces.scratchpad_previous.clear();
+        self.spatial.workspaces.workspace_previous.clear();
     }
 
     /// Ocean -> Classic. Reefs sorted left-to-right become workspaces 1..N
@@ -730,7 +786,7 @@ impl Smallvil {
     /// keep their viewport rectangle and re-enter the Classic `pinned` set.
     pub(super) fn migrate_ocean_to_classic(&mut self) {
         let (reefs, floating, cameras, entry_outputs, pinned_surfaces) =
-            self.ocean.drain_for_classic();
+            self.spatial.ocean.drain_for_classic();
 
         let output_viewports: std::collections::HashMap<String, Rectangle<i32, Logical>> = self
             .space
@@ -801,7 +857,9 @@ impl Smallvil {
                 .flatten()
                 .unwrap_or_else(|| nearest_output(&rect));
             let ws = ws_counters.entry(target_output.clone()).or_insert(1);
-            self.layout
+            self.spatial
+                .workspaces
+                .layout
                 .insert_migrated_tree(target_output.clone(), *ws, tree);
             let center_x = rect.loc.x as f64 + rect.size.w as f64 / 2.0;
             let center_y = rect.loc.y as f64 + rect.size.h as f64 / 2.0;
@@ -820,7 +878,10 @@ impl Smallvil {
         // Set active workspaces from the cameras.
         for output_name in &output_names {
             let active = nearest_ws.get(output_name).map(|(_, ws)| *ws).unwrap_or(1);
-            self.layout.set_active_workspace(output_name, active);
+            self.spatial
+                .workspaces
+                .layout
+                .set_active_workspace(output_name, active);
         }
 
         // Restrict nearest-reef selection to the floater's connected output.
@@ -845,7 +906,7 @@ impl Smallvil {
                 let Some(viewport) = output_viewports.get(&output).copied() else {
                     tracing::warn!(%output, "preserving floating world geometry without output geometry");
                     let output = entry_outputs.get(&surface).cloned().unwrap_or(output);
-                    self.floating_workspace.insert(
+                    self.spatial.workspaces.floating_workspace.insert(
                         surface,
                         FloatingTag {
                             window,
@@ -872,7 +933,7 @@ impl Smallvil {
                     .get(&surface)
                     .cloned()
                     .unwrap_or(target_output);
-                self.floating_workspace.insert(
+                self.spatial.workspaces.floating_workspace.insert(
                     surface,
                     FloatingTag {
                         window,
@@ -896,7 +957,7 @@ impl Smallvil {
                 toplevel.with_pending_state(|state| state.size = Some(local_rect.size));
                 toplevel.send_pending_configure();
             }
-            self.floating_workspace.insert(
+            self.spatial.workspaces.floating_workspace.insert(
                 surface,
                 FloatingTag {
                     window,
@@ -911,8 +972,13 @@ impl Smallvil {
         // floating entries were created just above; Classic's invariant is
         // that pinned windows stay floating, which holds).
         for surface in pinned_surfaces.into_keys() {
-            if self.floating_workspace.contains_key(&surface) {
-                self.pinned.insert(surface);
+            if self
+                .spatial
+                .workspaces
+                .floating_workspace
+                .contains_key(&surface)
+            {
+                self.spatial.workspaces.pinned.insert(surface);
             }
         }
 
@@ -923,8 +989,8 @@ impl Smallvil {
         for group in &mut self.groups {
             let active_surface = &group.members[group.active].surface;
             if let (Some(output), Some(workspace)) = (
-                self.layout.output_of(active_surface),
-                self.layout.workspace_of(active_surface),
+                self.spatial.workspaces.layout.output_of(active_surface),
+                self.spatial.workspaces.layout.workspace_of(active_surface),
             ) {
                 group.output = output.to_string();
                 group.workspace = workspace;
@@ -947,6 +1013,7 @@ impl Smallvil {
         let output_geo = self.space.output_geometry(output)?;
         let visible = self.render_placements(output)?;
         let layouts = self
+            .spatial
             .ocean
             .world_layouts(self.config.gaps, self.config.bsp_split_bias);
         let current = layouts.iter().find(|(window, _, _)| {
@@ -954,7 +1021,7 @@ impl Smallvil {
                 .toplevel()
                 .is_some_and(|toplevel| toplevel.wl_surface() == focused)
         })?;
-        let camera = self.ocean.camera(&output.name());
+        let camera = self.spatial.ocean.camera(&output.name());
         let current_view = visible
             .iter()
             .find(|placement| placement.surface() == Some(focused))
@@ -965,7 +1032,10 @@ impl Smallvil {
             .filter_map(|(window, rect, _)| {
                 let surface = window.toplevel().map(|t| t.wl_surface())?;
                 if surface == focused
-                    || !self.ocean.visible_on_output(surface, &output.name())
+                    || !self
+                        .spatial
+                        .ocean
+                        .visible_on_output(surface, &output.name())
                     || self
                         .fullscreen
                         .get(surface)
@@ -979,7 +1049,7 @@ impl Smallvil {
                     .map(|placement| placement.rect);
                 let view_rect = match visible_rect {
                     Some(rect) => rect,
-                    None if self.ocean.is_screen_pinned(surface) => return None,
+                    None if self.spatial.ocean.is_screen_pinned(surface) => return None,
                     None => crate::ocean::world_to_view_rect(*rect, camera, output_geo.loc),
                 };
                 let score = directional_score(current_view, view_rect, direction)?;

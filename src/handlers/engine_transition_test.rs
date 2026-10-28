@@ -47,23 +47,34 @@ struct Membership {
 
 fn owners(state: &Smallvil, surface: &WlSurface) -> Vec<Owner> {
     let mut found = Vec::new();
-    if state.layout.contains(surface) {
+    if state.spatial.workspaces.layout.contains(surface) {
         found.push(Owner::Tiled {
-            output: state.layout.output_of(surface).unwrap().to_string(),
-            workspace: state.layout.workspace_of(surface).unwrap(),
+            output: state
+                .spatial
+                .workspaces
+                .layout
+                .output_of(surface)
+                .unwrap()
+                .to_string(),
+            workspace: state
+                .spatial
+                .workspaces
+                .layout
+                .workspace_of(surface)
+                .unwrap(),
         });
     }
-    if let Some(tag) = state.floating_workspace.get(surface) {
+    if let Some(tag) = state.spatial.workspaces.floating_workspace.get(surface) {
         found.push(Owner::Floating {
             output: tag.output.clone(),
             workspace: tag.workspace,
             rect: tag.rect,
         });
     }
-    if state.ocean.is_tiled(surface) {
+    if state.spatial.ocean.is_tiled(surface) {
         found.push(Owner::OceanTiled);
     }
-    if state.ocean.floating_rect(surface).is_some() {
+    if state.spatial.ocean.floating_rect(surface).is_some() {
         found.push(Owner::OceanFloating);
     }
     if found.is_empty()
@@ -539,7 +550,7 @@ fn scratchpads_and_floating_stacking_survive_engine_changes() {
                     .iter()
                     .any(|p| p.surface() == Some(&scratch) || p.surface() == Some(&notes)));
             }
-            let reefs = f.state.ocean.reef_rects_on_output("A");
+            let reefs = f.state.spatial.ocean.reef_rects_on_output("A");
             assert_eq!(reefs.len(), 1, "only the real workspace becomes a reef");
         } else {
             assert_eq!(now, initial, "membership after {target:?}");

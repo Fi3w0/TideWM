@@ -466,7 +466,7 @@ fn snapshot_window(state: &Smallvil, surface: &WlSurface) -> Option<serde_json::
 }
 
 /// A long-lived subscribe connection. One per `subscribe` request, stored
-/// in `Smallvil::ipc_subscribers` keyed by a process-unique `usize` id.
+/// in `Smallvil::ipc.subscribers` keyed by a process-unique `usize` id.
 pub(crate) struct IpcSubscriber {
     /// Keeps this long-lived connection included in `MAX_CONNECTIONS`.
     /// The request-side lease is transferred here when a subscribe request
@@ -781,10 +781,10 @@ fn register_subscriber(
         }
     };
 
-    let id = state.next_ipc_subscriber_id;
-    state.next_ipc_subscriber_id += 1;
+    let id = state.ipc.next_subscriber_id;
+    state.ipc.next_subscriber_id += 1;
 
-    state.ipc_subscribers.insert(
+    state.ipc.subscribers.insert(
         id,
         IpcSubscriber {
             _connection_lease: connection_lease,
@@ -812,7 +812,7 @@ fn register_subscriber(
         }
     }))
     .unwrap_or_else(|_| br#"{"ok":true,"data":{"subscription_id":0,"events":[]}}"#.to_vec());
-    if let Some(sub) = state.ipc_subscribers.get_mut(&id) {
+    if let Some(sub) = state.ipc.subscribers.get_mut(&id) {
         sub.pending.extend(ack_line);
         sub.pending.push_back(b'\n');
         // Best-effort inline flush. The periodic `flush_ipc_subscribers`
@@ -833,7 +833,7 @@ fn register_subscriber(
             match reader.read(&mut buf) {
                 Ok(0) => {
                     // Clean client-side close.
-                    state.ipc_subscribers.remove(&id);
+                    state.ipc.subscribers.remove(&id);
                     Ok(PostAction::Remove)
                 }
                 Ok(_) => {
@@ -847,7 +847,7 @@ fn register_subscriber(
                 }
                 Err(err) => {
                     tracing::warn!(%err, "IPC subscriber read error; dropping");
-                    state.ipc_subscribers.remove(&id);
+                    state.ipc.subscribers.remove(&id);
                     Ok(PostAction::Remove)
                 }
             }
@@ -857,7 +857,7 @@ fn register_subscriber(
         Ok(token) => token,
         Err(err) => {
             tracing::warn!(%err, "Failed to register IPC subscriber EOF source; dropping subscriber");
-            state.ipc_subscribers.remove(&id);
+            state.ipc.subscribers.remove(&id);
             return;
         }
     };
@@ -865,7 +865,7 @@ fn register_subscriber(
     // `emit_ipc_event`/`flush_ipc_subscribers` can retire this source via
     // `loop_handle.remove`. Without it, a wedged subscriber's read source
     // would leak until the next EOF, which may never come.
-    if let Some(sub) = state.ipc_subscribers.get_mut(&id) {
+    if let Some(sub) = state.ipc.subscribers.get_mut(&id) {
         sub.read_token = Some(token);
     }
 }
@@ -978,7 +978,7 @@ fn handle_request(state: &mut Smallvil, request: Request) -> serde_json::Value {
             pid,
         } => resolve_window_response(state, window_id, app_id.as_deref(), pid),
 
-        Request::ActiveMode => json!({ "ok": true, "data": state.active_mode }),
+        Request::ActiveMode => json!({ "ok": true, "data": state.input.active_mode }),
         Request::FocusedOutput => {
             let name = state.primary_output().map(|output| output.name());
             json!({ "ok": true, "data": name.and_then(|name| output_json(state, &name)) })
@@ -1176,21 +1176,21 @@ fn outputs_json(state: &Smallvil) -> serde_json::Value {
                 "active_workspace": if ocean_engine {
                     serde_json::Value::Null
                 } else {
-                    json!(state.layout.active_workspace(&output.name()))
+                    json!(state.spatial.workspaces.layout.active_workspace(&output.name()))
                 },
             });
             if state.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Scroll) {
-                let workspace = state.layout.active_workspace(&output.name());
+                let workspace = state.spatial.workspaces.layout.active_workspace(&output.name());
                 entry["scroll"] = json!({
-                    "offset": state.layout.scroll.offset(&output.name(), state.layout.scroll_key(workspace)),
+                    "offset": state.spatial.workspaces.layout.scroll.offset(&output.name(), state.spatial.workspaces.layout.scroll_key(workspace)),
                     "orientation": match state.config.scroll.orientation { crate::scroll::Orientation::Horizontal => "horizontal", crate::scroll::Orientation::Vertical => "vertical" },
                     "workspaces": match state.config.scroll.workspaces { crate::scroll::WorkspaceMode::Separate => "separate", crate::scroll::WorkspaceMode::Sections => "sections" },
                 });
             }
             if ocean_engine {
-                let camera = state.ocean.camera(&output.name()).origin;
+                let camera = state.spatial.ocean.camera(&output.name()).origin;
                 entry["camera_origin"] = json!([camera.x, camera.y]);
-                entry["camera_zoom"] = json!(state.ocean.camera(&output.name()).zoom);
+                entry["camera_zoom"] = json!(state.spatial.ocean.camera(&output.name()).zoom);
             }
             entry
         })
@@ -1209,8 +1209,10 @@ fn output_json(state: &Smallvil, name: &str) -> Option<serde_json::Value> {
 
 /// A Scroll strip: position plus its columns as window ids and widths.
 fn scroll_json(state: &Smallvil, output: &str) -> serde_json::Value {
-    let workspace = state.layout.active_workspace(output);
+    let workspace = state.spatial.workspaces.layout.active_workspace(output);
     let columns: Vec<_> = state
+        .spatial
+        .workspaces
         .layout
         .scroll_columns(output, workspace)
         .into_iter()
@@ -1226,7 +1228,7 @@ fn scroll_json(state: &Smallvil, output: &str) -> serde_json::Value {
     json!({
         "output": output,
         "workspace": workspace,
-        "offset": state.layout.scroll.offset(output, state.layout.scroll_key(workspace)),
+        "offset": state.spatial.workspaces.layout.scroll.offset(output, state.spatial.workspaces.layout.scroll_key(workspace)),
         "columns": columns,
     })
 }
@@ -1270,8 +1272,15 @@ fn workspaces_json(state: &Smallvil) -> serde_json::Value {
                 .map(move |workspace| (name.clone(), workspace))
         })
         .map(|(output, workspace)| {
-            let tiled = state.layout.windows_in(&output, workspace).len();
+            let tiled = state
+                .spatial
+                .workspaces
+                .layout
+                .windows_in(&output, workspace)
+                .len();
             let floating = state
+                .spatial
+                .workspaces
                 .floating_workspace
                 .values()
                 .filter(|t| t.output == output && t.workspace == workspace)
@@ -1279,7 +1288,7 @@ fn workspaces_json(state: &Smallvil) -> serde_json::Value {
             let mut entry = json!({
                 "output": output,
                 "workspace": workspace,
-                "active": state.layout.active_workspace(&output) == workspace,
+                "active": state.spatial.workspaces.layout.active_workspace(&output) == workspace,
                 "window_count": tiled + floating,
             });
             // Scratchpad workspaces carry their name ("" for the unnamed
@@ -1340,7 +1349,7 @@ pub(crate) fn depth_json(state: &Smallvil) -> serde_json::Value {
         "background": cfg.background, "background_fit": cfg.background_fit,
         "show_title": cfg.show_title, "sink_after_ms": cfg.sink_after_ms,
         "tier_interval_ms": cfg.tier_interval_ms, "max_tier": cfg.max_tier,
-        "artwork": state.depth_background.diagnostics(),
+        "artwork": state.render.motion.depth_background.diagnostics(),
         "persistence": "live overrides last until config reload; edit depth {} to persist"
     })
 }
@@ -1431,29 +1440,44 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
                 "refresh_hz": if refresh_mhz > 0 { refresh_mhz as f64 / 1000.0 } else { 0.0 },
                 "scale": output.current_scale().fractional_scale(),
                 "transform": format!("{:?}", output.current_transform()),
-                "native_render": state.native_render_stats.get(output),
+                "native_render": state.render.motion.native_render_stats.get(output),
             })
         })
         .collect();
     let visible_windows = state.space.elements().count();
     let backdrop_texture_bytes = state
+        .render
+        .gpu
         .backdrop_textures
         .values()
         .fold(0_u64, |total, capture| {
             total.saturating_add(capture.estimated_texture_bytes())
         });
     let layer_alpha_mask_bytes = state
+        .render
+        .gpu
         .layer_alpha_masks
         .values()
         .fold(0_u64, |total, capture| {
             total.saturating_add(capture.estimated_texture_bytes())
         });
     let wallpaper_texture_bytes = state.builtin_wallpaper.estimated_texture_bytes();
-    let depth_texture_bytes = state.depth_background.estimated_texture_bytes();
-    let caustics_texture_bytes = state.caustics.values().fold(0_u64, |total, caustics| {
-        total.saturating_add(caustics.estimated_texture_bytes())
-    });
+    let depth_texture_bytes = state
+        .render
+        .motion
+        .depth_background
+        .estimated_texture_bytes();
+    let caustics_texture_bytes = state
+        .render
+        .motion
+        .caustics
+        .values()
+        .fold(0_u64, |total, caustics| {
+            total.saturating_add(caustics.estimated_texture_bytes())
+        });
     let transition_texture_bytes = state
+        .render
+        .motion
         .workspace_transitions
         .values()
         .fold(0_u64, |total, transition| {
@@ -1461,6 +1485,8 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
         })
         .saturating_add(
             state
+                .render
+                .motion
                 .workspace_glides
                 .values()
                 .fold(0_u64, |total, transition| {
@@ -1468,21 +1494,33 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
                 }),
         );
     let shader_capture_bytes = state
+        .render
+        .gpu
         .backdrop_textures
         .iter()
-        .filter(|(surface, _)| state.custom_shader_instances.contains_key(*surface))
+        .filter(|(surface, _)| {
+            state
+                .render
+                .gpu
+                .custom_shader_instances
+                .contains_key(*surface)
+        })
         .fold(0_u64, |total, (_, capture)| {
             total.saturating_add(capture.estimated_texture_bytes())
         });
     let shader_stage_bytes = state
+        .render
+        .gpu
         .custom_shader_instances
         .values()
         .fold(0_u64, |total, instance| {
             total.saturating_add(instance.target_bytes())
         });
     let (shader_programs, shader_compiles, shader_compile_failures) =
-        state.custom_shader_programs.stats();
+        state.render.gpu.custom_shader_programs.stats();
     let shader_updates = state
+        .render
+        .gpu
         .custom_shader_instances
         .values()
         .fold(0_u64, |total, instance| {
@@ -1518,7 +1556,7 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
         "cpu_user_us": cpu_user_us,
         "cpu_system_us": cpu_system_us,
         "threads": threads,
-        "animation_active": state.has_active_animation() || state.depth_background.animating(),
+        "animation_active": state.has_active_animation() || state.render.motion.depth_background.animating(),
         "depth": depth_json(state),
         "water_effects": state.config.water_effects,
         "builtin_wallpaper": state.config.builtin_wallpaper,
@@ -1528,9 +1566,9 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
         "tide_texture_estimate": {
             "bytes": tide_texture_estimate_bytes,
             "backdrop_bytes": backdrop_texture_bytes,
-            "backdrop_count": state.backdrop_textures.len(),
+            "backdrop_count": state.render.gpu.backdrop_textures.len(),
             "layer_alpha_mask_bytes": layer_alpha_mask_bytes,
-            "layer_alpha_mask_count": state.layer_alpha_masks.len(),
+            "layer_alpha_mask_count": state.render.gpu.layer_alpha_masks.len(),
             "wallpaper_bytes": wallpaper_texture_bytes,
             "depth_background_bytes": depth_texture_bytes,
             "caustics_bytes": caustics_texture_bytes,
@@ -1543,11 +1581,11 @@ fn perf_snapshot_json(state: &mut Smallvil) -> serde_json::Value {
             "programs": shader_programs,
             "compiles": shader_compiles,
             "compile_failures": shader_compile_failures,
-            "instances": state.custom_shader_instances.len(),
+            "instances": state.render.gpu.custom_shader_instances.len(),
             "capture_bytes": shader_capture_bytes,
             "stage_bytes": shader_stage_bytes,
-            "bypassed": state.custom_shader_bypassed.len(),
-            "bypasses": state.custom_shader_bypasses,
+            "bypassed": state.render.gpu.custom_shader_bypassed.len(),
+            "bypasses": state.render.gpu.custom_shader_bypasses,
             "updates": shader_updates,
             "scope": "capture_bytes is the share of backdrop_bytes feeding custom effects; stage_bytes are chained effects' offscreen stage outputs, included in the total; updates count redraws with new content by live instances",
         },
@@ -1606,19 +1644,27 @@ fn window_json(
 
     let ocean_engine = state.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean;
     let is_floating = if ocean_engine {
-        state.ocean.floating_rect(surface).is_some()
+        state.spatial.ocean.floating_rect(surface).is_some()
     } else {
-        state.floating_workspace.contains_key(surface)
+        state
+            .spatial
+            .workspaces
+            .floating_workspace
+            .contains_key(surface)
     };
     let output = if ocean_engine {
         None
     } else {
         state
+            .spatial
+            .workspaces
             .layout
             .output_of(surface)
             .map(str::to_string)
             .or_else(|| {
                 state
+                    .spatial
+                    .workspaces
                     .floating_workspace
                     .get(surface)
                     .map(|tag| tag.output.clone())
@@ -1628,9 +1674,14 @@ fn window_json(
     let workspace = if ocean_engine {
         None
     } else if is_floating {
-        state.floating_workspace.get(surface).map(|t| t.workspace)
+        state
+            .spatial
+            .workspaces
+            .floating_workspace
+            .get(surface)
+            .map(|t| t.workspace)
     } else {
-        state.layout.workspace_of(surface)
+        state.spatial.workspaces.layout.workspace_of(surface)
     };
 
     let mut entry = json!({
@@ -1641,7 +1692,7 @@ fn window_json(
         "workspace": workspace,
         "floating": is_floating,
         "pinned": state.window_is_pinned(surface),
-        "pseudo_tiled": state.pseudo_tiled.contains(surface),
+        "pseudo_tiled": state.spatial.workspaces.pseudo_tiled.contains(surface),
         "fullscreen": state.fullscreen.contains_key(surface),
         "urgent": state.urgent.contains(surface),
         // While fullscreen, `maximized` is retained internally only as the
@@ -1656,23 +1707,23 @@ fn window_json(
         })),
     });
     if state.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Scroll) {
-        if let Some((column, row)) = state.layout.scroll_position(surface) {
+        if let Some((column, row)) = state.spatial.workspaces.layout.scroll_position(surface) {
             entry["scroll"] = json!({
                 "column": column,
                 "row": row,
                 "column_width": state
-                    .layout
+                    .spatial.workspaces.layout
                     .output_of(surface)
-                    .zip(state.layout.workspace_of(surface))
+                    .zip(state.spatial.workspaces.layout.workspace_of(surface))
                     .and_then(|(output, workspace)| {
-                        state.layout.scroll_columns(output, workspace).get(column).map(|c| c.width)
+                        state.spatial.workspaces.layout.scroll_columns(output, workspace).get(column).map(|c| c.width)
                     }),
-                "row_weight": state.layout.scroll.weight(surface),
+                "row_weight": state.spatial.workspaces.layout.scroll.weight(surface),
             });
         }
     }
     if ocean_engine {
-        entry["entry_output"] = json!(state.ocean.entry_output(surface));
+        entry["entry_output"] = json!(state.spatial.ocean.entry_output(surface));
     }
     if let Some(workspace) = workspace {
         if crate::state::is_scratchpad_workspace(workspace) {
@@ -1692,14 +1743,23 @@ pub(crate) fn navigation_regression(
     state
         .foreign_toplevel_numeric_ids
         .insert(surface.clone(), 9_001);
-    state.layout.remove(&surface);
+    state.spatial.workspaces.layout.remove(&surface);
     state
+        .spatial
+        .workspaces
         .layout
         .insert(&output.name(), 7, windows[0].clone(), None);
     state.space.unmap_elem(&windows[0]);
     let response = handle_request(state, Request::FocusWindow { window_id: 9_001 });
     assert_eq!(response["ok"], true, "{response}");
-    assert_eq!(state.layout.active_workspace(&output.name()), 7);
+    assert_eq!(
+        state
+            .spatial
+            .workspaces
+            .layout
+            .active_workspace(&output.name()),
+        7
+    );
     assert_eq!(state.focused_window_surface(), Some(surface.clone()));
     let response = handle_request(
         state,
@@ -1787,7 +1847,7 @@ pub(crate) fn navigation_regression(
                         && placement.surface() == Some(&surface)
                     {
                         assert_eq!(
-                            state.layout.output_of(&surface),
+                            state.spatial.workspaces.layout.output_of(&surface),
                             Some(live_output.name().as_str())
                         );
                     }

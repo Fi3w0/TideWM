@@ -636,7 +636,7 @@ pub(crate) fn apply_output_changes(
     // Connector removal performs the same reconciliation after unmapping
     // its output in the udev backend.
     let space = &state.space;
-    if let Some(theme) = state.cursor_theme.as_mut() {
+    if let Some(theme) = state.input.cursor_theme.as_mut() {
         theme.retain_scales(|scale| {
             space
                 .outputs()

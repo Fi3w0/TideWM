@@ -75,16 +75,22 @@ impl TileMoveGrab {
     /// teardown still snaps the visual drag back without mutating the tree.
     fn commit(&self, data: &mut Smallvil) {
         if !data.window_is_visible(&self.surface)
-            || !data.layout.contains(&self.surface)
+            || !data.spatial.workspaces.layout.contains(&self.surface)
             || data.fullscreen.contains_key(&self.surface)
         {
             return;
         }
         if let Some(output) = data.output_for_point(self.last_location) {
             if output.name() != self.output {
-                let workspace = data.layout.active_workspace(&output.name());
+                let workspace = data
+                    .spatial
+                    .workspaces
+                    .layout
+                    .active_workspace(&output.name());
                 let target = data.output_tiling_area(&output).and_then(|area| {
-                    data.layout
+                    data.spatial
+                        .workspaces
+                        .layout
                         .layout(
                             &output.name(),
                             workspace,
@@ -105,6 +111,8 @@ impl TileMoveGrab {
         {
             let pointer_loc = self.last_location.to_i32_round();
             let target = data
+                .spatial
+                .workspaces
                 .layout
                 .layout(
                     &self.output,
@@ -128,9 +136,12 @@ impl TileMoveGrab {
                     .map(|(_, zone, _)| zone);
                 match zone {
                     Some(zone) if zone != crate::scroll::DropZone::Swap => {
-                        data.layout.scroll_drop(&self.surface, &target, zone);
+                        data.spatial
+                            .workspaces
+                            .layout
+                            .scroll_drop(&self.surface, &target, zone);
                     }
-                    _ => data.layout.swap(&self.surface, &target),
+                    _ => data.spatial.workspaces.layout.swap(&self.surface, &target),
                 }
             }
         }
@@ -154,13 +165,13 @@ impl PointerGrab<Smallvil> for TileMoveGrab {
             return;
         }
         if !data.window_is_visible(&self.surface)
-            || !data.layout.contains(&self.surface)
+            || !data.spatial.workspaces.layout.contains(&self.surface)
             || data.fullscreen.contains_key(&self.surface)
         {
             return;
         }
 
-        data.classic_tile_drag = Some(self.surface.clone());
+        data.input.classic_tile_drag = Some(self.surface.clone());
         let delta = event.location - self.start_data.location;
         let new_location = self.initial_location.to_f64() + delta;
         let new_location = new_location.to_i32_round();
@@ -302,7 +313,7 @@ impl PointerGrab<Smallvil> for TileMoveGrab {
         if self.completion.take_complete() {
             self.commit(data);
         }
-        data.classic_tile_drag = None;
+        data.input.classic_tile_drag = None;
         data.set_drag_preview(None);
         // Motion moved only the visual Space element. Always snap it back
         // to authoritative tiling, including on cancellation.

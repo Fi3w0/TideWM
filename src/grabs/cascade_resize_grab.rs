@@ -47,7 +47,7 @@ impl PointerGrab<Smallvil> for CascadeResizeGrab {
         if self
             .hits
             .iter()
-            .any(|hit| !data.layout.cascade_hit_is_current(hit))
+            .any(|hit| !data.spatial.workspaces.layout.cascade_hit_is_current(hit))
         {
             return;
         }
@@ -61,7 +61,10 @@ impl PointerGrab<Smallvil> for CascadeResizeGrab {
             let Some(new_ratio) = hit.ratio_for_delta(delta_pixels) else {
                 continue;
             };
-            data.layout.set_cascade_ratio(hit, new_ratio);
+            data.spatial
+                .workspaces
+                .layout
+                .set_cascade_ratio(hit, new_ratio);
         }
         data.retile_viscous();
     }
