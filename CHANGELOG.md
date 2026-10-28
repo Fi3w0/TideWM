@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.201 · 2026-10-28 — Leaving fullscreen keeps responding
+
+- Fixed a compositor freeze when leaving fullscreen on a tiled window in a split Classic layout. Restoring the tile now reads its size before locking the window's pending state.
+
 ## 0.90.200 · 2026-10-28 — GPU memory freed while idle
 
 - Textures and copied buffers that TideWM no longer needs are now freed every few seconds, on every GPU, even when nothing on screen is changing. Before, they could wait for the next drawn frame, and on a second GPU they were never swept. GPUs with nothing to free are not woken up.

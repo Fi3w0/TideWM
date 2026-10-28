@@ -1896,11 +1896,14 @@ impl Smallvil {
         let is_floating = !self.layout.contains(wl_surface) && !self.ocean.is_tiled(wl_surface);
         if !is_floating {
             self.maximized.remove(wl_surface);
+            // Layout reads client size hints via with_states, which takes the
+            // same surface lock as with_pending_state. Resolve it first.
+            let tiled_size = self
+                .tiled_rect_for_surface(wl_surface)
+                .map(|rect| rect.size);
             surface.with_pending_state(|state| {
                 state.states.unset(xdg_toplevel::State::Maximized);
-                state.size = self
-                    .tiled_rect_for_surface(wl_surface)
-                    .map(|rect| rect.size);
+                state.size = tiled_size;
             });
         }
         if is_floating {

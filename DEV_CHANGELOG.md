@@ -2,6 +2,12 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.201 — Avoid a recursive surface lock on tiled unfullscreen
+
+- `do_unfullscreen` resolves `tiled_rect_for_surface` before entering `ToplevelSurface::with_pending_state`. Smithay holds `PrivateSurfaceData` throughout that closure; BSP layout reads client size hints through `leaf_minimum`/`with_states`, which reacquired the same mutex and froze the event loop when another tile was present. Both the keybind/IPC toggle and client `unset_fullscreen` share this path. No layout or floating-restore behavior changes.
+- Reproduced with two real GTK clients in a private virtual KWin host before changing code. All-thread GDB backtraces from the unstripped debug build identify the recursive lock. One tiled client alone passes.
+- Regression: `tiled_fullscreen_round_trip_does_not_relock_surface_state` creates two real xdg-shell clients, exercises WM toggles and client requests on each, verifies restored configure size/focus/layout ownership and a subsequent Wayland round trip. A bounded child process makes a deadlock fail the test instead of hanging the suite; the test failed on the old code before applying the fix.
+
 ## 0.90.200 — Idle texture-cache sweep on every GPU node
 
 - Smithay frees dropped GL textures, EGL images and buffers only in `GlesRenderer::cleanup`, which runs on `unbind` after each rendered frame and on no-damage/direct-scanout `render_frame` calls, and only for the renderer that drew. Two gaps followed. Anything released after an idle desktop's last frame (a hidden-workspace window closing, a backdrop or capture texture dropped outside a frame) stayed queued until the next frame. Render-only GPU nodes, which hold cross-GPU imports in `GpuManager`, were never swept, because `ImportBridge::cleanup_texture_cache` only reaches the primary renderer.
