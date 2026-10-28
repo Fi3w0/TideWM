@@ -2,6 +2,62 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.90.209 — `SpatialState` boundary (plan step 7)
+
+- `0f96644`: `SpatialOwnership { Workspaces, Ocean }` and `WorkspaceProjection { Classic, Scroll }` with `SpatialEngine::ownership()`/`projection()`. Every runtime engine check now names the axis it tests; `uses_workspaces()` is gone. Equivalent case by case; site receipt in `.hermes/worklogs/spatial-state-2026-10-28/`.
+- `c782b28`: `Smallvil::spatial: SpatialState { engine }` is the only running-engine value (132 reads); only `migrate_spatial_engine` changes it. `config.spatial_engine` is just the file's request: reload migrates whenever request and running engine differ, and a refused migration no longer patches the config. Observable behavior is unchanged (a refused switch retries on the next reload; after a live `engine:` action a reload returns to the file's engine). New real-protocol test for the refused path.
+- `4b2bd74`: `SpatialState::hit_tests_through_space()` names the real hit-testing axis (Space for Classic, render placements for Scroll and Ocean). The planned per-operation dispatch was shrunk with Fiw's approval: focus targeting already dispatches once, `map_toplevel`'s Ocean checks are interleaved with shared logic, and output removal is engine-neutral.
+- Each commit: 712 tests, fmt, strict Clippy (all and default features); nested matrix with subscribers 61/0 vs `.208`. Design: `.hermes/worklogs/spatial-state-design.md`. Not run natively.
+
+## 0.90.208 — Scratchpads and floating order across engine changes
+
+- `92b549f`: Classic→Ocean used to turn scratchpad workspace 0 into a reef exactly over workspace 1, and a named scratchpad into a reef at `x = i32::MAX`. Ocean→Classic then renumbered the overlapping reefs nondeterministically (a normal tile could come back on workspace 2), and scratchpad windows came back as visible ordinary workspaces. Scratchpad trees and unpinned scratchpad floaters now stay in `layout`/`floating_workspace` for the duration of Ocean (it renders neither) and return untouched. A shown scratchpad points the camera at its origin workspace; pinned floaters still migrate. `Layouts::drain_for_migration` takes a keep predicate.
+- Every engine change also moved floating windows in `HashMap` order. `migrate_spatial_engine` now records the stacking order before unmapping (Space bottom-to-top, or Ocean's `floating_stack`); `drain_for_classic` returns floaters front-to-back, and Classic→Ocean and the final remap keep that order.
+- `407645c`: real-protocol test on two outputs taking tiled windows on two workspaces and both outputs, a floater, a pin, a tab group and a fullscreen window through Classic→Ocean→Scroll→Classic→Scroll→Ocean→Classic. One owner per window at every step; focus, pin, fullscreen, group and floating state unchanged; exact membership on every return. The new scratchpad/stacking test fails on the old code and passes three runs in a row.
+- 711 tests, fmt, strict Clippy (all and default features); nested matrix with subscribers 61/0. Invariants table: `.hermes/worklogs/spatial-invariants.md` (plan step 6). Not run natively yet.
+
+## 0.90.207 — Explicit imports in the state child modules
+
+- `d0ea005` replaces `use super::*` in all 13 `state/` child modules with explicit imports: the external paths each module uses plus `use super::{...}` for parent types and free helpers. Two accessibility-only imports in `session.rs` are feature-gated. `state/mod.rs` drops imports only its children used; its tests module keeps `use super::*` and imports `RenderElementStates`, which only tests use.
+- Everything after each import block is byte-identical to `ba8b06a`. No visibility, ownership or behavior changes.
+- fmt, 709 all-feature/all-target tests, strict Clippy (all and default features), all-feature release build pass; screencast-only and accessibility-only checks are clean. Nested matrix with subscribers: 61 observations, 0 differences vs `.206` and the fixed baseline. Native activation of `.203`–`.207` has not been run.
+
+## 0.90.206 — Complete the mechanical state domain moves
+
+- Five separate mechanical commits move the remaining 188 methods into `effects.rs` (40), `physics.rs` (34), `ocean.rs` (18), `groups_depth.rs` (36), and `spatial.rs` (60). Spatial explicitly includes `refresh_space` and `space_output_owner`, which were missing from the older split inventory. The parent retains fields, shared types, free helpers and tests; its now-empty `impl Smallvil` is removed. All 351 original state methods now live in 13 domain modules.
+- Bodies, documentation and attributes remain unchanged. Required private helpers become only `pub(super)` for existing cross-module callers, enumerated in each move commit. Formatting of widened signatures/module boundaries is isolated in separate commits. No accessors, new forwarding methods, dependencies, ownership changes, spatial-model redesign or configuration changes. Version/changelog metadata is separate from relocations.
+- Each move passes 709 all-feature/all-target tests and strict Clippy. Final fmt, full suite, all-feature/default-feature strict Clippy and all-feature release build pass. All 61 nested state/capture observations match the fixed baseline and `.205`, with subscriber checks passing. A whole-split check proves all 351 method bodies and the Smallvil fields byte-identical to the pre-split source. Native activation of the accumulated moves has not been run; explicit-import cleanup remains a separate next step.
+
+## 0.90.205 — Extract focus, Scroll and session domains
+
+- Three separate mechanical commits move 102 methods from `state/mod.rs` to `focus.rs` (57), `scroll.rs` (19) and `session.rs` (26). Fields, shared types, free helpers and tests remain in the parent, which shrinks from 13,456 to 10,350 lines. Method bodies/docs and accessibility feature guards are unchanged. A separate formatting commit wraps one widened helper signature; version/changelog metadata is separate from the moves.
+- Required private-to-`pub(super)` changes preserve existing callers: focus — `release_popup_grab`, `refocus_after_hide`, `neighbor_in_direction`; Scroll — `queue_scroll_pointer_refresh`, `scroll_axis_step`, `scroll_focus_target`, `anchor_scroll_floaters`, `rescue_scroll_floaters`, `floating_bounds`, `scroll_columns_changed`; session — `lock_focus_target`, `handle_client_disconnect`, `schedule_accessibility_sync`. Existing public visibility stays unchanged; no private method becomes `pub(crate)`, and no accessors, forwarding methods, dependencies or behavior changes are added.
+- The unchanged 709-test all-feature/all-target suite and strict Clippy pass after every move. Final fmt, full suite, all-feature/default-feature strict Clippy, and all-feature release build pass. All 61 nested state/capture observations match both the post-fullscreen-fix baseline and `.204`, with all-events/engine-only subscriber checks passing. Native activation of this batch has not been run.
+
+## 0.90.204 — Extract config reload, workspace and render domains
+
+- Three separate mechanical commits move 53 methods from `state/mod.rs` into `config_reload.rs` (9), `workspace.rs` (23) and `render.rs` (21). Method bodies, documentation and attributes remain unchanged; the struct, fields, shared types, free helpers and tests stay in the parent. `state/mod.rs` falls from 16,412 to 13,456 lines. One version/changelog commit records the batch separately from the relocations.
+- Required private-to-`pub(super)` visibility changes preserve the existing call graph: `has_lua_handler`; `resolve_window_rules_on_workspace`, `workspace_of_surface`, `apply_workspace_switch`; `placement_visual_sample`, `rendered_rect_on_output`, `request_surface_redraws`, `placement_physical_rect`. Existing public visibility is retained; no private method becomes `pub(crate)`. No accessors, forwarding API, duplicated authority, dependencies or behavior changes.
+- Each move passes the unchanged 709-test all-feature/all-target suite, fmt and strict Clippy. Final batch fmt, full suite, strict Clippy and all-feature release build pass. All 61 nested state/capture observations match both the post-fullscreen-fix baseline and `.203`; all-events and engine-only subscriber checks pass in Classic, Scroll and Ocean. Native activation of this batch has not been run.
+
+## 0.90.203 — Extract state IPC event and subscriber coordination
+
+- Move the six approved methods `emit_state_change_events`, `ipc_seen_state`, `emit_ipc_event`, `flush_ipc_subscribers`, `arm_ipc_flush_timer` and `remove_ipc_subscriber` verbatim into `state/ipc.rs`. IPC fields, shared types and tests remain in `state/mod.rs`; `has_lua_handler` stays with configuration coordination.
+- No visibility changes: the existing `pub(crate)` entry points stay unchanged and the two internal helpers remain private. No behavior changes, forwarding methods, dependencies or method-body formatting. The pure relocation and version/changelog update are separate commits.
+- Validation: 709 all-feature/all-target tests, fmt, strict Clippy, all-feature release build, and 61 nested state/capture observations identical to the post-fullscreen-fix baseline. Live all-events and engine-only subscribers verify event delivery and filtering in all three engines. Native activation of this move has not been run.
+
+## 0.90.202 — Extract the compositor initialization domain
+
+- Rename `src/tide_core/state.rs` to `state/mod.rs` and move only the approved `Smallvil::new` and `init_wayland_listener` methods verbatim to `state/init.rs`. The struct, fields, shared types, free helpers, remaining methods and tests stay in the parent module. The child uses `use super::*` plus initialization-only imports moved out of the parent.
+- No method or field visibility changes, forwarding methods, dependencies or behavior changes. The relocation is a separate commit from this version/changelog update; method text is checked byte for byte against the preceding source.
+- Validation: 709 locked all-feature/all-target tests, fmt, strict Clippy, all-feature release build, and all 61 nested runtime observations/capture hashes identical to the post-fullscreen-fix baseline. Native startup after a maintainer relog also verifies both outputs, a fresh Wayland connection, roleless surface create/commit/destroy and continued IPC response.
+
+## 0.90.201 — Avoid a recursive surface lock on tiled unfullscreen
+
+- `do_unfullscreen` resolves `tiled_rect_for_surface` before entering `ToplevelSurface::with_pending_state`. Smithay holds `PrivateSurfaceData` throughout that closure; BSP layout reads client size hints through `leaf_minimum`/`with_states`, which reacquired the same mutex and froze the event loop when another tile was present. Both the keybind/IPC toggle and client `unset_fullscreen` share this path. No layout or floating-restore behavior changes.
+- Reproduced with two real GTK clients in a private virtual KWin host before changing code. All-thread GDB backtraces from the unstripped debug build identify the recursive lock. One tiled client alone passes.
+- Regression: `tiled_fullscreen_round_trip_does_not_relock_surface_state` creates two real xdg-shell clients, exercises WM toggles and client requests on each, verifies restored configure size/focus/layout ownership and a subsequent Wayland round trip. A bounded child process makes a deadlock fail the test instead of hanging the suite; the test failed on the old code before applying the fix.
+
 ## 0.90.200 — Idle texture-cache sweep on every GPU node
 
 - Smithay frees dropped GL textures, EGL images and buffers only in `GlesRenderer::cleanup`, which runs on `unbind` after each rendered frame and on no-damage/direct-scanout `render_frame` calls, and only for the renderer that drew. Two gaps followed. Anything released after an idle desktop's last frame (a hidden-workspace window closing, a backdrop or capture texture dropped outside a frame) stayed queued until the next frame. Render-only GPU nodes, which hold cross-GPU imports in `GpuManager`, were never swept, because `ImportBridge::cleanup_texture_cache` only reaches the primary renderer.

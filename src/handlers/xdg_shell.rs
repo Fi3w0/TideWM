@@ -156,8 +156,8 @@ impl XdgShellHandler for Smallvil {
                 window,
                 initial_window_location,
                 view_scale,
-                smart_attach_ocean: self.config.spatial_engine
-                    == crate::config::SpatialEngine::Ocean
+                smart_attach_ocean: self.spatial.engine.ownership()
+                    == crate::config::SpatialOwnership::Ocean
                     && self.config.ocean.smart_tiling,
                 last_location,
                 completion: GrabCompletion::default(),
@@ -449,11 +449,9 @@ impl Smallvil {
                 }
             });
 
-        let active_pin = match self.config.spatial_engine {
-            crate::config::SpatialEngine::Classic | crate::config::SpatialEngine::Scroll => {
-                self.pinned.remove(&wl_surface)
-            }
-            crate::config::SpatialEngine::Ocean => {
+        let active_pin = match self.spatial.engine.ownership() {
+            crate::config::SpatialOwnership::Workspaces => self.pinned.remove(&wl_surface),
+            crate::config::SpatialOwnership::Ocean => {
                 self.pinned.remove(&wl_surface);
                 self.ocean.unpin_from_screen(&wl_surface)
             }
@@ -1207,7 +1205,8 @@ impl Smallvil {
         self.window_depths
             .insert(surface.clone(), crate::depth::WindowDepth::new());
         let focused = self.intended_window_surface();
-        let ocean_engine = self.config.spatial_engine == crate::config::SpatialEngine::Ocean;
+        let ocean_engine =
+            self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean;
         let workspace = rule
             .workspace
             .unwrap_or_else(|| self.layout.active_workspace(&output.name()));
@@ -1896,11 +1895,14 @@ impl Smallvil {
         let is_floating = !self.layout.contains(wl_surface) && !self.ocean.is_tiled(wl_surface);
         if !is_floating {
             self.maximized.remove(wl_surface);
+            // Layout reads client size hints via with_states, which takes the
+            // same surface lock as with_pending_state. Resolve it first.
+            let tiled_size = self
+                .tiled_rect_for_surface(wl_surface)
+                .map(|rect| rect.size);
             surface.with_pending_state(|state| {
                 state.states.unset(xdg_toplevel::State::Maximized);
-                state.size = self
-                    .tiled_rect_for_surface(wl_surface)
-                    .map(|rect| rect.size);
+                state.size = tiled_size;
             });
         }
         if is_floating {
@@ -1946,12 +1948,11 @@ impl Smallvil {
                 self.space.map_element(window, rect.loc, false);
             }
             if entry.was_pinned {
-                match self.config.spatial_engine {
-                    crate::config::SpatialEngine::Classic
-                    | crate::config::SpatialEngine::Scroll => {
+                match self.spatial.engine.ownership() {
+                    crate::config::SpatialOwnership::Workspaces => {
                         self.pinned.insert(wl_surface.clone());
                     }
-                    crate::config::SpatialEngine::Ocean => {
+                    crate::config::SpatialOwnership::Ocean => {
                         self.ocean.pin_to_screen(wl_surface, &entry.output);
                     }
                 }
@@ -2366,3 +2367,7 @@ mod tests {
 #[cfg(test)]
 #[path = "floating_placement_test.rs"]
 mod floating_placement_test;
+
+#[cfg(test)]
+#[path = "engine_transition_test.rs"]
+mod engine_transition_test;

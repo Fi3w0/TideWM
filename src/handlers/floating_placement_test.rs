@@ -17,7 +17,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-fn string(value: &str) -> Vec<u8> {
+pub(super) fn string(value: &str) -> Vec<u8> {
     let mut bytes = ((value.len() + 1) as u32).to_ne_bytes().to_vec();
     bytes.extend_from_slice(value.as_bytes());
     bytes.push(0);
@@ -27,14 +27,14 @@ fn string(value: &str) -> Vec<u8> {
     bytes
 }
 
-struct Fixture {
-    event_loop: EventLoop<'static, Smallvil>,
-    state: Smallvil,
-    peer: UnixStream,
-    next_id: u32,
+pub(super) struct Fixture {
+    pub(super) event_loop: EventLoop<'static, Smallvil>,
+    pub(super) state: Smallvil,
+    pub(super) peer: UnixStream,
+    pub(super) next_id: u32,
 }
 impl Fixture {
-    fn request(&mut self, object: u32, opcode: u16, words: &[u32], tail: &[u8]) {
+    pub(super) fn request(&mut self, object: u32, opcode: u16, words: &[u32], tail: &[u8]) {
         let size = 8 + words.len() * 4 + tail.len();
         let mut bytes = object.to_ne_bytes().to_vec();
         bytes.extend_from_slice(&(((size as u32) << 16) | u32::from(opcode)).to_ne_bytes());
@@ -44,7 +44,7 @@ impl Fixture {
         bytes.extend_from_slice(tail);
         self.peer.write_all(&bytes).unwrap();
     }
-    fn dispatch(&mut self) -> Vec<(u32, u16, Vec<u8>)> {
+    pub(super) fn dispatch(&mut self) -> Vec<(u32, u16, Vec<u8>)> {
         self.event_loop
             .dispatch(Some(Duration::ZERO), &mut self.state)
             .unwrap();
@@ -72,7 +72,7 @@ impl Fixture {
         }
         events
     }
-    fn window(&mut self, app: &str, parent: Option<u32>, natural: (i32, i32)) -> u32 {
+    pub(super) fn window(&mut self, app: &str, parent: Option<u32>, natural: (i32, i32)) -> u32 {
         let id = self.next_id;
         self.next_id += 5;
         self.request(3, 0, &[id], &[]); // wl_surface
@@ -121,7 +121,7 @@ impl Fixture {
         }
         id
     }
-    fn surface(
+    pub(super) fn surface(
         &self,
         id: u32,
     ) -> smithay::reexports::wayland_server::protocol::wl_surface::WlSurface {
@@ -136,7 +136,7 @@ impl Fixture {
             })
             .unwrap()
     }
-    fn pointer_on(&mut self, x: f64, y: f64) {
+    pub(super) fn pointer_on(&mut self, x: f64, y: f64) {
         let pointer = self.state.seat.get_pointer().unwrap();
         pointer.motion(
             &mut self.state,
@@ -436,4 +436,184 @@ rule {
         Rectangle::new((420, 320).into(), (360, 260).into())
     );
     assert!(f.state.space.element_geometry(&tag.window).is_none());
+}
+
+#[test]
+fn tiled_fullscreen_round_trip_does_not_relock_surface_state() {
+    const CHILD: &str = "TIDEWM_TILED_FULLSCREEN_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "tidewm-fullscreen-test-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("config/tidewm")).unwrap();
+        std::fs::create_dir(root.join("runtime")).unwrap();
+        std::fs::set_permissions(root.join("runtime"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::write(root.join("config/tidewm/config.wave"), "engine = classic\nwelcome_hint = false\nwater_effects = false\nanimations {\n enabled = false\n}\n").unwrap();
+        let log = std::fs::File::create(root.join("child.log")).unwrap();
+        let test_name = concat!(
+            module_path!(),
+            "::tiled_fullscreen_round_trip_does_not_relock_surface_state"
+        );
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                test_name.split_once("::").unwrap().1,
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_RUNTIME_DIR", root.join("runtime"))
+            .env("XDG_STATE_HOME", root.join("state"))
+            .env("XDG_CACHE_HOME", root.join("cache"))
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .spawn()
+            .unwrap();
+        // A self-deadlock must fail this test instead of hanging the test suite.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let output = std::fs::read_to_string(root.join("child.log")).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(status.is_some(), "tiled unfullscreen deadlocked: {output}");
+        assert!(status.unwrap().success(), "{output}");
+        assert!(output.contains("running 1 test"), "{output}");
+        return;
+    }
+    let mut event_loop = EventLoop::try_new().unwrap();
+    let state = Smallvil::new(&mut event_loop, Display::new().unwrap());
+    let (server, peer) = UnixStream::pair().unwrap();
+    state
+        .display_handle
+        .clone()
+        .insert_client(
+            server,
+            Arc::new(ClientState {
+                compositor_state: CompositorClientState::default(),
+                security_context: None,
+                disconnect_sender: None,
+            }),
+        )
+        .unwrap();
+    peer.set_nonblocking(true).unwrap();
+    let mut f = Fixture {
+        event_loop,
+        state,
+        peer,
+        next_id: 7,
+    };
+
+    let output = Output::new(
+        "fullscreen-output".into(),
+        PhysicalProperties {
+            size: (0, 0).into(),
+            subpixel: Subpixel::Unknown,
+            make: "test".into(),
+            model: "test".into(),
+            serial_number: "test".into(),
+        },
+    );
+    output.change_current_state(
+        Some(Mode {
+            size: (1200, 900).into(),
+            refresh: 60_000,
+        }),
+        None,
+        Some(Scale::Integer(1)),
+        None,
+    );
+    output.create_global::<Smallvil>(&f.state.display_handle);
+    f.state.space.map_output(&output, (0, 0));
+    f.request(1, 1, &[2], &[]);
+    let globals = f.dispatch();
+    for (interface, id) in [
+        ("wl_compositor", 3u32),
+        ("xdg_wm_base", 4),
+        ("wp_single_pixel_buffer_manager_v1", 5),
+        ("wp_viewporter", 6),
+    ] {
+        let name = globals
+            .iter()
+            .find_map(|(object, op, body)| {
+                if (*object, *op) != (2, 0) {
+                    return None;
+                }
+                let len = u32::from_ne_bytes(body[4..8].try_into().unwrap()) as usize;
+                (std::str::from_utf8(&body[8..8 + len - 1]).unwrap() == interface)
+                    .then(|| u32::from_ne_bytes(body[..4].try_into().unwrap()))
+            })
+            .unwrap();
+        let mut tail = string(interface);
+        tail.extend_from_slice(
+            &(if interface == "wl_compositor" {
+                4u32
+            } else {
+                1u32
+            })
+            .to_ne_bytes(),
+        );
+        tail.extend_from_slice(&id.to_ne_bytes());
+        f.request(2, 0, &[name], &tail);
+    }
+    f.dispatch();
+
+    let ids = [
+        f.window("tile-one", None, (400, 300)),
+        f.window("tile-two", None, (400, 300)),
+    ];
+    for id in ids {
+        let surface = f.surface(id);
+        assert!(f.state.layout.contains(&surface));
+        f.state
+            .focus_window(Some(surface.clone()), SERIAL_COUNTER.next_serial());
+        let expected = f.state.tiled_rect_for_surface(&surface).unwrap().size;
+        for client_request in [false, true] {
+            if client_request {
+                f.request(id + 2, 11, &[0], &[]); // xdg_toplevel.set_fullscreen
+            } else {
+                f.state.run_action(crate::config::Action::ToggleFullscreen);
+            }
+            f.dispatch();
+            assert!(f.state.fullscreen.contains_key(&surface));
+            if client_request {
+                f.request(id + 2, 12, &[], &[]); // xdg_toplevel.unset_fullscreen
+            } else {
+                f.state.run_action(crate::config::Action::ToggleFullscreen);
+            }
+            let events = f.dispatch();
+            assert!(!f.state.fullscreen.contains_key(&surface));
+            assert!(f.state.layout.contains(&surface));
+            assert_eq!(f.state.focused_window_surface(), Some(surface.clone()));
+            let configure = events
+                .iter()
+                .rev()
+                .find(|(object, op, _)| (*object, *op) == (id + 2, 0))
+                .unwrap();
+            let width = i32::from_ne_bytes(configure.2[..4].try_into().unwrap());
+            let height = i32::from_ne_bytes(configure.2[4..8].try_into().unwrap());
+            assert_eq!((width, height), (expected.w, expected.h));
+            let callback = f.next_id;
+            f.next_id += 1;
+            f.request(1, 0, &[callback], &[]); // round-trip after unfullscreen
+            assert!(f
+                .dispatch()
+                .iter()
+                .any(|(object, op, _)| (*object, *op) == (callback, 0)));
+        }
+    }
 }

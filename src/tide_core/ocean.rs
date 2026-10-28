@@ -1114,11 +1114,21 @@ impl OceanSpace {
             .drain(..)
             .map(|r| (r._name, r.rect, r.layout))
             .collect();
-        let floating = self
-            .floating
-            .drain()
-            .map(|(surface, (window, rect))| (surface, window, rect))
+        // Front-to-back, so Classic can restack in the same order. Every
+        // floater is in `floating_stack`; any stray entry goes to the back.
+        let mut floating: Vec<(WlSurface, Window, Rectangle<i32, Logical>)> = self
+            .floating_stack
+            .iter()
+            .filter_map(|surface| {
+                let (window, rect) = self.floating.remove(surface)?;
+                Some((surface.clone(), window, rect))
+            })
             .collect();
+        floating.extend(
+            self.floating
+                .drain()
+                .map(|(surface, (window, rect))| (surface, window, rect)),
+        );
         let cameras = self
             .cameras
             .keys()
@@ -1512,6 +1522,11 @@ impl OceanSpace {
     /// pointer isn't over a valid target.
     pub fn drag_hint(&self) -> Option<&WlSurface> {
         self.drag_hint.as_ref()
+    }
+
+    /// Floating windows, topmost first.
+    pub fn floating_front_to_back(&self) -> &[WlSurface] {
+        &self.floating_stack
     }
 
     pub fn raise_floating(&mut self, surface: &WlSurface) -> bool {

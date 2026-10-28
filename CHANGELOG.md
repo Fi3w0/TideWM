@@ -2,6 +2,43 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.90.209 · 2026-10-28 — Spatial engine bookkeeping
+
+- Internal cleanup of how TideWM tracks the running engine versus the one your config asks for. Engine switches, reloads and window behavior stay the same.
+
+## 0.90.208 · 2026-10-28 — Engine switches keep scratchpads and window stacking
+
+- Switching to Ocean and back no longer turns scratchpads into normal workspaces or reshuffles workspace numbers. Scratchpad windows stay hidden in Ocean and come back where they were.
+- Floating windows keep their stacking order when you switch engines.
+
+## 0.90.207 · 2026-10-28 — Explicit state imports
+
+- Each state module now lists exactly what it uses instead of importing everything from the shared parent. Nothing changes for users.
+
+## 0.90.206 · 2026-10-28 — Complete state method extraction
+
+- Moved the remaining effects, physics, Ocean, groups/depth and spatial methods into dedicated state modules. Shared state stays centralized; window behavior, rendering and configuration stay the same.
+
+## 0.90.205 · 2026-10-28 — Focus, Scroll and session organization
+
+- Separated focus/input routing, Scroll coordination and session lifecycle into dedicated state modules. Window behavior, input handling, protocol handling and configuration stay the same.
+
+## 0.90.204 · 2026-10-28 — State module organization
+
+- Separated config reload, workspace coordination, and rendering into dedicated state modules. Window behavior, rendering policy, IPC, and configuration stay the same.
+
+## 0.90.203 · 2026-10-28 — IPC code organization
+
+- Moved state-change event and subscriber coordination into a dedicated state module. IPC behavior and configuration stay the same.
+
+## 0.90.202 · 2026-10-28 — Initialization code organization
+
+- Moved compositor initialization into its own module as the first step in splitting the central state file. Behavior and configuration stay the same.
+
+## 0.90.201 · 2026-10-28 — Leaving fullscreen keeps responding
+
+- Fixed a compositor freeze when leaving fullscreen on a tiled window in a split Classic layout. Restoring the tile now reads its size before locking the window's pending state.
+
 ## 0.90.200 · 2026-10-28 — GPU memory freed while idle
 
 - Textures and copied buffers that TideWM no longer needs are now freed every few seconds, on every GPU, even when nothing on screen is changing. Before, they could wait for the next drawn frame, and on a second GPU they were never swept. GPUs with nothing to free are not woken up.

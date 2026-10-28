@@ -603,7 +603,7 @@ impl Smallvil {
         let completion = GrabCompletion::default();
 
         let Some((window, loc)) = self.window_under(location) else {
-            if self.config.spatial_engine != crate::config::SpatialEngine::Ocean {
+            if self.spatial.engine.ownership() != crate::config::SpatialOwnership::Ocean {
                 return None;
             }
             let output = self.output_for_point(location)?;
@@ -634,7 +634,7 @@ impl Smallvil {
             location,
         };
 
-        if self.config.spatial_engine == crate::config::SpatialEngine::Ocean
+        if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean
             && self.config.ocean.smart_tiling
             && self.ocean.is_tiled(&wl_surface)
         {
@@ -658,7 +658,7 @@ impl Smallvil {
             return Some(completion);
         }
 
-        if self.config.spatial_engine == crate::config::SpatialEngine::Ocean
+        if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean
             && self.config.ocean.freeform_windows
             && self.ocean.is_tiled(&wl_surface)
         {
@@ -708,8 +708,8 @@ impl Smallvil {
                     window,
                     initial_window_location: model_loc,
                     view_scale,
-                    smart_attach_ocean: self.config.spatial_engine
-                        == crate::config::SpatialEngine::Ocean
+                    smart_attach_ocean: self.spatial.engine.ownership()
+                        == crate::config::SpatialOwnership::Ocean
                         && self.config.ocean.smart_tiling,
                     last_location,
                     completion: completion.clone(),
@@ -1235,7 +1235,8 @@ impl Smallvil {
                             latin_keysym,
                             modifiers,
                             &data.helper_keys_down,
-                            data.config.spatial_engine == crate::config::SpatialEngine::Ocean,
+                            data.spatial.engine.ownership()
+                                == crate::config::SpatialOwnership::Ocean,
                         )
                         .map(|bind| bind.action.clone());
 
@@ -1729,8 +1730,8 @@ impl Smallvil {
                                 // Fullscreen/maximized are output-owned placements;
                                 // a compositor drag must not move/resize it
                                 // behind the protocol state's back.
-                            } else if self.config.spatial_engine
-                                == crate::config::SpatialEngine::Ocean
+                            } else if self.spatial.engine.ownership()
+                                == crate::config::SpatialOwnership::Ocean
                                 && self.config.ocean.smart_tiling
                                 && button == BTN_LEFT
                                 && self.ocean.is_tiled(&wl_surface)
@@ -1765,8 +1766,8 @@ impl Smallvil {
                                 );
                                 pointer.set_grab(self, grab, serial, Focus::Clear);
                                 return;
-                            } else if self.config.spatial_engine
-                                == crate::config::SpatialEngine::Ocean
+                            } else if self.spatial.engine.ownership()
+                                == crate::config::SpatialOwnership::Ocean
                                 && self.config.ocean.freeform_windows
                                 && self.ocean.is_tiled(&wl_surface)
                             {
@@ -1851,8 +1852,8 @@ impl Smallvil {
                                         window,
                                         initial_window_location: model_loc,
                                         view_scale,
-                                        smart_attach_ocean: self.config.spatial_engine
-                                            == crate::config::SpatialEngine::Ocean
+                                        smart_attach_ocean: self.spatial.engine.ownership()
+                                            == crate::config::SpatialOwnership::Ocean
                                             && self.config.ocean.smart_tiling,
                                         last_location,
                                         completion: GrabCompletion::default(),
@@ -1971,8 +1972,8 @@ impl Smallvil {
                         }
                     }
 
-                    let canvas_pan = self.config.spatial_engine
-                        == crate::config::SpatialEngine::Ocean
+                    let canvas_pan = self.spatial.engine.ownership()
+                        == crate::config::SpatialOwnership::Ocean
                         && under.is_none()
                         && self.config.ocean.canvas_pan_button.matches(button)
                         && (!self.config.ocean.canvas_pan_requires_modifier
@@ -2434,7 +2435,7 @@ impl Smallvil {
                 let horizontal_amount_discrete = event.amount_v120(Axis::Horizontal);
                 let vertical_amount_discrete = event.amount_v120(Axis::Vertical);
 
-                if self.config.spatial_engine == crate::config::SpatialEngine::Ocean
+                if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean
                     && self.config.ocean.zoom_enabled
                     && self.config.ocean.modifier_zoom
                     && vertical_amount != 0.0
@@ -2471,7 +2472,8 @@ impl Smallvil {
                 // Scroll's optional stack camera: Mod+wheel up/down pans the
                 // focused column vertically. Horizontal Mod+wheel is left to
                 // the client for now; without Mod the event passes through.
-                if self.config.spatial_engine == crate::config::SpatialEngine::Scroll
+                if self.spatial.engine.projection()
+                    == Some(crate::config::WorkspaceProjection::Scroll)
                     && self.config.scroll.stack != crate::scroll::StackMode::Fit
                     && self
                         .config
@@ -2660,7 +2662,8 @@ impl Smallvil {
                 if compositor_swipe
                     && workspace_fallback
                     && !action_match
-                    && self.config.spatial_engine == crate::config::SpatialEngine::Scroll
+                    && self.spatial.engine.projection()
+                        == Some(crate::config::WorkspaceProjection::Scroll)
                 {
                     if let Some(output) = self.primary_output() {
                         let workspace = self.layout.active_workspace(&output.name());
@@ -3236,7 +3239,7 @@ impl Smallvil {
                 self.cycle_tab(false);
             }
             Action::SwitchWorkspace(workspace) => {
-                if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+                if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
                     let Some(output) = self.primary_output() else {
                         return;
                     };
@@ -3278,7 +3281,7 @@ impl Smallvil {
             }
             Action::WorkspaceStep(step) => self.workspace_step(step),
             Action::MoveToWorkspace(workspace) => {
-                if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+                if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
                     tracing::warn!(
                         ?workspace,
                         "move-to-workspace has no Ocean meaning; window dredge belongs to S4"
@@ -3298,7 +3301,7 @@ impl Smallvil {
                     tracing::warn!(output = %name, "workspace-on: no such output");
                     return;
                 };
-                if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+                if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
                     // Same app-slot meaning `workspace:N` has under Ocean.
                     if let crate::config::WorkspaceRef::Number(number) = workspace {
                         self.jump_to_app_slot(&output, number as usize);
@@ -3343,7 +3346,7 @@ impl Smallvil {
                 self.toggle_overview();
             }
             Action::SinkWindow => {
-                if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+                if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
                     if !self.config.ocean.depth_enabled {
                         return;
                     }
@@ -3387,7 +3390,7 @@ impl Smallvil {
                 self.close_depth_deck();
             }
             Action::DepthDown => {
-                if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+                if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
                     if !self.config.ocean.depth_enabled {
                         return;
                     }
@@ -3414,7 +3417,7 @@ impl Smallvil {
                 }
             }
             Action::DepthUp => {
-                if self.config.spatial_engine == crate::config::SpatialEngine::Ocean {
+                if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
                     if !self.config.ocean.depth_enabled {
                         return;
                     }
@@ -3441,7 +3444,7 @@ impl Smallvil {
                 }
             }
             Action::OceanPan(direction) => {
-                if self.config.spatial_engine != crate::config::SpatialEngine::Ocean {
+                if self.spatial.engine.ownership() != crate::config::SpatialOwnership::Ocean {
                     return;
                 }
                 let Some(output) = self.primary_output() else {
@@ -3475,7 +3478,7 @@ impl Smallvil {
                 }
             }
             Action::OceanZoomIn | Action::OceanZoomOut | Action::OceanZoomReset => {
-                if self.config.spatial_engine != crate::config::SpatialEngine::Ocean
+                if self.spatial.engine.ownership() != crate::config::SpatialOwnership::Ocean
                     || !self.config.ocean.zoom_enabled
                 {
                     return;
@@ -3504,7 +3507,7 @@ impl Smallvil {
                 self.request_redraw();
             }
             Action::OceanCenterFocused => {
-                if self.config.spatial_engine != crate::config::SpatialEngine::Ocean {
+                if self.spatial.engine.ownership() != crate::config::SpatialOwnership::Ocean {
                     return;
                 }
                 let Some(surface) = self.focused_window_surface() else {
@@ -3532,7 +3535,7 @@ impl Smallvil {
                 self.request_redraw();
             }
             Action::OceanDredgeWindow => {
-                if self.config.spatial_engine != crate::config::SpatialEngine::Ocean
+                if self.spatial.engine.ownership() != crate::config::SpatialOwnership::Ocean
                     || !self.config.ocean.depth_enabled
                 {
                     return;
@@ -3555,7 +3558,7 @@ impl Smallvil {
                 }
             }
             Action::OceanSurfaceWindow => {
-                if self.config.spatial_engine != crate::config::SpatialEngine::Ocean
+                if self.spatial.engine.ownership() != crate::config::SpatialOwnership::Ocean
                     || !self.config.ocean.depth_enabled
                 {
                     return;
@@ -3587,7 +3590,7 @@ impl Smallvil {
                 }
             }
             Action::OceanBookmark(name) => {
-                if self.config.spatial_engine != crate::config::SpatialEngine::Ocean {
+                if self.spatial.engine.ownership() != crate::config::SpatialOwnership::Ocean {
                     return;
                 }
                 let Some(output) = self.primary_output() else {
@@ -3605,7 +3608,7 @@ impl Smallvil {
                 }
             }
             Action::OceanSaveBookmark(name) => {
-                if self.config.spatial_engine != crate::config::SpatialEngine::Ocean {
+                if self.spatial.engine.ownership() != crate::config::SpatialOwnership::Ocean {
                     return;
                 }
                 let Some(output) = self.primary_output() else {
