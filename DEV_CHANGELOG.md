@@ -2,6 +2,11 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.5 — Scroll gesture direction option
+
+- Added `ScrollConfig::gesture_invert` (default `false`), parsed as `scroll.gesture_invert` with the existing `set_bool`. `update_scroll_gesture` negates the per-update strip delta after the `gesture_distance` scaling, so the release snap (which reads the resulting offset) follows automatically. Swim, Ocean and action swipes are unaffected.
+- Config test covers default and `true`. Docs: DOCUMENTATION scroll table/example, TECHNICAL_REPORT scroll guide.
+
 ## 0.91.4 — Ebb Phase 2: trim out-of-view caches
 
 - Added `ebb/trim.rs` (pass timing, weak hidden clocks, bounded reports), `ebb/pressure.rs` (optional PSI), `state/ebb_trim.rs` (visibility, pass execution, PSI registration), `share/defaults/ebb.wave`, `tidectl ebb init/run`, and per-app `rule { ebb }`. No new dependency, thread or service.

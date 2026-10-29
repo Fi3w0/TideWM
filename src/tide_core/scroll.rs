@@ -95,6 +95,8 @@ pub struct ScrollConfig {
     /// Widths `switch-preset-width` cycles through.
     pub preset_widths: PresetWidths,
     pub gesture_distance: f64,
+    /// Flip the touchpad swipe direction that pans the strip.
+    pub gesture_invert: bool,
     /// Whether floating windows follow the camera or stay on the strip.
     pub float_anchor: FloatAnchor,
     /// With `float_anchor = strip`, move a floater the strip can no longer
@@ -197,6 +199,7 @@ impl Default for ScrollConfig {
             preset_widths: PresetWidths::new(&[1.0 / 3.0, 0.5, 2.0 / 3.0])
                 .expect("default presets are valid"),
             gesture_distance: 1200.0,
+            gesture_invert: false,
             float_anchor: FloatAnchor::Screen,
             float_rescue: true,
             stack: StackMode::Hybrid,

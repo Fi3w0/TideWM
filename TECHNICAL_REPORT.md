@@ -49,6 +49,7 @@ scroll {
     always_center_single = false
     preset_widths        = [0.333, 0.5, 0.667]
     gesture_distance     = 1200
+    gesture_invert       = false
     float_anchor         = screen                 # or strip
     float_rescue         = true
     stack                = hybrid                 # fit, scroll, hybrid
@@ -78,6 +79,7 @@ scroll {
 - **`workspace_scroll`:** `workspace-down`/`workspace-up` slide vertically between workspaces (the previous one stays live underneath) while the columns keep scrolling horizontally. `workspace_scroll = false` makes those actions switch instantly; `workspace_scroll_duration` sets the slide length. Only `workspaces = separate`; scratchpads and Ocean do not participate. No keybinds are added automatically.
 - **`workspaces`:** `separate` gives each workspace its own strip and scroll position. `sections` lays a monitor's workspaces end to end in one strip, and switching workspace jumps to its section. In both modes, scratchpads stay separate, and floating windows float above the strip or stay on it (see `float_anchor`).
 - **`gesture_distance`:** how far a touchpad swipe travels per screen. The swipe uses your workspace-swipe finger count.
+- **`gesture_invert`:** reverses which way that swipe pans the strip, for touchpads or habits where it feels backwards.
 - **`float_anchor`:** `screen` keeps floating windows where they are on the monitor while the strip scrolls. `strip` leaves each one at its spot on the strip, so it scrolls away with the columns and comes back when you return. Pinned windows and scratchpads always stay on screen. `toggle-float-anchor` flips it until the next reload.
 - **`float_rescue`:** with `float_anchor = strip`, a floating window the strip can no longer scroll to (because the apps around it closed) comes back onto the screen. Set `false` to leave it off-screen. Switching to an off-screen floating window with the keyboard or Alt+Tab scrolls the strip to it.
 - **Spacing** comes from the global `gaps`.
