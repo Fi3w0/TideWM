@@ -1358,6 +1358,7 @@ pub(super) fn apply_scroll_block(cfg: &mut crate::scroll::ScrollConfig, body: &[
                     "Expected scroll.workspace_scroll_duration from 1 to 10000ms"
                 ),
             },
+            "gesture_invert" => set_bool(&mut cfg.gesture_invert, "scroll.gesture_invert", value),
             "always_center_single" => set_bool(
                 &mut cfg.always_center_single,
                 "scroll.always_center_single",

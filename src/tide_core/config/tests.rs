@@ -34,7 +34,7 @@ fn scroll_config_and_engine_actions_are_explicit_and_finite() {
     );
     assert_eq!(config.scroll.tile_proportion, 0.6);
     let center_entries = wave_entries(
-            "scroll {\n center_focused = on-overflow\n always_center_single = true\n preset_widths = [0.75, 0.25, 0.5]\n }\n",
+            "scroll {\n center_focused = on-overflow\n always_center_single = true\n gesture_invert = true\n preset_widths = [0.75, 0.25, 0.5]\n }\n",
         );
     let centered = Config::from_raw(lower_entries(&center_entries)).0;
     assert_eq!(
@@ -42,6 +42,8 @@ fn scroll_config_and_engine_actions_are_explicit_and_finite() {
         crate::scroll::CenterMode::OnOverflow
     );
     assert!(centered.scroll.always_center_single);
+    assert!(centered.scroll.gesture_invert);
+    assert!(!config.scroll.gesture_invert);
     assert_eq!(centered.scroll.preset_widths.as_slice(), &[0.25, 0.5, 0.75]);
     let center_entries =
         wave_entries("scroll {\n center_focused = true\n preset_widths = [0.05]\n }\n");

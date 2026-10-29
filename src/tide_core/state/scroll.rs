@@ -798,6 +798,11 @@ impl Smallvil {
             crate::scroll::Orientation::Horizontal => delta_x,
             crate::scroll::Orientation::Vertical => delta_y,
         } / self.config.scroll.gesture_distance;
+        let delta = if self.config.scroll.gesture_invert {
+            -delta
+        } else {
+            delta
+        };
         self.spatial
             .workspaces
             .layout

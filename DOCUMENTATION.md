@@ -2103,6 +2103,7 @@ scroll {
     always_center_single = false
     preset_widths = [0.333, 0.5, 0.667]
     gesture_distance = 1200
+    gesture_invert = false
     float_anchor = screen
     float_rescue = true
     stack = hybrid
@@ -2122,6 +2123,7 @@ scroll {
 | `always_center_single` | bool | `false` | Keep a workspace's only column centered whatever `center_focused` says. |
 | `preset_widths` | list of 1–16 widths, `0.1`–`1.0` | `[0.333, 0.5, 0.667]` | Widths `switch-preset-width` steps through, narrowest first after the widest. |
 | `gesture_distance` | positive float | `1200` | Touchpad travel per viewport. A sensitivity, not a monitor width. |
+| `gesture_invert` | bool | `false` | Reverse the direction a `workspace_swipe_fingers` swipe pans the strip. |
 | `float_anchor` | `screen` \| `strip` | `screen` | `screen` keeps floating windows fixed on the monitor while the strip scrolls under them. `strip` keeps each floating window at its place on the strip, so it scrolls away with the columns and comes back when you scroll back; it may sit off-screen along the strip and is drawn only on its own monitor. Pinned windows and scratchpads always stay on screen. `toggle-float-anchor` flips it until the next reload. |
 | `float_rescue` | bool | `true` | With `float_anchor = strip`: when the columns around a floating window close and the strip can no longer scroll to it, move it onto the screen at the nearest edge. `false` leaves it where it was, off-screen. Keyboard focus, Alt+Tab, `focus-window` and notification activation on an off-screen strip floater scroll the strip just far enough to show it; pointer focus never does. |
 | `stack` | `fit` \| `scroll` \| `hybrid` | `hybrid` | How a column's windows share the vertical axis. `fit` divides the height evenly (the column always fits); `scroll` gives every window `stack_height` of the column and lets it overflow; `hybrid` divides while each window keeps at least `stack_min_height`, then scrolls. Horizontal Scroll only. |
