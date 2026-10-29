@@ -4302,3 +4302,32 @@ fn center_visible_columns_is_a_plain_column_action() {
         Some(Action::Column(ColumnAction::CenterVisible))
     ));
 }
+
+#[test]
+fn window_height_actions_and_preset_heights_parse() {
+    assert!(matches!(
+        parse_action("set-window-height:50%"),
+        Some(Action::Column(ColumnAction::SetHeight(_)))
+    ));
+    assert!(matches!(
+        parse_action("set-window-height:+10%"),
+        Some(Action::Column(ColumnAction::SetHeight(_)))
+    ));
+    assert!(parse_action("set-window-height:0").is_none());
+    assert!(parse_action("set-window-height:").is_none());
+    assert!(matches!(
+        parse_action("reset-window-height"),
+        Some(Action::Column(ColumnAction::ResetHeight))
+    ));
+    assert!(matches!(
+        parse_action("switch-preset-height-back"),
+        Some(Action::Column(ColumnAction::SwitchPresetHeightBack))
+    ));
+    let entries = wave_entries("scroll {\n preset_heights = [0.75, 0.25]\n }\n");
+    let config = Config::from_raw(lower_entries(&entries)).0;
+    assert_eq!(config.scroll.preset_heights.as_slice(), &[0.25, 0.75]);
+    assert_eq!(config.scroll.preset_widths.as_slice().len(), 3);
+    let entries = wave_entries("scroll {\n preset_heights = [5]\n }\n");
+    let config = Config::from_raw(lower_entries(&entries)).0;
+    assert_eq!(config.scroll.preset_heights.as_slice().len(), 3);
+}

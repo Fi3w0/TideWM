@@ -541,6 +541,49 @@ impl Smallvil {
                 }
                 return;
             }
+            ColumnAction::SetHeight(_)
+            | ColumnAction::ResetHeight
+            | ColumnAction::SwitchPresetHeight
+            | ColumnAction::SwitchPresetHeightBack => {
+                if self.fullscreen.contains_key(&focused) || self.group_of(&focused).is_some() {
+                    return;
+                }
+                let layout = &mut self.spatial.workspaces.layout;
+                let Some(current) = layout.scroll_height_share(&focused) else {
+                    return;
+                };
+                let share = match action {
+                    ColumnAction::ResetHeight => None,
+                    ColumnAction::SetHeight(change) => {
+                        let Some(area) = area else {
+                            return;
+                        };
+                        let length = if self.config.scroll.orientation
+                            == crate::scroll::Orientation::Vertical
+                        {
+                            area.size.w
+                        } else {
+                            area.size.h
+                        };
+                        Some(change.apply(current, f64::from((length - 2 * gap).max(1))))
+                    }
+                    _ => {
+                        let step = if action == ColumnAction::SwitchPresetHeight {
+                            crate::scroll::next_preset
+                        } else {
+                            crate::scroll::previous_preset
+                        };
+                        match step(self.config.scroll.preset_heights.as_slice(), current) {
+                            Some(share) => Some(share),
+                            None => return,
+                        }
+                    }
+                };
+                if layout.scroll_set_height_share(&focused, share) {
+                    self.scroll_columns_changed(&focused);
+                }
+                return;
+            }
             ColumnAction::SetWidth(change) => {
                 if let Some(area) = area {
                     let viewport = self.spatial.workspaces.layout.scroll_viewport(area, gap);

@@ -264,6 +264,60 @@ impl Layouts {
         })
     }
 
+    /// The window's share of its column's height (its weight over the
+    /// column's total), or `None` when it is alone in the column.
+    pub(crate) fn scroll_height_share(&self, surface: &WlSurface) -> Option<f64> {
+        let (output, workspace) = self.key_of(surface)?;
+        let column = self
+            .scroll_columns(&output, workspace)
+            .into_iter()
+            .find(|column| column.windows.contains(surface))?;
+        if column.windows.len() < 2 {
+            return None;
+        }
+        let total: f64 = column.windows.iter().map(|s| self.scroll.weight(s)).sum();
+        Some(self.scroll.weight(surface) / total)
+    }
+
+    /// Gives the window `share` of its column's height (clamped to 5-95%)
+    /// by adjusting its weight against the others'. `None` resets it to the
+    /// default weight. False when it is alone or nothing changed.
+    pub(crate) fn scroll_set_height_share(
+        &mut self,
+        surface: &WlSurface,
+        share: Option<f64>,
+    ) -> bool {
+        let Some((output, workspace)) = self.key_of(surface) else {
+            return false;
+        };
+        let Some(column) = self
+            .scroll_columns(&output, workspace)
+            .into_iter()
+            .find(|column| column.windows.contains(surface))
+        else {
+            return false;
+        };
+        if column.windows.len() < 2 {
+            return false;
+        }
+        let before = self.scroll.weight(surface);
+        let weight = match share {
+            None => 1.0,
+            Some(share) => {
+                let others: f64 = column
+                    .windows
+                    .iter()
+                    .filter(|s| *s != surface)
+                    .map(|s| self.scroll.weight(s))
+                    .sum();
+                let share = share.clamp(0.05, 0.95);
+                share * others / (1.0 - share)
+            }
+        };
+        self.scroll.set_weight(surface, weight);
+        (self.scroll.weight(surface) - before).abs() > 1e-9
+    }
+
     /// Moves a window up or down inside its column.
     pub(crate) fn scroll_move_in_column(&mut self, surface: &WlSurface, delta: isize) -> bool {
         self.edit_scroll_columns(surface, |columns, column, row, _| {
@@ -1086,6 +1140,35 @@ mod tests {
         assert!((offset + 246.0).abs() < 1.0, "{offset}");
         // Already centered: nothing more to do.
         assert!(!layouts.scroll_center_visible(&surface(&w[0]), area, 8));
+    }
+
+    #[test]
+    fn window_height_shares_adjust_weights_inside_a_column() {
+        let mut protocol = ProtocolFixture::new();
+        let mut layouts = Layouts::default();
+        layouts.scroll.config = Some(ScrollConfig::default());
+        let w: Vec<_> = (0..3).map(|_| protocol.window()).collect();
+        for window in &w {
+            layouts.insert("screen", 1, window.clone(), None);
+        }
+        let s: Vec<_> = w.iter().map(surface).collect();
+        // Alone in a column there is nothing to share.
+        assert_eq!(layouts.scroll_height_share(&s[0]), None);
+        assert!(!layouts.scroll_set_height_share(&s[0], Some(0.5)));
+        // Stack all three in one column.
+        assert!(layouts.scroll_consume_into_column(&s[0]));
+        assert!(layouts.scroll_consume_into_column(&s[0]));
+        let equal = layouts.scroll_height_share(&s[1]).unwrap();
+        assert!((equal - 1.0 / 3.0).abs() < 1e-9);
+        assert!(layouts.scroll_set_height_share(&s[1], Some(0.5)));
+        let share = layouts.scroll_height_share(&s[1]).unwrap();
+        assert!((share - 0.5).abs() < 1e-9, "{share}");
+        // Out-of-range requests clamp instead of starving the others.
+        assert!(layouts.scroll_set_height_share(&s[1], Some(2.0)));
+        assert!(layouts.scroll_height_share(&s[1]).unwrap() <= 0.95 + 1e-9);
+        assert!(layouts.scroll_set_height_share(&s[1], None));
+        assert!((layouts.scroll_height_share(&s[1]).unwrap() - 1.0 / 3.0).abs() < 1e-9);
+        assert!(!layouts.scroll_set_height_share(&s[1], None));
     }
 
     #[test]

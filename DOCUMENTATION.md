@@ -1888,6 +1888,7 @@ The same set of strings works after `bind ... { }` at the top level or inside a 
 - `center-column` — Scroll only: center the focused column once, even the first or last one (the strip may show empty space past its end until the next focus change)
 - `focus-column-first` / `focus-column-last` — Scroll only: focus the first or last column, on its most recently focused window
 - `move-column-first` / `move-column-last` — Scroll only: move the focused column to the start or end of the strip
+- `set-window-height:<v>` — Scroll only: set or adjust the window's share of its column (`50%`, `+10%`, `-10%`, or pixels along the column); ignored for a window alone in its column. `reset-window-height` restores the equal weight; `switch-preset-height` / `switch-preset-height-back` step through `scroll.preset_heights`
 - `center-visible-columns` — Scroll only: center all fully visible columns together in the viewport
 - `move-column-to-index:<n>` — Scroll only: move the focused column to place `n` (1 is first; larger than the strip means last)
 - `set-column-width:<v>` — Scroll only: set the focused column's width. `50%` or `33.3%` is a share of the usable viewport, `800` is logical pixels, and a leading `+`/`-` (`+10%`, `-10%`, `+100`) changes the current width. The result stays between 10% and 100% of the viewport
@@ -2124,6 +2125,7 @@ scroll {
 | `tile_proportion` | float, `0.1`–`1.0` | `0.5` | Share of the usable viewport a new app takes. `1.0` fills it; `0.94` leaves a narrow neighbor peek. |
 | `center_focused` | `never` \| `always` \| `on-overflow` | `never` | `always` centers every revealed column, including the first, last and only one; `on-overflow` centers only a column that isn't fully visible; `never` moves only as far as needed. `true`/`false` mean `always`/`never`. |
 | `always_center_single` | bool | `false` | Keep a workspace's only column centered whatever `center_focused` says. |
+| `preset_heights` | list of 1–16 shares, `0.1`–`1.0` | `[0.333, 0.5, 0.667]` | Shares of a column's height `switch-preset-height` steps through. |
 | `preset_widths` | list of 1–16 widths, `0.1`–`1.0` | `[0.333, 0.5, 0.667]` | Widths `switch-preset-width` steps through, narrowest first after the widest. |
 | `gesture_distance` | positive float | `1200` | Touchpad travel per viewport. A sensitivity, not a monitor width. |
 | `gesture_invert` | bool | `false` | Reverse the direction a `workspace_swipe_fingers` swipe pans the strip. |

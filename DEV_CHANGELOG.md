@@ -2,6 +2,10 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.10 — Window height actions and `scroll.preset_heights`
+
+- Added `ColumnAction::{SetHeight, ResetHeight, SwitchPresetHeight, SwitchPresetHeightBack}`. A height is the window's weight over the column's total (`Layouts::scroll_height_share`); `scroll_set_height_share` solves `w = s·others/(1−s)` for a share clamped to 5–95 % and sets the weight (`None` resets to 1.0). Alone-in-column, grouped and fullscreen windows are ignored. Pixel values use the cross-axis length minus gaps. `scroll.preset_heights` shares `PresetWidths` (default ⅓, ½, ⅔) and the existing `next_preset`/`previous_preset`; the config arm now serves both keys. Tests: layout (share math, clamp, reset, alone) and parse/config. Nested/native: not run.
+
 ## 0.91.9 — `center-visible-columns`
 
 - Added `ColumnAction::CenterVisible` and `Layouts::scroll_center_visible`: takes the row-0 slots fully inside the viewport, centers their span by setting the offset to `(start + end - viewport) / 2` clamped to `scroll_bounds`, and enables end margins exactly like an explicit `center-column` (cleared by the next reveal or pan). Returns false when nothing is fully visible or the offset does not change. Tests: layout (offset -246 for two 250px columns in a 1000px viewport, second call no-op) and parse. Nested/native: not run.

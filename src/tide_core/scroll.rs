@@ -94,6 +94,8 @@ pub struct ScrollConfig {
     pub always_center_single: bool,
     /// Widths `switch-preset-width` cycles through.
     pub preset_widths: PresetWidths,
+    /// Shares of the column `switch-preset-height` cycles through.
+    pub preset_heights: PresetWidths,
     pub gesture_distance: f64,
     /// Flip the touchpad swipe direction that pans the strip.
     pub gesture_invert: bool,
@@ -197,6 +199,8 @@ impl Default for ScrollConfig {
             center_focused: CenterMode::Never,
             always_center_single: false,
             preset_widths: PresetWidths::new(&[1.0 / 3.0, 0.5, 2.0 / 3.0])
+                .expect("default presets are valid"),
+            preset_heights: PresetWidths::new(&[1.0 / 3.0, 0.5, 2.0 / 3.0])
                 .expect("default presets are valid"),
             gesture_distance: 1200.0,
             gesture_invert: false,

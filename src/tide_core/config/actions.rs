@@ -100,6 +100,15 @@ pub enum ColumnAction {
     SwitchPresetWidthBack,
     /// Set or adjust the column width (`set-column-width:<v>`).
     SetWidth(crate::scroll::SizeChange),
+    /// Set or adjust the window's share of its column height
+    /// (`set-window-height:<v>`).
+    SetHeight(crate::scroll::SizeChange),
+    /// Give the window an equal-weight share again.
+    ResetHeight,
+    /// Cycle the window's share through `scroll.preset_heights`.
+    SwitchPresetHeight,
+    /// `SwitchPresetHeight` in the other direction.
+    SwitchPresetHeightBack,
     /// Toggle the column between full width and its previous width.
     Maximize,
     /// Widen the column into the space other fully visible columns leave.
@@ -731,6 +740,13 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
             .filter(|index| *index >= 1)
             .map(|index| Action::Column(ColumnAction::MoveToIndex(index))),
         "center-visible-columns" => Some(Action::Column(ColumnAction::CenterVisible)),
+        "reset-window-height" => Some(Action::Column(ColumnAction::ResetHeight)),
+        "switch-preset-height" => Some(Action::Column(ColumnAction::SwitchPresetHeight)),
+        "switch-preset-height-back" => Some(Action::Column(ColumnAction::SwitchPresetHeightBack)),
+        other if other.starts_with("set-window-height:") => {
+            crate::scroll::SizeChange::parse(&other["set-window-height:".len()..])
+                .map(|change| Action::Column(ColumnAction::SetHeight(change)))
+        }
         "toggle-column-tabbed" => Some(Action::Column(ColumnAction::ToggleTabbed)),
         other if other.starts_with("set-column-width:") => {
             crate::scroll::SizeChange::parse(&other["set-column-width:".len()..])
