@@ -3359,6 +3359,12 @@ impl Smallvil {
                     self.move_to_workspace(&surface, workspace);
                 }
             }
+            Action::MoveColumnToWorkspace(workspace) => {
+                let Some(workspace) = self.resolve_workspace_ref(&workspace) else {
+                    return;
+                };
+                self.move_column_to_workspace(workspace);
+            }
             Action::SwitchWorkspaceOn(name, workspace) => {
                 let Some(output) = self.output_by_name(&name) else {
                     tracing::warn!(output = %name, "workspace-on: no such output");

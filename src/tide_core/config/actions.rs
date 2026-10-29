@@ -250,6 +250,8 @@ pub enum Action {
     /// vertically instead of switching instantly.
     WorkspaceStep(i32),
     MoveToWorkspace(WorkspaceRef),
+    /// Moves the focused Scroll column, all its windows, to a workspace.
+    MoveColumnToWorkspace(WorkspaceRef),
     /// Swaps the current output's active workspace content with the named
     /// output's. No default keybind -- output names are machine-specific
     /// (see `output { }`), so there's nothing sensible to bind out of the box.
@@ -558,6 +560,9 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
             output.to_string(),
             parse_workspace_ref(n),
         ));
+    }
+    if let Some(n) = action.strip_prefix("move-column-to-workspace:") {
+        return Some(Action::MoveColumnToWorkspace(parse_workspace_ref(n)));
     }
     if let Some(n) = action.strip_prefix("move-to-workspace:") {
         return Some(Action::MoveToWorkspace(parse_workspace_ref(n)));

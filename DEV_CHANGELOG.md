@@ -2,6 +2,11 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.11 — `move-column-to-workspace`
+
+- Added `Action::MoveColumnToWorkspace(WorkspaceRef)` and `Smallvil::move_column_to_workspace`. It snapshots the column's windows, head width and per-window weights, moves each window with `move_to_workspace` (which forgets scroll state and re-inserts each window as its own column), then restores `stacked`, weights and head width. Skipped for the same workspace, scratchpads, grouped and fullscreen windows, and outside Scroll.
+- Nested (real kitty clients over IPC, Scroll engine): a two-window column with a 30% height moved to a workspace that already had a column kept both windows stacked in one new column with the same weights; `set-window-height`, `reset-window-height` and `switch-preset-height` gave the expected shares. Native: not run.
+
 ## 0.91.10 — Window height actions and `scroll.preset_heights`
 
 - Added `ColumnAction::{SetHeight, ResetHeight, SwitchPresetHeight, SwitchPresetHeightBack}`. A height is the window's weight over the column's total (`Layouts::scroll_height_share`); `scroll_set_height_share` solves `w = s·others/(1−s)` for a share clamped to 5–95 % and sets the weight (`None` resets to 1.0). Alone-in-column, grouped and fullscreen windows are ignored. Pixel values use the cross-axis length minus gaps. `scroll.preset_heights` shares `PresetWidths` (default ⅓, ½, ⅔) and the existing `next_preset`/`previous_preset`; the config arm now serves both keys. Tests: layout (share math, clamp, reset, alone) and parse/config. Nested/native: not run.

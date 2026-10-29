@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.11 · 2026-10-30 — Send a column to another workspace
+
+- Scroll: `move-column-to-workspace:<n|name>` sends the focused column, with all its windows, their order, widths and heights, to another workspace.
+
 ## 0.91.10 · 2026-10-30 — Window heights in Scroll columns
 
 - Scroll: `set-window-height:<v>` (`50%`, `+10%`, pixels), `reset-window-height`, and `switch-preset-height` / `switch-preset-height-back` with the new `scroll.preset_heights` list change how a column's height is split between its windows.

@@ -1889,6 +1889,7 @@ The same set of strings works after `bind ... { }` at the top level or inside a 
 - `focus-column-first` / `focus-column-last` — Scroll only: focus the first or last column, on its most recently focused window
 - `move-column-first` / `move-column-last` — Scroll only: move the focused column to the start or end of the strip
 - `set-window-height:<v>` — Scroll only: set or adjust the window's share of its column (`50%`, `+10%`, `-10%`, or pixels along the column); ignored for a window alone in its column. `reset-window-height` restores the equal weight; `switch-preset-height` / `switch-preset-height-back` step through `scroll.preset_heights`
+- `move-column-to-workspace:<n|name>` — Scroll only: send the focused column, all its windows, to a workspace (not for grouped or fullscreen windows)
 - `center-visible-columns` — Scroll only: center all fully visible columns together in the viewport
 - `move-column-to-index:<n>` — Scroll only: move the focused column to place `n` (1 is first; larger than the strip means last)
 - `set-column-width:<v>` — Scroll only: set the focused column's width. `50%` or `33.3%` is a share of the usable viewport, `800` is logical pixels, and a leading `+`/`-` (`+10%`, `-10%`, `+100`) changes the current width. The result stays between 10% and 100% of the viewport
