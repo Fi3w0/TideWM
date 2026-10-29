@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.8 · 2026-10-30 — Move a column to a place
+
+- Scroll: `move-column-to-index:<n>` moves the focused column to place `n` (1 is first; a number past the end means last).
+
 ## 0.91.7 · 2026-10-30 — Reload on demand
 
 - New `reload-config` action and `tidectl reload` re-read the config files immediately, for setups where the file watcher misses a change.

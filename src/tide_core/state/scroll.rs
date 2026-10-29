@@ -632,7 +632,19 @@ impl Smallvil {
         // Column edits leave grouped and fullscreen windows where they are.
         let editable = !self.fullscreen.contains_key(&focused) && self.group_of(&focused).is_none();
         let changed = match action {
-            _ if !editable && !matches!(action, ColumnAction::MoveToEnd { .. }) => false,
+            _ if !editable
+                && !matches!(
+                    action,
+                    ColumnAction::MoveToEnd { .. } | ColumnAction::MoveToIndex(_)
+                ) =>
+            {
+                false
+            }
+            ColumnAction::MoveToIndex(index) => self
+                .spatial
+                .workspaces
+                .layout
+                .scroll_move_column_to(&focused, index - 1),
             ColumnAction::MoveToEnd { last } => self.spatial.workspaces.layout.scroll_move_column(
                 &focused,
                 if last { 1 } else { -1 },

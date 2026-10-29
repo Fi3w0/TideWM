@@ -2,6 +2,10 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.8 — `move-column-to-index`
+
+- Added `ColumnAction::MoveToIndex(usize)` (`move-column-to-index:<n>`, 1-based, `0`/non-numeric rejected at parse) and `Layouts::scroll_move_column_to`, a clamped variant of `scroll_move_column` through `edit_scroll_columns`. Like `MoveToEnd` it is allowed on grouped/fullscreen windows. Tests: parse cases and exact/clamped/no-op moves in the existing column-edit test. Nested/native: not run.
+
 ## 0.91.7 — `reload-config` action
 
 - Added `Action::ReloadConfig` (`reload-config`, no argument) dispatched to `Smallvil::reload_config`, the same path the watcher uses, so diffing, toasts and handlers are unchanged. `tidectl reload` is shorthand. Parse test added; DOCUMENTATION actions list updated.

@@ -4283,3 +4283,14 @@ fn reload_config_is_a_plain_bindable_action() {
     ));
     assert!(parse_action("reload-config:x").is_none());
 }
+
+#[test]
+fn move_column_to_index_parses_one_based_places_only() {
+    assert!(matches!(
+        parse_action("move-column-to-index:3"),
+        Some(Action::Column(ColumnAction::MoveToIndex(3)))
+    ));
+    assert!(parse_action("move-column-to-index:0").is_none());
+    assert!(parse_action("move-column-to-index:x").is_none());
+    assert!(parse_action("move-column-to-index:").is_none());
+}

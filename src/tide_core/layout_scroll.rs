@@ -250,6 +250,20 @@ impl Layouts {
         })
     }
 
+    /// Moves the focused window's column to the 0-based place `index`,
+    /// clamped to the last column.
+    pub(crate) fn scroll_move_column_to(&mut self, surface: &WlSurface, index: usize) -> bool {
+        self.edit_scroll_columns(surface, |columns, column, _, _| {
+            let target = index.min(columns.len() - 1);
+            if target == column {
+                return false;
+            }
+            let moved = columns.remove(column);
+            columns.insert(target, moved);
+            true
+        })
+    }
+
     /// Moves a window up or down inside its column.
     pub(crate) fn scroll_move_in_column(&mut self, surface: &WlSurface, delta: isize) -> bool {
         self.edit_scroll_columns(surface, |columns, column, row, _| {
@@ -886,6 +900,13 @@ mod tests {
         assert!(layouts.scroll_expel_from_column(&s[3]));
         assert_eq!(shape(&layouts).len(), 4);
         assert!(!layouts.scroll_move_column(&s[0], 5, false));
+        // Moving to a place: exact, clamped to the last column, no-op in place.
+        let head = shape(&layouts)[0][0].clone();
+        assert!(layouts.scroll_move_column_to(&head, 2));
+        assert_eq!(shape(&layouts)[2][0], head);
+        assert!(!layouts.scroll_move_column_to(&head, 2));
+        assert!(layouts.scroll_move_column_to(&head, 99));
+        assert_eq!(shape(&layouts).last().unwrap()[0], head);
     }
 
     #[test]

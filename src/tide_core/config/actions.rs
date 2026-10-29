@@ -114,6 +114,9 @@ pub enum ColumnAction {
     FocusRowEnd { last: bool },
     /// Move the column to the first or last place.
     MoveToEnd { last: bool },
+    /// Move the column to a 1-based place, clamped to the last column
+    /// (`move-column-to-index:<n>`).
+    MoveToIndex(usize),
     /// Turn the column into one tab group, or a tab group back into a
     /// stacked column.
     ToggleTabbed,
@@ -719,6 +722,12 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         }
         "move-column-first" => Some(Action::Column(ColumnAction::MoveToEnd { last: false })),
         "move-column-last" => Some(Action::Column(ColumnAction::MoveToEnd { last: true })),
+        other if other.starts_with("move-column-to-index:") => other
+            ["move-column-to-index:".len()..]
+            .parse::<usize>()
+            .ok()
+            .filter(|index| *index >= 1)
+            .map(|index| Action::Column(ColumnAction::MoveToIndex(index))),
         "toggle-column-tabbed" => Some(Action::Column(ColumnAction::ToggleTabbed)),
         other if other.starts_with("set-column-width:") => {
             crate::scroll::SizeChange::parse(&other["set-column-width:".len()..])
