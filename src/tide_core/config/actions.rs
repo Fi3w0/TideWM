@@ -106,6 +106,8 @@ pub enum ColumnAction {
     Expand,
     /// Center the focused column once.
     Center,
+    /// Center the span of all fully visible columns once.
+    CenterVisible,
     /// Focus the first (`last == false`) or last column.
     FocusEnd { last: bool },
     /// Focus the next (`forward`) or previous column, wrapping at the ends.
@@ -728,6 +730,7 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
             .ok()
             .filter(|index| *index >= 1)
             .map(|index| Action::Column(ColumnAction::MoveToIndex(index))),
+        "center-visible-columns" => Some(Action::Column(ColumnAction::CenterVisible)),
         "toggle-column-tabbed" => Some(Action::Column(ColumnAction::ToggleTabbed)),
         other if other.starts_with("set-column-width:") => {
             crate::scroll::SizeChange::parse(&other["set-column-width:".len()..])

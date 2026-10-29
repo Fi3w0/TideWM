@@ -4294,3 +4294,11 @@ fn move_column_to_index_parses_one_based_places_only() {
     assert!(parse_action("move-column-to-index:x").is_none());
     assert!(parse_action("move-column-to-index:").is_none());
 }
+
+#[test]
+fn center_visible_columns_is_a_plain_column_action() {
+    assert!(matches!(
+        parse_action("center-visible-columns"),
+        Some(Action::Column(ColumnAction::CenterVisible))
+    ));
+}

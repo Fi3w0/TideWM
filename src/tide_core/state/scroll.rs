@@ -585,6 +585,20 @@ impl Smallvil {
                 }
                 return;
             }
+            ColumnAction::CenterVisible => {
+                if let Some(area) = area {
+                    if self
+                        .spatial
+                        .workspaces
+                        .layout
+                        .scroll_center_visible(&focused, area, gap)
+                    {
+                        self.retile();
+                        self.request_redraw();
+                    }
+                }
+                return;
+            }
             ColumnAction::ToggleTabbed => {
                 self.toggle_column_tabbed(&focused);
                 return;

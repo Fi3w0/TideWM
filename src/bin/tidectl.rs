@@ -1245,7 +1245,7 @@ ACTIONS:
         master-grow, master-shrink, resize-left/right/up/down,
         move-left/right/up/down, snap:left/right/top/bottom,
         consume-or-expel-left/right, consume-into-column, expel-from-column,
-        switch-preset-width(-back), set-column-width:<+10%|50%|800>, maximize-column, expand-column, center-column,
+        switch-preset-width(-back), set-column-width:<+10%|50%|800>, maximize-column, expand-column, center-column, center-visible-columns,
         focus-column-first/last, focus-column-right-or-first,
         focus-column-left-or-last, focus-window-top/bottom, move-column-first/last, move-column-to-index:<n>, toggle-column-tabbed,
         workspace-down/up (focus-workspace-down/up),

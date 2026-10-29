@@ -789,6 +789,50 @@ impl Layouts {
         x_changed || y_changed
     }
 
+    /// Centers the span of all fully visible columns in the viewport (niri's
+    /// center-visible-columns). Like an explicit center it may leave empty
+    /// space past the strip's ends until the next reveal or pan.
+    pub(crate) fn scroll_center_visible(
+        &mut self,
+        surface: &WlSurface,
+        area: Rectangle<i32, Logical>,
+        gap: i32,
+    ) -> bool {
+        if self.scroll.config.is_none() {
+            return false;
+        }
+        let Some((output, workspace)) = self.key_of(surface) else {
+            return false;
+        };
+        let shown = if self.scroll_key(workspace) == 0 {
+            self.active_workspace(&output)
+        } else {
+            workspace
+        };
+        let slots = self.scroll_slots(&output, shown, area, gap);
+        let key = self.scroll_key(workspace);
+        let previous = self.scroll.offset(&output, key);
+        let viewport = self.scroll_viewport(area, gap);
+        let visible = slots
+            .iter()
+            .filter(|slot| slot.row == 0 && slot.window.is_some())
+            .filter(|slot| {
+                slot.start >= previous - 0.5
+                    && slot.start + slot.extent <= previous + viewport + 0.5
+            });
+        let (start, end) = visible.fold((f64::MAX, f64::MIN), |(start, end), slot| {
+            (start.min(slot.start), end.max(slot.start + slot.extent))
+        });
+        if start > end {
+            return false;
+        }
+        self.scroll.set_margins(&output, key, true);
+        let (minimum, maximum) = self.scroll_bounds(&slots, viewport, (&output, key));
+        let offset = ((start + end - viewport) / 2.0).clamp(minimum, maximum);
+        self.scroll.set_offset(&output, key, offset);
+        (previous - offset).abs() > f64::EPSILON
+    }
+
     /// The column width that fills the viewport space other fully visible
     /// columns leave around `surface`'s column (niri's
     /// expand-column-to-available-width).
@@ -1021,6 +1065,27 @@ mod tests {
             .scroll_available_width(&surface(&w[1]), area, 8)
             .unwrap();
         assert!((width - 0.742).abs() < 1e-9, "{width}");
+    }
+
+    #[test]
+    fn center_visible_centers_the_span_of_fully_visible_columns() {
+        let mut protocol = ProtocolFixture::new();
+        let mut layouts = Layouts::default();
+        layouts.scroll.config = Some(ScrollConfig {
+            tile_proportion: 0.25,
+            ..Default::default()
+        });
+        let w: Vec<_> = (0..2).map(|_| protocol.window()).collect();
+        for window in &w {
+            layouts.insert("screen", 1, window.clone(), None);
+        }
+        // Viewport 1000; the two columns span 0..508 (250 + 8 + 250).
+        let area = Rectangle::new((0, 0).into(), (1016, 600).into());
+        assert!(layouts.scroll_center_visible(&surface(&w[0]), area, 8));
+        let offset = layouts.scroll.offset("screen", 1);
+        assert!((offset + 246.0).abs() < 1.0, "{offset}");
+        // Already centered: nothing more to do.
+        assert!(!layouts.scroll_center_visible(&surface(&w[0]), area, 8));
     }
 
     #[test]

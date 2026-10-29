@@ -2,6 +2,10 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.9 — `center-visible-columns`
+
+- Added `ColumnAction::CenterVisible` and `Layouts::scroll_center_visible`: takes the row-0 slots fully inside the viewport, centers their span by setting the offset to `(start + end - viewport) / 2` clamped to `scroll_bounds`, and enables end margins exactly like an explicit `center-column` (cleared by the next reveal or pan). Returns false when nothing is fully visible or the offset does not change. Tests: layout (offset -246 for two 250px columns in a 1000px viewport, second call no-op) and parse. Nested/native: not run.
+
 ## 0.91.8 — `move-column-to-index`
 
 - Added `ColumnAction::MoveToIndex(usize)` (`move-column-to-index:<n>`, 1-based, `0`/non-numeric rejected at parse) and `Layouts::scroll_move_column_to`, a clamped variant of `scroll_move_column` through `edit_scroll_columns`. Like `MoveToEnd` it is allowed on grouped/fullscreen windows. Tests: parse cases and exact/clamped/no-op moves in the existing column-edit test. Nested/native: not run.
