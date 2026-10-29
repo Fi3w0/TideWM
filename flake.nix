@@ -27,8 +27,7 @@
         { pkgs, lib, ... }:
         {
           imports = [ ./packaging/nix/module.nix ];
-          # Use the system's package set so its license policy applies to
-          # the noncommercial logo bundled with the GPL compositor.
+          # Use the system's package set, so its overlays and config apply.
           programs.tidewm.package = lib.mkDefault (
             pkgs.callPackage ./packaging/nix/package.nix { inherit gitCommit; }
           );

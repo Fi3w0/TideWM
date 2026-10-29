@@ -15,10 +15,10 @@ cargo build --release --locked --features screencast
 sudo install -Dm755 target/release/TideWM /usr/local/bin/TideWM
 sudo install -Dm755 target/release/tidectl /usr/local/bin/tidectl
 sudo install -Dm644 share/wayland-sessions/tidewm.desktop /usr/share/wayland-sessions/tidewm.desktop
-sudo install -Dm644 share/icons/TideWM-logo-faithful-4k.png /usr/share/pixmaps/tidewm.png
+sudo install -Dm644 share/icons/tidewm.png /usr/share/pixmaps/tidewm.png
 sudo install -Dm644 LICENSE /usr/local/share/licenses/tidewm/LICENSE
 sudo install -Dm644 share/icons/LICENSE /usr/local/share/licenses/tidewm/LOGO-NOTICE
-sudo install -Dm644 LICENSES/CC-BY-NC-SA-4.0.txt /usr/local/share/licenses/tidewm/CC-BY-NC-SA-4.0.txt
+sudo install -Dm644 LICENSES/CC-BY-SA-4.0.txt /usr/local/share/licenses/tidewm/CC-BY-SA-4.0.txt
 sudo install -Dm644 assets/fonts/OFL-LICENSE.txt /usr/local/share/licenses/tidewm/OFL-LICENSE.txt
 sudo install -Dm644 LICENSING.md /usr/local/share/doc/tidewm/LICENSING.md
 

@@ -171,7 +171,7 @@ Split it with `include`, format it with `wavefmt`, ask the running session anyth
 | --- | --- |
 | Arch and derivatives | `packaging/arch/install.sh` |
 | Gentoo | `packaging/gentoo/install.sh` |
-| NixOS / Nix | `NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:Fi3w0/TideWM` <sub>(the logo is non-commercial)</sub> |
+| NixOS / Nix | `nix run github:Fi3w0/TideWM` |
 | Anything else | `./install.sh` after the [build dependencies](TECHNICAL_REPORT.md#building) |
 
 Then pick **TideWM** in your display manager. Details: [packaging guide](packaging/README.md).
@@ -240,7 +240,7 @@ Bug reports from new hardware are the most useful thing you can send right now. 
 <summary><b>License</b></summary>
 
 - **TideWM code, including its bundled Wave configuration engine:** GPL-3.0-or-later, see [LICENSE](LICENSE).
-- **TideWM logo:** [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International](LICENSES/CC-BY-NC-SA-4.0.txt), see the [logo notice](share/icons/LICENSE).
+- **TideWM icon (`share/icons/tidewm.png`):** [Creative Commons Attribution-ShareAlike 4.0 International](LICENSES/CC-BY-SA-4.0.txt). The faithful 4k logo stays [CC BY-NC-SA 4.0](LICENSES/CC-BY-NC-SA-4.0.txt) and is not packaged; see the [logo notice](share/icons/LICENSE).
 - **Standalone Scorium:** a separate project with its own [custom source-available license](https://github.com/Scorium-lang/scorium-rs/blob/main/LICENSE), labelled PolyForm Strict 1.0.0. Its restrictions apply to that project; TideWM's bundled Wave code stays GPL.
 - **Bundled Adwaita Sans font:** [SIL Open Font License 1.1](assets/fonts/OFL-LICENSE.txt).
 

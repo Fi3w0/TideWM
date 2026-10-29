@@ -92,11 +92,11 @@ rustPlatform.buildRustPackage {
     install -Dm644 share/wayland-sessions/tidewm.desktop -t $out/share/wayland-sessions
     substituteInPlace $out/share/wayland-sessions/tidewm.desktop \
       --replace-fail "Exec=TideWM" "Exec=$out/bin/TideWM"
-    install -Dm644 share/icons/TideWM-logo-faithful-4k.png $out/share/pixmaps/tidewm.png
+    install -Dm644 share/icons/tidewm.png $out/share/pixmaps/tidewm.png
     install -Dm644 share/nvidia/50-tidewm.json $out/share/tidewm/nvidia/50-tidewm.json
     install -Dm644 LICENSE $out/share/licenses/tidewm/LICENSE
     install -Dm644 share/icons/LICENSE $out/share/licenses/tidewm/LOGO-NOTICE
-    install -Dm644 LICENSES/CC-BY-NC-SA-4.0.txt $out/share/licenses/tidewm/CC-BY-NC-SA-4.0.txt
+    install -Dm644 LICENSES/CC-BY-SA-4.0.txt $out/share/licenses/tidewm/CC-BY-SA-4.0.txt
     install -Dm644 assets/fonts/OFL-LICENSE.txt $out/share/licenses/tidewm/OFL-LICENSE.txt
   ''
   + lib.optionalString withScreencast ''
@@ -115,7 +115,7 @@ rustPlatform.buildRustPackage {
     homepage = "https://github.com/Fi3w0/TideWM";
     license = with lib.licenses; [
       gpl3Plus
-      cc-by-nc-sa-40
+      cc-by-sa-40
       ofl
     ];
     mainProgram = "TideWM";
