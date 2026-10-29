@@ -1873,6 +1873,7 @@ The same set of strings works after `bind ... { }` at the top level or inside a 
 **Focus and layout**
 - `cycle-focus` — most-recently-used order, not z-order
 - `focus-urgent` — jump to whichever window is currently marked urgent, if any
+- `focus-floating` / `focus-tiling` — focus the most recently used floating or tiled window on the focused output; `switch-focus-between-floating-and-tiling` toggles between the two layers
 - `reload-config` — re-read the config files now (what the file watcher does automatically); `tidectl reload` is the shorthand
 - `focus-left` / `focus-right` / `focus-up` / `focus-down` — Classic selects by live screen geometry. Ocean compares the current camera projection, keeps the camera still for a visible neighbor, and glides it to an off-camera neighbor using `ocean.camera_animation_ms`/`camera_sway`; screen pins use their viewport position.
 - `swap-left` / `swap-right` / `swap-up` / `swap-down` — in Scroll, along the strip moves the whole column, across it reorders inside the column

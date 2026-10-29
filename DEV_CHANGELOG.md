@@ -2,6 +2,11 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.12 — Floating/tiling focus actions
+
+- Added `Action::{FocusFloating, FocusTiling, SwitchFocusFloatingTiling}` over `Smallvil::focus_window_kind`: the first visible window of the wanted kind rendered on the focused output, taken from `focus_history` and otherwise from stacking order, activated through `activate_toplevel` (so a floater is raised and a hidden one is not chosen). Parse test added.
+- Nested (Scroll, three kitty clients, one floated): `focus-tiling` chose the most recently used tile, `focus-floating` the floater, and the switch action alternated. Native: not run.
+
 ## 0.91.11 — `move-column-to-workspace`
 
 - Added `Action::MoveColumnToWorkspace(WorkspaceRef)` and `Smallvil::move_column_to_workspace`. It snapshots the column's windows, head width and per-window weights, moves each window with `move_to_workspace` (which forgets scroll state and re-inserts each window as its own column), then restores `stacked`, weights and head width. Skipped for the same workspace, scratchpads, grouped and fullscreen windows, and outside Scroll.

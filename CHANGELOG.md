@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.12 · 2026-10-30 — Jump between floating and tiled windows
+
+- New `focus-floating`, `focus-tiling` and `switch-focus-between-floating-and-tiling` actions focus the most recently used floating or tiled window on the focused monitor.
+
 ## 0.91.11 · 2026-10-30 — Send a column to another workspace
 
 - Scroll: `move-column-to-workspace:<n|name>` sends the focused column, with all its windows, their order, widths and heights, to another workspace.

@@ -3192,6 +3192,9 @@ impl Smallvil {
                 self.focus_urgent();
             }
             Action::ReloadConfig => self.reload_config(),
+            Action::FocusFloating => self.focus_window_kind(true),
+            Action::FocusTiling => self.focus_window_kind(false),
+            Action::SwitchFocusFloatingTiling => self.switch_focus_floating_tiling(),
             Action::TagWindow(tag) => {
                 let focused = self.focused_window_surface();
                 if let Some(surface) = focused {

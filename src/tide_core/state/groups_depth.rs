@@ -1015,6 +1015,47 @@ impl Smallvil {
         self.activate_toplevel(&surface);
     }
 
+    /// Focuses the most recently used visible floating (`floating`) or tiled
+    /// window on the focused output, falling back to stacking order. The
+    /// bindable counterpart to niri's focus-floating / focus-tiling; when
+    /// there is no such window nothing changes.
+    pub(crate) fn focus_window_kind(&mut self, floating: bool) {
+        let Some(output) = self.focused_output().map(|output| output.name()) else {
+            return;
+        };
+        let matches = |state: &Self, surface: &WlSurface| {
+            state.is_floating(surface) == floating
+                && state.window_is_visible(surface)
+                && state
+                    .rendered_output_for_surface(surface)
+                    .is_some_and(|rendered| rendered.name() == output)
+        };
+        let recent = self
+            .input
+            .focus_history
+            .iter()
+            .find(|surface| matches(self, surface))
+            .cloned();
+        let target = recent.or_else(|| {
+            self.space
+                .elements()
+                .rev()
+                .filter_map(|window| window.toplevel().map(|t| t.wl_surface().clone()))
+                .find(|surface| matches(self, surface))
+        });
+        if let Some(target) = target {
+            self.activate_toplevel(&target);
+        }
+    }
+
+    /// Moves focus from the floating layer to the tiled one, or back.
+    pub(crate) fn switch_focus_floating_tiling(&mut self) {
+        let floating = self
+            .focused_window_surface()
+            .is_some_and(|surface| self.is_floating(&surface));
+        self.focus_window_kind(!floating);
+    }
+
     /// Adds `tag` to `surface`'s tag set (`tag-window:<name>`) -- the
     /// runtime counterpart to `rule { add_tag = [...] }`. Idempotent, like
     /// `HashSet::insert` itself. `tag` is the one match criterion besides

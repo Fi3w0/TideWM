@@ -4331,3 +4331,19 @@ fn window_height_actions_and_preset_heights_parse() {
     let config = Config::from_raw(lower_entries(&entries)).0;
     assert_eq!(config.scroll.preset_heights.as_slice().len(), 3);
 }
+
+#[test]
+fn floating_tiling_focus_actions_parse() {
+    assert!(matches!(
+        parse_action("focus-floating"),
+        Some(Action::FocusFloating)
+    ));
+    assert!(matches!(
+        parse_action("focus-tiling"),
+        Some(Action::FocusTiling)
+    ));
+    assert!(matches!(
+        parse_action("switch-focus-between-floating-and-tiling"),
+        Some(Action::SwitchFocusFloatingTiling)
+    ));
+}

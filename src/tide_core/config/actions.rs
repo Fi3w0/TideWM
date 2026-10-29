@@ -192,6 +192,12 @@ pub enum Action {
     /// bindable counterpart to a bar reading the `urgent` IPC flag. See
     /// `Smallvil::focus_urgent`.
     FocusUrgent,
+    /// Focuses the most recently used floating window on the output.
+    FocusFloating,
+    /// Focuses the most recently used tiled window on the output.
+    FocusTiling,
+    /// Moves focus from the tiled layer to the floating one, or back.
+    SwitchFocusFloatingTiling,
     /// Re-reads the config files now, exactly like the file watcher does.
     /// Useful where a watcher misses a change (network mounts, replaced
     /// directories). See `Smallvil::reload_config`.
@@ -685,6 +691,9 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "raise-window" => Some(Action::RaiseWindow),
         "lower-window" => Some(Action::LowerWindow),
         "focus-urgent" => Some(Action::FocusUrgent),
+        "focus-floating" => Some(Action::FocusFloating),
+        "focus-tiling" => Some(Action::FocusTiling),
+        "switch-focus-between-floating-and-tiling" => Some(Action::SwitchFocusFloatingTiling),
         "reload-config" => Some(Action::ReloadConfig),
         "toggle-dpms" => Some(Action::ToggleDpms),
         "switch-layout" => Some(Action::SwitchLayout(LayoutSwitch::Next)),
