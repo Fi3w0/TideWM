@@ -813,6 +813,7 @@ fn build_request(args: &[String]) -> Result<Value, String> {
             Ok(request)
         }
         "depth" => depth_request(rest),
+        "reload" if rest.is_empty() => Ok(action_request("reload-config")),
         "outputs" => Ok(json!({ "request": "outputs" })),
         "workspaces" => Ok(json!({ "request": "workspaces" })),
         "windows" => Ok(json!({ "request": "windows" })),
@@ -1237,7 +1238,7 @@ ACTIONS:
         close-window, toggle-floating, toggle-fullscreen, toggle-pin,
         toggle-scratchpad, move-to-scratchpad, toggle-pseudo-tile,
         toggle-float-ambient, toggle-float-anchor,
-        raise-window, lower-window, focus-urgent, toggle-dpms,
+        raise-window, lower-window, focus-urgent, reload-config, toggle-dpms,
         cycle-focus, focus-left/right/up/down, swap-left/right/up/down,
         group-left/right/up/down, ungroup, cycle-tab-next/prev, quit,
         mode:<name>, exit-mode, layout:bsp, layout:master,

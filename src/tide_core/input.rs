@@ -3191,6 +3191,7 @@ impl Smallvil {
             Action::FocusUrgent => {
                 self.focus_urgent();
             }
+            Action::ReloadConfig => self.reload_config(),
             Action::TagWindow(tag) => {
                 let focused = self.focused_window_surface();
                 if let Some(surface) = focused {

@@ -4274,3 +4274,12 @@ fn destination_workspace_rules_define_snap_limits_before_ownership_changes() {
         assert_eq!(rect.loc.x + rect.size.w, 2500);
     }
 }
+
+#[test]
+fn reload_config_is_a_plain_bindable_action() {
+    assert!(matches!(
+        parse_action("reload-config"),
+        Some(Action::ReloadConfig)
+    ));
+    assert!(parse_action("reload-config:x").is_none());
+}

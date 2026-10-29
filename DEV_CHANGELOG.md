@@ -2,6 +2,11 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.7 — `reload-config` action
+
+- Added `Action::ReloadConfig` (`reload-config`, no argument) dispatched to `Smallvil::reload_config`, the same path the watcher uses, so diffing, toasts and handlers are unchanged. `tidectl reload` is shorthand. Parse test added; DOCUMENTATION actions list updated.
+- Nested: with a private compositor, appending `gaps = 33` was applied by the watcher, then `tidectl reload` logged a no-op reload. `load-config-file <path>` is deliberately not added (arbitrary-path config swap needs a design decision about includes and persistence).
+
 ## 0.91.6 — Close returns to the most recently used window
 
 - `repair_keyboard_focus` (non-Ocean) now picks the first visible `focus_history` entry rendered on the removed window's output before the old topmost-`Space` fallback. `detach_mapped_toplevel` already prunes the closed surface from the history, so the choice is the previously focused window; the Scroll camera follows through normal focus reveal. Ocean path and the pointer-based focus-follows-mouse branch unchanged.

@@ -178,6 +178,10 @@ pub enum Action {
     /// bindable counterpart to a bar reading the `urgent` IPC flag. See
     /// `Smallvil::focus_urgent`.
     FocusUrgent,
+    /// Re-reads the config files now, exactly like the file watcher does.
+    /// Useful where a watcher misses a change (network mounts, replaced
+    /// directories). See `Smallvil::reload_config`.
+    ReloadConfig,
     /// Toggles every output's power together (all on, or all off). See
     /// `Smallvil::toggle_dpms`.
     ToggleDpms,
@@ -662,6 +666,7 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "raise-window" => Some(Action::RaiseWindow),
         "lower-window" => Some(Action::LowerWindow),
         "focus-urgent" => Some(Action::FocusUrgent),
+        "reload-config" => Some(Action::ReloadConfig),
         "toggle-dpms" => Some(Action::ToggleDpms),
         "switch-layout" => Some(Action::SwitchLayout(LayoutSwitch::Next)),
         "cycle-focus" => Some(Action::CycleFocus),

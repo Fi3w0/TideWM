@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.7 · 2026-10-30 — Reload on demand
+
+- New `reload-config` action and `tidectl reload` re-read the config files immediately, for setups where the file watcher misses a change.
+
 ## 0.91.6 · 2026-10-30 — Closing returns to your last window
 
 - Closing a window now focuses the window you used before it on that monitor (like niri), not whichever happens to be on top. In Scroll the strip follows that window.
