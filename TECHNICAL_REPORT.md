@@ -189,7 +189,7 @@ universal or long-session guarantee. See [profile setup and rollback](packaging/
 | **Intel** | Untested. Reports welcome. |
 | **Hybrid AMD + NVIDIA laptops** | GPU selection and offload are implemented and unit-tested, but not yet run end to end on a laptop. |
 
-**Distros:** Arch and Gentoo are fully supported and tested. On Gentoo, both systemd and OpenRC work. Fedora, Debian/Ubuntu, openSUSE and NixOS have build instructions or packages and should work, but they get less testing. TideWM needs no particular init system: libseat and libudev are enough.
+**Distros:** Arch and Gentoo are fully supported and tested. On Gentoo, both systemd and OpenRC work. Fedora, Debian/Ubuntu, openSUSE, Void and NixOS have build instructions or packages and should work, but they get less testing. TideWM needs no particular init system: libseat and libudev are enough, so it runs under OpenRC, runit, s6 or systemd alike.
 
 ## Building
 
@@ -224,9 +224,22 @@ sudo apt install pkg-config libwayland-dev libudev-dev libinput-dev \
 # openSUSE (add clang for screencast)
 sudo zypper install pkgconf-pkg-config wayland-devel libudev-devel libinput-devel \
     libxkbcommon-devel Mesa-libEGL-devel Mesa-libgbm-devel libdrm-devel libseat-devel
+
+# Void (add clang and pipewire-devel for screencast)
+sudo xbps-install -S pkg-config wayland-devel eudev-libudev-devel libinput-devel \
+    libxkbcommon-devel MesaLib-devel libdrm-devel libseat-devel seatd
 ```
 
 If a package name is wrong on your distro, the library list above is what matters, and an [issue](https://github.com/Fi3w0/TideWM/issues/new/choose) helps everyone.
+
+**Without systemd** (Void, Artix, Gentoo OpenRC, ...), libseat needs a seat manager: run seatd and add your user to its group, or use elogind. On Void with runit:
+
+```bash
+sudo ln -s /etc/sv/seatd /var/service/
+sudo usermod -aG _seatd "$USER"   # log out and back in
+```
+
+There is no systemd user bus, so start TideWM from a TTY as `dbus-run-session TideWM` if portals, screen sharing or tray apps need a session bus. The systemd environment export and `tidectl doctor`'s journal and core-dump checks quietly skip when systemd isn't there.
 
 Optional: [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite) for X11 apps (`xwayland.enabled = false` turns it off).
 

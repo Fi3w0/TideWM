@@ -164,12 +164,14 @@ Split it with `include`, format it with `wavefmt`, ask the running session anyth
 
 > [!NOTE]
 > TideWM is in **beta** and built by one person. It is a daily driver on Arch and Gentoo (AMD and NVIDIA); other distros should work, and reports are very welcome.
+>
+> **No systemd required.** TideWM gets its seat through libseat, so it runs on OpenRC, runit (Void), s6 and friends with seatd or elogind.
 
 | Distro | Command |
 | --- | --- |
 | Arch and derivatives | `packaging/arch/install.sh` |
 | Gentoo | `packaging/gentoo/install.sh` |
-| NixOS / Nix | `NIXPKGS_ALLOW_UNFREE=1 nix run --impure github:Fi3w0/TideWM` <sub>(the logo is non-commercial)</sub> |
+| NixOS / Nix | `nix run github:Fi3w0/TideWM` |
 | Anything else | `./install.sh` after the [build dependencies](TECHNICAL_REPORT.md#building) |
 
 Then pick **TideWM** in your display manager. Details: [packaging guide](packaging/README.md).
@@ -193,6 +195,8 @@ sudo dnf install pkgconf-pkg-config wayland-devel systemd-devel libinput-devel l
 sudo apt install pkg-config libwayland-dev libudev-dev libinput-dev libxkbcommon-dev libegl1-mesa-dev libgbm-dev libdrm-dev libseat-dev
 # Gentoo (systemd or OpenRC)
 sudo emerge --ask dev-util/pkgconf dev-libs/wayland dev-libs/libinput x11-libs/libxkbcommon media-libs/mesa x11-libs/libdrm sys-auth/seatd sys-fs/eudev
+# Void
+sudo xbps-install -S pkg-config wayland-devel eudev-libudev-devel libinput-devel libxkbcommon-devel MesaLib-devel libdrm-devel libseat-devel seatd
 ```
 
 Screen sharing (OBS, Discord, browsers) needs `--features screencast` and clang/libclang at build time.
@@ -236,7 +240,7 @@ Bug reports from new hardware are the most useful thing you can send right now. 
 <summary><b>License</b></summary>
 
 - **TideWM code, including its bundled Wave configuration engine:** GPL-3.0-or-later, see [LICENSE](LICENSE).
-- **TideWM logo:** [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International](LICENSES/CC-BY-NC-SA-4.0.txt), see the [logo notice](share/icons/LICENSE).
+- **TideWM icon (`share/icons/tidewm.png`):** [Creative Commons Attribution-ShareAlike 4.0 International](LICENSES/CC-BY-SA-4.0.txt). The faithful 4k logo stays [CC BY-NC-SA 4.0](LICENSES/CC-BY-NC-SA-4.0.txt) and is not packaged; see the [logo notice](share/icons/LICENSE).
 - **Standalone Scorium:** a separate project with its own [custom source-available license](https://github.com/Scorium-lang/scorium-rs/blob/main/LICENSE), labelled PolyForm Strict 1.0.0. Its restrictions apply to that project; TideWM's bundled Wave code stays GPL.
 - **Bundled Adwaita Sans font:** [SIL Open Font License 1.1](assets/fonts/OFL-LICENSE.txt).
 

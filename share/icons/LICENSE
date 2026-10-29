@@ -1,30 +1,34 @@
 TideWM logo artwork
 Copyright (C) 2026 Fi3w0
 
-SPDX-License-Identifier: CC-BY-NC-SA-4.0
+This directory holds two renderings of the TideWM logo under different
+licenses.
 
-This notice applies to these files only:
-  TideWM-logo-faithful-4k.png
-  tidewm.png
+tidewm.png
+  SPDX-License-Identifier: CC-BY-SA-4.0
+  Creative Commons Attribution-ShareAlike 4.0 International:
+    https://creativecommons.org/licenses/by-sa/4.0/
+  Full legal text: LICENSES/CC-BY-SA-4.0.txt at the repository root.
+  This is the icon TideWM packages install.
 
-The artwork is licensed under Creative Commons
-Attribution-NonCommercial-ShareAlike 4.0 International:
-  https://creativecommons.org/licenses/by-nc-sa/4.0/
-
-The complete legal text is provided in
-LICENSES/CC-BY-NC-SA-4.0.txt at the repository root.
+TideWM-logo-faithful-4k.png
+  SPDX-License-Identifier: CC-BY-NC-SA-4.0
+  Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International:
+    https://creativecommons.org/licenses/by-nc-sa/4.0/
+  Full legal text: LICENSES/CC-BY-NC-SA-4.0.txt at the repository root.
 
 Suggested attribution:
-  TideWM logo by Fi3w0 (2026), CC BY-NC-SA 4.0.
+  TideWM logo by Fi3w0 (2026), CC BY-SA 4.0 (tidewm.png)
+  or CC BY-NC-SA 4.0 (TideWM-logo-faithful-4k.png).
   Source: https://github.com/Fi3w0/TideWM/tree/master/share/icons
 
 Credit the creator, link to the license and indicate modifications when
-sharing the artwork. Sharing and adaptation under this license are for
-noncommercial purposes; shared adaptations use the same license or another
-license permitted by its ShareAlike terms. The full legal text controls.
+sharing the artwork. Shared adaptations use the same license or another
+license permitted by its ShareAlike terms. The NonCommercial condition
+applies only to TideWM-logo-faithful-4k.png. The full legal texts control.
 
-This artwork license does not grant trademark rights or imply endorsement.
-For permission beyond this license, contact Fi3w0:
+Neither license grants trademark rights or implies endorsement.
+For permission beyond these licenses, contact Fi3w0:
   https://github.com/Fi3w0
 
 Rights previously granted under another license are not revoked by this notice.

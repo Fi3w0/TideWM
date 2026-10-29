@@ -7,7 +7,8 @@ for one component does not replace another component's terms.
 | --- | --- | --- |
 | TideWM source code, shaders, scripts, documentation, configuration examples and other project assets unless separately identified below | GNU GPL version 3 or later (`GPL-3.0-or-later`) | [LICENSE](LICENSE) |
 | Bundled Wave implementation and `wavefmt` | GNU GPL version 3 or later (`GPL-3.0-or-later`) | [LICENSE](LICENSE); these are part of TideWM |
-| `share/icons/TideWM-logo-faithful-4k.png` and `share/icons/tidewm.png` | Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (`CC-BY-NC-SA-4.0`) | [Logo notice](share/icons/LICENSE), [full legal text](LICENSES/CC-BY-NC-SA-4.0.txt) |
+| `share/icons/tidewm.png` (the icon packages install) | Creative Commons Attribution-ShareAlike 4.0 International (`CC-BY-SA-4.0`) | [Logo notice](share/icons/LICENSE), [full legal text](LICENSES/CC-BY-SA-4.0.txt) |
+| `share/icons/TideWM-logo-faithful-4k.png` | Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (`CC-BY-NC-SA-4.0`) | [Logo notice](share/icons/LICENSE), [full legal text](LICENSES/CC-BY-NC-SA-4.0.txt) |
 | `protocols/hyprland-toplevel-export-v1.xml` (protocol definition from hyprwm/hyprland-protocols) | BSD 3-Clause (`BSD-3-Clause`) | [Copyright notice and license](protocols/LICENSE-hyprland-protocols) |
 | `assets/fonts/AdwaitaSans-Regular.ttf` | SIL Open Font License 1.1 (`OFL-1.1`) | [Font copyright notices and license](assets/fonts/OFL-LICENSE.txt) |
 
@@ -16,24 +17,30 @@ These project notices do not relicense third-party material.
 
 ## Logo attribution and use
 
-When sharing the logo, credit Fi3w0, provide the license link and identify
+TideWM has two renderings of its logo under different licenses:
+
+- `share/icons/tidewm.png` is free artwork under CC BY-SA 4.0. It is the icon
+  every package installs, so distributing TideWM, commercially or not, needs
+  nothing beyond the GPL and this attribution.
+- `share/icons/TideWM-logo-faithful-4k.png` stays under CC BY-NC-SA 4.0. It is
+  kept in the repository but not installed by any package.
+
+When sharing either file, credit Fi3w0, provide the license link and identify
 modifications. A suitable attribution is:
 
-> TideWM logo by Fi3w0 (2026), licensed under CC BY-NC-SA 4.0.
-> https://creativecommons.org/licenses/by-nc-sa/4.0/
+> TideWM logo by Fi3w0 (2026), licensed under CC BY-SA 4.0.
+> https://creativecommons.org/licenses/by-sa/4.0/
 > Source: https://github.com/Fi3w0/TideWM/tree/master/share/icons
 
-The logo license permits noncommercial sharing and adaptation. Shared
-adaptations must follow its ShareAlike terms. It does not grant trademark
-rights or permission to imply official endorsement. See the full legal text
-for the binding conditions and exceptions.
+(use `CC BY-NC-SA 4.0` and https://creativecommons.org/licenses/by-nc-sa/4.0/
+for the faithful 4k file). Shared adaptations must follow the ShareAlike
+terms of the file they start from. Neither license grants trademark rights
+or permission to imply official endorsement. See the full legal texts for
+the binding conditions and exceptions.
 
-TideWM's GPL software remains usable and distributable commercially under
-the GPL. A distributor relying on the logo's CC license must separately
-respect its NonCommercial condition; commercial distributions can omit or
-replace the standalone icon, or obtain separate permission from
-[Fi3w0](https://github.com/Fi3w0). Earlier license grants are not revoked by
-this notice.
+Using the faithful 4k file beyond its NonCommercial condition needs separate
+permission from [Fi3w0](https://github.com/Fi3w0). Earlier license grants
+are not revoked by this notice.
 
 ## Wave and standalone Scorium
 
@@ -60,9 +67,8 @@ standalone library must establish suitable licensing before shipping.
 
 ## Packaged notices
 
-The installers and distro packages include the GPL text, logo attribution
-notice, CC BY-NC-SA legal text and the font's OFL notices in their
-`share/licenses` directory. Package metadata lists the separate licenses.
-Because the bundled logo is noncommercial, the Nix package is classified as
-unfree; see [packaging/README.md](packaging/README.md) for a package-specific
-opt-in. Gentoo users may need to accept `CC-BY-NC-SA-4.0` for this package.
+The installers and distro packages install the CC BY-SA icon and include
+the GPL text, logo attribution notice, CC BY-SA legal text and the font's OFL
+notices in their `share/licenses` directory. Package metadata lists the
+separate licenses, all of them free, so no unfree or license opt-in is
+needed on Nix, Gentoo or elsewhere.
