@@ -2,6 +2,11 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.6 — Close returns to the most recently used window
+
+- `repair_keyboard_focus` (non-Ocean) now picks the first visible `focus_history` entry rendered on the removed window's output before the old topmost-`Space` fallback. `detach_mapped_toplevel` already prunes the closed surface from the history, so the choice is the previously focused window; the Scroll camera follows through normal focus reveal. Ocean path and the pointer-based focus-follows-mouse branch unchanged.
+- Regression: extended the real-protocol `tiled_fullscreen_round_trip_does_not_relock_surface_state` child test with a third window; closing it after focusing tile-one must focus tile-one (fails against the old fallback, which picked tile-two). Native check owed.
+
 ## 0.91.5 — Scroll gesture direction option
 
 - Added `ScrollConfig::gesture_invert` (default `false`), parsed as `scroll.gesture_invert` with the existing `set_bool`. `update_scroll_gesture` negates the per-update strip delta after the `gesture_distance` scaling, so the release snap (which reads the resulting offset) follows automatically. Swim, Ocean and action swipes are unaffected.

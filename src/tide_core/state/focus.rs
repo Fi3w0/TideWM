@@ -1093,28 +1093,45 @@ impl Smallvil {
                 self.input.window_focus = self.topmost_ocean_surface(preferred_output);
             } else {
                 self.refresh_space();
-                self.input.window_focus = preferred_output
-                    .and_then(|output_name| {
-                        self.space
-                            .elements()
-                            .rev()
-                            .find(|window| {
-                                self.output_for_window(window)
+                // Like niri's activate-previous-column on removal: return to
+                // the most recently used window on that output before falling
+                // back to stacking order.
+                let recent = preferred_output.and_then(|output_name| {
+                    self.input
+                        .focus_history
+                        .iter()
+                        .find(|surface| {
+                            self.window_is_visible(surface)
+                                && self
+                                    .rendered_output_for_surface(surface)
                                     .is_some_and(|output| output.name() == output_name)
-                            })
-                            .and_then(|window| {
+                        })
+                        .cloned()
+                });
+                self.input.window_focus = recent.or_else(|| {
+                    preferred_output
+                        .and_then(|output_name| {
+                            self.space
+                                .elements()
+                                .rev()
+                                .find(|window| {
+                                    self.output_for_window(window)
+                                        .is_some_and(|output| output.name() == output_name)
+                                })
+                                .and_then(|window| {
+                                    window
+                                        .toplevel()
+                                        .map(|toplevel| toplevel.wl_surface().clone())
+                                })
+                        })
+                        .or_else(|| {
+                            self.space.elements().rev().find_map(|window| {
                                 window
                                     .toplevel()
                                     .map(|toplevel| toplevel.wl_surface().clone())
                             })
-                    })
-                    .or_else(|| {
-                        self.space.elements().rev().find_map(|window| {
-                            window
-                                .toplevel()
-                                .map(|toplevel| toplevel.wl_surface().clone())
                         })
-                    });
+                });
             }
         }
         self.reconcile_keyboard_focus(serial);
