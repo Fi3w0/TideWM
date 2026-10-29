@@ -164,6 +164,8 @@ Split it with `include`, format it with `wavefmt`, ask the running session anyth
 
 > [!NOTE]
 > TideWM is in **beta** and built by one person. It is a daily driver on Arch and Gentoo (AMD and NVIDIA); other distros should work, and reports are very welcome.
+>
+> **No systemd required.** TideWM gets its seat through libseat, so it runs on OpenRC, runit (Void), s6 and friends with seatd or elogind.
 
 | Distro | Command |
 | --- | --- |
@@ -193,6 +195,8 @@ sudo dnf install pkgconf-pkg-config wayland-devel systemd-devel libinput-devel l
 sudo apt install pkg-config libwayland-dev libudev-dev libinput-dev libxkbcommon-dev libegl1-mesa-dev libgbm-dev libdrm-dev libseat-dev
 # Gentoo (systemd or OpenRC)
 sudo emerge --ask dev-util/pkgconf dev-libs/wayland dev-libs/libinput x11-libs/libxkbcommon media-libs/mesa x11-libs/libdrm sys-auth/seatd sys-fs/eudev
+# Void
+sudo xbps-install -S pkg-config wayland-devel eudev-libudev-devel libinput-devel libxkbcommon-devel MesaLib-devel libdrm-devel libseat-devel seatd
 ```
 
 Screen sharing (OBS, Discord, browsers) needs `--features screencast` and clang/libclang at build time.
