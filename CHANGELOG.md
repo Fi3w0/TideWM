@@ -2,6 +2,11 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.13 · 2026-10-30 — Release a captured keyboard, switch off the touchpad
+
+- `toggle-keyboard-shortcuts-inhibit` turns the focused client's shortcut capture (VMs, remote desktops) off or on. While a client captures shortcuts, this is the only bind that still works.
+- `toggle-touchpad` disables or re-enables every touchpad until restart.
+
 ## 0.91.12 · 2026-10-30 — Jump between floating and tiled windows
 
 - New `focus-floating`, `focus-tiling` and `switch-focus-between-floating-and-tiling` actions focus the most recently used floating or tiled window on the focused monitor.

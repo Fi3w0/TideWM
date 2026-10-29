@@ -34,7 +34,7 @@ use smithay::{
     output::Output,
     reexports::input::{
         AccelProfile, ClickMethod, Device as InputDevice, DeviceConfigResult, DragLockState,
-        ScrollMethod,
+        ScrollMethod, SendEventsMode,
     },
     utils::{Logical, Point, Rectangle, Size, SERIAL_COUNTER},
     wayland::{
@@ -307,6 +307,20 @@ pub fn apply_touchpad_config(cfg: &TouchpadConfig, device: &mut InputDevice) {
     }
 }
 
+/// Disables or re-enables a touchpad-class device without touching the rest
+/// of `[input.touchpad]` (`toggle-touchpad`).
+fn apply_touchpad_power(device: &mut InputDevice, disabled: bool) {
+    if device.config_tap_finger_count() == 0 {
+        return;
+    }
+    let mode = if disabled {
+        SendEventsMode::DISABLED
+    } else {
+        SendEventsMode::ENABLED
+    };
+    warn_on_config_err(device.config_send_events_set_mode(mode), "toggle_touchpad");
+}
+
 fn warn_on_config_err(result: DeviceConfigResult, setting: &str) {
     if let Err(e) = result {
         tracing::warn!(setting, error = ?e, "Failed to apply libinput setting");
@@ -442,12 +456,26 @@ fn completed_swipe_direction(delta_x: f64, delta_y: f64, threshold: f64) -> Opti
 impl Smallvil {
     pub(crate) fn register_input_device(&mut self, device: &mut InputDevice) {
         apply_touchpad_config(&self.config.input.touchpad, device);
+        if self.input.touchpads_disabled {
+            apply_touchpad_power(device, true);
+        }
         let device_config = self.config.input.resolve_device(device.name().as_ref());
         apply_device_calibration(&device_config, device, false);
         if !self.input.known_input_devices.contains(device) {
             self.input.known_input_devices.push(device.clone());
         }
         self.refresh_input_device_outputs();
+    }
+
+    /// Disables or re-enables every touchpad (`toggle-touchpad`). The choice
+    /// outlives hotplug and config reloads, and resets on restart.
+    pub(crate) fn toggle_touchpad(&mut self) {
+        self.input.touchpads_disabled = !self.input.touchpads_disabled;
+        let disabled = self.input.touchpads_disabled;
+        for device in &mut self.input.known_input_devices {
+            apply_touchpad_power(device, disabled);
+        }
+        tracing::info!(disabled, "Touchpads toggled");
     }
 
     pub(crate) fn unregister_input_device(&mut self, device: &InputDevice) {
@@ -462,6 +490,9 @@ impl Smallvil {
         let touchpad = &self.config.input.touchpad;
         for device in &mut self.input.known_input_devices {
             apply_touchpad_config(touchpad, device);
+            if self.input.touchpads_disabled {
+                apply_touchpad_power(device, true);
+            }
             let name = device.name().into_owned();
             let previous = InputDeviceConfig::resolve(previous_rules, &name);
             let current = InputDeviceConfig::resolve(current_rules, &name);
@@ -1178,6 +1209,25 @@ impl Smallvil {
                             })
                             .is_some_and(|inhibitor| inhibitor.is_active())
                         {
+                            // Only the toggle itself escapes the inhibitor,
+                            // so a captured session can always be released
+                            // from the keyboard (niri's allow-inhibiting).
+                            let toggle = matching_keybind(
+                                data.keybind_table(),
+                                keysym,
+                                latin_keysym,
+                                modifiers,
+                                &data.input.helper_keys_down,
+                                data.spatial.engine.ownership()
+                                    == crate::config::SpatialOwnership::Ocean,
+                            )
+                            .is_some_and(|bind| {
+                                matches!(bind.action, Action::ToggleKeyboardShortcutsInhibit)
+                            });
+                            if toggle {
+                                data.run_action(Action::ToggleKeyboardShortcutsInhibit);
+                                return FilterResult::Intercept(());
+                            }
                             return FilterResult::Forward;
                         }
 
@@ -1241,19 +1291,7 @@ impl Smallvil {
                         // (reload_config clears it if the name vanishes),
                         // but degrades safely to "nothing matches,
                         // everything forwards" rather than panicking.
-                        let table: &[Keybind] = if data.input.rescue_keybinds_active {
-                            &data.config.rescue_keybinds
-                        } else {
-                            match &data.input.active_mode {
-                                Some(name) => data
-                                    .config
-                                    .modes
-                                    .get(name)
-                                    .map(Vec::as_slice)
-                                    .unwrap_or(&[]),
-                                None => &data.config.keybinds,
-                            }
-                        };
+                        let table: &[Keybind] = data.keybind_table();
                         let action = matching_keybind(
                             table,
                             keysym,
@@ -3192,6 +3230,8 @@ impl Smallvil {
                 self.focus_urgent();
             }
             Action::ReloadConfig => self.reload_config(),
+            Action::ToggleKeyboardShortcutsInhibit => self.toggle_keyboard_shortcuts_inhibit(),
+            Action::ToggleTouchpad => self.toggle_touchpad(),
             Action::FocusFloating => self.focus_window_kind(true),
             Action::FocusTiling => self.focus_window_kind(false),
             Action::SwitchFocusFloatingTiling => self.switch_focus_floating_tiling(),

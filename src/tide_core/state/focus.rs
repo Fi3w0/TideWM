@@ -156,6 +156,8 @@ pub(crate) struct InputState {
     /// per-device calibration settings without waiting for another hotplug.
     /// Always empty under winit.
     pub known_input_devices: Vec<smithay::reexports::input::Device>,
+    /// `toggle-touchpad` state, reapplied to touchpads on hotplug and reload.
+    pub touchpads_disabled: bool,
     /// Resolved libinput-device to live-output bindings. Rebuilt on device
     /// topology, output topology, and config changes so input events only do
     /// a hash lookup and clone an `Output` handle, with no per-event strings

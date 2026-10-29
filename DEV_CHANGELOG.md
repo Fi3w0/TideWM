@@ -2,6 +2,11 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.13 — Shortcut-inhibit and touchpad toggles
+
+- Added `Action::ToggleKeyboardShortcutsInhibit` (flips the focused surface's Smithay inhibitor with `activate`/`inactivate`) and `Action::ToggleTouchpad` (libinput `SendEventsMode::DISABLED`/`ENABLED` on touchpad-class devices, remembered in `InputState::touchpads_disabled` and reapplied by `register_input_device` and `reapply_input_device_config`). The keyboard filter now matches the active keybind table (new `Smallvil::keybind_table`, also used by the normal path) while an inhibitor is active and lets only the inhibit toggle through before forwarding.
+- Parse test only; neither path is reachable nested (no inhibiting client, no libinput device). Native: not run. `toggle-window-urgent` is not added: `mark_urgent` deliberately ignores the focused window and focus clears urgency, so a toggle on the focused window would have no lasting effect.
+
 ## 0.91.12 — Floating/tiling focus actions
 
 - Added `Action::{FocusFloating, FocusTiling, SwitchFocusFloatingTiling}` over `Smallvil::focus_window_kind`: the first visible window of the wanted kind rendered on the focused output, taken from `focus_history` and otherwise from stacking order, activated through `activate_toplevel` (so a floater is raised and a hidden one is not chosen). Parse test added.

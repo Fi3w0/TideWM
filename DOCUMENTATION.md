@@ -1874,6 +1874,8 @@ The same set of strings works after `bind ... { }` at the top level or inside a 
 - `cycle-focus` — most-recently-used order, not z-order
 - `focus-urgent` — jump to whichever window is currently marked urgent, if any
 - `focus-floating` / `focus-tiling` — focus the most recently used floating or tiled window on the focused output; `switch-focus-between-floating-and-tiling` toggles between the two layers
+- `toggle-keyboard-shortcuts-inhibit` — turn the focused client's shortcuts inhibitor off or back on (VMs, remote desktops). While an inhibitor is active this is the only bind that still fires, so keep it bound
+- `toggle-touchpad` — disable or re-enable every touchpad (physical touchpads only; the choice survives hotplug and config reloads, not a restart)
 - `reload-config` — re-read the config files now (what the file watcher does automatically); `tidectl reload` is the shorthand
 - `focus-left` / `focus-right` / `focus-up` / `focus-down` — Classic selects by live screen geometry. Ocean compares the current camera projection, keeps the camera still for a visible neighbor, and glides it to an off-camera neighbor using `ocean.camera_animation_ms`/`camera_sway`; screen pins use their viewport position.
 - `swap-left` / `swap-right` / `swap-up` / `swap-down` — in Scroll, along the strip moves the whole column, across it reorders inside the column

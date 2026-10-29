@@ -1238,7 +1238,7 @@ ACTIONS:
         close-window, toggle-floating, toggle-fullscreen, toggle-pin,
         toggle-scratchpad, move-to-scratchpad, toggle-pseudo-tile,
         toggle-float-ambient, toggle-float-anchor,
-        raise-window, lower-window, focus-urgent, focus-floating, focus-tiling, switch-focus-between-floating-and-tiling, reload-config, toggle-dpms,
+        raise-window, lower-window, focus-urgent, focus-floating, focus-tiling, switch-focus-between-floating-and-tiling, reload-config, toggle-keyboard-shortcuts-inhibit, toggle-touchpad, toggle-dpms,
         cycle-focus, focus-left/right/up/down, swap-left/right/up/down,
         group-left/right/up/down, ungroup, cycle-tab-next/prev, quit,
         mode:<name>, exit-mode, layout:bsp, layout:master,

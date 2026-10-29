@@ -1048,6 +1048,41 @@ impl Smallvil {
         }
     }
 
+    /// The keybind table the keyboard filter matches against: the rescue
+    /// table, the active mode's own binds, or the base table.
+    pub(crate) fn keybind_table(&self) -> &[crate::config::Keybind] {
+        if self.input.rescue_keybinds_active {
+            &self.config.rescue_keybinds
+        } else {
+            match &self.input.active_mode {
+                Some(name) => self
+                    .config
+                    .modes
+                    .get(name)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+                None => &self.config.keybinds,
+            }
+        }
+    }
+
+    /// Turns the focused client's keyboard-shortcuts inhibitor off, or back
+    /// on, so the compositor's own binds work again (or stop working) while a
+    /// VM or remote-desktop client has focus. No-op without an inhibitor.
+    pub(crate) fn toggle_keyboard_shortcuts_inhibit(&mut self) {
+        let Some(inhibitor) = self
+            .keyboard_focused_surface()
+            .and_then(|surface| smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitorSeat::keyboard_shortcuts_inhibitor_for_surface(&self.seat, surface))
+        else {
+            return;
+        };
+        if inhibitor.is_active() {
+            inhibitor.inactivate();
+        } else {
+            inhibitor.activate();
+        }
+    }
+
     /// Moves focus from the floating layer to the tiled one, or back.
     pub(crate) fn switch_focus_floating_tiling(&mut self) {
         let floating = self

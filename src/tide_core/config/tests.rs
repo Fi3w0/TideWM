@@ -4347,3 +4347,15 @@ fn floating_tiling_focus_actions_parse() {
         Some(Action::SwitchFocusFloatingTiling)
     ));
 }
+
+#[test]
+fn shortcut_inhibit_and_touchpad_toggles_parse() {
+    assert!(matches!(
+        parse_action("toggle-keyboard-shortcuts-inhibit"),
+        Some(Action::ToggleKeyboardShortcutsInhibit)
+    ));
+    assert!(matches!(
+        parse_action("toggle-touchpad"),
+        Some(Action::ToggleTouchpad)
+    ));
+}

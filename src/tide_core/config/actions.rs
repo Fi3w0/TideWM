@@ -192,6 +192,11 @@ pub enum Action {
     /// bindable counterpart to a bar reading the `urgent` IPC flag. See
     /// `Smallvil::focus_urgent`.
     FocusUrgent,
+    /// Toggles the focused client's keyboard-shortcuts inhibitor. This is the
+    /// one bind that still fires while an inhibitor is active.
+    ToggleKeyboardShortcutsInhibit,
+    /// Disables or re-enables every touchpad.
+    ToggleTouchpad,
     /// Focuses the most recently used floating window on the output.
     FocusFloating,
     /// Focuses the most recently used tiled window on the output.
@@ -691,6 +696,8 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "raise-window" => Some(Action::RaiseWindow),
         "lower-window" => Some(Action::LowerWindow),
         "focus-urgent" => Some(Action::FocusUrgent),
+        "toggle-keyboard-shortcuts-inhibit" => Some(Action::ToggleKeyboardShortcutsInhibit),
+        "toggle-touchpad" => Some(Action::ToggleTouchpad),
         "focus-floating" => Some(Action::FocusFloating),
         "focus-tiling" => Some(Action::FocusTiling),
         "switch-focus-between-floating-and-tiling" => Some(Action::SwitchFocusFloatingTiling),
