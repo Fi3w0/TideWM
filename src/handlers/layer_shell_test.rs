@@ -2181,3 +2181,597 @@ fn monitor_window_moves_keep_ownership_and_return_modes() {
                     .overlaps(fixture.state.space.output_geometry(&outputs[2]).unwrap())
         }));
 }
+
+#[test]
+fn monitor_column_moves_preserve_order_weights_and_event_snapshots() {
+    use crate::config::{parse_action, SpatialEngine};
+    use crate::state::SessionLock;
+    const CHILD: &str = "TIDEWM_MONITOR_COLUMN_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "tidewm-monitor-column-test-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("config/tidewm")).unwrap();
+        std::fs::create_dir(root.join("runtime")).unwrap();
+        std::fs::set_permissions(root.join("runtime"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::write(root.join("config/tidewm/config.wave"), "engine = scroll\nwelcome_hint = false\nwater_effects = false\ngaps = 0\nscroll {\n tile_proportion = 1.0\n}\nanimations {\n enabled = false\n}\n").unwrap();
+        let name = concat!(
+            module_path!(),
+            "::monitor_column_moves_preserve_order_weights_and_event_snapshots"
+        );
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name.split_once("::").unwrap().1, "--nocapture"])
+            .env(CHILD, "1")
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_RUNTIME_DIR", root.join("runtime"))
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(String::from_utf8_lossy(&result.stdout).contains("running 1 test"));
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    }
+    let mut event_loop = EventLoop::try_new().unwrap();
+    let state = Smallvil::new(&mut event_loop, Display::new().unwrap());
+    let (server, peer) = UnixStream::pair().unwrap();
+    state
+        .display_handle
+        .clone()
+        .insert_client(
+            server,
+            Arc::new(ClientState {
+                compositor_state: CompositorClientState::default(),
+                security_context: None,
+                disconnect_sender: None,
+            }),
+        )
+        .unwrap();
+    peer.set_nonblocking(true).unwrap();
+    let mut fixture = Fixture {
+        event_loop,
+        state,
+        peer,
+    };
+    let mut outputs = Vec::new();
+    // Registration order differs from physical order. Right has a fractional
+    // scale: selection and pointer placement must use logical geometry.
+    for (name, location, size, scale) in [
+        ("origin", (0, 0), (1000, 600), Scale::Integer(1)),
+        ("diagonal", (1000, -800), (1000, 600), Scale::Integer(1)),
+        ("right", (1000, 0), (1125, 875), Scale::Fractional(1.25)),
+        ("below", (0, 800), (1000, 600), Scale::Integer(1)),
+    ] {
+        let output = Output::new(
+            name.into(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "test".into(),
+                model: "test".into(),
+                serial_number: "test".into(),
+            },
+        );
+        output.change_current_state(
+            Some(Mode {
+                size: size.into(),
+                refresh: 60_000,
+            }),
+            None,
+            Some(scale),
+            Some(location.into()),
+        );
+        fixture.state.space.map_output(&output, location);
+        outputs.push(output);
+    }
+    fixture.request(1, 1, &[2], &[]);
+    let globals: Vec<_> = fixture
+        .dispatch()
+        .into_iter()
+        .filter_map(|(object, opcode, body)| {
+            if object != 2 || opcode != 0 {
+                return None;
+            }
+            let name = u32::from_ne_bytes(body[..4].try_into().unwrap());
+            let length = u32::from_ne_bytes(body[4..8].try_into().unwrap()) as usize;
+            Some((
+                String::from_utf8(body[8..8 + length - 1].to_vec()).unwrap(),
+                name,
+            ))
+        })
+        .collect();
+    for (interface, id, version) in [
+        ("wl_compositor", 3_u32, 4_u32),
+        ("xdg_wm_base", 4, 1),
+        ("wp_single_pixel_buffer_manager_v1", 5, 1),
+        ("wp_viewporter", 6, 1),
+    ] {
+        let name = globals
+            .iter()
+            .find(|(candidate, _)| candidate == interface)
+            .unwrap()
+            .1;
+        let mut tail = string(interface);
+        tail.extend_from_slice(&version.to_ne_bytes());
+        tail.extend_from_slice(&id.to_ne_bytes());
+        fixture.request(2, 0, &[name], &tail);
+    }
+    let mut surfaces = Vec::new();
+    for surface in [7_u32, 12, 17, 22, 27, 32] {
+        fixture.request(3, 0, &[surface], &[]);
+        fixture.request(4, 2, &[surface + 1, surface], &[]);
+        fixture.request(surface + 1, 1, &[surface + 2], &[]);
+        fixture.request(6, 1, &[surface + 3, surface], &[]);
+        fixture.request(surface + 3, 2, &[1000, 600], &[]);
+        fixture.request(surface, 6, &[], &[]);
+        let serial = fixture
+            .dispatch()
+            .into_iter()
+            .find_map(|(object, opcode, body)| {
+                (object == surface + 1 && opcode == 0)
+                    .then(|| u32::from_ne_bytes(body[..4].try_into().unwrap()))
+            })
+            .unwrap();
+        fixture.request(surface + 1, 4, &[serial], &[]);
+        fixture.request(5, 1, &[surface + 4, u32::MAX, 0, 0, u32::MAX], &[]);
+        fixture.request(surface, 1, &[surface + 4, 0, 0], &[]);
+        fixture.request(surface, 6, &[], &[]);
+        fixture.dispatch();
+        surfaces.push(surface);
+    }
+    let surfaces: Vec<_> = surfaces
+        .into_iter()
+        .map(|id| {
+            fixture
+                .state
+                .space
+                .elements()
+                .find_map(|window| {
+                    let surface = window.toplevel()?.wl_surface();
+                    (surface.id().protocol_id() == id).then(|| surface.clone())
+                })
+                .unwrap()
+        })
+        .collect();
+    fixture
+        .state
+        .spatial
+        .workspaces
+        .layout
+        .set_active_workspace("right", 3);
+    for surface in &surfaces[4..] {
+        assert!(fixture
+            .state
+            .move_tiled_window_to_output(surface, &outputs[2], None));
+    }
+    {
+        let layout = &mut fixture.state.spatial.workspaces.layout;
+        let mut source = layout.scroll_columns("origin", 1);
+        source[0].windows = surfaces[..3].to_vec();
+        source[0].width = 0.72;
+        source[1].windows = vec![surfaces[3].clone()];
+        source[1].width = 0.4;
+        source.truncate(2);
+        layout.set_scroll_columns("origin", 1, source);
+        for (index, surface) in surfaces[..3].iter().enumerate() {
+            layout.scroll.set_weight(surface, (index + 1) as f64);
+        }
+        let mut destination = layout.scroll_columns("right", 3);
+        destination[0].windows = vec![surfaces[4].clone()];
+        destination[0].width = 0.31;
+        destination[1].windows = vec![surfaces[5].clone()];
+        destination[1].width = 0.58;
+        layout.set_scroll_columns("right", 3, destination);
+    }
+    fixture.state.retile();
+    let run = |fixture: &mut Fixture, action: &str| {
+        fixture.state.run_action(parse_action(action).unwrap());
+        // Behave like real clients: ack the last configure and commit its
+        // viewport size, so a refused old buffer cannot appear to overlap a
+        // neighbor after its tile moved into a smaller destination slot.
+        let mut events = fixture.dispatch();
+        for _ in 0..16 {
+            let mut acknowledged = false;
+            for surface in [7_u32, 12, 17, 22, 27, 32] {
+                let size = events.iter().rev().find_map(|(object, opcode, body)| {
+                    (*object == surface + 2 && *opcode == 0).then(|| {
+                        (
+                            u32::from_ne_bytes(body[..4].try_into().unwrap()),
+                            u32::from_ne_bytes(body[4..8].try_into().unwrap()),
+                        )
+                    })
+                });
+                let serial = events.iter().rev().find_map(|(object, opcode, body)| {
+                    (*object == surface + 1 && *opcode == 0)
+                        .then(|| u32::from_ne_bytes(body[..4].try_into().unwrap()))
+                });
+                if let Some(serial) = serial {
+                    if let Some((width, height)) = size.filter(|(w, h)| *w > 0 && *h > 0) {
+                        fixture.request(surface + 3, 2, &[width, height], &[]);
+                    }
+                    fixture.request(surface + 1, 4, &[serial], &[]);
+                    fixture.request(surface, 6, &[], &[]);
+                    acknowledged = true;
+                }
+            }
+            if !acknowledged {
+                break;
+            }
+            events = fixture.dispatch();
+        }
+        fixture.state.refresh_space();
+        fixture.state.emit_state_change_events();
+    };
+    fixture.state.activate_toplevel(&surfaces[5]);
+    fixture.state.activate_toplevel(&surfaces[4]);
+    fixture.state.activate_toplevel(&surfaces[1]);
+    run(&mut fixture, "focus-monitor:right");
+    fixture.state.activate_toplevel(&surfaces[1]);
+    fixture.state.config.input.focus_follows_mouse = true;
+    assert_eq!(fixture.state.primary_output(), Some(outputs[2].clone()));
+    fixture
+        .state
+        .spatial
+        .workspaces
+        .output_pins
+        .insert(surfaces[2].clone(), "origin".into());
+
+    // A real IPC subscriber must see only the final rebuilt column, with
+    // no intermediate row-focus changes or per-row destination columns.
+    let _ipc = crate::ipc::init(&mut fixture.event_loop).unwrap();
+    let mut subscriber = UnixStream::connect(std::env::var_os("TIDEWM_SOCKET").unwrap()).unwrap();
+    subscriber
+        .write_all(b"{\"request\":\"subscribe\",\"events\":[\"window\",\"focus\",\"scroll\"]}\n")
+        .unwrap();
+    subscriber.set_nonblocking(true).unwrap();
+    for _ in 0..8 {
+        fixture.dispatch();
+        if !fixture.state.ipc.subscribers.is_empty() {
+            break;
+        }
+    }
+    fixture.state.emit_state_change_events();
+    let drain = |subscriber: &mut UnixStream| {
+        let mut bytes = Vec::new();
+        match subscriber.read_to_end(&mut bytes) {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            other => panic!("unexpected subscriber read: {other:?}"),
+        }
+        String::from_utf8(bytes)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>()
+    };
+    let ack = drain(&mut subscriber);
+    assert!(ack.iter().any(|line| line["ok"] == true), "{ack:?}");
+    let row_ids: Vec<_> = surfaces[..3]
+        .iter()
+        .map(|surface| fixture.state.foreign_toplevel_numeric_ids[surface])
+        .collect();
+    run(&mut fixture, "move-column-to-monitor-right");
+    let columns = fixture
+        .state
+        .spatial
+        .workspaces
+        .layout
+        .scroll_columns("right", 3);
+    assert_eq!(columns.len(), 3);
+    assert_eq!(columns[0].windows, surfaces[4..5]);
+    assert_eq!(columns[0].width, 0.31);
+    assert_eq!(columns[1].windows, surfaces[..3]);
+    assert_eq!(columns[1].width, 0.72);
+    assert_eq!(columns[2].windows, surfaces[5..6]);
+    assert_eq!(columns[2].width, 0.58);
+    let source = fixture
+        .state
+        .spatial
+        .workspaces
+        .layout
+        .scroll_columns("origin", 1);
+    assert_eq!(source.len(), 1);
+    assert_eq!(source[0].windows, surfaces[3..4]);
+    assert_eq!(source[0].width, 0.4);
+    assert_eq!(
+        fixture.state.focused_window_surface(),
+        Some(surfaces[1].clone())
+    );
+    assert_eq!(
+        fixture.state.seat.get_pointer().unwrap().current_focus(),
+        Some(surfaces[1].clone())
+    );
+    assert_eq!(
+        fixture.state.spatial.workspaces.output_pins[&surfaces[2]],
+        "right"
+    );
+    for (row, surface) in surfaces[..3].iter().enumerate() {
+        assert_eq!(
+            fixture
+                .state
+                .spatial
+                .workspaces
+                .layout
+                .scroll
+                .weight(surface),
+            (row + 1) as f64
+        );
+    }
+    let events = drain(&mut subscriber);
+    assert!(!events.iter().any(|event| event["event"] == "focus-changed"));
+    for (row, id) in row_ids.iter().enumerate() {
+        let snapshots: Vec<_> = events
+            .iter()
+            .filter(|event| event["event"] == "window-changed" && event["data"]["window_id"] == *id)
+            .collect();
+        assert!(!snapshots.is_empty(), "missing row event");
+        for event in snapshots {
+            assert_eq!(event["data"]["output"], "right");
+            assert_eq!(event["data"]["workspace"], 3);
+            assert_eq!(event["data"]["scroll"]["column"], 1);
+            assert_eq!(event["data"]["scroll"]["row"], row);
+            assert_eq!(event["data"]["scroll"]["column_width"], 0.72);
+            assert_eq!(event["data"]["scroll"]["row_weight"], (row + 1) as f64);
+        }
+    }
+    assert!(events
+        .iter()
+        .any(|event| event["event"] == "scroll-changed"));
+    drop(subscriber);
+    fixture.dispatch();
+    // Same/missing monitor, strip edge and active grabs/lock are no-ops.
+    let saved = fixture
+        .state
+        .spatial
+        .workspaces
+        .layout
+        .scroll_columns("right", 3);
+    let location = fixture.state.seat.get_pointer().unwrap().current_location();
+    for action in [
+        "move-column-to-monitor-right",
+        "move-column-to-monitor:right",
+        "move-column-to-monitor:missing",
+    ] {
+        run(&mut fixture, action);
+        assert_eq!(
+            fixture
+                .state
+                .spatial
+                .workspaces
+                .layout
+                .scroll_columns("right", 3),
+            saved
+        );
+        assert_eq!(
+            fixture.state.seat.get_pointer().unwrap().current_location(),
+            location
+        );
+    }
+    fixture.state.session_lock = SessionLock::Locked;
+    run(&mut fixture, "move-column-to-monitor-left");
+    assert_eq!(
+        fixture
+            .state
+            .spatial
+            .workspaces
+            .layout
+            .scroll_columns("right", 3),
+        saved
+    );
+    fixture.state.session_lock = SessionLock::Unlocked;
+    let pointer = fixture.state.seat.get_pointer().unwrap();
+    pointer.button(
+        &mut fixture.state,
+        &smithay::input::pointer::ButtonEvent {
+            serial: smithay::utils::SERIAL_COUNTER.next_serial(),
+            time: smithay::backend::input::InputTime::now(),
+            button: 0x110,
+            state: smithay::backend::input::ButtonState::Pressed,
+        },
+    );
+    assert!(pointer.is_grabbed());
+    run(&mut fixture, "move-column-to-monitor-left");
+    assert_eq!(
+        fixture
+            .state
+            .spatial
+            .workspaces
+            .layout
+            .scroll_columns("right", 3),
+        saved
+    );
+    pointer.button(
+        &mut fixture.state,
+        &smithay::input::pointer::ButtonEvent {
+            serial: smithay::utils::SERIAL_COUNTER.next_serial(),
+            time: smithay::backend::input::InputTime::now(),
+            button: 0x110,
+            state: smithay::backend::input::ButtonState::Released,
+        },
+    );
+    fixture.state.config.input.focus_follows_mouse = false;
+    run(&mut fixture, "move-column-to-monitor-left");
+    run(&mut fixture, "move-column-to-monitor-down");
+    assert_eq!(
+        fixture
+            .state
+            .spatial
+            .workspaces
+            .layout
+            .output_of(&surfaces[1]),
+        Some("below")
+    );
+    run(&mut fixture, "move-column-to-monitor-up");
+    assert_eq!(
+        fixture
+            .state
+            .spatial
+            .workspaces
+            .layout
+            .output_of(&surfaces[1]),
+        Some("origin")
+    );
+    // A tabbed column remains one group, preserving tab order and active tab.
+    run(&mut fixture, "toggle-column-tabbed");
+    run(&mut fixture, "move-column-to-monitor:right");
+    let index = fixture.state.group_of(&surfaces[1]).unwrap();
+    assert_eq!(fixture.state.groups[index].output, "right");
+    assert_eq!(fixture.state.groups[index].workspace, 3);
+    assert_eq!(
+        fixture.state.groups[index]
+            .members
+            .iter()
+            .map(|member| member.surface.clone())
+            .collect::<Vec<_>>(),
+        surfaces[..3]
+    );
+    assert_eq!(
+        fixture.state.groups[index].members[fixture.state.groups[index].active].surface,
+        surfaces[1]
+    );
+    assert!(!fixture
+        .state
+        .spatial
+        .workspaces
+        .layout
+        .contains(&surfaces[0]));
+    assert!(!fixture
+        .state
+        .spatial
+        .workspaces
+        .layout
+        .contains(&surfaces[2]));
+    run(&mut fixture, "toggle-column-tabbed");
+    let restored = fixture
+        .state
+        .spatial
+        .workspaces
+        .layout
+        .scroll_columns("right", 3)
+        .into_iter()
+        .find(|c| c.windows.contains(&surfaces[1]))
+        .unwrap();
+    assert_eq!(restored.windows, surfaces[..3]);
+    assert_eq!(restored.width, 0.72);
+    // Fullscreen in an incoming stacked column preempts the target owner.
+    fixture.state.activate_toplevel(&surfaces[4]);
+    run(&mut fixture, "toggle-fullscreen");
+    fixture.state.activate_toplevel(&surfaces[1]);
+    run(&mut fixture, "move-column-to-monitor:origin");
+    run(&mut fixture, "toggle-fullscreen");
+    run(&mut fixture, "move-column-to-monitor:right");
+    assert_eq!(fixture.state.fullscreen[&surfaces[1]].output, "right");
+    assert!(!fixture.state.fullscreen.contains_key(&surfaces[4]));
+    assert_eq!(
+        fixture
+            .state
+            .mapped_toplevel_window(&surfaces[1])
+            .unwrap()
+            .toplevel()
+            .unwrap()
+            .with_pending_state(|state| state.size),
+        Some((900, 700).into())
+    );
+    run(&mut fixture, "toggle-fullscreen");
+    // Overflowing stack keeps its ordered rows and reveals the selected one.
+    run(&mut fixture, "move-column-to-monitor:origin");
+    fixture.state.config.scroll.stack = crate::scroll::StackMode::Scroll;
+    fixture.state.config.scroll.stack_height = 0.8;
+    fixture.state.retile();
+    fixture.state.activate_toplevel(&surfaces[2]);
+    run(&mut fixture, "move-column-to-monitor:right");
+    assert_eq!(
+        fixture.state.focused_window_surface(),
+        Some(surfaces[2].clone())
+    );
+    assert!(
+        fixture
+            .state
+            .spatial
+            .workspaces
+            .layout
+            .scroll
+            .stack_offset(&surfaces[0])
+            > 0.0
+    );
+    assert_eq!(
+        fixture.state.seat.get_pointer().unwrap().current_focus(),
+        Some(surfaces[2].clone())
+    );
+    // The same transfer works across sectioned workspaces and with a
+    // vertical strip: physical monitor directions do not rotate with it.
+    fixture.state.config.scroll.workspaces = crate::scroll::WorkspaceMode::Sections;
+    fixture.state.config.scroll.orientation = crate::scroll::Orientation::Vertical;
+    fixture.state.retile();
+    run(&mut fixture, "move-column-to-monitor:origin");
+    assert_eq!(
+        fixture
+            .state
+            .spatial
+            .workspaces
+            .layout
+            .workspace_of(&surfaces[2]),
+        Some(1)
+    );
+    run(&mut fixture, "move-column-to-monitor-right");
+    let vertical = fixture
+        .state
+        .spatial
+        .workspaces
+        .layout
+        .scroll_columns("right", 3)
+        .into_iter()
+        .find(|column| column.windows.contains(&surfaces[2]))
+        .unwrap();
+    assert_eq!(vertical.windows, surfaces[..3]);
+    assert_eq!(vertical.width, 0.72);
+    assert_eq!(
+        fixture.state.focused_window_surface(),
+        Some(surfaces[2].clone())
+    );
+    fixture.state.config.scroll.workspaces = crate::scroll::WorkspaceMode::Separate;
+    fixture.state.config.scroll.orientation = crate::scroll::Orientation::Horizontal;
+    fixture.state.retile();
+    // A focused floater uses the single-window transfer path.
+    fixture.state.activate_toplevel(&surfaces[3]);
+    run(&mut fixture, "toggle-floating");
+    let columns_before = fixture
+        .state
+        .spatial
+        .workspaces
+        .layout
+        .scroll_columns("right", 3);
+    run(&mut fixture, "move-column-to-monitor:right");
+    assert_eq!(
+        fixture.state.spatial.workspaces.floating_workspace[&surfaces[3]].output,
+        "right"
+    );
+    assert_eq!(
+        fixture
+            .state
+            .spatial
+            .workspaces
+            .layout
+            .scroll_columns("right", 3),
+        columns_before
+    );
+    // Other engines do not reinterpret their layout as a Scroll column.
+    for engine in [SpatialEngine::Classic, SpatialEngine::Ocean] {
+        assert!(fixture.state.migrate_spatial_engine(engine));
+        let before = fixture.state.preferred_output_for_toplevel(&surfaces[3]);
+        run(&mut fixture, "move-column-to-monitor:origin");
+        assert_eq!(
+            fixture.state.preferred_output_for_toplevel(&surfaces[3]),
+            before
+        );
+    }
+}

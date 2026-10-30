@@ -3336,6 +3336,14 @@ impl Smallvil {
                     self.move_focused_window_to_monitor(&output);
                 }
             }
+            Action::MoveColumnToMonitor(direction) => {
+                self.move_column_to_monitor_direction(direction);
+            }
+            Action::MoveColumnToMonitorNamed(name) => {
+                if let Some(output) = self.output_by_name(&name) {
+                    self.move_column_to_monitor(&output);
+                }
+            }
             Action::SwapDirection(direction) => {
                 self.swap_direction(direction);
             }

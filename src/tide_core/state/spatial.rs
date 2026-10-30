@@ -2054,7 +2054,7 @@ impl Smallvil {
 
     /// The focused window's own monitor, independent of an unrelated
     /// pointer output. Shared Ocean uses the camera presenting that window.
-    fn window_monitor(&self, surface: &WlSurface) -> Option<Output> {
+    pub(super) fn window_monitor(&self, surface: &WlSurface) -> Option<Output> {
         let workspace_owner = (self.spatial.engine.ownership()
             == crate::config::SpatialOwnership::Workspaces)
             .then(|| {
@@ -2224,9 +2224,12 @@ impl Smallvil {
             entry.output = to_name.clone();
             entry.restore_rect = relocate(entry.restore_rect);
         }
+        let mut moved_surfaces = vec![surface.clone()];
         if tiled {
             // Validated above; this core also moves parked tabs and pins.
-            self.transfer_tiled_window_to_output(&surface, to, None);
+            if let Some(members) = self.transfer_tiled_window_to_output(&surface, to, None) {
+                moved_surfaces = members;
+            }
             if let Some(width) = scroll_width {
                 self.spatial
                     .workspaces
@@ -2309,7 +2312,9 @@ impl Smallvil {
         self.focus_window(Some(surface.clone()), SERIAL_COUNTER.next_serial());
         self.warp_pointer_to_monitor(to);
         self.refresh_ext_workspaces();
-        self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged { surface });
+        for surface in moved_surfaces {
+            self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged { surface });
+        }
     }
 
     /// Completes a cross-monitor tile drop onto the destination's visible
@@ -2327,28 +2332,31 @@ impl Smallvil {
         {
             return false;
         }
-        self.transfer_tiled_window_to_output(surface, to, target)
+        let Some(members) = self.transfer_tiled_window_to_output(surface, to, target) else {
+            return false;
+        };
+        self.refresh_ext_workspaces();
+        for surface in members {
+            self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged { surface });
+        }
+        true
     }
 
-    /// Ownership transfer shared by pointer drops and keyboard moves. The
-    /// keyboard caller also moves fullscreen/maximize overrides; drag callers
-    /// reject those states before entering here.
-    fn transfer_tiled_window_to_output(
+    /// Ownership transfer shared by pointer drops, window and column moves.
+    /// Callers publish returned members; column moves first rebuild the whole
+    /// destination column. Pointer-drop eligibility stays in its wrapper.
+    pub(super) fn transfer_tiled_window_to_output(
         &mut self,
         surface: &WlSurface,
         to: &Output,
         target: Option<&WlSurface>,
-    ) -> bool {
-        let Some(geometry) = self.space.output_geometry(to) else {
-            return false;
-        };
+    ) -> Option<Vec<WlSurface>> {
+        let geometry = self.space.output_geometry(to)?;
         let name = to.name();
         let workspace = self.spatial.workspaces.layout.active_workspace(&name);
         let window = match self.spatial.engine.ownership() {
             crate::config::SpatialOwnership::Workspaces => {
-                let Some(window) = self.spatial.workspaces.layout.window_of(surface) else {
-                    return false;
-                };
+                let window = self.spatial.workspaces.layout.window_of(surface)?;
                 let target = target.filter(|target| {
                     self.spatial.workspaces.layout.output_of(target) == Some(name.as_str())
                         && self.spatial.workspaces.layout.workspace_of(target) == Some(workspace)
@@ -2361,14 +2369,9 @@ impl Smallvil {
                 window
             }
             crate::config::SpatialOwnership::Ocean => {
-                let Some(window) =
-                    self.spatial
-                        .ocean
-                        .move_tiled_to_output(surface, &name, geometry.size, target)
-                else {
-                    return false;
-                };
-                window
+                self.spatial
+                    .ocean
+                    .move_tiled_to_output(surface, &name, geometry.size, target)?
             }
         };
         let members = if let Some(index) = self.group_of(surface) {
@@ -2385,6 +2388,7 @@ impl Smallvil {
             vec![(surface.clone(), None)]
         };
         self.set_window_fractional_scale(&window, to);
+        let mut moved = Vec::with_capacity(members.len());
         for (member, parked) in members {
             if let Some(pin) = self.spatial.workspaces.output_pins.get_mut(&member) {
                 *pin = name.clone();
@@ -2396,10 +2400,9 @@ impl Smallvil {
                 self.set_window_fractional_scale(&parked, to);
             }
             self.refresh_window_opacity_and_glass_for(&member);
-            self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged { surface: member });
+            moved.push(member);
         }
-        self.refresh_ext_workspaces();
-        true
+        Some(moved)
     }
 
     /// Moves exactly `surface` to `to`, wherever it currently lives --

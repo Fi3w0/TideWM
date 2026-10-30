@@ -273,6 +273,9 @@ pub enum Action {
     MoveToWorkspace(WorkspaceRef),
     /// Moves the focused Scroll column, all its windows, to a workspace.
     MoveColumnToWorkspace(WorkspaceRef),
+    /// Move the focused Scroll column to another monitor and follow it.
+    MoveColumnToMonitor(Direction),
+    MoveColumnToMonitorNamed(String),
     /// Swaps the current output's active workspace content with the named
     /// output's. No default keybind -- output names are machine-specific
     /// (see `output { }`), so there's nothing sensible to bind out of the box.
@@ -558,6 +561,10 @@ fn is_typing_key(key_name: &str) -> bool {
 /// string syntax used in binds, so anything a keybind can trigger is
 /// IPC-addressable for free, including actions added by later phases.
 pub(crate) fn parse_action(action: &str) -> Option<Action> {
+    if let Some(name) = action.strip_prefix("move-column-to-monitor:") {
+        return (!name.trim().is_empty())
+            .then(|| Action::MoveColumnToMonitorNamed(name.trim().to_string()));
+    }
     if let Some(name) = action.strip_prefix("move-window-to-monitor:") {
         return (!name.trim().is_empty())
             .then(|| Action::MoveWindowToMonitorNamed(name.trim().to_string()));
@@ -677,6 +684,10 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         return (!name.trim().is_empty()).then(|| Action::ToggleTag(name.trim().to_string()));
     }
     match action {
+        "move-column-to-monitor-left" => Some(Action::MoveColumnToMonitor(Direction::Left)),
+        "move-column-to-monitor-right" => Some(Action::MoveColumnToMonitor(Direction::Right)),
+        "move-column-to-monitor-up" => Some(Action::MoveColumnToMonitor(Direction::Up)),
+        "move-column-to-monitor-down" => Some(Action::MoveColumnToMonitor(Direction::Down)),
         "move-window-to-monitor-left" => Some(Action::MoveWindowToMonitor(Direction::Left)),
         "move-window-to-monitor-right" => Some(Action::MoveWindowToMonitor(Direction::Right)),
         "move-window-to-monitor-up" => Some(Action::MoveWindowToMonitor(Direction::Up)),
