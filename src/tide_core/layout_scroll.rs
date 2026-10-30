@@ -793,6 +793,14 @@ impl Layouts {
         self.scroll_reveal_with(surface, area, gap, None)
     }
 
+    /// Whether the strip holding `surface` remembers a panned view, so a caller
+    /// that only wants a sensible starting view can leave it alone.
+    pub(crate) fn scroll_view_saved(&self, surface: &WlSurface) -> bool {
+        self.key_of(surface).is_some_and(|(output, workspace)| {
+            self.scroll.has_offset(&output, self.scroll_key(workspace))
+        })
+    }
+
     /// Reveals `surface`, forcing centering on or off with `center`, or
     /// following the configured centering mode with `None`.
     pub(crate) fn scroll_reveal_with(
@@ -1169,6 +1177,20 @@ mod tests {
         assert!(layouts.scroll_set_height_share(&s[1], None));
         assert!((layouts.scroll_height_share(&s[1]).unwrap() - 1.0 / 3.0).abs() < 1e-9);
         assert!(!layouts.scroll_set_height_share(&s[1], None));
+    }
+
+    #[test]
+    fn a_panned_strip_reports_its_saved_view() {
+        let mut protocol = ProtocolFixture::new();
+        let mut layouts = Layouts::default();
+        layouts.scroll.config = Some(ScrollConfig::default());
+        let window = protocol.window();
+        layouts.insert("screen", 1, window.clone(), None);
+        assert!(!layouts.scroll_view_saved(&surface(&window)));
+        layouts.scroll.set_offset("screen", 1, 24.0);
+        assert!(layouts.scroll_view_saved(&surface(&window)));
+        layouts.scroll.set_offset("screen", 1, 0.0);
+        assert!(!layouts.scroll_view_saved(&surface(&window)));
     }
 
     #[test]

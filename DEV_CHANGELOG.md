@@ -2,6 +2,12 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.14 — Keep a panned Scroll view across reload and engine migration
+
+- Cause (found with a temporary `set_offset` backtrace): `migrate_spatial_engine` and the end of every successful `reload_config` called `reveal_scroll_window(focus)`, which recomputed the offset from the focused column and discarded a deliberate pan. The offset itself survived Ocean untouched.
+- Added `ScrollState::has_offset`, `Layouts::scroll_view_saved` and `Smallvil::reveal_scroll_window_unless_panned`; both call sites use it, so only a strip without a remembered view is moved to show the focus. `prepare_scroll` still clamps a remembered view into the strip. Focus-driven reveals are unchanged.
+- Nested (Scroll, four kitty clients, `scroll-left` x2, engine flip to Ocean and back, then `tidectl reload`): `o1` stayed at x=-16 through both; `focus-column-first` still revealed it (x=8). Before the change the round trip snapped it to -1100. Native: not run. Design choice (keep the view) is mine, pending Fiw's confirmation.
+
 ## 0.91.13 — Shortcut-inhibit and touchpad toggles
 
 - Added `Action::ToggleKeyboardShortcutsInhibit` (flips the focused surface's Smithay inhibitor with `activate`/`inactivate`) and `Action::ToggleTouchpad` (libinput `SendEventsMode::DISABLED`/`ENABLED` on touchpad-class devices, remembered in `InputState::touchpads_disabled` and reapplied by `register_input_device` and `reapply_input_device_config`). The keyboard filter now matches the active keybind table (new `Smallvil::keybind_table`, also used by the normal path) while an inhibitor is active and lets only the inhibit toggle through before forwarding.

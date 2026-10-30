@@ -105,6 +105,17 @@ impl Smallvil {
         }
     }
 
+    /// `reveal_scroll_window` for the moments the compositor re-lays the strip
+    /// out on its own (config reload, engine migration): a strip that already
+    /// remembers a panned view keeps it, so a monitor does not come back
+    /// panned to a different column. Prepare-time clamping still keeps the
+    /// remembered view inside the strip.
+    pub(crate) fn reveal_scroll_window_unless_panned(&mut self, surface: &WlSurface) {
+        if !self.spatial.workspaces.layout.scroll_view_saved(surface) {
+            self.reveal_scroll_window(surface);
+        }
+    }
+
     /// Scrolls the strip just far enough to show a strip-anchored floater
     /// that sits off-screen along it; the floater rides along through
     /// `anchor_scroll_floaters`. Bounded like any other pan.

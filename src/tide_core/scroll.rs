@@ -277,6 +277,10 @@ impl ScrollState {
             .copied()
             .unwrap_or(0.0)
     }
+    /// Whether a non-zero view offset is remembered for this strip.
+    pub fn has_offset(&self, output: &str, workspace: u32) -> bool {
+        self.offsets.contains_key(&(output.to_owned(), workspace))
+    }
     pub fn set_offset(&mut self, output: &str, workspace: u32, value: f64) {
         if value.is_finite() {
             let key = (output.to_owned(), workspace);

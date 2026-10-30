@@ -2450,7 +2450,7 @@ impl Smallvil {
             self.refresh_window_opacity_and_glass_for(surface);
         }
         if let Some(focus) = self.input.window_focus.clone() {
-            self.reveal_scroll_window(&focus);
+            self.reveal_scroll_window_unless_panned(&focus);
         }
         self.sync_tide();
         self.refresh_ext_workspaces();

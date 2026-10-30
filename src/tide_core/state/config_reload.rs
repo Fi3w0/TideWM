@@ -631,7 +631,7 @@ impl Smallvil {
                 }
                 self.retile();
                 if let Some(focus) = self.input.window_focus.clone() {
-                    self.reveal_scroll_window(&focus);
+                    self.reveal_scroll_window_unless_panned(&focus);
                 }
                 if !diff.is_empty() || had_error_overlay || !warnings.is_empty() {
                     self.request_redraw();
