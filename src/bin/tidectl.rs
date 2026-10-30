@@ -814,6 +814,14 @@ fn build_request(args: &[String]) -> Result<Value, String> {
         }
         "depth" => depth_request(rest),
         "reload" if rest.is_empty() => Ok(action_request("reload-config")),
+        "load-config" if rest.len() == 1 => {
+            let path = std::fs::canonicalize(&rest[0])
+                .map_err(|e| format!("cannot read {}: {e}", rest[0]))?;
+            Ok(action_request(&format!(
+                "load-config-file:{}",
+                path.display()
+            )))
+        }
         "outputs" => Ok(json!({ "request": "outputs" })),
         "workspaces" => Ok(json!({ "request": "workspaces" })),
         "windows" => Ok(json!({ "request": "windows" })),
@@ -1238,7 +1246,7 @@ ACTIONS:
         close-window, toggle-floating, toggle-fullscreen, toggle-pin,
         toggle-scratchpad, move-to-scratchpad, toggle-pseudo-tile,
         toggle-float-ambient, toggle-float-anchor,
-        raise-window, lower-window, focus-urgent, focus-floating, focus-tiling, switch-focus-between-floating-and-tiling, reload-config, toggle-keyboard-shortcuts-inhibit, toggle-touchpad, toggle-dpms,
+        raise-window, lower-window, focus-urgent, focus-floating, focus-tiling, switch-focus-between-floating-and-tiling, reload-config, load-config-file:<path> (or `tidectl load-config <file>`), toggle-keyboard-shortcuts-inhibit, toggle-touchpad, toggle-dpms,
         cycle-focus, focus-left/right/up/down, swap-left/right/up/down,
         group-left/right/up/down, ungroup, cycle-tab-next/prev, quit,
         mode:<name>, exit-mode, layout:bsp, layout:master,

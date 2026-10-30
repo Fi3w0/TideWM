@@ -207,6 +207,9 @@ pub enum Action {
     /// Useful where a watcher misses a change (network mounts, replaced
     /// directories). See `Smallvil::reload_config`.
     ReloadConfig,
+    /// Switches this session to another config file (`load-config-file:<path>`).
+    /// Session-only: a restart goes back to the normal path.
+    LoadConfigFile(String),
     /// Toggles every output's power together (all on, or all off). See
     /// `Smallvil::toggle_dpms`.
     ToggleDpms,
@@ -702,6 +705,10 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "focus-tiling" => Some(Action::FocusTiling),
         "switch-focus-between-floating-and-tiling" => Some(Action::SwitchFocusFloatingTiling),
         "reload-config" => Some(Action::ReloadConfig),
+        other if other.starts_with("load-config-file:") => {
+            let path = other["load-config-file:".len()..].trim();
+            (!path.is_empty()).then(|| Action::LoadConfigFile(path.to_string()))
+        }
         "toggle-dpms" => Some(Action::ToggleDpms),
         "switch-layout" => Some(Action::SwitchLayout(LayoutSwitch::Next)),
         "cycle-focus" => Some(Action::CycleFocus),

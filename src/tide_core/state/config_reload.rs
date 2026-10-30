@@ -267,6 +267,43 @@ impl Smallvil {
         notices
     }
 
+    /// Switches the running session to the config file at `path` and reloads
+    /// it (`load-config-file`). A file that does not exist, or that fails to
+    /// load, leaves the current configuration and path in place; the usual
+    /// error overlay explains why. Session-only: nothing is written, and a
+    /// restart goes back to the normal path.
+    pub fn load_config_file(&mut self, path: &str) {
+        let expanded = match path.strip_prefix("~/") {
+            Some(rest) => std::env::var_os("HOME")
+                .map(|home| std::path::PathBuf::from(home).join(rest))
+                .unwrap_or_else(|| std::path::PathBuf::from(path)),
+            None => std::path::PathBuf::from(path),
+        };
+        let Ok(target) = std::fs::canonicalize(&expanded) else {
+            tracing::warn!(path, "load-config-file: no such file");
+            return;
+        };
+        if !target.is_file() {
+            tracing::warn!(path, "load-config-file: not a regular file");
+            return;
+        }
+        let previous = crate::config::set_config_path_override(target.clone());
+        self.reload_config();
+        if !self
+            .config
+            .source_paths
+            .iter()
+            .any(|loaded| loaded == &target)
+        {
+            // The new file did not load, so the old configuration is still
+            // live: keep watching and reloading that one.
+            crate::config::replace_config_path_override(previous);
+            tracing::warn!(path = %target.display(), "load-config-file: keeping the previous config");
+        } else {
+            tracing::info!(path = %target.display(), "Loaded config file for this session");
+        }
+    }
+
     pub fn reload_config(&mut self) {
         self.sync_tide();
         match Config::reload_staged(&self.tide) {

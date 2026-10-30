@@ -114,7 +114,9 @@ use files::load_raw_config;
 use files::{config_path, load_raw_config_in};
 #[cfg(test)]
 use files::{ensure_private_owned_dir, event_affects_paths, watch_directories};
-pub use files::{set_config_path_override, spawn_watcher, ConfigWatcher};
+pub use files::{
+    replace_config_path_override, set_config_path_override, spawn_watcher, ConfigWatcher,
+};
 
 mod diff;
 pub(crate) use diff::diff_entries;

@@ -4359,3 +4359,13 @@ fn shortcut_inhibit_and_touchpad_toggles_parse() {
         Some(Action::ToggleTouchpad)
     ));
 }
+
+#[test]
+fn load_config_file_needs_a_path() {
+    assert!(matches!(
+        parse_action("load-config-file:/tmp/other.wave"),
+        Some(Action::LoadConfigFile(ref path)) if path == "/tmp/other.wave"
+    ));
+    assert!(parse_action("load-config-file:").is_none());
+    assert!(parse_action("load-config-file:   ").is_none());
+}

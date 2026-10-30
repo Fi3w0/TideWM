@@ -2,6 +2,12 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.15 — `load-config-file`
+
+- `CONFIG_PATH_OVERRIDE` is now an `RwLock<Option<PathBuf>>` instead of a once-set `OnceLock`; `set_config_path_override` returns the previous value and `replace_config_path_override` can clear or restore it. Startup `-c` behaves as before.
+- Added `Action::LoadConfigFile(String)` and `Smallvil::load_config_file`: expands a leading `~/`, canonicalizes, requires a regular file, swaps the override and runs the ordinary `reload_config`. If the target is not among the resulting `config.source_paths` (the reload failed and kept the old config, showing the usual overlay), the previous override is restored. The watcher needed no change: it already follows `source_paths` through `sync_config_watch_paths`. `tidectl load-config <file>` canonicalizes relative paths on the client.
+- Nested (two private configs with distinct `@marker` values): loading B switched the marker; edits to B were picked up and edits to A ignored; a missing path and a syntax-broken file both kept B live, and B stayed the watched file afterwards. Parse test added. Native: not run. Session-only scope is my default pending Fiw's confirmation.
+
 ## 0.91.14 — Keep a panned Scroll view across reload and engine migration
 
 - Cause (found with a temporary `set_offset` backtrace): `migrate_spatial_engine` and the end of every successful `reload_config` called `reveal_scroll_window(focus)`, which recomputed the offset from the focused column and discarded a deliberate pan. The offset itself survived Ocean untouched.

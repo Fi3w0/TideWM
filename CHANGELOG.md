@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.15 · 2026-10-30 — Switch config files live
+
+- New `load-config-file:<path>` action and `tidectl load-config <file>` switch the running session to another config file. The file watcher follows it; a missing or broken file leaves the current config running. Nothing is written: a restart goes back to your normal config.
+
 ## 0.91.14 · 2026-10-30 — Panned strips stay panned
 
 - A Scroll strip you panned away from the focused window no longer snaps back to it on a config reload or after a trip through Ocean and back.

@@ -3230,6 +3230,7 @@ impl Smallvil {
                 self.focus_urgent();
             }
             Action::ReloadConfig => self.reload_config(),
+            Action::LoadConfigFile(path) => self.load_config_file(&path),
             Action::ToggleKeyboardShortcutsInhibit => self.toggle_keyboard_shortcuts_inhibit(),
             Action::ToggleTouchpad => self.toggle_touchpad(),
             Action::FocusFloating => self.focus_window_kind(true),
