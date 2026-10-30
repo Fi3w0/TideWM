@@ -815,8 +815,13 @@ fn build_request(args: &[String]) -> Result<Value, String> {
         "depth" => depth_request(rest),
         "reload" if rest.is_empty() => Ok(action_request("reload-config")),
         "load-config" if rest.len() == 1 => {
-            let path = std::fs::canonicalize(&rest[0])
-                .map_err(|e| format!("cannot read {}: {e}", rest[0]))?;
+            // Absolute but symlinks kept: a symlinked config.wave must keep
+            // resolving its includes next to the link.
+            let path = std::path::absolute(&rest[0])
+                .map_err(|e| format!("cannot use {}: {e}", rest[0]))?;
+            if !path.is_file() {
+                return Err(format!("not a file: {}", path.display()));
+            }
             Ok(action_request(&format!(
                 "load-config-file:{}",
                 path.display()

@@ -2,6 +2,11 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.16 — Keep symlinks in `load-config-file` paths
+
+- Native 0.91.15 test found it: `load_config_file` and `tidectl load-config` canonicalized the path, so `~/.config/tidewm/config.wave -> ~/fiw-gentoo/dots/tidewm/config.wave` became the override and its relative includes (`theme.wave`, `abyssal-*.wave`) were looked up in the dots directory and skipped. Startup never canonicalizes, so `-c` was unaffected.
+- New `config::session_config_path`: expands `~/`, makes the path absolute with `std::path::absolute` (no symlink resolution) and requires a file. `tidectl` uses `std::path::absolute` too. Test: a symlink is kept, a directory and a missing file are rejected. Nested: a symlinked config whose include sits beside the link (not its target) now loads it.
+
 ## 0.91.15 — `load-config-file`
 
 - `CONFIG_PATH_OVERRIDE` is now an `RwLock<Option<PathBuf>>` instead of a once-set `OnceLock`; `set_config_path_override` returns the previous value and `replace_config_path_override` can clear or restore it. Startup `-c` behaves as before.

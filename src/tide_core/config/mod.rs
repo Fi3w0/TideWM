@@ -115,7 +115,8 @@ use files::{config_path, load_raw_config_in};
 #[cfg(test)]
 use files::{ensure_private_owned_dir, event_affects_paths, watch_directories};
 pub use files::{
-    replace_config_path_override, set_config_path_override, spawn_watcher, ConfigWatcher,
+    replace_config_path_override, session_config_path, set_config_path_override, spawn_watcher,
+    ConfigWatcher,
 };
 
 mod diff;

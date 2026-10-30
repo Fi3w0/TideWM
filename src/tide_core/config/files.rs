@@ -206,6 +206,20 @@ pub fn set_config_path_override(path: PathBuf) -> Option<PathBuf> {
     replace_config_path_override(Some(path))
 }
 
+/// The absolute path `load-config-file` switches to: a leading `~/` expanded,
+/// a relative path made absolute, and symlinks kept as given. Resolving a
+/// symlinked `config.wave` to its target would make its relative includes and
+/// shader paths resolve next to the target instead of next to the link.
+/// `None` unless it names a file.
+pub fn session_config_path(path: &str) -> Option<PathBuf> {
+    let expanded = match path.strip_prefix("~/") {
+        Some(rest) => PathBuf::from(std::env::var_os("HOME")?).join(rest),
+        None => PathBuf::from(path),
+    };
+    let absolute = std::path::absolute(expanded).ok()?;
+    absolute.is_file().then_some(absolute)
+}
+
 /// Sets or clears the override, returning what it was.
 pub fn replace_config_path_override(path: Option<PathBuf>) -> Option<PathBuf> {
     match CONFIG_PATH_OVERRIDE.write() {

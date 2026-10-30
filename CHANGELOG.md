@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.16 · 2026-10-30 — `load-config` with a symlinked config
+
+- Fixed: loading a symlinked `config.wave` with `load-config-file` / `tidectl load-config` looked for its includes and shaders next to the link's target instead of next to the link, dropping them.
+
 ## 0.91.15 · 2026-10-30 — Switch config files live
 
 - New `load-config-file:<path>` action and `tidectl load-config <file>` switch the running session to another config file. The file watcher follows it; a missing or broken file leaves the current config running. Nothing is written: a restart goes back to your normal config.

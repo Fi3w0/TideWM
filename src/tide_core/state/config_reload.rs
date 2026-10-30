@@ -273,20 +273,10 @@ impl Smallvil {
     /// error overlay explains why. Session-only: nothing is written, and a
     /// restart goes back to the normal path.
     pub fn load_config_file(&mut self, path: &str) {
-        let expanded = match path.strip_prefix("~/") {
-            Some(rest) => std::env::var_os("HOME")
-                .map(|home| std::path::PathBuf::from(home).join(rest))
-                .unwrap_or_else(|| std::path::PathBuf::from(path)),
-            None => std::path::PathBuf::from(path),
-        };
-        let Ok(target) = std::fs::canonicalize(&expanded) else {
+        let Some(target) = crate::config::session_config_path(path) else {
             tracing::warn!(path, "load-config-file: no such file");
             return;
         };
-        if !target.is_file() {
-            tracing::warn!(path, "load-config-file: not a regular file");
-            return;
-        }
         let previous = crate::config::set_config_path_override(target.clone());
         self.reload_config();
         if !self

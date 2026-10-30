@@ -4369,3 +4369,26 @@ fn load_config_file_needs_a_path() {
     assert!(parse_action("load-config-file:").is_none());
     assert!(parse_action("load-config-file:   ").is_none());
 }
+
+#[test]
+fn session_config_path_keeps_symlinks() {
+    let dir = std::env::temp_dir().join(format!("tidewm-session-path-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("dots")).unwrap();
+    std::fs::write(dir.join("dots/config.wave"), "gaps = 4\n").unwrap();
+    std::os::unix::fs::symlink(dir.join("dots/config.wave"), dir.join("config.wave")).unwrap();
+    let link = dir.join("config.wave");
+    assert_eq!(
+        crate::config::session_config_path(link.to_str().unwrap()),
+        Some(link.clone())
+    );
+    assert_eq!(
+        crate::config::session_config_path(dir.to_str().unwrap()),
+        None
+    );
+    assert_eq!(
+        crate::config::session_config_path(dir.join("missing.wave").to_str().unwrap()),
+        None
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
