@@ -1015,6 +1015,82 @@ impl Smallvil {
         self.activate_toplevel(&surface);
     }
 
+    /// Focuses the most recently used visible floating (`floating`) or tiled
+    /// window on the focused output, falling back to stacking order. The
+    /// bindable counterpart to niri's focus-floating / focus-tiling; when
+    /// there is no such window nothing changes.
+    pub(crate) fn focus_window_kind(&mut self, floating: bool) {
+        let Some(output) = self.focused_output().map(|output| output.name()) else {
+            return;
+        };
+        let matches = |state: &Self, surface: &WlSurface| {
+            state.is_floating(surface) == floating
+                && state.window_is_visible(surface)
+                && state
+                    .rendered_output_for_surface(surface)
+                    .is_some_and(|rendered| rendered.name() == output)
+        };
+        let recent = self
+            .input
+            .focus_history
+            .iter()
+            .find(|surface| matches(self, surface))
+            .cloned();
+        let target = recent.or_else(|| {
+            self.space
+                .elements()
+                .rev()
+                .filter_map(|window| window.toplevel().map(|t| t.wl_surface().clone()))
+                .find(|surface| matches(self, surface))
+        });
+        if let Some(target) = target {
+            self.activate_toplevel(&target);
+        }
+    }
+
+    /// The keybind table the keyboard filter matches against: the rescue
+    /// table, the active mode's own binds, or the base table.
+    pub(crate) fn keybind_table(&self) -> &[crate::config::Keybind] {
+        if self.input.rescue_keybinds_active {
+            &self.config.rescue_keybinds
+        } else {
+            match &self.input.active_mode {
+                Some(name) => self
+                    .config
+                    .modes
+                    .get(name)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+                None => &self.config.keybinds,
+            }
+        }
+    }
+
+    /// Turns the focused client's keyboard-shortcuts inhibitor off, or back
+    /// on, so the compositor's own binds work again (or stop working) while a
+    /// VM or remote-desktop client has focus. No-op without an inhibitor.
+    pub(crate) fn toggle_keyboard_shortcuts_inhibit(&mut self) {
+        let Some(inhibitor) = self
+            .keyboard_focused_surface()
+            .and_then(|surface| smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitorSeat::keyboard_shortcuts_inhibitor_for_surface(&self.seat, surface))
+        else {
+            return;
+        };
+        if inhibitor.is_active() {
+            inhibitor.inactivate();
+        } else {
+            inhibitor.activate();
+        }
+    }
+
+    /// Moves focus from the floating layer to the tiled one, or back.
+    pub(crate) fn switch_focus_floating_tiling(&mut self) {
+        let floating = self
+            .focused_window_surface()
+            .is_some_and(|surface| self.is_floating(&surface));
+        self.focus_window_kind(!floating);
+    }
+
     /// Adds `tag` to `surface`'s tag set (`tag-window:<name>`) -- the
     /// runtime counterpart to `rule { add_tag = [...] }`. Idempotent, like
     /// `HashSet::insert` itself. `tag` is the one match criterion besides

@@ -4274,3 +4274,121 @@ fn destination_workspace_rules_define_snap_limits_before_ownership_changes() {
         assert_eq!(rect.loc.x + rect.size.w, 2500);
     }
 }
+
+#[test]
+fn reload_config_is_a_plain_bindable_action() {
+    assert!(matches!(
+        parse_action("reload-config"),
+        Some(Action::ReloadConfig)
+    ));
+    assert!(parse_action("reload-config:x").is_none());
+}
+
+#[test]
+fn move_column_to_index_parses_one_based_places_only() {
+    assert!(matches!(
+        parse_action("move-column-to-index:3"),
+        Some(Action::Column(ColumnAction::MoveToIndex(3)))
+    ));
+    assert!(parse_action("move-column-to-index:0").is_none());
+    assert!(parse_action("move-column-to-index:x").is_none());
+    assert!(parse_action("move-column-to-index:").is_none());
+}
+
+#[test]
+fn center_visible_columns_is_a_plain_column_action() {
+    assert!(matches!(
+        parse_action("center-visible-columns"),
+        Some(Action::Column(ColumnAction::CenterVisible))
+    ));
+}
+
+#[test]
+fn window_height_actions_and_preset_heights_parse() {
+    assert!(matches!(
+        parse_action("set-window-height:50%"),
+        Some(Action::Column(ColumnAction::SetHeight(_)))
+    ));
+    assert!(matches!(
+        parse_action("set-window-height:+10%"),
+        Some(Action::Column(ColumnAction::SetHeight(_)))
+    ));
+    assert!(parse_action("set-window-height:0").is_none());
+    assert!(parse_action("set-window-height:").is_none());
+    assert!(matches!(
+        parse_action("reset-window-height"),
+        Some(Action::Column(ColumnAction::ResetHeight))
+    ));
+    assert!(matches!(
+        parse_action("switch-preset-height-back"),
+        Some(Action::Column(ColumnAction::SwitchPresetHeightBack))
+    ));
+    let entries = wave_entries("scroll {\n preset_heights = [0.75, 0.25]\n }\n");
+    let config = Config::from_raw(lower_entries(&entries)).0;
+    assert_eq!(config.scroll.preset_heights.as_slice(), &[0.25, 0.75]);
+    assert_eq!(config.scroll.preset_widths.as_slice().len(), 3);
+    let entries = wave_entries("scroll {\n preset_heights = [5]\n }\n");
+    let config = Config::from_raw(lower_entries(&entries)).0;
+    assert_eq!(config.scroll.preset_heights.as_slice().len(), 3);
+}
+
+#[test]
+fn floating_tiling_focus_actions_parse() {
+    assert!(matches!(
+        parse_action("focus-floating"),
+        Some(Action::FocusFloating)
+    ));
+    assert!(matches!(
+        parse_action("focus-tiling"),
+        Some(Action::FocusTiling)
+    ));
+    assert!(matches!(
+        parse_action("switch-focus-between-floating-and-tiling"),
+        Some(Action::SwitchFocusFloatingTiling)
+    ));
+}
+
+#[test]
+fn shortcut_inhibit_and_touchpad_toggles_parse() {
+    assert!(matches!(
+        parse_action("toggle-keyboard-shortcuts-inhibit"),
+        Some(Action::ToggleKeyboardShortcutsInhibit)
+    ));
+    assert!(matches!(
+        parse_action("toggle-touchpad"),
+        Some(Action::ToggleTouchpad)
+    ));
+}
+
+#[test]
+fn load_config_file_needs_a_path() {
+    assert!(matches!(
+        parse_action("load-config-file:/tmp/other.wave"),
+        Some(Action::LoadConfigFile(ref path)) if path == "/tmp/other.wave"
+    ));
+    assert!(parse_action("load-config-file:").is_none());
+    assert!(parse_action("load-config-file:   ").is_none());
+}
+
+#[test]
+fn session_config_path_keeps_symlinks() {
+    let dir = std::env::temp_dir().join(format!("tidewm-session-path-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("dots")).unwrap();
+    std::fs::write(dir.join("dots/config.wave"), "gaps = 4\n").unwrap();
+    std::os::unix::fs::symlink(dir.join("dots/config.wave"), dir.join("config.wave")).unwrap();
+    let link = dir.join("config.wave");
+    assert_eq!(
+        crate::config::session_config_path(link.to_str().unwrap()),
+        Some(link.clone())
+    );
+    assert_eq!(
+        crate::config::session_config_path(dir.to_str().unwrap()),
+        None
+    );
+    assert_eq!(
+        crate::config::session_config_path(dir.join("missing.wave").to_str().unwrap()),
+        None
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}

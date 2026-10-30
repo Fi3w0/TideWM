@@ -195,21 +195,46 @@ pub(super) fn load_raw_config_in(
     Ok((raw, warnings, entries, source_paths))
 }
 
-static CONFIG_PATH_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+static CONFIG_PATH_OVERRIDE: RwLock<Option<PathBuf>> = RwLock::new(None);
 
-/// Overrides the config path for the rest of this process's lifetime
-/// (`-c`/`--config`, see `main.rs`). Must be called before the first
-/// `Config::load()`/`Config::path()` -- `config_path()` reads it on every
-/// call, including the hot-reload watcher's own path lookup, so one
-/// override this early covers both. First call wins; later calls are a
-/// silent no-op, same as a `OnceLock` normally behaves.
-pub fn set_config_path_override(path: PathBuf) {
-    let _ = CONFIG_PATH_OVERRIDE.set(path);
+/// Overrides the config path (`-c`/`--config` at startup, see `main.rs`, and
+/// `load-config-file` at runtime). `config_path()` reads it on every call,
+/// including the hot-reload watcher's own path lookup, so one override
+/// covers both. Returns the previous override so a failed runtime switch can
+/// put it back.
+pub fn set_config_path_override(path: PathBuf) -> Option<PathBuf> {
+    replace_config_path_override(Some(path))
+}
+
+/// The absolute path `load-config-file` switches to: a leading `~/` expanded,
+/// a relative path made absolute, and symlinks kept as given. Resolving a
+/// symlinked `config.wave` to its target would make its relative includes and
+/// shader paths resolve next to the target instead of next to the link.
+/// `None` unless it names a file.
+pub fn session_config_path(path: &str) -> Option<PathBuf> {
+    let expanded = match path.strip_prefix("~/") {
+        Some(rest) => PathBuf::from(std::env::var_os("HOME")?).join(rest),
+        None => PathBuf::from(path),
+    };
+    let absolute = std::path::absolute(expanded).ok()?;
+    absolute.is_file().then_some(absolute)
+}
+
+/// Sets or clears the override, returning what it was.
+pub fn replace_config_path_override(path: Option<PathBuf>) -> Option<PathBuf> {
+    match CONFIG_PATH_OVERRIDE.write() {
+        Ok(mut guard) => std::mem::replace(&mut *guard, path),
+        Err(_) => None,
+    }
 }
 
 pub(super) fn config_path() -> PathBuf {
-    if let Some(path) = CONFIG_PATH_OVERRIDE.get() {
-        return path.clone();
+    if let Some(path) = CONFIG_PATH_OVERRIDE
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+    {
+        return path;
     }
     if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME") {
         return PathBuf::from(dir).join("tidewm").join("config.wave");

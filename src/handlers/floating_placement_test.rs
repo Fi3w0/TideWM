@@ -642,4 +642,21 @@ fn tiled_fullscreen_round_trip_does_not_relock_surface_state() {
                 .any(|(object, op, _)| (*object, *op) == (callback, 0)));
         }
     }
+
+    // Closing the focused window returns to the previously used one (niri's
+    // activate-previous-column), not to whatever is topmost in stacking order.
+    let third = f.window("tile-three", None, (400, 300));
+    let first = f.surface(ids[0]);
+    let second = f.surface(ids[1]);
+    f.state
+        .focus_window(Some(first.clone()), SERIAL_COUNTER.next_serial());
+    let closing = f.surface(third);
+    f.state
+        .focus_window(Some(closing), SERIAL_COUNTER.next_serial());
+    f.request(third + 2, 0, &[], &[]); // xdg_toplevel.destroy
+    f.request(third + 1, 0, &[], &[]); // xdg_surface.destroy
+    f.request(third, 0, &[], &[]); // wl_surface.destroy
+    f.dispatch();
+    assert_eq!(f.state.focused_window_surface(), Some(first));
+    assert_ne!(f.state.focused_window_surface(), Some(second));
 }

@@ -268,6 +268,7 @@ impl Smallvil {
                 dnd_icon: None,
                 cursor_theme: None,
                 known_input_devices: Vec::new(),
+                touchpads_disabled: false,
                 input_device_outputs: HashMap::new(),
                 is_lid_closed: false,
                 is_tablet_mode: false,

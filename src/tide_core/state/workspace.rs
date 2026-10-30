@@ -675,6 +675,51 @@ impl Smallvil {
         }
     }
 
+    /// Moves the focused Scroll column, every window in it, to `workspace`.
+    /// Moving a window forgets its width and weight, and a re-inserted
+    /// window starts its own column, so both are restored afterwards.
+    pub fn move_column_to_workspace(&mut self, workspace: u32) {
+        if self.spatial.engine.projection() != Some(crate::config::WorkspaceProjection::Scroll) {
+            return;
+        }
+        let Some(focused) = self.focused_window_surface() else {
+            return;
+        };
+        let layout = &self.spatial.workspaces.layout;
+        let (Some(output), Some(current)) =
+            (layout.output_of(&focused), layout.workspace_of(&focused))
+        else {
+            return;
+        };
+        if current == workspace
+            || is_scratchpad_workspace(current)
+            || self.fullscreen.contains_key(&focused)
+            || self.group_of(&focused).is_some()
+        {
+            return;
+        }
+        let columns = layout.scroll_columns(output, current);
+        let Some(column) = columns.iter().find(|c| c.windows.contains(&focused)) else {
+            return;
+        };
+        let windows = column.windows.clone();
+        let width = column.width;
+        let weights: Vec<f64> = windows.iter().map(|s| layout.scroll.weight(s)).collect();
+        for surface in &windows {
+            self.move_to_workspace(surface, workspace);
+        }
+        let layout = &mut self.spatial.workspaces.layout;
+        for (index, surface) in windows.iter().enumerate() {
+            if layout.workspace_of(surface) != Some(workspace) {
+                return;
+            }
+            layout.scroll.set_stacked(surface, index > 0);
+            layout.scroll.set_weight(surface, weights[index]);
+        }
+        layout.scroll.resize(windows[0].clone(), width);
+        self.scroll_columns_changed(&windows[0]);
+    }
+
     /// Toggles a reserved scratchpad workspace. Entering remembers only a
     /// non-scratchpad origin; switching directly between named scratchpads
     /// therefore preserves the real workspace used when toggling back.

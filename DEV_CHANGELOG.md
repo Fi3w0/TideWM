@@ -2,6 +2,60 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.16 — Keep symlinks in `load-config-file` paths
+
+- Native 0.91.15 test found it: `load_config_file` and `tidectl load-config` canonicalized the path, so `~/.config/tidewm/config.wave -> ~/fiw-gentoo/dots/tidewm/config.wave` became the override and its relative includes (`theme.wave`, `abyssal-*.wave`) were looked up in the dots directory and skipped. Startup never canonicalizes, so `-c` was unaffected.
+- New `config::session_config_path`: expands `~/`, makes the path absolute with `std::path::absolute` (no symlink resolution) and requires a file. `tidectl` uses `std::path::absolute` too. Test: a symlink is kept, a directory and a missing file are rejected. Nested: a symlinked config whose include sits beside the link (not its target) now loads it.
+
+## 0.91.15 — `load-config-file`
+
+- `CONFIG_PATH_OVERRIDE` is now an `RwLock<Option<PathBuf>>` instead of a once-set `OnceLock`; `set_config_path_override` returns the previous value and `replace_config_path_override` can clear or restore it. Startup `-c` behaves as before.
+- Added `Action::LoadConfigFile(String)` and `Smallvil::load_config_file`: expands a leading `~/`, canonicalizes, requires a regular file, swaps the override and runs the ordinary `reload_config`. If the target is not among the resulting `config.source_paths` (the reload failed and kept the old config, showing the usual overlay), the previous override is restored. The watcher needed no change: it already follows `source_paths` through `sync_config_watch_paths`. `tidectl load-config <file>` canonicalizes relative paths on the client.
+- Nested (two private configs with distinct `@marker` values): loading B switched the marker; edits to B were picked up and edits to A ignored; a missing path and a syntax-broken file both kept B live, and B stayed the watched file afterwards. Parse test added. Native: not run. Session-only scope is my default pending Fiw's confirmation.
+
+## 0.91.14 — Keep a panned Scroll view across reload and engine migration
+
+- Cause (found with a temporary `set_offset` backtrace): `migrate_spatial_engine` and the end of every successful `reload_config` called `reveal_scroll_window(focus)`, which recomputed the offset from the focused column and discarded a deliberate pan. The offset itself survived Ocean untouched.
+- Added `ScrollState::has_offset`, `Layouts::scroll_view_saved` and `Smallvil::reveal_scroll_window_unless_panned`; both call sites use it, so only a strip without a remembered view is moved to show the focus. `prepare_scroll` still clamps a remembered view into the strip. Focus-driven reveals are unchanged.
+- Nested (Scroll, four kitty clients, `scroll-left` x2, engine flip to Ocean and back, then `tidectl reload`): `o1` stayed at x=-16 through both; `focus-column-first` still revealed it (x=8). Before the change the round trip snapped it to -1100. Native: not run. Design choice (keep the view) is mine, pending Fiw's confirmation.
+
+## 0.91.13 — Shortcut-inhibit and touchpad toggles
+
+- Added `Action::ToggleKeyboardShortcutsInhibit` (flips the focused surface's Smithay inhibitor with `activate`/`inactivate`) and `Action::ToggleTouchpad` (libinput `SendEventsMode::DISABLED`/`ENABLED` on touchpad-class devices, remembered in `InputState::touchpads_disabled` and reapplied by `register_input_device` and `reapply_input_device_config`). The keyboard filter now matches the active keybind table (new `Smallvil::keybind_table`, also used by the normal path) while an inhibitor is active and lets only the inhibit toggle through before forwarding.
+- Parse test only; neither path is reachable nested (no inhibiting client, no libinput device). Native: not run. `toggle-window-urgent` is not added: `mark_urgent` deliberately ignores the focused window and focus clears urgency, so a toggle on the focused window would have no lasting effect.
+
+## 0.91.12 — Floating/tiling focus actions
+
+- Added `Action::{FocusFloating, FocusTiling, SwitchFocusFloatingTiling}` over `Smallvil::focus_window_kind`: the first visible window of the wanted kind rendered on the focused output, taken from `focus_history` and otherwise from stacking order, activated through `activate_toplevel` (so a floater is raised and a hidden one is not chosen). Parse test added.
+- Nested (Scroll, three kitty clients, one floated): `focus-tiling` chose the most recently used tile, `focus-floating` the floater, and the switch action alternated. Native: not run.
+
+## 0.91.11 — `move-column-to-workspace`
+
+- Added `Action::MoveColumnToWorkspace(WorkspaceRef)` and `Smallvil::move_column_to_workspace`. It snapshots the column's windows, head width and per-window weights, moves each window with `move_to_workspace` (which forgets scroll state and re-inserts each window as its own column), then restores `stacked`, weights and head width. Skipped for the same workspace, scratchpads, grouped and fullscreen windows, and outside Scroll.
+- Nested (real kitty clients over IPC, Scroll engine): a two-window column with a 30% height moved to a workspace that already had a column kept both windows stacked in one new column with the same weights; `set-window-height`, `reset-window-height` and `switch-preset-height` gave the expected shares. Native: not run.
+
+## 0.91.10 — Window height actions and `scroll.preset_heights`
+
+- Added `ColumnAction::{SetHeight, ResetHeight, SwitchPresetHeight, SwitchPresetHeightBack}`. A height is the window's weight over the column's total (`Layouts::scroll_height_share`); `scroll_set_height_share` solves `w = s·others/(1−s)` for a share clamped to 5–95 % and sets the weight (`None` resets to 1.0). Alone-in-column, grouped and fullscreen windows are ignored. Pixel values use the cross-axis length minus gaps. `scroll.preset_heights` shares `PresetWidths` (default ⅓, ½, ⅔) and the existing `next_preset`/`previous_preset`; the config arm now serves both keys. Tests: layout (share math, clamp, reset, alone) and parse/config. Nested/native: not run.
+
+## 0.91.9 — `center-visible-columns`
+
+- Added `ColumnAction::CenterVisible` and `Layouts::scroll_center_visible`: takes the row-0 slots fully inside the viewport, centers their span by setting the offset to `(start + end - viewport) / 2` clamped to `scroll_bounds`, and enables end margins exactly like an explicit `center-column` (cleared by the next reveal or pan). Returns false when nothing is fully visible or the offset does not change. Tests: layout (offset -246 for two 250px columns in a 1000px viewport, second call no-op) and parse. Nested/native: not run.
+
+## 0.91.8 — `move-column-to-index`
+
+- Added `ColumnAction::MoveToIndex(usize)` (`move-column-to-index:<n>`, 1-based, `0`/non-numeric rejected at parse) and `Layouts::scroll_move_column_to`, a clamped variant of `scroll_move_column` through `edit_scroll_columns`. Like `MoveToEnd` it is allowed on grouped/fullscreen windows. Tests: parse cases and exact/clamped/no-op moves in the existing column-edit test. Nested/native: not run.
+
+## 0.91.7 — `reload-config` action
+
+- Added `Action::ReloadConfig` (`reload-config`, no argument) dispatched to `Smallvil::reload_config`, the same path the watcher uses, so diffing, toasts and handlers are unchanged. `tidectl reload` is shorthand. Parse test added; DOCUMENTATION actions list updated.
+- Nested: with a private compositor, appending `gaps = 33` was applied by the watcher, then `tidectl reload` logged a no-op reload. `load-config-file <path>` is deliberately not added (arbitrary-path config swap needs a design decision about includes and persistence).
+
+## 0.91.6 — Close returns to the most recently used window
+
+- `repair_keyboard_focus` (non-Ocean) now picks the first visible `focus_history` entry rendered on the removed window's output before the old topmost-`Space` fallback. `detach_mapped_toplevel` already prunes the closed surface from the history, so the choice is the previously focused window; the Scroll camera follows through normal focus reveal. Ocean path and the pointer-based focus-follows-mouse branch unchanged.
+- Regression: extended the real-protocol `tiled_fullscreen_round_trip_does_not_relock_surface_state` child test with a third window; closing it after focusing tile-one must focus tile-one (fails against the old fallback, which picked tile-two). Native check owed.
+
 ## 0.91.5 — Scroll gesture direction option
 
 - Added `ScrollConfig::gesture_invert` (default `false`), parsed as `scroll.gesture_invert` with the existing `set_bool`. `update_scroll_gesture` negates the per-update strip delta after the `gesture_distance` scaling, so the release snap (which reads the resulting offset) follows automatically. Swim, Ocean and action swipes are unaffected.

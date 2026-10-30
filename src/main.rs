@@ -765,7 +765,9 @@ fn parse_args() -> Args {
                 std::process::exit(0);
             }
             "-c" | "--config" => match args.next() {
-                Some(path) => config::set_config_path_override(std::path::PathBuf::from(path)),
+                Some(path) => {
+                    config::set_config_path_override(std::path::PathBuf::from(path));
+                }
                 None => fail("--config requires a path argument"),
             },
             "-s" | "--spawn" => match args.next() {

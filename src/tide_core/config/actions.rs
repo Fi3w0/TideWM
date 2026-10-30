@@ -100,12 +100,23 @@ pub enum ColumnAction {
     SwitchPresetWidthBack,
     /// Set or adjust the column width (`set-column-width:<v>`).
     SetWidth(crate::scroll::SizeChange),
+    /// Set or adjust the window's share of its column height
+    /// (`set-window-height:<v>`).
+    SetHeight(crate::scroll::SizeChange),
+    /// Give the window an equal-weight share again.
+    ResetHeight,
+    /// Cycle the window's share through `scroll.preset_heights`.
+    SwitchPresetHeight,
+    /// `SwitchPresetHeight` in the other direction.
+    SwitchPresetHeightBack,
     /// Toggle the column between full width and its previous width.
     Maximize,
     /// Widen the column into the space other fully visible columns leave.
     Expand,
     /// Center the focused column once.
     Center,
+    /// Center the span of all fully visible columns once.
+    CenterVisible,
     /// Focus the first (`last == false`) or last column.
     FocusEnd { last: bool },
     /// Focus the next (`forward`) or previous column, wrapping at the ends.
@@ -114,6 +125,9 @@ pub enum ColumnAction {
     FocusRowEnd { last: bool },
     /// Move the column to the first or last place.
     MoveToEnd { last: bool },
+    /// Move the column to a 1-based place, clamped to the last column
+    /// (`move-column-to-index:<n>`).
+    MoveToIndex(usize),
     /// Turn the column into one tab group, or a tab group back into a
     /// stacked column.
     ToggleTabbed,
@@ -178,6 +192,24 @@ pub enum Action {
     /// bindable counterpart to a bar reading the `urgent` IPC flag. See
     /// `Smallvil::focus_urgent`.
     FocusUrgent,
+    /// Toggles the focused client's keyboard-shortcuts inhibitor. This is the
+    /// one bind that still fires while an inhibitor is active.
+    ToggleKeyboardShortcutsInhibit,
+    /// Disables or re-enables every touchpad.
+    ToggleTouchpad,
+    /// Focuses the most recently used floating window on the output.
+    FocusFloating,
+    /// Focuses the most recently used tiled window on the output.
+    FocusTiling,
+    /// Moves focus from the tiled layer to the floating one, or back.
+    SwitchFocusFloatingTiling,
+    /// Re-reads the config files now, exactly like the file watcher does.
+    /// Useful where a watcher misses a change (network mounts, replaced
+    /// directories). See `Smallvil::reload_config`.
+    ReloadConfig,
+    /// Switches this session to another config file (`load-config-file:<path>`).
+    /// Session-only: a restart goes back to the normal path.
+    LoadConfigFile(String),
     /// Toggles every output's power together (all on, or all off). See
     /// `Smallvil::toggle_dpms`.
     ToggleDpms,
@@ -232,6 +264,8 @@ pub enum Action {
     /// vertically instead of switching instantly.
     WorkspaceStep(i32),
     MoveToWorkspace(WorkspaceRef),
+    /// Moves the focused Scroll column, all its windows, to a workspace.
+    MoveColumnToWorkspace(WorkspaceRef),
     /// Swaps the current output's active workspace content with the named
     /// output's. No default keybind -- output names are machine-specific
     /// (see `output { }`), so there's nothing sensible to bind out of the box.
@@ -541,6 +575,9 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
             parse_workspace_ref(n),
         ));
     }
+    if let Some(n) = action.strip_prefix("move-column-to-workspace:") {
+        return Some(Action::MoveColumnToWorkspace(parse_workspace_ref(n)));
+    }
     if let Some(n) = action.strip_prefix("move-to-workspace:") {
         return Some(Action::MoveToWorkspace(parse_workspace_ref(n)));
     }
@@ -662,6 +699,16 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "raise-window" => Some(Action::RaiseWindow),
         "lower-window" => Some(Action::LowerWindow),
         "focus-urgent" => Some(Action::FocusUrgent),
+        "toggle-keyboard-shortcuts-inhibit" => Some(Action::ToggleKeyboardShortcutsInhibit),
+        "toggle-touchpad" => Some(Action::ToggleTouchpad),
+        "focus-floating" => Some(Action::FocusFloating),
+        "focus-tiling" => Some(Action::FocusTiling),
+        "switch-focus-between-floating-and-tiling" => Some(Action::SwitchFocusFloatingTiling),
+        "reload-config" => Some(Action::ReloadConfig),
+        other if other.starts_with("load-config-file:") => {
+            let path = other["load-config-file:".len()..].trim();
+            (!path.is_empty()).then(|| Action::LoadConfigFile(path.to_string()))
+        }
         "toggle-dpms" => Some(Action::ToggleDpms),
         "switch-layout" => Some(Action::SwitchLayout(LayoutSwitch::Next)),
         "cycle-focus" => Some(Action::CycleFocus),
@@ -714,6 +761,20 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         }
         "move-column-first" => Some(Action::Column(ColumnAction::MoveToEnd { last: false })),
         "move-column-last" => Some(Action::Column(ColumnAction::MoveToEnd { last: true })),
+        other if other.starts_with("move-column-to-index:") => other
+            ["move-column-to-index:".len()..]
+            .parse::<usize>()
+            .ok()
+            .filter(|index| *index >= 1)
+            .map(|index| Action::Column(ColumnAction::MoveToIndex(index))),
+        "center-visible-columns" => Some(Action::Column(ColumnAction::CenterVisible)),
+        "reset-window-height" => Some(Action::Column(ColumnAction::ResetHeight)),
+        "switch-preset-height" => Some(Action::Column(ColumnAction::SwitchPresetHeight)),
+        "switch-preset-height-back" => Some(Action::Column(ColumnAction::SwitchPresetHeightBack)),
+        other if other.starts_with("set-window-height:") => {
+            crate::scroll::SizeChange::parse(&other["set-window-height:".len()..])
+                .map(|change| Action::Column(ColumnAction::SetHeight(change)))
+        }
         "toggle-column-tabbed" => Some(Action::Column(ColumnAction::ToggleTabbed)),
         other if other.starts_with("set-column-width:") => {
             crate::scroll::SizeChange::parse(&other["set-column-width:".len()..])

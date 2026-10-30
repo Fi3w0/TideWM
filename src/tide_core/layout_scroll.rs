@@ -250,6 +250,74 @@ impl Layouts {
         })
     }
 
+    /// Moves the focused window's column to the 0-based place `index`,
+    /// clamped to the last column.
+    pub(crate) fn scroll_move_column_to(&mut self, surface: &WlSurface, index: usize) -> bool {
+        self.edit_scroll_columns(surface, |columns, column, _, _| {
+            let target = index.min(columns.len() - 1);
+            if target == column {
+                return false;
+            }
+            let moved = columns.remove(column);
+            columns.insert(target, moved);
+            true
+        })
+    }
+
+    /// The window's share of its column's height (its weight over the
+    /// column's total), or `None` when it is alone in the column.
+    pub(crate) fn scroll_height_share(&self, surface: &WlSurface) -> Option<f64> {
+        let (output, workspace) = self.key_of(surface)?;
+        let column = self
+            .scroll_columns(&output, workspace)
+            .into_iter()
+            .find(|column| column.windows.contains(surface))?;
+        if column.windows.len() < 2 {
+            return None;
+        }
+        let total: f64 = column.windows.iter().map(|s| self.scroll.weight(s)).sum();
+        Some(self.scroll.weight(surface) / total)
+    }
+
+    /// Gives the window `share` of its column's height (clamped to 5-95%)
+    /// by adjusting its weight against the others'. `None` resets it to the
+    /// default weight. False when it is alone or nothing changed.
+    pub(crate) fn scroll_set_height_share(
+        &mut self,
+        surface: &WlSurface,
+        share: Option<f64>,
+    ) -> bool {
+        let Some((output, workspace)) = self.key_of(surface) else {
+            return false;
+        };
+        let Some(column) = self
+            .scroll_columns(&output, workspace)
+            .into_iter()
+            .find(|column| column.windows.contains(surface))
+        else {
+            return false;
+        };
+        if column.windows.len() < 2 {
+            return false;
+        }
+        let before = self.scroll.weight(surface);
+        let weight = match share {
+            None => 1.0,
+            Some(share) => {
+                let others: f64 = column
+                    .windows
+                    .iter()
+                    .filter(|s| *s != surface)
+                    .map(|s| self.scroll.weight(s))
+                    .sum();
+                let share = share.clamp(0.05, 0.95);
+                share * others / (1.0 - share)
+            }
+        };
+        self.scroll.set_weight(surface, weight);
+        (self.scroll.weight(surface) - before).abs() > 1e-9
+    }
+
     /// Moves a window up or down inside its column.
     pub(crate) fn scroll_move_in_column(&mut self, surface: &WlSurface, delta: isize) -> bool {
         self.edit_scroll_columns(surface, |columns, column, row, _| {
@@ -725,6 +793,14 @@ impl Layouts {
         self.scroll_reveal_with(surface, area, gap, None)
     }
 
+    /// Whether the strip holding `surface` remembers a panned view, so a caller
+    /// that only wants a sensible starting view can leave it alone.
+    pub(crate) fn scroll_view_saved(&self, surface: &WlSurface) -> bool {
+        self.key_of(surface).is_some_and(|(output, workspace)| {
+            self.scroll.has_offset(&output, self.scroll_key(workspace))
+        })
+    }
+
     /// Reveals `surface`, forcing centering on or off with `center`, or
     /// following the configured centering mode with `None`.
     pub(crate) fn scroll_reveal_with(
@@ -773,6 +849,50 @@ impl Layouts {
         let x_changed = (previous - offset).abs() > f64::EPSILON;
         let y_changed = self.scroll_reveal_stack(surface, area, gap);
         x_changed || y_changed
+    }
+
+    /// Centers the span of all fully visible columns in the viewport (niri's
+    /// center-visible-columns). Like an explicit center it may leave empty
+    /// space past the strip's ends until the next reveal or pan.
+    pub(crate) fn scroll_center_visible(
+        &mut self,
+        surface: &WlSurface,
+        area: Rectangle<i32, Logical>,
+        gap: i32,
+    ) -> bool {
+        if self.scroll.config.is_none() {
+            return false;
+        }
+        let Some((output, workspace)) = self.key_of(surface) else {
+            return false;
+        };
+        let shown = if self.scroll_key(workspace) == 0 {
+            self.active_workspace(&output)
+        } else {
+            workspace
+        };
+        let slots = self.scroll_slots(&output, shown, area, gap);
+        let key = self.scroll_key(workspace);
+        let previous = self.scroll.offset(&output, key);
+        let viewport = self.scroll_viewport(area, gap);
+        let visible = slots
+            .iter()
+            .filter(|slot| slot.row == 0 && slot.window.is_some())
+            .filter(|slot| {
+                slot.start >= previous - 0.5
+                    && slot.start + slot.extent <= previous + viewport + 0.5
+            });
+        let (start, end) = visible.fold((f64::MAX, f64::MIN), |(start, end), slot| {
+            (start.min(slot.start), end.max(slot.start + slot.extent))
+        });
+        if start > end {
+            return false;
+        }
+        self.scroll.set_margins(&output, key, true);
+        let (minimum, maximum) = self.scroll_bounds(&slots, viewport, (&output, key));
+        let offset = ((start + end - viewport) / 2.0).clamp(minimum, maximum);
+        self.scroll.set_offset(&output, key, offset);
+        (previous - offset).abs() > f64::EPSILON
     }
 
     /// The column width that fills the viewport space other fully visible
@@ -886,6 +1006,13 @@ mod tests {
         assert!(layouts.scroll_expel_from_column(&s[3]));
         assert_eq!(shape(&layouts).len(), 4);
         assert!(!layouts.scroll_move_column(&s[0], 5, false));
+        // Moving to a place: exact, clamped to the last column, no-op in place.
+        let head = shape(&layouts)[0][0].clone();
+        assert!(layouts.scroll_move_column_to(&head, 2));
+        assert_eq!(shape(&layouts)[2][0], head);
+        assert!(!layouts.scroll_move_column_to(&head, 2));
+        assert!(layouts.scroll_move_column_to(&head, 99));
+        assert_eq!(shape(&layouts).last().unwrap()[0], head);
     }
 
     #[test]
@@ -1000,6 +1127,70 @@ mod tests {
             .scroll_available_width(&surface(&w[1]), area, 8)
             .unwrap();
         assert!((width - 0.742).abs() < 1e-9, "{width}");
+    }
+
+    #[test]
+    fn center_visible_centers_the_span_of_fully_visible_columns() {
+        let mut protocol = ProtocolFixture::new();
+        let mut layouts = Layouts::default();
+        layouts.scroll.config = Some(ScrollConfig {
+            tile_proportion: 0.25,
+            ..Default::default()
+        });
+        let w: Vec<_> = (0..2).map(|_| protocol.window()).collect();
+        for window in &w {
+            layouts.insert("screen", 1, window.clone(), None);
+        }
+        // Viewport 1000; the two columns span 0..508 (250 + 8 + 250).
+        let area = Rectangle::new((0, 0).into(), (1016, 600).into());
+        assert!(layouts.scroll_center_visible(&surface(&w[0]), area, 8));
+        let offset = layouts.scroll.offset("screen", 1);
+        assert!((offset + 246.0).abs() < 1.0, "{offset}");
+        // Already centered: nothing more to do.
+        assert!(!layouts.scroll_center_visible(&surface(&w[0]), area, 8));
+    }
+
+    #[test]
+    fn window_height_shares_adjust_weights_inside_a_column() {
+        let mut protocol = ProtocolFixture::new();
+        let mut layouts = Layouts::default();
+        layouts.scroll.config = Some(ScrollConfig::default());
+        let w: Vec<_> = (0..3).map(|_| protocol.window()).collect();
+        for window in &w {
+            layouts.insert("screen", 1, window.clone(), None);
+        }
+        let s: Vec<_> = w.iter().map(surface).collect();
+        // Alone in a column there is nothing to share.
+        assert_eq!(layouts.scroll_height_share(&s[0]), None);
+        assert!(!layouts.scroll_set_height_share(&s[0], Some(0.5)));
+        // Stack all three in one column.
+        assert!(layouts.scroll_consume_into_column(&s[0]));
+        assert!(layouts.scroll_consume_into_column(&s[0]));
+        let equal = layouts.scroll_height_share(&s[1]).unwrap();
+        assert!((equal - 1.0 / 3.0).abs() < 1e-9);
+        assert!(layouts.scroll_set_height_share(&s[1], Some(0.5)));
+        let share = layouts.scroll_height_share(&s[1]).unwrap();
+        assert!((share - 0.5).abs() < 1e-9, "{share}");
+        // Out-of-range requests clamp instead of starving the others.
+        assert!(layouts.scroll_set_height_share(&s[1], Some(2.0)));
+        assert!(layouts.scroll_height_share(&s[1]).unwrap() <= 0.95 + 1e-9);
+        assert!(layouts.scroll_set_height_share(&s[1], None));
+        assert!((layouts.scroll_height_share(&s[1]).unwrap() - 1.0 / 3.0).abs() < 1e-9);
+        assert!(!layouts.scroll_set_height_share(&s[1], None));
+    }
+
+    #[test]
+    fn a_panned_strip_reports_its_saved_view() {
+        let mut protocol = ProtocolFixture::new();
+        let mut layouts = Layouts::default();
+        layouts.scroll.config = Some(ScrollConfig::default());
+        let window = protocol.window();
+        layouts.insert("screen", 1, window.clone(), None);
+        assert!(!layouts.scroll_view_saved(&surface(&window)));
+        layouts.scroll.set_offset("screen", 1, 24.0);
+        assert!(layouts.scroll_view_saved(&surface(&window)));
+        layouts.scroll.set_offset("screen", 1, 0.0);
+        assert!(!layouts.scroll_view_saved(&surface(&window)));
     }
 
     #[test]

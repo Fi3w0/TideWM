@@ -2,6 +2,51 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.16 · 2026-10-30 — `load-config` with a symlinked config
+
+- Fixed: loading a symlinked `config.wave` with `load-config-file` / `tidectl load-config` looked for its includes and shaders next to the link's target instead of next to the link, dropping them.
+
+## 0.91.15 · 2026-10-30 — Switch config files live
+
+- New `load-config-file:<path>` action and `tidectl load-config <file>` switch the running session to another config file. The file watcher follows it; a missing or broken file leaves the current config running. Nothing is written: a restart goes back to your normal config.
+
+## 0.91.14 · 2026-10-30 — Panned strips stay panned
+
+- A Scroll strip you panned away from the focused window no longer snaps back to it on a config reload or after a trip through Ocean and back.
+
+## 0.91.13 · 2026-10-30 — Release a captured keyboard, switch off the touchpad
+
+- `toggle-keyboard-shortcuts-inhibit` turns the focused client's shortcut capture (VMs, remote desktops) off or on. While a client captures shortcuts, this is the only bind that still works.
+- `toggle-touchpad` disables or re-enables every touchpad until restart.
+
+## 0.91.12 · 2026-10-30 — Jump between floating and tiled windows
+
+- New `focus-floating`, `focus-tiling` and `switch-focus-between-floating-and-tiling` actions focus the most recently used floating or tiled window on the focused monitor.
+
+## 0.91.11 · 2026-10-30 — Send a column to another workspace
+
+- Scroll: `move-column-to-workspace:<n|name>` sends the focused column, with all its windows, their order, widths and heights, to another workspace.
+
+## 0.91.10 · 2026-10-30 — Window heights in Scroll columns
+
+- Scroll: `set-window-height:<v>` (`50%`, `+10%`, pixels), `reset-window-height`, and `switch-preset-height` / `switch-preset-height-back` with the new `scroll.preset_heights` list change how a column's height is split between its windows.
+
+## 0.91.9 · 2026-10-30 — Center what you see
+
+- Scroll: `center-visible-columns` centers all fully visible columns together in the viewport.
+
+## 0.91.8 · 2026-10-30 — Move a column to a place
+
+- Scroll: `move-column-to-index:<n>` moves the focused column to place `n` (1 is first; a number past the end means last).
+
+## 0.91.7 · 2026-10-30 — Reload on demand
+
+- New `reload-config` action and `tidectl reload` re-read the config files immediately, for setups where the file watcher misses a change.
+
+## 0.91.6 · 2026-10-30 — Closing returns to your last window
+
+- Closing a window now focuses the window you used before it on that monitor (like niri), not whichever happens to be on top. In Scroll the strip follows that window.
+
 ## 0.91.5 · 2026-10-29 — Reversible strip swipe
 
 - `scroll { gesture_invert = true }` reverses the direction a touchpad swipe pans the Scroll strip. Default unchanged.

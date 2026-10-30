@@ -1364,7 +1364,7 @@ pub(super) fn apply_scroll_block(cfg: &mut crate::scroll::ScrollConfig, body: &[
                 "scroll.always_center_single",
                 value,
             ),
-            "preset_widths" => {
+            "preset_widths" | "preset_heights" => {
                 let widths: Option<Vec<f64>> = list_items(value)
                     .iter()
                     .map(|item| {
@@ -1374,10 +1374,12 @@ pub(super) fn apply_scroll_block(cfg: &mut crate::scroll::ScrollConfig, body: &[
                     })
                     .collect();
                 match widths.as_deref().and_then(crate::scroll::PresetWidths::new) {
-                    Some(widths) => cfg.preset_widths = widths,
+                    Some(widths) if key == "preset_widths" => cfg.preset_widths = widths,
+                    Some(widths) => cfg.preset_heights = widths,
                     _ => tracing::warn!(
+                        key,
                         value,
-                        "Expected scroll.preset_widths as a list of 1 to 16 widths from 0.1 to 1.0"
+                        "Expected a list of 1 to 16 sizes from 0.1 to 1.0"
                     ),
                 }
             }

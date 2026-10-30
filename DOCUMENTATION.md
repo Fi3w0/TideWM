@@ -1873,6 +1873,11 @@ The same set of strings works after `bind ... { }` at the top level or inside a 
 **Focus and layout**
 - `cycle-focus` — most-recently-used order, not z-order
 - `focus-urgent` — jump to whichever window is currently marked urgent, if any
+- `focus-floating` / `focus-tiling` — focus the most recently used floating or tiled window on the focused output; `switch-focus-between-floating-and-tiling` toggles between the two layers
+- `toggle-keyboard-shortcuts-inhibit` — turn the focused client's shortcuts inhibitor off or back on (VMs, remote desktops). While an inhibitor is active this is the only bind that still fires, so keep it bound
+- `toggle-touchpad` — disable or re-enable every touchpad (physical touchpads only; the choice survives hotplug and config reloads, not a restart)
+- `load-config-file:<path>` — switch this session to another config file and reload it (`tidectl load-config <file>` resolves a relative path first). If the file is missing or fails to load, the current config stays and the error overlay says why. Session-only: nothing is written, and a restart goes back to the normal path (or `-c`). It is as powerful as editing your config, so keep the IPC socket private
+- `reload-config` — re-read the config files now (what the file watcher does automatically); `tidectl reload` is the shorthand
 - `focus-left` / `focus-right` / `focus-up` / `focus-down` — Classic selects by live screen geometry. Ocean compares the current camera projection, keeps the camera still for a visible neighbor, and glides it to an off-camera neighbor using `ocean.camera_animation_ms`/`camera_sway`; screen pins use their viewport position.
 - `swap-left` / `swap-right` / `swap-up` / `swap-down` — in Scroll, along the strip moves the whole column, across it reorders inside the column
 - `consume-or-expel-left` / `consume-or-expel-right` — Scroll only: a window alone joins the neighbor column on that side; a window sharing a column leaves it for a new column on that side
@@ -1887,6 +1892,10 @@ The same set of strings works after `bind ... { }` at the top level or inside a 
 - `center-column` — Scroll only: center the focused column once, even the first or last one (the strip may show empty space past its end until the next focus change)
 - `focus-column-first` / `focus-column-last` — Scroll only: focus the first or last column, on its most recently focused window
 - `move-column-first` / `move-column-last` — Scroll only: move the focused column to the start or end of the strip
+- `set-window-height:<v>` — Scroll only: set or adjust the window's share of its column (`50%`, `+10%`, `-10%`, or pixels along the column); ignored for a window alone in its column. `reset-window-height` restores the equal weight; `switch-preset-height` / `switch-preset-height-back` step through `scroll.preset_heights`
+- `move-column-to-workspace:<n|name>` — Scroll only: send the focused column, all its windows, to a workspace (not for grouped or fullscreen windows)
+- `center-visible-columns` — Scroll only: center all fully visible columns together in the viewport
+- `move-column-to-index:<n>` — Scroll only: move the focused column to place `n` (1 is first; larger than the strip means last)
 - `set-column-width:<v>` — Scroll only: set the focused column's width. `50%` or `33.3%` is a share of the usable viewport, `800` is logical pixels, and a leading `+`/`-` (`+10%`, `-10%`, `+100`) changes the current width. The result stays between 10% and 100% of the viewport
 - `toggle-float-anchor` — Scroll only: switch `scroll.float_anchor` between `screen` and `strip` for the running session; a config reload restores the configured value
 - `toggle-column-tabbed` — Scroll only: turn the focused column into one tab group (tabs in column order, the focused window stays visible), or a tab group back into a stacked column in tab order
@@ -2121,6 +2130,7 @@ scroll {
 | `tile_proportion` | float, `0.1`–`1.0` | `0.5` | Share of the usable viewport a new app takes. `1.0` fills it; `0.94` leaves a narrow neighbor peek. |
 | `center_focused` | `never` \| `always` \| `on-overflow` | `never` | `always` centers every revealed column, including the first, last and only one; `on-overflow` centers only a column that isn't fully visible; `never` moves only as far as needed. `true`/`false` mean `always`/`never`. |
 | `always_center_single` | bool | `false` | Keep a workspace's only column centered whatever `center_focused` says. |
+| `preset_heights` | list of 1–16 shares, `0.1`–`1.0` | `[0.333, 0.5, 0.667]` | Shares of a column's height `switch-preset-height` steps through. |
 | `preset_widths` | list of 1–16 widths, `0.1`–`1.0` | `[0.333, 0.5, 0.667]` | Widths `switch-preset-width` steps through, narrowest first after the widest. |
 | `gesture_distance` | positive float | `1200` | Touchpad travel per viewport. A sensitivity, not a monitor width. |
 | `gesture_invert` | bool | `false` | Reverse the direction a `workspace_swipe_fingers` swipe pans the strip. |

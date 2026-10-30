@@ -813,6 +813,20 @@ fn build_request(args: &[String]) -> Result<Value, String> {
             Ok(request)
         }
         "depth" => depth_request(rest),
+        "reload" if rest.is_empty() => Ok(action_request("reload-config")),
+        "load-config" if rest.len() == 1 => {
+            // Absolute but symlinks kept: a symlinked config.wave must keep
+            // resolving its includes next to the link.
+            let path = std::path::absolute(&rest[0])
+                .map_err(|e| format!("cannot use {}: {e}", rest[0]))?;
+            if !path.is_file() {
+                return Err(format!("not a file: {}", path.display()));
+            }
+            Ok(action_request(&format!(
+                "load-config-file:{}",
+                path.display()
+            )))
+        }
         "outputs" => Ok(json!({ "request": "outputs" })),
         "workspaces" => Ok(json!({ "request": "workspaces" })),
         "windows" => Ok(json!({ "request": "windows" })),
@@ -1237,16 +1251,16 @@ ACTIONS:
         close-window, toggle-floating, toggle-fullscreen, toggle-pin,
         toggle-scratchpad, move-to-scratchpad, toggle-pseudo-tile,
         toggle-float-ambient, toggle-float-anchor,
-        raise-window, lower-window, focus-urgent, toggle-dpms,
+        raise-window, lower-window, focus-urgent, focus-floating, focus-tiling, switch-focus-between-floating-and-tiling, reload-config, load-config-file:<path> (or `tidectl load-config <file>`), toggle-keyboard-shortcuts-inhibit, toggle-touchpad, toggle-dpms,
         cycle-focus, focus-left/right/up/down, swap-left/right/up/down,
         group-left/right/up/down, ungroup, cycle-tab-next/prev, quit,
         mode:<name>, exit-mode, layout:bsp, layout:master,
         master-grow, master-shrink, resize-left/right/up/down,
         move-left/right/up/down, snap:left/right/top/bottom,
         consume-or-expel-left/right, consume-into-column, expel-from-column,
-        switch-preset-width(-back), set-column-width:<+10%|50%|800>, maximize-column, expand-column, center-column,
+        switch-preset-width(-back), set-column-width:<+10%|50%|800>, maximize-column, expand-column, center-column, center-visible-columns, move-column-to-workspace:<n|name>, set-window-height:<+10%|50%|400>, reset-window-height, switch-preset-height(-back),
         focus-column-first/last, focus-column-right-or-first,
-        focus-column-left-or-last, focus-window-top/bottom, move-column-first/last, toggle-column-tabbed,
+        focus-column-left-or-last, focus-window-top/bottom, move-column-first/last, move-column-to-index:<n>, toggle-column-tabbed,
         workspace-down/up (focus-workspace-down/up),
         snap:top-left/top-right/bottom-left/bottom-right, snap:fullscreen,
         toggle-overview

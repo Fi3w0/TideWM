@@ -105,6 +105,17 @@ impl Smallvil {
         }
     }
 
+    /// `reveal_scroll_window` for the moments the compositor re-lays the strip
+    /// out on its own (config reload, engine migration): a strip that already
+    /// remembers a panned view keeps it, so a monitor does not come back
+    /// panned to a different column. Prepare-time clamping still keeps the
+    /// remembered view inside the strip.
+    pub(crate) fn reveal_scroll_window_unless_panned(&mut self, surface: &WlSurface) {
+        if !self.spatial.workspaces.layout.scroll_view_saved(surface) {
+            self.reveal_scroll_window(surface);
+        }
+    }
+
     /// Scrolls the strip just far enough to show a strip-anchored floater
     /// that sits off-screen along it; the floater rides along through
     /// `anchor_scroll_floaters`. Bounded like any other pan.
@@ -541,6 +552,49 @@ impl Smallvil {
                 }
                 return;
             }
+            ColumnAction::SetHeight(_)
+            | ColumnAction::ResetHeight
+            | ColumnAction::SwitchPresetHeight
+            | ColumnAction::SwitchPresetHeightBack => {
+                if self.fullscreen.contains_key(&focused) || self.group_of(&focused).is_some() {
+                    return;
+                }
+                let layout = &mut self.spatial.workspaces.layout;
+                let Some(current) = layout.scroll_height_share(&focused) else {
+                    return;
+                };
+                let share = match action {
+                    ColumnAction::ResetHeight => None,
+                    ColumnAction::SetHeight(change) => {
+                        let Some(area) = area else {
+                            return;
+                        };
+                        let length = if self.config.scroll.orientation
+                            == crate::scroll::Orientation::Vertical
+                        {
+                            area.size.w
+                        } else {
+                            area.size.h
+                        };
+                        Some(change.apply(current, f64::from((length - 2 * gap).max(1))))
+                    }
+                    _ => {
+                        let step = if action == ColumnAction::SwitchPresetHeight {
+                            crate::scroll::next_preset
+                        } else {
+                            crate::scroll::previous_preset
+                        };
+                        match step(self.config.scroll.preset_heights.as_slice(), current) {
+                            Some(share) => Some(share),
+                            None => return,
+                        }
+                    }
+                };
+                if layout.scroll_set_height_share(&focused, share) {
+                    self.scroll_columns_changed(&focused);
+                }
+                return;
+            }
             ColumnAction::SetWidth(change) => {
                 if let Some(area) = area {
                     let viewport = self.spatial.workspaces.layout.scroll_viewport(area, gap);
@@ -579,6 +633,20 @@ impl Smallvil {
                         gap,
                         Some(true),
                     ) {
+                        self.retile();
+                        self.request_redraw();
+                    }
+                }
+                return;
+            }
+            ColumnAction::CenterVisible => {
+                if let Some(area) = area {
+                    if self
+                        .spatial
+                        .workspaces
+                        .layout
+                        .scroll_center_visible(&focused, area, gap)
+                    {
                         self.retile();
                         self.request_redraw();
                     }
@@ -632,7 +700,19 @@ impl Smallvil {
         // Column edits leave grouped and fullscreen windows where they are.
         let editable = !self.fullscreen.contains_key(&focused) && self.group_of(&focused).is_none();
         let changed = match action {
-            _ if !editable && !matches!(action, ColumnAction::MoveToEnd { .. }) => false,
+            _ if !editable
+                && !matches!(
+                    action,
+                    ColumnAction::MoveToEnd { .. } | ColumnAction::MoveToIndex(_)
+                ) =>
+            {
+                false
+            }
+            ColumnAction::MoveToIndex(index) => self
+                .spatial
+                .workspaces
+                .layout
+                .scroll_move_column_to(&focused, index - 1),
             ColumnAction::MoveToEnd { last } => self.spatial.workspaces.layout.scroll_move_column(
                 &focused,
                 if last { 1 } else { -1 },
