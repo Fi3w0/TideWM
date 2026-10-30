@@ -4349,6 +4349,28 @@ fn floating_tiling_focus_actions_parse() {
 }
 
 #[test]
+fn monitor_focus_actions_parse() {
+    for (name, direction) in [
+        ("left", Direction::Left),
+        ("right", Direction::Right),
+        ("up", Direction::Up),
+        ("down", Direction::Down),
+    ] {
+        assert!(matches!(
+            parse_action(&format!("focus-monitor-{name}")),
+            Some(Action::FocusMonitor(parsed)) if parsed == direction
+        ));
+    }
+    assert!(matches!(
+        parse_action("focus-monitor: test-output "),
+        Some(Action::FocusMonitorNamed(name)) if name == "test-output"
+    ));
+    assert!(parse_action("focus-monitor:").is_none());
+    assert!(parse_action("focus-monitor:   ").is_none());
+    assert!(parse_action("focus-monitor-diagonal").is_none());
+}
+
+#[test]
 fn shortcut_inhibit_and_touchpad_toggles_parse() {
     assert!(matches!(
         parse_action("toggle-keyboard-shortcuts-inhibit"),

@@ -1872,6 +1872,8 @@ The same set of strings works after `bind ... { }` at the top level or inside a 
 
 **Focus and layout**
 - `cycle-focus` — most-recently-used order, not z-order
+- `focus-monitor-left` / `focus-monitor-right` / `focus-monitor-up` / `focus-monitor-down` — focus the nearest monitor on that side whose perpendicular span overlaps the current monitor. Uses live logical output positions and sizes; stops at the edge without wrapping. Restores the destination's most recently used mapped window (tiled or floating), or clears window focus on an empty monitor. Moves the pointer to the center of the restored window's visible portion, or to the monitor center when empty. Ocean cameras keep their view. No-op during lock, exclusive keyboard layers, pointer grabs or compositor gestures
+- `focus-monitor:<name>` — the same focus and pointer handoff to a connected monitor by exact connector name; an unknown name does nothing. No shortcuts are added automatically
 - `focus-urgent` — jump to whichever window is currently marked urgent, if any
 - `focus-floating` / `focus-tiling` — focus the most recently used floating or tiled window on the focused output; `switch-focus-between-floating-and-tiling` toggles between the two layers
 - `toggle-keyboard-shortcuts-inhibit` — turn the focused client's shortcuts inhibitor off or back on (VMs, remote desktops). While an inhibitor is active this is the only bind that still fires, so keep it bound

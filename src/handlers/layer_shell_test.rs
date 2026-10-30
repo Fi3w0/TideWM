@@ -1219,3 +1219,345 @@ fn scroll_columns_enter_only_their_own_output() {
         );
     }
 }
+
+#[test]
+fn monitor_focus_uses_live_geometry_and_restores_recent_windows() {
+    use crate::config::{parse_action, Direction, SpatialEngine};
+    use crate::state::SessionLock;
+    const CHILD: &str = "TIDEWM_MONITOR_FOCUS_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "tidewm-monitor-focus-test-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("config/tidewm")).unwrap();
+        std::fs::create_dir(root.join("runtime")).unwrap();
+        std::fs::set_permissions(root.join("runtime"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::write(root.join("config/tidewm/config.wave"), "engine = scroll\nwelcome_hint = false\nwater_effects = false\ngaps = 0\nscroll {\n tile_proportion = 1.0\n}\nanimations {\n enabled = false\n}\n").unwrap();
+        let name = concat!(
+            module_path!(),
+            "::monitor_focus_uses_live_geometry_and_restores_recent_windows"
+        );
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name.split_once("::").unwrap().1, "--nocapture"])
+            .env(CHILD, "1")
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_RUNTIME_DIR", root.join("runtime"))
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(String::from_utf8_lossy(&result.stdout).contains("running 1 test"));
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    }
+    let mut event_loop = EventLoop::try_new().unwrap();
+    let state = Smallvil::new(&mut event_loop, Display::new().unwrap());
+    let (server, peer) = UnixStream::pair().unwrap();
+    state
+        .display_handle
+        .clone()
+        .insert_client(
+            server,
+            Arc::new(ClientState {
+                compositor_state: CompositorClientState::default(),
+                security_context: None,
+                disconnect_sender: None,
+            }),
+        )
+        .unwrap();
+    peer.set_nonblocking(true).unwrap();
+    let mut fixture = Fixture {
+        event_loop,
+        state,
+        peer,
+    };
+    let mut outputs = Vec::new();
+    // Registration order differs from physical order. Right has a fractional
+    // scale: selection and pointer placement must use logical geometry.
+    for (name, location, size, scale) in [
+        ("origin", (0, 0), (1000, 600), Scale::Integer(1)),
+        ("diagonal", (1000, -800), (1000, 600), Scale::Integer(1)),
+        ("right", (1000, 0), (1250, 750), Scale::Fractional(1.25)),
+        ("below", (0, 600), (1000, 600), Scale::Integer(1)),
+    ] {
+        let output = Output::new(
+            name.into(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "test".into(),
+                model: "test".into(),
+                serial_number: "test".into(),
+            },
+        );
+        output.change_current_state(
+            Some(Mode {
+                size: size.into(),
+                refresh: 60_000,
+            }),
+            None,
+            Some(scale),
+            Some(location.into()),
+        );
+        fixture.state.space.map_output(&output, location);
+        outputs.push(output);
+    }
+    fixture.request(1, 1, &[2], &[]);
+    let globals: Vec<_> = fixture
+        .dispatch()
+        .into_iter()
+        .filter_map(|(object, opcode, body)| {
+            if object != 2 || opcode != 0 {
+                return None;
+            }
+            let name = u32::from_ne_bytes(body[..4].try_into().unwrap());
+            let length = u32::from_ne_bytes(body[4..8].try_into().unwrap()) as usize;
+            Some((
+                String::from_utf8(body[8..8 + length - 1].to_vec()).unwrap(),
+                name,
+            ))
+        })
+        .collect();
+    for (interface, id, version) in [
+        ("wl_compositor", 3_u32, 4_u32),
+        ("xdg_wm_base", 4, 1),
+        ("wp_single_pixel_buffer_manager_v1", 5, 1),
+        ("wp_viewporter", 6, 1),
+    ] {
+        let name = globals
+            .iter()
+            .find(|(candidate, _)| candidate == interface)
+            .unwrap()
+            .1;
+        let mut tail = string(interface);
+        tail.extend_from_slice(&version.to_ne_bytes());
+        tail.extend_from_slice(&id.to_ne_bytes());
+        fixture.request(2, 0, &[name], &tail);
+    }
+    let mut surfaces = Vec::new();
+    for surface in [7_u32, 12, 17] {
+        fixture.request(3, 0, &[surface], &[]);
+        fixture.request(4, 2, &[surface + 1, surface], &[]);
+        fixture.request(surface + 1, 1, &[surface + 2], &[]);
+        fixture.request(6, 1, &[surface + 3, surface], &[]);
+        fixture.request(surface + 3, 2, &[1000, 600], &[]);
+        fixture.request(surface, 6, &[], &[]);
+        let serial = fixture
+            .dispatch()
+            .into_iter()
+            .find_map(|(object, opcode, body)| {
+                (object == surface + 1 && opcode == 0)
+                    .then(|| u32::from_ne_bytes(body[..4].try_into().unwrap()))
+            })
+            .unwrap();
+        fixture.request(surface + 1, 4, &[serial], &[]);
+        fixture.request(5, 1, &[surface + 4, u32::MAX, 0, 0, u32::MAX], &[]);
+        fixture.request(surface, 1, &[surface + 4, 0, 0], &[]);
+        fixture.request(surface, 6, &[], &[]);
+        fixture.dispatch();
+        surfaces.push(surface);
+    }
+    let surfaces: Vec<_> = surfaces
+        .into_iter()
+        .map(|id| {
+            fixture
+                .state
+                .space
+                .elements()
+                .find_map(|window| {
+                    let surface = window.toplevel()?.wl_surface();
+                    (surface.id().protocol_id() == id).then(|| surface.clone())
+                })
+                .unwrap()
+        })
+        .collect();
+    for surface in &surfaces[1..] {
+        assert!(fixture
+            .state
+            .move_tiled_window_to_output(surface, &outputs[2], None));
+    }
+    fixture.state.retile();
+    fixture.state.toggle_floating(&surfaces[2]);
+    let run = |fixture: &mut Fixture, action: &str| {
+        fixture.state.run_action(parse_action(action).unwrap());
+        fixture.dispatch();
+    };
+    // Keyboard navigation can leave focus on a different output from the
+    // pointer. A named action must still perform the requested handoff.
+    fixture.state.config.input.focus_follows_mouse = true;
+    fixture.state.activate_toplevel(&surfaces[1]);
+    run(&mut fixture, "focus-monitor:right");
+    fixture.state.activate_toplevel(&surfaces[0]);
+    assert_eq!(fixture.state.primary_output(), Some(outputs[2].clone()));
+    run(&mut fixture, "focus-monitor:right");
+    assert_eq!(
+        fixture.state.focused_window_surface(),
+        Some(surfaces[1].clone())
+    );
+    for engine in [
+        SpatialEngine::Scroll,
+        SpatialEngine::Classic,
+        SpatialEngine::Ocean,
+    ] {
+        assert!(fixture.state.migrate_spatial_engine(engine));
+        fixture.state.config.input.focus_follows_mouse = false;
+        fixture.state.activate_toplevel(&surfaces[1]);
+        fixture.state.activate_toplevel(&surfaces[0]);
+        // Pointer policy is independent of the saved window selection.
+        let camera = fixture.state.spatial.ocean.camera("right");
+        run(&mut fixture, "focus-monitor-right");
+        assert_eq!(
+            fixture.state.focused_window_surface(),
+            Some(surfaces[1].clone()),
+            "{engine:?}"
+        );
+        assert_eq!(
+            fixture.state.spatial.ocean.camera("right"),
+            camera,
+            "monitor focus must not recenter the Ocean camera"
+        );
+        assert_eq!(fixture.state.primary_output(), Some(outputs[2].clone()));
+        assert_eq!(
+            fixture.state.seat.get_pointer().unwrap().current_location(),
+            (1500.0, 300.0).into()
+        );
+        run(&mut fixture, "focus-monitor-left");
+        assert_eq!(
+            fixture.state.focused_window_surface(),
+            Some(surfaces[0].clone())
+        );
+        fixture.state.config.input.focus_follows_mouse = true;
+        run(&mut fixture, "focus-monitor-right");
+        assert_eq!(
+            fixture.state.focused_window_surface(),
+            Some(surfaces[1].clone())
+        );
+        assert_eq!(fixture.state.primary_output(), Some(outputs[2].clone()));
+        // Floating windows participate in the same per-monitor history.
+        fixture.state.activate_toplevel(&surfaces[2]);
+        run(&mut fixture, "focus-monitor:origin");
+        run(&mut fixture, "focus-monitor-right");
+        assert_eq!(
+            fixture.state.focused_window_surface(),
+            Some(surfaces[2].clone())
+        );
+        // No output on that side: no wrap and no focus or cursor changes.
+        run(&mut fixture, "focus-monitor-right");
+        assert_eq!(fixture.state.primary_output(), Some(outputs[2].clone()));
+        run(&mut fixture, "focus-monitor:origin");
+        run(&mut fixture, "focus-monitor-down");
+        assert_eq!(fixture.state.focused_window_surface(), None);
+        assert_eq!(fixture.state.primary_output(), Some(outputs[3].clone()));
+        assert_eq!(
+            fixture.state.seat.get_pointer().unwrap().current_location(),
+            (500.0, 900.0).into()
+        );
+        run(&mut fixture, "focus-monitor-up");
+        assert_eq!(
+            fixture.state.focused_window_surface(),
+            Some(surfaces[0].clone())
+        );
+        run(&mut fixture, "focus-monitor:missing-output");
+        assert_eq!(fixture.state.primary_output(), Some(outputs[0].clone()));
+    }
+    // In shared Ocean, the destination can show the same window even when
+    // its largest rendered share is on the source monitor.
+    let right_camera = fixture.state.spatial.ocean.camera("right");
+    let mut origin = fixture.state.spatial.ocean.camera("origin").origin;
+    origin.x += 800.0;
+    fixture.state.config.ocean.shared_canvas = true;
+    fixture.state.spatial.ocean.set_shared_canvas(true);
+    fixture
+        .state
+        .spatial
+        .ocean
+        .set_camera_origin("right", origin);
+    fixture.state.retile();
+    fixture.state.activate_toplevel(&surfaces[0]);
+    for follows_mouse in [false, true] {
+        fixture.state.config.input.focus_follows_mouse = follows_mouse;
+        run(&mut fixture, "focus-monitor:origin");
+        run(&mut fixture, "focus-monitor:right");
+        assert_eq!(
+            fixture.state.focused_window_surface(),
+            Some(surfaces[0].clone())
+        );
+        assert_eq!(fixture.state.primary_output(), Some(outputs[2].clone()));
+        assert!(
+            fixture
+                .state
+                .seat
+                .get_pointer()
+                .unwrap()
+                .current_location()
+                .x
+                < 1200.0,
+            "pointer must land on the visible portion of the restored window"
+        );
+    }
+    run(&mut fixture, "focus-monitor:origin");
+    fixture.state.config.ocean.shared_canvas = false;
+    fixture.state.spatial.ocean.set_shared_canvas(false);
+    fixture
+        .state
+        .spatial
+        .ocean
+        .set_camera_origin("right", right_camera.origin);
+    fixture.state.retile();
+    // Read current output locations every time, including negative positions.
+    fixture.state.space.map_output(&outputs[2], (-1000, 0));
+    assert_eq!(
+        fixture.state.monitor_in_direction(Direction::Left),
+        Some(outputs[2].clone())
+    );
+    assert_eq!(fixture.state.monitor_in_direction(Direction::Right), None);
+    run(&mut fixture, "focus-monitor-left");
+    assert_eq!(fixture.state.primary_output(), Some(outputs[2].clone()));
+    let pointer = fixture.state.seat.get_pointer().unwrap();
+    let location = pointer.current_location();
+    pointer.button(
+        &mut fixture.state,
+        &smithay::input::pointer::ButtonEvent {
+            serial: smithay::utils::SERIAL_COUNTER.next_serial(),
+            time: smithay::backend::input::InputTime::now(),
+            button: 0x110,
+            state: smithay::backend::input::ButtonState::Pressed,
+        },
+    );
+    assert!(pointer.is_grabbed());
+    run(&mut fixture, "focus-monitor:origin");
+    assert_eq!(pointer.current_location(), location);
+    pointer.button(
+        &mut fixture.state,
+        &smithay::input::pointer::ButtonEvent {
+            serial: smithay::utils::SERIAL_COUNTER.next_serial(),
+            time: smithay::backend::input::InputTime::now(),
+            button: 0x110,
+            state: smithay::backend::input::ButtonState::Released,
+        },
+    );
+    fixture.state.session_lock = SessionLock::Locked;
+    let location = fixture.state.seat.get_pointer().unwrap().current_location();
+    run(&mut fixture, "focus-monitor:origin");
+    assert_eq!(
+        fixture.state.seat.get_pointer().unwrap().current_location(),
+        location
+    );
+    fixture.state.session_lock = SessionLock::Unlocked;
+    fixture.state.space.unmap_output(&outputs[0]);
+    run(&mut fixture, "focus-monitor:origin");
+    assert_eq!(
+        fixture.state.seat.get_pointer().unwrap().current_location(),
+        location
+    );
+}

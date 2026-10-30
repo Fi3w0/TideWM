@@ -2,6 +2,12 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.17 — Directional and named monitor focus
+
+- Added `Action::FocusMonitor(Direction)` and `FocusMonitorNamed(String)` through the shared keybind/IPC action parser. `monitor_in_direction` reads live logical output rectangles, requires overlapping perpendicular spans and chooses the nearest center on the requested side, following niri's `output_*_of` pattern. Doubled centers use i64; ties use connector names. No cached topology, vendor assumptions or default binds.
+- `focus_monitor` restores the destination's most recently used mapped window, with a stacking-order fallback, raises floating windows and clears window focus on an empty destination. Moves the pointer to the restored window's visible center (output center when empty) with the existing client-scale conversion, without applying focus-follows-mouse to the window underneath. Pointer movement was explicitly chosen by Fiw. Ocean views stay put; shared-canvas selection uses the destination camera's visible placements even when a window's largest share is elsewhere. Ordinary Scroll navigation reveals the restored window. Lock, exclusive layers, pointer grabs and compositor gestures block the action.
+- Regression fixture uses real Wayland toplevels and four logical outputs, including fractional scale and a diagonal output registered before the right neighbor. Covers all three engines, floating/tiled history, both focus-follows-mouse policies, empty monitors, edge no-op, named/missing/disconnected outputs, negative positions, live repositioning, camera preservation, shared Ocean views, differing keyboard/pointer outputs, lock and pointer grabs. Native multi-monitor appearance and pointer behavior remain unverified.
+
 ## 0.91.16 — Keep symlinks in `load-config-file` paths
 
 - Native 0.91.15 test found it: `load_config_file` and `tidectl load-config` canonicalized the path, so `~/.config/tidewm/config.wave -> ~/fiw-gentoo/dots/tidewm/config.wave` became the override and its relative includes (`theme.wave`, `abyssal-*.wave`) were looked up in the dots directory and skipped. Startup never canonicalizes, so `-c` was unaffected.

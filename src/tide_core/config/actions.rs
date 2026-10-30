@@ -221,6 +221,10 @@ pub enum Action {
     SwitchLayout(LayoutSwitch),
     CycleFocus,
     FocusDirection(Direction),
+    /// Focus the nearest monitor on that side, using live logical geometry.
+    FocusMonitor(Direction),
+    /// Focus a monitor by its connector name.
+    FocusMonitorNamed(String),
     SwapDirection(Direction),
     /// Keyboard-driven resize. Right/down grow and left/up shrink the
     /// focused window along that axis; floating windows change by pixels,
@@ -551,6 +555,10 @@ fn is_typing_key(key_name: &str) -> bool {
 /// string syntax used in binds, so anything a keybind can trigger is
 /// IPC-addressable for free, including actions added by later phases.
 pub(crate) fn parse_action(action: &str) -> Option<Action> {
+    if let Some(name) = action.strip_prefix("focus-monitor:") {
+        return (!name.trim().is_empty())
+            .then(|| Action::FocusMonitorNamed(name.trim().to_string()));
+    }
     if let Some(cmd) = action.strip_prefix("spawn:") {
         return Some(Action::Spawn(cmd.to_string()));
     }
@@ -662,6 +670,10 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         return (!name.trim().is_empty()).then(|| Action::ToggleTag(name.trim().to_string()));
     }
     match action {
+        "focus-monitor-left" => Some(Action::FocusMonitor(Direction::Left)),
+        "focus-monitor-right" => Some(Action::FocusMonitor(Direction::Right)),
+        "focus-monitor-up" => Some(Action::FocusMonitor(Direction::Up)),
+        "focus-monitor-down" => Some(Action::FocusMonitor(Direction::Down)),
         "exit-mode" => Some(Action::ExitMode),
         "master-grow" => Some(Action::GrowMaster),
         "master-shrink" => Some(Action::ShrinkMaster),

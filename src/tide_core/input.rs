@@ -3318,6 +3318,16 @@ impl Smallvil {
             Action::FocusDirection(direction) => {
                 self.focus_direction(direction);
             }
+            Action::FocusMonitor(direction) => {
+                if let Some(output) = self.monitor_in_direction(direction) {
+                    self.focus_monitor(&output);
+                }
+            }
+            Action::FocusMonitorNamed(name) => {
+                if let Some(output) = self.output_by_name(&name) {
+                    self.focus_monitor(&output);
+                }
+            }
             Action::SwapDirection(direction) => {
                 self.swap_direction(direction);
             }
