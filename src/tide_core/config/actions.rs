@@ -276,6 +276,9 @@ pub enum Action {
     /// Move the focused Scroll column to another monitor and follow it.
     MoveColumnToMonitor(Direction),
     MoveColumnToMonitorNamed(String),
+    /// Move the action output's active workspace, choosing a free target slot.
+    MoveWorkspaceToMonitor(Direction),
+    MoveWorkspaceToMonitorNamed(String),
     /// Swaps the current output's active workspace content with the named
     /// output's. No default keybind -- output names are machine-specific
     /// (see `output { }`), so there's nothing sensible to bind out of the box.
@@ -561,6 +564,10 @@ fn is_typing_key(key_name: &str) -> bool {
 /// string syntax used in binds, so anything a keybind can trigger is
 /// IPC-addressable for free, including actions added by later phases.
 pub(crate) fn parse_action(action: &str) -> Option<Action> {
+    if let Some(name) = action.strip_prefix("move-workspace-to-monitor:") {
+        return (!name.trim().is_empty())
+            .then(|| Action::MoveWorkspaceToMonitorNamed(name.trim().to_string()));
+    }
     if let Some(name) = action.strip_prefix("move-column-to-monitor:") {
         return (!name.trim().is_empty())
             .then(|| Action::MoveColumnToMonitorNamed(name.trim().to_string()));
@@ -684,6 +691,10 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         return (!name.trim().is_empty()).then(|| Action::ToggleTag(name.trim().to_string()));
     }
     match action {
+        "move-workspace-to-monitor-left" => Some(Action::MoveWorkspaceToMonitor(Direction::Left)),
+        "move-workspace-to-monitor-right" => Some(Action::MoveWorkspaceToMonitor(Direction::Right)),
+        "move-workspace-to-monitor-up" => Some(Action::MoveWorkspaceToMonitor(Direction::Up)),
+        "move-workspace-to-monitor-down" => Some(Action::MoveWorkspaceToMonitor(Direction::Down)),
         "move-column-to-monitor-left" => Some(Action::MoveColumnToMonitor(Direction::Left)),
         "move-column-to-monitor-right" => Some(Action::MoveColumnToMonitor(Direction::Right)),
         "move-column-to-monitor-up" => Some(Action::MoveColumnToMonitor(Direction::Up)),

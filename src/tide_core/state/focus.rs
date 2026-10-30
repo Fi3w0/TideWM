@@ -487,12 +487,14 @@ impl Smallvil {
             return None;
         }
         let output = self.output_for_point(pointer.current_location())?;
+        let geometry = self.space.output_geometry(&output)?;
         self.render_placements(&output)?
             .into_iter()
             .any(|placement| {
                 placement
                     .surface()
                     .is_some_and(|candidate| candidate == surface)
+                    && self.placement_input_rect(&placement).overlaps(geometry)
             })
             .then_some(output)
     }

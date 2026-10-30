@@ -7,14 +7,14 @@ use smithay::{
     desktop::Window,
     output::Output,
     reexports::wayland_server::protocol::wl_surface::WlSurface,
-    utils::{Logical, Point, Rectangle},
+    utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
 };
 
 use crate::{config::WorkspaceRef, layout::Layouts};
 
 use super::{
-    clamp_rect_visible, is_scratchpad_workspace, swapped_group_owner, FloatingTag, Smallvil,
-    NAMED_SCRATCHPAD_BASE, SCRATCHPAD_WORKSPACE,
+    clamp_rect_visible, is_scratchpad_workspace, swapped_group_owner, FloatingTag, FocusOrigin,
+    Smallvil, NAMED_SCRATCHPAD_BASE, SCRATCHPAD_WORKSPACE,
 };
 
 /// Workspace-owned window placement: layout trees, floating tags, pins,
@@ -89,7 +89,416 @@ pub struct WorkspaceState {
     pub classic_depth: crate::classic_depth::ClassicDepthDeck,
 }
 
+/// Fiw's transfer rule: keep the number if vacant, otherwise choose the
+/// lowest free normal slot. Work is bounded by residents, not the ID range.
+fn workspace_transfer_slot(preferred: u32, mut occupied: Vec<u32>) -> Option<u32> {
+    if is_scratchpad_workspace(preferred) {
+        return None;
+    }
+    occupied.retain(|workspace| !is_scratchpad_workspace(*workspace));
+    if !occupied.contains(&preferred) {
+        return Some(preferred);
+    }
+    occupied.sort_unstable();
+    occupied.dedup();
+    let mut next = 1_u32;
+    for workspace in occupied {
+        if workspace > next {
+            break;
+        }
+        if workspace == next {
+            next = next.checked_add(1)?;
+        }
+    }
+    (!is_scratchpad_workspace(next)).then_some(next)
+}
+
 impl Smallvil {
+    /// Move the action output's active workspace as one ownership
+    /// transaction. A destination slot is vacant only if it has no tiled,
+    /// floating, grouped or parked residents; sticky floaters stay put.
+    pub(crate) fn move_workspace_to_monitor(&mut self, to: &Output) {
+        if self.monitor_action_blocked()
+            || self.spatial.engine.ownership() != crate::config::SpatialOwnership::Workspaces
+        {
+            return;
+        }
+        let Some(from) = self.primary_output() else {
+            return;
+        };
+        if from == *to {
+            return;
+        }
+        let (Some(from_geo), Some(to_geo)) = (
+            self.space.output_geometry(&from),
+            self.space.output_geometry(to),
+        ) else {
+            return;
+        };
+        let from_name = from.name();
+        let to_name = to.name();
+        let workspace = self.spatial.workspaces.layout.active_workspace(&from_name);
+        if is_scratchpad_workspace(workspace) {
+            return;
+        }
+        let mut occupied: Vec<_> = self
+            .spatial
+            .workspaces
+            .layout
+            .populated_workspaces()
+            .into_iter()
+            .filter(|(output, _)| output == &to_name)
+            .map(|(_, workspace)| workspace)
+            .collect();
+        occupied.extend(
+            self.spatial
+                .workspaces
+                .floating_workspace
+                .iter()
+                .filter(|(surface, tag)| {
+                    tag.output == to_name && !self.spatial.workspaces.pinned.contains(*surface)
+                })
+                .map(|(_, tag)| tag.workspace),
+        );
+        occupied.extend(
+            self.spatial
+                .workspaces
+                .classic_depth
+                .occupied_workspaces(&to_name),
+        );
+        occupied.extend(
+            self.groups
+                .iter()
+                .filter(|group| group.output == to_name)
+                .map(|group| group.workspace),
+        );
+        let Some(target) = workspace_transfer_slot(workspace, occupied) else {
+            return;
+        };
+        let previous = self.spatial.workspaces.layout.active_workspace(&to_name);
+        let strip_view = (self.spatial.engine.projection()
+            == Some(crate::config::WorkspaceProjection::Scroll)
+            && self.config.scroll.float_anchor == crate::scroll::FloatAnchor::Strip)
+            .then(|| {
+                let layout = &self.spatial.workspaces.layout;
+                let area = self.output_tiling_area(&from).unwrap_or(from_geo);
+                (
+                    layout
+                        .scroll_workspace_start(
+                            &from_name,
+                            workspace,
+                            area,
+                            self.gaps_for(&from_name, workspace),
+                        )
+                        .unwrap_or(0.0),
+                    layout
+                        .scroll
+                        .offset(&from_name, layout.scroll_key(workspace)),
+                )
+            });
+        let mut incoming: Vec<(WlSurface, Window)> = self
+            .spatial
+            .workspaces
+            .layout
+            .windows_in(&from_name, workspace)
+            .into_iter()
+            .filter_map(|window| Some((window.toplevel()?.wl_surface().clone(), window)))
+            .collect();
+        incoming.extend(
+            self.spatial
+                .workspaces
+                .floating_workspace
+                .iter()
+                .filter(|(surface, tag)| {
+                    tag.output == from_name
+                        && tag.workspace == workspace
+                        && !self.spatial.workspaces.pinned.contains(*surface)
+                })
+                .map(|(surface, tag)| (surface.clone(), tag.window.clone())),
+        );
+        incoming.extend(
+            self.spatial
+                .workspaces
+                .classic_depth
+                .entries_for(&from_name, workspace)
+                .map(|entry| (entry.surface.clone(), entry.window.clone())),
+        );
+        for group in self
+            .groups
+            .iter()
+            .filter(|group| group.output == from_name && group.workspace == workspace)
+        {
+            incoming.extend(group.members.iter().filter_map(|member| {
+                member
+                    .parked_window
+                    .clone()
+                    .map(|window| (member.surface.clone(), window))
+            }));
+        }
+        let focused = self.focused_window_surface();
+        if incoming
+            .iter()
+            .any(|(surface, _)| self.fullscreen.contains_key(surface))
+        {
+            let owner = self
+                .fullscreen
+                .iter()
+                .find(|(_, entry)| entry.output == to_name)
+                .map(|(surface, _)| surface.clone());
+            if let Some(owner) = owner {
+                if let Some(toplevel) = self
+                    .mapped_toplevel_window(&owner)
+                    .and_then(|window| window.toplevel().cloned())
+                {
+                    self.do_unfullscreen(&toplevel);
+                } else {
+                    self.fullscreen.remove(&owner);
+                }
+            }
+        }
+        // No dispatch can add a resident to the validated destination slot.
+        if !self
+            .spatial
+            .workspaces
+            .layout
+            .move_workspace_to(&from_name, workspace, &to_name, target)
+        {
+            return;
+        }
+        self.close_depth_deck();
+        for output in [&from_name, &to_name] {
+            self.render
+                .motion
+                .pending_workspace_transitions
+                .remove(output);
+            self.render.motion.workspace_transitions.remove(output);
+            self.render.motion.workspace_glides.remove(output);
+            self.render.motion.depth_transitions.remove(output);
+            self.render.motion.workspace_scroll_cameras.remove(output);
+            self.render.motion.swim_cameras.remove(output);
+        }
+        // Hide the former destination view before activating the moved tree.
+        // Ordinary workspace switching would publish partial focus/empty
+        // state, so activation and notifications happen at the end instead.
+        for window in self
+            .spatial
+            .workspaces
+            .layout
+            .windows_in(&to_name, previous)
+        {
+            if target != previous {
+                self.space.unmap_elem(&window);
+            }
+        }
+        let outgoing: Vec<_> = self
+            .spatial
+            .workspaces
+            .floating_workspace
+            .iter()
+            .filter(|(surface, tag)| {
+                tag.output == to_name
+                    && tag.workspace == previous
+                    && !self.spatial.workspaces.pinned.contains(*surface)
+            })
+            .map(|(surface, tag)| (surface.clone(), tag.window.clone()))
+            .collect();
+        for (surface, window) in outgoing {
+            if !self.fullscreen.contains_key(&surface) && !self.maximized.contains_key(&surface) {
+                if let Some(rect) = self.space.element_geometry(&window) {
+                    self.spatial
+                        .workspaces
+                        .floating_workspace
+                        .get_mut(&surface)
+                        .unwrap()
+                        .rect = rect;
+                }
+            }
+            self.space.unmap_elem(&window);
+        }
+        let bounds = self.output_tiling_area(to).unwrap_or(to_geo);
+        let strip_delta = strip_view.map_or(0.0, |(start, offset)| {
+            let layout = &self.spatial.workspaces.layout;
+            offset - layout.scroll.offset(&to_name, layout.scroll_key(target))
+                + layout
+                    .scroll_workspace_start(
+                        &to_name,
+                        target,
+                        bounds,
+                        self.gaps_for(&to_name, target),
+                    )
+                    .unwrap_or(0.0)
+                - start
+        });
+        let strip_bounds = Self::strip_floating_bounds(bounds, self.config.scroll.orientation);
+        let relocate = |mut rect: Rectangle<i32, Logical>, anchored: bool| {
+            let (dx, dy) = if !anchored {
+                (0.0, 0.0)
+            } else {
+                match self.config.scroll.orientation {
+                    crate::scroll::Orientation::Horizontal => (strip_delta, 0.0),
+                    crate::scroll::Orientation::Vertical => (0.0, strip_delta),
+                }
+            };
+            rect.loc = (
+                (f64::from(rect.loc.x) - f64::from(from_geo.loc.x) + f64::from(to_geo.loc.x) + dx)
+                    .round() as i32,
+                (f64::from(rect.loc.y) - f64::from(from_geo.loc.y) + f64::from(to_geo.loc.y) + dy)
+                    .round() as i32,
+            )
+                .into();
+            clamp_rect_visible(rect, if anchored { strip_bounds } else { bounds })
+        };
+        let floaters: Vec<_> = self
+            .spatial
+            .workspaces
+            .floating_workspace
+            .iter()
+            .filter(|(surface, tag)| {
+                tag.output == from_name
+                    && tag.workspace == workspace
+                    && !self.spatial.workspaces.pinned.contains(*surface)
+            })
+            .map(|(surface, tag)| {
+                let rect = if self.fullscreen.contains_key(surface)
+                    || self.maximized.contains_key(surface)
+                {
+                    tag.rect
+                } else {
+                    self.space.element_geometry(&tag.window).unwrap_or(tag.rect)
+                };
+                let anchored = strip_view.is_some()
+                    && !self
+                        .fullscreen
+                        .get(surface)
+                        .is_some_and(|entry| entry.was_pinned);
+                (surface.clone(), relocate(rect, anchored))
+            })
+            .collect();
+        for (surface, rect) in floaters {
+            let tag = self
+                .spatial
+                .workspaces
+                .floating_workspace
+                .get_mut(&surface)
+                .unwrap();
+            tag.output = to_name.clone();
+            tag.workspace = target;
+            tag.rect = rect;
+            self.space.map_element(tag.window.clone(), rect.loc, false);
+        }
+        self.spatial
+            .workspaces
+            .classic_depth
+            .move_workspace(&from_name, workspace, &to_name, target);
+        for group in self
+            .groups
+            .iter_mut()
+            .filter(|group| group.output == from_name && group.workspace == workspace)
+        {
+            group.output = to_name.clone();
+            group.workspace = target;
+            group.strip = None;
+        }
+        for (surface, window) in &incoming {
+            let anchored = strip_view.is_some()
+                && !self
+                    .fullscreen
+                    .get(surface)
+                    .is_some_and(|entry| entry.was_pinned);
+            if let Some(entry) = self.fullscreen.get_mut(surface) {
+                entry.output = to_name.clone();
+                entry.restore_rect = entry.restore_rect.map(|rect| relocate(rect, anchored));
+            }
+            if let Some(entry) = self.maximized.get_mut(surface) {
+                entry.output = to_name.clone();
+                entry.restore_rect = relocate(entry.restore_rect, anchored);
+            }
+            if let Some(pin) = self.spatial.workspaces.output_pins.get_mut(surface) {
+                *pin = to_name.clone();
+            }
+            self.physics.window_float_bodies.remove(surface);
+            self.physics.window_viscosity.remove(surface);
+            self.render.motion.window_move_animations.remove(surface);
+            self.set_window_fractional_scale(window, to);
+        }
+        self.spatial
+            .workspaces
+            .layout
+            .set_active_workspace(&to_name, target);
+        if previous != target {
+            self.spatial
+                .workspaces
+                .workspace_previous
+                .insert(to_name.clone(), previous);
+        }
+        self.spatial.workspaces.workspace_step_output = Some(to_name.clone());
+        for (surface, _) in &incoming {
+            self.refresh_window_opacity_and_glass_for(surface);
+        }
+        self.refresh_space();
+        self.retile();
+        self.refresh_space();
+        let visible = |surface: &WlSurface| {
+            incoming.iter().any(|(candidate, _)| candidate == surface)
+                && self.window_is_visible(surface)
+        };
+        let focus = focused
+            .filter(|surface| visible(surface))
+            .or_else(|| {
+                self.input
+                    .focus_history
+                    .iter()
+                    .find(|surface| visible(surface))
+                    .cloned()
+            })
+            .or_else(|| {
+                self.space
+                    .elements()
+                    .rev()
+                    .filter_map(|window| {
+                        window
+                            .toplevel()
+                            .map(|toplevel| toplevel.wl_surface().clone())
+                    })
+                    .find(visible)
+            });
+        let origin = if self.spatial.engine.projection()
+            == Some(crate::config::WorkspaceProjection::Scroll)
+            && self.config.scroll.workspaces == crate::scroll::WorkspaceMode::Sections
+        {
+            FocusOrigin::Navigation
+        } else {
+            FocusOrigin::Restore
+        };
+        self.focus_window_with_ripple(focus, SERIAL_COUNTER.next_serial(), true, origin);
+        self.warp_pointer_to_monitor(to);
+        // Retile may have recreated an empty source strip's float clock.
+        // There are no workspace-owned floaters left to anchor against it.
+        let layout = &mut self.spatial.workspaces.layout;
+        if layout.scroll_key(workspace) != 0 {
+            layout.scroll.forget_strip(&from_name, workspace);
+        }
+        if incoming.is_empty() && layout.scroll_key(target) != 0 {
+            layout.scroll.forget_strip(&to_name, target);
+        }
+        self.refresh_ext_workspaces();
+        if previous != target {
+            self.emit_ipc_event(crate::ipc::IpcEvent::WorkspaceChanged {
+                output: to_name.clone(),
+                from: previous,
+                to: target,
+            });
+        }
+        for (surface, _) in &incoming {
+            self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
+                surface: surface.clone(),
+            });
+        }
+        if incoming.is_empty() {
+            self.check_workspace_created_empty(&to_name, target);
+        }
+    }
+
     /// Prospective placement must evaluate live workspace matches at its
     /// destination before previewing or mutating the window's ownership.
     pub(super) fn resolve_window_rules_on_workspace(
@@ -193,6 +602,12 @@ impl Smallvil {
                     .values()
                     .filter(|tag| tag.output == output)
                     .map(|tag| tag.workspace),
+            )
+            .chain(
+                self.spatial
+                    .workspaces
+                    .classic_depth
+                    .occupied_workspaces(output),
             )
             .collect();
         if let Some(count) = self.config.workspace_count {
@@ -1457,5 +1872,24 @@ impl Smallvil {
             (output_geometry.size.w, output_geometry.size.h),
         ));
         self.request_redraw();
+    }
+}
+
+#[cfg(test)]
+mod transfer_tests {
+    use super::workspace_transfer_slot;
+
+    #[test]
+    fn workspace_transfer_numbers_keep_free_ids_and_fill_bounded_gaps() {
+        assert_eq!(workspace_transfer_slot(4, vec![1, 2, 3]), Some(4));
+        assert_eq!(workspace_transfer_slot(4, vec![4, 2, 1, 3, 2]), Some(5));
+        assert_eq!(workspace_transfer_slot(4, vec![4, 3, 1]), Some(2));
+        assert_eq!(
+            workspace_transfer_slot(1_000_000, vec![1, 2]),
+            Some(1_000_000)
+        );
+        assert_eq!(workspace_transfer_slot(4, vec![4, 0, u32::MAX]), Some(1));
+        assert_eq!(workspace_transfer_slot(0, vec![]), None);
+        assert_eq!(workspace_transfer_slot(u32::MAX, vec![]), None);
     }
 }

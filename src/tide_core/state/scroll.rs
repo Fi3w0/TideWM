@@ -607,6 +607,10 @@ impl Smallvil {
         self.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Scroll)
             && self.config.scroll.float_anchor == crate::scroll::FloatAnchor::Strip
             && !self.spatial.workspaces.pinned.contains(surface)
+            && !self
+                .fullscreen
+                .get(surface)
+                .is_some_and(|entry| entry.was_pinned)
             && self
                 .spatial
                 .workspaces
@@ -625,8 +629,15 @@ impl Smallvil {
         if !self.scroll_strip_floater(surface) {
             return full;
         }
+        Self::strip_floating_bounds(full, self.config.scroll.orientation)
+    }
+
+    pub(super) fn strip_floating_bounds(
+        full: Rectangle<i32, Logical>,
+        orientation: crate::scroll::Orientation,
+    ) -> Rectangle<i32, Logical> {
         const HALF: i32 = i32::MAX / 4;
-        match self.config.scroll.orientation {
+        match orientation {
             crate::scroll::Orientation::Horizontal => {
                 Rectangle::new((-HALF, full.loc.y).into(), (2 * HALF, full.size.h).into())
             }

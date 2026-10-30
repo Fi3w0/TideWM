@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.20 · 2026-10-30 — Move a workspace to another monitor
+
+- New `move-workspace-to-monitor-left/right/up/down` and `move-workspace-to-monitor:<name>` actions move the active workspace in Classic or Scroll. Keep its number when free; otherwise use the first free slot. Layout, windows and parked tabs travel together; focus and pointer follow. Sticky floaters stay on their monitor.
+
 ## 0.91.19 · 2026-10-30 — Move a Scroll column to another monitor
 
 - New `move-column-to-monitor-left/right/up/down` and `move-column-to-monitor:<name>` actions send the whole Scroll column to another monitor's active workspace, keeping its rows, height shares, width proportion and selected window. Focus and pointer follow. Tabbed columns travel together; on a floater, the action moves that window.

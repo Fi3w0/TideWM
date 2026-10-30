@@ -566,6 +566,54 @@ impl Layouts {
         }
     }
 
+    /// Move a complete tree into an empty slot, retaining its split shape
+    /// and per-window Scroll metadata. Slot selection also accounts for
+    /// floating/deck residents in the compositor before calling here.
+    pub(crate) fn move_workspace_to(
+        &mut self,
+        from: &str,
+        workspace: u32,
+        to: &str,
+        target: u32,
+    ) -> bool {
+        if from == to || self.window_count(to, target) != 0 {
+            return false;
+        }
+        let source = (from.to_string(), workspace);
+        let destination = (to.to_string(), target);
+        let algorithm = self.algorithm(from, workspace);
+        let explicit_algorithm = self.algorithms.remove(&source);
+        let ratio = self.master_ratio.remove(&source);
+        let cascade = self.cascade_state.remove(&source);
+        self.cascade_state.remove(&destination);
+        self.trees.remove(&destination);
+        if let Some(tree) = self.trees.remove(&source).filter(|tree| !tree.is_empty()) {
+            index_tree_owners(&mut self.owners, to, target, &tree);
+            self.trees.insert(destination.clone(), tree);
+        }
+        self.algorithms.remove(&destination);
+        self.master_ratio.remove(&destination);
+        let inherited_target = self
+            .workspace_algorithm_overrides
+            .get(&target)
+            .copied()
+            .unwrap_or(self.default_algorithm);
+        if explicit_algorithm.is_some() || algorithm != inherited_target {
+            self.algorithms.insert(destination.clone(), algorithm);
+        }
+        if let Some(ratio) = ratio {
+            self.master_ratio.insert(destination.clone(), ratio);
+        }
+        if let Some(cascade) = cascade {
+            self.cascade_state.insert(destination, cascade);
+        }
+        if self.scroll_key(workspace) != 0 && self.scroll_key(target) != 0 {
+            self.scroll.move_strip(from, workspace, to, target);
+        }
+        self.bump_topology_revision();
+        true
+    }
+
     /// Removes the window backed by `surface` from whichever tree holds it.
     /// No-op if `surface` isn't tiled anywhere.
     pub fn remove(&mut self, surface: &WlSurface) {
@@ -2728,5 +2776,35 @@ mod tests {
         assert_eq!(layouts.window_count("DP-1", 3), 0);
         assert_eq!(layouts.algorithm("DP-1", 3), LayoutAlgorithm::Bsp);
         assert!(!layouts.trees.contains_key(&("DP-2".to_string(), 3)));
+    }
+    #[test]
+    fn empty_workspace_transfers_do_not_grow_default_layout_caches() {
+        let mut layouts = Layouts::default();
+        for workspace in 1..256 {
+            assert!(layouts.move_workspace_to("from", workspace, "to", workspace));
+        }
+        assert!(layouts.trees.is_empty());
+        assert!(layouts.algorithms.is_empty());
+        assert!(layouts.master_ratio.is_empty());
+        assert!(layouts.cascade_state.is_empty());
+        layouts.set_workspace_algorithm_overrides(HashMap::from([(4, LayoutAlgorithm::Master)]));
+        assert!(layouts.move_workspace_to("from", 4, "to", 1));
+        assert_eq!(layouts.algorithm("to", 1), LayoutAlgorithm::Master);
+        assert_eq!(layouts.algorithms.len(), 1);
+    }
+
+    #[test]
+    fn whole_workspace_transfer_refuses_an_occupied_tree_without_losing_either() {
+        let mut protocol = ProtocolFixture::new();
+        let first = protocol.window_with_min((20, 20));
+        let second = protocol.window_with_min((20, 20));
+        let a = first.toplevel().unwrap().wl_surface().clone();
+        let b = second.toplevel().unwrap().wl_surface().clone();
+        let mut layouts = Layouts::default();
+        layouts.insert("from", 4, first, None);
+        layouts.insert("to", 4, second, None);
+        assert!(!layouts.move_workspace_to("from", 4, "to", 4));
+        assert_eq!(layouts.output_of(&a), Some("from"));
+        assert_eq!(layouts.output_of(&b), Some("to"));
     }
 }

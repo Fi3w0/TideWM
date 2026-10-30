@@ -258,6 +258,35 @@ pub struct ScrollState {
     stack_offsets: HashMap<WlSurface, f64>,
 }
 impl ScrollState {
+    pub(crate) fn forget_strip(&mut self, output: &str, workspace: u32) {
+        let key = (output.to_string(), workspace);
+        self.offsets.remove(&key);
+        self.float_offsets.remove(&key);
+        self.margins.remove(&key);
+    }
+
+    /// Move one independent strip's remembered view. Sectioned workspaces
+    /// share an output-wide key and are handled by their caller instead.
+    pub(crate) fn move_strip(&mut self, from: &str, workspace: u32, to: &str, target: u32) {
+        let source = (from.to_string(), workspace);
+        let destination = (to.to_string(), target);
+        let offset = self.offsets.remove(&source);
+        let float_offset = self.float_offsets.remove(&source);
+        let margins = self.margins.remove(&source);
+        self.offsets.remove(&destination);
+        self.float_offsets.remove(&destination);
+        self.margins.remove(&destination);
+        if let Some(offset) = offset {
+            self.offsets.insert(destination.clone(), offset);
+        }
+        if let Some(offset) = float_offset {
+            self.float_offsets.insert(destination.clone(), offset);
+        }
+        if margins {
+            self.margins.insert(destination);
+        }
+    }
+
     /// Records `offset` as the one floating windows now sit against and
     /// returns how far they must move, or `None` the first time a strip is
     /// seen. Whole pixels so repeated small pans cannot drift.
@@ -902,5 +931,21 @@ mod tests {
         assert_eq!(second.loc.y, 8 + 128);
         assert_eq!(third.loc.y, 8 + 2 * 128 - 50);
         assert_eq!(third.size.h, 120);
+    }
+    #[test]
+    fn moving_strip_view_replaces_stale_destination_and_moves_float_clock() {
+        let mut state = ScrollState::default();
+        state.set_offset("from", 4, 128.0);
+        state.set_margins("from", 4, true);
+        state.float_shift("from", 4, 128.0);
+        state.set_offset("to", 5, 999.0);
+        state.float_shift("to", 5, 999.0);
+        state.move_strip("from", 4, "to", 5);
+        assert!(!state.has_offset("from", 4));
+        assert!(!state.has_margins("from", 4));
+        assert_eq!(state.offset("to", 5), 128.0);
+        assert!(state.has_margins("to", 5));
+        assert_eq!(state.float_shift("to", 5, 138.0), Some(-10));
+        assert_eq!(state.float_shift("from", 4, 1.0), None);
     }
 }

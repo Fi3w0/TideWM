@@ -522,6 +522,20 @@ impl Layouts {
         (offset - previous).abs() > 0.5
     }
 
+    /// Strip-local start before the view offset, for workspace transfers.
+    pub(crate) fn scroll_workspace_start(
+        &self,
+        output: &str,
+        workspace: u32,
+        area: Rectangle<i32, Logical>,
+        gap: i32,
+    ) -> Option<f64> {
+        self.scroll_slots(output, workspace, area, gap)
+            .into_iter()
+            .find(|slot| slot.workspace == workspace)
+            .map(|slot| slot.start)
+    }
+
     fn scroll_slots(
         &self,
         output: &str,

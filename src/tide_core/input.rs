@@ -3344,6 +3344,16 @@ impl Smallvil {
                     self.move_column_to_monitor(&output);
                 }
             }
+            Action::MoveWorkspaceToMonitor(direction) => {
+                if let Some(output) = self.monitor_in_direction(direction) {
+                    self.move_workspace_to_monitor(&output);
+                }
+            }
+            Action::MoveWorkspaceToMonitorNamed(name) => {
+                if let Some(output) = self.output_by_name(&name) {
+                    self.move_workspace_to_monitor(&output);
+                }
+            }
             Action::SwapDirection(direction) => {
                 self.swap_direction(direction);
             }

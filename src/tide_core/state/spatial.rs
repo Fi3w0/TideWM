@@ -1384,6 +1384,15 @@ impl Smallvil {
                         .unwrap_or_else(|| output.clone());
                     self.set_window_fractional_scale(&window, &scale_output);
                     let bounds = self.floating_bounds(&surface, full);
+                    let restore_bounds = if self
+                        .fullscreen
+                        .get(&surface)
+                        .is_some_and(|entry| entry.was_pinned)
+                    {
+                        full
+                    } else {
+                        bounds
+                    };
 
                     if let Some(tag) = self.spatial.workspaces.floating_workspace.get_mut(&surface)
                     {
@@ -1391,11 +1400,11 @@ impl Smallvil {
                     }
                     if let Some(entry) = self.fullscreen.get_mut(&surface) {
                         if let Some(rect) = &mut entry.restore_rect {
-                            *rect = clamp_rect_visible(*rect, full);
+                            *rect = clamp_rect_visible(*rect, restore_bounds);
                         }
                     }
                     if let Some(entry) = self.maximized.get_mut(&surface) {
-                        entry.restore_rect = clamp_rect_visible(entry.restore_rect, full);
+                        entry.restore_rect = clamp_rect_visible(entry.restore_rect, restore_bounds);
                     }
 
                     if !self.fullscreen.contains_key(&surface)

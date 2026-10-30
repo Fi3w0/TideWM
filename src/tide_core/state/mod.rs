@@ -854,6 +854,9 @@ pub(crate) enum FocusOrigin {
     /// Pointer hover, press, touch contact or tablet tip. The pointer is
     /// already on the app, so the viewport must not move under it.
     Pointer,
+    /// Restore a transferred workspace's focus without navigating away
+    /// from its remembered Scroll view.
+    Restore,
 }
 
 /// Pointer space is surface space. A placement -- and `Space::element_location`
