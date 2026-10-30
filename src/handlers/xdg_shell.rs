@@ -344,9 +344,9 @@ impl Smallvil {
         let requested_output = wl_output.as_ref().and_then(Output::from_resource);
         // A mapped window's Layouts/FloatingTag ownership is authoritative.
         // Merely changing FullscreenEntry to a different client-hinted output
-        // left the window owned by A but sized for B. Tide has no individual
-        // send-to-output primitive yet, and xdg-shell explicitly allows the
-        // compositor to ignore this hint, so honor it only before first map.
+        // left the window owned by A but sized for B. Explicit monitor actions
+        // perform that ownership transaction; this client hint is honored only
+        // before first map, as permitted by xdg-shell.
         let owned_output = self
             .preferred_output_for_toplevel(&wl_surface)
             .and_then(|name| self.output_by_name(&name));
@@ -358,7 +358,7 @@ impl Smallvil {
                 .is_some_and(|requested| owned_output.as_ref() != Some(requested))
             {
                 tracing::debug!(
-                    "Ignoring fullscreen output hint until individual window output moves exist"
+                    "Ignoring fullscreen output hint for a mapped window on another output"
                 );
             }
             owned_output

@@ -1561,3 +1561,623 @@ fn monitor_focus_uses_live_geometry_and_restores_recent_windows() {
         location
     );
 }
+
+#[test]
+fn monitor_window_moves_keep_ownership_and_return_modes() {
+    use crate::config::{parse_action, SpatialEngine};
+    use crate::state::SessionLock;
+    const CHILD: &str = "TIDEWM_MONITOR_MOVE_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "tidewm-monitor-move-test-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("config/tidewm")).unwrap();
+        std::fs::create_dir(root.join("runtime")).unwrap();
+        std::fs::set_permissions(root.join("runtime"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::write(root.join("config/tidewm/config.wave"), "engine = scroll\nwelcome_hint = false\nwater_effects = false\ngaps = 0\nscroll {\n tile_proportion = 1.0\n}\nanimations {\n enabled = false\n}\n").unwrap();
+        let name = concat!(
+            module_path!(),
+            "::monitor_window_moves_keep_ownership_and_return_modes"
+        );
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name.split_once("::").unwrap().1, "--nocapture"])
+            .env(CHILD, "1")
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_RUNTIME_DIR", root.join("runtime"))
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(String::from_utf8_lossy(&result.stdout).contains("running 1 test"));
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    }
+    let mut event_loop = EventLoop::try_new().unwrap();
+    let state = Smallvil::new(&mut event_loop, Display::new().unwrap());
+    let (server, peer) = UnixStream::pair().unwrap();
+    state
+        .display_handle
+        .clone()
+        .insert_client(
+            server,
+            Arc::new(ClientState {
+                compositor_state: CompositorClientState::default(),
+                security_context: None,
+                disconnect_sender: None,
+            }),
+        )
+        .unwrap();
+    peer.set_nonblocking(true).unwrap();
+    let mut fixture = Fixture {
+        event_loop,
+        state,
+        peer,
+    };
+    let mut outputs = Vec::new();
+    // Registration order differs from physical order. Right has a fractional
+    // scale: selection and pointer placement must use logical geometry.
+    for (name, location, size, scale) in [
+        ("origin", (0, 0), (1000, 600), Scale::Integer(1)),
+        ("diagonal", (1000, -800), (1000, 600), Scale::Integer(1)),
+        ("right", (1000, 0), (1125, 875), Scale::Fractional(1.25)),
+        ("below", (0, 800), (1000, 600), Scale::Integer(1)),
+    ] {
+        let output = Output::new(
+            name.into(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "test".into(),
+                model: "test".into(),
+                serial_number: "test".into(),
+            },
+        );
+        output.change_current_state(
+            Some(Mode {
+                size: size.into(),
+                refresh: 60_000,
+            }),
+            None,
+            Some(scale),
+            Some(location.into()),
+        );
+        fixture.state.space.map_output(&output, location);
+        outputs.push(output);
+    }
+    fixture.request(1, 1, &[2], &[]);
+    let globals: Vec<_> = fixture
+        .dispatch()
+        .into_iter()
+        .filter_map(|(object, opcode, body)| {
+            if object != 2 || opcode != 0 {
+                return None;
+            }
+            let name = u32::from_ne_bytes(body[..4].try_into().unwrap());
+            let length = u32::from_ne_bytes(body[4..8].try_into().unwrap()) as usize;
+            Some((
+                String::from_utf8(body[8..8 + length - 1].to_vec()).unwrap(),
+                name,
+            ))
+        })
+        .collect();
+    for (interface, id, version) in [
+        ("wl_compositor", 3_u32, 4_u32),
+        ("xdg_wm_base", 4, 1),
+        ("wp_single_pixel_buffer_manager_v1", 5, 1),
+        ("wp_viewporter", 6, 1),
+    ] {
+        let name = globals
+            .iter()
+            .find(|(candidate, _)| candidate == interface)
+            .unwrap()
+            .1;
+        let mut tail = string(interface);
+        tail.extend_from_slice(&version.to_ne_bytes());
+        tail.extend_from_slice(&id.to_ne_bytes());
+        fixture.request(2, 0, &[name], &tail);
+    }
+    let mut surfaces = Vec::new();
+    for surface in [7_u32, 12, 17, 22] {
+        fixture.request(3, 0, &[surface], &[]);
+        fixture.request(4, 2, &[surface + 1, surface], &[]);
+        fixture.request(surface + 1, 1, &[surface + 2], &[]);
+        fixture.request(6, 1, &[surface + 3, surface], &[]);
+        fixture.request(surface + 3, 2, &[1000, 600], &[]);
+        fixture.request(surface, 6, &[], &[]);
+        let serial = fixture
+            .dispatch()
+            .into_iter()
+            .find_map(|(object, opcode, body)| {
+                (object == surface + 1 && opcode == 0)
+                    .then(|| u32::from_ne_bytes(body[..4].try_into().unwrap()))
+            })
+            .unwrap();
+        fixture.request(surface + 1, 4, &[serial], &[]);
+        fixture.request(5, 1, &[surface + 4, u32::MAX, 0, 0, u32::MAX], &[]);
+        fixture.request(surface, 1, &[surface + 4, 0, 0], &[]);
+        fixture.request(surface, 6, &[], &[]);
+        fixture.dispatch();
+        surfaces.push(surface);
+    }
+    let surfaces: Vec<_> = surfaces
+        .into_iter()
+        .map(|id| {
+            fixture
+                .state
+                .space
+                .elements()
+                .find_map(|window| {
+                    let surface = window.toplevel()?.wl_surface();
+                    (surface.id().protocol_id() == id).then(|| surface.clone())
+                })
+                .unwrap()
+        })
+        .collect();
+    fixture.state.config.ocean.camera_animation_ms = 0;
+    fixture.state.toggle_floating(&surfaces[2]);
+    fixture
+        .state
+        .spatial
+        .workspaces
+        .layout
+        .set_active_workspace("right", 3);
+    let run = |fixture: &mut Fixture, action: &str| {
+        let cameras = [
+            fixture.state.spatial.ocean.camera("origin"),
+            fixture.state.spatial.ocean.camera("right"),
+        ];
+        fixture.state.run_action(parse_action(action).unwrap());
+        // Behave like real clients: ack the last configure and commit its
+        // viewport size, so a refused old buffer cannot appear to overlap a
+        // neighbor after its tile moved into a smaller destination slot.
+        let mut events = fixture.dispatch();
+        for _ in 0..16 {
+            let mut acknowledged = false;
+            for surface in [7_u32, 12, 17, 22] {
+                let size = events.iter().rev().find_map(|(object, opcode, body)| {
+                    (*object == surface + 2 && *opcode == 0).then(|| {
+                        (
+                            u32::from_ne_bytes(body[..4].try_into().unwrap()),
+                            u32::from_ne_bytes(body[4..8].try_into().unwrap()),
+                        )
+                    })
+                });
+                let serial = events.iter().rev().find_map(|(object, opcode, body)| {
+                    (*object == surface + 1 && *opcode == 0)
+                        .then(|| u32::from_ne_bytes(body[..4].try_into().unwrap()))
+                });
+                if let Some(serial) = serial {
+                    if let Some((width, height)) = size.filter(|(w, h)| *w > 0 && *h > 0) {
+                        fixture.request(surface + 3, 2, &[width, height], &[]);
+                    }
+                    fixture.request(surface + 1, 4, &[serial], &[]);
+                    fixture.request(surface, 6, &[], &[]);
+                    acknowledged = true;
+                }
+            }
+            if !acknowledged {
+                break;
+            }
+            events = fixture.dispatch();
+        }
+        fixture.state.refresh_space();
+        if action.starts_with("move-window-to-monitor") {
+            assert_eq!(
+                fixture.state.spatial.ocean.camera("origin"),
+                cameras[0],
+                "{action}"
+            );
+            assert_eq!(
+                fixture.state.spatial.ocean.camera("right"),
+                cameras[1],
+                "{action}"
+            );
+        }
+    };
+    let owner = |fixture: &Fixture, index: usize| {
+        fixture
+            .state
+            .spatial
+            .workspaces
+            .layout
+            .output_of(&surfaces[index])
+            .or_else(|| {
+                fixture
+                    .state
+                    .spatial
+                    .workspaces
+                    .floating_workspace
+                    .get(&surfaces[index])
+                    .map(|tag| tag.output.as_str())
+            })
+            .or_else(|| fixture.state.spatial.ocean.entry_output(&surfaces[index]))
+            .unwrap()
+            .to_string()
+    };
+    for engine in [
+        SpatialEngine::Scroll,
+        SpatialEngine::Classic,
+        SpatialEngine::Ocean,
+    ] {
+        assert!(fixture.state.migrate_spatial_engine(engine));
+        fixture.state.activate_toplevel(&surfaces[0]);
+        // With pointer policy on, leave the pointer on a different monitor.
+        // A window move still starts from the focused window's own monitor.
+        fixture.state.config.input.focus_follows_mouse = true;
+        run(&mut fixture, "focus-monitor:right");
+        fixture.state.activate_toplevel(&surfaces[0]);
+        assert_eq!(fixture.state.primary_output(), Some(outputs[2].clone()));
+        if engine == SpatialEngine::Scroll {
+            fixture
+                .state
+                .spatial
+                .workspaces
+                .layout
+                .scroll
+                .set_stacked(&surfaces[1], true);
+            fixture
+                .state
+                .spatial
+                .workspaces
+                .layout
+                .scroll
+                .resize(surfaces[0].clone(), 0.7);
+            fixture
+                .state
+                .spatial
+                .workspaces
+                .layout
+                .scroll
+                .set_weight(&surfaces[1], 2.0);
+            fixture.state.retile();
+        }
+        run(&mut fixture, "move-window-to-monitor-right");
+        assert_eq!(owner(&fixture, 0), "right", "{engine:?}");
+        assert_eq!(
+            fixture.state.focused_window_surface(),
+            Some(surfaces[0].clone())
+        );
+        assert_eq!(fixture.state.primary_output(), Some(outputs[2].clone()));
+        assert_eq!(
+            fixture.state.seat.get_pointer().unwrap().current_focus(),
+            Some(surfaces[0].clone()),
+            "{engine:?}; pos={:?}; placements={:?}",
+            fixture.state.seat.get_pointer().unwrap().current_location(),
+            fixture
+                .state
+                .render_placements(&outputs[2])
+                .unwrap()
+                .iter()
+                .map(|p| (p.surface().map(|s| s.id().protocol_id()), p.rect))
+                .collect::<Vec<_>>()
+        );
+        if engine != SpatialEngine::Ocean {
+            assert_eq!(
+                fixture
+                    .state
+                    .spatial
+                    .workspaces
+                    .layout
+                    .workspace_of(&surfaces[0]),
+                Some(3)
+            );
+            assert_eq!(
+                fixture
+                    .state
+                    .spatial
+                    .workspaces
+                    .layout
+                    .workspace_of(&surfaces[1]),
+                Some(1)
+            );
+        }
+        if engine == SpatialEngine::Scroll {
+            let layout = &fixture.state.spatial.workspaces.layout;
+            assert!(!layout.scroll.is_stacked(&surfaces[1]));
+            assert_eq!(layout.scroll.proportion(&surfaces[1]), 0.7);
+            assert_eq!(layout.scroll.proportion(&surfaces[0]), 0.7);
+            assert_eq!(layout.scroll.weight(&surfaces[1]), 2.0);
+        }
+        // Same monitor, missing monitor and strip edge are complete no-ops.
+        let pointer = fixture.state.seat.get_pointer().unwrap();
+        let location = pointer.current_location();
+        for action in [
+            "move-window-to-monitor-right",
+            "move-window-to-monitor:right",
+            "move-window-to-monitor:missing",
+        ] {
+            run(&mut fixture, action);
+            assert_eq!(owner(&fixture, 0), "right");
+            assert_eq!(pointer.current_location(), location);
+        }
+        fixture.state.config.input.focus_follows_mouse = false;
+        run(&mut fixture, "move-window-to-monitor-left");
+        assert_eq!(
+            owner(&fixture, 0),
+            "origin",
+            "{engine:?}; durable={:?}; pointer={:?}; focus={:?}",
+            fixture
+                .state
+                .spatial
+                .workspaces
+                .layout
+                .output_of(&surfaces[0]),
+            fixture.state.seat.get_pointer().unwrap().current_location(),
+            fixture.state.focused_window_surface()
+        );
+        assert_eq!(fixture.state.primary_output(), Some(outputs[0].clone()));
+        run(&mut fixture, "move-window-to-monitor-down");
+        assert_eq!(owner(&fixture, 0), "below");
+        run(&mut fixture, "move-window-to-monitor-up");
+        assert_eq!(owner(&fixture, 0), "origin");
+        // Group tabs are one tiling slot. A transfer carries the parked tab,
+        // its output pin and group workspace, without inserting it as a tile.
+        fixture.state.group_with(&surfaces[0], &surfaces[1]);
+        fixture
+            .state
+            .spatial
+            .workspaces
+            .output_pins
+            .insert(surfaces[1].clone(), "origin".into());
+        run(&mut fixture, "move-window-to-monitor:right");
+        let group = fixture.state.group_of(&surfaces[0]).unwrap();
+        assert_eq!(fixture.state.groups[group].output, "right");
+        assert_eq!(fixture.state.groups[group].workspace, 3);
+        assert_eq!(
+            fixture
+                .state
+                .spatial
+                .workspaces
+                .output_pins
+                .get(&surfaces[1])
+                .map(String::as_str),
+            Some("right")
+        );
+        fixture.state.ungroup(&surfaces[1]);
+        assert_eq!(owner(&fixture, 1), "right");
+        for surface in &surfaces[..2] {
+            fixture.state.activate_toplevel(surface);
+            run(&mut fixture, "move-window-to-monitor:origin");
+        }
+        // A fullscreen tile moves without leaving fullscreen and preempts
+        // the existing destination fullscreen owner. Configure uses the
+        // destination logical mode, not physical pixels or the old mode.
+        fixture.state.activate_toplevel(&surfaces[3]);
+        run(&mut fixture, "move-window-to-monitor:right");
+        run(&mut fixture, "toggle-fullscreen");
+        fixture.state.activate_toplevel(&surfaces[0]);
+        run(&mut fixture, "move-window-to-monitor:right");
+        assert_eq!(
+            fixture.state.fullscreen.contains_key(&surfaces[3]),
+            engine == SpatialEngine::Scroll
+        );
+        assert_eq!(
+            fixture.state.focused_window_surface(),
+            Some(surfaces[0].clone())
+        );
+        assert_eq!(
+            fixture.state.seat.get_pointer().unwrap().current_focus(),
+            Some(surfaces[0].clone())
+        );
+        run(&mut fixture, "move-window-to-monitor:origin");
+        if engine != SpatialEngine::Scroll {
+            fixture.state.activate_toplevel(&surfaces[3]);
+            run(&mut fixture, "toggle-fullscreen");
+        }
+        fixture.state.activate_toplevel(&surfaces[0]);
+        run(&mut fixture, "toggle-fullscreen");
+        run(&mut fixture, "move-window-to-monitor:right");
+        assert_eq!(fixture.state.fullscreen[&surfaces[0]].output, "right");
+        assert!(!fixture.state.fullscreen.contains_key(&surfaces[3]));
+        let toplevel = fixture
+            .state
+            .mapped_toplevel_window(&surfaces[0])
+            .unwrap()
+            .toplevel()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            toplevel.with_pending_state(|state| state.size),
+            Some((900, 700).into())
+        );
+        run(&mut fixture, "toggle-fullscreen");
+        assert_eq!(owner(&fixture, 0), "right");
+        run(&mut fixture, "move-window-to-monitor:origin");
+        fixture.state.activate_toplevel(&surfaces[3]);
+        run(&mut fixture, "move-window-to-monitor:origin");
+        // Ordinary floaters, workspace/screen pins and output pins survive.
+        fixture.state.activate_toplevel(&surfaces[2]);
+        fixture
+            .state
+            .spatial
+            .workspaces
+            .output_pins
+            .insert(surfaces[2].clone(), "origin".into());
+        let floating_size = if engine == SpatialEngine::Ocean {
+            fixture
+                .state
+                .spatial
+                .ocean
+                .floating_rect(&surfaces[2])
+                .unwrap()
+                .size
+        } else {
+            let window = fixture.state.mapped_toplevel_window(&surfaces[2]).unwrap();
+            fixture.state.space.element_geometry(&window).unwrap().size
+        };
+        run(&mut fixture, "move-window-to-monitor:right");
+        assert_eq!(owner(&fixture, 2), "right");
+        assert_eq!(
+            fixture
+                .state
+                .spatial
+                .workspaces
+                .output_pins
+                .get(&surfaces[2])
+                .map(String::as_str),
+            Some("right")
+        );
+        if engine == SpatialEngine::Ocean {
+            assert_eq!(
+                fixture
+                    .state
+                    .spatial
+                    .ocean
+                    .floating_rect(&surfaces[2])
+                    .unwrap()
+                    .size,
+                floating_size
+            );
+        } else {
+            let tag = &fixture.state.spatial.workspaces.floating_workspace[&surfaces[2]];
+            assert_eq!(tag.workspace, 3);
+            assert_eq!(tag.rect.size, floating_size);
+        }
+        run(&mut fixture, "move-window-to-monitor:origin");
+        run(&mut fixture, "toggle-pin");
+        run(&mut fixture, "move-window-to-monitor:right");
+        assert!(fixture.state.window_is_pinned(&surfaces[2]));
+        assert_eq!(owner(&fixture, 2), "right");
+        run(&mut fixture, "move-window-to-monitor:origin");
+        assert!(fixture.state.window_is_pinned(&surfaces[2]));
+        for fullscreen in [false, true] {
+            run(&mut fixture, "toggle-border-fullscreen");
+            if fullscreen {
+                run(&mut fixture, "toggle-fullscreen");
+            }
+            let saved_size = fixture.state.maximized[&surfaces[2]].restore_rect.size;
+            run(&mut fixture, "move-window-to-monitor:right");
+            assert_eq!(fixture.state.maximized[&surfaces[2]].output, "right");
+            assert_eq!(
+                fixture.state.maximized[&surfaces[2]].restore_rect.size,
+                saved_size
+            );
+            if fullscreen {
+                assert_eq!(fixture.state.fullscreen[&surfaces[2]].output, "right");
+                assert_eq!(
+                    fixture.state.fullscreen[&surfaces[2]]
+                        .restore_rect
+                        .unwrap()
+                        .size,
+                    saved_size
+                );
+                run(&mut fixture, "toggle-fullscreen");
+            }
+            assert!(fixture.state.window_is_pinned(&surfaces[2]));
+            assert!(fixture.state.maximized.contains_key(&surfaces[2]));
+            run(&mut fixture, "toggle-border-fullscreen");
+            assert!(!fixture.state.maximized.contains_key(&surfaces[2]));
+            assert_eq!(owner(&fixture, 2), "right");
+            let window = fixture.state.mapped_toplevel_window(&surfaces[2]).unwrap();
+            assert_eq!(
+                fixture.state.space.element_geometry(&window).unwrap().size,
+                floating_size
+            );
+            run(&mut fixture, "move-window-to-monitor:origin");
+        }
+        run(&mut fixture, "toggle-pin");
+        fixture.state.session_lock = SessionLock::Locked;
+        run(&mut fixture, "move-window-to-monitor:right");
+        assert_eq!(owner(&fixture, 2), "origin");
+        fixture.state.session_lock = SessionLock::Unlocked;
+        let pointer = fixture.state.seat.get_pointer().unwrap();
+        pointer.button(
+            &mut fixture.state,
+            &smithay::input::pointer::ButtonEvent {
+                serial: smithay::utils::SERIAL_COUNTER.next_serial(),
+                time: smithay::backend::input::InputTime::now(),
+                button: 0x110,
+                state: smithay::backend::input::ButtonState::Pressed,
+            },
+        );
+        assert!(pointer.is_grabbed());
+        run(&mut fixture, "move-window-to-monitor:right");
+        assert_eq!(owner(&fixture, 2), "origin");
+        pointer.button(
+            &mut fixture.state,
+            &smithay::input::pointer::ButtonEvent {
+                serial: smithay::utils::SERIAL_COUNTER.next_serial(),
+                time: smithay::backend::input::InputTime::now(),
+                button: 0x110,
+                state: smithay::backend::input::ButtonState::Released,
+            },
+        );
+    }
+
+    // Shared Ocean with unequal camera zoom: an actual screen pin retains
+    // its viewport size/scale and follows ownership onto the new monitor.
+    fixture.state.config.ocean.shared_canvas = true;
+    fixture.state.spatial.ocean.set_shared_canvas(true);
+    fixture.state.spatial.ocean.set_camera_origin(
+        "right",
+        crate::ocean::OceanPoint {
+            x: 10000.0,
+            y: 2000.0,
+        },
+    );
+    fixture
+        .state
+        .spatial
+        .ocean
+        .zoom_at("right", (0.0, 0.0).into(), 0.5, Duration::ZERO);
+    fixture.state.retile();
+    fixture.state.activate_toplevel(&surfaces[2]);
+    run(&mut fixture, "toggle-pin");
+    let pin = fixture
+        .state
+        .render_placements(&outputs[0])
+        .unwrap()
+        .into_iter()
+        .find(|p| p.surface() == Some(&surfaces[2]))
+        .unwrap();
+    run(&mut fixture, "move-window-to-monitor:right");
+    let moved = fixture
+        .state
+        .render_placements(&outputs[2])
+        .unwrap()
+        .into_iter()
+        .find(|p| p.surface() == Some(&surfaces[2]))
+        .unwrap();
+    assert_eq!(moved.rect.size, pin.rect.size);
+    assert_eq!(moved.view_scale, pin.view_scale);
+    assert_eq!(
+        fixture.state.spatial.ocean.entry_output(&surfaces[2]),
+        Some("right")
+    );
+    assert_eq!(fixture.state.primary_output(), Some(outputs[2].clone()));
+    run(&mut fixture, "toggle-pin");
+    run(&mut fixture, "move-window-to-monitor:origin");
+    // A panned-away destination reef must be revealed, without moving the
+    // source camera. This uses the existing Ocean navigation animation.
+    fixture.state.activate_toplevel(&surfaces[0]);
+    let source_camera = fixture.state.spatial.ocean.camera("origin");
+    fixture
+        .state
+        .run_action(parse_action("move-window-to-monitor:right").unwrap());
+    fixture.dispatch();
+    assert_eq!(
+        fixture.state.spatial.ocean.entry_output(&surfaces[0]),
+        Some("right")
+    );
+    assert_eq!(fixture.state.spatial.ocean.camera("origin"), source_camera);
+    assert!(fixture
+        .state
+        .render_placements(&outputs[2])
+        .unwrap()
+        .iter()
+        .any(|p| {
+            p.surface() == Some(&surfaces[0])
+                && crate::placement::translated_rect(p.rect, p.view_offset)
+                    .overlaps(fixture.state.space.output_geometry(&outputs[2]).unwrap())
+        }));
+}

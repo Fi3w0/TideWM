@@ -4371,6 +4371,28 @@ fn monitor_focus_actions_parse() {
 }
 
 #[test]
+fn monitor_window_move_actions_parse() {
+    for (name, direction) in [
+        ("left", Direction::Left),
+        ("right", Direction::Right),
+        ("up", Direction::Up),
+        ("down", Direction::Down),
+    ] {
+        assert!(matches!(
+            parse_action(&format!("move-window-to-monitor-{name}")),
+            Some(Action::MoveWindowToMonitor(parsed)) if parsed == direction
+        ));
+    }
+    assert!(matches!(
+        parse_action("move-window-to-monitor: test-output "),
+        Some(Action::MoveWindowToMonitorNamed(name)) if name == "test-output"
+    ));
+    assert!(parse_action("move-window-to-monitor:").is_none());
+    assert!(parse_action("move-window-to-monitor:   ").is_none());
+    assert!(parse_action("move-window-to-monitor-diagonal").is_none());
+}
+
+#[test]
 fn shortcut_inhibit_and_touchpad_toggles_parse() {
     assert!(matches!(
         parse_action("toggle-keyboard-shortcuts-inhibit"),

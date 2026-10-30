@@ -1869,6 +1869,8 @@ The same set of strings works after `bind ... { }` at the top level or inside a 
 - `move-to-scratchpad`
 - `toggle-scratchpad:<name>` / `move-to-scratchpad:<name>` — named scratchpads (Hyprland's named special workspaces), any number of them, independent of the unnamed one. A name is created on first use; no declaration needed. The IPC `workspaces` query reports these entries with a `scratchpad` field holding the name (`""` for the unnamed scratchpad) so bars can label or hide them.
 - `raise-window` / `lower-window` — floating windows only, no-op on a tiled one
+- `move-window-to-monitor-left` / `move-window-to-monitor-right` / `move-window-to-monitor-up` / `move-window-to-monitor-down` — move the focused window to the nearest monitor on that side, using the window's monitor and live logical output geometry. Stops at the edge; Classic/Scroll use the destination's active workspace. Focus and pointer follow. A Scroll row becomes its own column with the same width proportion; group tabs travel together. Floating logical size, pins and fullscreen/maximized return geometry survive. Lock, exclusive layers, pointer grabs and compositor gestures block the action
+- `move-window-to-monitor:<name>` — the same transfer by exact connected monitor name; a missing or same monitor does nothing. A moved fullscreen window replaces the destination fullscreen owner. A normal arrival also leaves an existing destination fullscreen window in Classic/Ocean; Scroll retains its fullscreen column and reveals the arrival. Ocean preserves a visible destination tile's view, or reveals its reef with the configured camera animation if off-camera. No bindings are added automatically
 
 **Focus and layout**
 - `cycle-focus` — most-recently-used order, not z-order

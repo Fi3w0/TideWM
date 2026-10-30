@@ -225,6 +225,9 @@ pub enum Action {
     FocusMonitor(Direction),
     /// Focus a monitor by its connector name.
     FocusMonitorNamed(String),
+    /// Move the focused window to that monitor's active workspace and follow.
+    MoveWindowToMonitor(Direction),
+    MoveWindowToMonitorNamed(String),
     SwapDirection(Direction),
     /// Keyboard-driven resize. Right/down grow and left/up shrink the
     /// focused window along that axis; floating windows change by pixels,
@@ -555,6 +558,10 @@ fn is_typing_key(key_name: &str) -> bool {
 /// string syntax used in binds, so anything a keybind can trigger is
 /// IPC-addressable for free, including actions added by later phases.
 pub(crate) fn parse_action(action: &str) -> Option<Action> {
+    if let Some(name) = action.strip_prefix("move-window-to-monitor:") {
+        return (!name.trim().is_empty())
+            .then(|| Action::MoveWindowToMonitorNamed(name.trim().to_string()));
+    }
     if let Some(name) = action.strip_prefix("focus-monitor:") {
         return (!name.trim().is_empty())
             .then(|| Action::FocusMonitorNamed(name.trim().to_string()));
@@ -670,6 +677,10 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         return (!name.trim().is_empty()).then(|| Action::ToggleTag(name.trim().to_string()));
     }
     match action {
+        "move-window-to-monitor-left" => Some(Action::MoveWindowToMonitor(Direction::Left)),
+        "move-window-to-monitor-right" => Some(Action::MoveWindowToMonitor(Direction::Right)),
+        "move-window-to-monitor-up" => Some(Action::MoveWindowToMonitor(Direction::Up)),
+        "move-window-to-monitor-down" => Some(Action::MoveWindowToMonitor(Direction::Down)),
         "focus-monitor-left" => Some(Action::FocusMonitor(Direction::Left)),
         "focus-monitor-right" => Some(Action::FocusMonitor(Direction::Right)),
         "focus-monitor-up" => Some(Action::FocusMonitor(Direction::Up)),

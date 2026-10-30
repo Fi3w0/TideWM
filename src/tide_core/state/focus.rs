@@ -1697,7 +1697,15 @@ impl Smallvil {
     /// doubled centers so full-range output positions cannot overflow.
     pub(crate) fn monitor_in_direction(&self, direction: Direction) -> Option<Output> {
         let current = self.primary_output()?;
-        let from = self.space.output_geometry(&current)?;
+        self.monitor_in_direction_from(&current, direction)
+    }
+
+    pub(super) fn monitor_in_direction_from(
+        &self,
+        current: &Output,
+        direction: Direction,
+    ) -> Option<Output> {
+        let from = self.space.output_geometry(current)?;
         let horizontal = matches!(direction, Direction::Left | Direction::Right);
         let axes = |rect: Rectangle<i32, Logical>| {
             let (start, size, cross, cross_size) = if horizontal {
@@ -1714,7 +1722,7 @@ impl Smallvil {
         let (center, start, end) = axes(from);
         self.space
             .outputs()
-            .filter(|output| **output != current)
+            .filter(|output| *output != current)
             .filter_map(|output| {
                 let (other_center, other_start, other_end) =
                     axes(self.space.output_geometry(output)?);
@@ -1734,14 +1742,7 @@ impl Smallvil {
     /// pointer onto it. An empty monitor clears
     /// window focus; its pointer location still routes subsequent actions.
     pub(crate) fn focus_monitor(&mut self, output: &Output) {
-        if self.activation_blocked()
-            || self.input.classic_tile_drag.is_some()
-            || self.input.compositor_gesture.is_some()
-            || self
-                .seat
-                .get_pointer()
-                .is_some_and(|pointer| pointer.is_grabbed())
-        {
+        if self.monitor_action_blocked() {
             return;
         }
         let Some(geometry) = self.space.output_geometry(output) else {
@@ -1789,6 +1790,25 @@ impl Smallvil {
         } else {
             self.focus_window(None, SERIAL_COUNTER.next_serial());
         }
+        self.warp_pointer_to_monitor(output);
+    }
+
+    pub(super) fn monitor_action_blocked(&self) -> bool {
+        self.activation_blocked()
+            || self.input.classic_tile_drag.is_some()
+            || self.input.compositor_gesture.is_some()
+            || self
+                .seat
+                .get_pointer()
+                .is_some_and(|pointer| pointer.is_grabbed())
+    }
+
+    /// Shared by monitor focus and explicit window transfers. The caller
+    /// has already checked lock/grab policy and selected window focus.
+    pub(super) fn warp_pointer_to_monitor(&mut self, output: &Output) {
+        let Some(geometry) = self.space.output_geometry(output) else {
+            return;
+        };
         if let Some(pointer) = self.seat.get_pointer() {
             // Land on the restored window when it is visible. Besides
             // avoiding an immediate hover handoff, this lets shared Ocean
@@ -1800,7 +1820,22 @@ impl Smallvil {
                         .into_iter()
                         .find(|placement| placement.surface() == Some(&surface))
                         .and_then(|placement| {
-                            self.placement_input_rect(&placement).intersection(geometry)
+                            let rect = self.placement_input_rect(&placement);
+                            // A growing tile may not have committed its new
+                            // buffer yet. Stay inside both the destination
+                            // slot and the currently hit-testable content.
+                            let size = placement.window.geometry().size;
+                            let content = Rectangle::new(
+                                rect.loc,
+                                (
+                                    (f64::from(size.w) * placement.view_scale).round().max(1.0)
+                                        as i32,
+                                    (f64::from(size.h) * placement.view_scale).round().max(1.0)
+                                        as i32,
+                                )
+                                    .into(),
+                            );
+                            rect.intersection(content)?.intersection(geometry)
                         })
                 })
                 .unwrap_or(geometry);

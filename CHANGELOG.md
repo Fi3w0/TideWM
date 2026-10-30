@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.18 · 2026-10-30 — Move a window to another monitor
+
+- New `move-window-to-monitor-left/right/up/down` and `move-window-to-monitor:<name>` actions send the focused window to the destination's active workspace, with focus and pointer following. Floating size, fullscreen/maximized return geometry, groups and pins carry across.
+
 ## 0.91.17 · 2026-10-30 — Focus another monitor
 
 - New `focus-monitor-left/right/up/down` and `focus-monitor:<name>` actions restore the most recently used window on another monitor and move the pointer there. Directions follow your live monitor arrangement and stop at the edge.
