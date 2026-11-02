@@ -3093,8 +3093,13 @@ impl Smallvil {
                 return;
             };
             let (along, _) = self.scroll_axis_step(direction);
-            if !along {
+            let pages = self.config.scroll.pages;
+            if pages && !along {
+                return;
+            }
+            if !along || pages {
                 // Across the strip: the window's share of a shared column.
+                // A page splits along the strip instead.
                 let Some((column, _)) = self.spatial.workspaces.layout.scroll_position(&surface)
                 else {
                     return;
@@ -3109,12 +3114,19 @@ impl Smallvil {
                     .scroll_columns(&owner, workspace)[column]
                     .windows
                     .len();
-                if !crate::scroll::row_resize_enabled(rows, self.config.scroll.stack) {
+                if !(if pages {
+                    rows > 1
+                } else {
+                    crate::scroll::row_resize_enabled(rows, self.config.scroll.stack)
+                }) {
                     return;
                 }
-                let cross = match self.config.scroll.orientation {
-                    crate::scroll::Orientation::Horizontal => window.geometry().size.h,
-                    crate::scroll::Orientation::Vertical => window.geometry().size.w,
+                let cross = match (self.config.scroll.orientation
+                    == crate::scroll::Orientation::Horizontal)
+                    != pages
+                {
+                    true => window.geometry().size.h,
+                    false => window.geometry().size.w,
                 }
                 .max(1);
                 let delta = if matches!(direction, Direction::Right | Direction::Down) {
@@ -3130,6 +3142,10 @@ impl Smallvil {
                     .layout
                     .scroll
                     .set_weight(&surface, weight);
+                self.spatial
+                    .workspaces
+                    .layout
+                    .scroll_clamp_page_split(&surface);
                 self.retile();
                 self.reveal_scroll_window(&surface);
                 self.request_redraw();

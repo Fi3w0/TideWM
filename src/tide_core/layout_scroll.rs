@@ -29,6 +29,45 @@ fn surface_of(window: &Window) -> Option<WlSurface> {
 }
 
 impl Layouts {
+    /// Whether the strip is paged (`scroll.pages`).
+    pub(crate) fn scroll_pages(&self) -> bool {
+        self.scroll.config.is_some_and(|cfg| cfg.pages)
+    }
+
+    /// With pages, gives every window of `surface`'s page an equal share
+    /// again, so a window joining a page never inherits an old split.
+    pub(crate) fn scroll_reset_page_split(&mut self, surface: &WlSurface) {
+        if !self.scroll_pages() {
+            return;
+        }
+        let Some((output, workspace)) = self.key_of(surface) else {
+            return;
+        };
+        if let Some(column) = self
+            .scroll_columns(&output, workspace)
+            .into_iter()
+            .find(|column| column.windows.contains(surface))
+        {
+            for window in &column.windows {
+                self.scroll.set_weight(window, 1.0);
+            }
+        }
+    }
+
+    /// Pulls `surface`'s share of its page back inside the page limits after
+    /// a free weight change (mouse or keyboard resize).
+    pub(crate) fn scroll_clamp_page_split(&mut self, surface: &WlSurface) {
+        if let Some(share) = self
+            .scroll_height_share(surface)
+            .filter(|_| self.scroll_pages())
+        {
+            let clamped = share.clamp(scroll::PAGE_MIN_SHARE, 1.0 - scroll::PAGE_MIN_SHARE);
+            if (clamped - share).abs() > 1e-9 {
+                self.scroll_set_height_share(surface, Some(clamped));
+            }
+        }
+    }
+
     pub(crate) fn scroll_key(&self, workspace: u32) -> u32 {
         if self
             .scroll
@@ -162,7 +201,8 @@ impl Layouts {
     /// niri's consume-or-expel: a window sharing a column leaves it for a new
     /// column on that side; a window alone joins the neighbor column.
     pub(crate) fn scroll_consume_or_expel(&mut self, surface: &WlSurface, forward: bool) -> bool {
-        self.edit_scroll_columns(surface, |columns, column, row, default_width| {
+        let pages = self.scroll_pages();
+        let changed = self.edit_scroll_columns(surface, |columns, column, row, default_width| {
             if columns[column].windows.len() > 1 {
                 let window = columns[column].windows.remove(row);
                 let at = if forward { column + 1 } else { column };
@@ -183,22 +223,36 @@ impl Layouts {
             .filter(|target| *target < columns.len()) else {
                 return false;
             };
+            if pages && columns[target].windows.len() >= scroll::PAGE_WINDOWS {
+                return false;
+            }
             let window = columns[column].windows.remove(0);
             columns[target].windows.push(window);
             true
-        })
+        });
+        if changed {
+            self.scroll_reset_page_split(surface);
+        }
+        changed
     }
 
     /// Pulls the first window of the next column into this one.
     pub(crate) fn scroll_consume_into_column(&mut self, surface: &WlSurface) -> bool {
-        self.edit_scroll_columns(surface, |columns, column, _, _| {
-            if column + 1 >= columns.len() {
+        let pages = self.scroll_pages();
+        let changed = self.edit_scroll_columns(surface, |columns, column, _, _| {
+            if column + 1 >= columns.len()
+                || (pages && columns[column].windows.len() >= scroll::PAGE_WINDOWS)
+            {
                 return false;
             }
             let window = columns[column + 1].windows.remove(0);
             columns[column].windows.push(window);
             true
-        })
+        });
+        if changed {
+            self.scroll_reset_page_split(surface);
+        }
+        changed
     }
 
     /// Moves a window out of a shared column into a new column right after.
@@ -264,6 +318,95 @@ impl Layouts {
         })
     }
 
+    /// `swap-*` along a paged strip: swap with the other window of the page;
+    /// at the page edge, leave the page for a new page on that side; a window
+    /// alone on its page joins the neighbor page if it has room, otherwise
+    /// the two pages trade places.
+    pub(crate) fn scroll_page_move(&mut self, surface: &WlSurface, step: isize) -> bool {
+        let forward = step > 0;
+        let moved = self.edit_scroll_columns(surface, |columns, column, row, default_width| {
+            let rows = columns[column].windows.len();
+            if let Some(target) = row.checked_add_signed(step).filter(|t| *t < rows) {
+                columns[column].windows.swap(row, target);
+                return true;
+            }
+            if rows > 1 {
+                let window = columns[column].windows.remove(row);
+                let at = if forward { column + 1 } else { column };
+                columns.insert(
+                    at,
+                    ScrollColumn {
+                        windows: vec![window],
+                        width: default_width,
+                    },
+                );
+                return true;
+            }
+            let Some(next) = column
+                .checked_add_signed(step)
+                .filter(|n| *n < columns.len())
+            else {
+                return false;
+            };
+            if columns[next].windows.len() < scroll::PAGE_WINDOWS {
+                let window = columns[column].windows.remove(0);
+                if forward {
+                    columns[next].windows.insert(0, window);
+                } else {
+                    columns[next].windows.push(window);
+                }
+            } else {
+                columns.swap(column, next);
+            }
+            true
+        });
+        if moved {
+            self.scroll_reset_page_split(surface);
+            if let Some((output, workspace)) = self.key_of(surface) {
+                for column in self.scroll_columns(&output, workspace) {
+                    if column.windows.len() == 1 {
+                        self.scroll.set_weight(&column.windows[0], 1.0);
+                    }
+                }
+            }
+        }
+        moved
+    }
+
+    /// `scroll-left/right` on a paged strip: show the previous or next page
+    /// whole instead of panning half a viewport.
+    pub(crate) fn scroll_flip_page(
+        &mut self,
+        output: &str,
+        workspace: u32,
+        area: Rectangle<i32, Logical>,
+        gap: i32,
+        forward: bool,
+    ) {
+        let slots = self.scroll_slots(output, workspace, area, gap);
+        let viewport = self.scroll_viewport(area, gap);
+        let key = self.scroll_key(workspace);
+        let offset = self.scroll.offset(output, key);
+        let mut starts: Vec<f64> = slots
+            .iter()
+            .filter(|slot| slot.row == 0)
+            .map(|slot| slot.start)
+            .collect();
+        starts.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+        let target = if forward {
+            starts.into_iter().find(|start| *start > offset + 0.5)
+        } else {
+            starts.into_iter().rev().find(|start| *start < offset - 0.5)
+        };
+        let Some(target) = target else {
+            return;
+        };
+        self.scroll.set_margins(output, key, false);
+        let (minimum, maximum) = self.scroll_bounds(&slots, viewport, (output, key));
+        self.scroll
+            .set_offset(output, key, target.clamp(minimum, maximum));
+    }
+
     /// The window's share of its column's height (its weight over the
     /// column's total), or `None` when it is alone in the column.
     pub(crate) fn scroll_height_share(&self, surface: &WlSurface) -> Option<f64> {
@@ -310,7 +453,12 @@ impl Layouts {
                     .filter(|s| *s != surface)
                     .map(|s| self.scroll.weight(s))
                     .sum();
-                let share = share.clamp(0.05, 0.95);
+                let (low, high) = if self.scroll_pages() {
+                    (scroll::PAGE_MIN_SHARE, 1.0 - scroll::PAGE_MIN_SHARE)
+                } else {
+                    (0.05, 0.95)
+                };
+                let share = share.clamp(low, high);
                 share * others / (1.0 - share)
             }
         };
@@ -344,7 +492,8 @@ impl Layouts {
             return false;
         }
         let target = target.clone();
-        self.edit_scroll_columns(moving, |columns, column, row, default_width| {
+        let pages = self.scroll_pages();
+        let moved = self.edit_scroll_columns(moving, |columns, column, row, default_width| {
             let alone = columns[column].windows.len() == 1;
             let width = if alone {
                 columns[column].width
@@ -365,6 +514,20 @@ impl Layouts {
                 windows: vec![window],
                 width,
             };
+            // A full page cannot take another window: land beside it.
+            let zone = match zone {
+                scroll::DropZone::Before
+                    if pages && columns[at].windows.len() >= scroll::PAGE_WINDOWS =>
+                {
+                    scroll::DropZone::ColumnBefore
+                }
+                scroll::DropZone::After
+                    if pages && columns[at].windows.len() >= scroll::PAGE_WINDOWS =>
+                {
+                    scroll::DropZone::ColumnAfter
+                }
+                zone => zone,
+            };
             match zone {
                 scroll::DropZone::ColumnBefore => columns.insert(at, single(window)),
                 scroll::DropZone::ColumnAfter => columns.insert(at + 1, single(window)),
@@ -373,7 +536,11 @@ impl Layouts {
                 scroll::DropZone::Swap => return false,
             }
             true
-        })
+        });
+        if moved {
+            self.scroll_reset_page_split(moving);
+        }
+        moved
     }
 
     /// Where a new window goes when `target` is focused: after the last
@@ -427,7 +594,8 @@ impl Layouts {
         gap: i32,
     ) -> Option<(WlSurface, usize, Vec<f64>, f64, f64, i32)> {
         let cfg = self.scroll.config?;
-        if cfg.orientation != crate::scroll::Orientation::Horizontal
+        if cfg.pages
+            || cfg.orientation != crate::scroll::Orientation::Horizontal
             || cfg.stack == crate::scroll::StackMode::Fit
         {
             return None;
@@ -589,7 +757,13 @@ impl Layouts {
                     .flatten()
                     .filter_map(|s| self.scroll.fullscreen_extents.get(s).copied())
                     .reduce(f64::max)
-                    .unwrap_or_else(|| (viewport * proportion).round().max(1.0));
+                    .unwrap_or_else(|| {
+                        if cfg.pages {
+                            viewport
+                        } else {
+                            (viewport * proportion).round().max(1.0)
+                        }
+                    });
                 let weights: Vec<f64> = surfaces
                     .iter()
                     .map(|s| s.as_ref().map(|s| self.scroll.weight(s)).unwrap_or(1.0))
@@ -744,6 +918,16 @@ impl Layouts {
                     .is_some_and(|s| self.scroll.fullscreen_extents.contains_key(&s));
                 let rect = if fullscreen {
                     scroll::tile_rect(area, slot.start, slot.extent, offset, gap, cfg.orientation)
+                } else if cfg.pages {
+                    scroll::page_tile_rect(
+                        area,
+                        slot.start,
+                        slot.extent,
+                        offset,
+                        gap,
+                        cfg.orientation,
+                        (slot.row, &slot.weights),
+                    )
                 } else if horizontal && cfg.stack != crate::scroll::StackMode::Fit {
                     let gap = gap
                         .max(0)
@@ -1341,6 +1525,120 @@ mod tests {
             layouts.scroll_reveal(first.toplevel().unwrap().wl_surface(), area, 8);
             layouts.prepare_scroll("screen", 1, area, 8);
             assert_eq!(layouts.scroll.offset("screen", 1), 0.0);
+        }
+    }
+
+    #[test]
+    fn pages_fill_the_viewport_hold_two_windows_and_move_the_camera_per_page() {
+        let mut protocol = ProtocolFixture::new();
+        for orientation in [Orientation::Horizontal, Orientation::Vertical] {
+            let mut layouts = Layouts::default();
+            // Fiw's settings: centering and a 0.94 width must not matter.
+            layouts.scroll.config = Some(ScrollConfig {
+                pages: true,
+                center_focused: scroll::CenterMode::Always,
+                tile_proportion: 0.94,
+                orientation,
+                ..Default::default()
+            });
+            let (a, b, c) = (protocol.window(), protocol.window(), protocol.window());
+            for window in [&a, &b, &c] {
+                layouts.insert("screen", 1, window.clone(), None);
+            }
+            let (sa, sb, sc) = (surface(&a), surface(&b), surface(&c));
+            // New windows open as their own pages.
+            assert_eq!(shape(&layouts).len(), 3);
+            assert!(layouts.scroll_consume_or_expel(&sb, false));
+            assert_eq!(
+                shape(&layouts),
+                vec![vec![sa.clone(), sb.clone()], vec![sc.clone()]]
+            );
+            // A full page takes no third window.
+            assert!(!layouts.scroll_consume_or_expel(&sc, false));
+            assert!(!layouts.scroll_consume_into_column(&sa));
+
+            let area = Rectangle::new((0, 0).into(), (1200, 800).into());
+            let along = |rect: Rectangle<i32, Logical>| match orientation {
+                Orientation::Horizontal => (rect.loc.x, rect.size.w, rect.loc.y, rect.size.h),
+                Orientation::Vertical => (rect.loc.y, rect.size.h, rect.loc.x, rect.size.w),
+            };
+            let full_along = match orientation {
+                Orientation::Horizontal => 1200,
+                Orientation::Vertical => 800,
+            };
+            let full_cross = 2000 - full_along;
+            let viewport = full_along - 16;
+            layouts.scroll_reveal(&sa, area, 8);
+            layouts.prepare_scroll("screen", 1, area, 8);
+            let rects: Vec<_> = layouts
+                .layout("screen", 1, area, 8)
+                .into_iter()
+                .map(|(_, rect)| along(rect))
+                .collect();
+            // The two windows split the page along the strip and fill it.
+            assert_eq!(rects[0].0, 8);
+            assert_eq!(rects[0].1 + 8 + rects[1].1, viewport);
+            assert_eq!(rects[1].0, 8 + rects[0].1 + 8);
+            assert!((rects[0].1 - rects[1].1).abs() <= 1);
+            for rect in &rects[..2] {
+                assert_eq!((rect.2, rect.3), (8, full_cross - 16));
+            }
+            // The next page starts exactly one page later, off-screen.
+            assert_eq!(rects[2].0, 8 + viewport + 8);
+            assert_eq!(rects[2].1, viewport);
+
+            // The camera never moves between windows of one page.
+            assert!(!layouts.scroll_reveal(&sb, area, 8));
+            assert_eq!(layouts.scroll.offset("screen", 1), 0.0);
+            assert!(layouts.scroll_reveal(&sc, area, 8));
+            let page = f64::from(viewport + 8);
+            assert_eq!(layouts.scroll.offset("screen", 1), page);
+            layouts.scroll_flip_page("screen", 1, area, 8, false);
+            assert_eq!(layouts.scroll.offset("screen", 1), 0.0);
+            layouts.scroll_flip_page("screen", 1, area, 8, false);
+            assert_eq!(layouts.scroll.offset("screen", 1), 0.0);
+            layouts.scroll_flip_page("screen", 1, area, 8, true);
+            assert_eq!(layouts.scroll.offset("screen", 1), page);
+
+            // Resizing stops at the page limit.
+            assert!(layouts.scroll_set_height_share(&sa, Some(0.01)));
+            let share = layouts.scroll_height_share(&sa).unwrap();
+            assert!((share - scroll::PAGE_MIN_SHARE).abs() < 1e-9);
+
+            // Swap inside the page, leave it at the edge, join a neighbor
+            // with room, trade places with a full one.
+            assert!(layouts.scroll_page_move(&sb, 1));
+            assert_eq!(
+                shape(&layouts),
+                vec![vec![sa.clone()], vec![sb.clone()], vec![sc.clone()]]
+            );
+            assert!(layouts.scroll_page_move(&sb, 1));
+            assert_eq!(
+                shape(&layouts),
+                vec![vec![sa.clone()], vec![sb.clone(), sc.clone()]]
+            );
+            // Joining resets the split to equal shares.
+            assert!((layouts.scroll_height_share(&sb).unwrap() - 0.5).abs() < 1e-9);
+            assert!(layouts.scroll_page_move(&sc, -1));
+            assert_eq!(
+                shape(&layouts),
+                vec![vec![sa.clone()], vec![sc.clone(), sb.clone()]]
+            );
+            assert!(layouts.scroll_page_move(&sa, 1));
+            assert_eq!(
+                shape(&layouts),
+                vec![vec![sc.clone(), sb.clone()], vec![sa.clone()]]
+            );
+            assert!(!layouts.scroll_page_move(&sa, 1));
+            // A drop beside a window of a full page lands as its own page.
+            assert!(layouts.scroll_drop(&sa, &sc, scroll::DropZone::Before));
+            assert_eq!(
+                shape(&layouts),
+                vec![vec![sa.clone()], vec![sc.clone(), sb.clone()]]
+            );
+            // Closing one window of a page leaves the other filling it.
+            layouts.remove(&sc);
+            assert_eq!(shape(&layouts), vec![vec![sa.clone()], vec![sb.clone()]]);
         }
     }
 

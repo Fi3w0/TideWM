@@ -1997,6 +1997,13 @@ impl Smallvil {
         }
         if self.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Scroll) {
             let moved = match self.scroll_axis_step(direction) {
+                // A page's windows sit along the strip; nothing to swap across.
+                (true, step) if self.config.scroll.pages => self
+                    .spatial
+                    .workspaces
+                    .layout
+                    .scroll_page_move(&focused, step),
+                (false, _) if self.config.scroll.pages => false,
                 (true, step) => self
                     .spatial
                     .workspaces

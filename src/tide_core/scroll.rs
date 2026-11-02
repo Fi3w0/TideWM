@@ -118,7 +118,15 @@ pub struct ScrollConfig {
     pub workspace_scroll: bool,
     /// Vertical workspace-slide duration, milliseconds.
     pub workspace_scroll_duration_ms: u32,
+    /// Paged strip: every column is one page, exactly one viewport long,
+    /// holding up to `PAGE_WINDOWS` windows side by side along the strip.
+    pub pages: bool,
 }
+
+/// Most windows one page holds with `scroll.pages`.
+pub const PAGE_WINDOWS: usize = 2;
+/// Smallest share of a page one of its windows can be resized to.
+pub const PAGE_MIN_SHARE: f64 = 0.2;
 
 /// A column width or window height change: `50%`, `+10%`, `-10%`,
 /// `800` or `+40` (logical pixels). Percentages are kept in hundredths so
@@ -211,6 +219,7 @@ impl Default for ScrollConfig {
             stack_min_height: 0.33,
             workspace_scroll: true,
             workspace_scroll_duration_ms: 220,
+            pages: false,
         }
     }
 }
@@ -646,6 +655,50 @@ pub fn column_tile_rect(
             )
         }
     }
+}
+
+/// The rect of window `row` in a page: the page (a column one viewport
+/// long) is split along the strip by `weights`, with `gap` between windows,
+/// and every window fills the cross axis.
+pub fn page_tile_rect(
+    area: Rectangle<i32, Logical>,
+    start: f64,
+    extent: f64,
+    offset: f64,
+    gap: i32,
+    orientation: Orientation,
+    (row, weights): (usize, &[f64]),
+) -> Rectangle<i32, Logical> {
+    let rows = weights.len().max(1);
+    let row = row.min(rows - 1);
+    let inner = f64::from(
+        gap.max(0)
+            .min(area.size.w.min(area.size.h).saturating_sub(1) / 2),
+    );
+    let available = (extent - inner * (rows - 1) as f64).max(1.0);
+    let total: f64 = weights
+        .iter()
+        .map(|w| w.max(0.0))
+        .sum::<f64>()
+        .max(f64::EPSILON);
+    let edge = |index: usize| {
+        let before: f64 = weights[..index].iter().map(|w| w.max(0.0)).sum();
+        (available * before / total).round() + inner * index as f64
+    };
+    let from = edge(row);
+    let to = if row + 1 == rows {
+        extent
+    } else {
+        edge(row + 1) - inner
+    };
+    tile_rect(
+        area,
+        start + from,
+        (to - from).max(1.0),
+        offset,
+        gap,
+        orientation,
+    )
 }
 
 /// Whether a column's rows can be resized vertically. A shared column

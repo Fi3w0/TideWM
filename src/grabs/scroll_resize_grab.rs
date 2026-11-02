@@ -25,6 +25,9 @@ pub struct ScrollResizeStart {
     /// it has its column to itself.
     pub row: Option<(f64, f64)>,
     pub horizontal: bool,
+    /// Paged strip: the page always fills the viewport, so only the split
+    /// between its windows (the row share) changes.
+    pub pages: bool,
 }
 
 pub struct ScrollResizeGrab {
@@ -68,10 +71,12 @@ impl PointerGrab<Smallvil> for ScrollResizeGrab {
         } else {
             (delta.y, delta.x)
         };
-        data.spatial.workspaces.layout.scroll.resize(
-            self.start.head.clone(),
-            self.start.width + along / self.start.viewport.max(1.0),
-        );
+        if !self.start.pages {
+            data.spatial.workspaces.layout.scroll.resize(
+                self.start.head.clone(),
+                self.start.width + along / self.start.viewport.max(1.0),
+            );
+        }
         if let Some((weight, cross)) = self.start.row {
             let cross = cross.max(1.0);
             data.spatial
@@ -79,6 +84,12 @@ impl PointerGrab<Smallvil> for ScrollResizeGrab {
                 .layout
                 .scroll
                 .set_weight(&self.surface, weight * (cross + across).max(1.0) / cross);
+            if self.start.pages {
+                data.spatial
+                    .workspaces
+                    .layout
+                    .scroll_clamp_page_split(&self.surface);
+            }
         }
         data.retile_viscous();
         data.reveal_scroll_window(&self.surface);

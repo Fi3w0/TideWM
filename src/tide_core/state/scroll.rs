@@ -189,8 +189,39 @@ impl Smallvil {
         {
             return None;
         }
-        let zone = crate::scroll::drop_zone(rect, point, self.config.scroll.orientation);
+        let mut zone = crate::scroll::drop_zone(rect, point, self.scroll_drop_orientation());
+        if self.config.scroll.pages {
+            // A full page cannot take another window: preview landing beside it.
+            let full = self
+                .spatial
+                .workspaces
+                .layout
+                .scroll_columns(output, workspace)
+                .iter()
+                .find(|column| column.windows.contains(&target))
+                .is_some_and(|column| {
+                    column.windows.iter().filter(|s| *s != moving).count()
+                        >= crate::scroll::PAGE_WINDOWS
+                });
+            zone = match zone {
+                crate::scroll::DropZone::Before if full => crate::scroll::DropZone::ColumnBefore,
+                crate::scroll::DropZone::After if full => crate::scroll::DropZone::ColumnAfter,
+                zone => zone,
+            };
+        }
         Some((target, zone, rect))
+    }
+
+    /// The axis drop zones and their preview bars are measured along. A
+    /// page splits its windows along the strip, so pages swap the axes:
+    /// the strip-direction quarters join a page, the cross quarters open a
+    /// new page.
+    pub(crate) fn scroll_drop_orientation(&self) -> crate::scroll::Orientation {
+        match (self.config.scroll.pages, self.config.scroll.orientation) {
+            (false, orientation) => orientation,
+            (true, crate::scroll::Orientation::Horizontal) => crate::scroll::Orientation::Vertical,
+            (true, crate::scroll::Orientation::Vertical) => crate::scroll::Orientation::Horizontal,
+        }
     }
 
     pub(super) fn queue_scroll_pointer_refresh(&mut self) {
@@ -399,6 +430,25 @@ impl Smallvil {
             .enumerate()
             .find_map(|(c, col)| col.iter().position(|s| s == focused).map(|r| (c, r)))?;
         let (along, step) = self.scroll_axis_step(direction);
+        if self.config.scroll.pages {
+            // A page's windows sit along the strip: step through them, then
+            // to the nearest window of the neighbor page.
+            if !along {
+                return None;
+            }
+            if let Some(next) = row
+                .checked_add_signed(step)
+                .and_then(|row| columns[column].get(row))
+            {
+                return Some(next.clone());
+            }
+            let target = columns.get(column.checked_add_signed(step)?)?;
+            return if step > 0 {
+                target.first().cloned()
+            } else {
+                target.last().cloned()
+            };
+        }
         if !along {
             return columns[column].get(row.checked_add_signed(step)?).cloned();
         }
@@ -440,26 +490,34 @@ impl Smallvil {
             .layout
             .scroll_columns(&owner, workspace);
         let column = columns.get(column)?;
-        let horizontal = self.config.scroll.orientation == crate::scroll::Orientation::Horizontal;
+        let pages = self.config.scroll.pages;
+        // A page splits along the strip, so its rows resize along it.
+        let horizontal =
+            (self.config.scroll.orientation == crate::scroll::Orientation::Horizontal) != pages;
         let viewport = f64::from(if horizontal { area.size.w } else { area.size.h } - 2 * gap);
-        let row = crate::scroll::row_resize_enabled(column.windows.len(), self.config.scroll.stack)
-            .then(|| {
-                let size = self
-                    .mapped_toplevel_window(surface)
-                    .map(|w| w.geometry().size)
-                    .unwrap_or_default();
-                let cross = if horizontal { size.h } else { size.w };
-                (
-                    self.spatial.workspaces.layout.scroll.weight(surface),
-                    f64::from(cross),
-                )
-            });
+        let rows_resize = if pages {
+            column.windows.len() > 1
+        } else {
+            crate::scroll::row_resize_enabled(column.windows.len(), self.config.scroll.stack)
+        };
+        let row = rows_resize.then(|| {
+            let size = self
+                .mapped_toplevel_window(surface)
+                .map(|w| w.geometry().size)
+                .unwrap_or_default();
+            let cross = if horizontal { size.h } else { size.w };
+            (
+                self.spatial.workspaces.layout.scroll.weight(surface),
+                f64::from(cross),
+            )
+        });
         Some(crate::grabs::ScrollResizeStart {
             head: column.windows.first()?.clone(),
             width: column.width,
             viewport,
             row,
             horizontal,
+            pages,
         })
     }
 
@@ -976,10 +1034,20 @@ impl Smallvil {
             .layout
             .active_workspace(&output.name());
         let gap = self.gaps_for(&output.name(), workspace);
-        self.spatial
-            .workspaces
-            .layout
-            .scroll_pan(&output.name(), workspace, area, gap, delta);
+        if self.config.scroll.pages {
+            self.spatial.workspaces.layout.scroll_flip_page(
+                &output.name(),
+                workspace,
+                area,
+                gap,
+                delta > 0.0,
+            );
+        } else {
+            self.spatial
+                .workspaces
+                .layout
+                .scroll_pan(&output.name(), workspace, area, gap, delta);
+        }
         self.retile_filtered(false, None, Some(&output.name()));
         self.request_output_redraw(&output);
     }

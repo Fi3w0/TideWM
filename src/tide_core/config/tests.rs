@@ -4371,6 +4371,17 @@ fn monitor_focus_actions_parse() {
 }
 
 #[test]
+fn scroll_pages_parse_and_default_off() {
+    let paged = Config::from_raw(lower_entries(&wave_entries("scroll {\n pages = true\n}\n"))).0;
+    assert!(paged.scroll.pages);
+    let plain = Config::from_raw(lower_entries(&wave_entries(
+        "scroll {\n orientation = vertical\n}\n",
+    )))
+    .0;
+    assert!(!plain.scroll.pages);
+}
+
+#[test]
 fn focus_direction_or_monitor_actions_parse() {
     for (name, direction) in [
         ("column-or-monitor-left", Direction::Left),

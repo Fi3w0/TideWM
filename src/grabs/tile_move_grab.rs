@@ -189,7 +189,7 @@ impl PointerGrab<Smallvil> for TileMoveGrab {
                 let thickness = data.gaps_for(&self.output, self.workspace).max(6);
                 (
                     self.output.clone(),
-                    crate::scroll::drop_hint(rect, zone, data.config.scroll.orientation, thickness),
+                    crate::scroll::drop_hint(rect, zone, data.scroll_drop_orientation(), thickness),
                 )
             });
         data.set_drag_preview(hint);
