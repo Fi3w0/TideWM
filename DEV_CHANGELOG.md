@@ -2,6 +2,12 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.21 — Directional focus with monitor fallback
+
+- Added `Action::FocusDirectionOrMonitor(Direction)`, parsed from niri's names `focus-column-or-monitor-left/right` and `focus-window-or-monitor-up/down`. `focus_direction_or_monitor` runs the ordinary `focus_direction`; if keyboard focus did not change (Scroll strip end, no Classic/Ocean neighbor) or nothing was focused, it selects the monitor on that side from the focused window's own monitor (`window_monitor`), falling back to the pointer output, and calls `focus_monitor`. Fiw chose all engines.
+- Classic/Scroll directional focus that itself lands on another monitor (Classic `Space` geometry spans outputs) also moves the pointer with `warp_pointer_to_monitor`, so focus-follows-mouse cannot undo the handoff. Ocean's directional focus already travels the action output's camera, so it never warps. Lock, exclusive layers, pointer grabs and compositor gestures block the action (`monitor_action_blocked`). No new state, caches or default binds.
+- Real-protocol fixture with two logical outputs and three configure-acking toplevels: Scroll in-strip moves keep the pointer, strip ends hand off both ways and restore the most recent window, up/down no-ops, unfocused fallback via the pointer output, lock no-op; Classic cross-monitor directional focus moves focus and pointer both ways. Parse test covers the four names and rejects mismatched axes. Native behavior unverified.
+
 ## 0.91.20 — Move the active workspace between monitors
 
 - Added directional/named `move-workspace-to-monitor` actions for Classic/Scroll, using the ordinary action output and live logical topology. Fiw chose: preserve the number if vacant, otherwise select the first free normal slot. Tiled, ordinary floating, grouped and deck-only residents reserve a slot; sticky floaters do not. Source retains its now-empty numbered slot; aliases/config remain tied to numbers. Empty workspaces can move. Ocean, scratchpads, same/missing destinations and monitor-action guards are no-ops.

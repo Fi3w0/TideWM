@@ -225,6 +225,10 @@ pub enum Action {
     FocusMonitor(Direction),
     /// Focus a monitor by its connector name.
     FocusMonitorNamed(String),
+    /// Directional focus; at the end of the strip (or with nothing to
+    /// focus) hand off to the monitor on that side, like niri's
+    /// `focus-column-or-monitor-*`.
+    FocusDirectionOrMonitor(Direction),
     /// Move the focused window to that monitor's active workspace and follow.
     MoveWindowToMonitor(Direction),
     MoveWindowToMonitorNamed(String),
@@ -707,6 +711,10 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         "focus-monitor-right" => Some(Action::FocusMonitor(Direction::Right)),
         "focus-monitor-up" => Some(Action::FocusMonitor(Direction::Up)),
         "focus-monitor-down" => Some(Action::FocusMonitor(Direction::Down)),
+        "focus-column-or-monitor-left" => Some(Action::FocusDirectionOrMonitor(Direction::Left)),
+        "focus-column-or-monitor-right" => Some(Action::FocusDirectionOrMonitor(Direction::Right)),
+        "focus-window-or-monitor-up" => Some(Action::FocusDirectionOrMonitor(Direction::Up)),
+        "focus-window-or-monitor-down" => Some(Action::FocusDirectionOrMonitor(Direction::Down)),
         "exit-mode" => Some(Action::ExitMode),
         "master-grow" => Some(Action::GrowMaster),
         "master-shrink" => Some(Action::ShrinkMaster),

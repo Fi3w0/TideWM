@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.21 · 2026-11-02 — Focus past the strip end onto the next monitor
+
+- New `focus-column-or-monitor-left/right` and `focus-window-or-monitor-up/down` actions move focus like `focus-left/right/up/down`, and when there is nothing more on that side (end of the Scroll strip, no neighbor, empty workspace) they focus the monitor on that side instead. Works in every engine; the pointer follows whenever focus lands on another monitor.
+
 ## 0.91.20 · 2026-10-30 — Move a workspace to another monitor
 
 - New `move-workspace-to-monitor-left/right/up/down` and `move-workspace-to-monitor:<name>` actions move the active workspace in Classic or Scroll. Keep its number when free; otherwise use the first free slot. Layout, windows and parked tabs travel together; focus and pointer follow. Sticky floaters stay on their monitor.

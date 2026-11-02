@@ -1563,6 +1563,256 @@ fn monitor_focus_uses_live_geometry_and_restores_recent_windows() {
 }
 
 #[test]
+fn focus_direction_or_monitor_hands_off_at_strip_ends() {
+    use crate::config::{parse_action, SpatialEngine};
+    use crate::state::SessionLock;
+    const CHILD: &str = "TIDEWM_FOCUS_OR_MONITOR_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "tidewm-focus-or-monitor-test-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("config/tidewm")).unwrap();
+        std::fs::create_dir(root.join("runtime")).unwrap();
+        std::fs::set_permissions(root.join("runtime"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::write(root.join("config/tidewm/config.wave"), "engine = scroll\nwelcome_hint = false\nwater_effects = false\ngaps = 0\nscroll {\n tile_proportion = 1.0\n}\nanimations {\n enabled = false\n}\n").unwrap();
+        let name = concat!(
+            module_path!(),
+            "::focus_direction_or_monitor_hands_off_at_strip_ends"
+        );
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name.split_once("::").unwrap().1, "--nocapture"])
+            .env(CHILD, "1")
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_RUNTIME_DIR", root.join("runtime"))
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(String::from_utf8_lossy(&result.stdout).contains("running 1 test"));
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    }
+    let mut event_loop = EventLoop::try_new().unwrap();
+    let state = Smallvil::new(&mut event_loop, Display::new().unwrap());
+    let (server, peer) = UnixStream::pair().unwrap();
+    state
+        .display_handle
+        .clone()
+        .insert_client(
+            server,
+            Arc::new(ClientState {
+                compositor_state: CompositorClientState::default(),
+                security_context: None,
+                disconnect_sender: None,
+            }),
+        )
+        .unwrap();
+    peer.set_nonblocking(true).unwrap();
+    let mut fixture = Fixture {
+        event_loop,
+        state,
+        peer,
+    };
+    let mut outputs = Vec::new();
+    for (name, location, size, scale) in [
+        ("left", (0, 0), (1000, 600), Scale::Integer(1)),
+        ("right", (1000, 0), (1000, 600), Scale::Integer(1)),
+    ] {
+        let output = Output::new(
+            name.into(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "test".into(),
+                model: "test".into(),
+                serial_number: "test".into(),
+            },
+        );
+        output.change_current_state(
+            Some(Mode {
+                size: size.into(),
+                refresh: 60_000,
+            }),
+            None,
+            Some(scale),
+            Some(location.into()),
+        );
+        fixture.state.space.map_output(&output, location);
+        outputs.push(output);
+    }
+    fixture.request(1, 1, &[2], &[]);
+    let globals: Vec<_> = fixture
+        .dispatch()
+        .into_iter()
+        .filter_map(|(object, opcode, body)| {
+            if object != 2 || opcode != 0 {
+                return None;
+            }
+            let name = u32::from_ne_bytes(body[..4].try_into().unwrap());
+            let length = u32::from_ne_bytes(body[4..8].try_into().unwrap()) as usize;
+            Some((
+                String::from_utf8(body[8..8 + length - 1].to_vec()).unwrap(),
+                name,
+            ))
+        })
+        .collect();
+    for (interface, id, version) in [
+        ("wl_compositor", 3_u32, 4_u32),
+        ("xdg_wm_base", 4, 1),
+        ("wp_single_pixel_buffer_manager_v1", 5, 1),
+        ("wp_viewporter", 6, 1),
+    ] {
+        let name = globals
+            .iter()
+            .find(|(candidate, _)| candidate == interface)
+            .unwrap()
+            .1;
+        let mut tail = string(interface);
+        tail.extend_from_slice(&version.to_ne_bytes());
+        tail.extend_from_slice(&id.to_ne_bytes());
+        fixture.request(2, 0, &[name], &tail);
+    }
+    let mut surfaces = Vec::new();
+    for surface in [7_u32, 12, 17] {
+        fixture.request(3, 0, &[surface], &[]);
+        fixture.request(4, 2, &[surface + 1, surface], &[]);
+        fixture.request(surface + 1, 1, &[surface + 2], &[]);
+        fixture.request(6, 1, &[surface + 3, surface], &[]);
+        fixture.request(surface + 3, 2, &[1000, 600], &[]);
+        fixture.request(surface, 6, &[], &[]);
+        let serial = fixture
+            .dispatch()
+            .into_iter()
+            .find_map(|(object, opcode, body)| {
+                (object == surface + 1 && opcode == 0)
+                    .then(|| u32::from_ne_bytes(body[..4].try_into().unwrap()))
+            })
+            .unwrap();
+        fixture.request(surface + 1, 4, &[serial], &[]);
+        fixture.request(5, 1, &[surface + 4, u32::MAX, 0, 0, u32::MAX], &[]);
+        fixture.request(surface, 1, &[surface + 4, 0, 0], &[]);
+        fixture.request(surface, 6, &[], &[]);
+        fixture.dispatch();
+        surfaces.push(surface);
+    }
+    let surfaces: Vec<_> = surfaces
+        .into_iter()
+        .map(|id| {
+            fixture
+                .state
+                .space
+                .elements()
+                .find_map(|window| {
+                    let surface = window.toplevel()?.wl_surface();
+                    (surface.id().protocol_id() == id).then(|| surface.clone())
+                })
+                .unwrap()
+        })
+        .collect();
+    assert!(fixture
+        .state
+        .move_tiled_window_to_output(&surfaces[2], &outputs[1], None));
+    fixture.state.retile();
+    fixture.state.config.input.focus_follows_mouse = false;
+    let run = |fixture: &mut Fixture, action: &str| {
+        fixture.state.run_action(parse_action(action).unwrap());
+        fixture.dispatch();
+    };
+    let focused = |fixture: &Fixture| fixture.state.focused_window_surface();
+    let pointer = |fixture: &Fixture| fixture.state.seat.get_pointer().unwrap().current_location();
+
+    // Scroll: two columns on the left monitor, one on the right.
+    fixture.state.activate_toplevel(&surfaces[1]);
+    fixture.state.activate_toplevel(&surfaces[0]);
+    let start = pointer(&fixture);
+    // Nothing to the left of the first column and no monitor there.
+    run(&mut fixture, "focus-column-or-monitor-left");
+    assert_eq!(focused(&fixture), Some(surfaces[0].clone()));
+    assert_eq!(pointer(&fixture), start);
+    // Inside the strip it is ordinary column focus; the pointer stays.
+    run(&mut fixture, "focus-column-or-monitor-right");
+    assert_eq!(focused(&fixture), Some(surfaces[1].clone()));
+    assert_eq!(pointer(&fixture), start);
+    // At the strip end it hands off to the right monitor.
+    run(&mut fixture, "focus-column-or-monitor-right");
+    assert_eq!(focused(&fixture), Some(surfaces[2].clone()));
+    assert_eq!(fixture.state.primary_output(), Some(outputs[1].clone()));
+    // The single right column is both ends: back to the left monitor's
+    // most recently used window.
+    run(&mut fixture, "focus-column-or-monitor-left");
+    assert_eq!(focused(&fixture), Some(surfaces[1].clone()));
+    assert_eq!(fixture.state.primary_output(), Some(outputs[0].clone()));
+    // No row and no monitor below: unchanged.
+    run(&mut fixture, "focus-window-or-monitor-down");
+    assert_eq!(focused(&fixture), Some(surfaces[1].clone()));
+    run(&mut fixture, "focus-window-or-monitor-up");
+    assert_eq!(focused(&fixture), Some(surfaces[1].clone()));
+    // Without a focused window the pointer output decides the side.
+    fixture
+        .state
+        .focus_window(None, smithay::utils::SERIAL_COUNTER.next_serial());
+    run(&mut fixture, "focus-column-or-monitor-right");
+    assert_eq!(focused(&fixture), Some(surfaces[2].clone()));
+    assert_eq!(fixture.state.primary_output(), Some(outputs[1].clone()));
+    // Lock blocks the handoff entirely.
+    fixture.state.session_lock = SessionLock::Locked;
+    let location = pointer(&fixture);
+    run(&mut fixture, "focus-column-or-monitor-left");
+    assert_eq!(pointer(&fixture), location);
+    fixture.state.session_lock = SessionLock::Unlocked;
+    run(&mut fixture, "focus-column-or-monitor-left");
+    assert_eq!(focused(&fixture), Some(surfaces[1].clone()));
+
+    // Classic geometry can reach the other monitor directly; the pointer
+    // still follows so a later hover cannot undo the handoff.
+    assert!(fixture.state.migrate_spatial_engine(SpatialEngine::Classic));
+    fixture.state.retile();
+    fixture.state.refresh_space();
+    fixture.state.activate_toplevel(&surfaces[0]);
+    fixture.state.activate_toplevel(&surfaces[1]);
+    let right_of =
+        |fixture: &Fixture,
+         surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface| {
+            let window = fixture
+                .state
+                .space
+                .elements()
+                .find(|window| window.toplevel().map(|t| t.wl_surface()) == Some(surface))
+                .unwrap();
+            fixture.state.space.element_geometry(window).unwrap().loc.x
+        };
+    let (rightmost, other) = if right_of(&fixture, &surfaces[1]) > right_of(&fixture, &surfaces[0])
+    {
+        (surfaces[1].clone(), surfaces[0].clone())
+    } else {
+        (surfaces[0].clone(), surfaces[1].clone())
+    };
+    fixture.state.activate_toplevel(&other);
+    fixture.state.activate_toplevel(&rightmost);
+    let location = pointer(&fixture);
+    run(&mut fixture, "focus-column-or-monitor-right");
+    assert_eq!(focused(&fixture), Some(surfaces[2].clone()));
+    assert_eq!(fixture.state.primary_output(), Some(outputs[1].clone()));
+    assert_ne!(pointer(&fixture), location);
+    run(&mut fixture, "focus-column-or-monitor-left");
+    assert_eq!(focused(&fixture), Some(rightmost.clone()));
+    assert_eq!(fixture.state.primary_output(), Some(outputs[0].clone()));
+    run(&mut fixture, "focus-column-or-monitor-left");
+    assert_eq!(focused(&fixture), Some(other));
+    assert_eq!(fixture.state.primary_output(), Some(outputs[0].clone()));
+}
+
+#[test]
 fn monitor_window_moves_keep_ownership_and_return_modes() {
     use crate::config::{parse_action, SpatialEngine};
     use crate::state::SessionLock;

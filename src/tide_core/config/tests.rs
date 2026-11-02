@@ -4371,6 +4371,23 @@ fn monitor_focus_actions_parse() {
 }
 
 #[test]
+fn focus_direction_or_monitor_actions_parse() {
+    for (name, direction) in [
+        ("column-or-monitor-left", Direction::Left),
+        ("column-or-monitor-right", Direction::Right),
+        ("window-or-monitor-up", Direction::Up),
+        ("window-or-monitor-down", Direction::Down),
+    ] {
+        assert!(matches!(
+            parse_action(&format!("focus-{name}")),
+            Some(Action::FocusDirectionOrMonitor(parsed)) if parsed == direction
+        ));
+    }
+    assert!(parse_action("focus-column-or-monitor-up").is_none());
+    assert!(parse_action("focus-window-or-monitor-left").is_none());
+}
+
+#[test]
 fn monitor_window_move_actions_parse() {
     for (name, direction) in [
         ("left", Direction::Left),

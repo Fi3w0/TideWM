@@ -1941,6 +1941,47 @@ impl Smallvil {
         self.focus_window(Some(next_surface), SERIAL_COUNTER.next_serial());
     }
 
+    /// `focus-column-or-monitor-*` / `focus-window-or-monitor-*`: ordinary
+    /// directional focus, or the monitor on that side when focus did not
+    /// move (strip end, no neighbor, empty workspace). The side is taken
+    /// from the focused window's own monitor, falling back to the pointer
+    /// output. When Classic/Scroll directional focus itself crosses to
+    /// another monitor, the pointer follows as for `focus-monitor`.
+    pub(crate) fn focus_direction_or_monitor(&mut self, direction: Direction) {
+        if self.monitor_action_blocked() {
+            return;
+        }
+        let before = self.focused_window_surface();
+        let from = before
+            .as_ref()
+            .and_then(|surface| self.window_monitor(surface))
+            .or_else(|| self.primary_output());
+        if before.is_some() {
+            self.focus_direction(direction);
+            let after = self.focused_window_surface();
+            if after != before {
+                // Ocean's directional focus already travels the action
+                // output's camera to the target, so only workspace
+                // ownership can land on another monitor.
+                let landed = (self.spatial.engine.ownership()
+                    == crate::config::SpatialOwnership::Workspaces)
+                    .then(|| {
+                        after
+                            .as_ref()
+                            .and_then(|surface| self.window_monitor(surface))
+                    })
+                    .flatten();
+                if let Some(landed) = landed.filter(|landed| Some(landed) != from.as_ref()) {
+                    self.warp_pointer_to_monitor(&landed);
+                }
+                return;
+            }
+        }
+        if let Some(to) = from.and_then(|from| self.monitor_in_direction_from(&from, direction)) {
+            self.focus_monitor(&to);
+        }
+    }
+
     /// Swaps the currently focused *tiled* window with its neighbor in
     /// `direction`, keeping focus on the same window (which moves to the
     /// neighbor's former slot). Floating windows aren't part of the tiling

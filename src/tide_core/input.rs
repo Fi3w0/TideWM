@@ -3328,6 +3328,9 @@ impl Smallvil {
                     self.focus_monitor(&output);
                 }
             }
+            Action::FocusDirectionOrMonitor(direction) => {
+                self.focus_direction_or_monitor(direction);
+            }
             Action::MoveWindowToMonitor(direction) => {
                 self.move_focused_window_to_monitor_direction(direction);
             }
