@@ -221,6 +221,17 @@ pub enum Action {
     SwitchLayout(LayoutSwitch),
     CycleFocus,
     FocusDirection(Direction),
+    /// Focus the nearest monitor on that side, using live logical geometry.
+    FocusMonitor(Direction),
+    /// Focus a monitor by its connector name.
+    FocusMonitorNamed(String),
+    /// Directional focus; at the end of the strip (or with nothing to
+    /// focus) hand off to the monitor on that side, like niri's
+    /// `focus-column-or-monitor-*`.
+    FocusDirectionOrMonitor(Direction),
+    /// Move the focused window to that monitor's active workspace and follow.
+    MoveWindowToMonitor(Direction),
+    MoveWindowToMonitorNamed(String),
     SwapDirection(Direction),
     /// Keyboard-driven resize. Right/down grow and left/up shrink the
     /// focused window along that axis; floating windows change by pixels,
@@ -266,6 +277,12 @@ pub enum Action {
     MoveToWorkspace(WorkspaceRef),
     /// Moves the focused Scroll column, all its windows, to a workspace.
     MoveColumnToWorkspace(WorkspaceRef),
+    /// Move the focused Scroll column to another monitor and follow it.
+    MoveColumnToMonitor(Direction),
+    MoveColumnToMonitorNamed(String),
+    /// Move the action output's active workspace, choosing a free target slot.
+    MoveWorkspaceToMonitor(Direction),
+    MoveWorkspaceToMonitorNamed(String),
     /// Swaps the current output's active workspace content with the named
     /// output's. No default keybind -- output names are machine-specific
     /// (see `output { }`), so there's nothing sensible to bind out of the box.
@@ -551,6 +568,22 @@ fn is_typing_key(key_name: &str) -> bool {
 /// string syntax used in binds, so anything a keybind can trigger is
 /// IPC-addressable for free, including actions added by later phases.
 pub(crate) fn parse_action(action: &str) -> Option<Action> {
+    if let Some(name) = action.strip_prefix("move-workspace-to-monitor:") {
+        return (!name.trim().is_empty())
+            .then(|| Action::MoveWorkspaceToMonitorNamed(name.trim().to_string()));
+    }
+    if let Some(name) = action.strip_prefix("move-column-to-monitor:") {
+        return (!name.trim().is_empty())
+            .then(|| Action::MoveColumnToMonitorNamed(name.trim().to_string()));
+    }
+    if let Some(name) = action.strip_prefix("move-window-to-monitor:") {
+        return (!name.trim().is_empty())
+            .then(|| Action::MoveWindowToMonitorNamed(name.trim().to_string()));
+    }
+    if let Some(name) = action.strip_prefix("focus-monitor:") {
+        return (!name.trim().is_empty())
+            .then(|| Action::FocusMonitorNamed(name.trim().to_string()));
+    }
     if let Some(cmd) = action.strip_prefix("spawn:") {
         return Some(Action::Spawn(cmd.to_string()));
     }
@@ -662,6 +695,26 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         return (!name.trim().is_empty()).then(|| Action::ToggleTag(name.trim().to_string()));
     }
     match action {
+        "move-workspace-to-monitor-left" => Some(Action::MoveWorkspaceToMonitor(Direction::Left)),
+        "move-workspace-to-monitor-right" => Some(Action::MoveWorkspaceToMonitor(Direction::Right)),
+        "move-workspace-to-monitor-up" => Some(Action::MoveWorkspaceToMonitor(Direction::Up)),
+        "move-workspace-to-monitor-down" => Some(Action::MoveWorkspaceToMonitor(Direction::Down)),
+        "move-column-to-monitor-left" => Some(Action::MoveColumnToMonitor(Direction::Left)),
+        "move-column-to-monitor-right" => Some(Action::MoveColumnToMonitor(Direction::Right)),
+        "move-column-to-monitor-up" => Some(Action::MoveColumnToMonitor(Direction::Up)),
+        "move-column-to-monitor-down" => Some(Action::MoveColumnToMonitor(Direction::Down)),
+        "move-window-to-monitor-left" => Some(Action::MoveWindowToMonitor(Direction::Left)),
+        "move-window-to-monitor-right" => Some(Action::MoveWindowToMonitor(Direction::Right)),
+        "move-window-to-monitor-up" => Some(Action::MoveWindowToMonitor(Direction::Up)),
+        "move-window-to-monitor-down" => Some(Action::MoveWindowToMonitor(Direction::Down)),
+        "focus-monitor-left" => Some(Action::FocusMonitor(Direction::Left)),
+        "focus-monitor-right" => Some(Action::FocusMonitor(Direction::Right)),
+        "focus-monitor-up" => Some(Action::FocusMonitor(Direction::Up)),
+        "focus-monitor-down" => Some(Action::FocusMonitor(Direction::Down)),
+        "focus-column-or-monitor-left" => Some(Action::FocusDirectionOrMonitor(Direction::Left)),
+        "focus-column-or-monitor-right" => Some(Action::FocusDirectionOrMonitor(Direction::Right)),
+        "focus-window-or-monitor-up" => Some(Action::FocusDirectionOrMonitor(Direction::Up)),
+        "focus-window-or-monitor-down" => Some(Action::FocusDirectionOrMonitor(Direction::Down)),
         "exit-mode" => Some(Action::ExitMode),
         "master-grow" => Some(Action::GrowMaster),
         "master-shrink" => Some(Action::ShrinkMaster),

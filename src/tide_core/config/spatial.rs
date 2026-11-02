@@ -1364,6 +1364,7 @@ pub(super) fn apply_scroll_block(cfg: &mut crate::scroll::ScrollConfig, body: &[
                 "scroll.always_center_single",
                 value,
             ),
+            "pages" => set_bool(&mut cfg.pages, "scroll.pages", value),
             "preset_widths" | "preset_heights" => {
                 let widths: Option<Vec<f64>> = list_items(value)
                     .iter()

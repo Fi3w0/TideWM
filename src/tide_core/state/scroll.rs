@@ -1,13 +1,167 @@
 use smithay::{
+    output::Output,
     reexports::wayland_server::protocol::wl_surface::WlSurface,
-    utils::{Logical, Point, Rectangle},
+    utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
 };
 
 use crate::config::Direction;
 
-use super::{is_scratchpad_workspace, Smallvil};
+use super::{clamp_rect_visible, is_scratchpad_workspace, Smallvil};
 
 impl Smallvil {
+    pub(crate) fn move_column_to_monitor_direction(&mut self, direction: Direction) {
+        let Some(from) = self
+            .focused_window_surface()
+            .and_then(|surface| self.window_monitor(&surface))
+        else {
+            return;
+        };
+        if let Some(to) = self.monitor_in_direction_from(&from, direction) {
+            self.move_column_to_monitor(&to);
+        }
+    }
+
+    /// Move one complete Scroll column as a batch, restoring its tree order
+    /// and sizing before publishing events or handing off pointer focus.
+    pub(crate) fn move_column_to_monitor(&mut self, to: &Output) {
+        if self.monitor_action_blocked()
+            || self.spatial.engine.projection() != Some(crate::config::WorkspaceProjection::Scroll)
+        {
+            return;
+        }
+        let Some(focused) = self.focused_window_surface() else {
+            return;
+        };
+        let layout = &self.spatial.workspaces.layout;
+        let (Some(from), Some(workspace)) =
+            (layout.output_of(&focused), layout.workspace_of(&focused))
+        else {
+            // niri's column action moves the active floating window as one
+            // window, rather than touching an unrelated tiling column.
+            self.move_focused_window_to_monitor(to);
+            return;
+        };
+        if from == to.name() || is_scratchpad_workspace(workspace) {
+            return;
+        }
+        let (Some(from_geo), Some(to_geo)) = (
+            self.output_by_name(from)
+                .and_then(|from| self.space.output_geometry(&from)),
+            self.space.output_geometry(to),
+        ) else {
+            return;
+        };
+        let Some(column) = layout
+            .scroll_columns(from, workspace)
+            .into_iter()
+            .find(|column| column.windows.contains(&focused))
+        else {
+            return;
+        };
+        if column
+            .windows
+            .iter()
+            .any(|surface| layout.window_of(surface).is_none())
+        {
+            return;
+        }
+        let weights: Vec<_> = column
+            .windows
+            .iter()
+            .map(|s| layout.scroll.weight(s))
+            .collect();
+        let stack_offset = layout.scroll.stack_offset(&column.windows[0]);
+        let to_name = to.name();
+        let target_workspace = layout.active_workspace(&to_name);
+        let mut destination = layout.scroll_columns(&to_name, target_workspace);
+        let insert_at = self
+            .input
+            .focus_history
+            .iter()
+            .find_map(|surface| {
+                let active = self
+                    .group_of(surface)
+                    .map(|index| &self.groups[index].members[self.groups[index].active].surface)
+                    .unwrap_or(surface);
+                destination
+                    .iter()
+                    .position(|column| column.windows.contains(active))
+                    .map(|i| i + 1)
+            })
+            .unwrap_or(destination.len());
+        let bounds = self.output_tiling_area(to).unwrap_or(to_geo);
+        let relocate = |mut rect: Rectangle<i32, Logical>| {
+            rect.loc = (
+                (f64::from(rect.loc.x) - f64::from(from_geo.loc.x) + f64::from(to_geo.loc.x))
+                    .round() as i32,
+                (f64::from(rect.loc.y) - f64::from(from_geo.loc.y) + f64::from(to_geo.loc.y))
+                    .round() as i32,
+            )
+                .into();
+            clamp_rect_visible(rect, bounds)
+        };
+        if column
+            .windows
+            .iter()
+            .any(|s| self.fullscreen.contains_key(s))
+        {
+            let previous = self
+                .fullscreen
+                .iter()
+                .find(|(_, entry)| entry.output == to_name)
+                .map(|(surface, _)| surface.clone());
+            if let Some(previous) = previous {
+                if let Some(toplevel) = self
+                    .mapped_toplevel_window(&previous)
+                    .and_then(|window| window.toplevel().cloned())
+                {
+                    self.do_unfullscreen(&toplevel);
+                } else {
+                    self.fullscreen.remove(&previous);
+                }
+            }
+        }
+        let mut moved = Vec::new();
+        for surface in &column.windows {
+            if let Some(entry) = self.fullscreen.get_mut(surface) {
+                entry.output = to_name.clone();
+                entry.restore_rect = entry.restore_rect.map(relocate);
+            }
+            if let Some(entry) = self.maximized.get_mut(surface) {
+                entry.output = to_name.clone();
+                entry.restore_rect = relocate(entry.restore_rect);
+            }
+            // All leaves and both outputs were validated before mutation;
+            // no dispatch can intervene during this synchronous batch.
+            moved.extend(
+                self.transfer_tiled_window_to_output(surface, to, None)
+                    .expect("validated column row remains tiled during transfer"),
+            );
+        }
+        destination.insert(insert_at, column.clone());
+        let layout = &mut self.spatial.workspaces.layout;
+        layout.set_scroll_columns(&to_name, target_workspace, destination);
+        for (surface, weight) in column.windows.iter().zip(weights) {
+            layout.scroll.set_weight(surface, weight);
+        }
+        layout
+            .scroll
+            .set_stack_offset(&column.windows[0], stack_offset);
+        for surface in &moved {
+            self.physics.window_float_bodies.remove(surface);
+            self.physics.window_viscosity.remove(surface);
+            self.render.motion.window_move_animations.remove(surface);
+        }
+        self.retile();
+        self.focus_window(Some(focused), SERIAL_COUNTER.next_serial());
+        self.refresh_space();
+        self.warp_pointer_to_monitor(to);
+        self.refresh_ext_workspaces();
+        for surface in moved {
+            self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged { surface });
+        }
+    }
+
     /// The tile under `point` on a Scroll strip and where a drop there
     /// lands, for a tiled drag of `moving` on `output`'s `workspace`.
     pub(crate) fn scroll_drop_target(
@@ -35,8 +189,39 @@ impl Smallvil {
         {
             return None;
         }
-        let zone = crate::scroll::drop_zone(rect, point, self.config.scroll.orientation);
+        let mut zone = crate::scroll::drop_zone(rect, point, self.scroll_drop_orientation());
+        if self.config.scroll.pages {
+            // A full page cannot take another window: preview landing beside it.
+            let full = self
+                .spatial
+                .workspaces
+                .layout
+                .scroll_columns(output, workspace)
+                .iter()
+                .find(|column| column.windows.contains(&target))
+                .is_some_and(|column| {
+                    column.windows.iter().filter(|s| *s != moving).count()
+                        >= crate::scroll::PAGE_WINDOWS
+                });
+            zone = match zone {
+                crate::scroll::DropZone::Before if full => crate::scroll::DropZone::ColumnBefore,
+                crate::scroll::DropZone::After if full => crate::scroll::DropZone::ColumnAfter,
+                zone => zone,
+            };
+        }
         Some((target, zone, rect))
+    }
+
+    /// The axis drop zones and their preview bars are measured along. A
+    /// page splits its windows along the strip, so pages swap the axes:
+    /// the strip-direction quarters join a page, the cross quarters open a
+    /// new page.
+    pub(crate) fn scroll_drop_orientation(&self) -> crate::scroll::Orientation {
+        match (self.config.scroll.pages, self.config.scroll.orientation) {
+            (false, orientation) => orientation,
+            (true, crate::scroll::Orientation::Horizontal) => crate::scroll::Orientation::Vertical,
+            (true, crate::scroll::Orientation::Vertical) => crate::scroll::Orientation::Horizontal,
+        }
     }
 
     pub(super) fn queue_scroll_pointer_refresh(&mut self) {
@@ -245,6 +430,25 @@ impl Smallvil {
             .enumerate()
             .find_map(|(c, col)| col.iter().position(|s| s == focused).map(|r| (c, r)))?;
         let (along, step) = self.scroll_axis_step(direction);
+        if self.config.scroll.pages {
+            // A page's windows sit along the strip: step through them, then
+            // to the nearest window of the neighbor page.
+            if !along {
+                return None;
+            }
+            if let Some(next) = row
+                .checked_add_signed(step)
+                .and_then(|row| columns[column].get(row))
+            {
+                return Some(next.clone());
+            }
+            let target = columns.get(column.checked_add_signed(step)?)?;
+            return if step > 0 {
+                target.first().cloned()
+            } else {
+                target.last().cloned()
+            };
+        }
         if !along {
             return columns[column].get(row.checked_add_signed(step)?).cloned();
         }
@@ -286,26 +490,34 @@ impl Smallvil {
             .layout
             .scroll_columns(&owner, workspace);
         let column = columns.get(column)?;
-        let horizontal = self.config.scroll.orientation == crate::scroll::Orientation::Horizontal;
+        let pages = self.config.scroll.pages;
+        // A page splits along the strip, so its rows resize along it.
+        let horizontal =
+            (self.config.scroll.orientation == crate::scroll::Orientation::Horizontal) != pages;
         let viewport = f64::from(if horizontal { area.size.w } else { area.size.h } - 2 * gap);
-        let row = crate::scroll::row_resize_enabled(column.windows.len(), self.config.scroll.stack)
-            .then(|| {
-                let size = self
-                    .mapped_toplevel_window(surface)
-                    .map(|w| w.geometry().size)
-                    .unwrap_or_default();
-                let cross = if horizontal { size.h } else { size.w };
-                (
-                    self.spatial.workspaces.layout.scroll.weight(surface),
-                    f64::from(cross),
-                )
-            });
+        let rows_resize = if pages {
+            column.windows.len() > 1
+        } else {
+            crate::scroll::row_resize_enabled(column.windows.len(), self.config.scroll.stack)
+        };
+        let row = rows_resize.then(|| {
+            let size = self
+                .mapped_toplevel_window(surface)
+                .map(|w| w.geometry().size)
+                .unwrap_or_default();
+            let cross = if horizontal { size.h } else { size.w };
+            (
+                self.spatial.workspaces.layout.scroll.weight(surface),
+                f64::from(cross),
+            )
+        });
         Some(crate::grabs::ScrollResizeStart {
             head: column.windows.first()?.clone(),
             width: column.width,
             viewport,
             row,
             horizontal,
+            pages,
         })
     }
 
@@ -453,6 +665,10 @@ impl Smallvil {
         self.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Scroll)
             && self.config.scroll.float_anchor == crate::scroll::FloatAnchor::Strip
             && !self.spatial.workspaces.pinned.contains(surface)
+            && !self
+                .fullscreen
+                .get(surface)
+                .is_some_and(|entry| entry.was_pinned)
             && self
                 .spatial
                 .workspaces
@@ -471,8 +687,15 @@ impl Smallvil {
         if !self.scroll_strip_floater(surface) {
             return full;
         }
+        Self::strip_floating_bounds(full, self.config.scroll.orientation)
+    }
+
+    pub(super) fn strip_floating_bounds(
+        full: Rectangle<i32, Logical>,
+        orientation: crate::scroll::Orientation,
+    ) -> Rectangle<i32, Logical> {
         const HALF: i32 = i32::MAX / 4;
-        match self.config.scroll.orientation {
+        match orientation {
             crate::scroll::Orientation::Horizontal => {
                 Rectangle::new((-HALF, full.loc.y).into(), (2 * HALF, full.size.h).into())
             }
@@ -811,10 +1034,20 @@ impl Smallvil {
             .layout
             .active_workspace(&output.name());
         let gap = self.gaps_for(&output.name(), workspace);
-        self.spatial
-            .workspaces
-            .layout
-            .scroll_pan(&output.name(), workspace, area, gap, delta);
+        if self.config.scroll.pages {
+            self.spatial.workspaces.layout.scroll_flip_page(
+                &output.name(),
+                workspace,
+                area,
+                gap,
+                delta > 0.0,
+            );
+        } else {
+            self.spatial
+                .workspaces
+                .layout
+                .scroll_pan(&output.name(), workspace, area, gap, delta);
+        }
         self.retile_filtered(false, None, Some(&output.name()));
         self.request_output_redraw(&output);
     }

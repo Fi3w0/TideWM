@@ -1672,6 +1672,35 @@ impl OceanSpace {
         self.floating.get(surface).map(|(_, rect)| *rect)
     }
 
+    /// An explicit monitor move changes ownership without changing a pin's
+    /// viewport size or scale. Its dormant world rect follows the new camera.
+    pub(crate) fn transfer_floating_to_output(
+        &mut self,
+        surface: &WlSurface,
+        output: &str,
+        mut rect: Rectangle<i32, Logical>,
+        viewport: Size<i32, Logical>,
+    ) -> bool {
+        if !self.floating.contains_key(surface) {
+            return false;
+        }
+        let camera = self.camera(output);
+        if let Some(pin) = self.screen_pins.get_mut(surface) {
+            pin.output = output.to_string();
+            self.clamp_screen_pins(output, viewport);
+            let pin = &self.screen_pins[surface];
+            rect.loc = (
+                (camera.origin.x + pin.viewport_loc.x / camera.zoom.max(0.05)).round() as i32,
+                (camera.origin.y + pin.viewport_loc.y / camera.zoom.max(0.05)).round() as i32,
+            )
+                .into();
+        }
+        self.set_floating_rect(surface, rect);
+        self.entry_outputs
+            .insert(surface.clone(), output.to_string());
+        true
+    }
+
     /// Every surface Ocean currently treats as freely floating (a world
     /// rect, not a reef tile). Read-only iteration for F1 full-tier
     /// float-physics' per-tick candidate scan, which needs to consider

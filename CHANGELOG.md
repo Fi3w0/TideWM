@@ -2,6 +2,35 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.23 · 2026-11-02 — Pages keep your width and centering
+
+- Pages now use your normal column width and centering: with `tile_proportion = 0.94` and `center_focused`, the page in view is centered and the pages beside it peek in. `tile_proportion = 1.0` still gives full-screen pages.
+- Fixed: a strip that was already scrolled when pages were turned on (or a workspace that remembered a scrolled view) could show half of two pages until focus moved. The view now always settles on a whole page; a touchpad swipe still pans freely and settles when you let go.
+
+## 0.91.22 · 2026-11-02 — Paged Scroll
+
+- New `scroll { pages = true }` turns the strip into pages: each page holds one or two windows that always fill it (side by side, or top and bottom in a vertical strip). New windows open on a new page, the camera shows whole pages, and windows only change pages when you move or drag them. Off by default.
+
+## 0.91.21 · 2026-11-02 — Focus past the strip end onto the next monitor
+
+- New `focus-column-or-monitor-left/right` and `focus-window-or-monitor-up/down` actions move focus like `focus-left/right/up/down`, and when there is nothing more on that side (end of the Scroll strip, no neighbor, empty workspace) they focus the monitor on that side instead. Works in every engine; the pointer follows whenever focus lands on another monitor.
+
+## 0.91.20 · 2026-10-30 — Move a workspace to another monitor
+
+- New `move-workspace-to-monitor-left/right/up/down` and `move-workspace-to-monitor:<name>` actions move the active workspace in Classic or Scroll. Keep its number when free; otherwise use the first free slot. Layout, windows and parked tabs travel together; focus and pointer follow. Sticky floaters stay on their monitor.
+
+## 0.91.19 · 2026-10-30 — Move a Scroll column to another monitor
+
+- New `move-column-to-monitor-left/right/up/down` and `move-column-to-monitor:<name>` actions send the whole Scroll column to another monitor's active workspace, keeping its rows, height shares, width proportion and selected window. Focus and pointer follow. Tabbed columns travel together; on a floater, the action moves that window.
+
+## 0.91.18 · 2026-10-30 — Move a window to another monitor
+
+- New `move-window-to-monitor-left/right/up/down` and `move-window-to-monitor:<name>` actions send the focused window to the destination's active workspace, with focus and pointer following. Floating size, fullscreen/maximized return geometry, groups and pins carry across.
+
+## 0.91.17 · 2026-10-30 — Focus another monitor
+
+- New `focus-monitor-left/right/up/down` and `focus-monitor:<name>` actions restore the most recently used window on another monitor and move the pointer there. Directions follow your live monitor arrangement and stop at the edge.
+
 ## 0.91.16 · 2026-10-30 — `load-config` with a symlinked config
 
 - Fixed: loading a symlinked `config.wave` with `load-config-file` / `tidectl load-config` looked for its includes and shaders next to the link's target instead of next to the link, dropping them.

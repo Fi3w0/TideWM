@@ -1179,10 +1179,18 @@ impl Smallvil {
                 .active_workspace(&output.name());
 
             let gaps = self.gaps_for(&output.name(), workspace);
-            self.spatial
-                .workspaces
-                .layout
-                .prepare_scroll(&output.name(), workspace, area, gaps);
+            // A touchpad strip swipe pans freely; it settles on release.
+            let swiping = matches!(
+                &self.input.compositor_gesture,
+                Some(super::CompositorGesture::Scroll { output: name, .. }) if *name == output.name()
+            );
+            self.spatial.workspaces.layout.prepare_scroll(
+                &output.name(),
+                workspace,
+                area,
+                gaps,
+                !swiping,
+            );
             self.anchor_scroll_floaters(&output.name(), workspace);
             self.rescue_scroll_floaters(&output.name(), workspace, area, gaps);
             let window_count = self
@@ -1384,6 +1392,15 @@ impl Smallvil {
                         .unwrap_or_else(|| output.clone());
                     self.set_window_fractional_scale(&window, &scale_output);
                     let bounds = self.floating_bounds(&surface, full);
+                    let restore_bounds = if self
+                        .fullscreen
+                        .get(&surface)
+                        .is_some_and(|entry| entry.was_pinned)
+                    {
+                        full
+                    } else {
+                        bounds
+                    };
 
                     if let Some(tag) = self.spatial.workspaces.floating_workspace.get_mut(&surface)
                     {
@@ -1391,11 +1408,11 @@ impl Smallvil {
                     }
                     if let Some(entry) = self.fullscreen.get_mut(&surface) {
                         if let Some(rect) = &mut entry.restore_rect {
-                            *rect = clamp_rect_visible(*rect, full);
+                            *rect = clamp_rect_visible(*rect, restore_bounds);
                         }
                     }
                     if let Some(entry) = self.maximized.get_mut(&surface) {
-                        entry.restore_rect = clamp_rect_visible(entry.restore_rect, full);
+                        entry.restore_rect = clamp_rect_visible(entry.restore_rect, restore_bounds);
                     }
 
                     if !self.fullscreen.contains_key(&surface)
@@ -2052,6 +2069,271 @@ impl Smallvil {
         }
     }
 
+    /// The focused window's own monitor, independent of an unrelated
+    /// pointer output. Shared Ocean uses the camera presenting that window.
+    pub(super) fn window_monitor(&self, surface: &WlSurface) -> Option<Output> {
+        let workspace_owner = (self.spatial.engine.ownership()
+            == crate::config::SpatialOwnership::Workspaces)
+            .then(|| {
+                self.spatial
+                    .workspaces
+                    .layout
+                    .output_of(surface)
+                    .or_else(|| {
+                        self.spatial
+                            .workspaces
+                            .floating_workspace
+                            .get(surface)
+                            .map(|tag| tag.output.as_str())
+                    })
+            })
+            .flatten();
+        self.fullscreen
+            .get(surface)
+            .map(|entry| entry.output.as_str())
+            .or(workspace_owner)
+            .and_then(|name| self.output_by_name(name))
+            .or_else(|| {
+                self.preferred_output_for_toplevel(surface)
+                    .and_then(|name| self.output_by_name(&name))
+            })
+    }
+
+    pub(crate) fn move_focused_window_to_monitor_direction(&mut self, direction: Direction) {
+        let Some(from) = self
+            .focused_window_surface()
+            .and_then(|surface| self.window_monitor(&surface))
+        else {
+            return;
+        };
+        if let Some(to) = self.monitor_in_direction_from(&from, direction) {
+            self.move_focused_window_to_monitor(&to);
+        }
+    }
+
+    /// Explicit keyboard/IPC transfer: destination active workspace, focus
+    /// and pointer follow. Unlike hotplug recall, workspace numbers need not
+    /// match. Fullscreen/maximize remain overrides over the moved normal slot.
+    pub(crate) fn move_focused_window_to_monitor(&mut self, to: &Output) {
+        if self.monitor_action_blocked() {
+            return;
+        }
+        let Some(surface) = self.focused_window_surface() else {
+            return;
+        };
+        let Some(from) = self.window_monitor(&surface) else {
+            return;
+        };
+        if from == *to {
+            return;
+        }
+        let (Some(from_geo), Some(to_geo), Some(window)) = (
+            self.space.output_geometry(&from),
+            self.space.output_geometry(to),
+            self.mapped_toplevel_window(&surface),
+        ) else {
+            return;
+        };
+        let ocean = self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean;
+        let tiled = self.spatial_is_tiled(&surface);
+        let normal_rect = if ocean {
+            self.spatial.ocean.floating_rect(&surface)
+        } else {
+            self.spatial
+                .workspaces
+                .floating_workspace
+                .get(&surface)
+                .map(|tag| {
+                    if self.fullscreen.contains_key(&surface)
+                        || self.maximized.contains_key(&surface)
+                    {
+                        tag.rect
+                    } else {
+                        self.space.element_geometry(&window).unwrap_or(tag.rect)
+                    }
+                })
+        };
+        if !tiled && normal_rect.is_none() {
+            return;
+        }
+        let to_name = to.name();
+        let workspace = self.spatial.workspaces.layout.active_workspace(&to_name);
+        let area = self.output_tiling_area(to).unwrap_or(to_geo);
+        let (from_origin, to_origin, bounds) = if ocean {
+            let source = self.spatial.ocean.camera(&from.name());
+            let target = self.spatial.ocean.camera(&to_name);
+            let zoom = target.zoom.max(0.05);
+            let bounds = Rectangle::new(
+                (
+                    (target.origin.x + (f64::from(area.loc.x) - f64::from(to_geo.loc.x)) / zoom)
+                        .round() as i32,
+                    (target.origin.y + (f64::from(area.loc.y) - f64::from(to_geo.loc.y)) / zoom)
+                        .round() as i32,
+                )
+                    .into(),
+                (
+                    (f64::from(area.size.w) / zoom).round().max(1.0) as i32,
+                    (f64::from(area.size.h) / zoom).round().max(1.0) as i32,
+                )
+                    .into(),
+            );
+            (
+                (source.origin.x, source.origin.y),
+                (target.origin.x, target.origin.y),
+                bounds,
+            )
+        } else {
+            (
+                (f64::from(from_geo.loc.x), f64::from(from_geo.loc.y)),
+                (f64::from(to_geo.loc.x), f64::from(to_geo.loc.y)),
+                area,
+            )
+        };
+        // Preserve logical size and camera/output-relative position. Widen
+        // before subtracting arbitrary output coordinates; float casts saturate.
+        let relocate = |mut rect: Rectangle<i32, Logical>| {
+            rect.loc = (
+                (f64::from(rect.loc.x) - from_origin.0 + to_origin.0).round() as i32,
+                (f64::from(rect.loc.y) - from_origin.1 + to_origin.1).round() as i32,
+            )
+                .into();
+            clamp_rect_visible(rect, bounds)
+        };
+        let scroll_width = self
+            .spatial
+            .workspaces
+            .layout
+            .output_of(&surface)
+            .zip(self.spatial.workspaces.layout.workspace_of(&surface))
+            .and_then(|(output, workspace)| {
+                self.spatial
+                    .workspaces
+                    .layout
+                    .scroll_columns(output, workspace)
+                    .into_iter()
+                    .find(|column| column.windows.contains(&surface))
+                    .map(|column| column.width)
+            });
+        if self.fullscreen.contains_key(&surface)
+            || self.spatial.engine.projection() != Some(crate::config::WorkspaceProjection::Scroll)
+        {
+            let previous = self
+                .fullscreen
+                .iter()
+                .find(|(other, entry)| *other != &surface && entry.output == to_name)
+                .map(|(other, _)| other.clone());
+            if let Some(previous) = previous {
+                if let Some(toplevel) = self
+                    .mapped_toplevel_window(&previous)
+                    .and_then(|window| window.toplevel().cloned())
+                {
+                    self.do_unfullscreen(&toplevel);
+                } else {
+                    self.fullscreen.remove(&previous);
+                }
+            }
+        }
+        if let Some(entry) = self.fullscreen.get_mut(&surface) {
+            entry.output = to_name.clone();
+            entry.restore_rect = entry.restore_rect.map(relocate);
+        }
+        if let Some(entry) = self.maximized.get_mut(&surface) {
+            entry.output = to_name.clone();
+            entry.restore_rect = relocate(entry.restore_rect);
+        }
+        let mut moved_surfaces = vec![surface.clone()];
+        if tiled {
+            // Validated above; this core also moves parked tabs and pins.
+            if let Some(members) = self.transfer_tiled_window_to_output(&surface, to, None) {
+                moved_surfaces = members;
+            }
+            if let Some(width) = scroll_width {
+                self.spatial
+                    .workspaces
+                    .layout
+                    .scroll
+                    .resize(surface.clone(), width);
+            }
+        } else if let Some(rect) = normal_rect.map(relocate) {
+            if ocean {
+                self.spatial.ocean.transfer_floating_to_output(
+                    &surface,
+                    &to_name,
+                    rect,
+                    to_geo.size,
+                );
+            } else if let Some(tag) = self.spatial.workspaces.floating_workspace.get_mut(&surface) {
+                tag.output = to_name.clone();
+                tag.workspace = workspace;
+                tag.rect = rect;
+                self.space.map_element(window.clone(), rect.loc, false);
+            }
+            if let Some(pin) = self.spatial.workspaces.output_pins.get_mut(&surface) {
+                *pin = to_name.clone();
+            }
+        }
+        self.physics.window_float_bodies.remove(&surface);
+        self.physics.window_viscosity.remove(&surface);
+        self.render.motion.window_move_animations.remove(&surface);
+        self.refresh_window_opacity_and_glass_for(&surface);
+        // A floated override was mapped at its moved normal rect above.
+        // Drop its old output membership before retile checks ownership.
+        self.refresh_space();
+        self.retile();
+        // Classic hit-testing uses Space's cached output membership. Refresh
+        // before the pointer handoff rather than waiting for the next frame.
+        self.refresh_space();
+        // Ocean may insert into an existing reef outside the destination's
+        // current view. Follow the ordinary directional-focus policy: leave
+        // a visible tile alone, reveal an off-camera tile on that camera only.
+        if ocean && tiled && !self.fullscreen.contains_key(&surface) {
+            let visible = self.render_placements(to).is_some_and(|placements| {
+                placements.iter().any(|placement| {
+                    placement.surface() == Some(&surface)
+                        && self.placement_input_rect(placement).overlaps(to_geo)
+                })
+            });
+            if !visible {
+                if let Some(rect) = self.spatial.ocean.world_rect(
+                    &surface,
+                    self.config.gaps,
+                    self.config.bsp_split_bias,
+                ) {
+                    self.spatial.ocean.center_on_rect(
+                        &to_name,
+                        to_geo.size,
+                        rect,
+                        Duration::from_millis(self.config.ocean.camera_animation_ms),
+                        self.config.ocean.camera_sway,
+                    );
+                    self.retile();
+                }
+            }
+        }
+        // Ocean's normal floating world rect remains the restore geometry;
+        // explicitly configure output-sized overrides at the destination.
+        if let Some(toplevel) = window.toplevel() {
+            let size = if self.fullscreen.contains_key(&surface) {
+                Some(to_geo.size)
+            } else if self.maximized.contains_key(&surface) {
+                Some(crate::layout::inset(area, self.gaps_for(&to_name, workspace)).size)
+            } else {
+                normal_rect.map(|rect| rect.size)
+            };
+            if let Some(size) = size {
+                toplevel.with_pending_state(|state| state.size = Some(size));
+                toplevel.send_pending_configure();
+            }
+        }
+        self.set_window_fractional_scale(&window, to);
+        self.focus_window(Some(surface.clone()), SERIAL_COUNTER.next_serial());
+        self.warp_pointer_to_monitor(to);
+        self.refresh_ext_workspaces();
+        for surface in moved_surfaces {
+            self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged { surface });
+        }
+    }
+
     /// Completes a cross-monitor tile drop onto the destination's visible
     /// tree. Group tabs travel together; pointer callbacks supply the target
     /// and never need to lock/query the pointer again during release.
@@ -2067,16 +2349,31 @@ impl Smallvil {
         {
             return false;
         }
-        let Some(geometry) = self.space.output_geometry(to) else {
+        let Some(members) = self.transfer_tiled_window_to_output(surface, to, target) else {
             return false;
         };
+        self.refresh_ext_workspaces();
+        for surface in members {
+            self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged { surface });
+        }
+        true
+    }
+
+    /// Ownership transfer shared by pointer drops, window and column moves.
+    /// Callers publish returned members; column moves first rebuild the whole
+    /// destination column. Pointer-drop eligibility stays in its wrapper.
+    pub(super) fn transfer_tiled_window_to_output(
+        &mut self,
+        surface: &WlSurface,
+        to: &Output,
+        target: Option<&WlSurface>,
+    ) -> Option<Vec<WlSurface>> {
+        let geometry = self.space.output_geometry(to)?;
         let name = to.name();
         let workspace = self.spatial.workspaces.layout.active_workspace(&name);
         let window = match self.spatial.engine.ownership() {
             crate::config::SpatialOwnership::Workspaces => {
-                let Some(window) = self.spatial.workspaces.layout.window_of(surface) else {
-                    return false;
-                };
+                let window = self.spatial.workspaces.layout.window_of(surface)?;
                 let target = target.filter(|target| {
                     self.spatial.workspaces.layout.output_of(target) == Some(name.as_str())
                         && self.spatial.workspaces.layout.workspace_of(target) == Some(workspace)
@@ -2089,14 +2386,9 @@ impl Smallvil {
                 window
             }
             crate::config::SpatialOwnership::Ocean => {
-                let Some(window) =
-                    self.spatial
-                        .ocean
-                        .move_tiled_to_output(surface, &name, geometry.size, target)
-                else {
-                    return false;
-                };
-                window
+                self.spatial
+                    .ocean
+                    .move_tiled_to_output(surface, &name, geometry.size, target)?
             }
         };
         let members = if let Some(index) = self.group_of(surface) {
@@ -2113,6 +2405,7 @@ impl Smallvil {
             vec![(surface.clone(), None)]
         };
         self.set_window_fractional_scale(&window, to);
+        let mut moved = Vec::with_capacity(members.len());
         for (member, parked) in members {
             if let Some(pin) = self.spatial.workspaces.output_pins.get_mut(&member) {
                 *pin = name.clone();
@@ -2124,10 +2417,9 @@ impl Smallvil {
                 self.set_window_fractional_scale(&parked, to);
             }
             self.refresh_window_opacity_and_glass_for(&member);
-            self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged { surface: member });
+            moved.push(member);
         }
-        self.refresh_ext_workspaces();
-        true
+        Some(moved)
     }
 
     /// Moves exactly `surface` to `to`, wherever it currently lives --
@@ -2809,8 +3101,13 @@ impl Smallvil {
                 return;
             };
             let (along, _) = self.scroll_axis_step(direction);
-            if !along {
+            let pages = self.config.scroll.pages;
+            if pages && !along {
+                return;
+            }
+            if !along || pages {
                 // Across the strip: the window's share of a shared column.
+                // A page splits along the strip instead.
                 let Some((column, _)) = self.spatial.workspaces.layout.scroll_position(&surface)
                 else {
                     return;
@@ -2825,12 +3122,19 @@ impl Smallvil {
                     .scroll_columns(&owner, workspace)[column]
                     .windows
                     .len();
-                if !crate::scroll::row_resize_enabled(rows, self.config.scroll.stack) {
+                if !(if pages {
+                    rows > 1
+                } else {
+                    crate::scroll::row_resize_enabled(rows, self.config.scroll.stack)
+                }) {
                     return;
                 }
-                let cross = match self.config.scroll.orientation {
-                    crate::scroll::Orientation::Horizontal => window.geometry().size.h,
-                    crate::scroll::Orientation::Vertical => window.geometry().size.w,
+                let cross = match (self.config.scroll.orientation
+                    == crate::scroll::Orientation::Horizontal)
+                    != pages
+                {
+                    true => window.geometry().size.h,
+                    false => window.geometry().size.w,
                 }
                 .max(1);
                 let delta = if matches!(direction, Direction::Right | Direction::Down) {
@@ -2846,6 +3150,10 @@ impl Smallvil {
                     .layout
                     .scroll
                     .set_weight(&surface, weight);
+                self.spatial
+                    .workspaces
+                    .layout
+                    .scroll_clamp_page_split(&surface);
                 self.retile();
                 self.reveal_scroll_window(&surface);
                 self.request_redraw();

@@ -4349,6 +4349,122 @@ fn floating_tiling_focus_actions_parse() {
 }
 
 #[test]
+fn monitor_focus_actions_parse() {
+    for (name, direction) in [
+        ("left", Direction::Left),
+        ("right", Direction::Right),
+        ("up", Direction::Up),
+        ("down", Direction::Down),
+    ] {
+        assert!(matches!(
+            parse_action(&format!("focus-monitor-{name}")),
+            Some(Action::FocusMonitor(parsed)) if parsed == direction
+        ));
+    }
+    assert!(matches!(
+        parse_action("focus-monitor: test-output "),
+        Some(Action::FocusMonitorNamed(name)) if name == "test-output"
+    ));
+    assert!(parse_action("focus-monitor:").is_none());
+    assert!(parse_action("focus-monitor:   ").is_none());
+    assert!(parse_action("focus-monitor-diagonal").is_none());
+}
+
+#[test]
+fn scroll_pages_parse_and_default_off() {
+    let paged = Config::from_raw(lower_entries(&wave_entries("scroll {\n pages = true\n}\n"))).0;
+    assert!(paged.scroll.pages);
+    let plain = Config::from_raw(lower_entries(&wave_entries(
+        "scroll {\n orientation = vertical\n}\n",
+    )))
+    .0;
+    assert!(!plain.scroll.pages);
+}
+
+#[test]
+fn focus_direction_or_monitor_actions_parse() {
+    for (name, direction) in [
+        ("column-or-monitor-left", Direction::Left),
+        ("column-or-monitor-right", Direction::Right),
+        ("window-or-monitor-up", Direction::Up),
+        ("window-or-monitor-down", Direction::Down),
+    ] {
+        assert!(matches!(
+            parse_action(&format!("focus-{name}")),
+            Some(Action::FocusDirectionOrMonitor(parsed)) if parsed == direction
+        ));
+    }
+    assert!(parse_action("focus-column-or-monitor-up").is_none());
+    assert!(parse_action("focus-window-or-monitor-left").is_none());
+}
+
+#[test]
+fn monitor_window_move_actions_parse() {
+    for (name, direction) in [
+        ("left", Direction::Left),
+        ("right", Direction::Right),
+        ("up", Direction::Up),
+        ("down", Direction::Down),
+    ] {
+        assert!(matches!(
+            parse_action(&format!("move-window-to-monitor-{name}")),
+            Some(Action::MoveWindowToMonitor(parsed)) if parsed == direction
+        ));
+    }
+    assert!(matches!(
+        parse_action("move-window-to-monitor: test-output "),
+        Some(Action::MoveWindowToMonitorNamed(name)) if name == "test-output"
+    ));
+    assert!(parse_action("move-window-to-monitor:").is_none());
+    assert!(parse_action("move-window-to-monitor:   ").is_none());
+    assert!(parse_action("move-window-to-monitor-diagonal").is_none());
+}
+
+#[test]
+fn monitor_column_move_actions_parse() {
+    for (name, direction) in [
+        ("left", Direction::Left),
+        ("right", Direction::Right),
+        ("up", Direction::Up),
+        ("down", Direction::Down),
+    ] {
+        assert!(matches!(
+            parse_action(&format!("move-column-to-monitor-{name}")),
+            Some(Action::MoveColumnToMonitor(parsed)) if parsed == direction
+        ));
+    }
+    assert!(matches!(
+        parse_action("move-column-to-monitor: test-output "),
+        Some(Action::MoveColumnToMonitorNamed(name)) if name == "test-output"
+    ));
+    assert!(parse_action("move-column-to-monitor:").is_none());
+    assert!(parse_action("move-column-to-monitor:   ").is_none());
+    assert!(parse_action("move-column-to-monitor-diagonal").is_none());
+}
+
+#[test]
+fn monitor_workspace_move_actions_parse() {
+    for (name, direction) in [
+        ("left", Direction::Left),
+        ("right", Direction::Right),
+        ("up", Direction::Up),
+        ("down", Direction::Down),
+    ] {
+        assert!(matches!(
+            parse_action(&format!("move-workspace-to-monitor-{name}")),
+            Some(Action::MoveWorkspaceToMonitor(parsed)) if parsed == direction
+        ));
+    }
+    assert!(matches!(
+        parse_action("move-workspace-to-monitor: test-output "),
+        Some(Action::MoveWorkspaceToMonitorNamed(name)) if name == "test-output"
+    ));
+    assert!(parse_action("move-workspace-to-monitor:").is_none());
+    assert!(parse_action("move-workspace-to-monitor:   ").is_none());
+    assert!(parse_action("move-workspace-to-monitor-diagonal").is_none());
+}
+
+#[test]
 fn shortcut_inhibit_and_touchpad_toggles_parse() {
     assert!(matches!(
         parse_action("toggle-keyboard-shortcuts-inhibit"),

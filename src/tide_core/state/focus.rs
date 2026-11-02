@@ -487,12 +487,14 @@ impl Smallvil {
             return None;
         }
         let output = self.output_for_point(pointer.current_location())?;
+        let geometry = self.space.output_geometry(&output)?;
         self.render_placements(&output)?
             .into_iter()
             .any(|placement| {
                 placement
                     .surface()
                     .is_some_and(|candidate| candidate == surface)
+                    && self.placement_input_rect(&placement).overlaps(geometry)
             })
             .then_some(output)
     }
@@ -1692,6 +1694,180 @@ impl Smallvil {
         self.input.cycling_focus = false;
     }
 
+    /// Like niri's output_left/right/up/down_of: the perpendicular spans
+    /// must overlap, then the nearest center on that side wins. Use i64
+    /// doubled centers so full-range output positions cannot overflow.
+    pub(crate) fn monitor_in_direction(&self, direction: Direction) -> Option<Output> {
+        let current = self.primary_output()?;
+        self.monitor_in_direction_from(&current, direction)
+    }
+
+    pub(super) fn monitor_in_direction_from(
+        &self,
+        current: &Output,
+        direction: Direction,
+    ) -> Option<Output> {
+        let from = self.space.output_geometry(current)?;
+        let horizontal = matches!(direction, Direction::Left | Direction::Right);
+        let axes = |rect: Rectangle<i32, Logical>| {
+            let (start, size, cross, cross_size) = if horizontal {
+                (rect.loc.x, rect.size.w, rect.loc.y, rect.size.h)
+            } else {
+                (rect.loc.y, rect.size.h, rect.loc.x, rect.size.w)
+            };
+            (
+                i64::from(start) * 2 + i64::from(size),
+                i64::from(cross),
+                i64::from(cross) + i64::from(cross_size),
+            )
+        };
+        let (center, start, end) = axes(from);
+        self.space
+            .outputs()
+            .filter(|output| *output != current)
+            .filter_map(|output| {
+                let (other_center, other_start, other_end) =
+                    axes(self.space.output_geometry(output)?);
+                let distance = if matches!(direction, Direction::Left | Direction::Up) {
+                    center - other_center
+                } else {
+                    other_center - center
+                };
+                (distance > 0 && start < other_end && other_start < end)
+                    .then(|| (distance, output.name(), output.clone()))
+            })
+            .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
+            .map(|(_, _, output)| output)
+    }
+
+    /// Restore this monitor's most recent mapped window and move the
+    /// pointer onto it. An empty monitor clears
+    /// window focus; its pointer location still routes subsequent actions.
+    pub(crate) fn focus_monitor(&mut self, output: &Output) {
+        if self.monitor_action_blocked() {
+            return;
+        }
+        let Some(geometry) = self.space.output_geometry(output) else {
+            return;
+        };
+        // A shared Ocean window can be visible through several cameras;
+        // its largest rendered share need not be on this monitor.
+        let ocean_windows = (self.spatial.engine.ownership()
+            == crate::config::SpatialOwnership::Ocean)
+            .then(|| {
+                self.render_placements(output)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|placement| self.placement_input_rect(placement).overlaps(geometry))
+                    .filter_map(|placement| placement.surface().cloned())
+                    .collect::<HashSet<_>>()
+            });
+        let matches = |surface: &WlSurface| {
+            self.window_is_visible(surface)
+                && ocean_windows.as_ref().map_or_else(
+                    || self.rendered_output_for_surface(surface).as_ref() == Some(output),
+                    |windows| windows.contains(surface),
+                )
+        };
+        let target = self
+            .input
+            .focus_history
+            .iter()
+            .find(|surface| matches(surface))
+            .cloned()
+            .or_else(|| {
+                self.space
+                    .elements()
+                    .rev()
+                    .filter_map(|window| window.toplevel().map(|t| t.wl_surface().clone()))
+                    .find(matches)
+            });
+        if let Some(surface) = target {
+            if !self.spatial_is_tiled(&surface) {
+                if let Some(window) = self.mapped_toplevel_window(&surface) {
+                    self.space.raise_element(&window, false);
+                }
+            }
+            self.focus_window(Some(surface), SERIAL_COUNTER.next_serial());
+        } else {
+            self.focus_window(None, SERIAL_COUNTER.next_serial());
+        }
+        self.warp_pointer_to_monitor(output);
+    }
+
+    pub(super) fn monitor_action_blocked(&self) -> bool {
+        self.activation_blocked()
+            || self.input.classic_tile_drag.is_some()
+            || self.input.compositor_gesture.is_some()
+            || self
+                .seat
+                .get_pointer()
+                .is_some_and(|pointer| pointer.is_grabbed())
+    }
+
+    /// Shared by monitor focus and explicit window transfers. The caller
+    /// has already checked lock/grab policy and selected window focus.
+    pub(super) fn warp_pointer_to_monitor(&mut self, output: &Output) {
+        let Some(geometry) = self.space.output_geometry(output) else {
+            return;
+        };
+        if let Some(pointer) = self.seat.get_pointer() {
+            // Land on the restored window when it is visible. Besides
+            // avoiding an immediate hover handoff, this lets shared Ocean
+            // resolve the intended camera even with click-to-focus.
+            let pointer_rect = self
+                .focused_window_surface()
+                .and_then(|surface| {
+                    self.render_placements(output)?
+                        .into_iter()
+                        .find(|placement| placement.surface() == Some(&surface))
+                        .and_then(|placement| {
+                            let rect = self.placement_input_rect(&placement);
+                            // A growing tile may not have committed its new
+                            // buffer yet. Stay inside both the destination
+                            // slot and the currently hit-testable content.
+                            let size = placement.window.geometry().size;
+                            let content = Rectangle::new(
+                                rect.loc,
+                                (
+                                    (f64::from(size.w) * placement.view_scale).round().max(1.0)
+                                        as i32,
+                                    (f64::from(size.h) * placement.view_scale).round().max(1.0)
+                                        as i32,
+                                )
+                                    .into(),
+                            );
+                            rect.intersection(content)?.intersection(geometry)
+                        })
+                })
+                .unwrap_or(geometry);
+            let pos = Point::from((
+                f64::from(pointer_rect.loc.x) + f64::from(pointer_rect.size.w) / 2.0,
+                f64::from(pointer_rect.loc.y) + f64::from(pointer_rect.size.h) / 2.0,
+            ));
+            let under = self.surface_under(pos);
+            let surface = under.as_ref().map(|(surface, _)| surface.clone());
+            let previous = surface
+                .as_ref()
+                .and_then(|surface| self.apply_pointer_client_scale(surface));
+            pointer.motion(
+                self,
+                under,
+                &MotionEvent {
+                    location: pos,
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time: smithay::backend::input::InputTime::now(),
+                },
+            );
+            if let (Some(surface), Some(previous)) = (surface.as_ref(), previous) {
+                self.restore_pointer_client_scale(surface, previous);
+            }
+            pointer.frame(self);
+            self.note_pointer_motion();
+        }
+        self.request_redraw();
+    }
+
     /// Moves keyboard focus to the nearest window in `direction`. Classic
     /// uses mapped screen geometry. Ocean uses camera-projected world geometry
     /// and travels the action output's camera only when the selected window is
@@ -1765,6 +1941,47 @@ impl Smallvil {
         self.focus_window(Some(next_surface), SERIAL_COUNTER.next_serial());
     }
 
+    /// `focus-column-or-monitor-*` / `focus-window-or-monitor-*`: ordinary
+    /// directional focus, or the monitor on that side when focus did not
+    /// move (strip end, no neighbor, empty workspace). The side is taken
+    /// from the focused window's own monitor, falling back to the pointer
+    /// output. When Classic/Scroll directional focus itself crosses to
+    /// another monitor, the pointer follows as for `focus-monitor`.
+    pub(crate) fn focus_direction_or_monitor(&mut self, direction: Direction) {
+        if self.monitor_action_blocked() {
+            return;
+        }
+        let before = self.focused_window_surface();
+        let from = before
+            .as_ref()
+            .and_then(|surface| self.window_monitor(surface))
+            .or_else(|| self.primary_output());
+        if before.is_some() {
+            self.focus_direction(direction);
+            let after = self.focused_window_surface();
+            if after != before {
+                // Ocean's directional focus already travels the action
+                // output's camera to the target, so only workspace
+                // ownership can land on another monitor.
+                let landed = (self.spatial.engine.ownership()
+                    == crate::config::SpatialOwnership::Workspaces)
+                    .then(|| {
+                        after
+                            .as_ref()
+                            .and_then(|surface| self.window_monitor(surface))
+                    })
+                    .flatten();
+                if let Some(landed) = landed.filter(|landed| Some(landed) != from.as_ref()) {
+                    self.warp_pointer_to_monitor(&landed);
+                }
+                return;
+            }
+        }
+        if let Some(to) = from.and_then(|from| self.monitor_in_direction_from(&from, direction)) {
+            self.focus_monitor(&to);
+        }
+    }
+
     /// Swaps the currently focused *tiled* window with its neighbor in
     /// `direction`, keeping focus on the same window (which moves to the
     /// neighbor's former slot). Floating windows aren't part of the tiling
@@ -1780,6 +1997,13 @@ impl Smallvil {
         }
         if self.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Scroll) {
             let moved = match self.scroll_axis_step(direction) {
+                // A page's windows sit along the strip; nothing to swap across.
+                (true, step) if self.config.scroll.pages => self
+                    .spatial
+                    .workspaces
+                    .layout
+                    .scroll_page_move(&focused, step),
+                (false, _) if self.config.scroll.pages => false,
                 (true, step) => self
                     .spatial
                     .workspaces

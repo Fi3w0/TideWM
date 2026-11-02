@@ -3318,6 +3318,45 @@ impl Smallvil {
             Action::FocusDirection(direction) => {
                 self.focus_direction(direction);
             }
+            Action::FocusMonitor(direction) => {
+                if let Some(output) = self.monitor_in_direction(direction) {
+                    self.focus_monitor(&output);
+                }
+            }
+            Action::FocusMonitorNamed(name) => {
+                if let Some(output) = self.output_by_name(&name) {
+                    self.focus_monitor(&output);
+                }
+            }
+            Action::FocusDirectionOrMonitor(direction) => {
+                self.focus_direction_or_monitor(direction);
+            }
+            Action::MoveWindowToMonitor(direction) => {
+                self.move_focused_window_to_monitor_direction(direction);
+            }
+            Action::MoveWindowToMonitorNamed(name) => {
+                if let Some(output) = self.output_by_name(&name) {
+                    self.move_focused_window_to_monitor(&output);
+                }
+            }
+            Action::MoveColumnToMonitor(direction) => {
+                self.move_column_to_monitor_direction(direction);
+            }
+            Action::MoveColumnToMonitorNamed(name) => {
+                if let Some(output) = self.output_by_name(&name) {
+                    self.move_column_to_monitor(&output);
+                }
+            }
+            Action::MoveWorkspaceToMonitor(direction) => {
+                if let Some(output) = self.monitor_in_direction(direction) {
+                    self.move_workspace_to_monitor(&output);
+                }
+            }
+            Action::MoveWorkspaceToMonitorNamed(name) => {
+                if let Some(output) = self.output_by_name(&name) {
+                    self.move_workspace_to_monitor(&output);
+                }
+            }
             Action::SwapDirection(direction) => {
                 self.swap_direction(direction);
             }

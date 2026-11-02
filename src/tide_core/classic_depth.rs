@@ -58,6 +58,32 @@ impl ClassicDepthDeck {
         self.entries.iter().map(|entry| entry.output.as_str())
     }
 
+    pub(crate) fn occupied_workspaces<'a>(
+        &'a self,
+        output: &'a str,
+    ) -> impl Iterator<Item = u32> + 'a {
+        self.entries
+            .iter()
+            .filter(move |entry| entry.output == output)
+            .map(|entry| entry.workspace)
+    }
+
+    /// Parked windows stay parked when their whole workspace moves.
+    pub(crate) fn move_workspace(&mut self, from: &str, workspace: u32, to: &str, target: u32) {
+        for entry in &mut self.entries {
+            if entry.output == from && entry.workspace == workspace {
+                entry.output = to.to_string();
+                entry.workspace = target;
+            }
+        }
+        if let Some(view) = &mut self.view {
+            if view.output == from && view.workspace == workspace {
+                view.output = to.to_string();
+                view.workspace = target;
+            }
+        }
+    }
+
     /// Retag parked windows and an open deck view when their output leaves.
     /// Parked entries have no `Space`/`Layouts` owner, so output migration
     /// must update this durable tag explicitly.

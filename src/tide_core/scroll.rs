@@ -118,7 +118,17 @@ pub struct ScrollConfig {
     pub workspace_scroll: bool,
     /// Vertical workspace-slide duration, milliseconds.
     pub workspace_scroll_duration_ms: u32,
+    /// Paged strip: every column is one page (as wide as any column, so
+    /// `tile_proportion` and centering still apply) holding up to
+    /// `PAGE_WINDOWS` windows side by side along the strip, and the view
+    /// always shows whole pages.
+    pub pages: bool,
 }
+
+/// Most windows one page holds with `scroll.pages`.
+pub const PAGE_WINDOWS: usize = 2;
+/// Smallest share of a page one of its windows can be resized to.
+pub const PAGE_MIN_SHARE: f64 = 0.2;
 
 /// A column width or window height change: `50%`, `+10%`, `-10%`,
 /// `800` or `+40` (logical pixels). Percentages are kept in hundredths so
@@ -211,6 +221,7 @@ impl Default for ScrollConfig {
             stack_min_height: 0.33,
             workspace_scroll: true,
             workspace_scroll_duration_ms: 220,
+            pages: false,
         }
     }
 }
@@ -258,6 +269,35 @@ pub struct ScrollState {
     stack_offsets: HashMap<WlSurface, f64>,
 }
 impl ScrollState {
+    pub(crate) fn forget_strip(&mut self, output: &str, workspace: u32) {
+        let key = (output.to_string(), workspace);
+        self.offsets.remove(&key);
+        self.float_offsets.remove(&key);
+        self.margins.remove(&key);
+    }
+
+    /// Move one independent strip's remembered view. Sectioned workspaces
+    /// share an output-wide key and are handled by their caller instead.
+    pub(crate) fn move_strip(&mut self, from: &str, workspace: u32, to: &str, target: u32) {
+        let source = (from.to_string(), workspace);
+        let destination = (to.to_string(), target);
+        let offset = self.offsets.remove(&source);
+        let float_offset = self.float_offsets.remove(&source);
+        let margins = self.margins.remove(&source);
+        self.offsets.remove(&destination);
+        self.float_offsets.remove(&destination);
+        self.margins.remove(&destination);
+        if let Some(offset) = offset {
+            self.offsets.insert(destination.clone(), offset);
+        }
+        if let Some(offset) = float_offset {
+            self.float_offsets.insert(destination.clone(), offset);
+        }
+        if margins {
+            self.margins.insert(destination);
+        }
+    }
+
     /// Records `offset` as the one floating windows now sit against and
     /// returns how far they must move, or `None` the first time a strip is
     /// seen. Whole pixels so repeated small pans cannot drift.
@@ -619,6 +659,50 @@ pub fn column_tile_rect(
     }
 }
 
+/// The rect of window `row` in a page: the page (a column) is split along
+/// the strip by `weights`, with `gap` between windows,
+/// and every window fills the cross axis.
+pub fn page_tile_rect(
+    area: Rectangle<i32, Logical>,
+    start: f64,
+    extent: f64,
+    offset: f64,
+    gap: i32,
+    orientation: Orientation,
+    (row, weights): (usize, &[f64]),
+) -> Rectangle<i32, Logical> {
+    let rows = weights.len().max(1);
+    let row = row.min(rows - 1);
+    let inner = f64::from(
+        gap.max(0)
+            .min(area.size.w.min(area.size.h).saturating_sub(1) / 2),
+    );
+    let available = (extent - inner * (rows - 1) as f64).max(1.0);
+    let total: f64 = weights
+        .iter()
+        .map(|w| w.max(0.0))
+        .sum::<f64>()
+        .max(f64::EPSILON);
+    let edge = |index: usize| {
+        let before: f64 = weights[..index].iter().map(|w| w.max(0.0)).sum();
+        (available * before / total).round() + inner * index as f64
+    };
+    let from = edge(row);
+    let to = if row + 1 == rows {
+        extent
+    } else {
+        edge(row + 1) - inner
+    };
+    tile_rect(
+        area,
+        start + from,
+        (to - from).max(1.0),
+        offset,
+        gap,
+        orientation,
+    )
+}
+
 /// Whether a column's rows can be resized vertically. A shared column
 /// always can; a single-window column only when the stack camera is enabled
 /// (`scroll` or `hybrid`), because with `fit` the window already fills it.
@@ -902,5 +986,21 @@ mod tests {
         assert_eq!(second.loc.y, 8 + 128);
         assert_eq!(third.loc.y, 8 + 2 * 128 - 50);
         assert_eq!(third.size.h, 120);
+    }
+    #[test]
+    fn moving_strip_view_replaces_stale_destination_and_moves_float_clock() {
+        let mut state = ScrollState::default();
+        state.set_offset("from", 4, 128.0);
+        state.set_margins("from", 4, true);
+        state.float_shift("from", 4, 128.0);
+        state.set_offset("to", 5, 999.0);
+        state.float_shift("to", 5, 999.0);
+        state.move_strip("from", 4, "to", 5);
+        assert!(!state.has_offset("from", 4));
+        assert!(!state.has_margins("from", 4));
+        assert_eq!(state.offset("to", 5), 128.0);
+        assert!(state.has_margins("to", 5));
+        assert_eq!(state.float_shift("to", 5, 138.0), Some(-10));
+        assert_eq!(state.float_shift("from", 4, 1.0), None);
     }
 }
