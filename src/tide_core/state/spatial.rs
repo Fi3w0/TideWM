@@ -1179,10 +1179,18 @@ impl Smallvil {
                 .active_workspace(&output.name());
 
             let gaps = self.gaps_for(&output.name(), workspace);
-            self.spatial
-                .workspaces
-                .layout
-                .prepare_scroll(&output.name(), workspace, area, gaps);
+            // A touchpad strip swipe pans freely; it settles on release.
+            let swiping = matches!(
+                &self.input.compositor_gesture,
+                Some(super::CompositorGesture::Scroll { output: name, .. }) if *name == output.name()
+            );
+            self.spatial.workspaces.layout.prepare_scroll(
+                &output.name(),
+                workspace,
+                area,
+                gaps,
+                !swiping,
+            );
             self.anchor_scroll_floaters(&output.name(), workspace);
             self.rescue_scroll_floaters(&output.name(), workspace, area, gaps);
             let window_count = self

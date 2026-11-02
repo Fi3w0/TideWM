@@ -254,7 +254,7 @@ Or skip all of this and install a real package: [packaging/README.md](packaging/
 
 ### Pages
 
-`pages = true` turns the strip into pages, one screen each, for a tiling feel that still scrolls. A page holds one or two windows that always fill it: side by side, or top and bottom in a vertical strip. New apps open on a new page; moving focus between the two windows of a page never moves the camera, and `scroll-left/right` flips whole pages. `swap-*` along the strip swaps the two windows, moves a window out of its page at the edge, or joins it to a neighbor page with room; `resize-*` moves the divider (each window keeps at least 20%). Nothing moves between pages on its own. Details: [DOCUMENTATION.md](DOCUMENTATION.md#scroll-pages).
+`pages = true` turns the strip into pages for a tiling feel that still scrolls. A page is as wide as a column (`tile_proportion`; `1.0` gives full-screen pages, `0.94` with `center_focused` keeps the neighbors peeking in) and holds one or two windows that always fill it: side by side, or top and bottom in a vertical strip. New apps open on a new page; the view always shows whole pages, moving focus between the two windows of a page never moves it, and `scroll-left/right` flips whole pages. `swap-*` along the strip swaps the two windows, moves a window out of its page at the edge, or joins it to a neighbor page with room; `resize-*` moves the divider (each window keeps at least 20%). Nothing moves between pages on its own. Details: [DOCUMENTATION.md](DOCUMENTATION.md#scroll-pages).
 
 ```wave
 scroll {

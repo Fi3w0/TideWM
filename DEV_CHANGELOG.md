@@ -2,6 +2,11 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.23 — Pages keep column width and centering; settle on a page
+
+- Fiw after the native `0.91.22` test: keep `tile_proportion`/`center_focused` in page mode so neighbors peek. `scroll_slots` no longer forces a viewport extent for pages; a page is an ordinary column width (presets/set-column-width apply, `tile_proportion = 1.0` reproduces full-screen pages). New `Layouts::scroll_page_views` gives each page's whole-page view (`reveal` with the configured `scroll_centers`, leading edge otherwise); settling and `scroll_flip_page` pick from it, so pages land centered. Rows still split the page along the strip. Tests: full-width variant of the original fixture, plus a 0.94/centered fixture (peeking neighbors, split within the page width, in-page focus camera-neutral, centered settle and flips).
+- Native `0.91.22` (Fiw, two monitors): enabling `pages` by live reload left DP-4's remembered offset between pages (Spotify at x=179 instead of 8); only a reveal aligned. `Layouts::prepare_scroll` takes `settle`; with pages it snaps the clamped offset to the nearest page start. `retile_filtered` passes `settle = false` only while a `CompositorGesture::Scroll` owns that output, so touchpad swipes still pan continuously and `finish_scroll_gesture`'s reveal settles them. Strip-floater reveal shifts are overridden by the snap in paged mode (pages keep whole pages on screen). Regression: unaligned offset kept while swiping, settles to the nearer page otherwise.
+
 ## 0.91.22 — Paged Scroll strip
 
 - Added `ScrollConfig::pages` (`scroll { pages = true }`, default off, hot-reloadable). Designed with Fiw 2026-11-02: max 2 windows per page (`PAGE_WINDOWS`), split along the strip direction, nothing moves between pages automatically, a new window always opens a new page, the survivor of a closed pair fills the page, camera per page.

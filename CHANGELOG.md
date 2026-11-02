@@ -2,9 +2,14 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.23 · 2026-11-02 — Pages keep your width and centering
+
+- Pages now use your normal column width and centering: with `tile_proportion = 0.94` and `center_focused`, the page in view is centered and the pages beside it peek in. `tile_proportion = 1.0` still gives full-screen pages.
+- Fixed: a strip that was already scrolled when pages were turned on (or a workspace that remembered a scrolled view) could show half of two pages until focus moved. The view now always settles on a whole page; a touchpad swipe still pans freely and settles when you let go.
+
 ## 0.91.22 · 2026-11-02 — Paged Scroll
 
-- New `scroll { pages = true }` turns the strip into pages: each page is exactly one screen and holds one or two windows that always fill it (side by side, or top and bottom in a vertical strip). New windows open on a new page, the camera shows whole pages, and windows only change pages when you move or drag them. Off by default.
+- New `scroll { pages = true }` turns the strip into pages: each page holds one or two windows that always fill it (side by side, or top and bottom in a vertical strip). New windows open on a new page, the camera shows whole pages, and windows only change pages when you move or drag them. Off by default.
 
 ## 0.91.21 · 2026-11-02 — Focus past the strip end onto the next monitor
 

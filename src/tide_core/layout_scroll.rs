@@ -374,7 +374,8 @@ impl Layouts {
     }
 
     /// `scroll-left/right` on a paged strip: show the previous or next page
-    /// whole instead of panning half a viewport.
+    /// whole (centered when centering applies) instead of panning half a
+    /// viewport.
     pub(crate) fn scroll_flip_page(
         &mut self,
         output: &str,
@@ -387,24 +388,36 @@ impl Layouts {
         let viewport = self.scroll_viewport(area, gap);
         let key = self.scroll_key(workspace);
         let offset = self.scroll.offset(output, key);
-        let mut starts: Vec<f64> = slots
-            .iter()
-            .filter(|slot| slot.row == 0)
-            .map(|slot| slot.start)
-            .collect();
-        starts.dedup_by(|a, b| (*a - *b).abs() < 0.5);
-        let target = if forward {
-            starts.into_iter().find(|start| *start > offset + 0.5)
-        } else {
-            starts.into_iter().rev().find(|start| *start < offset - 0.5)
-        };
-        let Some(target) = target else {
-            return;
-        };
         self.scroll.set_margins(output, key, false);
         let (minimum, maximum) = self.scroll_bounds(&slots, viewport, (output, key));
-        self.scroll
-            .set_offset(output, key, target.clamp(minimum, maximum));
+        let mut views: Vec<f64> = self
+            .scroll_page_views(&slots, viewport)
+            .into_iter()
+            .map(|view| view.clamp(minimum, maximum))
+            .collect();
+        views.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+        let target = if forward {
+            views.into_iter().find(|view| *view > offset + 0.5)
+        } else {
+            views.into_iter().rev().find(|view| *view < offset - 0.5)
+        };
+        if let Some(target) = target {
+            self.scroll.set_offset(output, key, target);
+        }
+    }
+
+    /// The view that shows each page whole, in strip order: centered when
+    /// the configured centering applies to it, otherwise its leading edge
+    /// (a page wider than the viewport also aligns its leading edge).
+    fn scroll_page_views(&self, slots: &[ScrollSlot], viewport: f64) -> Vec<f64> {
+        slots
+            .iter()
+            .filter(|slot| slot.row == 0)
+            .map(|slot| {
+                let center = self.scroll_centers(slots, slot, f64::NEG_INFINITY, viewport);
+                scroll::reveal(slot.start, slot.start, slot.extent, viewport, center)
+            })
+            .collect()
     }
 
     /// The window's share of its column's height (its weight over the
@@ -757,13 +770,7 @@ impl Layouts {
                     .flatten()
                     .filter_map(|s| self.scroll.fullscreen_extents.get(s).copied())
                     .reduce(f64::max)
-                    .unwrap_or_else(|| {
-                        if cfg.pages {
-                            viewport
-                        } else {
-                            (viewport * proportion).round().max(1.0)
-                        }
-                    });
+                    .unwrap_or_else(|| (viewport * proportion).round().max(1.0));
                 let weights: Vec<f64> = surfaces
                     .iter()
                     .map(|s| s.as_ref().map(|s| self.scroll.weight(s)).unwrap_or(1.0))
@@ -874,12 +881,17 @@ impl Layouts {
         (self.scroll.offset(output, key), minimum, maximum + viewport)
     }
 
+    /// Clamps the strip's view before layout. With `scroll.pages` and
+    /// `settle` (no touchpad swipe in progress on this output) the view also
+    /// settles onto the nearest page start, so a view remembered from before
+    /// pages were enabled, or from a free pan, never shows half a page.
     pub(crate) fn prepare_scroll(
         &mut self,
         output: &str,
         workspace: u32,
         area: Rectangle<i32, Logical>,
         gap: i32,
+        settle: bool,
     ) {
         if self.scroll.config.is_none() {
             return;
@@ -894,6 +906,15 @@ impl Layouts {
                 let center = self.scroll_centers(&slots, slot, 0.0, viewport);
                 offset = scroll::reveal(0.0, slot.start, slot.extent, viewport, center)
                     .clamp(minimum, maximum);
+            }
+        }
+        if settle && self.scroll_pages() {
+            if let Some(target) = self
+                .scroll_page_views(&slots, viewport)
+                .into_iter()
+                .min_by(|a, b| (a - offset).abs().total_cmp(&(b - offset).abs()))
+            {
+                offset = target.clamp(minimum, maximum);
             }
         }
         self.scroll.set_offset(output, key, offset);
@@ -1299,7 +1320,7 @@ mod tests {
         let only = protocol.window();
         single.insert("screen", 1, only.clone(), None);
         single.scroll_reveal(&surface(&only), area, 8);
-        single.prepare_scroll("screen", 1, area, 8);
+        single.prepare_scroll("screen", 1, area, 8, true);
         let rect = single.layout("screen", 1, area, 8)[0].1;
         assert!(
             (2 * rect.loc.x + rect.size.w - area.size.w).abs() <= 1,
@@ -1509,13 +1530,13 @@ mod tests {
                 };
                 assert!(error.abs() <= 1, "not centered: {rect:?}");
             };
-            layouts.prepare_scroll("screen", 1, area, 8);
+            layouts.prepare_scroll("screen", 1, area, 8, true);
             centered(layouts.layout("screen", 1, area, 8)[0].1);
             assert!(layouts.scroll.offset("screen", 1) < 0.0);
             let last = protocol.window();
             layouts.insert("screen", 1, last.clone(), None);
             layouts.scroll_reveal(last.toplevel().unwrap().wl_surface(), area, 8);
-            layouts.prepare_scroll("screen", 1, area, 8);
+            layouts.prepare_scroll("screen", 1, area, 8, true);
             centered(layouts.layout("screen", 1, area, 8)[1].1);
             layouts.scroll_pan("screen", 1, area, 8, -100.0);
             centered(layouts.layout("screen", 1, area, 8)[0].1);
@@ -1523,21 +1544,21 @@ mod tests {
             centered(layouts.layout("screen", 1, area, 8)[1].1);
             layouts.scroll.config.as_mut().unwrap().center_focused = scroll::CenterMode::Never;
             layouts.scroll_reveal(first.toplevel().unwrap().wl_surface(), area, 8);
-            layouts.prepare_scroll("screen", 1, area, 8);
+            layouts.prepare_scroll("screen", 1, area, 8, true);
             assert_eq!(layouts.scroll.offset("screen", 1), 0.0);
         }
     }
 
     #[test]
-    fn pages_fill_the_viewport_hold_two_windows_and_move_the_camera_per_page() {
+    fn full_width_pages_hold_two_windows_and_move_the_camera_per_page() {
         let mut protocol = ProtocolFixture::new();
         for orientation in [Orientation::Horizontal, Orientation::Vertical] {
             let mut layouts = Layouts::default();
-            // Fiw's settings: centering and a 0.94 width must not matter.
+            // A full-width page: centering is the same as aligning.
             layouts.scroll.config = Some(ScrollConfig {
                 pages: true,
                 center_focused: scroll::CenterMode::Always,
-                tile_proportion: 0.94,
+                tile_proportion: 1.0,
                 orientation,
                 ..Default::default()
             });
@@ -1569,7 +1590,7 @@ mod tests {
             let full_cross = 2000 - full_along;
             let viewport = full_along - 16;
             layouts.scroll_reveal(&sa, area, 8);
-            layouts.prepare_scroll("screen", 1, area, 8);
+            layouts.prepare_scroll("screen", 1, area, 8, true);
             let rects: Vec<_> = layouts
                 .layout("screen", 1, area, 8)
                 .into_iter()
@@ -1598,6 +1619,18 @@ mod tests {
             layouts.scroll_flip_page("screen", 1, area, 8, false);
             assert_eq!(layouts.scroll.offset("screen", 1), 0.0);
             layouts.scroll_flip_page("screen", 1, area, 8, true);
+            assert_eq!(layouts.scroll.offset("screen", 1), page);
+
+            // A view left between pages (remembered from before pages were
+            // turned on, or a free pan) settles on the nearest page, except
+            // while a touchpad swipe is still panning it.
+            layouts.scroll.set_offset("screen", 1, page * 0.4);
+            layouts.prepare_scroll("screen", 1, area, 8, false);
+            assert_eq!(layouts.scroll.offset("screen", 1), page * 0.4);
+            layouts.prepare_scroll("screen", 1, area, 8, true);
+            assert_eq!(layouts.scroll.offset("screen", 1), 0.0);
+            layouts.scroll.set_offset("screen", 1, page * 0.6);
+            layouts.prepare_scroll("screen", 1, area, 8, true);
             assert_eq!(layouts.scroll.offset("screen", 1), page);
 
             // Resizing stops at the page limit.
@@ -1643,6 +1676,60 @@ mod tests {
     }
 
     #[test]
+    fn narrower_pages_keep_centering_so_neighbor_pages_peek() {
+        let mut protocol = ProtocolFixture::new();
+        let mut layouts = Layouts::default();
+        // Fiw's settings: 0.94 width, centered.
+        layouts.scroll.config = Some(ScrollConfig {
+            pages: true,
+            center_focused: scroll::CenterMode::Always,
+            tile_proportion: 0.94,
+            ..Default::default()
+        });
+        let windows: Vec<_> = (0..4).map(|_| protocol.window()).collect();
+        for window in &windows {
+            layouts.insert("screen", 1, window.clone(), None);
+        }
+        let s: Vec<_> = windows.iter().map(surface).collect();
+        // Pages [0 1] [2] [3].
+        assert!(layouts.scroll_consume_or_expel(&s[1], false));
+        let area = Rectangle::new((0, 0).into(), (1200, 800).into());
+        let viewport = 1200.0 - 16.0;
+        let extent = (viewport * 0.94_f64).round();
+        let margin = (viewport - extent) / 2.0;
+        let page = extent + 8.0;
+        // The middle page is centered: both neighbors peek in.
+        layouts.scroll_reveal(&s[2], area, 8);
+        layouts.prepare_scroll("screen", 1, area, 8, true);
+        assert_eq!(layouts.scroll.offset("screen", 1), page - margin);
+        let rects: Vec<_> = layouts
+            .layout("screen", 1, area, 8)
+            .into_iter()
+            .map(|(_, rect)| rect)
+            .collect();
+        assert_eq!(rects[2].size.w as f64, extent);
+        assert!(rects[1].loc.x + rects[1].size.w > 0, "previous page peeks");
+        assert!(rects[3].loc.x < 1200, "next page peeks");
+        // The first page's two windows split its width, not the screen's.
+        assert_eq!(f64::from(rects[0].size.w + 8 + rects[1].size.w), extent);
+        // Focus inside a page never moves the view.
+        layouts.scroll_reveal(&s[0], area, 8);
+        let first = layouts.scroll.offset("screen", 1);
+        assert_eq!(first, -margin);
+        assert!(!layouts.scroll_reveal(&s[1], area, 8));
+        // A view between pages settles centered on the nearer page.
+        layouts.scroll.set_offset("screen", 1, page * 0.7 - margin);
+        layouts.prepare_scroll("screen", 1, area, 8, true);
+        assert_eq!(layouts.scroll.offset("screen", 1), page - margin);
+        // Flipping lands centered on each page in turn.
+        layouts.scroll_flip_page("screen", 1, area, 8, true);
+        assert_eq!(layouts.scroll.offset("screen", 1), 2.0 * page - margin);
+        layouts.scroll_flip_page("screen", 1, area, 8, false);
+        layouts.scroll_flip_page("screen", 1, area, 8, false);
+        assert_eq!(layouts.scroll.offset("screen", 1), first);
+    }
+
+    #[test]
     fn fullscreen_columns_reserve_output_extent_without_covering_the_next_tile() {
         let mut protocol = ProtocolFixture::new();
         let mut layouts = Layouts::default();
@@ -1679,7 +1766,7 @@ mod tests {
         let area = Rectangle::new((120, -55).into(), (1101, 701).into());
         assert_eq!(layouts.layout("screen", 1, area, 7).len(), 2);
         layouts.set_active_workspace("screen", 9);
-        layouts.prepare_scroll("screen", 9, area, 7);
+        layouts.prepare_scroll("screen", 9, area, 7, true);
         assert!(layouts.scroll.offset("screen", 0) > 0.0);
         assert_eq!(
             layouts.workspace_of(second.toplevel().unwrap().wl_surface()),
@@ -1687,7 +1774,7 @@ mod tests {
         );
         assert_eq!(layouts.layout("screen", u32::MAX, area, 7).len(), 1);
         layouts.set_active_workspace("screen", 4); // empty section is reachable
-        layouts.prepare_scroll("screen", 4, area, 7);
+        layouts.prepare_scroll("screen", 4, area, 7, true);
         assert!(layouts.scroll.offset("screen", 0) > 0.0);
         layouts.scroll.config = None;
         assert_eq!(layouts.layout("screen", 1, area, 7).len(), 1);

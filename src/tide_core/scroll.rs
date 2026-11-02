@@ -118,8 +118,10 @@ pub struct ScrollConfig {
     pub workspace_scroll: bool,
     /// Vertical workspace-slide duration, milliseconds.
     pub workspace_scroll_duration_ms: u32,
-    /// Paged strip: every column is one page, exactly one viewport long,
-    /// holding up to `PAGE_WINDOWS` windows side by side along the strip.
+    /// Paged strip: every column is one page (as wide as any column, so
+    /// `tile_proportion` and centering still apply) holding up to
+    /// `PAGE_WINDOWS` windows side by side along the strip, and the view
+    /// always shows whole pages.
     pub pages: bool,
 }
 
@@ -657,8 +659,8 @@ pub fn column_tile_rect(
     }
 }
 
-/// The rect of window `row` in a page: the page (a column one viewport
-/// long) is split along the strip by `weights`, with `gap` between windows,
+/// The rect of window `row` in a page: the page (a column) is split along
+/// the strip by `weights`, with `gap` between windows,
 /// and every window fills the cross axis.
 pub fn page_tile_rect(
     area: Rectangle<i32, Logical>,
