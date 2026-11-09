@@ -316,6 +316,12 @@ pub(crate) enum IpcEvent {
     EbbWarning {
         warning: crate::ebb::Warning,
     },
+    /// The system is short of memory; listeners may drop their own caches.
+    EbbPressure {
+        source: String,
+        system_available_bytes: Option<u64>,
+        pressure_some_avg10: Option<f64>,
+    },
     DepthSettingsChanged,
     DepthBackgroundChanged,
     ConfigReloaded,
@@ -359,7 +365,7 @@ impl IpcEvent {
             IpcEvent::DepthChanged { .. }
             | IpcEvent::DepthSettingsChanged
             | IpcEvent::DepthBackgroundChanged => EventKind::Depth,
-            IpcEvent::EbbWarning { .. } => EventKind::Ebb,
+            IpcEvent::EbbWarning { .. } | IpcEvent::EbbPressure { .. } => EventKind::Ebb,
             IpcEvent::ConfigReloaded => EventKind::Config,
             IpcEvent::LayoutChanged { .. } => EventKind::Layout,
             IpcEvent::OutputChanged { .. } => EventKind::Output,
@@ -385,6 +391,7 @@ impl IpcEvent {
             IpcEvent::DepthSettingsChanged => "depth-settings-changed",
             IpcEvent::DepthBackgroundChanged => "depth-background-changed",
             IpcEvent::EbbWarning { .. } => "ebb-warning",
+            IpcEvent::EbbPressure { .. } => "ebb-pressure",
             IpcEvent::ConfigReloaded => "config-reloaded",
             IpcEvent::LayoutChanged { .. } => "layout-changed",
             IpcEvent::OutputChanged { .. } => "output-changed",
@@ -460,6 +467,15 @@ impl IpcEvent {
             IpcEvent::ScrollChanged { output } => scroll_json(state, output),
             IpcEvent::DepthSettingsChanged | IpcEvent::DepthBackgroundChanged => depth_json(state),
             IpcEvent::EbbWarning { warning } => json!(warning),
+            IpcEvent::EbbPressure {
+                source,
+                system_available_bytes,
+                pressure_some_avg10,
+            } => json!({
+                "source": source,
+                "system_available_bytes": system_available_bytes,
+                "pressure_some_avg10": pressure_some_avg10,
+            }),
             IpcEvent::ConfigReloaded => serde_json::Value::Null,
         };
         let mut line = serde_json::to_vec(&json!({ "event": self.event_name(), "data": data }))
@@ -1029,7 +1045,11 @@ fn handle_request(state: &mut Smallvil, request: Request) -> serde_json::Value {
             Ok(()) => json!({"ok":true,"data":{"queued":true,"deep":deep}}),
             Err(error) => json!({"ok":false,"error":error}),
         },
-        Request::EbbStats => json!({ "ok": true, "data": state.ebb.stats(&state.config.ebb) }),
+        Request::EbbStats => {
+            let mut data = state.ebb.stats(&state.config.ebb);
+            data["apps"] = state.ebb_apps();
+            json!({ "ok": true, "data": data })
+        }
         Request::Perf => json!({ "ok": true, "data": perf_snapshot_json(state) }),
         // Subscribe is intercepted upstream in `register_connection` before
         // `response_payload` ever runs, since handling it requires the

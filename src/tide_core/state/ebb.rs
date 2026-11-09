@@ -7,6 +7,37 @@ use crate::{
 use smithay::{reexports::wayland_server::Resource, utils::IsAlive};
 use std::time::Instant;
 
+/// Bounds the per-app report whatever the client count or their strings.
+const APP_REPORT_LIMIT: usize = 32;
+const APP_NAME_LIMIT: usize = 96;
+
+/// Pixels of every buffer attached in `surface`'s tree, at 4 bytes each.
+fn attached_buffer_bytes(
+    surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+) -> u64 {
+    use smithay::{
+        backend::renderer::utils::with_renderer_surface_state,
+        wayland::compositor::{with_surface_tree_downward, TraversalAction},
+    };
+    let mut pixels = 0_u64;
+    let mut surfaces = Vec::new();
+    with_surface_tree_downward(
+        surface,
+        (),
+        |_, _, _| TraversalAction::DoChildren(()),
+        |child, _, _| surfaces.push(child.clone()),
+        |_, _, _| true,
+    );
+    for child in surfaces {
+        if let Some(size) =
+            with_renderer_surface_state(&child, |state| state.buffer_size()).flatten()
+        {
+            pixels = pixels.saturating_add(size.w.max(0) as u64 * size.h.max(0) as u64);
+        }
+    }
+    pixels.saturating_mul(4)
+}
+
 impl Smallvil {
     pub(crate) fn ebb_tick(&mut self, screens_off: bool) {
         self.ebb_refresh_pressure();
@@ -16,6 +47,9 @@ impl Smallvil {
             || self.input.last_activity.elapsed().as_millis()
                 >= u128::from(self.config.ebb.away_after_ms);
         self.ebb.note_away(now, away);
+        if self.ebb.watch.pressure_event_due(now) {
+            self.emit_ebb_pressure();
+        }
         let interval = u64::from(self.config.ebb.check_every_ms).div_ceil(1000);
         if self
             .ebb
@@ -61,25 +95,28 @@ impl Smallvil {
             self.ebb.trim.audit_pending = true;
         }
         self.ebb_observe_hidden(screens_off);
-        if matches!(
-            self.config.ebb.mode,
-            crate::config::EbbMode::Balanced | crate::config::EbbMode::Aggressive
-        ) && self.ebb.pressure.source.is_none()
-        {
+        // Without a kernel PSI watch, low available memory is the pressure
+        // signal. Every mode tells listeners; only the reacting modes trim.
+        if self.ebb.pressure.source.is_none() {
             let total = meminfo
                 .as_deref()
                 .and_then(|text| crate::ebb::kb_field(text, "MemTotal:"));
-            let threshold = if self.config.ebb.mode == crate::config::EbbMode::Aggressive {
-                15
-            } else {
-                10
+            let below = |percent: u128| {
+                total
+                    .zip(system_available_bytes)
+                    .is_some_and(|(total, available)| {
+                        total > 0 && u128::from(available) * 100 < u128::from(total) * percent
+                    })
             };
-            if total
-                .zip(system_available_bytes)
-                .is_some_and(|(total, available)| {
-                    total > 0 && u128::from(available) * 100 < u128::from(total) * threshold
-                })
-            {
+            if below(crate::ebb::watch::PRESSURE_AVAILABLE_PERCENT) {
+                self.ebb.watch.pressure_signalled = true;
+            }
+            let threshold = match self.config.ebb.mode {
+                crate::config::EbbMode::Aggressive => Some(15),
+                crate::config::EbbMode::Balanced => Some(10),
+                _ => None,
+            };
+            if threshold.is_some_and(below) {
                 self.ebb.trim.pressure_pending = true;
             }
         }
@@ -96,6 +133,7 @@ impl Smallvil {
             away_since_secs: self.ebb.away_since_secs,
             leftover_count: leftovers.iter().map(|entry| entry.count).sum(),
             leftovers,
+            activity: Some(self.ebb.watch.take(now)),
             cost_us,
         };
         self.ebb
@@ -122,6 +160,117 @@ impl Smallvil {
             }
             self.emit_ipc_event(IpcEvent::EbbWarning { warning });
         }
+    }
+
+    /// Tells listeners the system is short of memory so they can drop their
+    /// own caches. Read at emit time only; nothing is sampled for it.
+    fn emit_ebb_pressure(&mut self) {
+        let meminfo = std::fs::read_to_string("/proc/meminfo").ok();
+        let available = meminfo
+            .as_deref()
+            .and_then(|text| crate::ebb::kb_field(text, "MemAvailable:"));
+        let some_avg10 = std::fs::read_to_string("/proc/pressure/memory")
+            .ok()
+            .and_then(|text| crate::ebb::pressure_avg10(&text));
+        let source = self
+            .ebb
+            .pressure
+            .source
+            .clone()
+            .unwrap_or_else(|| "/proc/meminfo".to_string());
+        tracing::info!(%source, ?available, ?some_avg10, "Ebb: memory pressure");
+        self.emit_ipc_event(IpcEvent::EbbPressure {
+            source,
+            system_available_bytes: available,
+            pressure_some_avg10: some_avg10,
+        });
+    }
+
+    /// Per app: what TideWM holds for its surfaces and how large its attached
+    /// buffers are. Built on request from live state; nothing is stored.
+    pub(crate) fn ebb_apps(&self) -> serde_json::Value {
+        use smithay::desktop::layer_map_for_output;
+        #[derive(Default)]
+        struct App {
+            windows: usize,
+            layers: usize,
+            held_entries: usize,
+            held_bytes: u64,
+            buffer_bytes: u64,
+        }
+        let gpu = &self.render.gpu;
+        let mut apps: std::collections::HashMap<(Option<i32>, String), App> = Default::default();
+        let mut add =
+            |surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+             name: String,
+             layer: bool| {
+                let app = apps.entry((self.client_pid(surface), name)).or_default();
+                if layer {
+                    app.layers += 1;
+                } else {
+                    app.windows += 1;
+                }
+                for bytes in [
+                    gpu.backdrop_textures
+                        .get(surface)
+                        .map(|cache| cache.estimated_texture_bytes()),
+                    gpu.layer_alpha_masks
+                        .get(surface)
+                        .map(|cache| cache.estimated_texture_bytes()),
+                    gpu.custom_shader_instances
+                        .get(surface)
+                        .map(|instance| instance.target_bytes())
+                        .filter(|bytes| *bytes > 0),
+                    gpu.depth_schematics.contains_key(surface).then_some(0),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    app.held_entries += 1;
+                    app.held_bytes = app.held_bytes.saturating_add(bytes);
+                }
+                app.buffer_bytes = app
+                    .buffer_bytes
+                    .saturating_add(attached_buffer_bytes(surface));
+            };
+        for surface in self.foreign_toplevel_numeric_ids.keys() {
+            if self.mapped_toplevel_window(surface).is_some() {
+                let name = self.toplevel_identity(surface).0.unwrap_or_default();
+                add(surface, name, false);
+            }
+        }
+        for output in self.space.outputs() {
+            for layer in layer_map_for_output(output).layers() {
+                add(layer.wl_surface(), layer.namespace().to_string(), true);
+            }
+        }
+        let mut entries: Vec<_> = apps.into_iter().collect();
+        entries.sort_by(|a, b| {
+            let weight = |app: &App| app.held_bytes.saturating_add(app.buffer_bytes);
+            weight(&b.1).cmp(&weight(&a.1)).then_with(|| a.0.cmp(&b.0))
+        });
+        let omitted = entries.len().saturating_sub(APP_REPORT_LIMIT);
+        entries.truncate(APP_REPORT_LIMIT);
+        let entries: Vec<_> = entries
+            .into_iter()
+            .map(|((pid, name), app)| {
+                serde_json::json!({
+                    "app_id": name.chars().take(APP_NAME_LIMIT).collect::<String>(),
+                    "pid": pid,
+                    "windows": app.windows,
+                    "layers": app.layers,
+                    "held_entries": app.held_entries,
+                    "held_texture_estimate_bytes": app.held_bytes,
+                    "client_buffer_estimate_bytes": app.buffer_bytes,
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "entries": entries,
+            "omitted": omitted,
+            "held_scope": "TideWM-owned caches kept for this app's surfaces (backdrops, layer masks, shader stages, depth schematics)",
+            "client_buffer_scope": "estimate of the buffers currently attached to this app's mapped surfaces at 4 bytes per pixel; the client owns them, and its buffer pools and off-screen surfaces are not counted",
+        })
     }
 
     /// Called by backends after draining Smithay's existing texture release queue.

@@ -938,6 +938,24 @@ impl Smallvil {
     where
         I::Device: MappedInputDevice,
     {
+        let motion = matches!(
+            event,
+            InputEvent::PointerMotion { .. } | InputEvent::PointerMotionAbsolute { .. }
+        );
+        self.dispatch_input_event(event);
+        if motion {
+            // `last_activity` was stamped as this event entered dispatch, so
+            // Ebb's report-only pointer cost needs one more clock read.
+            self.ebb
+                .watch
+                .pointer_motion(self.input.last_activity.elapsed());
+        }
+    }
+
+    fn dispatch_input_event<I: InputBackend>(&mut self, event: InputEvent<I>)
+    where
+        I::Device: MappedInputDevice,
+    {
         // Device topology changes aren't user activity; every other variant
         // reaching this function is a real keyboard/pointer/touch event.
         if !matches!(

@@ -2404,6 +2404,7 @@ fn render_surface(
     }
 
     sample.total = frame_start.elapsed();
+    state.ebb.watch.frame(sample.empty);
     state
         .render
         .motion

@@ -162,7 +162,7 @@ fn main() {
         args.retain(|arg| arg != "--json" && arg != "-j");
     }
     let request = build_request(&args).unwrap_or_else(|msg| fail(&msg));
-    let response = match send_request(&socket, &request) {
+    let mut response = match send_request(&socket, &request) {
         Ok(r) => r,
         Err(e)
             if socket_override.is_none() && e.kind() == std::io::ErrorKind::ConnectionRefused =>
@@ -185,6 +185,11 @@ fn main() {
     };
 
     let ok = response.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    if ok && args[0] == "ebb" {
+        if let Some(data) = response.get_mut("data") {
+            tidectl_ebb::add_client_memory(data);
+        }
+    }
     if json_output {
         println!("{response}");
     } else if !ok {
@@ -1012,6 +1017,65 @@ fn print_ebb_stats(data: &Value) {
         data["cache_passes"]["passes"],
         data["cache_passes"]["entries_evicted"]
     );
+    let mib = |value: &Value| {
+        value
+            .as_u64()
+            .map(|bytes| format!("{:.1} MiB", bytes as f64 / 1_048_576.0))
+            .unwrap_or_else(|| "unknown".into())
+    };
+    let activity = &latest["activity"];
+    if let Some(frames) = activity["frames"].as_u64() {
+        let empty = activity["empty_frames"].as_u64().unwrap_or(0);
+        let pointer = match activity["pointer_mean_us"].as_u64() {
+            Some(mean) => format!(
+                "{} pointer events at {mean} µs each",
+                activity["pointer_events"]
+            ),
+            None => "no pointer motion".into(),
+        };
+        println!(
+            "Last {} s: {frames} frames, {}% with nothing to draw; {pointer}",
+            activity["period_secs"],
+            (empty * 100).checked_div(frames).unwrap_or(0),
+        );
+    }
+    println!(
+        "Memory pressure: {} events; source: {}",
+        data["pressure"]["events"].as_u64().unwrap_or(0),
+        data["pressure"]["source"]
+            .as_str()
+            .unwrap_or("sampled available memory")
+    );
+    if let Some(apps) = data["apps"]["entries"].as_array() {
+        println!("Apps (TideWM caches held for it / its attached buffers / its own memory):");
+        for app in apps {
+            let name = app["app_id"].as_str().filter(|name| !name.is_empty());
+            let pid = app["pid"]
+                .as_i64()
+                .map(|pid| format!(" (pid {pid})"))
+                .unwrap_or_default();
+            let surfaces = match (app["windows"].as_u64(), app["layers"].as_u64()) {
+                (Some(0), Some(layers)) => format!("{layers} layer surfaces"),
+                (Some(windows), Some(0)) => format!("{windows} windows"),
+                (windows, layers) => format!(
+                    "{} windows, {} layer surfaces",
+                    windows.unwrap_or(0),
+                    layers.unwrap_or(0)
+                ),
+            };
+            println!(
+                "  {}{pid}: {surfaces}; holds {} in {} caches; buffers ~{}; app PSS {}",
+                name.unwrap_or("(no app id)"),
+                mib(&app["held_texture_estimate_bytes"]),
+                app["held_entries"],
+                mib(&app["client_buffer_estimate_bytes"]),
+                mib(&app["client_pss_bytes"]),
+            );
+        }
+        if let Some(omitted) = data["apps"]["omitted"].as_u64().filter(|n| *n > 0) {
+            println!("  ... and {omitted} smaller apps");
+        }
+    }
     if let Some(warnings) = data["warnings"].as_array() {
         for warning in warnings.iter().filter(|w| w["active"] == true) {
             println!(

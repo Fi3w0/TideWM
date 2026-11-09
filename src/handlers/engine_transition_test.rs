@@ -675,6 +675,70 @@ fn ebb_reports_dead_handles_but_accepts_hidden_live_windows() {
 }
 
 #[test]
+fn ebb_names_apps_and_tells_listeners_about_pressure_once_per_episode() {
+    if run_isolated(
+        "ebb_names_apps_and_tells_listeners_about_pressure_once_per_episode",
+        ROUND_TRIP_CONFIG,
+        "ebb reach-out checked",
+    ) {
+        return;
+    }
+    let mut f = two_output_fixture();
+    map(&mut f, "a");
+    map(&mut f, "a");
+    map(&mut f, "deep");
+    // Hidden windows are still the app's windows; one row per (client, app).
+    let apps = f.state.ebb_apps();
+    let entries = apps["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2, "{apps}");
+    let row = |name: &str| entries.iter().find(|e| e["app_id"] == name).unwrap();
+    assert_eq!(row("a")["windows"], 2);
+    assert_eq!(row("deep")["windows"], 1);
+    assert_eq!(row("a")["layers"], 0);
+    assert!(row("a")["pid"].as_i64().is_some_and(|pid| pid > 0));
+    // No glass, shader or depth cache exists for these plain windows.
+    assert_eq!(row("a")["held_entries"], 0);
+    assert_eq!(row("a")["held_texture_estimate_bytes"], 0);
+    assert_eq!(apps["omitted"], 0);
+    assert!(serde_json::to_vec(&apps).unwrap().len() < 64 * 1024);
+
+    // No signal, no event. One signal is one event; a repeat inside the
+    // cooldown is dropped rather than queued for later.
+    f.state.ebb_tick(false);
+    assert_eq!(f.state.ebb.watch.pressure_events, 0);
+    f.state.ebb.watch.pressure_signalled = true;
+    f.state.ebb_tick(false);
+    assert_eq!(f.state.ebb.watch.pressure_events, 1);
+    f.state.ebb.watch.pressure_signalled = true;
+    f.state.ebb_tick(false);
+    assert_eq!(f.state.ebb.watch.pressure_events, 1);
+    assert!(!f.state.ebb.watch.pressure_signalled);
+    // Telling is not trimming: the default mode queues no pass for it.
+    assert!(!f.state.ebb.trim.pressure_pending);
+    let stats = f.state.ebb.stats(&f.state.config.ebb);
+    assert_eq!(stats["phase"], 3);
+    assert_eq!(stats["pressure"]["events"], 1);
+    // The first sample closes an activity period for the watchdog.
+    assert!(stats["latest"]["activity"]["period_secs"].is_u64());
+
+    let event = crate::ipc::IpcEvent::EbbPressure {
+        source: "/proc/pressure/memory".into(),
+        system_available_bytes: Some(1024),
+        pressure_some_avg10: None,
+    };
+    let wire: serde_json::Value = serde_json::from_slice(&event.to_json_line(&f.state)).unwrap();
+    assert_eq!(wire["event"], "ebb-pressure");
+    assert_eq!(wire["data"]["source"], "/proc/pressure/memory");
+    assert_eq!(wire["data"]["system_available_bytes"], 1024);
+    assert!(wire["data"]["pressure_some_avg10"].is_null());
+    assert!(crate::ipc::event_matches(
+        &std::collections::HashSet::from([crate::ipc::EventKind::Ebb]),
+        &event
+    ));
+    println!("ebb reach-out checked");
+}
+
+#[test]
 fn ebb_trims_only_hidden_caches_and_obeys_caps_rules_off_and_budget() {
     let config=format!("{ROUND_TRIP_CONFIG}\nebb_advanced {{\n pass_budget = 10ms\n toast = false\n}}\nrule {{\n app_id = exempt\n workspace = 2\n output = A\n ebb = off\n}}\n");
     if run_isolated(
