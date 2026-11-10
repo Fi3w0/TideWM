@@ -12,6 +12,9 @@ Every TideWM release in full technical detail, newest first. For a short summary
 
 ## 0.91.31 — X11 overlay position from MapNotify, not CreateNotify
 
+Native update (2026-11-10): Fiw confirms the reported toast placement works.
+The `.32` review above adds observer regression fixes; its native retest is separate.
+
 - Real Steam toast capture (native, HDMI-A-2 at 1.25, X root 4480×1440): `CreateNotify` at (3058,685), then the client moved the OR window to (4197,1510) and only then mapped it; a post-map `ConfigureNotify` animation walked it up to (4197,1370). 0.91.30 recorded the Create rect, so the toast still opened at the centre of the Steam window.
 - The observer now calls `GetGeometry` on `MapNotify` and puts that rect in the overlay record. `CreateNotify` remains only as the provisional pre-map record. No title, app or corner check was added; this is the general "position the client chose by the time it mapped" rule.
 - Nested private KWin host: a synthetic OR window created at (300,200), moved to (1000,700) before `XMapWindow`, lands at (1000,700), proving the Map rect is used. Native real-toast confirmation after 0.91.31 install is still owed.
@@ -26,6 +29,9 @@ Every TideWM release in full technical detail, newest first. For a short summary
 - Tests: 781 (747 + 25 + 9), four gates. Unit tests cover title+class+size matching, the score floor, case-insensitive class and the per-output scale translation. Nested private KWin host, eight synthetic override-redirect X11 windows at distinct positions: all eight floating, none focused, geometry exactly the requested rects; a 1× single window screenshot shows no border/shadow/rounding. Native Steam toast verification is still owed (the observer must see a real toast); `xwayland { enabled = false }` keeps the old behavior and starts no observer.
 
 ## 0.91.29 — Scroll pointer refresh only when the position changed
+
+Native update (2026-11-10): Fiw confirmed "steam scrolls now". The Classic and
+scale-1 comparison cases listed below were not independently exercised here.
 
 - Issue #6 / satellite #538 (Steam ignores the wheel; XTest buttons and a warped pointer work). `refresh_scroll_pointer_focus` runs before every `PointerAxis` and `PointerButton` and called `refresh_pointer_focus` unconditionally, so in Scroll every wheel step was preceded by a synthetic `wl_pointer.motion` + `frame` at the unchanged position; Classic returns early and sends none. `InputState::scroll_refresh_sent` remembers the (weak surface, surface-local position) last sent by a refresh; an identical one is skipped, and any real pointer motion clears it. Ocean keeps the unconditional refresh (its client scale can change without the position changing).
 - Live X query on the reporter's session (not a fix check): X screen 4480×1440, Steam's toplevel 2387×1372 at root (1920,0) on the 1.25 output, so satellite's scale and window size agree with TideWM's 1910×1098 logical geometry.

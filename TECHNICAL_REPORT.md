@@ -156,7 +156,7 @@ For tools: each `tidectl outputs` entry has a `scroll` object (`offset`, `orient
 | Classic, Ocean and Scroll engines, live switching | Done |
 | Multi-monitor, hotplug, mixed scale, dragging tiles between monitors | Done |
 | Layer shell (bars, launchers, wallpapers, lock screens) | Done |
-| XWayland | Done, via xwayland-satellite |
+| XWayland | Via xwayland-satellite. The reported overlay placement is native-confirmed on 0.91.31; 0.91.32 observer fixes have unit and nested release evidence. Late-record association and Ocean/Scroll anchoring remain follow-ups. |
 | Screenshots, per-window capture, clipboard, session lock | Done; per-window capture canvas and rendering use the same source-output scale, preserving client subsurfaces/popups. |
 | Screen sharing (OBS, Discord) through TideWM's own portal | Done with `--features screencast` |
 | IPC and `tidectl`: windows with geometry and Scroll position, outputs, layers, an event stream for windows, workspaces, focus, monitors, modes, engine and Scroll, plus `doctor`, `report`, `perf` | Done |
