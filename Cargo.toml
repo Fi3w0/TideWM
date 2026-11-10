@@ -1,6 +1,6 @@
 [package]
 name = "tidewm"
-version = "0.91.32"
+version = "0.91.33"
 edition = "2021"
 license = "GPL-3.0-or-later"
 # Verified floor: wayland-protocols 0.32.13 requires 1.86 (1.85 fails to
@@ -27,10 +27,11 @@ serde_json = "1"
 # Read-only X11 observer for override-redirect windows. Xwayland-satellite
 # maps an unparented OR window as an ordinary xdg_toplevel and moves the X11
 # window to whatever rect the compositor chooses, so the position the client
-# asked for must be recovered from the ordered X11 event stream. This is the one X11
-# connection TideWM owns; it never manages windows. Already in the tree via
+# asked for must be recovered from X11 events and owner ConfigureWindow requests.
+# The observer uses read-only event/RECORD connections; it never manages windows.
+# Already in the tree via
 # winit-x11, declared directly instead of relying on that transitive edge.
-x11rb = "0.14"
+x11rb = { version = "0.14", features = ["record"] }
 notify = "8"
 calloop = { version = "0.14", features = ["signals"] }
 fontdue = "0.9.3"

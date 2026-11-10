@@ -6,7 +6,7 @@ The quick technical picture: what TideWM is built from, what works, what's been 
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). Underneath is a complete tiling window manager: BSP, master/stack and cascade layouts, workspaces, multi-monitor, layer shell, IPC and XWayland. On top sits the water look (ripples, waves, glass, shadows, physics), and every piece of it is a config toggle.
 
-Current version: **0.91.32**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
+Current version: **0.91.33**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
 
 ## Architecture
 
@@ -156,7 +156,7 @@ For tools: each `tidectl outputs` entry has a `scroll` object (`offset`, `orient
 | Classic, Ocean and Scroll engines, live switching | Done |
 | Multi-monitor, hotplug, mixed scale, dragging tiles between monitors | Done |
 | Layer shell (bars, launchers, wallpapers, lock screens) | Done |
-| XWayland | Via xwayland-satellite. The reported overlay placement is native-confirmed on 0.91.31; 0.91.32 observer fixes have unit and nested release evidence. Late-record association and Ocean/Scroll anchoring remain follow-ups. |
+| XWayland | Via xwayland-satellite. Native 0.91.32 retest exposed client moves after mapping; 0.91.33 follows owner moves through optional RECORD support. Native acceptance, late-record association and Ocean/Scroll anchoring remain follow-ups. |
 | Screenshots, per-window capture, clipboard, session lock | Done; per-window capture canvas and rendering use the same source-output scale, preserving client subsurfaces/popups. |
 | Screen sharing (OBS, Discord) through TideWM's own portal | Done with `--features screencast` |
 | IPC and `tidectl`: windows with geometry and Scroll position, outputs, layers, an event stream for windows, workspaces, focus, monitors, modes, engine and Scroll, plus `doctor`, `report`, `perf` | Done |

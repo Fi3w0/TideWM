@@ -2,6 +2,14 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.33 — Follow owner-authored X11 overlay positioning
+
+- Native `.32` retest failed: the recorded toast maps near its initial position, requests the edge roughly 1 ms later, then animates there over subsequent ConfigureWindow requests. The `.32` snapshot was accurate at mapping but insufficient for this real sequence. A generic client reproduces it by moving 20 ms after map: `.32` stays at (300,200) instead of (1000,650).
+- Optional X11 RECORD support observes ConfigureWindow requests only. The server's resource-ID mask and the request sender's XID base distinguish owner requests from satellite configuring a foreign window; the latter are ignored to avoid a feedback loop. No application/title/corner/output policy is added. RECORD absence preserves first-map behavior and reports the unavailable follow-up path.
+- One additional connection and reader thread run inside the existing observer child, keeping all X11 waits outside the compositor. Its two producers write complete JSON lines atomically. The `record` feature is enabled on the existing x11rb dependency; no package or dependency version changes.
+- Matched XIDs retain their Wayland association until detach/unmap. Coalesced partial X/Y updates use live output position/scale and the existing clamped floating placement path on the original output, without focusing the window. The pending position queue is capped at 64; Gone, detach and observer EOF discard obsolete work. The child filters requests to tracked OR windows.
+- Tests add owner-versus-foreign requests, swapped byte order, signed/partial coordinates, resize-only/truncated requests, pre-map delivery and bounded queue cleanup. Native `.33` acceptance remains pending. Delayed initial association, Ocean coordinates/anchoring and cross-output moves remain follow-ups.
+
 ## 0.91.32 — X11 overlay observer lifecycle and matching
 
 - Review of `bbeff64` / `2a3b05b`: the provisional CreateNotify size-only fallback could classify an ordinary same-sized X11 window as an overlay, move it and suppress focus. Create geometry now stays private to the observer until MapNotify. Known title/class conflicts reject a candidate; tied scores leave the records unconsumed. Identity matches still tolerate initial size differences: satellite initializes surfaces at the session's smallest scale before receiving their destination output enter.

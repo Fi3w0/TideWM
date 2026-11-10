@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.33 · 2026-11-10 — Follow X11 overlay moves after mapping
+
+- X11 overlays can choose their position after opening and animate toward it. TideWM now follows moves requested by the window's owning X11 client when the server supports RECORD, while ignoring satellite's placement feedback. This fixes the late-move case that 0.91.32 froze at its initial position.
+
 ## 0.91.32 · 2026-11-10 — X11 popup matching and reuse
 
 - Ordinary X11 windows no longer inherit an unmapped popup's position or lose focus just because their sizes match. Conflicting identities and ambiguous matches are left alone.

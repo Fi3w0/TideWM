@@ -16,8 +16,13 @@
 //! move any X11 window. `Smallvil` matches a record to the X11-origin Wayland
 //! toplevel by title, WM_CLASS and initial size, then treats it as an
 //! overlay: float it at the recorded position, do not focus it, and skip
-//! compositor decorations/depth. The observer runs as a separate process so
+//! compositor decorations/depth. When RECORD is available, the observer also
+//! follows ConfigureWindow requests from each window's owning X11 connection;
+//! satellite's requests are excluded to prevent placement feedback loops.
+//! The observer runs as a separate process so
 //! the compositor's event loop never blocks on an X11 round trip.
+
+mod owner_moves;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -27,6 +32,7 @@ use std::{
         unix::process::CommandExt,
     },
     process::{Child, Stdio},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -70,6 +76,8 @@ pub(crate) struct OutputInfo {
 
 #[derive(Debug, Clone)]
 pub(crate) struct OverlayPlacement {
+    id: u32,
+    raw_position: (i32, i32),
     pub output: String,
     pub position: (i32, i32),
 }
@@ -87,6 +95,25 @@ struct OverlayRecord {
     received: Instant,
 }
 
+#[derive(Clone)]
+struct OverlayBinding {
+    surface: WlSurface,
+    output: String,
+    raw_position: (i32, i32),
+}
+
+#[derive(Default, Clone, Copy)]
+struct OwnerPosition {
+    x: Option<i32>,
+    y: Option<i32>,
+}
+
+impl OwnerPosition {
+    fn apply(self, position: (i32, i32)) -> (i32, i32) {
+        (self.x.unwrap_or(position.0), self.y.unwrap_or(position.1))
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct X11OverlayState {
     records: Vec<OverlayRecord>,
@@ -96,6 +123,8 @@ pub(crate) struct X11OverlayState {
     /// a render-only map so every decoration/depth check can ask one place.
     surfaces: HashSet<WlSurface>,
     token: Option<RegistrationToken>,
+    bindings: HashMap<u32, OverlayBinding>,
+    owner_positions: HashMap<u32, OwnerPosition>,
 }
 
 impl X11OverlayState {
@@ -109,6 +138,15 @@ impl X11OverlayState {
 
     pub(crate) fn forget_surface(&mut self, surface: &WlSurface) {
         self.surfaces.remove(surface);
+        let ids: Vec<_> = self
+            .bindings
+            .iter()
+            .filter_map(|(id, binding)| (binding.surface == *surface).then_some(*id))
+            .collect();
+        for id in ids {
+            self.bindings.remove(&id);
+            self.owner_positions.remove(&id);
+        }
     }
 
     /// Matches one Wayland surface's identity/size against the observer's
@@ -172,12 +210,17 @@ impl X11OverlayState {
         }
         let (id, _) = best?;
         let index = self.records.iter().position(|record| record.id == id)?;
-        let record = self.records.remove(index);
+        let mut record = self.records.remove(index);
+        if let Some(position) = self.owner_positions.remove(&id) {
+            (record.x, record.y) = position.apply((record.x, record.y));
+        }
         let output = output_for_record(&record, outputs)?;
         let scale = output.scale.max(f64::EPSILON);
         let local_x = (f64::from(record.x) - f64::from(output.x11_position.0)) / scale;
         let local_y = (f64::from(record.y) - f64::from(output.x11_position.1)) / scale;
         Some(OverlayPlacement {
+            id,
+            raw_position: (record.x, record.y),
             output: output.name.clone(),
             position: (
                 output.position.0 + local_x.round() as i32,
@@ -258,8 +301,24 @@ impl X11OverlayState {
                         received: Instant::now(),
                     });
                 }
+                Ok(ObserverLine::Move { id, x, y }) => {
+                    if !self.owner_positions.contains_key(&id) && self.owner_positions.len() >= 64 {
+                        // Keep the observer-to-main-loop queue bounded, including
+                        // moves delivered before their first map record.
+                        continue;
+                    }
+                    let pending = self.owner_positions.entry(id).or_default();
+                    if x.is_some() {
+                        pending.x = x;
+                    }
+                    if y.is_some() {
+                        pending.y = y;
+                    }
+                }
                 Ok(ObserverLine::Gone { id }) => {
                     self.records.retain(|record| record.id != id);
+                    self.bindings.remove(&id);
+                    self.owner_positions.remove(&id);
                 }
                 Err(err) => {
                     tracing::debug!(%err, "Ignoring malformed X11 overlay record");
@@ -277,6 +336,7 @@ impl X11OverlayState {
         // An interrupted observer cannot validate pending matches anymore.
         self.records.clear();
         self.buffer.clear();
+        self.owner_positions.clear();
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -305,6 +365,11 @@ enum ObserverLine {
         res_name: String,
         #[serde(default)]
         res_class: String,
+    },
+    Move {
+        id: u32,
+        x: Option<i32>,
+        y: Option<i32>,
     },
     Gone {
         id: u32,
@@ -424,6 +489,7 @@ pub(crate) fn start(handle: &LoopHandle<'static, Smallvil>, display: &str) -> X1
                     eof_handle.remove(token);
                 }
             }
+            data.apply_x11_owner_moves();
             Ok(PostAction::Continue)
         },
     ) {
@@ -499,7 +565,81 @@ impl Smallvil {
             ?placement,
             "X11 overlay lookup"
         );
+        if let Some(placement) = &placement {
+            self.x11_overlay.bindings.insert(
+                placement.id,
+                OverlayBinding {
+                    surface: surface.clone(),
+                    output: placement.output.clone(),
+                    raw_position: placement.raw_position,
+                },
+            );
+        }
         placement
+    }
+
+    fn apply_x11_owner_moves(&mut self) {
+        let ids: Vec<_> = self
+            .x11_overlay
+            .owner_positions
+            .keys()
+            .filter(|id| self.x11_overlay.bindings.contains_key(id))
+            .copied()
+            .collect();
+        for id in ids {
+            let movement = self.x11_overlay.owner_positions.remove(&id).unwrap();
+            let binding = self.x11_overlay.bindings.get_mut(&id).unwrap();
+            binding.raw_position = movement.apply(binding.raw_position);
+            let binding = binding.clone();
+            if !self.is_x11_overlay(&binding.surface)
+                || self.fullscreen.contains_key(&binding.surface)
+                || self.maximized.contains_key(&binding.surface)
+            {
+                continue;
+            }
+            let Some(output) = self.output_by_name(&binding.output) else {
+                continue;
+            };
+            let min_x = self
+                .space
+                .outputs()
+                .map(|o| o.current_location().x)
+                .min()
+                .unwrap_or(0);
+            let min_y = self
+                .space
+                .outputs()
+                .map(|o| o.current_location().y)
+                .min()
+                .unwrap_or(0);
+            let origin = output.current_location();
+            let scale = output.current_scale().fractional_scale();
+            let position = (
+                origin.x
+                    + ((f64::from(binding.raw_position.0) - f64::from(origin.x - min_x)) / scale)
+                        .round() as i32,
+                origin.y
+                    + ((f64::from(binding.raw_position.1) - f64::from(origin.y - min_y)) / scale)
+                        .round() as i32,
+            );
+            let workspace = self
+                .spatial
+                .workspaces
+                .floating_workspace
+                .get(&binding.surface)
+                .map(|tag| tag.workspace)
+                .unwrap_or_else(|| {
+                    self.spatial
+                        .workspaces
+                        .layout
+                        .active_workspace(&binding.output)
+                });
+            let rule = crate::config::WindowRule {
+                position: Some(position),
+                ..Default::default()
+            };
+            self.place_initial_floating(&binding.surface, &output, workspace, &rule, None);
+        }
     }
 }
 
@@ -549,7 +689,11 @@ pub(crate) fn run_observer() -> io::Result<()> {
 
     let mut created: HashMap<Window, Geometry> = HashMap::new();
     let mut emitted: HashSet<Window> = HashSet::new();
-    let mut stdout = io::stdout().lock();
+    let tracked = Arc::new(Mutex::new(HashSet::new()));
+    if let Err(err) = owner_moves::start(&conn, tracked.clone()) {
+        eprintln!("X11 overlay observer: client movement observation unavailable: {err}");
+    }
+    let mut stdout = io::stdout();
 
     loop {
         let event = match conn.wait_for_event() {
@@ -562,6 +706,9 @@ pub(crate) fn run_observer() -> io::Result<()> {
                 // Wayland surface. Keep geometry private until MapNotify;
                 // clients may enable override_redirect after creation.
                 created.insert(event.window, geometry_from_create(&event));
+                if event.override_redirect {
+                    tracked.lock().unwrap().insert(event.window);
+                }
             }
             x11rb::protocol::Event::ConfigureNotify(event) if event.event == root => {
                 if let Some(geometry) = created.get_mut(&event.window) {
@@ -598,6 +745,7 @@ pub(crate) fn run_observer() -> io::Result<()> {
                     Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
                     Err(err) => return Err(err),
                 };
+                tracked.lock().unwrap().insert(event.window);
                 emitted.insert(event.window);
                 write_record(
                     &mut stdout,
@@ -625,6 +773,7 @@ pub(crate) fn run_observer() -> io::Result<()> {
                 }
             }
             x11rb::protocol::Event::DestroyNotify(event) => {
+                tracked.lock().unwrap().remove(&event.window);
                 remove_window(&event, &mut created, &mut emitted, &mut stdout)?;
             }
             _ => {}
@@ -677,7 +826,9 @@ fn remove_window(
 }
 
 fn write_record(stdout: &mut impl Write, value: &serde_json::Value) -> io::Result<()> {
-    writeln!(stdout, "{value}")?;
+    // One write_all on Stdout holds its process-wide lock for the complete
+    // JSON line, so the child RECORD reader cannot interleave its output.
+    stdout.write_all(format!("{value}\n").as_bytes())?;
     stdout.flush()
 }
 
@@ -988,5 +1139,40 @@ mod tests {
         drop(writer);
         assert!(state.read_fd(reader.as_raw_fd()));
         assert!(state.records.is_empty());
+    }
+    #[test]
+    fn owner_position_delivered_before_mapping_replaces_the_snapshot() {
+        let mut state = X11OverlayState::default();
+        state.records.push(record("popup", "review"));
+        state
+            .buffer
+            .extend_from_slice(b"{\"kind\":\"move\",\"id\":7,\"x\":4100,\"y\":null}\n");
+        state
+            .buffer
+            .extend_from_slice(b"{\"kind\":\"move\",\"id\":7,\"x\":null,\"y\":1200}\n");
+        state.consume_lines();
+        let placement = state
+            .match_for(Some("review"), Some("popup"), (182, 45), &output())
+            .unwrap();
+        assert_eq!(placement.raw_position, (4100, 1200));
+        assert_eq!(placement.position, (3664, 960));
+        assert!(state.owner_positions.is_empty());
+    }
+
+    #[test]
+    fn unmap_forgets_queued_owner_moves_and_the_queue_is_bounded() {
+        let mut state = X11OverlayState::default();
+        for id in 0..80 {
+            state.buffer.extend_from_slice(
+                format!("{{\"kind\":\"move\",\"id\":{id},\"x\":10,\"y\":20}}\n").as_bytes(),
+            );
+        }
+        state.consume_lines();
+        assert_eq!(state.owner_positions.len(), 64);
+        state
+            .buffer
+            .extend_from_slice(b"{\"kind\":\"gone\",\"id\":7}\n");
+        state.consume_lines();
+        assert!(!state.owner_positions.contains_key(&7));
     }
 }
