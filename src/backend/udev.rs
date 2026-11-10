@@ -1964,8 +1964,13 @@ fn render_surface(
     // desktop underneath. A compositor-owned default glyph is safe to draw
     // over the lock and keeps the pointer usable before the lock client sets
     // its own state.
+    // A waiting `pick-window` shows a crosshair so the next click reads as
+    // "choose", whatever cursor the client under the pointer asked for.
+    let pick_status = CursorImageStatus::Named(CursorIcon::Crosshair);
     let effective_cursor_status = if locked {
         &forced_visible_status
+    } else if state.ipc.pick.is_some() {
+        &pick_status
     } else if idle_hidden || pointer_locked {
         &hidden_status
     } else if matches!(state.input.cursor_status, CursorImageStatus::Hidden)

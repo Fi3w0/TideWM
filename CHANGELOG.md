@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.28 · 2026-11-10 — Pick a window with a click
+
+- New `tidectl pick-window [--timeout <seconds>]` (IPC `{"request":"pick-window"}`): the pointer becomes a crosshair, and your next left click prints that window, the same entry `tidectl windows` shows. Clicking empty space answers with nothing; Escape or any other mouse button cancels; it gives up after 30 seconds by default. The click is not passed to the app. Useful for scripts and shells that need you to choose a window.
+
 ## 0.91.27 · 2026-11-10 — `tidectl perf` says why a fullscreen app is not scanned out
 
 - `tidectl perf --json` now counts, per monitor, the frames that had a fullscreen window and what kept that window from being handed straight to the display: something drawn above it, a buffer that is not opaque, a surface that does not cover the monitor, or the graphics driver refusing it. Report only; nothing about rendering changes.

@@ -2,6 +2,13 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.28 — `pick-window`
+
+- TODO "Picking": `Request::PickWindow { timeout_ms }` is converted like `subscribe` before the one-line reply path: the connection's lease and a cloned stream move into `IpcState::pick` (`WindowPick`), and the reply is written when the pick ends. One pick at a time; a newer request replaces the waiting one, which gets an error. Timeout 30 s by default, clamped to 1–120 s, on a calloop timer. Refused while the session is locked; not allowed inside a batch.
+- Input: a pressed button while a pick waits is consumed in the `PointerButton` arm before any focus, raise or grab code (its release is suppressed through `suppressed_pointer_buttons`). `answer_window_pick`: left answers with `window_under` at the pointer as the usual `windows` entry, or `null`; any other button cancels. Escape cancels in the key filter, after the session-lock gate and the rescue chord. `window_pick_waiting` polls the socket for `POLLHUP/ERR` first, so a client that died never swallows a click or an Escape (tidectl half-closes its write side, so EOF alone is not a sign of death).
+- udev draws a crosshair while a pick waits (`effective_cursor_status`); nested sessions keep the host cursor. `tidectl` waits the request's timeout plus its normal I/O timeout.
+- Tests: 776 (742 + 25 + 9): protocol test (window, empty space, other button, replacement, vanished client) and CLI argument test. Nested over the real socket: timeout after 2.0 s, replacement error, session alive. Not run: a real click, Escape and the crosshair (no pointer or key injection in the nested rig) — native owed.
+
 ## 0.91.27 — Fullscreen scanout diagnostic in the native render stats
 
 - Native finding (Fiw's session, RTX 3060, two outputs, a fullscreen game for hours): `native_render.primary_scanout` is 0 of 2.3 M and 3.2 M frames. TideWM passes `ALLOW_PRIMARY_PLANE_SCANOUT_ANY`, so the frame is being rejected before or at the plane test, and every game frame is composited. KWin (read at v6.5.0, `WorkspaceScene::scanoutCandidates`) scans a fullscreen opaque window out and, like TideWM, neither throttles nor stops what is below it.

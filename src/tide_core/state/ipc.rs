@@ -22,6 +22,8 @@ pub(crate) struct IpcState {
     /// kernel socket buffer. `None` during the normal fully-drained state, so
     /// IPC adds no periodic wakeup to an idle compositor.
     pub(crate) flush_token: Option<RegistrationToken>,
+    /// A `pick-window` request waiting for the next click.
+    pub(crate) pick: Option<crate::ipc::WindowPick>,
     /// Next subscriber id. Monotonic across the process lifetime rather
     /// than recycled, so a stale reference inside an in-flight calloop
     /// callback can't accidentally target a fresh subscriber that reused
@@ -285,6 +287,108 @@ impl Smallvil {
             Ok(token) => self.ipc.flush_token = Some(token),
             Err(err) => tracing::warn!(%err, "Failed to arm IPC subscriber flush timer"),
         }
+    }
+
+    /// Starts waiting for the click that answers a `pick-window` request.
+    pub(crate) fn begin_window_pick(
+        &mut self,
+        stream: std::os::unix::net::UnixStream,
+        lease: crate::ipc::ConnectionLease,
+        timeout: Option<std::time::Duration>,
+    ) {
+        // A newer request wins; the older one is told why.
+        self.finish_window_pick(Err("replaced by a newer pick-window request"));
+        self.ipc.pick = Some(crate::ipc::WindowPick {
+            stream,
+            _connection_lease: lease,
+            timer: None,
+        });
+        if !matches!(self.session_lock, super::SessionLock::Unlocked) {
+            self.finish_window_pick(Err("the session is locked"));
+            return;
+        }
+        let timeout = timeout.unwrap_or(crate::ipc::PICK_DEFAULT_TIMEOUT).clamp(
+            std::time::Duration::from_secs(1),
+            crate::ipc::PICK_MAX_TIMEOUT,
+        );
+        let timer = self.loop_handle.insert_source(
+            Timer::from_duration(timeout),
+            |_, _, state: &mut Smallvil| {
+                if let Some(pick) = state.ipc.pick.as_mut() {
+                    pick.timer = None;
+                }
+                state.finish_window_pick(Err("timed out waiting for a click"));
+                TimeoutAction::Drop
+            },
+        );
+        match (timer, self.ipc.pick.as_mut()) {
+            (Ok(token), Some(pick)) => pick.timer = Some(token),
+            _ => self.finish_window_pick(Err("could not start the pick timer")),
+        }
+        self.request_redraw();
+    }
+
+    /// Whether a pick is waiting and its client is still connected. A client
+    /// that went away must not swallow the user's next click.
+    pub(crate) fn window_pick_waiting(&mut self) -> bool {
+        use std::os::fd::AsRawFd;
+        let Some(pick) = self.ipc.pick.as_ref() else {
+            return false;
+        };
+        let mut poll = libc::pollfd {
+            fd: pick.stream.as_raw_fd(),
+            events: 0,
+            revents: 0,
+        };
+        // Safety: one valid pollfd for an owned live fd, nonblocking timeout.
+        let gone = unsafe { libc::poll(&mut poll, 1, 0) } < 0
+            || poll.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0;
+        if gone {
+            self.finish_window_pick(Err("client disconnected"));
+        }
+        !gone
+    }
+
+    /// The press that ends a pick: the left button answers with the window
+    /// at `position` (null over empty space), any other button cancels.
+    pub(crate) fn answer_window_pick(
+        &mut self,
+        button: u32,
+        position: smithay::utils::Point<f64, smithay::utils::Logical>,
+    ) {
+        const BTN_LEFT: u32 = 0x110;
+        if button != BTN_LEFT {
+            self.finish_window_pick(Err("cancelled"));
+            return;
+        }
+        let picked = self
+            .window_under(position)
+            .and_then(|(window, _)| crate::ipc::window_entry(self, &window));
+        self.finish_window_pick(Ok(picked.unwrap_or(serde_json::Value::Null)));
+    }
+
+    /// Answers the waiting pick, if any, and ends it.
+    pub(crate) fn finish_window_pick(&mut self, result: Result<serde_json::Value, &str>) {
+        use std::io::Write;
+        let Some(mut pick) = self.ipc.pick.take() else {
+            return;
+        };
+        if let Some(token) = pick.timer.take() {
+            self.loop_handle.remove(token);
+        }
+        let reply = match result {
+            Ok(data) => serde_json::json!({ "ok": true, "data": data }),
+            Err(error) => serde_json::json!({ "ok": false, "error": error }),
+        };
+        let mut line = serde_json::to_vec(&reply).unwrap_or_default();
+        line.push(b'\n');
+        // One short line into an empty socket buffer; a client that cannot
+        // take it has gone, and there is nobody to retry for.
+        let _ = pick.stream.set_nonblocking(true);
+        if let Err(error) = pick.stream.write_all(&line) {
+            tracing::debug!(%error, "pick-window reply not delivered");
+        }
+        self.request_redraw();
     }
 
     /// Tears down a subscriber: removes its entry from `ipc.subscribers`

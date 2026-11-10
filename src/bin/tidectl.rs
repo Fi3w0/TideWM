@@ -836,6 +836,16 @@ fn build_request(args: &[String]) -> Result<Value, String> {
         "workspaces" => Ok(json!({ "request": "workspaces" })),
         "windows" => Ok(json!({ "request": "windows" })),
         "focused-window" | "focused" => Ok(json!({ "request": "focused-window" })),
+        "pick-window" => match rest {
+            [] => Ok(json!({ "request": "pick-window" })),
+            [flag, seconds] if flag == "--timeout" => seconds
+                .parse::<u64>()
+                .ok()
+                .filter(|seconds| (1..=120).contains(seconds))
+                .map(|seconds| json!({ "request": "pick-window", "timeout_ms": seconds * 1000 }))
+                .ok_or_else(|| "pick-window --timeout takes 1 to 120 seconds".to_string()),
+            _ => Err("usage: tidectl pick-window [--timeout <seconds>]".into()),
+        },
         "active-mode" => Ok(json!({ "request": "active-mode" })),
         "focused-output" => Ok(json!({ "request": "focused-output" })),
         "pointer-output" => Ok(json!({ "request": "pointer-output" })),
@@ -964,7 +974,14 @@ fn connect_with_timeout(socket_path: &Path) -> std::io::Result<UnixStream> {
 
 fn send_request(socket_path: &Path, request: &Value) -> std::io::Result<Value> {
     let mut stream = connect_with_timeout(socket_path)?;
-    stream.set_read_timeout(Some(IPC_IO_TIMEOUT))?;
+    // `pick-window` answers when the user clicks, so wait as long as the
+    // compositor will (its default is 30 s) plus a margin.
+    let read_timeout = if request["request"] == "pick-window" {
+        Duration::from_millis(request["timeout_ms"].as_u64().unwrap_or(30_000)) + IPC_IO_TIMEOUT
+    } else {
+        IPC_IO_TIMEOUT
+    };
+    stream.set_read_timeout(Some(read_timeout))?;
     stream.set_write_timeout(Some(IPC_IO_TIMEOUT))?;
 
     let mut payload = serde_json::to_vec(request).map_err(std::io::Error::other)?;
@@ -1092,6 +1109,8 @@ fn print_response(command: &str, data: &Value) {
         "workspaces" => print_workspaces(data),
         "windows" => print_windows(data),
         "focused-window" | "focused" => print_window(data),
+        "pick-window" if data.is_null() => println!("(no window there)"),
+        "pick-window" => print_window(data),
         "active-mode" => match data.as_str() {
             Some(name) => println!("{name}"),
             None => println!("(none, base keybinds active)"),
@@ -1299,6 +1318,7 @@ STREAMING:
 DIAGNOSTICS:
     doctor              run quick health checks (PASS/WARN/FAIL/SKIP)
     doctor --json       same checks as machine-readable JSON
+    pick-window [--timeout <s>]  click a window to print it; Escape cancels
     ebb stats [--json]     show Ebb resource history and warnings
     ebb run [--deep]       queue a safe cache pass
     ebb init [--config <path>] create ebb.wave and add its include
@@ -1355,6 +1375,22 @@ tidewm-*.sock under $XDG_RUNTIME_DIR."#
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pick_window_takes_an_optional_bounded_timeout() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            build_request(&args(&["pick-window"])).unwrap(),
+            json!({"request":"pick-window"})
+        );
+        assert_eq!(
+            build_request(&args(&["pick-window", "--timeout", "5"])).unwrap(),
+            json!({"request":"pick-window","timeout_ms":5000})
+        );
+        assert!(build_request(&args(&["pick-window", "--timeout", "0"])).is_err());
+        assert!(build_request(&args(&["pick-window", "--timeout", "999"])).is_err());
+        assert!(build_request(&args(&["pick-window", "now"])).is_err());
+    }
 
     #[test]
     fn ebb_stats_uses_a_query_and_rejects_unknown_commands() {

@@ -42,7 +42,32 @@ pub(crate) const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_CONNECTIONS: usize = 64;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-struct ConnectionLease(Arc<AtomicUsize>);
+pub(crate) struct ConnectionLease(Arc<AtomicUsize>);
+
+#[cfg(test)]
+impl ConnectionLease {
+    pub(crate) fn for_test() -> Self {
+        Self(Arc::new(AtomicUsize::new(1)))
+    }
+}
+
+/// A `pick-window` request waiting for its click. One at a time.
+pub(crate) struct WindowPick {
+    pub(crate) stream: UnixStream,
+    pub(crate) _connection_lease: ConnectionLease,
+    pub(crate) timer: Option<RegistrationToken>,
+}
+
+pub(crate) const PICK_DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const PICK_MAX_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The `windows` entry for one surface, for replies built outside this file.
+pub(crate) fn window_entry(
+    state: &Smallvil,
+    window: &smithay::desktop::Window,
+) -> Option<serde_json::Value> {
+    window_json(state, window, state.focused_window_surface().as_ref())
+}
 
 impl Drop for ConnectionLease {
     fn drop(&mut self) {
@@ -103,6 +128,11 @@ enum Request {
     /// two snapshots across a window and derives CPU% from the delta.
     Perf,
     EbbStats,
+    /// Answers with the window under the next left click. The reply waits
+    /// for that click, Escape, another button or the timeout.
+    PickWindow {
+        timeout_ms: Option<u64>,
+    },
     EbbRun {
         #[serde(default)]
         deep: bool,
@@ -724,6 +754,22 @@ fn register_connection(
                             );
                             finish!();
                         }
+                        Ok(Request::PickWindow { timeout_ms }) => {
+                            let pick_lease = lease
+                                .take()
+                                .expect("IPC request lease must exist until conversion");
+                            match stream.try_clone() {
+                                Ok(stream) => state.begin_window_pick(
+                                    stream,
+                                    pick_lease,
+                                    timeout_ms.map(Duration::from_millis),
+                                ),
+                                Err(err) => {
+                                    tracing::warn!(%err, "Failed to clone IPC pick stream")
+                                }
+                            }
+                            finish!();
+                        }
                         _ => {
                             let payload = response_payload(&line, state);
                             match stream.try_clone() {
@@ -1056,6 +1102,11 @@ fn handle_request(state: &mut Smallvil, request: Request) -> serde_json::Value {
         // connection's stream (not available here). Reaching this arm means
         // Subscribe was sent after another request on the same connection --
         // not a valid sequence on this one-shot protocol.
+        // Converted before reaching here; a batch cannot wait for a click.
+        Request::PickWindow { .. } => json!({
+            "ok": false,
+            "error": "pick-window must be its own request",
+        }),
         Request::Subscribe { .. } => json!({
             "ok": false,
             "error": "subscribe must be the first and only request on a fresh connection"

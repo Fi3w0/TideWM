@@ -334,6 +334,7 @@ impl Smallvil {
             config_reload_timer_armed: false,
 
             ipc: IpcState {
+                pick: None,
                 subscribers: HashMap::new(),
                 seen: None,
                 flush_token: None,

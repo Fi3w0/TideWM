@@ -674,6 +674,80 @@ fn ebb_reports_dead_handles_but_accepts_hidden_live_windows() {
     println!("ebb ownership audit checked");
 }
 
+#[test]
+fn pick_window_answers_the_next_click_and_never_outlives_its_client() {
+    if run_isolated(
+        "pick_window_answers_the_next_click_and_never_outlives_its_client",
+        ROUND_TRIP_CONFIG,
+        "pick-window checked",
+    ) {
+        return;
+    }
+    use std::io::Read;
+    use std::os::unix::net::UnixStream as Socket;
+    let mut f = two_output_fixture();
+    let window = map(&mut f, "a");
+    f.dispatch();
+    let reply = |mut client: Socket| -> serde_json::Value {
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let mut text = String::new();
+        client.read_to_string(&mut text).unwrap();
+        serde_json::from_str(text.lines().next().unwrap()).unwrap()
+    };
+    let begin = |f: &mut Fixture| -> Socket {
+        let (server, client) = Socket::pair().unwrap();
+        f.state
+            .begin_window_pick(server, crate::ipc::ConnectionLease::for_test(), None);
+        client
+    };
+    let inside = {
+        let element = f
+            .state
+            .space
+            .elements()
+            .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == &window))
+            .unwrap()
+            .clone();
+        let geometry = f.state.space.element_geometry(&element).unwrap();
+        (geometry.loc + smithay::utils::Point::from((geometry.size.w / 2, geometry.size.h / 2)))
+            .to_f64()
+    };
+
+    // Left click on a window: its `windows` entry.
+    let client = begin(&mut f);
+    assert!(f.state.window_pick_waiting());
+    f.state.answer_window_pick(0x110, inside);
+    assert!(f.state.ipc.pick.is_none());
+    let picked = reply(client);
+    assert_eq!(picked["ok"], true);
+    assert_eq!(picked["data"]["app_id"], "a");
+
+    // Empty space answers null; another button cancels.
+    let client = begin(&mut f);
+    f.state
+        .answer_window_pick(0x110, smithay::utils::Point::from((-5000.0, -5000.0)));
+    let empty = reply(client);
+    assert_eq!(empty["ok"], true);
+    assert!(empty["data"].is_null());
+    let client = begin(&mut f);
+    f.state.answer_window_pick(0x111, inside);
+    assert_eq!(reply(client)["error"], "cancelled");
+
+    // A newer request replaces the waiting one, which is told so.
+    let first = begin(&mut f);
+    let second = begin(&mut f);
+    assert_eq!(reply(first)["ok"], false);
+    assert!(f.state.window_pick_waiting());
+
+    // A client that went away must not keep the next click.
+    drop(second);
+    assert!(!f.state.window_pick_waiting());
+    assert!(f.state.ipc.pick.is_none());
+    println!("pick-window checked");
+}
+
 const SCROLL_OPEN_CONFIG: &str = r#"engine = scroll
 welcome_hint = false
 water_effects = false
