@@ -2,6 +2,11 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.26 — `window-changed` for client-requested fullscreen and maximize
+
+- Found while diagnosing a full-VRAM gaming session (two paused video wallpapers kept ~1 GB while a fullscreen game filled the card): a shell cannot stop its wallpaper under a fullscreen game because TideWM never told it. `IpcEvent::WindowChanged` was emitted by the `toggle-fullscreen`/`toggle-maximize` actions only. The four `XdgShellHandler` request methods (`fullscreen_request`, `unfullscreen_request`, `maximize_request`, `unmaximize_request`, also the route `wlr-foreign-toplevel-management` takes) now compare `(fullscreen, maximized)` before and after and emit once when it changed (`sizing_state`/`emit_sizing_change`). Denied or duplicate requests emit nothing; the action path is unchanged, so no double events.
+- Nested (private KWin host, `queue-2026-11-09/fs_event.py`): a GTK client that fullscreens, unfullscreens and maximizes itself produces `window-changed` with `fullscreen: true`, `false`, then `maximized: true`; 0.91.25 produced none of the three. 773 tests, four gates. Native not run.
+
 ## 0.91.25 — Scroll restores the view a new window replaced
 
 - Last open half of "Scroll camera forgets the last window" (Fiw, 2026-10-27; niri's `activate_prev_column_on_removal`). `focus_window_on_map` marks the window with `ScrollState::expect_open`; its first `scroll_reveal_with` records the strip key and the view before and after (`OpenedColumn`). `ScrollState::forget` (every removal from the tree: close, move to another workspace or monitor, float) puts the earlier view back when the strip's offset still equals the recorded one. Any pan, resize, centering or other reveal changes the offset or clears the record, so a view the user moved is never overridden; revealing a different window ends the episode. `forget_strip`/`move_strip` drop a record for a strip that goes away. One record at most, no per-frame work, no retained handle past the window's removal.

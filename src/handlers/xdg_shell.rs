@@ -245,24 +245,33 @@ impl XdgShellHandler for Smallvil {
         wl_output: Option<wl_output::WlOutput>,
     ) {
         let wl_surface = surface.wl_surface().clone();
+        let before = self.sizing_state(&wl_surface);
         self.do_fullscreen_request(surface, wl_output);
         self.refresh_wlr_toplevel_state(&wl_surface);
+        self.emit_sizing_change(&wl_surface, before);
     }
 
     fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        let wl_surface = surface.wl_surface().clone();
+        let before = self.sizing_state(&wl_surface);
         self.do_unfullscreen(&surface);
+        self.emit_sizing_change(&wl_surface, before);
     }
 
     fn maximize_request(&mut self, surface: ToplevelSurface) {
         let wl_surface = surface.wl_surface().clone();
+        let before = self.sizing_state(&wl_surface);
         self.do_maximize_request(surface);
         self.refresh_wlr_toplevel_state(&wl_surface);
+        self.emit_sizing_change(&wl_surface, before);
     }
 
     fn unmaximize_request(&mut self, surface: ToplevelSurface) {
         let wl_surface = surface.wl_surface().clone();
+        let before = self.sizing_state(&wl_surface);
         self.do_unmaximize_request(surface);
         self.refresh_wlr_toplevel_state(&wl_surface);
+        self.emit_sizing_change(&wl_surface, before);
     }
 
     fn grab(&mut self, surface: PopupSurface, _seat: wl_seat::WlSeat, serial: Serial) {
@@ -1849,6 +1858,24 @@ impl Smallvil {
                     .swallow
                     .then_some(surface)
             })
+    }
+
+    /// (fullscreen, maximized) as IPC reports them.
+    fn sizing_state(&self, surface: &WlSurface) -> (bool, bool) {
+        (
+            self.fullscreen.contains_key(surface),
+            self.maximized.contains_key(surface),
+        )
+    }
+
+    /// A client asking for fullscreen or maximize itself (every game does)
+    /// is a window change shells must hear about, exactly like the keybind.
+    fn emit_sizing_change(&mut self, surface: &WlSurface, before: (bool, bool)) {
+        if surface.is_alive() && self.sizing_state(surface) != before {
+            self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
+                surface: surface.clone(),
+            });
+        }
     }
 
     /// The process ID on the other end of `surface`'s client socket
