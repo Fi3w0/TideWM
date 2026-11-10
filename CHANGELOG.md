@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.31 · 2026-11-10 — X11 overlays use their position at map time
+
+- X11 override-redirect windows can move between being created and being mapped; Steam's friend-playing toast is created centered on its main window and only moves to the bottom-right just before it maps. TideWM now reads the X11 rect at `MapNotify`, not `CreateNotify`, so the toast lands at the side like other desktops instead of staying in the middle. No app-specific rule; any OR window that sets its position before mapping gets the same treatment.
+
 ## 0.91.30 · 2026-11-10 — X11 overlays keep their position
 
 - X11 override-redirect windows that arrive without an X11 parent (Steam's friend-playing toasts, screen-recorder overlays) now open where the X11 app asked for them, floating and without taking focus or getting TideWM borders, shadows, rounding, glass or depth. Before, xwayland-satellite mapped them as ordinary toplevels and TideWM centered them. No config rule is needed.

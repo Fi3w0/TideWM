@@ -2,6 +2,13 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.31 — X11 overlay position from MapNotify, not CreateNotify
+
+- Real Steam toast capture (native, HDMI-A-2 at 1.25, X root 4480×1440): `CreateNotify` at (3058,685), then the client moved the OR window to (4197,1510) and only then mapped it; a post-map `ConfigureNotify` animation walked it up to (4197,1370). 0.91.30 recorded the Create rect, so the toast still opened at the centre of the Steam window.
+- The observer now calls `GetGeometry` on `MapNotify` and puts that rect in the overlay record. `CreateNotify` remains only as the provisional pre-map record. No title, app or corner check was added; this is the general "position the client chose by the time it mapped" rule.
+- Nested private KWin host: a synthetic OR window created at (300,200), moved to (1000,700) before `XMapWindow`, lands at (1000,700), proving the Map rect is used. Native real-toast confirmation after 0.91.31 install is still owed.
+- 781 tests, four gates.
+
 ## 0.91.30 — Native placement for X11 override-redirect overlays
 
 - Root cause (satellite #206/#411/#429): an X11 `override_redirect` window with no `WM_TRANSIENT_FOR` is mapped by xwayland-satellite as an ordinary `xdg_toplevel`. XDG toplevels cannot carry a position, and satellite's own `set_window_dims` then moves the X11 window to whatever rect TideWM chooses, so by map time the rect the client asked for is gone. Steam's `notificationtoasts_N_desktop` windows are this shape; TideWM centered them because that is the floating default.

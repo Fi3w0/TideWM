@@ -7,15 +7,17 @@
 //! gone. Steam's friend-playing toasts are exactly this shape
 //! (`notificationtoasts_N_desktop`), which is why they used to land centered.
 //!
-//! The only place the requested rect survives is the X server's
-//! `CreateNotify` event. A small observer child selects
-//! `SubstructureNotify` on the root window and records override-redirect
-//! windows there; this is read-only and does not manage or move any X11
-//! window. `Smallvil` matches a record to the X11-origin Wayland toplevel by
-//! title, WM_CLASS and initial size, then treats it as an overlay: float it
-//! at the recorded position, do not focus it, and skip compositor
-//! decorations/depth. The observer runs as a separate process so the
-//! compositor's event loop never blocks on an X11 round trip.
+//! The requested rect is read when the X11 window maps, not when it is
+//! created: clients may move an override-redirect window between those two
+//! events (Steam's notification toast starts centred on its main window and
+//! moves to the corner just before mapping). A small observer child selects
+//! `SubstructureNotify` on the root window and records that rect plus the
+//! window's title and `WM_CLASS`; this is read-only and does not manage or
+//! move any X11 window. `Smallvil` matches a record to the X11-origin Wayland
+//! toplevel by title, WM_CLASS and initial size, then treats it as an
+//! overlay: float it at the recorded position, do not focus it, and skip
+//! compositor decorations/depth. The observer runs as a separate process so
+//! the compositor's event loop never blocks on an X11 round trip.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -630,7 +632,25 @@ pub(crate) fn run_observer() -> io::Result<()> {
                 }
             }
             x11rb::protocol::Event::MapNotify(event) => {
-                let Some(geometry) = created.get(&event.window).copied() else {
+                // Use the geometry at map time, not CreateNotify's: clients
+                // may move an override-redirect window between creating and
+                // mapping it (Steam's notification toast does exactly this,
+                // moving from the centre of its main window to the corner
+                // before it maps). CreateNotify remains the provisional
+                // record for the pre-map race; this replaces it with the
+                // position actually requested at map.
+                let geometry = conn
+                    .get_geometry(event.window)
+                    .ok()
+                    .and_then(|cookie| cookie.reply().ok())
+                    .map(|reply| Geometry {
+                        x: i32::from(reply.x),
+                        y: i32::from(reply.y),
+                        width: reply.width,
+                        height: reply.height,
+                    })
+                    .or_else(|| created.get(&event.window).copied());
+                let Some(geometry) = geometry else {
                     continue;
                 };
                 if !is_override_redirect(&conn, event.window)? {
@@ -859,7 +879,7 @@ mod tests {
                 Some("steam"),
                 Some("notificationtoasts_3_desktop"),
                 (182, 45),
-                &output()
+                &output(),
             )
             .is_none());
     }
@@ -884,7 +904,7 @@ mod tests {
                 Some("steam"),
                 Some("notificationtoasts_3_desktop"),
                 (182, 45),
-                &output()
+                &output(),
             )
             .is_none());
     }

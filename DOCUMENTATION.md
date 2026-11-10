@@ -1510,7 +1510,7 @@ input {
 | `enabled` | bool | `true` | Whether `xwayland-satellite` is spawned at startup. Takes effect on next launch — not hot-reloaded. |
 | `path` | string | `xwayland-satellite` | Path to the `xwayland-satellite` binary. |
 
-X11 override-redirect windows with no X11 parent (Steam's friend-playing toasts, recorder overlays) are placed natively at the position the X11 client asked for: floating, without keyboard focus and without compositor borders, shadows, rounding, glass or depth. This needs no `rule { }`; satellite has no overlay role for them, so TideWM reads the position from the X server through an internal read-only observer child. `xwayland { enabled = false }` disables it along with satellite.
+X11 override-redirect windows with no X11 parent (Steam's friend-playing toasts, recorder overlays) are placed natively at the position the X11 client chose by the time it mapped: floating, without keyboard focus and without compositor borders, shadows, rounding, glass or depth. The rect is read at X11 map time, not creation time, so clients that move their overlay just before mapping land correctly. This needs no `rule { }`; satellite has no overlay role for them, so TideWM reads the position from the X server through an internal read-only observer child. `xwayland { enabled = false }` disables it along with satellite.
 
 ### `output <name> { }`
 
