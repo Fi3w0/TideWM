@@ -85,23 +85,16 @@ struct OverlayRecord {
     res_name: String,
     res_class: String,
     received: Instant,
-    /// A CreateNotify record has geometry but no title/class yet. It can
-    /// still win by size + recency, which is what lets an OR window that
-    /// maps before the observer's MapNotify round trip keep its position.
-    provisional: bool,
 }
 
 #[derive(Default)]
 pub(crate) struct X11OverlayState {
     records: Vec<OverlayRecord>,
-    buffer: String,
+    buffer: Vec<u8>,
     child: Option<Child>,
     /// Surfaces already classified as X11 overlays. Kept here rather than in
     /// a render-only map so every decoration/depth check can ask one place.
     surfaces: HashSet<WlSurface>,
-    /// Record ids already consumed by a map. A late MapNotify record for the
-    /// same X11 window must not be matched to a different Wayland surface.
-    consumed: HashSet<u32>,
     token: Option<RegistrationToken>,
 }
 
@@ -122,6 +115,9 @@ impl X11OverlayState {
     /// pending override-redirect records and consumes the winner. The score
     /// floor keeps a size-only coincidence from claiming an ordinary X11
     /// window; a record needs at least a title match or a class+size match.
+    /// Conflicting identities and equally ranked candidates are refused.
+    /// Size alone is never identity: satellite may start a new surface at
+    /// the session's smallest scale before receiving its destination enter.
     pub(crate) fn match_for(
         &mut self,
         app_id: Option<&str>,
@@ -134,11 +130,21 @@ impl X11OverlayState {
         let app_id = app_id.unwrap_or_default();
         let title = title.unwrap_or_default();
         let mut best: Option<(u32, u32)> = None;
+        let mut ambiguous = false;
 
-        for record in self.records.iter().filter(|record| !record.provisional) {
+        for record in &self.records {
             let Some(output) = output_for_record(record, outputs) else {
                 continue;
             };
+            // Known identity fields must agree, even if another field and
+            // the size happen to match a different window of the same app.
+            if (!record.name.is_empty() && !title.is_empty() && record.name != title)
+                || (!app_id.is_empty()
+                    && (!record.res_name.is_empty() || !record.res_class.is_empty())
+                    && !class_matches(record, app_id))
+            {
+                continue;
+            }
             let mut score = 0;
             if !record.name.is_empty() && record.name == title {
                 score += SCORE_NAME;
@@ -154,39 +160,19 @@ impl X11OverlayState {
             }
             if score >= SCORE_NAME && best.is_none_or(|(_, best_score)| score > best_score) {
                 best = Some((record.id, score));
+                ambiguous = false;
+            } else if score >= SCORE_NAME && best.is_some_and(|(_, best_score)| score == best_score)
+            {
+                ambiguous = true;
             }
         }
 
-        // Fall back to a CreateNotify-only record when the observer has not
-        // yet delivered MapNotify's title/class. Size is the only signal
-        // available, so require a recent record; an OR window and a normal
-        // X11 window mapping at the same size within the same instant would
-        // be ambiguous, but the provisional record is only emitted for
-        // override-redirect windows.
-        if best.is_none() {
-            for record in self.records.iter().filter(|record| record.provisional) {
-                let Some(output) = output_for_record(record, outputs) else {
-                    continue;
-                };
-                if !size_matches(record, size, output.scale)
-                    || record.received.elapsed() >= RECENT_FOR_MATCHING
-                {
-                    continue;
-                }
-                let score = SCORE_NAME + SCORE_RECENT;
-                if best.is_none_or(|(_, best_score)| score > best_score) {
-                    best = Some((record.id, score));
-                }
-            }
+        if ambiguous {
+            return None;
         }
-
         let (id, _) = best?;
         let index = self.records.iter().position(|record| record.id == id)?;
         let record = self.records.remove(index);
-        self.consumed.insert(id);
-        if self.consumed.len() > 256 {
-            self.consumed.clear();
-        }
         let output = output_for_record(&record, outputs)?;
         let scale = output.scale.max(f64::EPSILON);
         let local_x = (f64::from(record.x) - f64::from(output.x11_position.0)) / scale;
@@ -209,8 +195,7 @@ impl X11OverlayState {
         // The buffer is stack-owned and its length is passed exactly.
         let read = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
         if read > 0 {
-            self.buffer
-                .push_str(&String::from_utf8_lossy(&chunk[..read as usize]));
+            self.buffer.extend_from_slice(&chunk[..read as usize]);
             self.consume_lines();
             false
         } else if read == 0 {
@@ -229,45 +214,13 @@ impl X11OverlayState {
     }
 
     fn consume_lines(&mut self) {
-        while let Some(newline) = self.buffer.find('\n') {
-            let line = self.buffer[..newline].trim().to_string();
+        while let Some(newline) = self.buffer.iter().position(|byte| *byte == b'\n') {
+            let line = self.buffer[..newline].to_vec();
             self.buffer.drain(..=newline);
             if line.is_empty() {
                 continue;
             }
-            match serde_json::from_str::<ObserverLine>(&line) {
-                Ok(ObserverLine::Create {
-                    id,
-                    x,
-                    y,
-                    width,
-                    height,
-                }) => {
-                    tracing::debug!(
-                        id,
-                        x,
-                        y,
-                        width,
-                        height,
-                        "X11 overlay provisional record received"
-                    );
-                    self.records.retain(|record| record.id != id);
-                    if self.records.len() >= 64 {
-                        self.records.remove(0);
-                    }
-                    self.records.push(OverlayRecord {
-                        id,
-                        x,
-                        y,
-                        width,
-                        height,
-                        name: String::new(),
-                        res_name: String::new(),
-                        res_class: String::new(),
-                        received: Instant::now(),
-                        provisional: true,
-                    });
-                }
+            match serde_json::from_slice::<ObserverLine>(&line) {
                 Ok(ObserverLine::Overlay {
                     id,
                     x,
@@ -289,10 +242,6 @@ impl X11OverlayState {
                         res_class,
                         "X11 overlay record received"
                     );
-                    if self.consumed.contains(&id) {
-                        tracing::debug!(id, "Ignoring a late X11 overlay record already used");
-                        continue;
-                    }
                     self.records.retain(|record| record.id != id);
                     if self.records.len() >= 64 {
                         self.records.remove(0);
@@ -307,15 +256,13 @@ impl X11OverlayState {
                         res_name,
                         res_class,
                         received: Instant::now(),
-                        provisional: false,
                     });
                 }
                 Ok(ObserverLine::Gone { id }) => {
                     self.records.retain(|record| record.id != id);
-                    self.consumed.remove(&id);
                 }
                 Err(err) => {
-                    tracing::debug!(%err, line, "Ignoring malformed X11 overlay record");
+                    tracing::debug!(%err, "Ignoring malformed X11 overlay record");
                 }
             }
         }
@@ -327,6 +274,9 @@ impl X11OverlayState {
     }
 
     fn stop_child(&mut self) {
+        // An interrupted observer cannot validate pending matches anymore.
+        self.records.clear();
+        self.buffer.clear();
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -343,13 +293,6 @@ impl Drop for X11OverlayState {
 #[derive(serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ObserverLine {
-    Create {
-        id: u32,
-        x: i32,
-        y: i32,
-        width: u16,
-        height: u16,
-    },
     Overlay {
         id: u32,
         x: i32,
@@ -596,8 +539,8 @@ pub(crate) fn run_observer() -> io::Result<()> {
     // Xwayland resets its root during startup, which clears any
     // SubstructureNotify selection made before the server settles. Select
     // immediately (so an early OR window is still seen when no reset
-    // happens), then again after the reset window; this child runs before
-    // the compositor loop, so the delay costs nothing on its thread.
+    // happens), then again after the reset window. Only this observer child
+    // waits; the compositor loop continues dispatching independently.
     let _ = select_root(&conn, root);
     std::thread::sleep(Duration::from_millis(500));
     let atoms = Atoms::intern(&conn)?;
@@ -615,52 +558,47 @@ pub(crate) fn run_observer() -> io::Result<()> {
         };
         match event {
             x11rb::protocol::Event::CreateNotify(event) if event.parent == root => {
-                let geometry = geometry_from_create(&event);
-                created.insert(event.window, geometry);
-                if event.override_redirect {
-                    write_record(
-                        &mut stdout,
-                        &serde_json::json!({
-                            "kind": "create",
-                            "id": event.window,
-                            "x": geometry.x,
-                            "y": geometry.y,
-                            "width": geometry.width,
-                            "height": geometry.height,
-                        }),
-                    )?;
+                // Create is not proof of mapping, nor does size identify a
+                // Wayland surface. Keep geometry private until MapNotify;
+                // clients may enable override_redirect after creation.
+                created.insert(event.window, geometry_from_create(&event));
+            }
+            x11rb::protocol::Event::ConfigureNotify(event) if event.event == root => {
+                if let Some(geometry) = created.get_mut(&event.window) {
+                    *geometry = Geometry {
+                        x: i32::from(event.x),
+                        y: i32::from(event.y),
+                        width: event.width,
+                        height: event.height,
+                    };
                 }
             }
-            x11rb::protocol::Event::MapNotify(event) => {
-                // Use the geometry at map time, not CreateNotify's: clients
-                // may move an override-redirect window between creating and
-                // mapping it (Steam's notification toast does exactly this,
-                // moving from the centre of its main window to the corner
-                // before it maps). CreateNotify remains the provisional
-                // record for the pre-map race; this replaces it with the
-                // position actually requested at map.
-                let geometry = conn
-                    .get_geometry(event.window)
-                    .ok()
-                    .and_then(|cookie| cookie.reply().ok())
-                    .map(|reply| Geometry {
-                        x: i32::from(reply.x),
-                        y: i32::from(reply.y),
-                        width: reply.width,
-                        height: reply.height,
-                    })
-                    .or_else(|| created.get(&event.window).copied());
-                let Some(geometry) = geometry else {
+            x11rb::protocol::Event::MapNotify(event)
+                if event.event == root && event.override_redirect =>
+            {
+                // Snapshot the ordered Create/Configure event history here.
+                // GetGeometry can already see a later compositor move by
+                // the time its reply arrives, even while processing MapNotify.
+                let Some(geometry) = created.get(&event.window).copied() else {
                     continue;
                 };
-                if !is_override_redirect(&conn, event.window)? {
+                if emitted.contains(&event.window) {
                     continue;
                 }
-                if !emitted.insert(event.window) {
-                    continue;
-                }
-                let name = window_name(&conn, event.window, &atoms).unwrap_or_default();
-                let (res_name, res_class) = window_class(&conn, event.window)?.unwrap_or_default();
+                let identity = (|| {
+                    let name = window_name(&conn, event.window, &atoms)?.unwrap_or_default();
+                    let (res_name, res_class) =
+                        window_class(&conn, event.window)?.unwrap_or_default();
+                    Ok::<_, io::Error>((name, res_name, res_class))
+                })();
+                let (name, res_name, res_class) = match identity {
+                    Ok(identity) => identity,
+                    // A popup may close before any property reply. Losing
+                    // that one popup is normal; losing the observer is not.
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                    Err(err) => return Err(err),
+                };
+                emitted.insert(event.window);
                 write_record(
                     &mut stdout,
                     &serde_json::json!({
@@ -675,6 +613,16 @@ pub(crate) fn run_observer() -> io::Result<()> {
                         "res_class": res_class,
                     }),
                 )?;
+            }
+            x11rb::protocol::Event::UnmapNotify(event) if event.event == root => {
+                // X11 clients often reuse the same XID for their next popup.
+                // End this map episode so the next MapNotify is eligible.
+                if emitted.remove(&event.window) {
+                    write_record(
+                        &mut stdout,
+                        &serde_json::json!({"kind":"gone", "id":event.window}),
+                    )?;
+                }
             }
             x11rb::protocol::Event::DestroyNotify(event) => {
                 remove_window(&event, &mut created, &mut emitted, &mut stdout)?;
@@ -733,15 +681,6 @@ fn write_record(stdout: &mut impl Write, value: &serde_json::Value) -> io::Resul
     stdout.flush()
 }
 
-fn is_override_redirect(conn: &impl ConnectionExt, window: Window) -> io::Result<bool> {
-    Ok(conn
-        .get_window_attributes(window)
-        .map_err(protocol_error)?
-        .reply()
-        .map_err(protocol_error)?
-        .override_redirect)
-}
-
 fn window_name(
     conn: &impl ConnectionExt,
     window: Window,
@@ -791,11 +730,21 @@ fn get_property(
         .get_property(false, window, property, type_, 0, 1024)
         .map_err(protocol_error)?
         .reply()
-        .map_err(protocol_error)?;
+        .map_err(property_error)?;
     if reply.format == 8 {
         Ok(Some(reply.value))
     } else {
         Ok(None)
+    }
+}
+
+fn property_error(err: x11rb::errors::ReplyError) -> io::Error {
+    if matches!(&err, x11rb::errors::ReplyError::X11Error(error)
+        if error.error_kind == x11rb::protocol::ErrorKind::Window)
+    {
+        io::Error::new(io::ErrorKind::NotFound, err)
+    } else {
+        protocol_error(err)
     }
 }
 
@@ -844,7 +793,6 @@ mod tests {
             res_name: res_name.into(),
             res_class: "Steam".into(),
             received: Instant::now(),
-            provisional: false,
         }
     }
 
@@ -889,7 +837,7 @@ mod tests {
         let mut state = X11OverlayState::default();
         state.records.push(record("", "STEAM"));
         assert!(state
-            .match_for(Some("steam"), Some("something else"), (183, 44), &output())
+            .match_for(Some("steam"), Some(""), (183, 44), &output())
             .is_some());
     }
 
@@ -939,5 +887,106 @@ mod tests {
             .expect("record should match");
         assert_eq!(placement.output, "DP-4");
         assert_eq!(placement.position, (-1820, 200));
+    }
+    #[test]
+    fn an_unmapped_x11_window_cannot_claim_an_ordinary_toplevel_by_size() {
+        let mut state = X11OverlayState::default();
+        state.buffer.extend_from_slice(
+            b"{\"kind\":\"create\",\"id\":7,\"x\":4000,\"y\":1300,\"width\":227,\"height\":56}\n",
+        );
+        state.consume_lines();
+        assert!(state
+            .match_for(Some("ordinary"), Some("ordinary"), (182, 45), &output())
+            .is_none());
+    }
+
+    #[test]
+    fn a_conflicting_title_cannot_match_by_class_and_size() {
+        let mut state = X11OverlayState::default();
+        state.records.push(record("popup", "review"));
+        assert!(state
+            .match_for(Some("review"), Some("ordinary"), (182, 45), &output())
+            .is_none());
+    }
+
+    #[test]
+    fn pipe_reads_preserve_a_title_split_inside_utf8() {
+        use std::os::unix::net::UnixStream;
+        let (mut writer, reader) = UnixStream::pair().unwrap();
+        let line = serde_json::json!({"kind":"overlay", "id":7, "x":4000, "y":1300,
+            "width":227, "height":56, "name":"café", "res_name":"review", "res_class":"Review"})
+        .to_string()
+            + "\n";
+        let split = line.find('é').unwrap() + 1;
+        let mut state = X11OverlayState::default();
+        writer.write_all(&line.as_bytes()[..split]).unwrap();
+        assert!(!state.read_fd(reader.as_raw_fd()));
+        writer.write_all(&line.as_bytes()[split..]).unwrap();
+        assert!(!state.read_fd(reader.as_raw_fd()));
+        assert_eq!(state.records[0].name, "café");
+    }
+    #[test]
+    fn equally_ranked_candidates_are_not_arbitrarily_consumed() {
+        let mut state = X11OverlayState::default();
+        let first = record("popup", "review");
+        let mut second = first.clone();
+        second.id = 8;
+        second.x += 10;
+        state.records.extend([first, second]);
+        assert!(state
+            .match_for(Some("review"), Some("popup"), (182, 45), &output())
+            .is_none());
+        assert_eq!(state.records.len(), 2);
+    }
+
+    #[test]
+    fn known_identity_can_match_before_satellite_switches_to_the_output_scale() {
+        let mut state = X11OverlayState::default();
+        state.records.push(record("popup", "review"));
+        // Satellite initializes at the smallest scale in a mixed-scale
+        // session, then adjusts after the destination wl_surface.enter.
+        assert!(state
+            .match_for(Some("review"), Some("popup"), (227, 56), &output())
+            .is_some());
+    }
+
+    #[test]
+    fn unmap_discards_a_record_and_allows_the_same_xid_to_map_again() {
+        let mut state = X11OverlayState::default();
+        let line = serde_json::json!({"kind":"overlay", "id":7, "x":4000, "y":1300,
+            "width":227, "height":56, "name":"popup", "res_name":"review", "res_class":"Review"})
+        .to_string()
+            + "\n";
+        state.buffer.extend_from_slice(line.as_bytes());
+        state.consume_lines();
+        state
+            .buffer
+            .extend_from_slice(b"{\"kind\":\"gone\",\"id\":7}\n");
+        state.consume_lines();
+        assert!(state.records.is_empty());
+        state.buffer.extend_from_slice(line.as_bytes());
+        state.consume_lines();
+        assert!(state
+            .match_for(Some("review"), Some("popup"), (182, 45), &output())
+            .is_some());
+        state
+            .buffer
+            .extend_from_slice(b"{\"kind\":\"gone\",\"id\":7}\n");
+        state.buffer.extend_from_slice(line.as_bytes());
+        state.consume_lines();
+        assert!(state
+            .match_for(Some("review"), Some("popup"), (182, 45), &output())
+            .is_some());
+    }
+
+    #[test]
+    fn observer_eof_discards_unmatched_records() {
+        use std::os::unix::net::UnixStream;
+        let (writer, reader) = UnixStream::pair().unwrap();
+        let mut state = X11OverlayState::default();
+        state.records.push(record("popup", "review"));
+        drop(writer);
+        assert!(state.read_fd(reader.as_raw_fd()));
+        assert!(state.records.is_empty());
     }
 }

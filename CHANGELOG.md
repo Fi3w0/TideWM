@@ -2,6 +2,12 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.32 · 2026-11-10 — X11 popup matching and reuse
+
+- Ordinary X11 windows no longer inherit an unmapped popup's position or lose focus just because their sizes match. Conflicting identities and ambiguous matches are left alone.
+- Reused X11 popups keep their placement after unmapping and reopening. Short-lived popups no longer stop the position observer, and non-ASCII titles survive split pipe reads.
+- Popup placement uses the X11 geometry events up to mapping, so a later move cannot overwrite the recorded map position.
+
 ## 0.91.31 · 2026-11-10 — X11 overlays use their position at map time
 
 - X11 override-redirect windows can move between being created and being mapped; Steam's friend-playing toast is created centered on its main window and only moves to the bottom-right just before it maps. TideWM now reads the X11 rect at `MapNotify`, not `CreateNotify`, so the toast lands at the side like other desktops instead of staying in the middle. No app-specific rule; any OR window that sets its position before mapping gets the same treatment.

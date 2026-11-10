@@ -6,7 +6,7 @@ The quick technical picture: what TideWM is built from, what works, what's been 
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). Underneath is a complete tiling window manager: BSP, master/stack and cascade layouts, workspaces, multi-monitor, layer shell, IPC and XWayland. On top sits the water look (ripples, waves, glass, shadows, physics), and every piece of it is a config toggle.
 
-Current version: **0.91.31**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
+Current version: **0.91.32**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
 
 ## Architecture
 
@@ -17,7 +17,7 @@ Current version: **0.91.31**, beta. 1.0 waits for a wider real-hardware pass (In
   - **Scroll:** a scrolling strip of apps per monitor, niri-style.
 
   How they relate: [SPATIAL_MODEL.md](SPATIAL_MODEL.md). Scroll is covered [below](#scroll-engine).
-- **XWayland** through [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite), so X11 apps arrive as ordinary Wayland windows. Override-redirect overlays without an X11 parent (Steam toasts, recorder overlays) keep the position the X11 client asked for and stay undecorated and unfocused.
+- **XWayland** through [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite), so X11 apps arrive as ordinary Wayland windows. Override-redirect overlays without an X11 parent (Steam toasts, recorder overlays) use a read-only observer to recover their map position and avoid compositor decoration or focus on map. Matching is best-effort; see the [XWayland reference](DOCUMENTATION.md#xwayland--).
 - **One render pipeline.** Glass, shadows, rounding, borders and animations are drawn once per frame from a shared window-placement snapshot. The same path feeds both backends, screenshots, screen sharing and workspace transitions, so an effect never needs a second implementation.
 - **Monitor navigation:** directional or named `focus-monitor` actions restore recent window focus; `move-window-to-monitor` actions transfer the focused window to the destination active workspace, and Scroll adds whole-column transfers with `move-column-to-monitor`. Classic/Scroll also support whole-workspace transfers, keeping the number when free or selecting the first free slot. Focus and pointer follow using live logical output geometry. Multi-output protocol tests cover all three engines, groups, floating/pinned and fullscreen/maximized windows; the actions were also checked natively on two monitors (2026-11-02).
 - **Config:** [Wave](WAVE.md), data on the surface and Lua underneath. It's hot-reloaded, and a broken edit never half-applies.

@@ -1510,7 +1510,9 @@ input {
 | `enabled` | bool | `true` | Whether `xwayland-satellite` is spawned at startup. Takes effect on next launch — not hot-reloaded. |
 | `path` | string | `xwayland-satellite` | Path to the `xwayland-satellite` binary. |
 
-X11 override-redirect windows with no X11 parent (Steam's friend-playing toasts, recorder overlays) are placed natively at the position the X11 client chose by the time it mapped: floating, without keyboard focus and without compositor borders, shadows, rounding, glass or depth. The rect is read at X11 map time, not creation time, so clients that move their overlay just before mapping land correctly. This needs no `rule { }`; satellite has no overlay role for them, so TideWM reads the position from the X server through an internal read-only observer child. `xwayland { enabled = false }` disables it along with satellite.
+X11 override-redirect windows that satellite exposes as ordinary toplevels (such as unparented notification overlays) can keep the position the X11 client chose by the time it mapped: floating, without taking focus on map and without compositor borders, shadows, rounding, glass or depth. This needs no `rule { }`. An internal read-only observer child snapshots the ordered X11 creation/configuration events at mapping and matches the record to satellite's Wayland toplevel by identity and size. Unmapping clears the record and permits reuse of the same X11 window. `xwayland { enabled = false }` disables the observer along with satellite.
+
+This is a first-map compatibility path: satellite does not expose the X11 window ID or an overlay role to TideWM. Size alone never identifies a window, conflicting identities and equally ranked records are refused, and a missing or late record leaves ordinary placement in effect. Post-map X11 moves are not continuously mirrored.
 
 ### `output <name> { }`
 

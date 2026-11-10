@@ -2,6 +2,14 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.32 — X11 overlay observer lifecycle and matching
+
+- Review of `bbeff64` / `2a3b05b`: the provisional CreateNotify size-only fallback could classify an ordinary same-sized X11 window as an overlay, move it and suppress focus. Create geometry now stays private to the observer until MapNotify. Known title/class conflicts reject a candidate; tied scores leave the records unconsumed. Identity matches still tolerate initial size differences: satellite initializes surfaces at the session's smallest scale before receiving their destination output enter.
+- Track CreateNotify and ConfigureNotify geometry in X11 event order and snapshot it at MapNotify. The previous GetGeometry round trip could already see a later client/compositor move; a server-grab fixture reproduces this independently of scheduling. No client/app/monitor placement policy was added.
+- UnmapNotify ends the map episode and discards its unmatched record; the same XID may emit a fresh record on remap. Remove the consumed-XID set and its wholesale-clear cap. BadWindow during a popup property query discards that popup instead of terminating the observer. Observer EOF clears unmatched records.
+- Decode the newline-delimited observer protocol from buffered bytes, preserving UTF-8 across reads. Regression cases cover identity conflicts, unknown Create records, ambiguous candidates, initial scale differences, UTF-8 splits, unmap/remap records and observer EOF, alongside the existing geometry tests.
+- Validation: 788 tests (754 + 25 + 9), fmt, strict all-feature/default Clippy and the locked all-feature release build pass. Four real-client nested red/green cases also pass on the release binary: ordinary-window collision, reused-XID remap, short-lived-popup churn and map-event geometry. Native `.32` is not run. Remaining late-record association and Ocean/Scroll integration findings stay in the private queue; this release does not claim exact XID-to-Wayland correlation or continuous post-map X11 positioning.
+
 ## 0.91.31 — X11 overlay position from MapNotify, not CreateNotify
 
 - Real Steam toast capture (native, HDMI-A-2 at 1.25, X root 4480×1440): `CreateNotify` at (3058,685), then the client moved the OR window to (4197,1510) and only then mapped it; a post-map `ConfigureNotify` animation walked it up to (4197,1370). 0.91.30 recorded the Create rect, so the toast still opened at the centre of the Steam window.
