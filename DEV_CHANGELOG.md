@@ -2,6 +2,12 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.27 — Fullscreen scanout diagnostic in the native render stats
+
+- Native finding (Fiw's session, RTX 3060, two outputs, a fullscreen game for hours): `native_render.primary_scanout` is 0 of 2.3 M and 3.2 M frames. TideWM passes `ALLOW_PRIMARY_PLANE_SCANOUT_ANY`, so the frame is being rejected before or at the plane test, and every game frame is composited. KWin (read at v6.5.0, `WorkspaceScene::scanoutCandidates`) scans a fullscreen opaque window out and, like TideWM, neither throttles nor stops what is below it.
+- `backend::perf::scanout_blocker` mirrors the conditions Smithay's `DrmCompositor` applies before trying the primary plane (last visible element, covers the output, opaque) for the fullscreen window's surface element, only on frames whose output has a fullscreen window. `OutputRenderStats` gains `fullscreen_frames`, `fullscreen_clear`, `fullscreen_element_above`, `fullscreen_not_opaque`, `fullscreen_not_covering`, `fullscreen_missing`, plus `scanout_format_unsupported` and `scanout_test_failed` from Smithay's own `RenderingReason`s. An element above includes a cursor that is not on the cursor plane.
+- 774 tests (unit test for each blocker), four gates. udev-only, so nested runs do not exercise it; native not run. The fix follows from what these counters show.
+
 ## 0.91.26 — `window-changed` for client-requested fullscreen and maximize
 
 - Found while diagnosing a full-VRAM gaming session (two paused video wallpapers kept ~1 GB while a fullscreen game filled the card): a shell cannot stop its wallpaper under a fullscreen game because TideWM never told it. `IpcEvent::WindowChanged` was emitted by the `toggle-fullscreen`/`toggle-maximize` actions only. The four `XdgShellHandler` request methods (`fullscreen_request`, `unfullscreen_request`, `maximize_request`, `unmaximize_request`, also the route `wlr-foreign-toplevel-management` takes) now compare `(fullscreen, maximized)` before and after and emit once when it changed (`sizing_state`/`emit_sizing_change`). Denied or duplicate requests emit nothing; the action path is unchanged, so no double events.

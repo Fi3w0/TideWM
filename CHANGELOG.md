@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.27 · 2026-11-10 — `tidectl perf` says why a fullscreen app is not scanned out
+
+- `tidectl perf --json` now counts, per monitor, the frames that had a fullscreen window and what kept that window from being handed straight to the display: something drawn above it, a buffer that is not opaque, a surface that does not cover the monitor, or the graphics driver refusing it. Report only; nothing about rendering changes.
+
 ## 0.91.26 · 2026-11-10 — Shells hear when an app goes fullscreen by itself
 
 - Fixed: `window-changed` was only sent when you toggled fullscreen or maximize with a keybind. An app that goes fullscreen or maximizes on its own (every game, a video player's fullscreen button) now sends it too, so bars and shells can react, for example by stopping a video wallpaper under a fullscreen game.
