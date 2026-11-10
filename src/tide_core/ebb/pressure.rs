@@ -133,6 +133,11 @@ impl PressureWatch {
         })
     }
 
+    /// Called when the loop reports the private epoll readable. That report
+    /// is the notification: the kernel clears a trigger's pending event when
+    /// its file is polled, and the outer loop polled it through this epoll to
+    /// learn it was readable. The wait below therefore usually finds nothing
+    /// and only empties the ready list.
     pub fn notified(&self) -> io::Result<bool> {
         let mut event = libc::epoll_event { events: 0, u64: 0 };
         // Safety: writable space for one event, owned live fd, nonblocking timeout.
@@ -140,13 +145,23 @@ impl PressureWatch {
         if count < 0 {
             return Err(io::Error::last_os_error());
         }
-        if count == 0 {
-            return Ok(false);
+        let mut poll = libc::pollfd {
+            fd: self._pressure.as_raw_fd(),
+            events: libc::POLLPRI,
+            revents: 0,
+        };
+        // Safety: one valid pollfd for an owned live fd, nonblocking timeout.
+        if unsafe { libc::poll(&mut poll, 1, 0) } < 0 {
+            return Err(io::Error::last_os_error());
         }
-        if event.events & (libc::EPOLLERR | libc::EPOLLHUP) as u32 != 0 {
+        // A removed cgroup or destroyed trigger reports an error forever;
+        // dropping the source keeps a level-triggered loop from spinning.
+        if (count > 0 && event.events & (libc::EPOLLERR | libc::EPOLLHUP) as u32 != 0)
+            || poll.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0
+        {
             return Err(io::Error::other("PSI monitor closed"));
         }
-        Ok(event.events & libc::EPOLLPRI as u32 != 0)
+        Ok(true)
     }
 }
 

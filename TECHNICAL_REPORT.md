@@ -6,7 +6,7 @@ The quick technical picture: what TideWM is built from, what works, what's been 
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). Underneath is a complete tiling window manager: BSP, master/stack and cascade layouts, workspaces, multi-monitor, layer shell, IPC and XWayland. On top sits the water look (ripples, waves, glass, shadows, physics), and every piece of it is a config toggle.
 
-Current version: **0.91.23**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
+Current version: **0.91.24**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
 
 ## Architecture
 
@@ -167,7 +167,7 @@ For tools: each `tidectl outputs` entry has a `scroll` object (`offset`, `orient
 | Multi-GPU client offload | Done; not yet tested on a hybrid laptop |
 | AUR package | Not yet |
 
-## Ebb resource monitoring (0.91.2–0.91.4)
+## Ebb resource monitoring (0.91.2–0.91.24)
 
 Ebb adds bounded in-memory PSS/fd/texture-estimate history, growth and
 retained-reference findings, `tidectl ebb stats`, and a generic `ebb-warning`
@@ -176,11 +176,14 @@ that operation. Phase 2 adds out-of-view eviction of rebuildable `render.gpu`
 caches, map shrinking, per-mode hidden delays, caps that gate both cache and
 heap trimming, per-app `rule { ebb = ... }`, generated `ebb.wave` with
 `tidectl ebb init`, manual `tidectl ebb run [--deep]` passes, and optional kernel
-PSI pressure triggers. It adds no dependency or telemetry thread. Per-app
-ownership reports, a shell-facing pressure event and multi-day soak evidence
-remain planned; Phase 2 passes were exercised on a native session (manual
-light/deep runs), while real eviction of a surviving cache, PSI firing and
-screens-off passes remain unverified. See
+PSI pressure triggers. Phase 3 (0.91.24) adds a per-app "who holds what" list
+to `tidectl ebb stats`, an `ebb-pressure` event shells can react to, and two
+report-only findings (constant redraws with nothing to draw, costly pointer
+motion). It adds no dependency or telemetry thread. Multi-day soak evidence
+remains planned. Phase 2 passes were exercised on a native session (manual
+light/deep runs); pressure delivery was fixed in 0.91.24 and checked with real
+kernel pressure in a nested session, while real eviction of a surviving cache,
+native pressure and screens-off passes remain unverified. See
 [the Ebb reference](DOCUMENTATION.md#ebb) for settings,
 scopes and limitations. No memory-saving or cross-compositor performance claim
 follows from the implementation.

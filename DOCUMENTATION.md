@@ -2222,7 +2222,8 @@ requests coalesces into one pass.
 the latest sample, history, findings, effective settings, cache-pass counters
 and the pressure source. The IPC requests are `{"request":"ebb-stats"}` and
 `{"request":"ebb-run","deep":false}`. Subscribe to channel `ebb` for
-`ebb-warning`; Wave handlers may use `on "ebb-warning"`. Notifications are
+`ebb-warning` and `ebb-pressure`; Wave handlers may use `on "ebb-warning"` and
+`on "ebb-pressure"`. Notifications are
 limited to once per day per finding; an existing error panel or toast takes
 precedence. No history is written to disk. History keeps 1,440 recent samples
 (24 hours at the default interval, four hours at 10 seconds), plus up to 168
@@ -2267,7 +2268,29 @@ crossed. The gate stays active until that signal reaches 90% of the cap. If a
 pass finds nothing releasable while over a cap, Ebb stops retrying until caps
 clear or change and reports that finding. Caps never permit freeing visible or
 client resources, and they are soft gates rather than enforced memory limits.
-Per-app ownership reports and a shell-facing pressure event remain later phases.
+
+**Who holds what.** `tidectl ebb stats` ends with one line per app (and per
+layer-shell namespace): the rebuildable caches TideWM holds for its surfaces,
+an estimate of the buffers it currently has attached (4 bytes per pixel; the
+app owns those, and its buffer pools and unmapped surfaces are not counted),
+and the app's own memory. At most 32 apps are listed, largest first. The app's
+memory (`client_pss_bytes`) is read by `tidectl` from `/proc/<pid>/smaps_rollup`
+and is `null` when unreadable; a raw `ebb-stats` IPC reply does not contain it.
+X11 apps share one process (xwayland-satellite), so they show the same number.
+
+**Memory pressure for shells.** When the kernel reports memory pressure (or,
+without PSI, when available memory drops below 10% of the total), TideWM sends
+`ebb-pressure` on the `ebb` channel with `source`, `system_available_bytes` and
+`pressure_some_avg10`. It is sent at most once per minute and in every `mode`,
+including `off` and `low`; it never fires just because the session is idle. A
+shell or widget can drop its own caches when it arrives. Apps can also watch
+`/proc/pressure/memory` themselves; TideWM does not need to be in the path.
+
+**Watchdog.** Each sample also records how many frames were drawn, how many of
+them had nothing to draw, and what pointer motion cost. Two findings come from
+it, reported like the others and never acted on: `idle-redraw` (20 or more
+frames per second for a whole sample period with at least 90% of them empty)
+and `pointer-cost` (600 or more pointer events averaging 300 µs or more).
 
 ## NVIDIA memory profile
 
