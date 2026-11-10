@@ -178,6 +178,10 @@ pub struct Smallvil {
     /// DISPLAY installed by the live satellite. Kept alongside its PID so
     /// child-exit cleanup removes only TideWM's own value.
     pub(crate) xwayland_display: Option<String>,
+    /// Pending override-redirect rectangles reported by the X11 observer,
+    /// plus the surfaces already classified as overlays. See
+    /// `x11_overlay`'s module docs.
+    pub(crate) x11_overlay: crate::x11_overlay::X11OverlayState,
 
     /// Which backend is driving this session: `"winit"` (nested) or
     /// `"udev"` (standalone DRM/TTY). Set by `main.rs` after backend init;

@@ -390,6 +390,9 @@ impl Smallvil {
         surface: &WlSurface,
         fullscreen: bool,
     ) -> Option<crate::config::GlassMode> {
+        if self.is_x11_overlay(surface) {
+            return None;
+        }
         let frost = self.frost_config_for_surface(surface);
         let opacity = self.window_render_alpha_for(surface, fullscreen);
         selected_glass_mode(
@@ -404,6 +407,11 @@ impl Smallvil {
     }
 
     pub(super) fn window_render_alpha_for(&self, surface: &WlSurface, fullscreen: bool) -> f32 {
+        // An X11 overlay is the client's own surface; a config rule for its
+        // app must not fade the toast. Client-provided alpha still applies.
+        if self.is_x11_overlay(surface) {
+            return 1.0;
+        }
         let focused = matches!(&self.input.keyboard_focus, KeyboardFocusTarget::Window(focused) if focused == surface);
         self.render
             .windows
@@ -415,6 +423,11 @@ impl Smallvil {
     }
 
     fn frost_config_for_surface(&self, surface: &WlSurface) -> crate::config::FrostConfig {
+        if self.is_x11_overlay(surface) {
+            let mut config = self.config.frost.clone();
+            config.enabled = false;
+            return config;
+        }
         let rule = self.resolve_window_rules_for(surface);
         rule.frost
             .as_ref()
@@ -423,6 +436,11 @@ impl Smallvil {
     }
 
     fn shadow_config_for_surface(&self, surface: &WlSurface) -> crate::config::ShadowConfig {
+        if self.is_x11_overlay(surface) {
+            let mut config = self.config.shadow.clone();
+            config.enabled = false;
+            return config;
+        }
         let rule = self.resolve_window_rules_for(surface);
         let base = self
             .workspace_of_surface(surface)
@@ -439,6 +457,11 @@ impl Smallvil {
         &self,
         surface: &WlSurface,
     ) -> crate::config::RoundingConfig {
+        if self.is_x11_overlay(surface) {
+            let mut config = self.config.rounding.clone();
+            config.enabled = false;
+            return config;
+        }
         let rule = self.resolve_window_rules_for(surface);
         let base = self
             .workspace_of_surface(surface)
@@ -452,6 +475,11 @@ impl Smallvil {
     }
 
     fn border_config_for_surface(&self, surface: &WlSurface) -> crate::config::BorderConfig {
+        if self.is_x11_overlay(surface) {
+            let mut config = self.config.border.clone();
+            config.enabled = false;
+            return config;
+        }
         let rule = self.resolve_window_rules_for(surface);
         let base = self
             .workspace_of_surface(surface)

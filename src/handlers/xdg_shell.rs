@@ -1160,7 +1160,7 @@ impl Smallvil {
             self.initial_toplevel_identity
                 .insert(surface.clone(), identity);
         }
-        let rule = self.resolve_window_rules_for(surface);
+        let mut rule = self.resolve_window_rules_for(surface);
         // A rule matching this window may itself assign tags a *different*
         // rule keys off (`rule { tag = [...] }`) -- re-resolve once more so
         // that second rule's effects apply at this same first map, instead
@@ -1169,15 +1169,40 @@ impl Smallvil {
         // fixed-point loop: a tag-keyed rule that itself sets `add_tag`
         // still won't feed a third rule in the same map, an acknowledged
         // ceiling rather than a silent one.
-        let rule = if rule.add_tag.is_empty() {
-            rule
-        } else {
+        if !rule.add_tag.is_empty() {
             self.window_tags
                 .entry(surface.clone())
                 .or_default()
                 .extend(rule.add_tag.iter().cloned());
-            self.resolve_window_rules_for(surface)
-        };
+            rule = self.resolve_window_rules_for(surface);
+        }
+        // An X11 override-redirect window reaches TideWM as an ordinary
+        // toplevel because satellite has no overlay role for it. The
+        // observer remembers the rect the client asked for before satellite
+        // moved the X11 window, and this native placement replaces the
+        // centered-floating default. It is a placement decision, so it
+        // overrides the config rule's one-shot placement fields (but not
+        // live effects such as opacity).
+        if let Some(overlay) = self.take_x11_overlay(surface) {
+            self.x11_overlay.mark_surface(surface.clone());
+            rule.float = true;
+            rule.pin = false;
+            rule.tile = false;
+            rule.maximize = false;
+            rule.fullscreen = false;
+            rule.pseudo_tile = false;
+            rule.no_focus = true;
+            rule.workspace = None;
+            rule.pin_output = None;
+            rule.output = Some(overlay.output);
+            rule.position = Some(overlay.position);
+            rule.persistent_size = false;
+            rule.size = None;
+            rule.min_width = None;
+            rule.max_width = None;
+            rule.min_height = None;
+            rule.max_height = None;
+        }
         if let Some(opacity) = crate::config::WindowOpacity::from_rule(&rule) {
             self.render
                 .windows
@@ -1468,9 +1493,11 @@ impl Smallvil {
         // response with one synthetic downward impulse near the final center.
         const MAP_KICK_IMPULSE: f64 = 120.0;
         if let Some(center) = self.window_center_for_kick(surface) {
-            if let Some(window) = self.mapped_toplevel_window(surface) {
-                if let Some(output) = self.output_for_window(&window) {
-                    self.float_physics_kick_near(&output, center, (0.0, MAP_KICK_IMPULSE));
+            if !self.is_x11_overlay(surface) {
+                if let Some(window) = self.mapped_toplevel_window(surface) {
+                    if let Some(output) = self.output_for_window(&window) {
+                        self.float_physics_kick_near(&output, center, (0.0, MAP_KICK_IMPULSE));
+                    }
                 }
             }
         }
@@ -1701,6 +1728,7 @@ impl Smallvil {
         self.spatial.workspaces.output_pins.remove(surface);
         self.render.windows.window_opacity.remove(surface);
         self.render.windows.window_glass_modes.remove(surface);
+        self.x11_overlay.forget_surface(surface);
         self.render
             .windows
             .window_shader_assignments

@@ -1510,6 +1510,8 @@ input {
 | `enabled` | bool | `true` | Whether `xwayland-satellite` is spawned at startup. Takes effect on next launch — not hot-reloaded. |
 | `path` | string | `xwayland-satellite` | Path to the `xwayland-satellite` binary. |
 
+X11 override-redirect windows with no X11 parent (Steam's friend-playing toasts, recorder overlays) are placed natively at the position the X11 client asked for: floating, without keyboard focus and without compositor borders, shadows, rounding, glass or depth. This needs no `rule { }`; satellite has no overlay role for them, so TideWM reads the position from the X server through an internal read-only observer child. `xwayland { enabled = false }` disables it along with satellite.
+
 ### `output <name> { }`
 
 Per-connector overrides, **udev backend only** — winit's single simulated output has no real mode list or transform-as-monitor-orientation meaning. Purely opt-in: an output with no matching block auto-configures (preferred mode, auto-positioned to the right of whatever's already mapped, scale 1, no rotation). One block per connector; repeat the block (in the same or another included file) for a second monitor. Position validation uses the selected output's live logical size after mode, transform, and scale: TideWM does not assume a resolution, refresh rate, or maximum monitor count. A configured position whose rectangle or complete desktop span cannot be represented warns and uses automatic placement instead.

@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.30 · 2026-11-10 — X11 overlays keep their position
+
+- X11 override-redirect windows that arrive without an X11 parent (Steam's friend-playing toasts, screen-recorder overlays) now open where the X11 app asked for them, floating and without taking focus or getting TideWM borders, shadows, rounding, glass or depth. Before, xwayland-satellite mapped them as ordinary toplevels and TideWM centered them. No config rule is needed.
+
 ## 0.91.29 · 2026-11-10 — No repeated pointer position before every wheel step in Scroll
 
 - Scroll: TideWM no longer re-sends the pointer position to the app before every wheel step and click. It is sent only when the strip moved the app under a still pointer. This removes a difference from Classic that may be why the Steam client ignores the wheel (#6); that part is not confirmed yet.
