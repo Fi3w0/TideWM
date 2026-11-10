@@ -578,6 +578,9 @@ impl Smallvil {
         serial: smithay::utils::Serial,
         animate_handoff: bool,
     ) {
+        if let Some(surface) = surface.as_ref() {
+            self.spatial.workspaces.layout.scroll.expect_open(surface);
+        }
         self.focus_window_with_ripple(surface, serial, animate_handoff, FocusOrigin::Navigation);
     }
 

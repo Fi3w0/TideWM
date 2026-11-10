@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.25 · 2026-11-10 — Closing a new window puts the strip back
+
+- Scroll: when a new window slides the strip and you close it (or move it out of the strip) without scrolling or focusing anything else, the strip returns to where it was before the window opened, like niri. If you moved the view in between, it stays where you left it.
+
 ## 0.91.24 · 2026-11-10 — Ebb names apps and tells shells about memory pressure
 
 - `tidectl ebb stats` now lists each app with the caches TideWM holds for it, an estimate of the buffers it has on screen, and the app's own memory, so you can see who is holding what.

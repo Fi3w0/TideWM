@@ -6,7 +6,7 @@ The quick technical picture: what TideWM is built from, what works, what's been 
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). Underneath is a complete tiling window manager: BSP, master/stack and cascade layouts, workspaces, multi-monitor, layer shell, IPC and XWayland. On top sits the water look (ripples, waves, glass, shadows, physics), and every piece of it is a config toggle.
 
-Current version: **0.91.24**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
+Current version: **0.91.25**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
 
 ## Architecture
 
@@ -139,7 +139,7 @@ A column holds one app or several stacked ones. The table is for horizontal stri
 | Mod + left-drag | Drop near a tile's left or right edge for a new column there, near its top or bottom to join that column, or in the middle to swap. A highlight shows where it lands |
 | Touchpad swipe | Slide the strip with your fingers |
 
-New apps open as their own column right after the focused column, never in the middle of it. Closing the top app of a column keeps the rest of the column and its width.
+New apps open as their own column right after the focused column, never in the middle of it. If a new app slid the strip and you close it without scrolling or focusing anything else, the strip goes back to where it was. Closing the top app of a column keeps the rest of the column and its width.
 
 Focusing with the mouse never moves the strip: hovering with `focus_follows_mouse`, clicking, touch and tablet pens all leave it alone. You can cross to another monitor or click a neighbor's peek without anything sliding away. Keyboard focus, `tidectl focus-window` / `focus-app` and notification clicks do bring the app into view. When the strip slides under a still mouse, the app now under the pointer gets the wheel and clicks right away.
 

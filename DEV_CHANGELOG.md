@@ -2,6 +2,12 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.25 — Scroll restores the view a new window replaced
+
+- Last open half of "Scroll camera forgets the last window" (Fiw, 2026-10-27; niri's `activate_prev_column_on_removal`). `focus_window_on_map` marks the window with `ScrollState::expect_open`; its first `scroll_reveal_with` records the strip key and the view before and after (`OpenedColumn`). `ScrollState::forget` (every removal from the tree: close, move to another workspace or monitor, float) puts the earlier view back when the strip's offset still equals the recorded one. Any pan, resize, centering or other reveal changes the offset or clears the record, so a view the user moved is never overridden; revealing a different window ends the episode. `forget_strip`/`move_strip` drop a record for a strip that goes away. One record at most, no per-frame work, no retained handle past the window's removal.
+- Tests: 773 (740 + 24 + 9). Real-protocol test `scroll_leaving_a_new_window_restores_the_view_it_replaced`: restore after close, no restore after a pan, no restore after focusing elsewhere and back.
+- Nested (private KWin host, six GTK clients, `queue-2026-11-09/scroll_cam.py`): workspace round trips keep window and view (already true), a new window opens right after the focused column (already true), closing it returns focus (already true) and now the view (8 → 648 → 8; stayed 648 before). Native not run.
+
 ## 0.91.24 — Ebb Phase 3: per-app report, pressure event, activity watchdog
 
 - **Per-app report.** `Smallvil::ebb_apps` builds, on request only, one row per (client pid, app id / layer namespace): windows, layer surfaces, TideWM-held cache entries and their texture estimate (`backdrop_textures`, `layer_alpha_masks`, custom shader stage targets, depth schematics), and an attached-buffer estimate (every buffer in the surface tree at 4 bytes per pixel; pools and unmapped surfaces are outside it). Sorted by held + buffer bytes, capped at 32 rows with an `omitted` count and 96-character names. `ebb-stats` gains `apps` and reports `"phase": 3`. The app's own PSS is read by `tidectl` (`tidectl_ebb::add_client_memory`, `/proc/<pid>/smaps_rollup`) and added as `client_pss_bytes` in both text and `--json` output, so the compositor never walks another process's mappings on its main loop.

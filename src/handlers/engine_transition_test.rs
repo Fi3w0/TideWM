@@ -674,6 +674,88 @@ fn ebb_reports_dead_handles_but_accepts_hidden_live_windows() {
     println!("ebb ownership audit checked");
 }
 
+const SCROLL_OPEN_CONFIG: &str = r#"engine = scroll
+welcome_hint = false
+water_effects = false
+gaps = 8
+animations {
+ enabled = false
+}
+scroll {
+ tile_proportion = 0.5
+}
+rule {
+ app_id = a
+ output = A
+}
+"#;
+
+#[test]
+fn scroll_leaving_a_new_window_restores_the_view_it_replaced() {
+    if run_isolated(
+        "scroll_leaving_a_new_window_restores_the_view_it_replaced",
+        SCROLL_OPEN_CONFIG,
+        "scroll open view checked",
+    ) {
+        return;
+    }
+    let mut f = two_output_fixture();
+    let columns: Vec<_> = (0..4).map(|_| map(&mut f, "a")).collect();
+    let view = |f: &Fixture| f.state.spatial.workspaces.layout.scroll.offset("A", 1);
+    let close = |f: &mut Fixture, surface: &WlSurface| {
+        let id = surface.id().protocol_id();
+        f.request(id + 3, 0, &[], &[]); // viewport
+        f.request(id + 2, 0, &[], &[]); // toplevel
+        f.request(id + 1, 0, &[], &[]); // xdg_surface
+        f.request(id, 0, &[], &[]); // wl_surface
+        f.dispatch();
+    };
+    let focus = |f: &mut Fixture, surface: &WlSurface| {
+        f.state
+            .focus_window(Some(surface.clone()), SERIAL_COUNTER.next_serial());
+        f.dispatch();
+    };
+    // Two half-width columns fit; with the first two in view a new window
+    // opening after the second has to slide the strip.
+    focus(&mut f, &columns[0]);
+    focus(&mut f, &columns[1]);
+    let before = view(&f);
+    let opened = map(&mut f, "a");
+    assert_eq!(f.state.focused_window_surface(), Some(opened.clone()));
+    assert_ne!(view(&f), before, "the new column must have moved the view");
+    close(&mut f, &opened);
+    assert_eq!(f.state.focused_window_surface(), Some(columns[1].clone()));
+    assert_eq!(view(&f), before);
+
+    // A view the user moved after the open is theirs: closing keeps it away
+    // from the remembered one.
+    let opened = map(&mut f, "a");
+    let after = view(&f);
+    f.state
+        .spatial
+        .workspaces
+        .layout
+        .scroll
+        .set_offset("A", 1, after + 40.0);
+    close(&mut f, &opened);
+    assert_eq!(f.state.focused_window_surface(), Some(columns[1].clone()));
+    assert_ne!(view(&f), before);
+
+    // Focusing another window ends the episode too.
+    focus(&mut f, &columns[0]);
+    focus(&mut f, &columns[1]);
+    let before = view(&f);
+    let opened = map(&mut f, "a");
+    let after = view(&f);
+    assert_ne!(after, before);
+    focus(&mut f, &columns[3]);
+    focus(&mut f, &opened);
+    let returned = view(&f);
+    close(&mut f, &opened);
+    assert_eq!(view(&f), returned);
+    println!("scroll open view checked");
+}
+
 #[test]
 fn ebb_names_apps_and_tells_listeners_about_pressure_once_per_episode() {
     if run_isolated(
