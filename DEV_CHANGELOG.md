@@ -2,6 +2,12 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.29 — Scroll pointer refresh only when the position changed
+
+- Issue #6 / satellite #538 (Steam ignores the wheel; XTest buttons and a warped pointer work). `refresh_scroll_pointer_focus` runs before every `PointerAxis` and `PointerButton` and called `refresh_pointer_focus` unconditionally, so in Scroll every wheel step was preceded by a synthetic `wl_pointer.motion` + `frame` at the unchanged position; Classic returns early and sends none. `InputState::scroll_refresh_sent` remembers the (weak surface, surface-local position) last sent by a refresh; an identical one is skipped, and any real pointer motion clears it. Ocean keeps the unconditional refresh (its client scale can change without the position changing).
+- Live X query on the reporter's session (not a fix check): X screen 4480×1440, Steam's toplevel 2387×1372 at root (1920,0) on the 1.25 output, so satellite's scale and window size agree with TideWM's 1910×1098 logical geometry.
+- 776 tests, four gates. Whether Steam scrolls is `not run`: needs the reporter's native session (also still open: the same test in Classic and on the scale-1 output).
+
 ## 0.91.28 — `pick-window`
 
 - TODO "Picking": `Request::PickWindow { timeout_ms }` is converted like `subscribe` before the one-line reply path: the connection's lease and a cloned stream move into `IpcState::pick` (`WindowPick`), and the reply is written when the pick ends. One pick at a time; a newer request replaces the waiting one, which gets an error. Timeout 30 s by default, clamped to 1–120 s, on a calloop timer. Refused while the session is locked; not allowed inside a batch.

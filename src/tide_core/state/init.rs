@@ -264,6 +264,7 @@ impl Smallvil {
                 last_pointer_motion: Instant::now(),
                 cursor_idle_timer_armed: false,
                 last_activity: Instant::now(),
+                scroll_refresh_sent: None,
                 cursor_status: CursorImageStatus::default_named(),
                 dnd_icon: None,
                 cursor_theme: None,

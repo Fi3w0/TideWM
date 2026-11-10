@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.29 · 2026-11-10 — No repeated pointer position before every wheel step in Scroll
+
+- Scroll: TideWM no longer re-sends the pointer position to the app before every wheel step and click. It is sent only when the strip moved the app under a still pointer. This removes a difference from Classic that may be why the Steam client ignores the wheel (#6); that part is not confirmed yet.
+
 ## 0.91.28 · 2026-11-10 — Pick a window with a click
 
 - New `tidectl pick-window [--timeout <seconds>]` (IPC `{"request":"pick-window"}`): the pointer becomes a crosshair, and your next left click prints that window, the same entry `tidectl windows` shows. Clicking empty space answers with nothing; Escape or any other mouse button cancels; it gives up after 30 seconds by default. The click is not passed to the app. Useful for scripts and shells that need you to choose a window.

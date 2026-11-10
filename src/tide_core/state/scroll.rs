@@ -252,6 +252,26 @@ impl Smallvil {
         {
             return;
         }
+        // This runs before every wheel and button event. A strip only moves
+        // now and then, so most calls would repeat the position the client
+        // already has; an X11 app behind xwayland-satellite then sees a
+        // pointer motion ahead of every wheel step. Tell the client only
+        // when its surface or the position inside it really changed.
+        if self.spatial.engine.projection() == Some(crate::config::WorkspaceProjection::Scroll) {
+            let sent = self.seat.get_pointer().and_then(|pointer| {
+                let position = self.clamp_to_outputs(pointer.current_location());
+                self.surface_under(position).map(|(surface, origin)| {
+                    (
+                        smithay::reexports::wayland_server::Resource::downgrade(&surface),
+                        position - origin,
+                    )
+                })
+            });
+            if sent.is_some() && sent == self.input.scroll_refresh_sent {
+                return;
+            }
+            self.input.scroll_refresh_sent = sent;
+        }
         self.refresh_pointer_focus();
     }
 

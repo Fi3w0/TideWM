@@ -942,6 +942,10 @@ impl Smallvil {
             event,
             InputEvent::PointerMotion { .. } | InputEvent::PointerMotionAbsolute { .. }
         );
+        if motion {
+            // The client is about to hear the real position.
+            self.input.scroll_refresh_sent = None;
+        }
         self.dispatch_input_event(event);
         if motion {
             // `last_activity` was stamped as this event entered dispatch, so
