@@ -510,6 +510,7 @@ impl OceanSpace {
         );
     }
 
+    #[cfg(test)]
     pub fn jump_to_bookmark(&mut self, output: &str, name: &str) -> bool {
         let Some(origin) = self.bookmarks.get(name).copied() else {
             return false;
@@ -1418,45 +1419,6 @@ impl OceanSpace {
         (max_w.max(rect.size.w), max_h.max(rect.size.h))
     }
 
-    pub fn smart_tiling_target(
-        &self,
-        surface: &WlSurface,
-        output: &str,
-        pointer_view: Point<f64, Logical>,
-        snap_distance: i32,
-        gap: i32,
-        split_bias: SplitBias,
-    ) -> Option<WlSurface> {
-        let moving = self.floating_rect(surface)?;
-        let camera = self.camera(output);
-        let zoom = camera.zoom.max(0.05);
-        let pointer_world = OceanPoint {
-            x: camera.origin.x + pointer_view.x / zoom,
-            y: camera.origin.y + pointer_view.y / zoom,
-        };
-        let max_gap = snap_distance.max(0) as f64 / zoom;
-        self.tiled_layouts(gap, split_bias)
-            .into_iter()
-            .filter_map(|(window, rect)| {
-                let target = window.toplevel()?.wl_surface().clone();
-                (target != *surface && self.visible_on_output(&target, output))
-                    .then_some((target, rect))
-            })
-            .filter_map(|(target, rect)| {
-                let gap = rectangle_gap_distance(moving, rect);
-                // `distance_to_rect` returns a squared distance (fine for
-                // its other callers, which only ever rank candidates
-                // against each other); this compares it against a real
-                // screen-pixel threshold, so it needs the actual distance.
-                let pointer_distance = distance_to_rect(rect, pointer_world).sqrt();
-                (gap <= max_gap
-                    && pointer_distance <= max_gap + moving.size.w.max(moving.size.h) as f64)
-                    .then_some((target, gap))
-            })
-            .min_by(|(_, a), (_, b)| a.total_cmp(b))
-            .map(|(target, _)| target)
-    }
-
     pub fn tiled_target_at_view(
         &self,
         surface: &WlSurface,
@@ -1725,15 +1687,6 @@ impl OceanSpace {
                         .then_some(rect)
                 })
         })
-    }
-
-    pub fn view_delta_to_world(
-        &self,
-        output: &str,
-        delta: Point<f64, Logical>,
-    ) -> Point<f64, Logical> {
-        let zoom = self.camera(output).zoom.max(0.05);
-        Point::from((delta.x / zoom, delta.y / zoom))
     }
 
     pub(crate) fn viewport_world_bounds(
@@ -2016,28 +1969,6 @@ fn centered_attached_rect(
         )),
         size,
     )
-}
-
-fn rectangle_gap_distance(first: Rectangle<i32, Logical>, second: Rectangle<i32, Logical>) -> f64 {
-    let first_right = first.loc.x + first.size.w;
-    let first_bottom = first.loc.y + first.size.h;
-    let second_right = second.loc.x + second.size.w;
-    let second_bottom = second.loc.y + second.size.h;
-    let dx = if first_right < second.loc.x {
-        (second.loc.x - first_right) as f64
-    } else if second_right < first.loc.x {
-        (first.loc.x - second_right) as f64
-    } else {
-        0.0
-    };
-    let dy = if first_bottom < second.loc.y {
-        (second.loc.y - first_bottom) as f64
-    } else if second_bottom < first.loc.y {
-        (first.loc.y - second_bottom) as f64
-    } else {
-        0.0
-    };
-    dx.hypot(dy)
 }
 
 fn rectangle_contains_point(rect: Rectangle<i32, Logical>, point: OceanPoint) -> bool {
@@ -2665,7 +2596,6 @@ mod tests {
         // a bigger rect here would overlap whatever tile sits next door.
         assert_eq!(attached.size, Size::from((400, 300)));
         assert_eq!(attached.loc, slot.loc);
-        assert_eq!(rectangle_gap_distance(attached, slot), 0.0);
     }
 
     #[test]

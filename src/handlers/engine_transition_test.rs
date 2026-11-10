@@ -675,6 +675,226 @@ fn ebb_reports_dead_handles_but_accepts_hidden_live_windows() {
 }
 
 #[test]
+fn pick_window_answers_the_next_click_and_never_outlives_its_client() {
+    if run_isolated(
+        "pick_window_answers_the_next_click_and_never_outlives_its_client",
+        ROUND_TRIP_CONFIG,
+        "pick-window checked",
+    ) {
+        return;
+    }
+    use std::io::Read;
+    use std::os::unix::net::UnixStream as Socket;
+    let mut f = two_output_fixture();
+    let window = map(&mut f, "a");
+    f.dispatch();
+    let reply = |mut client: Socket| -> serde_json::Value {
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let mut text = String::new();
+        client.read_to_string(&mut text).unwrap();
+        serde_json::from_str(text.lines().next().unwrap()).unwrap()
+    };
+    let begin = |f: &mut Fixture| -> Socket {
+        let (server, client) = Socket::pair().unwrap();
+        f.state
+            .begin_window_pick(server, crate::ipc::ConnectionLease::for_test(), None);
+        client
+    };
+    let inside = {
+        let element = f
+            .state
+            .space
+            .elements()
+            .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == &window))
+            .unwrap()
+            .clone();
+        let geometry = f.state.space.element_geometry(&element).unwrap();
+        (geometry.loc + smithay::utils::Point::from((geometry.size.w / 2, geometry.size.h / 2)))
+            .to_f64()
+    };
+
+    // Left click on a window: its `windows` entry.
+    let client = begin(&mut f);
+    assert!(f.state.window_pick_waiting());
+    f.state.answer_window_pick(0x110, inside);
+    assert!(f.state.ipc.pick.is_none());
+    let picked = reply(client);
+    assert_eq!(picked["ok"], true);
+    assert_eq!(picked["data"]["app_id"], "a");
+
+    // Empty space answers null; another button cancels.
+    let client = begin(&mut f);
+    f.state
+        .answer_window_pick(0x110, smithay::utils::Point::from((-5000.0, -5000.0)));
+    let empty = reply(client);
+    assert_eq!(empty["ok"], true);
+    assert!(empty["data"].is_null());
+    let client = begin(&mut f);
+    f.state.answer_window_pick(0x111, inside);
+    assert_eq!(reply(client)["error"], "cancelled");
+
+    // A newer request replaces the waiting one, which is told so.
+    let first = begin(&mut f);
+    let second = begin(&mut f);
+    assert_eq!(reply(first)["ok"], false);
+    assert!(f.state.window_pick_waiting());
+
+    // A client that went away must not keep the next click.
+    drop(second);
+    assert!(!f.state.window_pick_waiting());
+    assert!(f.state.ipc.pick.is_none());
+    println!("pick-window checked");
+}
+
+const SCROLL_OPEN_CONFIG: &str = r#"engine = scroll
+welcome_hint = false
+water_effects = false
+gaps = 8
+animations {
+ enabled = false
+}
+scroll {
+ tile_proportion = 0.5
+}
+rule {
+ app_id = a
+ output = A
+}
+"#;
+
+#[test]
+fn scroll_leaving_a_new_window_restores_the_view_it_replaced() {
+    if run_isolated(
+        "scroll_leaving_a_new_window_restores_the_view_it_replaced",
+        SCROLL_OPEN_CONFIG,
+        "scroll open view checked",
+    ) {
+        return;
+    }
+    let mut f = two_output_fixture();
+    let columns: Vec<_> = (0..4).map(|_| map(&mut f, "a")).collect();
+    let view = |f: &Fixture| f.state.spatial.workspaces.layout.scroll.offset("A", 1);
+    let close = |f: &mut Fixture, surface: &WlSurface| {
+        let id = surface.id().protocol_id();
+        f.request(id + 3, 0, &[], &[]); // viewport
+        f.request(id + 2, 0, &[], &[]); // toplevel
+        f.request(id + 1, 0, &[], &[]); // xdg_surface
+        f.request(id, 0, &[], &[]); // wl_surface
+        f.dispatch();
+    };
+    let focus = |f: &mut Fixture, surface: &WlSurface| {
+        f.state
+            .focus_window(Some(surface.clone()), SERIAL_COUNTER.next_serial());
+        f.dispatch();
+    };
+    // Two half-width columns fit; with the first two in view a new window
+    // opening after the second has to slide the strip.
+    focus(&mut f, &columns[0]);
+    focus(&mut f, &columns[1]);
+    let before = view(&f);
+    let opened = map(&mut f, "a");
+    assert_eq!(f.state.focused_window_surface(), Some(opened.clone()));
+    assert_ne!(view(&f), before, "the new column must have moved the view");
+    close(&mut f, &opened);
+    assert_eq!(f.state.focused_window_surface(), Some(columns[1].clone()));
+    assert_eq!(view(&f), before);
+
+    // A view the user moved after the open is theirs: closing keeps it away
+    // from the remembered one.
+    let opened = map(&mut f, "a");
+    let after = view(&f);
+    f.state
+        .spatial
+        .workspaces
+        .layout
+        .scroll
+        .set_offset("A", 1, after + 40.0);
+    close(&mut f, &opened);
+    assert_eq!(f.state.focused_window_surface(), Some(columns[1].clone()));
+    assert_ne!(view(&f), before);
+
+    // Focusing another window ends the episode too.
+    focus(&mut f, &columns[0]);
+    focus(&mut f, &columns[1]);
+    let before = view(&f);
+    let opened = map(&mut f, "a");
+    let after = view(&f);
+    assert_ne!(after, before);
+    focus(&mut f, &columns[3]);
+    focus(&mut f, &opened);
+    let returned = view(&f);
+    close(&mut f, &opened);
+    assert_eq!(view(&f), returned);
+    println!("scroll open view checked");
+}
+
+#[test]
+fn ebb_names_apps_and_tells_listeners_about_pressure_once_per_episode() {
+    if run_isolated(
+        "ebb_names_apps_and_tells_listeners_about_pressure_once_per_episode",
+        ROUND_TRIP_CONFIG,
+        "ebb reach-out checked",
+    ) {
+        return;
+    }
+    let mut f = two_output_fixture();
+    map(&mut f, "a");
+    map(&mut f, "a");
+    map(&mut f, "deep");
+    // Hidden windows are still the app's windows; one row per (client, app).
+    let apps = f.state.ebb_apps();
+    let entries = apps["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2, "{apps}");
+    let row = |name: &str| entries.iter().find(|e| e["app_id"] == name).unwrap();
+    assert_eq!(row("a")["windows"], 2);
+    assert_eq!(row("deep")["windows"], 1);
+    assert_eq!(row("a")["layers"], 0);
+    assert!(row("a")["pid"].as_i64().is_some_and(|pid| pid > 0));
+    // No glass, shader or depth cache exists for these plain windows.
+    assert_eq!(row("a")["held_entries"], 0);
+    assert_eq!(row("a")["held_texture_estimate_bytes"], 0);
+    assert_eq!(apps["omitted"], 0);
+    assert!(serde_json::to_vec(&apps).unwrap().len() < 64 * 1024);
+
+    // No signal, no event. One signal is one event; a repeat inside the
+    // cooldown is dropped rather than queued for later.
+    f.state.ebb_tick(false);
+    assert_eq!(f.state.ebb.watch.pressure_events, 0);
+    f.state.ebb.watch.pressure_signalled = true;
+    f.state.ebb_tick(false);
+    assert_eq!(f.state.ebb.watch.pressure_events, 1);
+    f.state.ebb.watch.pressure_signalled = true;
+    f.state.ebb_tick(false);
+    assert_eq!(f.state.ebb.watch.pressure_events, 1);
+    assert!(!f.state.ebb.watch.pressure_signalled);
+    // Telling is not trimming: the default mode queues no pass for it.
+    assert!(!f.state.ebb.trim.pressure_pending);
+    let stats = f.state.ebb.stats(&f.state.config.ebb);
+    assert_eq!(stats["phase"], 3);
+    assert_eq!(stats["pressure"]["events"], 1);
+    // The first sample closes an activity period for the watchdog.
+    assert!(stats["latest"]["activity"]["period_secs"].is_u64());
+
+    let event = crate::ipc::IpcEvent::EbbPressure {
+        source: "/proc/pressure/memory".into(),
+        system_available_bytes: Some(1024),
+        pressure_some_avg10: None,
+    };
+    let wire: serde_json::Value = serde_json::from_slice(&event.to_json_line(&f.state)).unwrap();
+    assert_eq!(wire["event"], "ebb-pressure");
+    assert_eq!(wire["data"]["source"], "/proc/pressure/memory");
+    assert_eq!(wire["data"]["system_available_bytes"], 1024);
+    assert!(wire["data"]["pressure_some_avg10"].is_null());
+    assert!(crate::ipc::event_matches(
+        &std::collections::HashSet::from([crate::ipc::EventKind::Ebb]),
+        &event
+    ));
+    println!("ebb reach-out checked");
+}
+
+#[test]
 fn ebb_trims_only_hidden_caches_and_obeys_caps_rules_off_and_budget() {
     let config=format!("{ROUND_TRIP_CONFIG}\nebb_advanced {{\n pass_budget = 10ms\n toast = false\n}}\nrule {{\n app_id = exempt\n workspace = 2\n output = A\n ebb = off\n}}\n");
     if run_isolated(

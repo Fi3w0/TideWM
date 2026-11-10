@@ -139,6 +139,12 @@ pub(crate) struct InputState {
     /// burning frames at full rate forever. Pointer motion alone is not
     /// enough -- keys and touch must reset it too.
     pub(crate) last_activity: Instant,
+    /// The surface and surface-local position the last Scroll pointer
+    /// refresh told the client about. A real pointer motion clears it.
+    pub(crate) scroll_refresh_sent: Option<(
+        smithay::reexports::wayland_server::Weak<WlSurface>,
+        Point<f64, Logical>,
+    )>,
     /// Only read by the udev backend (see `cursor.rs`, `backend/udev.rs`).
     /// Under winit the host compositor draws the real cursor, so this is
     /// tracked but never rendered from.
@@ -578,6 +584,9 @@ impl Smallvil {
         serial: smithay::utils::Serial,
         animate_handoff: bool,
     ) {
+        if let Some(surface) = surface.as_ref() {
+            self.spatial.workspaces.layout.scroll.expect_open(surface);
+        }
         self.focus_window_with_ripple(surface, serial, animate_handoff, FocusOrigin::Navigation);
     }
 

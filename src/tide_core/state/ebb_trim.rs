@@ -318,9 +318,8 @@ impl Smallvil {
         }
         self.ebb.pressure.source = None;
         self.ebb.trim.pressure_pending = false;
-        if !matches!(mode, EbbMode::Balanced | EbbMode::Aggressive) {
-            return;
-        }
+        // Every mode listens, so shells hear about pressure even when Ebb's
+        // own trimming is off. Only `balanced` and `aggressive` queue a pass.
         let Ok(watch) = PressureWatch::open(mode) else {
             return;
         };
@@ -329,7 +328,15 @@ impl Smallvil {
             Generic::new(watch, Interest::READ, Mode::Level),
             |_, watch, state| {
                 match watch.notified() {
-                    Ok(true) => state.ebb.trim.pressure_pending = true,
+                    Ok(true) => {
+                        state.ebb.watch.pressure_signalled = true;
+                        if matches!(
+                            state.config.ebb.mode,
+                            EbbMode::Balanced | EbbMode::Aggressive
+                        ) {
+                            state.ebb.trim.pressure_pending = true;
+                        }
+                    }
                     Ok(false) => {}
                     Err(_) => {
                         state.ebb.pressure.registration = None;

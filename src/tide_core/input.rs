@@ -938,6 +938,28 @@ impl Smallvil {
     where
         I::Device: MappedInputDevice,
     {
+        let motion = matches!(
+            event,
+            InputEvent::PointerMotion { .. } | InputEvent::PointerMotionAbsolute { .. }
+        );
+        if motion {
+            // The client is about to hear the real position.
+            self.input.scroll_refresh_sent = None;
+        }
+        self.dispatch_input_event(event);
+        if motion {
+            // `last_activity` was stamped as this event entered dispatch, so
+            // Ebb's report-only pointer cost needs one more clock read.
+            self.ebb
+                .watch
+                .pointer_motion(self.input.last_activity.elapsed());
+        }
+    }
+
+    fn dispatch_input_event<I: InputBackend>(&mut self, event: InputEvent<I>)
+    where
+        I::Device: MappedInputDevice,
+    {
         // Device topology changes aren't user activity; every other variant
         // reaching this function is a real keyboard/pointer/touch event.
         if !matches!(
@@ -1190,6 +1212,13 @@ impl Smallvil {
                                 data.toast_output_width(),
                             );
                             data.request_redraw();
+                            return FilterResult::Intercept(());
+                        }
+
+                        // Escape ends a waiting `pick-window` and goes no
+                        // further, so it cannot also close the app in focus.
+                        if keysym == Keysym::Escape && data.window_pick_waiting() {
+                            data.finish_window_pick(Err("cancelled"));
                             return FilterResult::Intercept(());
                         }
 
@@ -1694,6 +1723,17 @@ impl Smallvil {
                         self.input.suppressed_pointer_buttons.insert(button);
                         self.minimap_click_travel();
                     }
+                    return;
+                }
+
+                // A waiting `pick-window` owns the next press: the left
+                // button answers with the window under the pointer (null
+                // over empty space), any other button cancels. The click is
+                // consumed here, never forwarded or turned into a grab, and
+                // the position was tracked by motion, not read from a grab.
+                if button_state == ButtonState::Pressed && self.window_pick_waiting() {
+                    self.input.suppressed_pointer_buttons.insert(button);
+                    self.answer_window_pick(button, pointer.current_location());
                     return;
                 }
 

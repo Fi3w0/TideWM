@@ -29,7 +29,7 @@ impl Smallvil {
     /// false`), exempting it from the automatic inactivity sink regardless
     /// of the global `depth { enabled }` setting.
     fn depth_exempt(&self, surface: &WlSurface) -> bool {
-        self.resolve_window_rules_for(surface).depth == Some(false)
+        self.is_x11_overlay(surface) || self.resolve_window_rules_for(surface).depth == Some(false)
     }
 
     pub(super) fn depth_live_alpha(&self, surface: &WlSurface) -> f32 {

@@ -541,6 +541,7 @@ pub fn init_winit(
                 } else {
                     false
                 };
+                state.ebb.watch.frame(!submitted);
                 if submitted {
                     state.mark_output_locked_frame(&entry.output);
                 }

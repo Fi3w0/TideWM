@@ -716,6 +716,11 @@ impl Smallvil {
     }
 
     pub(crate) fn start_window_open_animation(&mut self, surface: &WlSurface) {
+        if self.is_x11_overlay(surface) {
+            self.render.motion.window_open_animations.remove(surface);
+            self.render.motion.cascade_window_animations.remove(surface);
+            return;
+        }
         self.render
             .motion
             .closing_window_animations
@@ -1496,6 +1501,9 @@ impl Smallvil {
     /// triggers are being wired up -- new call sites should use
     /// `spawn_ripple` with an explicit trigger directly.
     pub(crate) fn spawn_window_map_ripple(&mut self, surface: &WlSurface) {
+        if self.is_x11_overlay(surface) {
+            return;
+        }
         self.spawn_ripple(surface, crate::config::RippleTrigger::Map);
     }
 

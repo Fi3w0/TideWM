@@ -100,6 +100,38 @@ pub fn init(config: &Path) -> io::Result<serde_json::Value> {
     Ok(serde_json::json!({"file":ebb,"created":created,"include_added":true,"backup":backup}))
 }
 
+/// Adds each listed app's own memory to an `ebb-stats` reply. Read here, in
+/// the CLI: `smaps_rollup` of a large client can take milliseconds, which the
+/// compositor's main loop should never spend on a report.
+pub fn add_client_memory(data: &mut serde_json::Value) {
+    // `get_mut`, not indexing: indexing would insert the missing keys.
+    let Some(entries) = data
+        .get_mut("apps")
+        .and_then(|apps| apps.get_mut("entries"))
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for entry in entries {
+        let pss = entry["pid"]
+            .as_i64()
+            .and_then(|pid| fs::read_to_string(format!("/proc/{pid}/smaps_rollup")).ok())
+            .and_then(|text| pss_bytes(&text));
+        entry["client_pss_bytes"] = serde_json::json!(pss);
+    }
+}
+
+fn pss_bytes(rollup: &str) -> Option<u64> {
+    rollup.lines().find_map(|line| {
+        line.strip_prefix("Pss:")?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()?
+            .checked_mul(1024)
+    })
+}
+
 pub fn default_config_path() -> io::Result<PathBuf> {
     let base =
         if let Some(path) = std::env::var_os("XDG_CONFIG_HOME").filter(|p| !p.is_empty()) {
@@ -155,6 +187,29 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn client_memory_is_added_per_app_and_unknown_stays_null() {
+        assert_eq!(
+            pss_bytes("Rss: 9 kB\nPss:   120 kB\nPss_Dirty: 4 kB\n"),
+            Some(122_880)
+        );
+        assert_eq!(pss_bytes("Rss: 9 kB\n"), None);
+        let mut data = serde_json::json!({"apps": {"entries": [
+            {"app_id": "self", "pid": std::process::id()},
+            {"app_id": "gone", "pid": null},
+        ]}});
+        add_client_memory(&mut data);
+        let entries = data["apps"]["entries"].as_array().unwrap();
+        assert!(entries[0]["client_pss_bytes"]
+            .as_u64()
+            .is_some_and(|pss| pss > 0));
+        assert!(entries[1]["client_pss_bytes"].is_null());
+        // Replies from an older compositor have no app list; leave them alone.
+        let mut old = serde_json::json!({"phase": 2});
+        add_client_memory(&mut old);
+        assert_eq!(old, serde_json::json!({"phase": 2}));
+    }
+
     #[test]
     fn init_refuses_to_shadow_inline_settings() {
         let root = std::env::temp_dir().join(format!("tide-ebb-inline-{}", std::process::id()));

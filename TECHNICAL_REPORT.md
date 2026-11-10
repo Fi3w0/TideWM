@@ -6,7 +6,7 @@ The quick technical picture: what TideWM is built from, what works, what's been 
 
 A Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay). Underneath is a complete tiling window manager: BSP, master/stack and cascade layouts, workspaces, multi-monitor, layer shell, IPC and XWayland. On top sits the water look (ripples, waves, glass, shadows, physics), and every piece of it is a config toggle.
 
-Current version: **0.91.20**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
+Current version: **0.91.33**, beta. 1.0 waits for a wider real-hardware pass (Intel, hybrid laptops, more distros).
 
 ## Architecture
 
@@ -17,9 +17,9 @@ Current version: **0.91.20**, beta. 1.0 waits for a wider real-hardware pass (In
   - **Scroll:** a scrolling strip of apps per monitor, niri-style.
 
   How they relate: [SPATIAL_MODEL.md](SPATIAL_MODEL.md). Scroll is covered [below](#scroll-engine).
-- **XWayland** through [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite), so X11 apps arrive as ordinary Wayland windows.
+- **XWayland** through [`xwayland-satellite`](https://github.com/Supreeeme/xwayland-satellite), so X11 apps arrive as ordinary Wayland windows. Override-redirect overlays without an X11 parent (Steam toasts, recorder overlays) use a read-only observer to recover their map position and avoid compositor decoration or focus on map. Matching is best-effort; see the [XWayland reference](DOCUMENTATION.md#xwayland--).
 - **One render pipeline.** Glass, shadows, rounding, borders and animations are drawn once per frame from a shared window-placement snapshot. The same path feeds both backends, screenshots, screen sharing and workspace transitions, so an effect never needs a second implementation.
-- **Monitor navigation:** directional or named `focus-monitor` actions restore recent window focus; `move-window-to-monitor` actions transfer the focused window to the destination active workspace, and Scroll adds whole-column transfers with `move-column-to-monitor`. Classic/Scroll also support whole-workspace transfers, keeping the number when free or selecting the first free slot. Focus and pointer follow using live logical output geometry. Multi-output protocol tests cover all three engines, groups, floating/pinned and fullscreen/maximized windows; native pointer/transfer appearance remains unverified.
+- **Monitor navigation:** directional or named `focus-monitor` actions restore recent window focus; `move-window-to-monitor` actions transfer the focused window to the destination active workspace, and Scroll adds whole-column transfers with `move-column-to-monitor`. Classic/Scroll also support whole-workspace transfers, keeping the number when free or selecting the first free slot. Focus and pointer follow using live logical output geometry. Multi-output protocol tests cover all three engines, groups, floating/pinned and fullscreen/maximized windows; the actions were also checked natively on two monitors (2026-11-02).
 - **Config:** [Wave](WAVE.md), data on the surface and Lua underneath. It's hot-reloaded, and a broken edit never half-applies.
 - **Memory:** about 50 MB PSS for plain tiling and 60–70 MB with the full water stack on AMD. About 100 MB on NVIDIA, a third of which is the driver's own mappings. 2 GB is a hard ceiling for feature growth, not a target.
 - **Attention-depth artwork:** shared PNG/JPEG/static WebP or looping GIF in place of deep windows' live pixels. One source/current frame, per-context GPU imports, optional title strips and one GIF clock; decoding stays off the compositor thread. Config and typed live IPC share the same settings. Hidden-workspace/locked/powered-off views pause animation. This does not suspend clients or their callbacks; GPU/CPU/RAM savings depend on the workload. See [`depth { }`](DOCUMENTATION.md#depth--).
@@ -95,6 +95,16 @@ scroll {
 gaps = 8
 ```
 
+### Pages
+
+`pages = true` turns the strip into pages for a tiling feel that still scrolls. A page is as wide as a column (`tile_proportion`; `1.0` gives full-screen pages, `0.94` with `center_focused` keeps the neighbors peeking in) and holds one or two windows that always fill it: side by side, or top and bottom in a vertical strip. New apps open on a new page; the view always shows whole pages, moving focus between the two windows of a page never moves it, and `scroll-left/right` flips whole pages. `swap-*` along the strip swaps the two windows, moves a window out of its page at the edge, or joins it to a neighbor page with room; `resize-*` moves the divider (each window keeps at least 20%). Nothing moves between pages on its own. Details: [DOCUMENTATION.md](DOCUMENTATION.md#scroll-pages).
+
+```wave
+scroll {
+    pages = true
+}
+```
+
 ### Moving around
 
 Scroll uses your existing binds. It adds none of its own.
@@ -129,7 +139,7 @@ A column holds one app or several stacked ones. The table is for horizontal stri
 | Mod + left-drag | Drop near a tile's left or right edge for a new column there, near its top or bottom to join that column, or in the middle to swap. A highlight shows where it lands |
 | Touchpad swipe | Slide the strip with your fingers |
 
-New apps open as their own column right after the focused column, never in the middle of it. Closing the top app of a column keeps the rest of the column and its width.
+New apps open as their own column right after the focused column, never in the middle of it. If a new app slid the strip and you close it without scrolling or focusing anything else, the strip goes back to where it was. Closing the top app of a column keeps the rest of the column and its width.
 
 Focusing with the mouse never moves the strip: hovering with `focus_follows_mouse`, clicking, touch and tablet pens all leave it alone. You can cross to another monitor or click a neighbor's peek without anything sliding away. Keyboard focus, `tidectl focus-window` / `focus-app` and notification clicks do bring the app into view. When the strip slides under a still mouse, the app now under the pointer gets the wheel and clicks right away.
 
@@ -146,7 +156,7 @@ For tools: each `tidectl outputs` entry has a `scroll` object (`offset`, `orient
 | Classic, Ocean and Scroll engines, live switching | Done |
 | Multi-monitor, hotplug, mixed scale, dragging tiles between monitors | Done |
 | Layer shell (bars, launchers, wallpapers, lock screens) | Done |
-| XWayland | Done, via xwayland-satellite |
+| XWayland | Via xwayland-satellite. Native 0.91.32 retest exposed client moves after mapping; 0.91.33 follows owner moves through optional RECORD support. Native acceptance, late-record association and Ocean/Scroll anchoring remain follow-ups. |
 | Screenshots, per-window capture, clipboard, session lock | Done; per-window capture canvas and rendering use the same source-output scale, preserving client subsurfaces/popups. |
 | Screen sharing (OBS, Discord) through TideWM's own portal | Done with `--features screencast` |
 | IPC and `tidectl`: windows with geometry and Scroll position, outputs, layers, an event stream for windows, workspaces, focus, monitors, modes, engine and Scroll, plus `doctor`, `report`, `perf` | Done |
@@ -157,7 +167,7 @@ For tools: each `tidectl outputs` entry has a `scroll` object (`offset`, `orient
 | Multi-GPU client offload | Done; not yet tested on a hybrid laptop |
 | AUR package | Not yet |
 
-## Ebb resource monitoring (0.91.2–0.91.4)
+## Ebb resource monitoring (0.91.2–0.91.24)
 
 Ebb adds bounded in-memory PSS/fd/texture-estimate history, growth and
 retained-reference findings, `tidectl ebb stats`, and a generic `ebb-warning`
@@ -166,11 +176,14 @@ that operation. Phase 2 adds out-of-view eviction of rebuildable `render.gpu`
 caches, map shrinking, per-mode hidden delays, caps that gate both cache and
 heap trimming, per-app `rule { ebb = ... }`, generated `ebb.wave` with
 `tidectl ebb init`, manual `tidectl ebb run [--deep]` passes, and optional kernel
-PSI pressure triggers. It adds no dependency or telemetry thread. Per-app
-ownership reports, a shell-facing pressure event and multi-day soak evidence
-remain planned; Phase 2 passes were exercised on a native session (manual
-light/deep runs), while real eviction of a surviving cache, PSI firing and
-screens-off passes remain unverified. See
+PSI pressure triggers. Phase 3 (0.91.24) adds a per-app "who holds what" list
+to `tidectl ebb stats`, an `ebb-pressure` event shells can react to, and two
+report-only findings (constant redraws with nothing to draw, costly pointer
+motion). It adds no dependency or telemetry thread. Multi-day soak evidence
+remains planned. Phase 2 passes were exercised on a native session (manual
+light/deep runs); pressure delivery was fixed in 0.91.24 and checked with real
+kernel pressure in a nested session, while real eviction of a surviving cache,
+native pressure and screens-off passes remain unverified. See
 [the Ebb reference](DOCUMENTATION.md#ebb) for settings,
 scopes and limitations. No memory-saving or cross-compositor performance claim
 follows from the implementation.
@@ -251,16 +264,6 @@ cargo build --release --locked --features screencast
 ```
 
 Or skip all of this and install a real package: [packaging/README.md](packaging/README.md).
-
-### Pages
-
-`pages = true` turns the strip into pages for a tiling feel that still scrolls. A page is as wide as a column (`tile_proportion`; `1.0` gives full-screen pages, `0.94` with `center_focused` keeps the neighbors peeking in) and holds one or two windows that always fill it: side by side, or top and bottom in a vertical strip. New apps open on a new page; the view always shows whole pages, moving focus between the two windows of a page never moves it, and `scroll-left/right` flips whole pages. `swap-*` along the strip swaps the two windows, moves a window out of its page at the edge, or joins it to a neighbor page with room; `resize-*` moves the divider (each window keeps at least 20%). Nothing moves between pages on its own. Details: [DOCUMENTATION.md](DOCUMENTATION.md#scroll-pages).
-
-```wave
-scroll {
-    pages = true
-}
-```
 
 ### Running
 

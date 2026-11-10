@@ -1,6 +1,7 @@
 //! Bounded, report-only resource monitoring. Owners still clean up on destruction.
 pub(crate) mod pressure;
 pub(crate) mod trim;
+pub(crate) mod watch;
 use serde::Serialize;
 use std::collections::VecDeque;
 
@@ -22,6 +23,8 @@ pub(crate) struct Sample {
     pub away_since_secs: Option<u64>,
     pub leftover_count: usize,
     pub leftovers: Vec<Leftover>,
+    /// Frame and pointer counters since the previous sample; latest only.
+    pub activity: Option<watch::Activity>,
     pub cost_us: u64,
 }
 
@@ -55,6 +58,7 @@ pub(crate) struct Warning {
 pub(crate) struct Ebb {
     pub trim: trim::TrimState,
     pub pressure: pressure::PressureState,
+    pub watch: watch::Watch,
     pub recent: VecDeque<Sample>,
     hourly: VecDeque<Hour>,
     warnings: Vec<Warning>,
@@ -145,6 +149,7 @@ impl Ebb {
         // the count, without multiplying per-owner allocations by 1440.
         if let Some(previous) = self.recent.back_mut() {
             previous.leftovers = Vec::new();
+            previous.activity = None;
         }
         self.recent.push_back(sample);
         if self.recent.len() > RECENT_LIMIT {
@@ -161,6 +166,9 @@ impl Ebb {
                 "TideWM retains {} references or cache entries for destroyed resources; see tidectl ebb stats",
                 sample.leftovers.iter().map(|entry| entry.count).sum::<usize>(),
             )));
+        }
+        if let Some(activity) = &sample.activity {
+            findings.extend(watch::findings(activity, sample.windows));
         }
         // A contiguous recent window only: no trend across activity/away
         // changes, unknown data, output sleep gaps, or a changed window count.
@@ -225,7 +233,7 @@ impl Ebb {
         for warning in &mut self.warnings {
             warning.active = false;
         }
-        // There are exactly eight fixed finding codes; reports cannot grow
+        // There are exactly ten fixed finding codes; reports cannot grow
         // with window count, arbitrary client strings or session duration.
         for (code, message) in findings {
             if let Some(warning) = self.warnings.iter_mut().find(|w| w.code == code) {
@@ -287,7 +295,7 @@ impl Ebb {
 
     pub fn stats(&self, config: &crate::config::EbbConfig) -> serde_json::Value {
         serde_json::json!({
-            "phase": 2,
+            "phase": 3,
             "config": config,
             "sample_count": self.recent.len(),
             "latest": self.recent.back(),
@@ -303,7 +311,10 @@ impl Ebb {
                 "released_texture_estimate_bytes": self.trim.released_texture_estimate_bytes,
                 "tracked_hidden": self.trim.hidden_since.len(), "last": self.trim.last_pass,
                 "queued": self.trim.requested, "deferred_reason": self.trim.deferred_reason },
-            "pressure": { "source": self.pressure.source, "pending": self.trim.pressure_pending },
+            "pressure": { "source": self.pressure.source, "pending": self.trim.pressure_pending,
+                "events": self.watch.pressure_events,
+                "last_event_uptime_secs": self.watch.last_pressure_event_secs,
+                "event_cooldown_secs": watch::PRESSURE_EVENT_COOLDOWN_SECS },
             "heap_trim": { "supported": cfg!(target_env = "gnu"), "calls": self.trim_calls,
                 "released_calls": self.trim_released, "last_cost_us": self.last_trim_cost_us,
                 "blocked": self.trim_blocked },
@@ -413,6 +424,7 @@ mod tests {
             away_since_secs: away.then_some(0),
             leftover_count: 0,
             leftovers: Vec::new(),
+            activity: None,
             cost_us: 300,
         }
     }
@@ -520,6 +532,25 @@ mod tests {
         s.uptime_secs = DAY;
         assert_eq!(ebb.record(s, 3600).len(), 1);
         ebb.record(sample(DAY + 60, 100 * MIB, false), 3600);
+        assert!(!ebb.warnings[0].active);
+    }
+
+    #[test]
+    fn watchdog_findings_use_the_latest_activity_only() {
+        let mut ebb = Ebb::default();
+        let mut busy = sample(60, 100 * MIB, false);
+        busy.activity = Some(watch::Activity {
+            period_secs: 60,
+            frames: 3600,
+            empty_frames: 3600,
+            pointer_events: 0,
+            pointer_mean_us: None,
+        });
+        let notified = ebb.record(busy, 3600);
+        assert_eq!(notified.len(), 1);
+        assert_eq!(notified[0].code, "idle-redraw");
+        ebb.record(sample(120, 100 * MIB, false), 3600);
+        assert!(ebb.recent[0].activity.is_none());
         assert!(!ebb.warnings[0].active);
     }
 

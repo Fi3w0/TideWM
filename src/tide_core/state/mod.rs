@@ -115,10 +115,10 @@ pub struct SpatialState {
     /// The running engine. Only `migrate_spatial_engine` changes it.
     pub(crate) engine: crate::config::SpatialEngine,
     /// Workspace-owned window placement for Classic and Scroll.
-    pub workspaces: workspace::WorkspaceState,
+    pub(crate) workspaces: workspace::WorkspaceState,
     /// Continuous world ownership, cameras, reefs, and bookmarks for the
     /// Ocean engine. Dormant while Classic is selected.
-    pub ocean: crate::ocean::OceanSpace,
+    pub(crate) ocean: crate::ocean::OceanSpace,
 }
 
 impl SpatialState {
@@ -178,6 +178,10 @@ pub struct Smallvil {
     /// DISPLAY installed by the live satellite. Kept alongside its PID so
     /// child-exit cleanup removes only TideWM's own value.
     pub(crate) xwayland_display: Option<String>,
+    /// Pending override-redirect rectangles reported by the X11 observer,
+    /// plus the surfaces already classified as overlays. See
+    /// `x11_overlay`'s module docs.
+    pub(crate) x11_overlay: crate::x11_overlay::X11OverlayState,
 
     /// Which backend is driving this session: `"winit"` (nested) or
     /// `"udev"` (standalone DRM/TTY). Set by `main.rs` after backend init;

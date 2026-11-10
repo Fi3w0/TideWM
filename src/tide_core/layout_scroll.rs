@@ -1064,6 +1064,8 @@ impl Layouts {
             center.unwrap_or_else(|| self.scroll_centers(&slots, slot, previous, viewport));
         let offset = scroll::reveal(previous, slot.start, slot.extent, viewport, center)
             .clamp(minimum, maximum);
+        self.scroll
+            .note_reveal(surface, &output, key, previous, offset);
         self.scroll.set_offset(&output, key, offset);
         let x_changed = (previous - offset).abs() > f64::EPSILON;
         let y_changed = self.scroll_reveal_stack(surface, area, gap);

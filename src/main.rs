@@ -15,6 +15,7 @@ mod screencast;
 mod session_env;
 mod tide_core;
 mod visual;
+mod x11_overlay;
 mod xwayland;
 
 pub(crate) use tide_core::{
@@ -807,6 +808,13 @@ fn print_help() {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Internal X11 override-redirect observer. Spawned by `x11_overlay::start`
+    // as the same binary so packaging stays one executable, and handled
+    // before tracing/backend/config initialization: this mode is a plain X11
+    // client, not a compositor.
+    if std::env::args_os().nth(1).as_deref() == Some(OsStr::new(x11_overlay::OBSERVER_FLAG)) {
+        return x11_overlay::run_observer().map_err(Into::into);
+    }
     let args = parse_args();
 
     // Log to stderr, not fmt()'s default stdout: a display-manager session
@@ -904,6 +912,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.xwayland_display = _satellite
         .as_ref()
         .map(|satellite| satellite.display_name.clone());
+    if let Some(satellite) = _satellite.as_ref() {
+        state.x11_overlay =
+            crate::x11_overlay::start(&event_loop.handle(), &satellite.display_name);
+    }
 
     // After backend init, not inside `Smallvil::new`: the DBus service
     // thread needs a real initial output list (for `RecordMonitor`'s

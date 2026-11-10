@@ -241,6 +241,7 @@ impl Smallvil {
             display_handle: dh,
             xwayland_satellite_pid: None,
             xwayland_display: None,
+            x11_overlay: crate::x11_overlay::X11OverlayState::default(),
             backend_name: "unknown",
             input: InputState {
                 window_focus: None,
@@ -264,6 +265,7 @@ impl Smallvil {
                 last_pointer_motion: Instant::now(),
                 cursor_idle_timer_armed: false,
                 last_activity: Instant::now(),
+                scroll_refresh_sent: None,
                 cursor_status: CursorImageStatus::default_named(),
                 dnd_icon: None,
                 cursor_theme: None,
@@ -334,6 +336,7 @@ impl Smallvil {
             config_reload_timer_armed: false,
 
             ipc: IpcState {
+                pick: None,
                 subscribers: HashMap::new(),
                 seen: None,
                 flush_token: None,

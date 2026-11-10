@@ -2,6 +2,51 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.33 · 2026-11-10 — Follow X11 overlay moves after mapping
+
+- X11 overlays can choose their position after opening and animate toward it. TideWM now follows moves requested by the window's owning X11 client when the server supports RECORD, while ignoring satellite's placement feedback. This fixes the late-move case that 0.91.32 froze at its initial position.
+
+## 0.91.32 · 2026-11-10 — X11 popup matching and reuse
+
+- Ordinary X11 windows no longer inherit an unmapped popup's position or lose focus just because their sizes match. Conflicting identities and ambiguous matches are left alone.
+- Reused X11 popups keep their placement after unmapping and reopening. Short-lived popups no longer stop the position observer, and non-ASCII titles survive split pipe reads.
+- Popup placement uses the X11 geometry events up to mapping, so a later move cannot overwrite the recorded map position.
+
+## 0.91.31 · 2026-11-10 — X11 overlays use their position at map time
+
+- X11 override-redirect windows can move between being created and being mapped; Steam's friend-playing toast is created centered on its main window and only moves to the bottom-right just before it maps. TideWM now reads the X11 rect at `MapNotify`, not `CreateNotify`, so the toast lands at the side like other desktops instead of staying in the middle. No app-specific rule; any OR window that sets its position before mapping gets the same treatment.
+
+## 0.91.30 · 2026-11-10 — X11 overlays keep their position
+
+- X11 override-redirect windows that arrive without an X11 parent (Steam's friend-playing toasts, screen-recorder overlays) now open where the X11 app asked for them, floating and without taking focus or getting TideWM borders, shadows, rounding, glass or depth. Before, xwayland-satellite mapped them as ordinary toplevels and TideWM centered them. No config rule is needed.
+
+## 0.91.29 · 2026-11-10 — No repeated pointer position before every wheel step in Scroll
+
+- Scroll: TideWM no longer re-sends the pointer position to the app before every wheel step and click. It is sent only when the strip moved the app under a still pointer. This removes a difference from Classic that may be why the Steam client ignores the wheel (#6); that part is not confirmed yet.
+
+## 0.91.28 · 2026-11-10 — Pick a window with a click
+
+- New `tidectl pick-window [--timeout <seconds>]` (IPC `{"request":"pick-window"}`): the pointer becomes a crosshair, and your next left click prints that window, the same entry `tidectl windows` shows. Clicking empty space answers with nothing; Escape or any other mouse button cancels; it gives up after 30 seconds by default. The click is not passed to the app. Useful for scripts and shells that need you to choose a window.
+
+## 0.91.27 · 2026-11-10 — `tidectl perf` says why a fullscreen app is not scanned out
+
+- `tidectl perf --json` now counts, per monitor, the frames that had a fullscreen window and what kept that window from being handed straight to the display: something drawn above it, a buffer that is not opaque, a surface that does not cover the monitor, or the graphics driver refusing it. Report only; nothing about rendering changes.
+
+## 0.91.26 · 2026-11-10 — Shells hear when an app goes fullscreen by itself
+
+- Fixed: `window-changed` was only sent when you toggled fullscreen or maximize with a keybind. An app that goes fullscreen or maximizes on its own (every game, a video player's fullscreen button) now sends it too, so bars and shells can react, for example by stopping a video wallpaper under a fullscreen game.
+
+## 0.91.25 · 2026-11-10 — Closing a new window puts the strip back
+
+- Scroll: when a new window slides the strip and you close it (or move it out of the strip) without scrolling or focusing anything else, the strip returns to where it was before the window opened, like niri. If you moved the view in between, it stays where you left it.
+
+## 0.91.24 · 2026-11-10 — Ebb names apps and tells shells about memory pressure
+
+- `tidectl ebb stats` now lists each app with the caches TideWM holds for it, an estimate of the buffers it has on screen, and the app's own memory, so you can see who is holding what.
+- New `ebb-pressure` event on the `ebb` channel (and `on "ebb-pressure"` in Wave) when the system runs short of memory, at most once a minute, so a shell can drop its own caches. It is sent in every Ebb mode; only `balanced` and `aggressive` also trim, as before.
+- Ebb now reports two more findings, without changing anything itself: redrawing constantly with nothing to draw, and pointer motion that costs too much.
+- Fixed: Ebb never actually received the kernel's memory-pressure notifications, so `balanced` and `aggressive` did not trim under pressure.
+
 ## 0.91.23 · 2026-11-02 — Pages keep your width and centering
 
 - Pages now use your normal column width and centering: with `tile_proportion = 0.94` and `center_focused`, the page in view is centered and the pages beside it peek in. `tile_proportion = 1.0` still gives full-screen pages.

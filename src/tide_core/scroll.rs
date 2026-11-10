@@ -267,9 +267,60 @@ pub struct ScrollState {
     /// Vertical stack camera, keyed by the column head. Only used when
     /// `scroll.stack` is not `Fit`.
     stack_offsets: HashMap<WlSurface, f64>,
+    /// A window about to be revealed for the first time after mapping.
+    pending_open: Option<WlSurface>,
+    /// The window that last opened as a column, with its strip's view before
+    /// and after that first reveal. Leaving the strip while the view is still
+    /// the one the open produced puts the earlier view back.
+    opened: Option<OpenedColumn>,
 }
+
+struct OpenedColumn {
+    surface: WlSurface,
+    strip: (String, u32),
+    before: f64,
+    after: f64,
+}
+
 impl ScrollState {
+    /// The next reveal of `surface` is its first as a new window.
+    pub(crate) fn expect_open(&mut self, surface: &WlSurface) {
+        self.pending_open = Some(surface.clone());
+    }
+
+    /// Records a first reveal; revealing any other window ends the episode.
+    pub(crate) fn note_reveal(
+        &mut self,
+        surface: &WlSurface,
+        output: &str,
+        workspace: u32,
+        before: f64,
+        after: f64,
+    ) {
+        if self.pending_open.as_ref() == Some(surface) {
+            self.pending_open = None;
+            self.opened = Some(OpenedColumn {
+                surface: surface.clone(),
+                strip: (output.to_string(), workspace),
+                before,
+                after,
+            });
+        } else if self
+            .opened
+            .as_ref()
+            .is_some_and(|opened| opened.surface != *surface)
+        {
+            self.opened = None;
+        }
+    }
+
+    fn forget_opened_strip(&mut self, output: &str, workspace: u32) {
+        self.opened
+            .take_if(|opened| opened.strip.0 == output && opened.strip.1 == workspace);
+    }
+
     pub(crate) fn forget_strip(&mut self, output: &str, workspace: u32) {
+        self.forget_opened_strip(output, workspace);
         let key = (output.to_string(), workspace);
         self.offsets.remove(&key);
         self.float_offsets.remove(&key);
@@ -279,6 +330,8 @@ impl ScrollState {
     /// Move one independent strip's remembered view. Sectioned workspaces
     /// share an output-wide key and are handled by their caller instead.
     pub(crate) fn move_strip(&mut self, from: &str, workspace: u32, to: &str, target: u32) {
+        self.forget_opened_strip(from, workspace);
+        self.forget_opened_strip(to, target);
         let source = (from.to_string(), workspace);
         let destination = (to.to_string(), target);
         let offset = self.offsets.remove(&source);
@@ -457,6 +510,15 @@ impl ScrollState {
         self.weights.clear();
     }
     pub fn forget(&mut self, surface: &WlSurface) {
+        self.pending_open.take_if(|pending| pending == surface);
+        if let Some(opened) = self.opened.take_if(|opened| opened.surface == *surface) {
+            let (output, workspace) = &opened.strip;
+            // Any pan, resize or other reveal since the open changed the
+            // view; then it is the user's and stays.
+            if self.offset(output, *workspace) == opened.after {
+                self.set_offset(output, *workspace, opened.before);
+            }
+        }
         self.proportions.remove(surface);
         self.fullscreen_extents.remove(surface);
         self.stacked.remove(surface);

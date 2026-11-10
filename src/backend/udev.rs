@@ -1964,8 +1964,13 @@ fn render_surface(
     // desktop underneath. A compositor-owned default glyph is safe to draw
     // over the lock and keeps the pointer usable before the lock client sets
     // its own state.
+    // A waiting `pick-window` shows a crosshair so the next click reads as
+    // "choose", whatever cursor the client under the pointer asked for.
+    let pick_status = CursorImageStatus::Named(CursorIcon::Crosshair);
     let effective_cursor_status = if locked {
         &forced_visible_status
+    } else if state.ipc.pick.is_some() {
+        &pick_status
     } else if idle_hidden || pointer_locked {
         &hidden_status
     } else if matches!(state.input.cursor_status, CursorImageStatus::Hidden)
@@ -2236,6 +2241,23 @@ fn render_surface(
     sample.scene = render_start
         .duration_since(frame_start)
         .saturating_sub(sample.backdrops);
+    // Report-only: on frames with a fullscreen window, note what would keep
+    // its surface off the primary plane (see `tidectl perf`).
+    sample.fullscreen = state
+        .fullscreen
+        .iter()
+        .find(|(_, entry)| entry.output == output.name())
+        .and_then(|(fullscreen_surface, _)| {
+            let mode = output.current_mode()?;
+            Some(super::perf::scanout_blocker(
+                &elements,
+                &smithay::backend::renderer::element::Id::from_wayland_resource(fullscreen_surface),
+                smithay::utils::Rectangle::from_size(
+                    output.current_transform().transform_size(mode.size),
+                ),
+                smithay::utils::Scale::from(output.current_scale().fractional_scale()),
+            ))
+        });
     let render_result = surface.compositor.render_frame::<_, OutputRenderElements>(
         renderer,
         &elements,
@@ -2256,6 +2278,20 @@ fn render_surface(
                 PrimaryPlaneElement::Swapchain(_)
             );
             sample.cursor_plane = render_result.cursor_element.is_some();
+            for element in render_result.states.states.values() {
+                use smithay::backend::renderer::element::{
+                    RenderElementPresentationState::Rendering, RenderingReason,
+                };
+                match element.presentation_state {
+                    Rendering {
+                        reason: Some(RenderingReason::FormatUnsupported),
+                    } => sample.scanout_format_unsupported = true,
+                    Rendering {
+                        reason: Some(RenderingReason::ScanoutFailed),
+                    } => sample.scanout_test_failed = true,
+                    _ => {}
+                }
+            }
             sample.needs_sync = render_result.needs_sync();
             sample.empty = render_result.is_empty;
             if let PrimaryPlaneElement::Swapchain(ref element) = render_result.primary_element {
@@ -2404,6 +2440,7 @@ fn render_surface(
     }
 
     sample.total = frame_start.elapsed();
+    state.ebb.watch.frame(sample.empty);
     state
         .render
         .motion

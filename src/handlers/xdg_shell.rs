@@ -245,24 +245,33 @@ impl XdgShellHandler for Smallvil {
         wl_output: Option<wl_output::WlOutput>,
     ) {
         let wl_surface = surface.wl_surface().clone();
+        let before = self.sizing_state(&wl_surface);
         self.do_fullscreen_request(surface, wl_output);
         self.refresh_wlr_toplevel_state(&wl_surface);
+        self.emit_sizing_change(&wl_surface, before);
     }
 
     fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        let wl_surface = surface.wl_surface().clone();
+        let before = self.sizing_state(&wl_surface);
         self.do_unfullscreen(&surface);
+        self.emit_sizing_change(&wl_surface, before);
     }
 
     fn maximize_request(&mut self, surface: ToplevelSurface) {
         let wl_surface = surface.wl_surface().clone();
+        let before = self.sizing_state(&wl_surface);
         self.do_maximize_request(surface);
         self.refresh_wlr_toplevel_state(&wl_surface);
+        self.emit_sizing_change(&wl_surface, before);
     }
 
     fn unmaximize_request(&mut self, surface: ToplevelSurface) {
         let wl_surface = surface.wl_surface().clone();
+        let before = self.sizing_state(&wl_surface);
         self.do_unmaximize_request(surface);
         self.refresh_wlr_toplevel_state(&wl_surface);
+        self.emit_sizing_change(&wl_surface, before);
     }
 
     fn grab(&mut self, surface: PopupSurface, _seat: wl_seat::WlSeat, serial: Serial) {
@@ -1151,7 +1160,7 @@ impl Smallvil {
             self.initial_toplevel_identity
                 .insert(surface.clone(), identity);
         }
-        let rule = self.resolve_window_rules_for(surface);
+        let mut rule = self.resolve_window_rules_for(surface);
         // A rule matching this window may itself assign tags a *different*
         // rule keys off (`rule { tag = [...] }`) -- re-resolve once more so
         // that second rule's effects apply at this same first map, instead
@@ -1160,15 +1169,40 @@ impl Smallvil {
         // fixed-point loop: a tag-keyed rule that itself sets `add_tag`
         // still won't feed a third rule in the same map, an acknowledged
         // ceiling rather than a silent one.
-        let rule = if rule.add_tag.is_empty() {
-            rule
-        } else {
+        if !rule.add_tag.is_empty() {
             self.window_tags
                 .entry(surface.clone())
                 .or_default()
                 .extend(rule.add_tag.iter().cloned());
-            self.resolve_window_rules_for(surface)
-        };
+            rule = self.resolve_window_rules_for(surface);
+        }
+        // An X11 override-redirect window reaches TideWM as an ordinary
+        // toplevel because satellite has no overlay role for it. The
+        // observer remembers the rect the client asked for before satellite
+        // moved the X11 window, and this native placement replaces the
+        // centered-floating default. It is a placement decision, so it
+        // overrides the config rule's one-shot placement fields (but not
+        // live effects such as opacity).
+        if let Some(overlay) = self.take_x11_overlay(surface) {
+            self.x11_overlay.mark_surface(surface.clone());
+            rule.float = true;
+            rule.pin = false;
+            rule.tile = false;
+            rule.maximize = false;
+            rule.fullscreen = false;
+            rule.pseudo_tile = false;
+            rule.no_focus = true;
+            rule.workspace = None;
+            rule.pin_output = None;
+            rule.output = Some(overlay.output);
+            rule.position = Some(overlay.position);
+            rule.persistent_size = false;
+            rule.size = None;
+            rule.min_width = None;
+            rule.max_width = None;
+            rule.min_height = None;
+            rule.max_height = None;
+        }
         if let Some(opacity) = crate::config::WindowOpacity::from_rule(&rule) {
             self.render
                 .windows
@@ -1459,9 +1493,11 @@ impl Smallvil {
         // response with one synthetic downward impulse near the final center.
         const MAP_KICK_IMPULSE: f64 = 120.0;
         if let Some(center) = self.window_center_for_kick(surface) {
-            if let Some(window) = self.mapped_toplevel_window(surface) {
-                if let Some(output) = self.output_for_window(&window) {
-                    self.float_physics_kick_near(&output, center, (0.0, MAP_KICK_IMPULSE));
+            if !self.is_x11_overlay(surface) {
+                if let Some(window) = self.mapped_toplevel_window(surface) {
+                    if let Some(output) = self.output_for_window(&window) {
+                        self.float_physics_kick_near(&output, center, (0.0, MAP_KICK_IMPULSE));
+                    }
                 }
             }
         }
@@ -1692,6 +1728,7 @@ impl Smallvil {
         self.spatial.workspaces.output_pins.remove(surface);
         self.render.windows.window_opacity.remove(surface);
         self.render.windows.window_glass_modes.remove(surface);
+        self.x11_overlay.forget_surface(surface);
         self.render
             .windows
             .window_shader_assignments
@@ -1849,6 +1886,24 @@ impl Smallvil {
                     .swallow
                     .then_some(surface)
             })
+    }
+
+    /// (fullscreen, maximized) as IPC reports them.
+    fn sizing_state(&self, surface: &WlSurface) -> (bool, bool) {
+        (
+            self.fullscreen.contains_key(surface),
+            self.maximized.contains_key(surface),
+        )
+    }
+
+    /// A client asking for fullscreen or maximize itself (every game does)
+    /// is a window change shells must hear about, exactly like the keybind.
+    fn emit_sizing_change(&mut self, surface: &WlSurface, before: (bool, bool)) {
+        if surface.is_alive() && self.sizing_state(surface) != before {
+            self.emit_ipc_event(crate::ipc::IpcEvent::WindowChanged {
+                surface: surface.clone(),
+            });
+        }
     }
 
     /// The process ID on the other end of `surface`'s client socket

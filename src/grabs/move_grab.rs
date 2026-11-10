@@ -88,9 +88,7 @@ impl PointerGrab<Smallvil> for MoveSurfaceGrab {
             // directly over a tile highlights it (a drop would reattach
             // there); everywhere else shows nothing (a drop stays
             // floating). Precise point-containment, matching
-            // `smart_attach_ocean_floating`'s own drop decision -- see that
-            // function's comment for why the proximity-radius
-            // `smart_tiling_target` isn't used here either. Reuses the same
+            // `smart_attach_ocean_floating`'s own drop decision. Reuses the same
             // `drag_hint` the tile-swap grab already draws through
             // `window_border_element` -- no new visual code, just feeding it
             // from a second grab.

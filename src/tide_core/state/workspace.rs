@@ -21,24 +21,24 @@ use super::{
 /// scratchpads and the Classic Depth Deck (plan step 8c). Lives in
 /// `SpatialState::workspaces`.
 pub struct WorkspaceState {
-    pub layout: Layouts,
+    pub(crate) layout: Layouts,
     /// (output, workspace) tag for every *floating* window. Tiled windows
     /// don't need one -- their workspace is implicit in which `Layouts` tree
     /// holds them -- but a floating window isn't tracked in `Layouts` at
     /// all, so `switch_workspace` needs this to know which floating windows
     /// belong to the workspace it's hiding or showing.
-    pub floating_workspace: HashMap<WlSurface, FloatingTag>,
+    pub(crate) floating_workspace: HashMap<WlSurface, FloatingTag>,
     /// Windows exempt from `switch_workspace`'s hide/show cycle -- stay
     /// mapped and visible no matter which workspace is active on their
     /// output. Always floating (`toggle_pin` un-tiles first if needed; a
     /// tiled pinned window has no coherent meaning when only one
     /// workspace's tree is ever rendered per output at a time).
-    pub pinned: HashSet<WlSurface>,
+    pub(crate) pinned: HashSet<WlSurface>,
     /// Tiled windows that keep `config.pseudo_tile_scale` of their tile's
     /// size instead of filling it -- a rect override `retile()` applies,
     /// same shape as the fullscreen override. Stays in its `Layouts` slot
     /// throughout, unlike floating: only the rendered rect changes.
-    pub pseudo_tiled: HashSet<WlSurface>,
+    pub(crate) pseudo_tiled: HashSet<WlSurface>,
     /// Per-output "workspace to return to" for `toggle_scratchpad`, so
     /// toggling the scratchpad off doesn't strand you on some fixed
     /// fallback workspace regardless of where you actually were.
@@ -83,10 +83,10 @@ pub struct WorkspaceState {
     /// recalls the window via `recall_pinned_windows_to`. Cleared
     /// per-surface in `detach_mapped_toplevel`, same lifecycle as
     /// `window_tags`.
-    pub output_pins: HashMap<WlSurface, String>,
+    pub(crate) output_pins: HashMap<WlSurface, String>,
     /// Structural parked-window state for Classic workspaces. This remains
     /// empty unless the opt-in `classic_depth` feature is used.
-    pub classic_depth: crate::classic_depth::ClassicDepthDeck,
+    pub(crate) classic_depth: crate::classic_depth::ClassicDepthDeck,
 }
 
 /// Fiw's transfer rule: keep the number if vacant, otherwise choose the

@@ -1162,6 +1162,7 @@ impl Layouts {
             .collect()
     }
 
+    #[cfg(test)]
     pub fn ratio_at(&self, output: &str, workspace: u32, path: &[Side]) -> Option<f32> {
         self.trees
             .get(&(output.to_string(), workspace))?
