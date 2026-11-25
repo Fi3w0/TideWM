@@ -2,6 +2,12 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.39 — Compass and minimap glow fixes
+
+- Fiw (2026-11-26) reported compass cues looking "squared" and cut. With `glow` above ~1.4 the smoothstep reach exceeded the element square, so the light ended in a hard box (nested captures). The shader now multiplies by a radial window `1 - smoothstep(0.45, 1.0, length(p))`; a first square window (`max(|x|,|y|)`) still read as boxed and was replaced.
+- Minimap: panel corner fade scaled only alpha; the buffer composites premultiplied, so color stayed in the cut corners (square corners). All four channels now scale. Rim pass skipped the box's axis-aligned square while the fill is rounded, leaving unpainted notches at box corners; it now skips by rounded coverage and weights by `1 - inside`. Rim alpha falls off quadratically with `rounded_rect_distance` over `glow_spread`, so it reads as light instead of a 9 px solid band.
+- `minimap::paint` split out of `MinimapPeek::build`; `dump_minimap_looks` (`#[ignore]`, `TIDEWM_MINIMAP_DUMP`) writes painted panels for presets and a custom config so the hold-only UI can be inspected. Checked by compositing the dumps over a nested Ocean capture.
+
 ## 0.91.38 — Configurable Ocean minimap and compass
 
 - Fiw (2026-11-26) chose: minimap — every preset value, labels/font, size/placement, cursor marker; compass — cue every window, shape/glow details, urgent pulse, labels. `MinimapConfig`/`CompassConfig` lose `Copy` (font paths).

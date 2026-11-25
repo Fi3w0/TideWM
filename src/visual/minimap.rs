@@ -448,219 +448,33 @@ impl MinimapPeek {
         } else {
             1.0
         };
-        let panel = style.panel(output_geometry.size);
-        let (width, height) = (
-            ((f64::from(panel.size.w) * scale).round() as i32).max(1),
-            ((f64::from(panel.size.h) * scale).round() as i32).max(1),
+        let map = paint(
+            &output_name,
+            output_geometry.size,
+            scale,
+            &style,
+            windows,
+            reef_rects,
+            viewports,
         );
-
-        let mut extent: Option<Rectangle<f64, Logical>> = None;
-        let mut grow = |rect: Rectangle<i32, Logical>| {
-            let rect = rect.to_f64();
-            extent = Some(match extent {
-                Some(current) => current.merge(rect),
-                None => rect,
-            });
-        };
-        for (rect, _, _) in windows {
-            grow(*rect);
-        }
-        for rect in reef_rects {
-            grow(*rect);
-        }
-        for (_, rect) in viewports {
-            grow(*rect);
-        }
-        let content = extent.unwrap_or_else(|| {
-            Rectangle::new(
-                Point::from((0.0, 0.0)),
-                Size::from((MIN_EXTENT, MIN_EXTENT)),
-            )
-        });
-
-        let pad_w = (content.size.w * MARGIN_FRACTION).max(MIN_EXTENT * MARGIN_FRACTION);
-        let pad_h = (content.size.h * MARGIN_FRACTION).max(MIN_EXTENT * MARGIN_FRACTION);
-        let padded: Rectangle<f64, Logical> = Rectangle::new(
-            Point::from((content.loc.x - pad_w, content.loc.y - pad_h)),
-            Size::from((
-                (content.size.w + pad_w * 2.0).max(MIN_EXTENT),
-                (content.size.h + pad_h * 2.0).max(MIN_EXTENT),
-            )),
-        );
-
-        // World <-> panel (logical); the raster multiplies by `scale`.
-        let (panel_w, panel_h) = (f64::from(panel.size.w), f64::from(panel.size.h));
-        let world_scale = (panel_w / padded.size.w).min(panel_h / padded.size.h);
-        let letterbox_x = (panel_w - padded.size.w * world_scale) / 2.0;
-        let letterbox_y = (panel_h - padded.size.h * world_scale) / 2.0;
-        // Folds letterbox centering into world_origin so world<->panel is
-        // one multiply/divide each way.
-        let world_origin = Point::from((
-            padded.loc.x - letterbox_x / world_scale,
-            padded.loc.y - letterbox_y / world_scale,
-        ));
-
-        let mut pixels = vec![0u8; (width * height * 4) as usize];
-        fill_gradient(
-            &mut pixels,
-            width,
-            height,
-            style.background_top,
-            style.background_bottom,
-            style.background_alpha,
-        );
-        let panel_radius = style.panel_radius * scale as f32;
-        if panel_radius > 0.0 {
-            // Fade the panel's corners out.
-            for y in 0..height {
-                for x in 0..width {
-                    let coverage =
-                        rounded_rect_coverage_local(x, y, 0, 0, width, height, panel_radius);
-                    if coverage < 1.0 {
-                        let i = ((y * width + x) * 4) as usize;
-                        pixels[i + 3] = (f32::from(pixels[i + 3]) * coverage) as u8;
-                    }
-                }
-            }
-        }
-
-        let px = scale * world_scale;
-        let world_to_canvas = |rect: Rectangle<i32, Logical>| -> Rectangle<i32, Logical> {
-            let rect = rect.to_f64();
-            let x0 = (rect.loc.x - world_origin.x) * px;
-            let y0 = (rect.loc.y - world_origin.y) * px;
-            Rectangle::new(
-                Point::from((x0.round() as i32, y0.round() as i32)),
-                Size::from((
-                    (rect.size.w * px).round().max(1.0) as i32,
-                    (rect.size.h * px).round().max(1.0) as i32,
-                )),
-            )
-        };
-        let s = scale as f32;
-        let radius = style.radius * s;
-        let spread = (style.rim_spread * s).round() as i32;
-        let thin = (s.round() as i32).max(1);
-        let font_px = style.font_size * s;
-        let label_h = (font_px * 1.6).round() as i32 + (LABEL_PAD * s) as i32;
-        let label = |pixels: &mut [u8], text: &str, rect: Rectangle<i32, Logical>| {
-            crate::text::draw_line(
-                pixels,
-                width,
-                height,
-                &style.font,
-                text,
-                font_px,
-                (
-                    rect.loc.x,
-                    rect.loc.y,
-                    rect.size.w,
-                    label_h.min(rect.size.h),
-                ),
-                (LABEL_PAD * s).round() as i32,
-                style.title_color,
-            );
-        };
-
-        for (rect, title, urgent) in windows {
-            let canvas_rect = world_to_canvas(*rect);
-            let border = if *urgent {
-                style.accent
-            } else {
-                style.window_border
-            };
-            let rim = if *urgent {
-                Some(style.accent)
-            } else {
-                style.soft_rim
-            };
-            if style.radius > 0.0 || style.soft_rim.is_some() {
-                draw_rounded_box(
-                    &mut pixels,
-                    width,
-                    height,
-                    canvas_rect,
-                    Some((style.window_fill, style.window_alpha)),
-                    (border, 235),
-                    radius,
-                    rim.map(|color| (color, style.rim_alpha)),
-                    spread,
-                );
-            } else {
-                fill_rect(
-                    &mut pixels,
-                    width,
-                    height,
-                    canvas_rect,
-                    rgba_a(style.window_fill, style.window_alpha),
-                );
-                stroke_rect(
-                    &mut pixels,
-                    width,
-                    height,
-                    canvas_rect,
-                    as_tuple(border),
-                    thin,
-                );
-            }
-            if style.show_titles {
-                label(&mut pixels, title, canvas_rect);
-            }
-        }
-        for (name, rect) in viewports {
-            let canvas_rect = world_to_canvas(*rect);
-            let active = name == &output_name;
-            let border = if active {
-                style.accent
-            } else {
-                style.viewport_border
-            };
-            if style.radius > 0.0 {
-                draw_rounded_box(
-                    &mut pixels,
-                    width,
-                    height,
-                    canvas_rect,
-                    None,
-                    (border, 255),
-                    radius,
-                    active.then_some((style.accent, 170)),
-                    spread,
-                );
-            } else {
-                stroke_rect(
-                    &mut pixels,
-                    width,
-                    height,
-                    canvas_rect,
-                    as_tuple(border),
-                    if active { thin * 2 } else { thin },
-                );
-            }
-            if style.show_output_names {
-                label(&mut pixels, name, canvas_rect);
-            }
-        }
-
         let buffer = MemoryRenderBuffer::from_slice(
-            &pixels,
+            &map.pixels,
             Fourcc::Argb8888,
-            (width, height),
+            map.physical,
             1,
             Transform::Normal,
             None,
         );
-
         Self {
             output_name,
             buffer,
-            panel,
-            physical: (width, height),
+            panel: map.panel,
+            physical: map.physical,
             output_loc: output_geometry.loc,
             cursor_buffer: build_cursor_glyph(&style, scale),
             cursor_size: style.cursor_size,
-            world_origin,
-            scale: world_scale,
+            world_origin: map.world_origin,
+            scale: map.world_scale,
             last_location: pointer_location,
         }
     }
@@ -750,6 +564,233 @@ impl MinimapPeek {
     }
 }
 
+/// The map's pixels and the transform that drew them.
+struct MapRaster {
+    pixels: Vec<u8>,
+    physical: (i32, i32),
+    panel: Rectangle<i32, Logical>,
+    world_origin: Point<f64, Logical>,
+    world_scale: f64,
+}
+
+/// Draws the map panel at physical `scale` (see `MinimapPeek::build`).
+#[allow(clippy::too_many_arguments)]
+fn paint(
+    output_name: &str,
+    output_size: Size<i32, Logical>,
+    scale: f64,
+    style: &MinimapStyle,
+    windows: &[(Rectangle<i32, Logical>, String, bool)],
+    reef_rects: &[Rectangle<i32, Logical>],
+    viewports: &[(String, Rectangle<i32, Logical>)],
+) -> MapRaster {
+    let panel = style.panel(output_size);
+    let (width, height) = (
+        ((f64::from(panel.size.w) * scale).round() as i32).max(1),
+        ((f64::from(panel.size.h) * scale).round() as i32).max(1),
+    );
+
+    let mut extent: Option<Rectangle<f64, Logical>> = None;
+    let mut grow = |rect: Rectangle<i32, Logical>| {
+        let rect = rect.to_f64();
+        extent = Some(match extent {
+            Some(current) => current.merge(rect),
+            None => rect,
+        });
+    };
+    for (rect, _, _) in windows {
+        grow(*rect);
+    }
+    for rect in reef_rects {
+        grow(*rect);
+    }
+    for (_, rect) in viewports {
+        grow(*rect);
+    }
+    let content = extent.unwrap_or_else(|| {
+        Rectangle::new(
+            Point::from((0.0, 0.0)),
+            Size::from((MIN_EXTENT, MIN_EXTENT)),
+        )
+    });
+
+    let pad_w = (content.size.w * MARGIN_FRACTION).max(MIN_EXTENT * MARGIN_FRACTION);
+    let pad_h = (content.size.h * MARGIN_FRACTION).max(MIN_EXTENT * MARGIN_FRACTION);
+    let padded: Rectangle<f64, Logical> = Rectangle::new(
+        Point::from((content.loc.x - pad_w, content.loc.y - pad_h)),
+        Size::from((
+            (content.size.w + pad_w * 2.0).max(MIN_EXTENT),
+            (content.size.h + pad_h * 2.0).max(MIN_EXTENT),
+        )),
+    );
+
+    // World <-> panel (logical); the raster multiplies by `scale`.
+    let (panel_w, panel_h) = (f64::from(panel.size.w), f64::from(panel.size.h));
+    let world_scale = (panel_w / padded.size.w).min(panel_h / padded.size.h);
+    let letterbox_x = (panel_w - padded.size.w * world_scale) / 2.0;
+    let letterbox_y = (panel_h - padded.size.h * world_scale) / 2.0;
+    // Folds letterbox centering into world_origin so world<->panel is
+    // one multiply/divide each way.
+    let world_origin = Point::from((
+        padded.loc.x - letterbox_x / world_scale,
+        padded.loc.y - letterbox_y / world_scale,
+    ));
+
+    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    fill_gradient(
+        &mut pixels,
+        width,
+        height,
+        style.background_top,
+        style.background_bottom,
+        style.background_alpha,
+    );
+    let panel_radius = style.panel_radius * scale as f32;
+    if panel_radius > 0.0 {
+        // Fade the panel's corners out.
+        for y in 0..height {
+            for x in 0..width {
+                let coverage = rounded_rect_coverage_local(x, y, 0, 0, width, height, panel_radius);
+                if coverage < 1.0 {
+                    // Fade color with alpha: the buffer is composited as
+                    // premultiplied, so leftover color would show as a hard
+                    // square corner.
+                    let i = ((y * width + x) * 4) as usize;
+                    for channel in &mut pixels[i..i + 4] {
+                        *channel = (f32::from(*channel) * coverage) as u8;
+                    }
+                }
+            }
+        }
+    }
+
+    let px = scale * world_scale;
+    let world_to_canvas = |rect: Rectangle<i32, Logical>| -> Rectangle<i32, Logical> {
+        let rect = rect.to_f64();
+        let x0 = (rect.loc.x - world_origin.x) * px;
+        let y0 = (rect.loc.y - world_origin.y) * px;
+        Rectangle::new(
+            Point::from((x0.round() as i32, y0.round() as i32)),
+            Size::from((
+                (rect.size.w * px).round().max(1.0) as i32,
+                (rect.size.h * px).round().max(1.0) as i32,
+            )),
+        )
+    };
+    let s = scale as f32;
+    let radius = style.radius * s;
+    let spread = (style.rim_spread * s).round() as i32;
+    let thin = (s.round() as i32).max(1);
+    let font_px = style.font_size * s;
+    let label_h = (font_px * 1.6).round() as i32 + (LABEL_PAD * s) as i32;
+    let label = |pixels: &mut [u8], text: &str, rect: Rectangle<i32, Logical>| {
+        crate::text::draw_line(
+            pixels,
+            width,
+            height,
+            &style.font,
+            text,
+            font_px,
+            (
+                rect.loc.x,
+                rect.loc.y,
+                rect.size.w,
+                label_h.min(rect.size.h),
+            ),
+            (LABEL_PAD * s).round() as i32,
+            style.title_color,
+        );
+    };
+
+    for (rect, title, urgent) in windows {
+        let canvas_rect = world_to_canvas(*rect);
+        let border = if *urgent {
+            style.accent
+        } else {
+            style.window_border
+        };
+        let rim = if *urgent {
+            Some(style.accent)
+        } else {
+            style.soft_rim
+        };
+        if style.radius > 0.0 || style.soft_rim.is_some() {
+            draw_rounded_box(
+                &mut pixels,
+                width,
+                height,
+                canvas_rect,
+                Some((style.window_fill, style.window_alpha)),
+                (border, 235),
+                radius,
+                rim.map(|color| (color, style.rim_alpha)),
+                spread,
+            );
+        } else {
+            fill_rect(
+                &mut pixels,
+                width,
+                height,
+                canvas_rect,
+                rgba_a(style.window_fill, style.window_alpha),
+            );
+            stroke_rect(
+                &mut pixels,
+                width,
+                height,
+                canvas_rect,
+                as_tuple(border),
+                thin,
+            );
+        }
+        if style.show_titles {
+            label(&mut pixels, title, canvas_rect);
+        }
+    }
+    for (name, rect) in viewports {
+        let canvas_rect = world_to_canvas(*rect);
+        let active = name == output_name;
+        let border = if active {
+            style.accent
+        } else {
+            style.viewport_border
+        };
+        if style.radius > 0.0 {
+            draw_rounded_box(
+                &mut pixels,
+                width,
+                height,
+                canvas_rect,
+                None,
+                (border, 255),
+                radius,
+                active.then_some((style.accent, 170)),
+                spread,
+            );
+        } else {
+            stroke_rect(
+                &mut pixels,
+                width,
+                height,
+                canvas_rect,
+                as_tuple(border),
+                if active { thin * 2 } else { thin },
+            );
+        }
+        if style.show_output_names {
+            label(&mut pixels, name, canvas_rect);
+        }
+    }
+
+    MapRaster {
+        pixels,
+        physical: (width, height),
+        panel,
+        world_origin,
+        world_scale,
+    }
+}
+
 fn as_tuple([r, g, b]: [u8; 3]) -> (u8, u8, u8) {
     (r, g, b)
 }
@@ -811,8 +852,11 @@ fn draw_rounded_box(
                 // corners) that function returns "fully inside" for both
                 // the inner and outer test, so the difference cancels to
                 // zero and the glow would only ever show up at corners.
-                let inside_original = x >= left && x < left + w && y >= top && y < top + h;
-                if inside_original {
+                // Skip only what the rounded box itself covers: skipping its
+                // whole square left the corner pixels between box and rim
+                // unpainted, as dark notches.
+                let inside = rounded_rect_coverage_local(x, y, left, top, w, h, radius);
+                if inside >= 1.0 {
                     continue;
                 }
                 let outer = rounded_rect_coverage_local(
@@ -825,13 +869,18 @@ fn draw_rounded_box(
                     radius + rim_spread as f32,
                 );
                 if outer > 0.0 {
+                    // Light falls off with distance from the box, so the rim
+                    // reads as a glow rather than a second, solid border.
+                    let distance = rounded_rect_distance(x, y, left, top, w, h, radius);
+                    let falloff = (1.0 - distance / rim_spread.max(1) as f32).clamp(0.0, 1.0);
+                    let falloff = falloff * falloff;
                     blend_pixel(
                         pixels,
                         canvas_w,
                         x,
                         y,
                         rim_color,
-                        (outer * rim_alpha as f32) as u8,
+                        (outer * (1.0 - inside) * falloff * rim_alpha as f32) as u8,
                     );
                 }
             }
@@ -881,6 +930,17 @@ fn draw_rounded_box(
             }
         }
     }
+}
+
+/// Distance in pixels from the pixel center to a rounded rectangle's edge,
+/// 0 inside it.
+fn rounded_rect_distance(x: i32, y: i32, left: i32, top: i32, w: i32, h: i32, radius: f32) -> f32 {
+    let (fx, fy) = ((x - left) as f32 + 0.5, (y - top) as f32 + 0.5);
+    let (hw, hh) = (w as f32 / 2.0, h as f32 / 2.0);
+    let radius = radius.min(hw).min(hh).max(0.0);
+    let qx = ((fx - hw).abs() - (hw - radius)).max(0.0);
+    let qy = ((fy - hh).abs() - (hh - radius)).max(0.0);
+    ((qx * qx + qy * qy).sqrt() - radius).max(0.0)
 }
 
 fn put_pixel(pixels: &mut [u8], width: i32, x: i32, y: i32, (r, g, b, a): (u8, u8, u8, u8)) {
@@ -1049,6 +1109,88 @@ mod tests {
             MinimapPosition::parse("top_right"),
             Some(MinimapPosition::TopRight)
         );
+    }
+
+    /// Writes the painted panel for a few configs as raw BGRA files into
+    /// `$TIDEWM_MINIMAP_DUMP`, so the look can be inspected without holding
+    /// the trigger key. Run with `--ignored`.
+    #[test]
+    #[ignore]
+    fn dump_minimap_looks() {
+        let Some(dir) = std::env::var_os("TIDEWM_MINIMAP_DUMP") else {
+            return;
+        };
+        let windows = vec![
+            (
+                Rectangle::new((12, 12).into(), (526, 696).into()),
+                "Editor".to_string(),
+                false,
+            ),
+            (
+                Rectangle::new((562, 12).into(), (526, 696).into()),
+                "Music player".to_string(),
+                true,
+            ),
+            (
+                Rectangle::new((562, 744).into(), (526, 336).into()),
+                "Chat".to_string(),
+                false,
+            ),
+        ];
+        let viewports = vec![(
+            "winit-0".to_string(),
+            Rectangle::new((960, -480).into(), (1100, 720).into()),
+        )];
+        let configs: Vec<(&str, crate::config::MinimapConfig)> = vec![
+            ("bioluminescent", Default::default()),
+            (
+                "glass",
+                crate::config::MinimapConfig {
+                    preset: MinimapPreset::Glass,
+                    ..Default::default()
+                },
+            ),
+            (
+                "plain",
+                crate::config::MinimapConfig {
+                    preset: MinimapPreset::Plain,
+                    ..Default::default()
+                },
+            ),
+            (
+                "custom",
+                crate::config::MinimapConfig {
+                    size: 0.55,
+                    position: MinimapPosition::BottomRight,
+                    background_top: Some([0.10, 0.04, 0.16]),
+                    background_bottom: Some([0.20, 0.06, 0.24]),
+                    window_color: Some([0.30, 0.10, 0.32]),
+                    accent_color: Some([1.0, 0.56, 0.82]),
+                    radius: Some(14.0),
+                    glow_spread: Some(14.0),
+                    font_size: 15.0,
+                    title_color: [1.0, 0.92, 0.97, 1.0],
+                    ..Default::default()
+                },
+            ),
+        ];
+        for (name, cfg) in configs {
+            let style = MinimapStyle::resolve(&cfg);
+            let map = paint(
+                "winit-0",
+                Size::from((1100, 720)),
+                1.25,
+                &style,
+                &windows,
+                &[],
+                &viewports,
+            );
+            let path = std::path::Path::new(&dir).join(format!(
+                "{name}_{}x{}_{}_{}.bgra",
+                map.physical.0, map.physical.1, map.panel.loc.x, map.panel.loc.y
+            ));
+            std::fs::write(path, &map.pixels).unwrap();
+        }
     }
 
     #[test]

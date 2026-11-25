@@ -2,6 +2,11 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.39 · 2026-11-26 — Softer compass and minimap glow
+
+- Compass cues no longer show a hard square around their light when the glow is wide; the light fades out in a circle.
+- Minimap glows fade with distance instead of looking like a second solid border, small panels have clean rounded corners, and window boxes lost the dark notches at their corners.
+
 ## 0.91.38 · 2026-11-26 — Customizable Ocean minimap and compass
 
 - The Ocean minimap can be restyled piece by piece (backgrounds, boxes, glow, labels, font, pointer marker), made smaller and placed in a corner, and is sharp at fractional scale.

@@ -95,7 +95,11 @@ void main() {
     float glow = 1.0 - smoothstep(0.0, u_glow, max(d, 0.0));
     glow *= glow;
     float core = 1.0 - smoothstep(-0.05, 0.15, d);
-    float a = clamp(glow * 0.7 + core * 0.6, 0.0, 1.0) * u_alpha * alpha;
+    // Round falloff: the light reaches zero before every edge and corner
+    // of the element's square, however wide `glow` is, so it never shows a
+    // hard square boundary.
+    float edge = 1.0 - smoothstep(0.45, 1.0, length(p));
+    float a = clamp(glow * 0.7 + core * 0.6, 0.0, 1.0) * edge * u_alpha * alpha;
     gl_FragColor = vec4(u_color * a, a);
 }
 "#;
