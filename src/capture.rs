@@ -748,6 +748,8 @@ impl Smallvil {
             let workspace_glide = self.workspace_glide_frame_element(&output);
             let depth_transition = self.depth_transition_frame_element(renderer, &output);
             let closing_windows = self.closing_window_frame_elements(renderer, &output);
+            // Screenshots and casts show the compass like the live frame.
+            let compass_elements = self.compass_frame_elements(renderer, &output);
             let glass_surfaces = self.glass_eligible_surfaces(&placements);
             #[allow(clippy::mutable_key_type)]
             let mut glass_layers =
@@ -784,6 +786,7 @@ impl Smallvil {
                     elements.extend(ripple_layers.above_all);
                     elements.extend(depth_transition);
                     elements.extend(ripple_layers.above_windows);
+                    elements.extend(compass_elements);
                     elements.extend(workspace_transition);
                     elements.extend(workspace_glide);
                     elements.extend(closing_windows);

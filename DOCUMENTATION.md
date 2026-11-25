@@ -719,15 +719,20 @@ discoverable without navigating to them:
 
 - **Urgent** windows glow bright cyan in any direction (left, right, up,
   down, or diagonally toward a corner).
-- **Deep** windows (sunk via `sink-window`, or sitting in a lower reef)
-  glow cool blue in any direction, same as urgent.
+- **Deep** windows (at least one screen below the surface line: sunk via
+  `sink-window`, or in a lower reef) glow cool blue.
+- **Ordinary** off-screen windows glow too, in `normal_color` (the deep
+  color unless set).
 
-Nearer windows glow brighter; the cue fades linearly to nothing at
-`max_distance`. The cues are ambient and render-only: they do not respond
+Each kind can be turned off. Nearer windows glow brighter; the cue fades
+linearly to nothing at `max_distance` and can shrink with distance.
+Screenshots and screencasts include the cues. The cues are ambient and render-only: they do not respond
 to clicks, and camera travel stays on the existing pan/zoom/bookmark/depth
 actions. No element is produced at all when nothing is off-screen, so an
 idle desktop ticks zero frames. One analytical shader, no texture or
-framebuffer, and a 16-cue cap (urgent first, then nearest).
+framebuffer, and a cue cap (urgent first, then deep, then ordinary, nearest
+first within a kind). An urgent `pulse` is the one option that keeps the
+output drawing frames, and only while an urgent cue is on screen.
 
 Ocean-only; `water_effects = false` disables the compass regardless of this
 block. Has no effect under the Classic engine.
@@ -741,6 +746,18 @@ block. Has no effect under the Classic engine.
 | `size` | float, `8`–`1024` | `96` | Glow rect side, logical pixels. |
 | `alpha` | float, `0`–`1` | `0.85` | Peak glow alpha at zero distance. `peak_alpha` is an alias. |
 | `shape` | string | `circle` | Cue shape: `circle`/`glow`/`blob`, `arrow`/`triangle`, `chevron`/`wedge`, `ring`, `diamond`. Arrows and chevrons point toward the window. |
+| `show_urgent` / `show_deep` / `show_normal` | bool | `true` | Which kinds get a cue. |
+| `normal_color` | color, optional | `deep_color` | Ordinary off-screen windows. |
+| `inset` | float, `0`–`512` | `0` | Extra space between a cue and the screen edge. |
+| `glow` (`softness`) | float, `0.1`–`4` | `1` | Glow reach around the shape; larger is softer and wider. |
+| `far_scale` | float, `0.1`–`1` | `1` | Size at `max_distance` as a fraction of `size` (1 keeps every cue the same size). |
+| `max_cues` | integer, `1`–`64` | `16` | Cue cap. |
+| `pulse` | float, `0`–`1` | `0` | Urgent cue pulse depth; `0` is off. |
+| `pulse_speed` | float, `0.05`–`10` | `1.2` | Pulses per second. |
+| `labels` | `off` \| `app` \| `title` | `off` | Text on a small pill beside each cue. |
+| `label_color` | `RRGGBB[AA]` | light | |
+| `label_font` (`font`) | path | bundled font | TTF/OTF file. |
+| `label_size` (`font_size`) | float, `4`–`96` | `12` | Logical pixels. |
 
 ```wave
 compass {
@@ -797,6 +814,22 @@ already uses.
 | `background_color` | color, optional | preset default | Overrides the backdrop. `background` is an alias. |
 | `window_color` | color, optional | preset default | Overrides window box fill. `window` is an alias. |
 | `accent_color` | color, optional | preset default | Overrides the viewport-beacon/urgent-highlight/glow color, and the window border. `accent` is an alias. |
+| `background_top` / `background_bottom` | color, optional | preset | Backdrop gradient ends (beat `background_color`). |
+| `background_opacity` | float, `0`–`1` | preset | |
+| `window_opacity` | float, `0`–`1` | preset | Window box fill opacity. |
+| `window_border_color` | color, optional | preset | Beats `accent_color` for window borders. |
+| `viewport_color` | color, optional | preset | Frames of the other monitors' views. |
+| `radius` | float, `0`–`64` | preset | Window box corner radius. |
+| `glow_color` / `glow_spread` / `glow_opacity` | color / `0`–`64` / `0`–`1` | preset | Soft rim around boxes; `glow_opacity = 0` turns it off. |
+| `show_titles` / `show_output_names` | bool | `true` | Labels on window boxes and on monitor views. |
+| `font` / `font_size` / `title_color` | path / `4`–`96` / `RRGGBB[AA]` | bundled / `13` / light grey | Label text. |
+| `size` | float, `0.15`–`1` | `1` | Panel size as a fraction of the monitor. |
+| `position` | `center`, `top`, `bottom`, `left`, `right`, `top-left`, `top-right`, `bottom-left`, `bottom-right` | `center` | Where a smaller panel sits. |
+| `margin` | float, `0`–`512` | `24` | Space between a smaller panel and the screen edge. |
+| `panel_radius` | float, `0`–`128` | `18` when smaller, else `0` | Panel corner radius. |
+| `cursor_color` / `cursor_size` / `cursor_shape` | `RRGGBB[AA]` / `4`–`128` / `crosshair`, `ring`, `dot`, `none` | accent / `20` / `crosshair` | The pointer marker over the map. |
+
+The map is rasterized at the monitor's real scale. With a smaller panel, a click beside it closes the map without moving the camera.
 
 ```wave
 minimap {

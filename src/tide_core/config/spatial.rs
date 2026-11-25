@@ -342,9 +342,31 @@ impl Default for SwimConfig {
 /// the cue fades to nothing at `max_distance`. Ambient render-only cues --
 /// travel stays on the existing pan/zoom/bookmark/depth actions.
 /// Ocean-only; `water_effects` remains the master bypass.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CompassConfig {
     pub enabled: bool,
+    /// Which kinds of off-screen window get a cue.
+    pub show_urgent: bool,
+    pub show_deep: bool,
+    pub show_normal: bool,
+    /// Ordinary off-screen windows; `None` uses `deep_color` (the look
+    /// before kinds were split).
+    pub normal_color: Option<[f32; 3]>,
+    /// Extra space between a cue and the screen edge, logical pixels.
+    pub inset: f32,
+    /// Glow reach around the shape (1 = default, larger = softer/wider).
+    pub glow: f32,
+    /// Size at `max_distance` as a fraction of `size` (1 = no shrinking).
+    pub far_scale: f32,
+    pub max_cues: usize,
+    /// Urgent cue pulse depth, 0 = off (no continuous frames).
+    pub pulse: f32,
+    /// Pulses per second.
+    pub pulse_speed: f32,
+    pub labels: crate::compass::CueLabels,
+    pub label_color: [f32; 4],
+    pub label_font: Option<String>,
+    pub label_size: f32,
     /// Glow color for off-screen urgent windows, any direction.
     pub urgent_color: [f32; 3],
     /// Glow color for windows below the viewport (sunk or lower reef).
@@ -364,6 +386,20 @@ impl Default for CompassConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            show_urgent: true,
+            show_deep: true,
+            show_normal: true,
+            normal_color: None,
+            inset: 0.0,
+            glow: 1.0,
+            far_scale: 1.0,
+            max_cues: 16,
+            pulse: 0.0,
+            pulse_speed: 1.2,
+            labels: crate::compass::CueLabels::Off,
+            label_color: [0.92, 0.97, 1.0, 0.95],
+            label_font: None,
+            label_size: 12.0,
             urgent_color: [0.463, 0.945, 1.0],
             deep_color: [0.176, 0.439, 0.588],
             max_distance: 3000.0,
@@ -382,7 +418,7 @@ impl Default for CompassConfig {
 /// Deliberately *not* gated by `water_effects` -- unlike the compass (an
 /// identity/bioluminescence effect), the minimap reads as navigation
 /// utility, so it stays available with water off.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MinimapConfig {
     pub enabled: bool,
     /// Modifiers that must be held for `keysym` to open the peek.
@@ -396,6 +432,34 @@ pub struct MinimapConfig {
     pub background_color: Option<[f32; 3]>,
     pub window_color: Option<[f32; 3]>,
     pub accent_color: Option<[f32; 3]>,
+    /// Every other preset value; `None` keeps the preset's own.
+    pub background_top: Option<[f32; 3]>,
+    pub background_bottom: Option<[f32; 3]>,
+    pub background_opacity: Option<f32>,
+    pub window_opacity: Option<f32>,
+    pub window_border_color: Option<[f32; 3]>,
+    /// Frames of the other monitors' views.
+    pub viewport_color: Option<[f32; 3]>,
+    pub radius: Option<f32>,
+    pub glow_color: Option<[f32; 3]>,
+    pub glow_spread: Option<f32>,
+    /// 0 turns the glow off.
+    pub glow_opacity: Option<f32>,
+    pub show_titles: bool,
+    pub show_output_names: bool,
+    pub font: Option<String>,
+    pub font_size: f32,
+    pub title_color: [f32; 4],
+    /// Panel size as a fraction of the monitor (1 = whole monitor).
+    pub size: f32,
+    pub position: crate::minimap::MinimapPosition,
+    /// Space between a smaller panel and the screen edge.
+    pub margin: f32,
+    /// Panel corner radius; `None` rounds a smaller panel, not a full one.
+    pub panel_radius: Option<f32>,
+    pub cursor_color: Option<[f32; 4]>,
+    pub cursor_size: f32,
+    pub cursor_shape: crate::minimap::CursorShape,
 }
 
 impl Default for MinimapConfig {
@@ -416,6 +480,28 @@ impl Default for MinimapConfig {
             background_color: None,
             window_color: None,
             accent_color: None,
+            background_top: None,
+            background_bottom: None,
+            background_opacity: None,
+            window_opacity: None,
+            window_border_color: None,
+            viewport_color: None,
+            radius: None,
+            glow_color: None,
+            glow_spread: None,
+            glow_opacity: None,
+            show_titles: true,
+            show_output_names: true,
+            font: None,
+            font_size: 13.0,
+            title_color: [225.0 / 255.0, 225.0 / 255.0, 225.0 / 255.0, 1.0],
+            size: 1.0,
+            position: crate::minimap::MinimapPosition::Center,
+            margin: 24.0,
+            panel_radius: None,
+            cursor_color: None,
+            cursor_size: 20.0,
+            cursor_shape: crate::minimap::CursorShape::Crosshair,
         }
     }
 }
@@ -1104,6 +1190,62 @@ pub(super) fn apply_compass_block(cfg: &mut CompassConfig, body: &[waves::Entry]
                     "Expected compass.shape as circle/arrow/chevron/ring/diamond, ignoring"
                 ),
             },
+            "show_urgent" => set_bool(&mut cfg.show_urgent, key, value),
+            "show_deep" => set_bool(&mut cfg.show_deep, key, value),
+            "show_normal" | "show_all" => set_bool(&mut cfg.show_normal, key, value),
+            "normal_color" => match parse_ripple_color(value) {
+                Some(color) => cfg.normal_color = Some(color),
+                None => tracing::warn!(value, "Expected compass.normal_color as #RRGGBB, ignoring"),
+            },
+            "inset" => {
+                if let Some(v) = parse_f32_clamped(value, 0.0, 512.0, key) {
+                    cfg.inset = v;
+                }
+            }
+            "glow" | "softness" => {
+                if let Some(v) = parse_f32_clamped(value, 0.1, 4.0, key) {
+                    cfg.glow = v;
+                }
+            }
+            "far_scale" => {
+                if let Some(v) = parse_f32_clamped(value, 0.1, 1.0, key) {
+                    cfg.far_scale = v;
+                }
+            }
+            "max_cues" => match value.trim().parse::<usize>() {
+                Ok(n) => cfg.max_cues = n.clamp(1, crate::compass::MAX_CUES_LIMIT),
+                Err(_) => tracing::warn!(value, "Expected compass.max_cues as a count, ignoring"),
+            },
+            "pulse" => {
+                if let Some(v) = parse_f32_clamped(value, 0.0, 1.0, key) {
+                    cfg.pulse = v;
+                }
+            }
+            "pulse_speed" => {
+                if let Some(v) = parse_f32_clamped(value, 0.05, 10.0, key) {
+                    cfg.pulse_speed = v;
+                }
+            }
+            "labels" => match crate::compass::CueLabels::parse(value) {
+                Some(labels) => cfg.labels = labels,
+                None => tracing::warn!(value, "Expected compass.labels off/app/title, ignoring"),
+            },
+            "label_color" => match parse_rgba_color(value) {
+                Some(color) => cfg.label_color = color,
+                None => tracing::warn!(
+                    value,
+                    "Expected compass.label_color as RRGGBB[AA], ignoring"
+                ),
+            },
+            "label_font" | "font" => {
+                let path = value.trim().trim_matches('"');
+                cfg.label_font = (!path.is_empty()).then(|| path.to_string());
+            }
+            "label_size" | "font_size" => {
+                if let Some(v) = parse_f32_clamped(value, 4.0, 96.0, key) {
+                    cfg.label_size = v;
+                }
+            }
             other => tracing::warn!(key = %other, "Unknown key in `compass` block, ignoring"),
         }
     }
@@ -1153,6 +1295,81 @@ pub(super) fn apply_minimap_block(cfg: &mut MinimapConfig, body: &[waves::Entry]
                 None => tracing::warn!(
                     value,
                     "Expected minimap.accent_color as #RRGGBB/rgb(...), ignoring"
+                ),
+            },
+            "background_top" | "background_bottom" | "window_border_color" | "viewport_color"
+            | "glow_color" => match parse_ripple_color(value) {
+                Some(color) => match key.as_str() {
+                    "background_top" => cfg.background_top = Some(color),
+                    "background_bottom" => cfg.background_bottom = Some(color),
+                    "window_border_color" => cfg.window_border_color = Some(color),
+                    "viewport_color" => cfg.viewport_color = Some(color),
+                    _ => cfg.glow_color = Some(color),
+                },
+                None => tracing::warn!(value, key = %key, "Expected an RRGGBB color, ignoring"),
+            },
+            "background_opacity" | "window_opacity" | "glow_opacity" => {
+                if let Some(v) = parse_f32_clamped(value, 0.0, 1.0, key) {
+                    match key.as_str() {
+                        "background_opacity" => cfg.background_opacity = Some(v),
+                        "window_opacity" => cfg.window_opacity = Some(v),
+                        _ => cfg.glow_opacity = Some(v),
+                    }
+                }
+            }
+            "radius" => cfg.radius = parse_f32_clamped(value, 0.0, 64.0, key).or(cfg.radius),
+            "glow_spread" => {
+                cfg.glow_spread = parse_f32_clamped(value, 0.0, 64.0, key).or(cfg.glow_spread)
+            }
+            "show_titles" | "titles" => set_bool(&mut cfg.show_titles, key, value),
+            "show_output_names" => set_bool(&mut cfg.show_output_names, key, value),
+            "font" => {
+                let path = value.trim().trim_matches('"');
+                cfg.font = (!path.is_empty()).then(|| path.to_string());
+            }
+            "font_size" => {
+                if let Some(v) = parse_f32_clamped(value, 4.0, 96.0, key) {
+                    cfg.font_size = v;
+                }
+            }
+            "title_color" | "text_color" => match parse_rgba_color(value) {
+                Some(color) => cfg.title_color = color,
+                None => tracing::warn!(value, "Expected minimap.title_color as RRGGBB[AA], ignoring"),
+            },
+            "size" => {
+                if let Some(v) = parse_f32_clamped(value, 0.15, 1.0, key) {
+                    cfg.size = v;
+                }
+            }
+            "position" => match crate::minimap::MinimapPosition::parse(value) {
+                Some(position) => cfg.position = position,
+                None => tracing::warn!(
+                    value,
+                    "Expected minimap.position center/top/bottom/left/right/top-left/top-right/bottom-left/bottom-right, ignoring"
+                ),
+            },
+            "margin" => {
+                if let Some(v) = parse_f32_clamped(value, 0.0, 512.0, key) {
+                    cfg.margin = v;
+                }
+            }
+            "panel_radius" => {
+                cfg.panel_radius = parse_f32_clamped(value, 0.0, 128.0, key).or(cfg.panel_radius)
+            }
+            "cursor_color" => match parse_rgba_color(value) {
+                Some(color) => cfg.cursor_color = Some(color),
+                None => tracing::warn!(value, "Expected minimap.cursor_color as RRGGBB[AA], ignoring"),
+            },
+            "cursor_size" => {
+                if let Some(v) = parse_f32_clamped(value, 4.0, 128.0, key) {
+                    cfg.cursor_size = v;
+                }
+            }
+            "cursor_shape" | "cursor" => match crate::minimap::CursorShape::parse(value) {
+                Some(shape) => cfg.cursor_shape = shape,
+                None => tracing::warn!(
+                    value,
+                    "Expected minimap.cursor_shape crosshair/ring/dot/none, ignoring"
                 ),
             },
             other => tracing::warn!(key = %other, "Unknown key in `minimap` block, ignoring"),

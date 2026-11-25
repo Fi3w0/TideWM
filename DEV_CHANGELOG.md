@@ -2,6 +2,14 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.38 — Configurable Ocean minimap and compass
+
+- Fiw (2026-11-26) chose: minimap — every preset value, labels/font, size/placement, cursor marker; compass — cue every window, shape/glow details, urgent pulse, labels. `MinimapConfig`/`CompassConfig` lose `Copy` (font paths).
+- Compass: `CueKind::Normal` splits ordinary windows from deep ones (world top at least one output height below Y=0; previously every non-urgent window was "deep"). `CompassParams` gains per-kind toggles, `normal_color` (default `deep_color`, so the old look is unchanged), `inset`, `glow` (shader `u_glow` replaces the fixed smoothstep width), `far_scale`, `max_cues` (`MAX_CUES_LIMIT` 64) and an urgent alpha multiplier; `CompassCue` carries `glow` and its `source` window. Pulse: `1 - pulse/2 * (1 - cos(2*pi*f*t))`; `Compass::pulsing` feeds `has_active_animation`/`output_has_active_animation`, cleared whenever the compass is not drawn. Labels: `CueLabels` off/app/title, cached physical-scale pill buffers per text, placed toward the screen middle. Fix: the capture scene lacked compass elements, so screenshots and casts of an Ocean screen never showed cues (found nested).
+- Minimap: `MinimapStyle::resolve(&MinimapConfig)` applies coarse (`background/window/accent_color`) then specific overrides; `MinimapPosition` (9) with `size`/`margin`/`panel_radius`; `CursorShape` crosshair/ring/dot/none; labels via the shared `text::draw_line` with font/size/color and per-kind toggles. Rasterized at physical scale with the full buffer as `src` (the logical-size buffer was soft at 1.25). Pointer math is panel-relative; a click outside a smaller panel closes without travel.
+- Shared: `text::font_from_path` (8-path cache, 32 MiB cap), `blend_premultiplied`, `draw_line`, `line_width`; tabs use them.
+- Tests: compass kinds/colors/order/source, toggles, inset, far scaling, cap, pulse, label parsing; minimap panel placement, click beside the panel, override precedence, glow off, parsers; existing transform tests at scale 1.25. Nested Ocean (winit, 1.25): two kitty windows panned off camera show pink `normal_color` cues, distance-scaled, with title pills, in a grim capture. Minimap appearance not run nested (hold-only trigger; no key injection into the host).
+
 ## 0.91.37 — Configurable group tabs
 
 - Fiw (2026-11-26): the hard-coded tab strip (22 px, teal/grey, square, size 13) looked outdated; asked for customization. Design choices were Fiw's: both a title bar and a slim indicator, colors/shape/placement/effects configurable, defaults following the theme. Effects (frost, shadow, switch animation) are the next stage and not in this release.

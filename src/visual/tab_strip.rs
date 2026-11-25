@@ -6,9 +6,9 @@
 //! change. Title commits from active or parked members invalidate the owning
 //! group so the next frame uses current labels.
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
-use fontdue::{Font, FontSettings};
+use fontdue::Font;
 use smithay::{
     backend::allocator::Fourcc,
     backend::renderer::element::{
@@ -24,9 +24,6 @@ use smithay::{
 use crate::config::{
     BorderConfig, RoundingConfig, TabPlacement, TabPosition, TabStyle, TabsConfig,
 };
-
-/// Largest font file TideWM will read for tab titles.
-const MAX_FONT_BYTES: u64 = 32 * 1024 * 1024;
 
 fn display_title(title: Option<String>) -> String {
     title
@@ -123,7 +120,7 @@ impl TabLook {
             margin: tabs.margin,
             padding: tabs.padding,
             radius,
-            font: load_font(tabs.font.as_deref()),
+            font: crate::text::font_from_path(tabs.font.as_deref()),
             font_size: tabs.font_size,
             active: pair(
                 tabs.active_from,
@@ -247,50 +244,6 @@ impl TabLook {
         };
         Rectangle::new((x, y).into(), (w.max(1), h.max(1)).into())
     }
-}
-
-/// The last configured font file and its parsed font.
-type LoadedFont = (String, Arc<Font>);
-
-fn bundled_font() -> Arc<Font> {
-    static FONT: OnceLock<Arc<Font>> = OnceLock::new();
-    FONT.get_or_init(|| Arc::new(crate::toast::font().clone()))
-        .clone()
-}
-
-/// The configured font file, loaded once per path; the bundled font when
-/// unset or unreadable (with one warning per path).
-fn load_font(path: Option<&str>) -> Arc<Font> {
-    let Some(path) = path else {
-        return bundled_font();
-    };
-    static CACHE: OnceLock<Mutex<Option<LoadedFont>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(None));
-    let mut cached = cache.lock().unwrap_or_else(|poison| poison.into_inner());
-    if let Some((cached_path, font)) = cached.as_ref() {
-        if cached_path == path {
-            return font.clone();
-        }
-    }
-    let expanded = if let Some(rest) = path.strip_prefix("~/") {
-        std::env::var_os("HOME")
-            .map(|home| std::path::Path::new(&home).join(rest))
-            .unwrap_or_else(|| path.into())
-    } else {
-        path.into()
-    };
-    let font = std::fs::metadata(&expanded)
-        .ok()
-        .filter(|meta| meta.len() <= MAX_FONT_BYTES)
-        .and_then(|_| std::fs::read(&expanded).ok())
-        .and_then(|bytes| Font::from_bytes(bytes, FontSettings::default()).ok())
-        .map(Arc::new)
-        .unwrap_or_else(|| {
-            tracing::warn!(path, "Could not load tabs.font, using the bundled font");
-            bundled_font()
-        });
-    *cached = Some((path.to_string(), font.clone()));
-    font
 }
 
 impl Strip {
@@ -472,63 +425,25 @@ fn draw_label(
     height: i32,
     look: &TabLook,
     title: &str,
-    (x0, y0, w, h): (i32, i32, i32, i32),
+    rect: (i32, i32, i32, i32),
     scale: f32,
     color: [f32; 4],
 ) {
-    let font_size = look.font_size * scale;
-    let pad = (look.padding * scale).round() as i32;
-    let line = crate::text::rasterize_line(&look.font, title, font_size, (w - pad * 2).max(0));
-    let (ascent, descent) = look
-        .font
-        .horizontal_line_metrics(font_size)
-        .map(|m| (m.ascent, m.descent))
-        .unwrap_or((font_size * 0.8, -font_size * 0.2));
-    let text_height = ascent - descent;
-    let baseline = y0 + ((h as f32 - text_height) / 2.0 + ascent).round() as i32;
-    let mut pen_x = x0 + pad;
-    let alpha = color[3] * look.opacity;
-    for glyph in line.glyphs {
-        let metrics = glyph.metrics;
-        let glyph_x0 = pen_x + metrics.xmin;
-        let glyph_y0 = baseline - metrics.ymin - metrics.height as i32;
-        for gy in 0..metrics.height {
-            for gx in 0..metrics.width {
-                let coverage = glyph.bitmap[gy * metrics.width + gx];
-                if coverage == 0 {
-                    continue;
-                }
-                let x = glyph_x0 + gx as i32;
-                let y = glyph_y0 + gy as i32;
-                if x < x0 || y < y0 || x >= (x0 + w).min(width) || y >= (y0 + h).min(height) {
-                    continue;
-                }
-                let a = f32::from(coverage) / 255.0 * alpha;
-                put_premultiplied(pixels, width, x, y, [color[0], color[1], color[2], a]);
-            }
-        }
-        pen_x += metrics.advance_width.round().max(1.0) as i32;
-    }
+    crate::text::draw_line(
+        pixels,
+        width,
+        height,
+        &look.font,
+        title,
+        look.font_size * scale,
+        rect,
+        (look.padding * scale).round() as i32,
+        [color[0], color[1], color[2], color[3] * look.opacity],
+    );
 }
 
-/// Source-over blend of a straight-alpha color onto premultiplied ARGB8888
-/// (memory order B, G, R, A).
 fn put_premultiplied(pixels: &mut [u8], width: i32, x: i32, y: i32, color: [f32; 4]) {
-    let a = color[3].clamp(0.0, 1.0);
-    if a <= 0.0 {
-        return;
-    }
-    let i = ((y * width + x) * 4) as usize;
-    let blend = |dst: u8, src: f32| {
-        let src = (src.clamp(0.0, 1.0) * a * 255.0).round();
-        (src + f32::from(dst) * (1.0 - a)).round().clamp(0.0, 255.0) as u8
-    };
-    pixels[i] = blend(pixels[i], color[2]);
-    pixels[i + 1] = blend(pixels[i + 1], color[1]);
-    pixels[i + 2] = blend(pixels[i + 2], color[0]);
-    pixels[i + 3] = ((a * 255.0) + f32::from(pixels[i + 3]) * (1.0 - a))
-        .round()
-        .clamp(0.0, 255.0) as u8;
+    crate::text::blend_premultiplied(pixels, width, x, y, color);
 }
 
 /// The strip's element at output-local physical `location`, drawn at its

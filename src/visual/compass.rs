@@ -16,9 +16,32 @@ use smithay::{
     },
 };
 
-/// Hard cap on simultaneously rendered cues. Urgent cues sort first, then
-/// nearest, so the cap drops only the least important entries.
-pub const MAX_CUES: usize = 16;
+/// Upper bound for `compass.max_cues`. Urgent cues sort first, then deep,
+/// then ordinary, nearest first within a kind, so a cap drops only the least
+/// important entries.
+pub const MAX_CUES_LIMIT: usize = 64;
+
+/// What text, if any, sits next to a cue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CueLabels {
+    #[default]
+    Off,
+    /// The window's app id.
+    App,
+    /// The window's title.
+    Title,
+}
+
+impl CueLabels {
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" | "false" => Self::Off,
+            "app" | "app_id" | "class" => Self::App,
+            "title" | "true" => Self::Title,
+            _ => return None,
+        })
+    }
+}
 
 const COMPASS_SHADER: &str = r#"
 precision highp float;
@@ -30,6 +53,7 @@ uniform vec3 u_color;
 uniform float u_alpha;
 uniform float u_angle;
 uniform float u_shape;
+uniform float u_glow;
 
 float sdLine(vec2 p, vec2 a, vec2 b) {
     vec2 pa = p - a;
@@ -68,7 +92,7 @@ void main() {
         d = (abs(r.x) + abs(r.y)) * 1.3 - 0.50;
     }
 
-    float glow = 1.0 - smoothstep(0.0, 1.0, max(d, 0.0));
+    float glow = 1.0 - smoothstep(0.0, u_glow, max(d, 0.0));
     glow *= glow;
     float core = 1.0 - smoothstep(-0.05, 0.15, d);
     float a = clamp(glow * 0.7 + core * 0.6, 0.0, 1.0) * u_alpha * alpha;
@@ -114,7 +138,10 @@ impl CompassShape {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CueKind {
     Urgent,
+    /// At least one screen below the surface line (sunk or a lower reef).
     Deep,
+    /// Any other off-screen window.
+    Normal,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -130,12 +157,26 @@ pub struct CompassCue {
     pub size: f32,
     /// Shader shape index.
     pub shape: f32,
+    /// Glow reach uniform.
+    pub glow: f32,
+    /// Index into the `windows` slice the cue came from (for labels).
+    pub source: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct CompassParams {
     pub urgent_color: [f32; 3],
     pub deep_color: [f32; 3],
+    pub normal_color: [f32; 3],
+    pub show_urgent: bool,
+    pub show_deep: bool,
+    pub show_normal: bool,
+    pub inset: f32,
+    pub glow: f32,
+    pub far_scale: f32,
+    pub max_cues: usize,
+    /// Urgent alpha multiplier this frame (pulse), 1 = steady.
+    pub urgent_pulse: f32,
     /// World-logical distance beyond the viewport edge at which a cue
     /// fades to nothing.
     pub max_distance: f32,
@@ -168,12 +209,20 @@ pub fn compute_cues(
     // Treat configured size as a maximum. A cue larger than a small logical
     // output cannot be clamped fully inside it (`f32::clamp` would receive
     // inverted bounds), so fit it to the live viewport first.
-    let cue_size = params.size.min(screen_w).min(screen_h).max(1.0);
-    let half = cue_size / 2.0;
+    let max_size = params.size.min(screen_w).min(screen_h).max(1.0);
 
     let mut cues: Vec<((u8, f32), CompassCue)> = windows
         .iter()
-        .filter_map(|(world_center, kind)| {
+        .enumerate()
+        .filter_map(|(source, (world_center, kind))| {
+            let shown = match kind {
+                CueKind::Urgent => params.show_urgent,
+                CueKind::Deep => params.show_deep,
+                CueKind::Normal => params.show_normal,
+            };
+            if !shown {
+                return None;
+            }
             let (wx, wy) = (world_center.x, world_center.y);
             if wx >= left && wx <= right && wy >= top && wy <= bottom {
                 return None;
@@ -208,26 +257,41 @@ pub fn compute_cues(
             let color = match kind {
                 CueKind::Urgent => params.urgent_color,
                 CueKind::Deep => params.deep_color,
+                CueKind::Normal => params.normal_color,
             };
-            // Urgent (rank 0) sorts ahead of deep (rank 1) regardless of
-            // distance; within a kind, nearer first.
+            // Urgent sorts ahead of deep, deep ahead of ordinary, regardless
+            // of distance; within a kind, nearer first.
             let rank = match kind {
                 CueKind::Urgent => 0u8,
                 CueKind::Deep => 1u8,
+                CueKind::Normal => 2u8,
             };
-            // Clamp the glow center fully inside the output so the full
-            // rect is visible instead of half-clipped at the edge.
-            let sx = (((edge_x - viewport.loc.x) * zoom) as f32).clamp(half, screen_w - half);
-            let sy = (((edge_y - viewport.loc.y) * zoom) as f32).clamp(half, screen_h - half);
+            // Far cues shrink toward `far_scale` of the full size.
+            let cue_size = max_size * (params.far_scale + (1.0 - params.far_scale) * factor);
+            let half = cue_size / 2.0;
+            let lo = |extent: f32| (half + params.inset).min(extent / 2.0);
+            // Clamp the glow center fully inside the output (plus inset) so
+            // the full rect is visible instead of half-clipped at the edge.
+            let sx = (((edge_x - viewport.loc.x) * zoom) as f32)
+                .clamp(lo(screen_w), screen_w - lo(screen_w));
+            let sy = (((edge_y - viewport.loc.y) * zoom) as f32)
+                .clamp(lo(screen_h), screen_h - lo(screen_h));
+            let pulse = if *kind == CueKind::Urgent {
+                params.urgent_pulse
+            } else {
+                1.0
+            };
             Some((
                 (rank, beyond),
                 CompassCue {
                     center: [sx, sy],
                     angle: dy.atan2(dx) as f32,
                     color,
-                    alpha: params.peak_alpha * factor,
+                    alpha: params.peak_alpha * factor * pulse,
                     size: cue_size,
                     shape: params.shape.as_f32(),
+                    glow: params.glow,
+                    source,
                 },
             ))
         })
@@ -236,7 +300,7 @@ pub fn compute_cues(
         std::cmp::Ordering::Equal => a.0 .1.total_cmp(&b.0 .1),
         other => other,
     });
-    cues.truncate(MAX_CUES);
+    cues.truncate(params.max_cues.clamp(1, MAX_CUES_LIMIT));
     cues.into_iter().map(|(_, cue)| cue).collect()
 }
 
@@ -248,6 +312,143 @@ pub struct Compass {
     slots: Vec<Id>,
     commit: CommitCounter,
     last_cues: Vec<CompassCue>,
+    /// An urgent cue is pulsing: the output keeps drawing frames.
+    pub(crate) pulsing: bool,
+    /// Rendered labels by text, kept while their cue is visible.
+    labels: Vec<CueLabel>,
+}
+
+/// A label buffer and its physical pixel size.
+pub struct CueLabel {
+    key: (String, u64, u64),
+    buffer: smithay::backend::renderer::element::memory::MemoryRenderBuffer,
+    physical: (i32, i32),
+}
+
+/// Look of cue labels for one frame.
+pub struct LabelStyle {
+    pub font: std::sync::Arc<fontdue::Font>,
+    pub size: f32,
+    pub color: [f32; 4],
+    /// `color` and `size` change the pixels; part of the cache key.
+    pub generation: u64,
+}
+
+impl Compass {
+    /// Label elements for this frame's `(cue, text)` pairs, placed beside
+    /// each cue toward the screen's middle. Buffers are reused by text;
+    /// unused ones are dropped. `screen` is the output's logical size.
+    pub fn label_elements(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        cues: &[(CompassCue, String)],
+        style: &LabelStyle,
+        screen: (f32, f32),
+        scale: f64,
+    ) -> Vec<
+        smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<GlesRenderer>,
+    > {
+        let mut kept = Vec::with_capacity(cues.len());
+        let mut elements = Vec::with_capacity(cues.len());
+        for (cue, text) in cues {
+            let key = (text.clone(), scale.to_bits(), style.generation);
+            let label = match self.labels.iter().position(|label| label.key == key) {
+                Some(index) => self.labels.swap_remove(index),
+                None => match build_label(text, style, scale) {
+                    Some((buffer, physical)) => CueLabel {
+                        key,
+                        buffer,
+                        physical,
+                    },
+                    None => continue,
+                },
+            };
+            let w = label.physical.0 as f64 / scale;
+            let h = label.physical.1 as f64 / scale;
+            let (cx, cy) = (f64::from(cue.center[0]), f64::from(cue.center[1]));
+            let reach = f64::from(cue.size) / 2.0 + 6.0;
+            let x = if cx < f64::from(screen.0) / 2.0 {
+                cx + reach
+            } else {
+                cx - reach - w
+            };
+            let x = x.clamp(0.0, (f64::from(screen.0) - w).max(0.0));
+            let y = (cy - h / 2.0).clamp(0.0, (f64::from(screen.1) - h).max(0.0));
+            if let Ok(element) =
+                smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement::from_buffer(
+                    renderer,
+                    Point::<f64, Logical>::from((x, y)).to_physical(scale),
+                    &label.buffer,
+                    None,
+                    Some(Rectangle::from_size(
+                        (f64::from(label.physical.0), f64::from(label.physical.1)).into(),
+                    )),
+                    Some(Size::from((w.round() as i32, h.round() as i32))),
+                    Kind::Unspecified,
+                )
+            {
+                elements.push(element);
+            }
+            kept.push(label);
+        }
+        self.labels = kept;
+        elements
+    }
+}
+
+/// A rounded dark pill with `text`, rasterized at physical scale.
+fn build_label(
+    text: &str,
+    style: &LabelStyle,
+    scale: f64,
+) -> Option<(
+    smithay::backend::renderer::element::memory::MemoryRenderBuffer,
+    (i32, i32),
+)> {
+    let font_px = style.size * scale as f32;
+    let pad = (6.0 * scale).round() as i32;
+    let max_text = (280.0 * scale) as i32;
+    let text_w = crate::text::line_width(&style.font, text, font_px, max_text).max(1);
+    let width = text_w + pad * 2;
+    let height = (font_px * 1.7).round().max(1.0) as i32;
+    let len = crate::text::checked_argb_len(width, height)?;
+    let mut pixels = vec![0u8; len];
+    let radius = height as f32 / 2.0;
+    for y in 0..height {
+        for x in 0..width {
+            let coverage =
+                crate::toast::rounded_rect_coverage_local(x, y, 0, 0, width, height, radius);
+            if coverage > 0.0 {
+                crate::text::blend_premultiplied(
+                    &mut pixels,
+                    width,
+                    x,
+                    y,
+                    [0.02, 0.05, 0.08, 0.55 * coverage],
+                );
+            }
+        }
+    }
+    crate::text::draw_line(
+        &mut pixels,
+        width,
+        height,
+        &style.font,
+        text,
+        font_px,
+        (0, 0, width, height),
+        pad,
+        style.color,
+    );
+    let buffer = smithay::backend::renderer::element::memory::MemoryRenderBuffer::from_slice(
+        &pixels,
+        smithay::backend::allocator::Fourcc::Argb8888,
+        (width, height),
+        1,
+        Transform::Normal,
+        None,
+    );
+    Some((buffer, (width, height)))
 }
 
 impl Compass {
@@ -300,6 +501,7 @@ pub fn compass_program(
             UniformName::new("u_alpha", UniformType::_1f),
             UniformName::new("u_angle", UniformType::_1f),
             UniformName::new("u_shape", UniformType::_1f),
+            UniformName::new("u_glow", UniformType::_1f),
         ],
     ) {
         Ok(program) => {
@@ -369,6 +571,7 @@ impl RenderElement<GlesRenderer> for CompassElement {
                 Uniform::new("u_alpha", self.cue.alpha),
                 Uniform::new("u_angle", self.cue.angle),
                 Uniform::new("u_shape", self.cue.shape),
+                Uniform::new("u_glow", self.cue.glow),
             ],
         )
     }
@@ -382,6 +585,15 @@ mod tests {
         CompassParams {
             urgent_color: [0.4, 0.9, 1.0],
             deep_color: [0.2, 0.4, 0.6],
+            normal_color: [0.3, 0.5, 0.5],
+            show_urgent: true,
+            show_deep: true,
+            show_normal: true,
+            inset: 0.0,
+            glow: 1.0,
+            far_scale: 1.0,
+            max_cues: 16,
+            urgent_pulse: 1.0,
             max_distance: 1000.0,
             peak_alpha: 0.85,
             size: 96.0,
@@ -455,7 +667,7 @@ mod tests {
             .collect();
         windows.push((Point::from((960.0, 1500.0)), CueKind::Urgent));
         let cues = compute_cues(viewport(), 1.0, &windows, &params());
-        assert!(cues.len() <= MAX_CUES);
+        assert!(cues.len() <= params().max_cues);
         assert_eq!(cues[0].color, params().urgent_color);
     }
 
@@ -483,6 +695,78 @@ mod tests {
         assert_eq!(cues[0].size, 17.0);
         assert!(cues[0].center[0] >= cues[0].size / 2.0);
         assert!(cues[0].center[1] >= cues[0].size / 2.0);
+    }
+
+    #[test]
+    fn kinds_have_their_own_color_toggle_and_order() {
+        let windows = [
+            (Point::from((960.0, 1600.0)), CueKind::Normal),
+            (Point::from((2500.0, 540.0)), CueKind::Deep),
+            (Point::from((-600.0, 540.0)), CueKind::Urgent),
+        ];
+        let cues = compute_cues(viewport(), 1.0, &windows, &params());
+        let colors: Vec<_> = cues.iter().map(|cue| cue.color).collect();
+        assert_eq!(
+            colors,
+            [
+                params().urgent_color,
+                params().deep_color,
+                params().normal_color
+            ]
+        );
+        assert_eq!(cues[0].source, 2, "a cue remembers which window it is for");
+        let hidden = CompassParams {
+            show_normal: false,
+            show_deep: false,
+            ..params()
+        };
+        let cues = compute_cues(viewport(), 1.0, &windows, &hidden);
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].color, params().urgent_color);
+    }
+
+    #[test]
+    fn inset_far_scale_cap_and_pulse_apply() {
+        let near = [(Point::from((1930.0, 540.0)), CueKind::Urgent)];
+        let far = [(Point::from((2820.0, 540.0)), CueKind::Urgent)];
+        let tuned = CompassParams {
+            inset: 20.0,
+            far_scale: 0.5,
+            urgent_pulse: 0.5,
+            ..params()
+        };
+        let near_cue = compute_cues(viewport(), 1.0, &near, &tuned)[0];
+        let far_cue = compute_cues(viewport(), 1.0, &far, &tuned)[0];
+        assert!(far_cue.size < near_cue.size, "far cues shrink");
+        assert!(far_cue.size >= params().size * 0.5 - 0.01);
+        let edge = 1920.0 - near_cue.size / 2.0 - 20.0;
+        assert!(
+            (near_cue.center[0] - edge).abs() < 0.5,
+            "inset moves the cue in"
+        );
+        let steady = compute_cues(viewport(), 1.0, &near, &params())[0];
+        assert!((near_cue.alpha - steady.alpha * 0.5).abs() < 0.001);
+        let many: Vec<_> = (0..10)
+            .map(|i| {
+                (
+                    Point::from((2000.0 + f64::from(i) * 10.0, 540.0)),
+                    CueKind::Normal,
+                )
+            })
+            .collect();
+        let capped = CompassParams {
+            max_cues: 3,
+            ..params()
+        };
+        assert_eq!(compute_cues(viewport(), 1.0, &many, &capped).len(), 3);
+    }
+
+    #[test]
+    fn labels_parse() {
+        assert_eq!(CueLabels::parse("title"), Some(CueLabels::Title));
+        assert_eq!(CueLabels::parse("app"), Some(CueLabels::App));
+        assert_eq!(CueLabels::parse("off"), Some(CueLabels::Off));
+        assert_eq!(CueLabels::parse("loud"), None);
     }
 
     #[test]

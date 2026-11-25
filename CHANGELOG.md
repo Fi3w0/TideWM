@@ -2,6 +2,11 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.38 · 2026-11-26 — Customizable Ocean minimap and compass
+
+- The Ocean minimap can be restyled piece by piece (backgrounds, boxes, glow, labels, font, pointer marker), made smaller and placed in a corner, and is sharp at fractional scale.
+- The compass cues ordinary off-screen windows separately from deep and urgent ones, each with its own color and on/off switch, and can shrink with distance, sit further from the edge, pulse for urgent windows and show titles. Screenshots and screencasts now include the compass.
+
 ## 0.91.37 · 2026-11-26 — Customizable group tabs
 
 - Grouped-window tabs follow your theme now: border colors and gradients, rounded corners, and sharp text at fractional scale. A new `tabs { }` block picks a title bar or a slim indicator on any edge, and sets colors, sizes, font and gaps. By default the tabs take their own space instead of covering the window's first line, and they no longer draw over floating windows.
