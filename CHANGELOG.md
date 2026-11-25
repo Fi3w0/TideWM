@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.35 · 2026-11-25 — Say what keeps a fullscreen window off direct scanout
+
+- `tidectl perf --json` now names what is drawn above a fullscreen window (`fullscreen_above_by`: a layer namespace, a window app_id or a TideWM element), and no longer counts the hardware cursor as a blocker.
+
 ## 0.91.34 · 2026-11-25 — Locked-pointer games keep their aim in Scroll
 
 - In Scroll, clicking in a game that captures the mouse (Minecraft, CS2) could snap the camera straight down. Before each click, after any window opened or closed, and on similar refreshes, TideWM re-sent the pointer's frozen position to the game, which read it as the cursor jumping. A captured pointer now gets only relative movement while the game stays under it. Classic was not affected.

@@ -1862,6 +1862,76 @@ fn schedule_empty_frame_retry<'l>(
     }
 }
 
+/// Names an element reported above a fullscreen window: the layer namespace
+/// or window app_id for a client surface, otherwise TideWM's element type.
+/// Runs only on fullscreen frames that are blocked, for one element.
+fn scanout_blocker_label(
+    state: &Smallvil,
+    output: &Output,
+    element: &OutputRenderElements,
+) -> String {
+    use smithay::backend::renderer::element::{Element, Id};
+    let id = element.id();
+    let owns = |root: &WlSurface| {
+        let found = std::cell::Cell::new(false);
+        smithay::wayland::compositor::with_surface_tree_downward(
+            root,
+            (),
+            |_, _, _| smithay::wayland::compositor::TraversalAction::DoChildren(()),
+            |surface, _, _| {
+                if Id::from_wayland_resource(surface) == *id {
+                    found.set(true);
+                }
+            },
+            |_, _, _| !found.get(),
+        );
+        found.get()
+    };
+    for layer in smithay::desktop::layer_map_for_output(output).layers() {
+        if owns(layer.wl_surface()) {
+            return format!("layer:{}", layer.namespace());
+        }
+    }
+    for window in state.space.elements() {
+        let Some(toplevel) = window.toplevel() else {
+            continue;
+        };
+        if owns(toplevel.wl_surface()) {
+            let (app_id, _) = state.toplevel_identity(toplevel.wl_surface());
+            return format!("window:{}", app_id.unwrap_or_default());
+        }
+    }
+    #[allow(unreachable_patterns)]
+    let kind = match element {
+        OutputRenderElements::Space(_) => "space",
+        OutputRenderElements::Cursor(_) => "cursor",
+        OutputRenderElements::Composited(_) => "composited",
+        OutputRenderElements::DepthImage(_) => "depth-image",
+        OutputRenderElements::Wallpaper(_) => "wallpaper",
+        OutputRenderElements::Lock(_) => "lock",
+        OutputRenderElements::WaterGlass(_) => "water-glass",
+        OutputRenderElements::FrostGlass(_) => "frost-glass",
+        OutputRenderElements::CustomShader(_) => "custom-shader",
+        OutputRenderElements::Shadow(_) => "shadow",
+        OutputRenderElements::RoundedSurface(_) => "rounded-surface",
+        OutputRenderElements::AnimatedSurface(_) => "animated-surface",
+        OutputRenderElements::AnimatedRoundedSurface(_) => "animated-rounded-surface",
+        OutputRenderElements::WindowSnapshot(_) => "window-snapshot",
+        OutputRenderElements::Border(_) => "border",
+        OutputRenderElements::Ripple(_) => "ripple",
+        OutputRenderElements::DepthOverlay(_) => "depth-overlay",
+        OutputRenderElements::DepthTransition(_) => "depth-transition",
+        OutputRenderElements::OceanCanvas(_) => "ocean-canvas",
+        OutputRenderElements::Caustics(_) => "caustics",
+        OutputRenderElements::Compass(_) => "compass",
+        OutputRenderElements::WorkspaceTransition(_) => "workspace-transition",
+        OutputRenderElements::WorkspaceGlide(_) => "workspace-glide",
+        OutputRenderElements::Dim(_) => "dim",
+        _ => "other",
+    };
+    kind.to_owned()
+}
+
 fn render_surface(
     state: &mut Smallvil,
     surface: &mut SurfaceData,
@@ -2256,8 +2326,12 @@ fn render_surface(
                     output.current_transform().transform_size(mode.size),
                 ),
                 smithay::utils::Scale::from(output.current_scale().fractional_scale()),
+                state.config.hardware_cursor,
             ))
         });
+    if let Some(super::perf::ScanoutBlocker::ElementAbove(index)) = sample.fullscreen {
+        sample.fullscreen_above = Some(scanout_blocker_label(state, output, &elements[index]));
+    }
     let render_result = surface.compositor.render_frame::<_, OutputRenderElements>(
         renderer,
         &elements,

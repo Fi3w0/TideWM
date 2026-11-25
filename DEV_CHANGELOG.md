@@ -2,6 +2,12 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.35 — Name the element that keeps a fullscreen window off the primary plane
+
+- Native `.33` (2026-11-25): DP-4 recorded 265 fullscreen frames, all `fullscreen_element_above`, and `primary_scanout = 0` on both outputs since login. The report could not say what was on top, and it counted `Kind::Cursor` elements even though Smithay puts them on the cursor plane when `ALLOW_CURSOR_PLANE_SCANOUT` is set (DP-4 used the cursor plane in 59,629 frames), so a fullscreen video with a visible pointer read as blocked.
+- `perf::scanout_blocker` takes the frame's cursor-plane flag (`hardware_cursor`) and skips cursor-kind elements when set; `ElementAbove` carries the index of the first element above. The udev path labels that one element (`scanout_blocker_label`): the owning layer namespace or window app_id for a client surface (walks surface trees only on blocked fullscreen frames), otherwise the `OutputRenderElements` variant. `OutputRenderStats::fullscreen_above_by` counts labels, capped at 32 keys (`other` after that).
+- Reference check (niri `6072f67`): same `ALLOW_PRIMARY_PLANE_SCANOUT_ANY | ALLOW_CURSOR_PLANE_SCANOUT` flags, no overlay planes by default, no border/rounding on fullscreen windows; Smithay wrappers (`Rescale`/`Relocate`/`Crop`) forward `underlying_storage`, TideWM's `RoundedSurfaceElement` does not (correct while rounding is drawn; fullscreen rounding is opt-in). Report-only: no render change. Native game run owed to name the blocker.
+
 ## 0.91.34 — No absolute pointer motion while a pointer lock is active
 
 - Native report (Fiw, 0.91.33, Scroll): right-click in Minecraft and CS2 snaps the camera straight down. `refresh_pointer_focus` sends a synthetic `pointer.motion` at the stored location, and Smithay's `WlSurface::motion` emits `wl_pointer.motion` with no constraint check. The relative-motion path already skips `motion` while locked, so the stored location stays at the point where the lock began; any refresh re-sent that point as absolute motion. Clients that warp-emulate pointer lock (Xwayland behind satellite, SDL/GLFW cursor modes) treat it as a warp and turn its distance from the assumed center into a look delta.

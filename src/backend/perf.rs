@@ -2,11 +2,11 @@
 //! not GPU execution time. Each live output owns one aggregate, with no logs
 //! or allocation per sample.
 
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use serde::Serialize;
 use smithay::{
-    backend::renderer::element::{Element, Id},
+    backend::renderer::element::{Element, Id, Kind},
     utils::{Physical, Rectangle, Scale},
 };
 
@@ -17,8 +17,9 @@ use smithay::{
 pub(crate) enum ScanoutBlocker {
     /// Nothing TideWM draws stands in the way; the rest is the driver's test.
     Clear,
-    /// Another element is drawn above the window on this output.
-    ElementAbove,
+    /// Another element is drawn above the window on this output; the index
+    /// of the first one in the front-to-back element list.
+    ElementAbove(usize),
     /// The window's buffer has transparency and no opaque region covering it.
     NotOpaque,
     /// The window's surface does not cover the whole output.
@@ -27,14 +28,20 @@ pub(crate) enum ScanoutBlocker {
     Missing,
 }
 
+/// `cursor_plane`: the frame allows cursor-plane scanout, so `Kind::Cursor`
+/// elements go to their own plane and never block the primary plane.
 pub(crate) fn scanout_blocker<E: Element>(
     elements: &[E],
     target: &Id,
     output: Rectangle<i32, Physical>,
     scale: Scale<f64>,
+    cursor_plane: bool,
 ) -> ScanoutBlocker {
-    let mut above = false;
-    for element in elements {
+    let mut above = None;
+    for (index, element) in elements.iter().enumerate() {
+        if cursor_plane && element.kind() == Kind::Cursor {
+            continue;
+        }
         let geometry = element.geometry(scale);
         if geometry
             .intersection(output)
@@ -43,11 +50,11 @@ pub(crate) fn scanout_blocker<E: Element>(
             continue;
         }
         if element.id() != target {
-            above = true;
+            above.get_or_insert(index);
             continue;
         }
-        if above {
-            return ScanoutBlocker::ElementAbove;
+        if let Some(index) = above {
+            return ScanoutBlocker::ElementAbove(index);
         }
         if !geometry.contains_rect(output) {
             return ScanoutBlocker::NotCovering;
@@ -100,6 +107,8 @@ pub(crate) struct RenderSample {
     pub failed: bool,
     /// Set on frames whose output has a fullscreen window.
     pub fullscreen: Option<ScanoutBlocker>,
+    /// What the first element above the fullscreen window is, when one is.
+    pub fullscreen_above: Option<String>,
     pub scanout_format_unsupported: bool,
     pub scanout_test_failed: bool,
 }
@@ -124,6 +133,9 @@ pub(crate) struct OutputRenderStats {
     fullscreen_not_opaque: u64,
     fullscreen_not_covering: u64,
     fullscreen_missing: u64,
+    /// `fullscreen_element_above` frames by what was on top (a layer
+    /// namespace, a window app_id or a TideWM element type).
+    fullscreen_above_by: BTreeMap<String, u64>,
     scanout_format_unsupported: u64,
     scanout_test_failed: u64,
     backdrop_rendered: u64,
@@ -165,12 +177,25 @@ impl OutputRenderStats {
             self.fullscreen_frames = self.fullscreen_frames.saturating_add(1);
             let counter = match blocker {
                 ScanoutBlocker::Clear => &mut self.fullscreen_clear,
-                ScanoutBlocker::ElementAbove => &mut self.fullscreen_element_above,
+                ScanoutBlocker::ElementAbove(_) => &mut self.fullscreen_element_above,
                 ScanoutBlocker::NotOpaque => &mut self.fullscreen_not_opaque,
                 ScanoutBlocker::NotCovering => &mut self.fullscreen_not_covering,
                 ScanoutBlocker::Missing => &mut self.fullscreen_missing,
             };
             *counter = counter.saturating_add(1);
+        }
+        if let Some(label) = sample.fullscreen_above {
+            // Bounded: a handful of element types and clients in practice.
+            const MAX_LABELS: usize = 32;
+            let key = if self.fullscreen_above_by.contains_key(&label)
+                || self.fullscreen_above_by.len() < MAX_LABELS
+            {
+                label
+            } else {
+                "other".to_owned()
+            };
+            let count = self.fullscreen_above_by.entry(key).or_default();
+            *count = count.saturating_add(1);
         }
         self.scanout_format_unsupported = self
             .scanout_format_unsupported
@@ -216,7 +241,7 @@ mod tests {
         let wallpaper = solid((1920, 1080), 1.0);
         let target = game.id().clone();
         let check = |elements: &[SolidColorRenderElement], target: &Id| {
-            scanout_blocker(elements, target, output, scale)
+            scanout_blocker(elements, target, output, scale, true)
         };
         // Whatever sits below an opaque full-output window is not a blocker.
         assert_eq!(
@@ -226,7 +251,21 @@ mod tests {
         let toast = solid((300, 80), 1.0);
         assert_eq!(
             check(&[toast, game.clone(), wallpaper.clone()], &target),
-            ScanoutBlocker::ElementAbove
+            ScanoutBlocker::ElementAbove(0)
+        );
+        // A cursor goes to the cursor plane when the frame allows it.
+        let cursor = SolidColorRenderElement::new(
+            Id::new(),
+            Rectangle::from_size((24, 24).into()),
+            CommitCounter::default(),
+            [1.0, 1.0, 1.0, 1.0],
+            Kind::Cursor,
+        );
+        let with_cursor = [cursor, game.clone(), wallpaper.clone()];
+        assert_eq!(check(&with_cursor, &target), ScanoutBlocker::Clear);
+        assert_eq!(
+            scanout_blocker(&with_cursor, &target, output, scale, false),
+            ScanoutBlocker::ElementAbove(0)
         );
         let translucent = solid((1920, 1080), 0.5);
         assert_eq!(
