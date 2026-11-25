@@ -3368,6 +3368,26 @@ impl Smallvil {
                     self.focus_monitor(&output);
                 }
             }
+            Action::CreateVirtualOutput {
+                name,
+                width,
+                height,
+                refresh_mhz,
+            } => {
+                if let Err(error) = self.create_virtual_output(
+                    name,
+                    (width, height),
+                    refresh_mhz,
+                    crate::state::VirtualOutputOrigin::Runtime,
+                ) {
+                    tracing::warn!(%error, "Could not create virtual output");
+                }
+            }
+            Action::RemoveVirtualOutput(name) => {
+                if let Err(error) = self.remove_virtual_output(&name) {
+                    tracing::warn!(%error, "Could not remove virtual output");
+                }
+            }
             Action::FocusDirectionOrMonitor(direction) => {
                 self.focus_direction_or_monitor(direction);
             }

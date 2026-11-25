@@ -482,6 +482,7 @@ impl Smallvil {
             hyprland_toplevel_export_global,
             tearing_control_global,
             capture_sessions: Vec::new(),
+            virtual_outputs: HashMap::new(),
             pending_captures: Vec::new(),
             idle_inhibit_manager_state,
             idle_notifier_state,

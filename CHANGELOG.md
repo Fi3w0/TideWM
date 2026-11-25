@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.36 · 2026-11-25 — Virtual monitors
+
+- New `virtual_output <name> { mode = 1920x1080@60 }` blocks and `create-virtual-output` / `remove-virtual-output` actions add monitors with no screen behind them: a real output with its own workspaces, for streaming to another device or parking windows. They draw only while something captures them, the cursor never wanders onto them, and removing one brings its windows back to a monitor you can see.
+
 ## 0.91.35 · 2026-11-25 — Say what keeps a fullscreen window off direct scanout
 
 - `tidectl perf --json` now names what is drawn above a fullscreen window (`fullscreen_above_by`: a layer namespace, a window app_id or a TideWM element), and no longer counts the hardware cursor as a blocker.

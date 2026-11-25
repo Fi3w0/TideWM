@@ -456,6 +456,10 @@ mod kde_decoration_test;
 mod pointer_lock_test;
 
 #[cfg(test)]
+#[path = "virtual_output_test.rs"]
+mod virtual_output_test;
+
+#[cfg(test)]
 mod decoration_tests {
     use super::decoration_configure_needed;
     use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;

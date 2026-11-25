@@ -1231,6 +1231,7 @@ fn render_requested_surfaces(
         state.render_pending_captures(renderer.as_mut(), &surface.output, true);
         state.capture_pending_workspace_transition(renderer.as_mut(), &surface.output);
     }
+    state.render_virtual_outputs(renderer.as_mut(), true);
     retries
 }
 
@@ -1641,57 +1642,8 @@ fn handle_connector_change(
                     // still-connected fallback (same workspace numbers) so
                     // neither tiled nor floating content becomes permanently
                     // unreachable. No-op if this was the only output.
-                    let disconnected_name = surface.output.name();
-                    state.remove_workspace_transition_output(&disconnected_name);
-                    state.remove_backdrop_output(&disconnected_name);
-                    let fallback: Option<String> = state
-                        .space
-                        .outputs()
-                        .find(|o| o.name() != disconnected_name)
-                        .map(|o| o.name());
-                    state
-                        .spatial
-                        .ocean
-                        .remove_output(&disconnected_name, fallback.as_deref());
-                    if let Some(fallback) = fallback.as_deref() {
-                        state.migrate_output_windows(&disconnected_name, fallback);
-                    }
-                    state.remove_layer_output(&surface.output);
-                    state.space.unmap_output(&surface.output);
-                    // `unmap_output` only forgets the output; the
-                    // wl_surface.leave events go out on the next refresh.
-                    // Send them now, before the global is retracted below.
-                    state.refresh_space();
-                    state.refresh_input_device_outputs();
-                    let space = &state.space;
-                    if let Some(theme) = state.input.cursor_theme.as_mut() {
-                        theme.retain_scales(|scale| {
-                            space
-                                .outputs()
-                                .any(|output| output.current_scale().integer_scale() == scale)
-                        });
-                    }
-                    state.remove_lock_output(&surface.output);
-                    state.render.gpu.layer_dim_buffers.remove(&surface.output);
-                    #[cfg(feature = "screencast")]
-                    if let Some(screencast) = &state.screencast {
-                        screencast.refresh_outputs(state.space.outputs());
-                    }
-                    state.wlr_output_management_state.refresh(&state.space);
-                    state.refresh_ext_workspaces();
-                    state
-                        .wlr_output_power_management_state
-                        .output_removed(&surface.output);
-                    state
-                        .wlr_gamma_control_state
-                        .output_removed(&surface.output);
-                    state.retile();
-                    state.refresh_pointer_focus();
-                    state.repair_keyboard_focus_after_output_change(
-                        fallback.as_deref(),
-                        smithay::utils::SERIAL_COUNTER.next_serial(),
-                    );
-                    retract_output_global(display_handle, state, surface.global);
+                    state.disconnect_output(&surface.output);
+                    state.retract_output_global(surface.global);
                 }
             }
             _ => {}
@@ -1699,40 +1651,8 @@ fn handle_connector_change(
     }
 }
 
-/// How long a disconnected output's disabled `wl_output` global stays
-/// bindable, so clients that raced a bind still find it (niri uses the same).
-const OUTPUT_GLOBAL_REMOVE_DELAY: Duration = Duration::from_secs(10);
-
 /// How often the maintenance timer sweeps every GPU's released textures.
 const TEXTURE_CACHE_CLEANUP_INTERVAL: Duration = Duration::from_secs(5);
-
-/// Retracts a disconnected output's `wl_output` global. Must run after every
-/// surface has left the output: a client that sees `global_remove` destroys
-/// its proxy, and a later `wl_surface.leave` naming it reaches the client as
-/// a null object (kitty/glfw segfaults on that). Disabling stops new binds
-/// and tells clients now; removal follows after a delay. Without this an
-/// already-bound client keeps a stale global and a replug advertises a
-/// second one on top.
-fn retract_output_global(
-    display_handle: &smithay::reexports::wayland_server::DisplayHandle,
-    state: &mut Smallvil,
-    global: smithay::reexports::wayland_server::backend::GlobalId,
-) {
-    display_handle.disable_global::<Smallvil>(global.clone());
-    let remover = display_handle.clone();
-    let delayed = global.clone();
-    let scheduled = state.loop_handle.insert_source(
-        Timer::from_duration(OUTPUT_GLOBAL_REMOVE_DELAY),
-        move |_, _, _| {
-            remover.remove_global::<Smallvil>(delayed.clone());
-            TimeoutAction::Drop
-        },
-    );
-    if let Err(err) = scheduled {
-        tracing::warn!(%err, "Failed to schedule wl_output global removal; removing now");
-        display_handle.remove_global::<Smallvil>(global);
-    }
-}
 
 /// Estimate one retrace from the output's live millihertz refresh value. If a
 /// mode is temporarily absent, retry slowly instead of assuming hardware.

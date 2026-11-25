@@ -1071,12 +1071,21 @@ impl Smallvil {
     /// the nearest valid representable point is used when motion reaches an
     /// outer edge or a gap in an L-shaped layout.
     pub(crate) fn clamp_to_outputs(&self, pos: Point<f64, Logical>) -> Point<f64, Logical> {
+        // The pointer stays on monitors a person can see; virtual outputs
+        // only count when nothing else is connected.
         nearest_point_in_output_rects(
             pos,
-            self.space
-                .outputs()
+            self.physical_outputs()
                 .filter_map(|output| self.space.output_geometry(output)),
         )
+        .or_else(|| {
+            nearest_point_in_output_rects(
+                pos,
+                self.space
+                    .outputs()
+                    .filter_map(|output| self.space.output_geometry(output)),
+            )
+        })
         .unwrap_or(pos)
     }
 

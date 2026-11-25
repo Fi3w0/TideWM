@@ -1729,7 +1729,7 @@ impl Smallvil {
         self.monitor_in_direction_from(&current, direction)
     }
 
-    pub(super) fn monitor_in_direction_from(
+    pub(crate) fn monitor_in_direction_from(
         &self,
         current: &Output,
         direction: Direction,
@@ -1749,8 +1749,9 @@ impl Smallvil {
             )
         };
         let (center, start, end) = axes(from);
-        self.space
-            .outputs()
+        // Directional moves stay on visible monitors; virtual outputs are
+        // reached by name.
+        self.physical_outputs()
             .filter(|output| *output != current)
             .filter_map(|output| {
                 let (other_center, other_start, other_end) =
@@ -1835,6 +1836,10 @@ impl Smallvil {
     /// Shared by monitor focus and explicit window transfers. The caller
     /// has already checked lock/grab policy and selected window focus.
     pub(super) fn warp_pointer_to_monitor(&mut self, output: &Output) {
+        if self.is_virtual_output(output) {
+            // Nobody can see a virtual output; keep the cursor where it is.
+            return;
+        }
         let Some(geometry) = self.space.output_geometry(output) else {
             return;
         };

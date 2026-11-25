@@ -628,6 +628,69 @@ pub(super) fn apply_switch_events_block(
     }
 }
 
+/// A compositor-only output with no display behind it: `virtual_output
+/// <name> { mode = 1920x1080@60 }`. Scale, position, transform and gaps come
+/// from an ordinary `output <name> { }` block with the same name.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VirtualOutputConfig {
+    pub name: String,
+    pub width: i32,
+    pub height: i32,
+    /// Hz; `None` means 60.
+    pub refresh: Option<f64>,
+}
+
+/// Virtual output names become `wl_output` names and action arguments, so
+/// they stay short, printable and free of the `:` action separator.
+pub fn valid_virtual_output_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+pub(super) fn lower_virtual_output_block(
+    header: &str,
+    body: &[waves::Entry],
+) -> Option<VirtualOutputConfig> {
+    let name = header.trim().to_string();
+    if !valid_virtual_output_name(&name) {
+        tracing::warn!(
+            name,
+            "A `virtual_output` block needs a name of letters, digits, `-`, `_` or `.`, ignoring"
+        );
+        return None;
+    }
+    let mut cfg = VirtualOutputConfig {
+        name,
+        width: 1920,
+        height: 1080,
+        refresh: None,
+    };
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!(name = %cfg.name, "Unexpected entry in `virtual_output` block, ignoring");
+            continue;
+        };
+        match key.as_str() {
+            "mode" => match parse_mode_str(value) {
+                Some((width, height, refresh)) => {
+                    cfg.width = width;
+                    cfg.height = height;
+                    cfg.refresh = refresh;
+                }
+                None => tracing::warn!(value, "Expected a mode like `1920x1080@60`, ignoring"),
+            },
+            other => tracing::warn!(
+                key = %other,
+                "Unknown key in `virtual_output` block (scale/position/gaps go in an `output` block of the same name), ignoring"
+            ),
+        }
+    }
+    Some(cfg)
+}
+
 pub(super) fn lower_output_block(header: &str, body: &[waves::Entry]) -> OutputConfig {
     let mut cfg = OutputConfig {
         name: header.trim().to_string(),

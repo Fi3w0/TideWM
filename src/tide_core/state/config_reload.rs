@@ -382,6 +382,7 @@ impl Smallvil {
                     crate::export_env_change(env_change);
                 }
                 self.config = new_config;
+                self.reconcile_config_virtual_outputs();
                 // A changed `xkb_layout` gives a new layout list, not just a
                 // new group; subscribers need to hear about it.
                 self.notify_keyboard_layout_changed();

@@ -1539,6 +1539,35 @@ output eDP-1 {
 }
 ```
 
+### `virtual_output <name> { }`
+
+A compositor-only monitor with no display behind it: a real `wl_output` with its own workspaces, for streaming to another device (Sunshine, OBS, a portal screencast) or as extra space to park windows. Works on both backends.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| header | string | — | Output name: letters, digits, `-`, `_`, `.` (up to 64). Must not match a connected monitor. |
+| `mode` | `WxH` or `WxH@Hz` | `1920x1080@60` | Size and refresh it advertises. Each edge 1–16384. |
+
+Scale, position, transform and gaps come from an ordinary `output <name> { }` block with the same name; without one it gets scale 1 and is placed beyond every connected monitor. Blocks are created after the real monitors at startup and reconciled on reload: a new block creates its output, a changed `mode` applies live, a removed block removes it.
+
+Behavior:
+
+- **Rendered only when watched.** Nothing draws a virtual output on a timer. A screenshot, `grim -o <name>`, or a screencast of it renders it through the capture path. Clients on it otherwise get a frame callback about once a second, so they keep running without burning frames.
+- **Never under the cursor.** The pointer stays on monitors you can see (virtual outputs count only when nothing else is connected), `focus-monitor-*`/`*-to-monitor-*` directions skip them, and moving a window or workspace there by name leaves the cursor where it is. Use the `:<name>` forms (`move-window-to-monitor:TV`, `move-workspace-to-monitor:TV`, `focus-monitor:TV`).
+- **Removal is safe.** Its windows move to a monitor you can see; an unplugged real monitor's windows never fall back onto a virtual one.
+- A session lock does not wait for a virtual output to draw; its captures show the lock like any other frame. DPMS changes are bookkeeping only.
+
+```
+virtual_output TV {
+    mode = 1920x1080@60
+}
+output TV {
+    scale = 1.5
+}
+```
+
+Runtime outputs come from actions (see the action list): `create-virtual-output:1600x900`, `create-virtual-output:TV:1920x1080@60`, `remove-virtual-output:TV`. The `outputs` IPC query marks each entry with `"virtual": true|false`.
+
 ### `gpu { }`
 
 Standalone udev/DRM sessions can select the GPU that owns TideWM's own GLES rendering and every output. This block is startup-only; restart TideWM after changing it.
@@ -1880,6 +1909,8 @@ The same set of strings works after `bind ... { }` at the top level or inside a 
 - `cycle-focus` — most-recently-used order, not z-order
 - `focus-monitor-left` / `focus-monitor-right` / `focus-monitor-up` / `focus-monitor-down` — focus the nearest monitor on that side whose perpendicular span overlaps the current monitor. Uses live logical output positions and sizes; stops at the edge without wrapping. Restores the destination's most recently used mapped window (tiled or floating), or clears window focus on an empty monitor. Moves the pointer to the center of the restored window's visible portion, or to the monitor center when empty. Ocean cameras keep their view. No-op during lock, exclusive keyboard layers, pointer grabs or compositor gestures
 - `focus-monitor:<name>` — the same focus and pointer handoff to a connected monitor by exact connector name; an unknown name does nothing. No shortcuts are added automatically
+- `create-virtual-output:<mode>` / `create-virtual-output:<name>:<mode>` — create a compositor-only monitor (see `virtual_output`), `<mode>` as `1920x1080` or `1920x1080@60`. Without a name it is called `VIRTUAL-1`, `VIRTUAL-2`, ... A taken name or an out-of-range mode is refused with a warning in the log. Lives until removed or TideWM exits
+- `remove-virtual-output:<name>` — remove a virtual output; its windows move to a monitor you can see. Real monitors are never removed. Removing a config-defined one lasts until the next config reload recreates it
 - `focus-column-or-monitor-left` / `focus-column-or-monitor-right` / `focus-window-or-monitor-up` / `focus-window-or-monitor-down` — the same as `focus-left/right/up/down`, but when focus cannot move that way (end of the Scroll strip, no neighbor, nothing focused) focus the monitor on that side as `focus-monitor-*` does. The side is measured from the focused window's monitor, or the pointer's monitor when nothing is focused. In Classic and Scroll the pointer also follows when ordinary directional focus lands on another monitor. Same no-op conditions as `focus-monitor-*`; no shortcuts are added automatically
 - `focus-urgent` — jump to whichever window is currently marked urgent, if any
 - `focus-floating` / `focus-tiling` — focus the most recently used floating or tiled window on the focused output; `switch-focus-between-floating-and-tiling` toggles between the two layers

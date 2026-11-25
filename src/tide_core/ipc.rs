@@ -1248,7 +1248,7 @@ fn resolve_window_response(
     json!({ "ok": true, "data": { "window_id": id, "app_id": app_id, "title": title } })
 }
 
-fn outputs_json(state: &Smallvil) -> serde_json::Value {
+pub(crate) fn outputs_json(state: &Smallvil) -> serde_json::Value {
     let ocean_engine = state.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean;
     let outputs: Vec<_> = state
         .space
@@ -1263,6 +1263,7 @@ fn outputs_json(state: &Smallvil) -> serde_json::Value {
                 "refresh_mhz": mode.map(|m| m.refresh),
                 "scale": output.current_scale().fractional_scale(),
                 "transform": format!("{:?}", output.current_transform()),
+                "virtual": state.is_virtual_output(output),
                 "active_workspace": if ocean_engine {
                     serde_json::Value::Null
                 } else {

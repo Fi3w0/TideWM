@@ -1134,6 +1134,7 @@ fn resolve_window_rules_folds_last_scalar_wins_bools_accumulate() {
         xwayland: XwaylandConfig::default(),
         spawn: Vec::new(),
         outputs: Vec::new(),
+        virtual_outputs: Vec::new(),
         gpu: GpuConfig::default(),
         switch_events: SwitchEventsConfig::default(),
         modes: HashMap::new(),

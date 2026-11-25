@@ -9,6 +9,8 @@ mod groups_depth;
 mod init;
 mod ipc;
 mod ocean;
+mod output_lifecycle;
+pub(crate) use output_lifecycle::VirtualOutputOrigin;
 mod physics;
 mod render;
 mod scroll;
@@ -552,6 +554,8 @@ pub struct Smallvil {
     pub(crate) capture_sessions: Vec<CaptureSession>,
     /// Validated capture requests waiting for a backend render loop (which
     /// owns the GL renderer) to produce pixels. See `capture.rs`.
+    /// Compositor-only outputs by name (see `output_lifecycle`).
+    pub(crate) virtual_outputs: HashMap<String, output_lifecycle::VirtualOutput>,
     pub pending_captures: Vec<PendingCapture>,
     /// `zwp_idle_inhibit_manager_v1`: only has an observable effect through
     /// `idle_notifier_state.set_is_inhibited` below -- TideWM has no

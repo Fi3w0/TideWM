@@ -79,13 +79,16 @@ pub use rules::{GlassMode, LayerRule, WindowOpacity, WindowRule, WorkspaceRule};
 mod devices;
 #[cfg(test)]
 use devices::apply_touchpad_block;
+pub(crate) use devices::valid_virtual_output_name;
 use devices::{
     apply_gpu_block, apply_input_block, apply_switch_events_block, apply_xwayland_block,
-    lower_output_block, parse_adaptive_sync, parse_position, GpuConfigRaw, SwitchEventsRaw,
+    lower_output_block, lower_virtual_output_block, parse_adaptive_sync, parse_position,
+    GpuConfigRaw, SwitchEventsRaw,
 };
 pub use devices::{
     parse_mode_str, AdaptiveSync, GpuConfig, GpuSelector, GpuVendor, InputConfig,
-    InputDeviceConfig, OutputConfig, SwitchEventsConfig, TouchpadConfig, XwaylandConfig,
+    InputDeviceConfig, OutputConfig, SwitchEventsConfig, TouchpadConfig, VirtualOutputConfig,
+    XwaylandConfig,
 };
 
 mod shaders;
@@ -341,6 +344,9 @@ pub struct Config {
     /// `AdaptiveSync`'s own doc for what actually happens with this today.
     pub adaptive_sync: AdaptiveSync,
     pub outputs: Vec<OutputConfig>,
+    /// `virtual_output` blocks: compositor-only outputs created at startup
+    /// and reconciled on reload.
+    pub virtual_outputs: Vec<VirtualOutputConfig>,
     /// Startup-only DRM GPU ownership and render-node policy. The nested
     /// backend is initialized before config hot reload can replace hardware,
     /// so changes take effect on the next TideWM start.
@@ -770,6 +776,7 @@ impl Config {
             xwayland: raw.xwayland,
             spawn: raw.spawn,
             outputs: raw.outputs,
+            virtual_outputs: raw.virtual_outputs,
             gpu: GpuConfig::from_raw(raw.gpu, &mut warnings),
             switch_events: SwitchEventsConfig::from_raw(raw.switch_events),
             window_rules: raw.window_rules,
@@ -1265,6 +1272,7 @@ struct RawConfig {
     xwayland: XwaylandConfig,
     spawn: Vec<String>,
     outputs: Vec<OutputConfig>,
+    virtual_outputs: Vec<VirtualOutputConfig>,
     gpu: GpuConfigRaw,
     switch_events: SwitchEventsRaw,
     window_rules: Vec<WindowRule>,
@@ -1417,6 +1425,7 @@ impl Default for RawConfig {
             xwayland: XwaylandConfig::default(),
             spawn: Vec::new(),
             outputs: Vec::new(),
+            virtual_outputs: Vec::new(),
             gpu: GpuConfigRaw::default(),
             switch_events: SwitchEventsRaw::default(),
             window_rules: Vec::new(),
@@ -1593,6 +1602,14 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
             apply_ripple_block(preset, body);
         }
         "output" => raw.outputs.push(lower_output_block(header, body)),
+        "virtual_output" => {
+            if let Some(cfg) = lower_virtual_output_block(header, body) {
+                // Last definition of a name wins, like other keyed blocks.
+                raw.virtual_outputs
+                    .retain(|existing| existing.name != cfg.name);
+                raw.virtual_outputs.push(cfg);
+            }
+        }
         "gpu" => apply_gpu_block(&mut raw.gpu, body),
         "rule" => raw.window_rules.push(lower_window_rule_block(body)),
         "layer_rule" => raw.layer_rules.push(lower_layer_rule_block(body)),
