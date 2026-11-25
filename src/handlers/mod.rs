@@ -452,6 +452,10 @@ impl XdgDecorationHandler for Smallvil {
 mod kde_decoration_test;
 
 #[cfg(test)]
+#[path = "pointer_lock_test.rs"]
+mod pointer_lock_test;
+
+#[cfg(test)]
 mod decoration_tests {
     use super::decoration_configure_needed;
     use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;

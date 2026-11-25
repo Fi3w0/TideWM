@@ -977,6 +977,24 @@ impl Smallvil {
         };
         let pos = self.clamp_to_outputs(pointer.current_location());
         let under = self.surface_under(pos);
+        // A locked pointer (wp_pointer_constraints) tells its client that only
+        // relative motion follows until the lock ends. While the locked
+        // surface is still under the pointer, re-sending the frozen lock
+        // position would arrive as a warp, and games turn the distance from
+        // where they assume the cursor is into a camera jump. Refresh only
+        // when something else is now under the pointer; that leave ends the
+        // lock as the protocol requires.
+        if self.pointer_is_locked() {
+            let locked_root = pointer
+                .current_focus()
+                .and_then(|focus| self.surface_root(&focus));
+            let under_root = under
+                .as_ref()
+                .and_then(|(surface, _)| self.surface_root(surface));
+            if locked_root.is_some() && locked_root == under_root {
+                return;
+            }
+        }
         let focus_surface = under.as_ref().map(|(surface, _)| surface.clone());
         let previous = focus_surface
             .as_ref()

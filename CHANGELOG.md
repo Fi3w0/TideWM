@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.34 · 2026-11-25 — Locked-pointer games keep their aim in Scroll
+
+- In Scroll, clicking in a game that captures the mouse (Minecraft, CS2) could snap the camera straight down. Before each click, after any window opened or closed, and on similar refreshes, TideWM re-sent the pointer's frozen position to the game, which read it as the cursor jumping. A captured pointer now gets only relative movement while the game stays under it. Classic was not affected.
+
 ## 0.91.33 · 2026-11-10 — Follow X11 overlay moves after mapping
 
 - X11 overlays can choose their position after opening and animate toward it. TideWM now follows moves requested by the window's owning X11 client when the server supports RECORD, while ignoring satellite's placement feedback. This fixes the late-move case that 0.91.32 froze at its initial position.

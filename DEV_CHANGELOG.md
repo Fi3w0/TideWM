@@ -2,6 +2,13 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.34 — No absolute pointer motion while a pointer lock is active
+
+- Native report (Fiw, 0.91.33, Scroll): right-click in Minecraft and CS2 snaps the camera straight down. `refresh_pointer_focus` sends a synthetic `pointer.motion` at the stored location, and Smithay's `WlSurface::motion` emits `wl_pointer.motion` with no constraint check. The relative-motion path already skips `motion` while locked, so the stored location stays at the point where the lock began; any refresh re-sent that point as absolute motion. Clients that warp-emulate pointer lock (Xwayland behind satellite, SDL/GLFW cursor modes) treat it as a warp and turn its distance from the assumed center into a look delta.
+- Scroll reaches the refresh before every button and axis event (`refresh_scroll_pointer_focus`; its 0.91.29 dedup resets on every real motion, including locked relative motion) and from `queue_scroll_pointer_refresh` after every retile. Ocean camera changes, output changes and session-lock transitions call the same helper. Classic button handling does not refresh, which is why only Scroll showed it.
+- `refresh_pointer_focus` now returns early while `pointer_is_locked()` and the surface under the pointer has the same root as the locked focus. A different surface under the pointer (session-lock surface, removed output, window moved away) still refreshes, so the leave ends the lock as before. No change to the unlocked path or the 0.91.29 Scroll dedup.
+- Regression: `handlers::pointer_lock_test` drives a real client with `zwp_pointer_constraints_v1` + `zwp_relative_pointer_manager_v1` through `process_input_event` using a minimal test `InputBackend`, with motion, left/right press/release and a retile. Scroll failed before the fix with three `wl_pointer.motion` events at the lock point (two clicks, one retile); Classic passed. Both pass now; relative motion and all four button events still arrive. 795 tests (761 + 25 + 9), four gates. Native retest with Minecraft/CS2 pending.
+
 ## 0.91.33 — Follow owner-authored X11 overlay positioning
 
 - Native `.32` retest failed: the recorded toast maps near its initial position, requests the edge roughly 1 ms later, then animates there over subsequent ConfigureWindow requests. The `.32` snapshot was accurate at mapping but insufficient for this real sequence. A generic client reproduces it by moving 20 ms after map: `.32` stays at (300,200) instead of (1000,650).
