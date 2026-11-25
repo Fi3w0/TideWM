@@ -1059,7 +1059,7 @@ impl Smallvil {
         Some(if self.spatial.workspaces.pseudo_tiled.contains(surface) {
             crate::layout::scale_centered(rect, self.config.pseudo_tile_scale)
         } else {
-            rect
+            self.group_tab_reserve(surface, rect)
         })
     }
 
@@ -1260,6 +1260,8 @@ impl Smallvil {
                         }
                     } else if self.spatial.workspaces.pseudo_tiled.contains(&surface) {
                         rect = crate::layout::scale_centered(rect, self.config.pseudo_tile_scale);
+                    } else {
+                        rect = self.group_tab_reserve(&surface, rect);
                     }
                 }
                 tracing::trace!(?rect, output = output.name(), "Tiling window");

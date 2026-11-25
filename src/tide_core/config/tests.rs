@@ -1112,6 +1112,7 @@ fn resolve_window_rules_folds_last_scalar_wins_bools_accumulate() {
         shadow: ShadowConfig::default(),
         rounding: RoundingConfig::default(),
         border: BorderConfig::default(),
+        tabs: TabsConfig::default(),
         popup: PopupConfig::default(),
         ripple: RippleConfig::system_default(),
         ripple_presets: HashMap::new(),

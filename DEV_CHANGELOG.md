@@ -2,6 +2,15 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.37 — Configurable group tabs
+
+- Fiw (2026-11-26): the hard-coded tab strip (22 px, teal/grey, square, size 13) looked outdated; asked for customization. Design choices were Fiw's: both a title bar and a slim indicator, colors/shape/placement/effects configurable, defaults following the theme. Effects (frost, shadow, switch animation) are the next stage and not in this release.
+- `config::TabsConfig` (`tabs`/`tab_bar`/`groupbar` block): style, position, placement, size, side_width, gap, margin, padding, radius, font path, font_size, active/inactive/urgent colors and `_to` gradients, angle, text colors, opacity. Unset colors resolve from `border { }`; a single custom color is solid; radius follows the smallest `rounding { }` radius capped at 8 and at half the size.
+- `tab_strip.rs` rewrite: `TabLook` resolves the frame's look; `StripKey` (titles, active, urgent, physical size, scale, style generation) decides reuse; strips rasterize premultiplied ARGB at physical pixels with SDF rounded tabs, angle gradients and baseline-centered titles. `render_element` passes the full buffer as `src`: without it Smithay crops the source to the destination's logical size, which cut and stretched strips at 1.25 (seen nested before the fix). Fonts load once per path (32 MiB cap), falling back to the bundled font.
+- Stacking: `group_tab_elements` (replaces `tab_strip_elements`) returns tabs keyed by the active surface; `desktop_render_elements` inserts them right after that window's popups, above its border. Removed the separate front-of-scene chains in udev, winit and capture, so floaters, popups and screenshots stack correctly. Tabs are hidden while the active member is fullscreen. Config reload bumps `tab_style_generation`.
+- Placement: `TabsConfig::reserve` shrinks a grouped tile by thickness + margin on the tab side; `Smallvil::group_tab_reserve` applies it in the Classic/Scroll retile, `tiled_rect_for_surface` and neighbor previews. Outside tabs fill that band. Ocean draws tabs inside (its reef tiling does not reserve).
+- Tests: rect per position/style/margin, outside band containment (all four edges), gap tiling, theme fallback, active/inactive pixels and transparent gaps. Nested winit (1.25 host scale) with two grouped kitty windows: bar (outside, theme gradient, centered text), live reload to a bottom indicator, window y 12 → 42 with tabs above it. Not run natively.
+
 ## 0.91.36 — Runtime virtual outputs
 
 - Requested by Fiw (2026-11-25) for streaming and extra desktop space; design choices were Fiw's: creation from config, tidectl/IPC and bindable actions; render only while watched.

@@ -2049,11 +2049,6 @@ fn render_surface(
     // pulls layer-shell content from `layer_map_for_output(output)`
     // unconditionally, independent of whatever `spaces` it's given, so an
     // empty space alone would not have hidden a panel/bar.
-    let tab_strip_elements = if locked {
-        Vec::new()
-    } else {
-        state.tab_strip_elements(renderer, output, &placements)
-    };
 
     // The overview shows window titles too -- same lock-gating as the tab
     // strip above, same reasoning.
@@ -2206,7 +2201,6 @@ fn render_surface(
             .chain(toast_element)
             .chain(error_element)
             .chain(cursor_glyph_element)
-            .chain(tab_strip_elements)
             .chain(welcome_element)
             .map(OutputRenderElements::Composited),
     );

@@ -483,6 +483,7 @@ impl Smallvil {
             tearing_control_global,
             capture_sessions: Vec::new(),
             virtual_outputs: HashMap::new(),
+            tab_style_generation: 0,
             pending_captures: Vec::new(),
             idle_inhibit_manager_state,
             idle_notifier_state,

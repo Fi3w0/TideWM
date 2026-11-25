@@ -1127,6 +1127,38 @@ border {
 
 Every field can be overridden inside `rule { border { } }`; matching blocks merge field by field. `border = on|off|none` is the rule shorthand.
 
+### `tabs { }`
+
+Look of grouped-window tabs (`group-*`, Scroll `toggle-column-tabbed`). With no block they follow the theme: tab colors come from `border { }` (active, inactive and urgent gradients and angle) and corners from `rounding { }`, capped at 8 px. Tabs are rasterized at each monitor's real scale, so text stays sharp at 1.25×, and are drawn directly above their own window, so floating windows and popups stay on top of them. Hidden while the group's window is fullscreen. Hot-reloadable.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `style` | `bar` \| `indicator` | `bar` | `bar`: one tab per window with its title. `indicator`: slim bars, no text (niri-style). |
+| `position` | `top` \| `bottom` \| `left` \| `right` | `top` | Edge of the group. A side `bar` stacks rows of `size` height in a column `side_width` wide. |
+| `placement` | `outside` \| `inside` | `outside` | `outside`: the window shrinks so the tabs never cover its content (Classic and Scroll). `inside`: drawn over the window edge. Ocean always draws them inside. |
+| `size` (`height`, `thickness`) | float, 1–256 | `26` bar, `4` indicator | Bar height or indicator thickness, logical pixels. |
+| `side_width` | float, 16–1024 | `180` | Column width of a `left`/`right` bar. |
+| `gap` | float, 0–64 | `4` | Space between tabs. |
+| `margin` | float, 0–128 | `4` | Space between the tabs and the window (inside: from the window edge). |
+| `padding` | float, 0–128 | `10` | Space before a title. |
+| `radius` (`rounding`) | float, 0–128 | from `rounding { }`, max 8 | Tab corner radius, capped to half the size. |
+| `font` | path | bundled font | A TTF/OTF file (`~/` allowed, up to 32 MiB); falls back to the bundled font with a warning. |
+| `font_size` | float, 4–96 | `13` | Logical pixels. |
+| `active_color` / `active_color_to` | `RRGGBB[AA]` | from `border { }` | Active tab; one color is solid, two make a gradient. Also `inactive_color(_to)`, `urgent_color(_to)`. |
+| `angle` | degrees | `border { angle }` | Gradient direction. |
+| `text_color` / `inactive_text_color` | `RRGGBB[AA]` | light / dimmer | Title color on the active (and urgent) tab, and on the others. |
+| `opacity` | float, 0–1 | `1.0` | Multiplies the whole tab row. |
+
+```
+tabs {
+    style = bar
+    position = top
+    placement = outside
+    font = ~/.local/share/fonts/Inter-Medium.ttf
+    font_size = 12
+}
+```
+
 ### `popup { }`
 
 Themes TideWM's own popup chrome: the config warning panel and the toast. Everything auto-follows the theme by default, so first-party UI matches window decoration without a second palette to keep in sync. Border thickness tracks `border.width` clamped into the 1-4px band a small pill can carry; border color tracks the same accent gradient window borders use; radius tracks the average `[rounding]` radius. Set a field only to pin that one piece away from the theme; the rest keep following it.

@@ -641,11 +641,6 @@ impl Smallvil {
             if let Some(error_element) = self.config_error_element(&output, renderer) {
                 elements.push(OutputRenderElements::Composited(error_element));
             }
-            elements.extend(
-                self.tab_strip_elements(renderer, &output, &placements)
-                    .into_iter()
-                    .map(OutputRenderElements::Composited),
-            );
             if self.should_show_welcome_hint() {
                 if let Some(welcome_element) = self
                     .welcome_hint

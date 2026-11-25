@@ -2,6 +2,10 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.37 · 2026-11-26 — Customizable group tabs
+
+- Grouped-window tabs follow your theme now: border colors and gradients, rounded corners, and sharp text at fractional scale. A new `tabs { }` block picks a title bar or a slim indicator on any edge, and sets colors, sizes, font and gaps. By default the tabs take their own space instead of covering the window's first line, and they no longer draw over floating windows.
+
 ## 0.91.36 · 2026-11-25 — Virtual monitors
 
 - New `virtual_output <name> { mode = 1920x1080@60 }` blocks and `create-virtual-output` / `remove-virtual-output` actions add monitors with no screen behind them: a real output with its own workspaces, for streaming to another device or parking windows. They draw only while something captures them, the cursor never wanders onto them, and removing one brings its windows back to a monitor you can see.

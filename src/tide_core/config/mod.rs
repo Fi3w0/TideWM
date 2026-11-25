@@ -68,7 +68,7 @@ use decoration::{
 pub use decoration::{
     BorderConfig, BorderOverrides, BorderPlacement, CausticsConfig, FrostConfig, FrostOverrides,
     GlassAnimation, PopupAnimation, PopupConfig, RoundingConfig, RoundingOverrides, ShadowConfig,
-    ShadowOverrides, ToastStyle, WaterGlassConfig,
+    ShadowOverrides, TabPlacement, TabPosition, TabStyle, TabsConfig, ToastStyle, WaterGlassConfig,
 };
 
 mod rules;
@@ -255,6 +255,8 @@ pub struct Config {
     pub rounding: RoundingConfig,
     /// Analytical solid/gradient window borders.
     pub border: BorderConfig,
+    /// Grouped-window tabs (`tabs { }`).
+    pub tabs: TabsConfig,
     /// Optional manual override for the compositor's own popup chrome
     /// (config warning panel, toast). Auto by default -- see `PopupConfig`.
     pub popup: PopupConfig,
@@ -754,6 +756,7 @@ impl Config {
             shadow: raw.shadow,
             rounding: raw.rounding,
             border: raw.border,
+            tabs: raw.tabs,
             popup: raw.popup,
             ripple: raw.ripple,
             ripple_presets: raw.ripple_presets,
@@ -1229,6 +1232,7 @@ struct RawConfig {
     shadow: ShadowConfig,
     rounding: RoundingConfig,
     border: BorderConfig,
+    tabs: TabsConfig,
     popup: PopupConfig,
     /// Sparse global overrides, mutated by `apply_ripple_block`. Runtime
     /// resolution layers these over `RippleConfig::system_default()`.
@@ -1404,6 +1408,7 @@ impl Default for RawConfig {
             shadow: ShadowConfig::default(),
             rounding: RoundingConfig::default(),
             border: BorderConfig::default(),
+            tabs: TabsConfig::default(),
             popup: PopupConfig::default(),
             ripple: RippleConfig::default(),
             ripple_presets: HashMap::new(),
@@ -1587,6 +1592,7 @@ fn apply_top_level_block(raw: &mut RawConfig, keyword: &str, header: &str, body:
         "shadow" => apply_shadow_block(&mut raw.shadow, body),
         "rounding" => apply_rounding_block(&mut raw.rounding, body),
         "border" => apply_border_block(&mut raw.border, body),
+        "tabs" | "tab_bar" | "groupbar" => decoration::apply_tabs_block(&mut raw.tabs, body),
         "popup" => apply_popup_block(&mut raw.popup, body),
         "ripple" => apply_ripple_block(&mut raw.ripple, body),
         "ripple_preset" => {

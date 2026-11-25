@@ -29,7 +29,6 @@ use smithay::{
         renderer::{
             element::{
                 default_primary_scanout_output_compare,
-                memory::MemoryRenderBuffer,
                 solid::{SolidColorBuffer, SolidColorRenderElement},
                 surface::WaylandSurfaceRenderElement,
                 RenderElementState,
@@ -554,6 +553,9 @@ pub struct Smallvil {
     pub(crate) capture_sessions: Vec<CaptureSession>,
     /// Validated capture requests waiting for a backend render loop (which
     /// owns the GL renderer) to produce pixels. See `capture.rs`.
+    /// Bumped on every config reload so cached tab strips pick up a new
+    /// `tabs`/`border`/`rounding` look.
+    pub(crate) tab_style_generation: u64,
     /// Compositor-only outputs by name (see `output_lifecycle`).
     pub(crate) virtual_outputs: HashMap<String, output_lifecycle::VirtualOutput>,
     pub pending_captures: Vec<PendingCapture>,
@@ -778,14 +780,10 @@ pub struct WindowGroup {
     /// Index into `members` of whichever one currently occupies the tree
     /// leaf.
     pub active: usize,
-    /// Cached tab-strip texture (see `tab_strip.rs`), same model as
-    /// `Toast`: built once, not every frame. `None` forces a rebuild on the
-    /// next `tab_strip_elements` pass -- set whenever membership/active
-    /// changes; a plain leaf-width change (an output resize, a sibling
-    /// split drag) is instead caught by comparing against `strip_width`
-    /// there, no separate invalidation needed for that case.
-    strip: Option<MemoryRenderBuffer>,
-    strip_width: i32,
+    /// Cached tabs (see `tab_strip.rs`), rebuilt when its key (titles,
+    /// active/urgent tab, physical size, scale, style generation) changes.
+    /// `None` forces a rebuild; membership/active changes set it.
+    strip: Option<crate::tab_strip::Strip>,
 }
 
 pub struct FloatingTag {
