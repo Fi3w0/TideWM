@@ -798,6 +798,7 @@ impl Smallvil {
             .device()
             .configured_output(&self.input.input_device_outputs)
             .filter(|output| self.space.output_geometry(output).is_some())
+            .or_else(|| self.physical_outputs().next().cloned())
             .or_else(|| self.space.outputs().next().cloned())?;
         let geometry = self.space.output_geometry(&output)?;
         Some(absolute_position_on_output(
@@ -3366,6 +3367,26 @@ impl Smallvil {
             Action::FocusMonitorNamed(name) => {
                 if let Some(output) = self.output_by_name(&name) {
                     self.focus_monitor(&output);
+                }
+            }
+            Action::CreateVirtualOutput {
+                name,
+                width,
+                height,
+                refresh_mhz,
+            } => {
+                if let Err(error) = self.create_virtual_output(
+                    name,
+                    (width, height),
+                    refresh_mhz,
+                    crate::state::VirtualOutputOrigin::Runtime,
+                ) {
+                    tracing::warn!(%error, "Could not create virtual output");
+                }
+            }
+            Action::RemoveVirtualOutput(name) => {
+                if let Err(error) = self.remove_virtual_output(&name) {
+                    tracing::warn!(%error, "Could not remove virtual output");
                 }
             }
             Action::FocusDirectionOrMonitor(direction) => {

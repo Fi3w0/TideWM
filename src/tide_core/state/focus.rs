@@ -977,6 +977,24 @@ impl Smallvil {
         };
         let pos = self.clamp_to_outputs(pointer.current_location());
         let under = self.surface_under(pos);
+        // A locked pointer (wp_pointer_constraints) tells its client that only
+        // relative motion follows until the lock ends. While the locked
+        // surface is still under the pointer, re-sending the frozen lock
+        // position would arrive as a warp, and games turn the distance from
+        // where they assume the cursor is into a camera jump. Refresh only
+        // when something else is now under the pointer; that leave ends the
+        // lock as the protocol requires.
+        if self.pointer_is_locked() {
+            let locked_root = pointer
+                .current_focus()
+                .and_then(|focus| self.surface_root(&focus));
+            let under_root = under
+                .as_ref()
+                .and_then(|(surface, _)| self.surface_root(surface));
+            if locked_root.is_some() && locked_root == under_root {
+                return;
+            }
+        }
         let focus_surface = under.as_ref().map(|(surface, _)| surface.clone());
         let previous = focus_surface
             .as_ref()
@@ -1711,7 +1729,7 @@ impl Smallvil {
         self.monitor_in_direction_from(&current, direction)
     }
 
-    pub(super) fn monitor_in_direction_from(
+    pub(crate) fn monitor_in_direction_from(
         &self,
         current: &Output,
         direction: Direction,
@@ -1731,8 +1749,9 @@ impl Smallvil {
             )
         };
         let (center, start, end) = axes(from);
-        self.space
-            .outputs()
+        // Directional moves stay on visible monitors; virtual outputs are
+        // reached by name.
+        self.physical_outputs()
             .filter(|output| *output != current)
             .filter_map(|output| {
                 let (other_center, other_start, other_end) =
@@ -1817,6 +1836,10 @@ impl Smallvil {
     /// Shared by monitor focus and explicit window transfers. The caller
     /// has already checked lock/grab policy and selected window focus.
     pub(super) fn warp_pointer_to_monitor(&mut self, output: &Output) {
+        if self.is_virtual_output(output) {
+            // Nobody can see a virtual output; keep the cursor where it is.
+            return;
+        }
         let Some(geometry) = self.space.output_geometry(output) else {
             return;
         };

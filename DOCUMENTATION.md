@@ -719,15 +719,20 @@ discoverable without navigating to them:
 
 - **Urgent** windows glow bright cyan in any direction (left, right, up,
   down, or diagonally toward a corner).
-- **Deep** windows (sunk via `sink-window`, or sitting in a lower reef)
-  glow cool blue in any direction, same as urgent.
+- **Deep** windows (at least one screen below the surface line: sunk via
+  `sink-window`, or in a lower reef) glow cool blue.
+- **Ordinary** off-screen windows glow too, in `normal_color` (the deep
+  color unless set).
 
-Nearer windows glow brighter; the cue fades linearly to nothing at
-`max_distance`. The cues are ambient and render-only: they do not respond
+Each kind can be turned off. Nearer windows glow brighter; the cue fades
+linearly to nothing at `max_distance` and can shrink with distance.
+Screenshots and screencasts include the cues. The cues are ambient and render-only: they do not respond
 to clicks, and camera travel stays on the existing pan/zoom/bookmark/depth
 actions. No element is produced at all when nothing is off-screen, so an
 idle desktop ticks zero frames. One analytical shader, no texture or
-framebuffer, and a 16-cue cap (urgent first, then nearest).
+framebuffer, and a cue cap (urgent first, then deep, then ordinary, nearest
+first within a kind). An urgent `pulse` is the one option that keeps the
+output drawing frames, and only while an urgent cue is on screen.
 
 Ocean-only; `water_effects = false` disables the compass regardless of this
 block. Has no effect under the Classic engine.
@@ -741,6 +746,18 @@ block. Has no effect under the Classic engine.
 | `size` | float, `8`–`1024` | `96` | Glow rect side, logical pixels. |
 | `alpha` | float, `0`–`1` | `0.85` | Peak glow alpha at zero distance. `peak_alpha` is an alias. |
 | `shape` | string | `circle` | Cue shape: `circle`/`glow`/`blob`, `arrow`/`triangle`, `chevron`/`wedge`, `ring`, `diamond`. Arrows and chevrons point toward the window. |
+| `show_urgent` / `show_deep` / `show_normal` | bool | `true` | Which kinds get a cue. |
+| `normal_color` | color, optional | `deep_color` | Ordinary off-screen windows. |
+| `inset` | float, `0`–`512` | `0` | Extra space between a cue and the screen edge. |
+| `glow` (`softness`) | float, `0.1`–`4` | `1` | Glow reach around the shape; larger is softer and wider. |
+| `far_scale` | float, `0.1`–`1` | `1` | Size at `max_distance` as a fraction of `size` (1 keeps every cue the same size). |
+| `max_cues` | integer, `1`–`64` | `16` | Cue cap. |
+| `pulse` | float, `0`–`1` | `0` | Urgent cue pulse depth; `0` is off. |
+| `pulse_speed` | float, `0.05`–`10` | `1.2` | Pulses per second. |
+| `labels` | `off` \| `app` \| `title` | `off` | Text on a small pill beside each cue. |
+| `label_color` | `RRGGBB[AA]` | light | |
+| `label_font` (`font`) | path | bundled font | TTF/OTF file. |
+| `label_size` (`font_size`) | float, `4`–`96` | `12` | Logical pixels. |
 
 ```wave
 compass {
@@ -797,6 +814,22 @@ already uses.
 | `background_color` | color, optional | preset default | Overrides the backdrop. `background` is an alias. |
 | `window_color` | color, optional | preset default | Overrides window box fill. `window` is an alias. |
 | `accent_color` | color, optional | preset default | Overrides the viewport-beacon/urgent-highlight/glow color, and the window border. `accent` is an alias. |
+| `background_top` / `background_bottom` | color, optional | preset | Backdrop gradient ends (beat `background_color`). |
+| `background_opacity` | float, `0`–`1` | preset | |
+| `window_opacity` | float, `0`–`1` | preset | Window box fill opacity. |
+| `window_border_color` | color, optional | preset | Beats `accent_color` for window borders. |
+| `viewport_color` | color, optional | preset | Frames of the other monitors' views. |
+| `radius` | float, `0`–`64` | preset | Window box corner radius. |
+| `glow_color` / `glow_spread` / `glow_opacity` | color / `0`–`64` / `0`–`1` | preset | Soft rim around boxes; `glow_opacity = 0` turns it off. |
+| `show_titles` / `show_output_names` | bool | `true` | Labels on window boxes and on monitor views. |
+| `font` / `font_size` / `title_color` | path / `4`–`96` / `RRGGBB[AA]` | bundled / `13` / light grey | Label text. |
+| `size` | float, `0.15`–`1` | `1` | Panel size as a fraction of the monitor. |
+| `position` | `center`, `top`, `bottom`, `left`, `right`, `top-left`, `top-right`, `bottom-left`, `bottom-right` | `center` | Where a smaller panel sits. |
+| `margin` | float, `0`–`512` | `24` | Space between a smaller panel and the screen edge. |
+| `panel_radius` | float, `0`–`128` | `18` when smaller, else `0` | Panel corner radius. |
+| `cursor_color` / `cursor_size` / `cursor_shape` | `RRGGBB[AA]` / `4`–`128` / `crosshair`, `ring`, `dot`, `none` | accent / `20` / `crosshair` | The pointer marker over the map. |
+
+The map is rasterized at the monitor's real scale. With a smaller panel, a click beside it closes the map without moving the camera.
 
 ```wave
 minimap {
@@ -1126,6 +1159,38 @@ border {
 ```
 
 Every field can be overridden inside `rule { border { } }`; matching blocks merge field by field. `border = on|off|none` is the rule shorthand.
+
+### `tabs { }`
+
+Look of grouped-window tabs (`group-*`, Scroll `toggle-column-tabbed`). With no block they follow the theme: tab colors come from `border { }` (active, inactive and urgent gradients and angle) and corners from `rounding { }`, capped at 8 px. Tabs are rasterized at each monitor's real scale, so text stays sharp at 1.25×, and are drawn directly above their own window, so floating windows and popups stay on top of them. Hidden while the group's window is fullscreen. Hot-reloadable.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `style` | `bar` \| `indicator` | `bar` | `bar`: one tab per window with its title. `indicator`: slim bars, no text (niri-style). |
+| `position` | `top` \| `bottom` \| `left` \| `right` | `top` | Edge of the group. A side `bar` stacks rows of `size` height in a column `side_width` wide. |
+| `placement` | `outside` \| `inside` | `outside` | `outside`: the window shrinks so the tabs never cover its content (Classic and Scroll). `inside`: drawn over the window edge. Ocean always draws them inside. |
+| `size` (`height`, `thickness`) | float, 1–256 | `26` bar, `4` indicator | Bar height or indicator thickness, logical pixels. |
+| `side_width` | float, 16–1024 | `180` | Column width of a `left`/`right` bar. |
+| `gap` | float, 0–64 | `4` | Space between tabs. |
+| `margin` | float, 0–128 | `4` | Space between the tabs and the window (inside: from the window edge). |
+| `padding` | float, 0–128 | `10` | Space before a title. |
+| `radius` (`rounding`) | float, 0–128 | from `rounding { }`, max 8 | Tab corner radius, capped to half the size. |
+| `font` | path | bundled font | A TTF/OTF file (`~/` allowed, up to 32 MiB); falls back to the bundled font with a warning. |
+| `font_size` | float, 4–96 | `13` | Logical pixels. |
+| `active_color` / `active_color_to` | `RRGGBB[AA]` | from `border { }` | Active tab; one color is solid, two make a gradient. Also `inactive_color(_to)`, `urgent_color(_to)`. |
+| `angle` | degrees | `border { angle }` | Gradient direction. |
+| `text_color` / `inactive_text_color` | `RRGGBB[AA]` | light / dimmer | Title color on the active (and urgent) tab, and on the others. |
+| `opacity` | float, 0–1 | `1.0` | Multiplies the whole tab row. |
+
+```
+tabs {
+    style = bar
+    position = top
+    placement = outside
+    font = ~/.local/share/fonts/Inter-Medium.ttf
+    font_size = 12
+}
+```
 
 ### `popup { }`
 
@@ -1539,6 +1604,35 @@ output eDP-1 {
 }
 ```
 
+### `virtual_output <name> { }`
+
+A compositor-only monitor with no display behind it: a real `wl_output` with its own workspaces, for streaming to another device (Sunshine, OBS, a portal screencast) or as extra space to park windows. Works on both backends.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| header | string | — | Output name: letters, digits, `-`, `_`, `.` (up to 64). Must not match a connected monitor. |
+| `mode` | `WxH` or `WxH@Hz` | `1920x1080@60` | Size and refresh it advertises. Each edge 1–16384. |
+
+Scale, position, transform and gaps come from an ordinary `output <name> { }` block with the same name; without one it gets scale 1 and is placed beyond every connected monitor. Blocks are created after the real monitors at startup and reconciled on reload: a new block creates its output, a changed `mode` applies live, a removed block removes it.
+
+Behavior:
+
+- **Rendered only when watched.** Nothing draws a virtual output on a timer. A screenshot, `grim -o <name>`, or a screencast of it renders it through the capture path. Clients on it otherwise get a frame callback about once a second, so they keep running without burning frames.
+- **Never under the cursor.** The pointer stays on monitors you can see (virtual outputs count only when nothing else is connected), `focus-monitor-*`/`*-to-monitor-*` directions skip them, and moving a window or workspace there by name leaves the cursor where it is. Use the `:<name>` forms (`move-window-to-monitor:TV`, `move-workspace-to-monitor:TV`, `focus-monitor:TV`).
+- **Removal is safe.** Its windows move to a monitor you can see; an unplugged real monitor's windows never fall back onto a virtual one.
+- A session lock does not wait for a virtual output to draw; its captures show the lock like any other frame. DPMS changes are bookkeeping only.
+
+```
+virtual_output TV {
+    mode = 1920x1080@60
+}
+output TV {
+    scale = 1.5
+}
+```
+
+Runtime outputs come from actions (see the action list): `create-virtual-output:1600x900`, `create-virtual-output:TV:1920x1080@60`, `remove-virtual-output:TV`. The `outputs` IPC query marks each entry with `"virtual": true|false`.
+
 ### `gpu { }`
 
 Standalone udev/DRM sessions can select the GPU that owns TideWM's own GLES rendering and every output. This block is startup-only; restart TideWM after changing it.
@@ -1594,7 +1688,7 @@ switch_events {
 
 Per-app placement applied the moment a window first maps, before it's ever tiled/rendered at a default spot (i3/sway's `for_window`, Hyprland's `windowrule`). One block per rule; repeat for more.
 
-New windows floated by `float`, `pin`, parent/dialog size hints, or `layout = floating` open centered in the chosen output's visible tiling work area, respecting layer-shell reservations and workspace gaps. Explicit position/size overrides centering wherever it fits; oversized windows shrink as far as client/rule minima allow. Dialogs without an explicit output follow their parent's output. This is a first-map policy: interactive `toggle-floating` keeps a visible window's geometry and only rescues coordinates outside the work area. Ocean placement uses its camera's world-coordinate work area.
+New windows floated by `float`, `pin`, parent/dialog size hints, or `layout = floating` open centered in the chosen output's visible tiling work area, respecting layer-shell reservations and workspace gaps. Explicit position/size overrides centering wherever it fits; oversized windows shrink as far as client/rule minima allow. Dialogs without an explicit output follow their parent's output. This is a first-map policy: interactive `toggle-floating` keeps a visible window's geometry and only rescues coordinates outside the work area. Ocean placement uses its camera's world-coordinate work area; a new window that takes focus is revealed by its output camera when the place it opened is off-camera (for example after a pan or minimap travel), while an already-visible map leaves the camera still.
 
 | Key | Type | Notes |
 | --- | --- | --- |
@@ -1880,6 +1974,8 @@ The same set of strings works after `bind ... { }` at the top level or inside a 
 - `cycle-focus` — most-recently-used order, not z-order
 - `focus-monitor-left` / `focus-monitor-right` / `focus-monitor-up` / `focus-monitor-down` — focus the nearest monitor on that side whose perpendicular span overlaps the current monitor. Uses live logical output positions and sizes; stops at the edge without wrapping. Restores the destination's most recently used mapped window (tiled or floating), or clears window focus on an empty monitor. Moves the pointer to the center of the restored window's visible portion, or to the monitor center when empty. Ocean cameras keep their view. No-op during lock, exclusive keyboard layers, pointer grabs or compositor gestures
 - `focus-monitor:<name>` — the same focus and pointer handoff to a connected monitor by exact connector name; an unknown name does nothing. No shortcuts are added automatically
+- `create-virtual-output:<mode>` / `create-virtual-output:<name>:<mode>` — create a compositor-only monitor (see `virtual_output`), `<mode>` as `1920x1080` or `1920x1080@60`. Without a name it is called `VIRTUAL-1`, `VIRTUAL-2`, ... A taken name or an out-of-range mode is refused with a warning in the log. Lives until removed or TideWM exits
+- `remove-virtual-output:<name>` — remove a virtual output; its windows move to a monitor you can see. Real monitors are never removed. Removing a config-defined one lasts until the next config reload recreates it
 - `focus-column-or-monitor-left` / `focus-column-or-monitor-right` / `focus-window-or-monitor-up` / `focus-window-or-monitor-down` — the same as `focus-left/right/up/down`, but when focus cannot move that way (end of the Scroll strip, no neighbor, nothing focused) focus the monitor on that side as `focus-monitor-*` does. The side is measured from the focused window's monitor, or the pointer's monitor when nothing is focused. In Classic and Scroll the pointer also follows when ordinary directional focus lands on another monitor. Same no-op conditions as `focus-monitor-*`; no shortcuts are added automatically
 - `focus-urgent` — jump to whichever window is currently marked urgent, if any
 - `focus-floating` / `focus-tiling` — focus the most recently used floating or tiled window on the focused output; `switch-focus-between-floating-and-tiling` toggles between the two layers

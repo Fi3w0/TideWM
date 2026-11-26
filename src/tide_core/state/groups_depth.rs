@@ -768,7 +768,6 @@ impl Smallvil {
                 ],
                 active: 0,
                 strip: None,
-                strip_width: 0,
             });
         }
         // b's leaf is gone from the tree, so the group's slot just grew;
@@ -1280,70 +1279,106 @@ impl Smallvil {
 
     /// Builds visible group tab strips at their active placement. Cached pixels
     /// rebuild only after invalidation or a live width change.
-    pub(crate) fn tab_strip_elements(
+    /// A grouped window's rectangle inside its tile `slot`: outside tabs
+    /// take their band from the slot so they never cover the window.
+    pub(crate) fn group_tab_reserve(
+        &self,
+        surface: &WlSurface,
+        slot: Rectangle<i32, Logical>,
+    ) -> Rectangle<i32, Logical> {
+        let active_in_group = self.group_of(surface).is_some_and(|index| {
+            let group = &self.groups[index];
+            group.members.len() > 1 && &group.members[group.active].surface == surface
+        });
+        if active_in_group && !self.fullscreen.contains_key(surface) {
+            self.config.tabs.reserve(slot)
+        } else {
+            slot
+        }
+    }
+
+    /// Each visible group's tabs on `output`, keyed by the active member's
+    /// surface so the element walk can draw them right above that window.
+    #[allow(clippy::mutable_key_type)] // Stable Wayland protocol identity.
+    pub(crate) fn group_tab_elements(
         &mut self,
         renderer: &mut GlesRenderer,
         output: &Output,
         scene: &[crate::placement::PlacedWindow],
-    ) -> Vec<MemoryRenderBufferRenderElement<GlesRenderer>> {
-        let output_name = output.name();
-        // Groups are few; a flat vector avoids using Wayland objects (whose
-        // liveness flag is interior-mutable) as hash keys for transient
-        // per-frame placement data.
-        let mut placements: Vec<(WlSurface, Rectangle<i32, Logical>)> = Vec::new();
-        for placement in scene {
-            let Some(surface) = placement.surface().cloned() else {
-                continue;
-            };
-            let rect = crate::placement::translated_rect(placement.rect, placement.view_offset);
-            placements.push((surface, rect));
+    ) -> HashMap<WlSurface, MemoryRenderBufferRenderElement<GlesRenderer>> {
+        let mut elements = HashMap::new();
+        if self.groups.is_empty() {
+            return elements;
         }
-
+        let output_name = output.name();
         // Render elements take output-local physical positions; placements
         // are global logical rects.
         let Some(output_geo) = self.space.output_geometry(output) else {
-            return Vec::new();
+            return elements;
         };
         let scale = output.current_scale().fractional_scale();
-        let mut elements = Vec::new();
+        let mut look = crate::tab_strip::TabLook::resolve(
+            &self.config.tabs,
+            &self.config.border,
+            &self.config.rounding,
+        );
+        // Ocean reefs do not reserve the tab band (`group_tab_reserve` runs
+        // in the Classic/Scroll tiling paths only).
+        if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean {
+            look = look.overlaid();
+        }
+        let generation = self.tab_style_generation;
         for group in &mut self.groups {
             if self.spatial.engine.ownership() == crate::config::SpatialOwnership::Workspaces
                 && group.output != output_name
             {
                 continue;
             }
-            let active_surface = &group.members[group.active].surface;
-            let Some(rect) = placements
-                .iter()
-                .find_map(|(surface, rect)| (surface == active_surface).then_some(*rect))
-            else {
+            let active_surface = group.members[group.active].surface.clone();
+            if self.fullscreen.contains_key(&active_surface) {
+                continue;
+            }
+            let Some(window_rect) = scene.iter().find_map(|placement| {
+                (placement.surface() == Some(&active_surface)).then(|| {
+                    crate::placement::translated_rect(placement.rect, placement.view_offset)
+                })
+            }) else {
                 continue;
             };
-
-            if group.strip.is_none() || group.strip_width != rect.size.w {
-                group.strip = None;
-                let titles: Vec<String> = group
-                    .members
-                    .iter()
-                    .map(|m| crate::tab_strip::window_title(&m.surface))
-                    .collect();
-                if let Some((buffer, width)) =
-                    crate::tab_strip::build_buffer(&titles, group.active, rect.size.w)
-                {
-                    group.strip = Some(buffer);
-                    group.strip_width = width;
-                }
+            let rect = look.strip_rect(window_rect, group.members.len());
+            let physical = (
+                (f64::from(rect.size.w) * scale).round().max(1.0) as i32,
+                (f64::from(rect.size.h) * scale).round().max(1.0) as i32,
+            );
+            let tabs: Vec<crate::tab_strip::Tab> = group
+                .members
+                .iter()
+                .enumerate()
+                .map(|(index, member)| crate::tab_strip::Tab {
+                    title: crate::tab_strip::window_title(&member.surface),
+                    active: index == group.active,
+                    urgent: self.urgent.contains(&member.surface),
+                })
+                .collect();
+            let key = crate::tab_strip::StripKey::new(tabs, physical, scale, generation);
+            let reuse = group
+                .strip
+                .as_ref()
+                .is_some_and(|strip| strip.key() == &key);
+            if !reuse {
+                group.strip = crate::tab_strip::build_strip(&look, key, rect, scale);
             }
-
-            if let Some(buffer) = &group.strip {
-                let location = (
-                    f64::from(rect.loc.x - output_geo.loc.x) * scale,
-                    f64::from(rect.loc.y - output_geo.loc.y) * scale,
-                );
-                if let Some(element) = crate::tab_strip::render_element(buffer, renderer, location)
-                {
-                    elements.push(element);
-                }
+            let Some(strip) = group.strip.as_mut() else {
+                continue;
+            };
+            // The window moved without changing size: keep the pixels.
+            strip.rect = rect;
+            let location = Point::from((
+                f64::from(rect.loc.x - output_geo.loc.x) * scale,
+                f64::from(rect.loc.y - output_geo.loc.y) * scale,
+            ));
+            if let Some(element) = crate::tab_strip::render_element(strip, renderer, location) {
+                elements.insert(active_surface, element);
             }
         }
         elements

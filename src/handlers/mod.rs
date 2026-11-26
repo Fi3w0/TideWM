@@ -452,6 +452,14 @@ impl XdgDecorationHandler for Smallvil {
 mod kde_decoration_test;
 
 #[cfg(test)]
+#[path = "pointer_lock_test.rs"]
+mod pointer_lock_test;
+
+#[cfg(test)]
+#[path = "virtual_output_test.rs"]
+mod virtual_output_test;
+
+#[cfg(test)]
 mod decoration_tests {
     use super::decoration_configure_needed;
     use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
@@ -660,6 +668,7 @@ impl FractionalScaleHandler for Smallvil {
                 self.mapped_toplevel_window(&root)
                     .and_then(|window| self.output_for_window(&window))
             })
+            .or_else(|| self.physical_outputs().next().cloned())
             .or_else(|| self.space.outputs().next().cloned());
         let Some(output) = output else {
             return;

@@ -71,6 +71,63 @@ impl Smallvil {
         true
     }
 
+    /// Brings a newly mapped, focused Ocean window into its output's camera
+    /// view. Map placement deliberately goes beside the previously focused
+    /// window even when that window is off-camera (after a pan, minimap
+    /// travel or camera switch), so without this the new window can take
+    /// keyboard focus while nothing visibly changes. A no-op when the window
+    /// is already fully visible, screen-pinned, fullscreen/maximized, or
+    /// while a lock/exclusive layer owns the screen.
+    pub(crate) fn reveal_ocean_window(&mut self, surface: &WlSurface) {
+        if self.spatial.engine.ownership() != crate::config::SpatialOwnership::Ocean
+            || !matches!(self.session_lock, SessionLock::Unlocked)
+            || self.exclusive_layer().is_some()
+            || self.fullscreen.contains_key(surface)
+            || self.maximized.contains_key(surface)
+            || self.spatial.ocean.is_screen_pinned(surface)
+        {
+            return;
+        }
+        let Some(output) = self
+            .spatial
+            .ocean
+            .entry_output(surface)
+            .and_then(|name| self.output_by_name(name))
+            .or_else(|| self.primary_output())
+        else {
+            return;
+        };
+        let Some(viewport) = self
+            .space
+            .output_geometry(&output)
+            .map(|geometry| geometry.size)
+        else {
+            return;
+        };
+        let Some(rect) =
+            self.spatial
+                .ocean
+                .world_rect(surface, self.config.gaps, self.config.bsp_split_bias)
+        else {
+            return;
+        };
+        if self
+            .spatial
+            .ocean
+            .rect_fully_visible_on_output(&output.name(), viewport, rect)
+        {
+            return;
+        }
+        self.spatial.ocean.center_on_rect(
+            &output.name(),
+            viewport,
+            rect,
+            Duration::from_millis(self.config.ocean.camera_animation_ms),
+            self.config.ocean.camera_sway,
+        );
+        self.request_redraw();
+    }
+
     pub(super) fn topmost_ocean_surface(
         &self,
         preferred_output: Option<&str>,
@@ -282,6 +339,10 @@ impl Smallvil {
             || !self.config.water_effects
             || !self.config.compass.enabled
         {
+            // Nothing is drawn, so nothing may keep the output animating.
+            for compass in self.render.motion.compasses.values_mut() {
+                compass.pulsing = false;
+            }
             return Vec::new();
         }
         let Some(output_geo) = self.space.output_geometry(output) else {
@@ -297,7 +358,11 @@ impl Smallvil {
                 output_geo.size.h as f64 / zoom,
             )),
         );
-        let cfg = self.config.compass;
+        let cfg = self.config.compass.clone();
+        // Physical depth is world Y below the surface line (Y = 0): a window
+        // a screen or more down is deep, anything else off-screen ordinary.
+        let deep_line = output_geo.size.h;
+        let mut labels: Vec<String> = Vec::new();
         let windows: Vec<(Point<f64, Logical>, crate::compass::CueKind)> = self
             .spatial
             .ocean
@@ -310,9 +375,18 @@ impl Smallvil {
                 }
                 let kind = if self.urgent.contains(&surface) {
                     crate::compass::CueKind::Urgent
-                } else {
+                } else if rect.loc.y >= deep_line {
                     crate::compass::CueKind::Deep
+                } else {
+                    crate::compass::CueKind::Normal
                 };
+                if cfg.labels != crate::compass::CueLabels::Off {
+                    let (app_id, title) = self.toplevel_identity(&surface);
+                    labels.push(match cfg.labels {
+                        crate::compass::CueLabels::App => app_id.unwrap_or_default(),
+                        _ => title.unwrap_or_default(),
+                    });
+                }
                 Some((
                     Point::from((
                         rect.loc.x as f64 + rect.size.w as f64 / 2.0,
@@ -322,6 +396,13 @@ impl Smallvil {
                 ))
             })
             .collect();
+        let pulsing = cfg.pulse > 0.0;
+        let urgent_pulse = if pulsing {
+            let phase = self.start_time.elapsed().as_secs_f32() * cfg.pulse_speed;
+            1.0 - cfg.pulse * 0.5 * (1.0 - (phase * std::f32::consts::TAU).cos())
+        } else {
+            1.0
+        };
         let cues = crate::compass::compute_cues(
             viewport,
             zoom,
@@ -329,6 +410,15 @@ impl Smallvil {
             &crate::compass::CompassParams {
                 urgent_color: cfg.urgent_color,
                 deep_color: cfg.deep_color,
+                normal_color: cfg.normal_color.unwrap_or(cfg.deep_color),
+                show_urgent: cfg.show_urgent,
+                show_deep: cfg.show_deep,
+                show_normal: cfg.show_normal,
+                inset: cfg.inset,
+                glow: cfg.glow,
+                far_scale: cfg.far_scale,
+                max_cues: cfg.max_cues,
+                urgent_pulse,
                 max_distance: cfg.max_distance,
                 peak_alpha: cfg.alpha,
                 size: cfg.size,
@@ -340,11 +430,40 @@ impl Smallvil {
         else {
             return Vec::new();
         };
+        let any_urgent = windows
+            .iter()
+            .any(|(_, kind)| *kind == crate::compass::CueKind::Urgent);
+        let labelled: Vec<(crate::compass::CompassCue, String)> = if labels.is_empty() {
+            Vec::new()
+        } else {
+            cues.iter()
+                .filter_map(|cue| {
+                    let text = labels.get(cue.source)?;
+                    (!text.is_empty()).then(|| (*cue, text.clone()))
+                })
+                .collect()
+        };
+        let label_style = crate::compass::LabelStyle {
+            font: crate::text::font_from_path(cfg.label_font.as_deref()),
+            size: cfg.label_size,
+            color: cfg.label_color,
+            generation: self.tab_style_generation,
+        };
+        let scale = output.current_scale().fractional_scale();
+        let screen = (output_geo.size.w as f32, output_geo.size.h as f32);
         let compass = self.render.motion.compasses.entry(output_name).or_default();
-        compass
-            .frame_elements(program, cues)
+        compass.pulsing = pulsing && any_urgent && cfg.show_urgent;
+        let label_elements =
+            compass.label_elements(renderer, &labelled, &label_style, screen, scale);
+        label_elements
             .into_iter()
-            .map(crate::backend::udev::OutputRenderElements::Compass)
+            .map(crate::backend::udev::OutputRenderElements::Composited)
+            .chain(
+                compass
+                    .frame_elements(program, cues)
+                    .into_iter()
+                    .map(crate::backend::udev::OutputRenderElements::Compass),
+            )
             .collect()
     }
 
@@ -412,15 +531,11 @@ impl Smallvil {
             })
             .collect();
 
-        let style = crate::minimap::MinimapStyle::resolve(
-            self.config.minimap.preset,
-            self.config.minimap.background_color,
-            self.config.minimap.window_color,
-            self.config.minimap.accent_color,
-        );
+        let style = crate::minimap::MinimapStyle::resolve(&self.config.minimap);
         self.minimap_peek = Some(crate::minimap::MinimapPeek::build(
             output_name,
             output_geometry,
+            output.current_scale().fractional_scale(),
             pointer_location,
             style,
             &windows,
@@ -458,6 +573,12 @@ impl Smallvil {
         let Some(peek) = self.minimap_peek.take() else {
             return;
         };
+        // A click beside a smaller panel just closes the map.
+        if !peek.pointer_on_panel() {
+            self.refresh_pointer_focus();
+            self.request_redraw();
+            return;
+        }
         let world = peek.world_point_at_last_location();
         let output_name = peek.output_name().to_string();
         let Some(viewport) = self
@@ -518,7 +639,7 @@ impl Smallvil {
         if let Some(cursor) = peek.cursor_element(renderer, output_loc, scale) {
             elements.push(cursor);
         }
-        if let Some(map) = peek.render_element(renderer) {
+        if let Some(map) = peek.render_element(renderer, scale) {
             elements.push(map);
         }
         elements

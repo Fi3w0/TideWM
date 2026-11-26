@@ -225,6 +225,17 @@ pub enum Action {
     FocusMonitor(Direction),
     /// Focus a monitor by its connector name.
     FocusMonitorNamed(String),
+    /// Create a compositor-only output: optional name, then
+    /// `width x height [@ refresh Hz]` (see `virtual_output` blocks).
+    CreateVirtualOutput {
+        name: Option<String>,
+        width: i32,
+        height: i32,
+        /// Millihertz, so the action stays exactly comparable.
+        refresh_mhz: Option<u32>,
+    },
+    /// Remove a virtual output by name; real monitors are never removed.
+    RemoveVirtualOutput(String),
     /// Directional focus; at the end of the strip (or with nothing to
     /// focus) hand off to the monitor on that side, like niri's
     /// `focus-column-or-monitor-*`.
@@ -580,6 +591,14 @@ pub(crate) fn parse_action(action: &str) -> Option<Action> {
         return (!name.trim().is_empty())
             .then(|| Action::MoveWindowToMonitorNamed(name.trim().to_string()));
     }
+    if let Some(rest) = action.strip_prefix("create-virtual-output:") {
+        return parse_create_virtual_output(rest);
+    }
+    if let Some(name) = action.strip_prefix("remove-virtual-output:") {
+        let name = name.trim();
+        return crate::config::valid_virtual_output_name(name)
+            .then(|| Action::RemoveVirtualOutput(name.to_string()));
+    }
     if let Some(name) = action.strip_prefix("focus-monitor:") {
         return (!name.trim().is_empty())
             .then(|| Action::FocusMonitorNamed(name.trim().to_string()));
@@ -863,4 +882,36 @@ fn parse_workspace_ref(n: &str) -> WorkspaceRef {
         Ok(n) => WorkspaceRef::Number(n),
         Err(_) => WorkspaceRef::Name(n.to_string()),
     }
+}
+
+/// `create-virtual-output:<mode>` or `create-virtual-output:<name>:<mode>`,
+/// where `<mode>` is `1920x1080` or `1920x1080@60`.
+fn parse_create_virtual_output(rest: &str) -> Option<Action> {
+    let (name, mode) = match rest.split_once(':') {
+        Some((name, mode)) => {
+            let name = name.trim();
+            if !crate::config::valid_virtual_output_name(name) {
+                return None;
+            }
+            (Some(name.to_string()), mode)
+        }
+        None => (None, rest),
+    };
+    let (width, height, refresh) = crate::config::parse_mode_str(mode.trim())?;
+    let refresh_mhz = match refresh {
+        Some(hz) => {
+            let mhz = (hz * 1000.0).round();
+            if !(1.0..=f64::from(u32::MAX)).contains(&mhz) {
+                return None;
+            }
+            Some(mhz as u32)
+        }
+        None => None,
+    };
+    Some(Action::CreateVirtualOutput {
+        name,
+        width,
+        height,
+        refresh_mhz,
+    })
 }

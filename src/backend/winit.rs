@@ -475,11 +475,6 @@ pub fn init_winit(
                                 .chain(overview_element)
                                 .chain(toast_element)
                                 .chain(error_element)
-                                .chain(state.tab_strip_elements(
-                                    renderer,
-                                    &entry.output,
-                                    &placements,
-                                ))
                                 .chain(welcome_element)
                                 .map(crate::backend::udev::OutputRenderElements::Composited),
                         );
@@ -599,6 +594,11 @@ pub fn init_winit(
                     );
                 }
                 entry.dirty = state.output_has_active_animation(output, &placements);
+            }
+            // Virtual outputs have no window of their own; drain their
+            // captures every tick, whether or not the host window redrew.
+            if let Some(entry) = outputs.first_mut() {
+                state.render_virtual_outputs(entry.backend.renderer(), false);
             }
 
             state.popups.cleanup();

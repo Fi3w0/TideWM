@@ -875,6 +875,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state.backend_name = "udev";
         crate::backend::udev::init_udev(&mut event_loop, &mut state)?;
     }
+    // Virtual outputs from `virtual_output` blocks join after the real ones,
+    // so automatic placement puts them beyond every connected monitor.
+    state.reconcile_config_virtual_outputs();
 
     // After backend init: both branches above have set TideWM's real
     // WAYLAND_DISPLAY (see `state.socket_name`), so it is now safe to make

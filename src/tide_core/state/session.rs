@@ -419,10 +419,12 @@ impl Smallvil {
         let SessionLock::Locking(_) = &self.session_lock else {
             return;
         };
+        // Virtual outputs render only when captured, so they cannot hold the
+        // confirmation back; their captures show the lock like any frame.
         if !self
             .space
             .outputs()
-            .all(|o| self.locked_outputs.contains(o))
+            .all(|o| self.locked_outputs.contains(o) || self.is_virtual_output(o))
         {
             return;
         }
@@ -835,9 +837,13 @@ impl Smallvil {
     /// success. The one place that does both together, shared by the
     /// protocol's own `SetMode` handler and `toggle_dpms` below.
     fn set_output_power_state(&mut self, output: &Output, on: bool) -> bool {
-        let applied = match &mut self.set_output_power {
-            Some(hook) => hook(output, on),
-            None => true,
+        let applied = if self.is_virtual_output(output) {
+            true
+        } else {
+            match &mut self.set_output_power {
+                Some(hook) => hook(output, on),
+                None => true,
+            }
         };
         if applied {
             if !on {

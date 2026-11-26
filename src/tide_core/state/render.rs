@@ -599,6 +599,8 @@ impl Smallvil {
                     stack = crate::placement::PlacementStack::Fullscreen;
                 } else if self.spatial.workspaces.pseudo_tiled.contains(surface) {
                     rect = crate::layout::scale_centered(rect, self.config.pseudo_tile_scale);
+                } else {
+                    rect = self.group_tab_reserve(surface, rect);
                 }
             }
             crate::placement::PlacedWindow::preview(window, rect)
@@ -670,6 +672,8 @@ impl Smallvil {
     ) -> Option<Vec<crate::backend::udev::OutputRenderElements>> {
         self.space.output_geometry(output)?;
         let mut result = Vec::new();
+        #[allow(clippy::mutable_key_type)]
+        let mut tab_layers = self.group_tab_elements(renderer, output, placements);
         let shadow_program = self
             .shadows_possible()
             .then(|| crate::shadow::shadow_program(&mut self.render.gpu.shadow_program, renderer))
@@ -702,6 +706,12 @@ impl Smallvil {
             placements: &[crate::placement::PlacedWindow],
             depth_layers: &mut HashMap<WlSurface, Vec<crate::backend::udev::OutputRenderElements>>,
             glass_layers: &mut HashMap<WlSurface, Vec<crate::backend::udev::OutputRenderElements>>,
+            tab_layers: &mut HashMap<
+                WlSurface,
+                smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<
+                    GlesRenderer,
+                >,
+            >,
             result: &mut Vec<crate::backend::udev::OutputRenderElements>,
         ) {
             let Some(output_geo) = state.space.output_geometry(output) else {
@@ -758,6 +768,11 @@ impl Smallvil {
                         entry.is_fullscreen(),
                     );
                     result.extend(popups);
+                    // A group's tabs sit above its own window and below
+                    // anything stacked over that window.
+                    if let Some(tabs) = tab_layers.remove(surface) {
+                        result.push(crate::backend::udev::OutputRenderElements::Composited(tabs));
+                    }
                     if let Some(program) = border_program {
                         if let Some(border) = state.window_border_element(
                             output,
@@ -869,6 +884,7 @@ impl Smallvil {
             placements,
             &mut *depth_layers,
             &mut *glass_layers,
+            &mut tab_layers,
             &mut result,
         );
         append_layers(
@@ -913,6 +929,7 @@ impl Smallvil {
             placements,
             &mut *depth_layers,
             &mut *glass_layers,
+            &mut tab_layers,
             &mut result,
         );
         // The canvas grid and caustics sit between windows and the

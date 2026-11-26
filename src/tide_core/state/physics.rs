@@ -1183,6 +1183,7 @@ impl Smallvil {
             || !self.render.motion.swim_cameras.is_empty()
             || !self.render.motion.workspace_scroll_cameras.is_empty()
             || self.spatial.ocean.has_active_camera_motion()
+            || self.render.motion.compasses.values().any(|compass| compass.pulsing)
             || (self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean
                 && self.config.ocean.canvas_marker
                 && self.render.motion.ocean_canvases.values().any(|canvas| {
@@ -1228,6 +1229,12 @@ impl Smallvil {
                 .workspace_scroll_cameras
                 .contains_key(&name)
             || self.spatial.ocean.has_active_camera_motion_on(&name)
+            || self
+                .render
+                .motion
+                .compasses
+                .get(&name)
+                .is_some_and(|compass| compass.pulsing)
             || (self.spatial.engine.ownership() == crate::config::SpatialOwnership::Ocean
                 && self.config.ocean.canvas_marker
                 && self

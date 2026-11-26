@@ -546,7 +546,14 @@ impl Smallvil {
             .seat
             .get_pointer()
             .and_then(|p| self.output_for_point(p.current_location()));
-        let first_output = || self.space.outputs().next().cloned();
+        // A virtual output can precede a reconnected monitor in Space's
+        // insertion-ordered list; it is never where a person is looking.
+        let first_output = || {
+            self.physical_outputs()
+                .next()
+                .cloned()
+                .or_else(|| self.space.outputs().next().cloned())
+        };
         let prefer_pointer =
             self.config.input.focus_follows_mouse && self.exclusive_layer().is_none();
         if prefer_pointer {
@@ -1059,7 +1066,7 @@ impl Smallvil {
         Some(if self.spatial.workspaces.pseudo_tiled.contains(surface) {
             crate::layout::scale_centered(rect, self.config.pseudo_tile_scale)
         } else {
-            rect
+            self.group_tab_reserve(surface, rect)
         })
     }
 
@@ -1071,12 +1078,21 @@ impl Smallvil {
     /// the nearest valid representable point is used when motion reaches an
     /// outer edge or a gap in an L-shaped layout.
     pub(crate) fn clamp_to_outputs(&self, pos: Point<f64, Logical>) -> Point<f64, Logical> {
+        // The pointer stays on monitors a person can see; virtual outputs
+        // only count when nothing else is connected.
         nearest_point_in_output_rects(
             pos,
-            self.space
-                .outputs()
+            self.physical_outputs()
                 .filter_map(|output| self.space.output_geometry(output)),
         )
+        .or_else(|| {
+            nearest_point_in_output_rects(
+                pos,
+                self.space
+                    .outputs()
+                    .filter_map(|output| self.space.output_geometry(output)),
+            )
+        })
         .unwrap_or(pos)
     }
 
@@ -1251,6 +1267,8 @@ impl Smallvil {
                         }
                     } else if self.spatial.workspaces.pseudo_tiled.contains(&surface) {
                         rect = crate::layout::scale_centered(rect, self.config.pseudo_tile_scale);
+                    } else {
+                        rect = self.group_tab_reserve(&surface, rect);
                     }
                 }
                 tracing::trace!(?rect, output = output.name(), "Tiling window");

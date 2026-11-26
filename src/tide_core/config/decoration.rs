@@ -1283,3 +1283,258 @@ pub(super) fn apply_popup_block(cfg: &mut PopupConfig, body: &[waves::Entry]) {
         }
     }
 }
+
+/// How a window group shows its tabs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TabStyle {
+    /// Tabs with titles.
+    #[default]
+    Bar,
+    /// Slim bars, one per tab, no text.
+    Indicator,
+}
+
+/// Which edge of the group the tabs sit on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TabPosition {
+    #[default]
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+impl TabPosition {
+    pub fn vertical(self) -> bool {
+        matches!(self, Self::Left | Self::Right)
+    }
+}
+
+/// Whether tabs cover the top of the window or take their own space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TabPlacement {
+    /// The window shrinks so the tabs never cover its content.
+    #[default]
+    Outside,
+    /// The tabs are drawn over the window's edge.
+    Inside,
+}
+
+/// `tabs { }`: look of grouped-window tabs. Every color left unset follows
+/// the matching `border { }` color, and `radius` follows `rounding { }`, so
+/// tabs match the theme without extra settings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TabsConfig {
+    pub style: TabStyle,
+    pub position: TabPosition,
+    pub placement: TabPlacement,
+    /// Bar height (top/bottom) or slim-bar thickness, logical pixels.
+    /// `None` uses the style's default (26 bar, 4 indicator).
+    pub size: Option<f32>,
+    /// Bar column width when the bar sits on the left or right.
+    pub side_width: f32,
+    /// Space between tabs.
+    pub gap: f32,
+    /// Inset of the tab row from the window edge.
+    pub margin: f32,
+    /// Horizontal space before a title.
+    pub padding: f32,
+    /// Corner radius; `None` follows `rounding { }`, capped to half the size.
+    pub radius: Option<f32>,
+    /// A TTF/OTF file; `None` uses TideWM's bundled font.
+    pub font: Option<String>,
+    pub font_size: f32,
+    pub active_from: Option<[f32; 4]>,
+    pub active_to: Option<[f32; 4]>,
+    pub inactive_from: Option<[f32; 4]>,
+    pub inactive_to: Option<[f32; 4]>,
+    pub urgent_from: Option<[f32; 4]>,
+    pub urgent_to: Option<[f32; 4]>,
+    /// Gradient angle in degrees; `None` follows `border { angle }`.
+    pub angle: Option<f32>,
+    pub text_color: [f32; 4],
+    pub inactive_text_color: [f32; 4],
+    pub opacity: f32,
+}
+
+impl Default for TabsConfig {
+    fn default() -> Self {
+        Self {
+            style: TabStyle::Bar,
+            position: TabPosition::Top,
+            placement: TabPlacement::Outside,
+            size: None,
+            side_width: 180.0,
+            gap: 4.0,
+            margin: 4.0,
+            padding: 10.0,
+            radius: None,
+            font: None,
+            font_size: 13.0,
+            active_from: None,
+            active_to: None,
+            inactive_from: None,
+            inactive_to: None,
+            urgent_from: None,
+            urgent_to: None,
+            angle: None,
+            text_color: [0.96, 0.97, 1.0, 1.0],
+            inactive_text_color: [0.80, 0.84, 0.90, 0.85],
+            opacity: 1.0,
+        }
+    }
+}
+
+impl TabsConfig {
+    pub fn size_or_default(&self) -> f32 {
+        self.size.unwrap_or(match self.style {
+            TabStyle::Bar => 26.0,
+            TabStyle::Indicator => 4.0,
+        })
+    }
+
+    /// The tab row's thickness across its edge, logical pixels.
+    pub fn thickness(&self) -> f32 {
+        match (self.style, self.position.vertical()) {
+            (TabStyle::Bar, true) => self.side_width,
+            _ => self.size_or_default(),
+        }
+    }
+
+    /// The window rectangle left inside `slot` once outside tabs take their
+    /// band; `slot` unchanged for inside tabs.
+    pub fn reserve(
+        &self,
+        slot: smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+    ) -> smithay::utils::Rectangle<i32, smithay::utils::Logical> {
+        if self.placement == TabPlacement::Inside {
+            return slot;
+        }
+        let band = (self.thickness() + self.margin).round() as i32;
+        let (w, h) = (slot.size.w, slot.size.h);
+        let (x, y, w, h) = match self.position {
+            TabPosition::Top => (slot.loc.x, slot.loc.y + band, w, h - band),
+            TabPosition::Bottom => (slot.loc.x, slot.loc.y, w, h - band),
+            TabPosition::Left => (slot.loc.x + band, slot.loc.y, w - band, h),
+            TabPosition::Right => (slot.loc.x, slot.loc.y, w - band, h),
+        };
+        // Never squeeze a window below a sliver; tabs then overlap instead.
+        if w < 32 || h < 32 {
+            return slot;
+        }
+        smithay::utils::Rectangle::new((x, y).into(), (w, h).into())
+    }
+}
+
+pub(super) fn apply_tabs_block(cfg: &mut TabsConfig, body: &[waves::Entry]) {
+    for entry in body {
+        let waves::Entry::Assign(key, value) = entry else {
+            tracing::warn!("Unexpected entry in `tabs` block, ignoring");
+            continue;
+        };
+        let color = |value: &str| {
+            let parsed = parse_rgba_color(value);
+            if parsed.is_none() {
+                tracing::warn!(value, key = %key, "Expected an RGBA tab color, ignoring");
+            }
+            parsed
+        };
+        let number = |value: &str, min: f32, max: f32| parse_f32_clamped(value, min, max, key);
+        match key.as_str() {
+            "style" => match value.trim() {
+                "bar" | "titles" => cfg.style = TabStyle::Bar,
+                "indicator" | "slim" => cfg.style = TabStyle::Indicator,
+                _ => tracing::warn!(value, "Expected tabs.style bar or indicator, ignoring"),
+            },
+            "position" => match value.trim() {
+                "top" => cfg.position = TabPosition::Top,
+                "bottom" => cfg.position = TabPosition::Bottom,
+                "left" => cfg.position = TabPosition::Left,
+                "right" => cfg.position = TabPosition::Right,
+                _ => tracing::warn!(
+                    value,
+                    "Expected tabs.position top/bottom/left/right, ignoring"
+                ),
+            },
+            "placement" => match value.trim() {
+                "outside" | "reserve" => cfg.placement = TabPlacement::Outside,
+                "inside" | "overlay" => cfg.placement = TabPlacement::Inside,
+                _ => tracing::warn!(value, "Expected tabs.placement outside or inside, ignoring"),
+            },
+            "size" | "height" | "thickness" => {
+                if let Some(size) = number(value, 1.0, 256.0) {
+                    cfg.size = Some(size);
+                }
+            }
+            "side_width" => {
+                if let Some(width) = number(value, 16.0, 1024.0) {
+                    cfg.side_width = width;
+                }
+            }
+            "gap" => {
+                if let Some(gap) = number(value, 0.0, 64.0) {
+                    cfg.gap = gap;
+                }
+            }
+            "margin" => {
+                if let Some(margin) = number(value, 0.0, 128.0) {
+                    cfg.margin = margin;
+                }
+            }
+            "padding" => {
+                if let Some(padding) = number(value, 0.0, 128.0) {
+                    cfg.padding = padding;
+                }
+            }
+            "radius" | "rounding" => {
+                if let Some(radius) = number(value, 0.0, 128.0) {
+                    cfg.radius = Some(radius);
+                }
+            }
+            "font" => {
+                let path = value.trim().trim_matches('"');
+                cfg.font = (!path.is_empty()).then(|| path.to_string());
+            }
+            "font_size" => {
+                if let Some(size) = number(value, 4.0, 96.0) {
+                    cfg.font_size = size;
+                }
+            }
+            "active_color" | "color" | "active_from" => {
+                cfg.active_from = color(value).or(cfg.active_from)
+            }
+            "active_color_to" | "color_to" | "active_to" => {
+                cfg.active_to = color(value).or(cfg.active_to)
+            }
+            "inactive_color" | "inactive_from" => {
+                cfg.inactive_from = color(value).or(cfg.inactive_from)
+            }
+            "inactive_color_to" | "inactive_to" => {
+                cfg.inactive_to = color(value).or(cfg.inactive_to)
+            }
+            "urgent_color" | "urgent_from" => cfg.urgent_from = color(value).or(cfg.urgent_from),
+            "urgent_color_to" | "urgent_to" => cfg.urgent_to = color(value).or(cfg.urgent_to),
+            "angle" | "gradient_angle" => {
+                if let Some(angle) = number(value, -3600.0, 3600.0) {
+                    cfg.angle = Some(angle);
+                }
+            }
+            "text_color" => {
+                if let Some(c) = color(value) {
+                    cfg.text_color = c;
+                }
+            }
+            "inactive_text_color" => {
+                if let Some(c) = color(value) {
+                    cfg.inactive_text_color = c;
+                }
+            }
+            "opacity" => {
+                if let Some(opacity) = number(value, 0.0, 1.0) {
+                    cfg.opacity = opacity;
+                }
+            }
+            other => tracing::warn!(key = %other, "Unknown key in `tabs` block, ignoring"),
+        }
+    }
+}

@@ -50,11 +50,15 @@ src_unpack() {
 	if [[ -n ${TIDEWM_SRC} ]]; then
 		einfo "Building from local checkout ${TIDEWM_SRC}"
 		mkdir -p "${S}" || die
-		tar -C "${TIDEWM_SRC}" --exclude=./target --exclude=./.git -cf - . |
+		# .hermes holds private, owner-only worklogs; userpriv cannot read them.
+		tar -C "${TIDEWM_SRC}" --exclude=./target --exclude=./.git \
+			--exclude=./.hermes --exclude=./.idea -cf - . |
 			tar -C "${S}" -xf - || die
 	else
 		git-r3_src_unpack
 	fi
+	# cargo_live_src_unpack runs `cargo fetch` in the current directory.
+	cd "${S}" || die
 	cargo_live_src_unpack
 }
 

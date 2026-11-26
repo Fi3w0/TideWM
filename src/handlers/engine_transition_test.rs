@@ -984,3 +984,79 @@ fn ebb_trims_only_hidden_caches_and_obeys_caps_rules_off_and_budget() {
     assert_eq!(f.state.render.gpu.backdrop_textures.len(), before); // queued, never inline
     println!("ebb cache safety checked");
 }
+
+const OCEAN_MAP_REVEAL_CONFIG: &str = r#"engine = ocean
+welcome_hint = false
+water_effects = false
+gaps = 8
+animations {
+ enabled = false
+}
+ocean {
+ camera_animation_ms = 0
+}
+rule {
+ app_id = a
+ output = A
+}
+"#;
+
+#[test]
+fn map_focus_reveals_a_new_ocean_window_after_camera_travel() {
+    if run_isolated(
+        "map_focus_reveals_a_new_ocean_window_after_camera_travel",
+        OCEAN_MAP_REVEAL_CONFIG,
+        "ocean map reveal checked",
+    ) {
+        return;
+    }
+    let mut f = two_output_fixture();
+    let first = map(&mut f, "a");
+    let output = f.state.output_by_name("A").unwrap();
+    let viewport = f.state.space.output_geometry(&output).unwrap().size;
+
+    // Travel the camera away from the reef. Being an output member is not
+    // the same as being on screen.
+    f.state.spatial.ocean.pan("A", 4000.0, 0.0);
+    let first_rect = f
+        .state
+        .spatial
+        .ocean
+        .world_rect(&first, f.state.config.gaps, f.state.config.bsp_split_bias)
+        .unwrap();
+    assert!(!f
+        .state
+        .spatial
+        .ocean
+        .rect_fully_visible_on_output("A", viewport, first_rect));
+
+    // The second window is inserted beside the off-camera first one, takes
+    // focus, and must bring the camera to itself.
+    let second = map(&mut f, "a");
+    assert_eq!(f.state.focused_window_surface(), Some(second.clone()));
+    let second_rect = f
+        .state
+        .spatial
+        .ocean
+        .world_rect(&second, f.state.config.gaps, f.state.config.bsp_split_bias)
+        .unwrap();
+    assert!(
+        f.state
+            .spatial
+            .ocean
+            .rect_fully_visible_on_output("A", viewport, second_rect),
+        "focused Ocean window is still outside its camera view: {:?}",
+        f.state.spatial.ocean.camera("A")
+    );
+
+    // Once the reef is in view, further maps must not move the camera.
+    let settled = f.state.spatial.ocean.camera("A");
+    let third = map(&mut f, "a");
+    assert_eq!(f.state.focused_window_surface(), Some(third));
+    assert_eq!(
+        f.state.spatial.ocean.camera("A"),
+        settled,
+        "a visible new window moved the camera anyway"
+    );
+    println!("ocean map reveal checked");
+}

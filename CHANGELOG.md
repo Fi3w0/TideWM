@@ -2,6 +2,49 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.41 · 2026-11-26 — The pointer stays above the minimap
+
+- On outputs using the compositor's software cursor, the mouse pointer could
+  disappear behind a full-screen minimap or another compositor overlay. The
+  pointer is now drawn in front of every overlay.
+- The minimap's optional marker can be turned off with `cursor_shape = none`;
+  the real cursor is visible over the map, so there is no second pointer.
+
+## 0.91.40 · 2026-11-26 — New Ocean windows appear where you are looking
+
+- A new window that takes focus in Ocean is brought into view, even when the
+  camera had been panned or travelled away first. Before, it opened beside the
+  focused window off-camera and nothing seemed to happen until you switched
+  engines or travelled back.
+- With a virtual monitor attached, a new window no longer falls back to an
+  output nobody can see when neither a window nor the pointer reports one.
+
+## 0.91.39 · 2026-11-26 — Softer compass and minimap glow
+
+- Compass cues no longer show a hard square around their light when the glow is wide; the light fades out in a circle.
+- Minimap glows fade with distance instead of looking like a second solid border, small panels have clean rounded corners, and window boxes lost the dark notches at their corners.
+
+## 0.91.38 · 2026-11-26 — Customizable Ocean minimap and compass
+
+- The Ocean minimap can be restyled piece by piece (backgrounds, boxes, glow, labels, font, pointer marker), made smaller and placed in a corner, and is sharp at fractional scale.
+- The compass cues ordinary off-screen windows separately from deep and urgent ones, each with its own color and on/off switch, and can shrink with distance, sit further from the edge, pulse for urgent windows and show titles. Screenshots and screencasts now include the compass.
+
+## 0.91.37 · 2026-11-26 — Customizable group tabs
+
+- Grouped-window tabs follow your theme now: border colors and gradients, rounded corners, and sharp text at fractional scale. A new `tabs { }` block picks a title bar or a slim indicator on any edge, and sets colors, sizes, font and gaps. By default the tabs take their own space instead of covering the window's first line, and they no longer draw over floating windows.
+
+## 0.91.36 · 2026-11-25 — Virtual monitors
+
+- New `virtual_output <name> { mode = 1920x1080@60 }` blocks and `create-virtual-output` / `remove-virtual-output` actions add monitors with no screen behind them: a real output with its own workspaces, for streaming to another device or parking windows. They draw only while something captures them, the cursor never wanders onto them, and removing one brings its windows back to a monitor you can see.
+
+## 0.91.35 · 2026-11-25 — Say what keeps a fullscreen window off direct scanout
+
+- `tidectl perf --json` now names what is drawn above a fullscreen window (`fullscreen_above_by`: a layer namespace, a window app_id or a TideWM element), and no longer counts the hardware cursor as a blocker.
+
+## 0.91.34 · 2026-11-25 — Locked-pointer games keep their aim in Scroll
+
+- In Scroll, clicking in a game that captures the mouse (Minecraft, CS2) could snap the camera straight down. Before each click, after any window opened or closed, and on similar refreshes, TideWM re-sent the pointer's frozen position to the game, which read it as the cursor jumping. A captured pointer now gets only relative movement while the game stays under it. Classic was not affected.
+
 ## 0.91.33 · 2026-11-10 — Follow X11 overlay moves after mapping
 
 - X11 overlays can choose their position after opening and animate toward it. TideWM now follows moves requested by the window's owning X11 client when the server supports RECORD, while ignoring satellite's placement feedback. This fixes the late-move case that 0.91.32 froze at its initial position.
