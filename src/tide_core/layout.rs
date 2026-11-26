@@ -2271,14 +2271,13 @@ fn cascade_rects_from_state(
         let cols = state.row_counts[i];
         let mut x = area.loc.x;
         let mut remaining_w = area.size.w;
-        for j in 0..cols {
+        for (j, ratio) in state.cell_ratios[i].iter().enumerate().take(cols) {
             let cell_w = if j + 1 == cols {
                 remaining_w.max(0)
             } else {
                 let available = remaining_w.max(0);
                 let minimum = i32::from(available > 0);
-                ((state.cell_ratios[i][j] * area.size.w as f32).round() as i32)
-                    .clamp(minimum, available)
+                ((*ratio * area.size.w as f32).round() as i32).clamp(minimum, available)
             };
             out.push(Rectangle::new((x, y).into(), (cell_w, row_h).into()));
             x += cell_w;
