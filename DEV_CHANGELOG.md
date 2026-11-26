@@ -2,6 +2,13 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.41 — Pointer above compositor overlays
+
+- Native `.40` report (Fiw): with a full-screen minimap open, the mouse pointer was above the map on one monitor but behind the purple screen on another; the configured ring marker looked wrong. The two cursor representations are independent: a client cursor surface uses `Kind::Cursor` (and is eligible for the hardware cursor plane), while the themed/fallback glyph is a CPU-composited element with `Kind::Unspecified`.
+- `render_surface` (udev) builds its front-to-back list with the glyph after the minimap/overview/toast/error chain, so on outputs taking the software cursor path the real pointer was painted under the overlays. Both cursor representations (client surfaces first, then the themed/fallback glyph) now precede `ripple_layers.above_all` and every compositor overlay. The lock path is unchanged in relative order (the lock elements stay behind the cursor).
+- Fiw's live minimap config switched `cursor_shape` from `ring` to `none`; with the real cursor in front, a second marker would double it. The option remains for anyone who wants a map-only pointer.
+- Not testable nested: winit draws the host cursor, so this code path is udev-only. Native acceptance follows the next install/relog.
+
 ## 0.91.40 — Reveal new Ocean windows
 
 - Fiw (2026-11-26, native `.39` in Ocean): Mod+Q kitty windows were created but appeared nowhere; switching to Scroll showed them. Reproduced nested: after a camera pan (the compass/minimap scene sat off-camera), `Ocean::insert` put the new window beside the focused window, which is still an output member but outside the camera; `focus_window_on_map` changed keyboard focus without touching the camera. The virtual-output lead was a separate latent fallback, not present in the repro config.

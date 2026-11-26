@@ -2191,7 +2191,19 @@ fn render_surface(
     } else {
         state.closing_window_frame_elements(renderer, output)
     };
-    let mut elements: Vec<OutputRenderElements> = ripple_layers.above_all;
+    // Every cursor representation stays in front of every compositor
+    // overlay. The themed/fallback glyph is CPU-composited, not a
+    // `Kind::Cursor` plane element, so its old position behind the
+    // minimap/overview/toast/error chain hid the real pointer underneath a
+    // full-screen minimap on outputs using the software cursor path.
+    let mut elements: Vec<OutputRenderElements> = Vec::new();
+    elements.extend(
+        cursor_surface_element
+            .into_iter()
+            .map(OutputRenderElements::Cursor),
+    );
+    elements.extend(cursor_glyph_element.map(OutputRenderElements::Composited));
+    elements.extend(ripple_layers.above_all);
     elements.extend(
         picker_element
             .into_iter()
@@ -2200,14 +2212,8 @@ fn render_surface(
             .chain(overview_element)
             .chain(toast_element)
             .chain(error_element)
-            .chain(cursor_glyph_element)
             .chain(welcome_element)
             .map(OutputRenderElements::Composited),
-    );
-    elements.extend(
-        cursor_surface_element
-            .into_iter()
-            .map(OutputRenderElements::Cursor),
     );
     elements.extend(depth_transition);
     elements.extend(ripple_layers.above_windows);
