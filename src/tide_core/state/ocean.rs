@@ -71,6 +71,63 @@ impl Smallvil {
         true
     }
 
+    /// Brings a newly mapped, focused Ocean window into its output's camera
+    /// view. Map placement deliberately goes beside the previously focused
+    /// window even when that window is off-camera (after a pan, minimap
+    /// travel or camera switch), so without this the new window can take
+    /// keyboard focus while nothing visibly changes. A no-op when the window
+    /// is already fully visible, screen-pinned, fullscreen/maximized, or
+    /// while a lock/exclusive layer owns the screen.
+    pub(crate) fn reveal_ocean_window(&mut self, surface: &WlSurface) {
+        if self.spatial.engine.ownership() != crate::config::SpatialOwnership::Ocean
+            || !matches!(self.session_lock, SessionLock::Unlocked)
+            || self.exclusive_layer().is_some()
+            || self.fullscreen.contains_key(surface)
+            || self.maximized.contains_key(surface)
+            || self.spatial.ocean.is_screen_pinned(surface)
+        {
+            return;
+        }
+        let Some(output) = self
+            .spatial
+            .ocean
+            .entry_output(surface)
+            .and_then(|name| self.output_by_name(name))
+            .or_else(|| self.primary_output())
+        else {
+            return;
+        };
+        let Some(viewport) = self
+            .space
+            .output_geometry(&output)
+            .map(|geometry| geometry.size)
+        else {
+            return;
+        };
+        let Some(rect) =
+            self.spatial
+                .ocean
+                .world_rect(surface, self.config.gaps, self.config.bsp_split_bias)
+        else {
+            return;
+        };
+        if self
+            .spatial
+            .ocean
+            .rect_fully_visible_on_output(&output.name(), viewport, rect)
+        {
+            return;
+        }
+        self.spatial.ocean.center_on_rect(
+            &output.name(),
+            viewport,
+            rect,
+            Duration::from_millis(self.config.ocean.camera_animation_ms),
+            self.config.ocean.camera_sway,
+        );
+        self.request_redraw();
+    }
+
     pub(super) fn topmost_ocean_surface(
         &self,
         preferred_output: Option<&str>,

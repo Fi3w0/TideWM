@@ -1049,6 +1049,24 @@ impl OceanSpace {
                 .is_none_or(|owner| owner == output)
     }
 
+    /// True when the whole `rect` is inside one output camera's viewport.
+    /// Used by map-focus reveal: being a member of the output is not the
+    /// same as being on screen, since the camera can be panned away.
+    pub fn rect_fully_visible_on_output(
+        &self,
+        output: &str,
+        viewport: Size<i32, Logical>,
+        rect: Rectangle<i32, Logical>,
+    ) -> bool {
+        let camera = self.camera(output);
+        let zoom = camera.zoom.max(0.05);
+        let left = (rect.loc.x as f64 - camera.origin.x) * zoom;
+        let top = (rect.loc.y as f64 - camera.origin.y) * zoom;
+        let right = left + rect.size.w as f64 * zoom;
+        let bottom = top + rect.size.h as f64 * zoom;
+        left >= 0.0 && top >= 0.0 && right <= viewport.w as f64 && bottom <= viewport.h as f64
+    }
+
     fn reef_accepts_output(&self, reef: &OceanReef, output: &str) -> bool {
         self.shared_canvas
             || reef.layout.windows().iter().all(|window| {

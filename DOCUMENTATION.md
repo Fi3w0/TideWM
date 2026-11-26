@@ -1688,7 +1688,7 @@ switch_events {
 
 Per-app placement applied the moment a window first maps, before it's ever tiled/rendered at a default spot (i3/sway's `for_window`, Hyprland's `windowrule`). One block per rule; repeat for more.
 
-New windows floated by `float`, `pin`, parent/dialog size hints, or `layout = floating` open centered in the chosen output's visible tiling work area, respecting layer-shell reservations and workspace gaps. Explicit position/size overrides centering wherever it fits; oversized windows shrink as far as client/rule minima allow. Dialogs without an explicit output follow their parent's output. This is a first-map policy: interactive `toggle-floating` keeps a visible window's geometry and only rescues coordinates outside the work area. Ocean placement uses its camera's world-coordinate work area.
+New windows floated by `float`, `pin`, parent/dialog size hints, or `layout = floating` open centered in the chosen output's visible tiling work area, respecting layer-shell reservations and workspace gaps. Explicit position/size overrides centering wherever it fits; oversized windows shrink as far as client/rule minima allow. Dialogs without an explicit output follow their parent's output. This is a first-map policy: interactive `toggle-floating` keeps a visible window's geometry and only rescues coordinates outside the work area. Ocean placement uses its camera's world-coordinate work area; a new window that takes focus is revealed by its output camera when the place it opened is off-camera (for example after a pan or minimap travel), while an already-visible map leaves the camera still.
 
 | Key | Type | Notes |
 | --- | --- | --- |

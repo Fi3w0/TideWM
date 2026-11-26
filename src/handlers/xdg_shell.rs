@@ -1480,6 +1480,11 @@ impl Smallvil {
                 SERIAL_COUNTER.next_serial(),
                 focus_on_map,
             );
+            // Ocean inserts beside the previously focused window, which may
+            // sit outside the camera after a pan or minimap travel. Focus
+            // alone does not move the camera; reveal the new window so a
+            // spawn is visible where the user is looking.
+            self.reveal_ocean_window(surface);
         }
 
         // Logical placement/focus above is already final. The open animation

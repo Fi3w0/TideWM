@@ -668,6 +668,7 @@ impl FractionalScaleHandler for Smallvil {
                 self.mapped_toplevel_window(&root)
                     .and_then(|window| self.output_for_window(&window))
             })
+            .or_else(|| self.physical_outputs().next().cloned())
             .or_else(|| self.space.outputs().next().cloned());
         let Some(output) = output else {
             return;

@@ -2,6 +2,14 @@
 
 Every TideWM release in full technical detail, newest first. For a short summary of what changed for users, see [CHANGELOG.md](CHANGELOG.md). Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.91.40 — Reveal new Ocean windows
+
+- Fiw (2026-11-26, native `.39` in Ocean): Mod+Q kitty windows were created but appeared nowhere; switching to Scroll showed them. Reproduced nested: after a camera pan (the compass/minimap scene sat off-camera), `Ocean::insert` put the new window beside the focused window, which is still an output member but outside the camera; `focus_window_on_map` changed keyboard focus without touching the camera. The virtual-output lead was a separate latent fallback, not present in the repro config.
+- `Smallvil::reveal_ocean_window` (`state/ocean.rs`): after first-map focus, resolve the surface's Ocean output and world rect; if the rect is not fully inside that camera's viewport (`OceanSpace::rect_fully_visible_on_output`), glide with `ocean.camera_animation_ms`/`camera_sway`. No-op when already visible, screen-pinned, fullscreen/maximized, or while a session lock/exclusive layer owns the screen. Called from `map_toplevel` inside the focused-map branch, so a `no_focus` map leaves the camera alone and a visible map does not move it.
+- `primary_output`'s last-resort fallback now prefers `physical_outputs()` before all Space outputs; `new_fractional_scale` and absolute input-device mapping use the same order. Space's output list is insertion-ordered, so a reconnected monitor can sit after a virtual output; without the filter, a first map with no focused or pointer output could pick a virtual output.
+- Tests: `engine_transition_test::map_focus_reveals_a_new_ocean_window_after_camera_travel` (two simulated outputs, real xdg windows; red with the reveal disabled: focused window stays outside the camera; green brings it in; a following visible map leaves the camera unchanged). `virtual_output_test` remaps the real monitor after the virtual one, asserts it is first in Space and that `primary_output` still returns the real one (red with the old fallback).
+- Nested winit (1.25): fresh Ocean, kitty mapped, camera panned three steps left, second kitty mapped — `grim -o winit-0` now shows both windows with the camera centred on the new one (before the fix: only the old window's edge was visible). Native acceptance follows Fiw's next install/relog.
+
 ## 0.91.39 — Compass and minimap glow fixes
 
 - Fiw (2026-11-26) reported compass cues looking "squared" and cut. With `glow` above ~1.4 the smoothstep reach exceeded the element square, so the light ended in a hard box (nested captures). The shader now multiplies by a radial window `1 - smoothstep(0.45, 1.0, length(p))`; a first square window (`max(|x|,|y|)`) still read as boxed and was replaced.

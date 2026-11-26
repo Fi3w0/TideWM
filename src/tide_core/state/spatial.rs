@@ -546,7 +546,14 @@ impl Smallvil {
             .seat
             .get_pointer()
             .and_then(|p| self.output_for_point(p.current_location()));
-        let first_output = || self.space.outputs().next().cloned();
+        // A virtual output can precede a reconnected monitor in Space's
+        // insertion-ordered list; it is never where a person is looking.
+        let first_output = || {
+            self.physical_outputs()
+                .next()
+                .cloned()
+                .or_else(|| self.space.outputs().next().cloned())
+        };
         let prefer_pointer =
             self.config.input.focus_follows_mouse && self.exclusive_layer().is_none();
         if prefer_pointer {

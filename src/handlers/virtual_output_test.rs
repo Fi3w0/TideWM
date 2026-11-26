@@ -213,6 +213,25 @@ fn virtual_outputs_join_and_leave_the_desktop() {
     assert!(flags.contains(&("TV".to_owned(), serde_json::json!(true))));
     assert!(flags.contains(&("REAL-1".to_owned(), serde_json::json!(false))));
 
+    // A monitor that reconnects is appended to Space's insertion-ordered
+    // output list, which can leave a virtual output first. With no focused
+    // window or output under the pointer, the fallback must still pick a
+    // monitor a person can see.
+    fixture.state.space.unmap_output(&real);
+    fixture.state.space.map_output(&real, (5000, 0));
+    assert_eq!(
+        fixture.state.space.outputs().next().map(Output::name),
+        Some("TV".to_owned())
+    );
+    assert_eq!(
+        fixture
+            .state
+            .primary_output()
+            .map(|output| output.name().to_string()),
+        Some("REAL-1".to_owned()),
+        "the new-window fallback chose a virtual output"
+    );
+
     // The pointer and directional moves stay on the visible monitor.
     let inside_tv = tv_geometry.loc.to_f64() + Point::from((10.0, 10.0));
     let clamped = fixture.state.clamp_to_outputs(inside_tv);

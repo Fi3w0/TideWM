@@ -2,6 +2,15 @@
 
 What changed in TideWM, in plain words, newest first. Releases are grouped by the stretch of work they came from. Every release in full technical detail lives in [DEV_CHANGELOG.md](DEV_CHANGELOG.md).
 
+## 0.91.40 · 2026-11-26 — New Ocean windows appear where you are looking
+
+- A new window that takes focus in Ocean is brought into view, even when the
+  camera had been panned or travelled away first. Before, it opened beside the
+  focused window off-camera and nothing seemed to happen until you switched
+  engines or travelled back.
+- With a virtual monitor attached, a new window no longer falls back to an
+  output nobody can see when neither a window nor the pointer reports one.
+
 ## 0.91.39 · 2026-11-26 — Softer compass and minimap glow
 
 - Compass cues no longer show a hard square around their light when the glow is wide; the light fades out in a circle.

@@ -798,6 +798,7 @@ impl Smallvil {
             .device()
             .configured_output(&self.input.input_device_outputs)
             .filter(|output| self.space.output_geometry(output).is_some())
+            .or_else(|| self.physical_outputs().next().cloned())
             .or_else(|| self.space.outputs().next().cloned())?;
         let geometry = self.space.output_geometry(&output)?;
         Some(absolute_position_on_output(
